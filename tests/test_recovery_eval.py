@@ -383,6 +383,82 @@ def test_native_accept_report_recovers_historical_execution():
     assert evaluation["checks"]["historical_execution"] == "evidence_failed"
 
 
+def test_anchor_authenticity_recovers_through_shared_digest():
+    """A signature-verification doc that authenticated an anchor
+    performs `registry_authenticity`/`revocation_list_authenticity`
+    on a descriptor that declared the same anchor digest — the
+    `shared:` binding pins both docs to the anchor bytes, never to
+    each other's."""
+    anchor = "c" * 64
+    record = {
+        "schema_version": "mumei.signature-envelope-evaluation/v1",
+        "checks_not_performed": [
+            "registry_authenticity", "revocation_list_authenticity",
+        ],
+        "registry_digest": anchor,
+        "revocation_digest": anchor,
+    }
+    authentic_doc = _doc(
+        "mumei.signature-verification/v1",
+        registry_authentic=True,
+        revocation_list_authentic=True,
+        registry_digest=anchor,
+        revocation_digest=anchor,
+    )
+    evaluation = evaluate_unperformed_check_recovery(
+        record, [authentic_doc],
+    )
+    assert evaluation["checks"] == {
+        "registry_authenticity": "recovered",
+        "revocation_list_authenticity": "recovered",
+    }
+
+    # A doc that authenticated DIFFERENT anchor bytes never counts —
+    # the shared digest must name the same anchor the record assessed.
+    evaluation = evaluate_unperformed_check_recovery(
+        record,
+        [_doc(
+            "mumei.signature-verification/v1",
+            registry_authentic=True,
+            revocation_list_authentic=True,
+            registry_digest="d" * 64,
+            revocation_digest="d" * 64,
+        )],
+    )
+    assert evaluation["checks"] == {
+        "registry_authenticity": "evidence_failed",
+        "revocation_list_authenticity": "evidence_failed",
+    }
+
+    # A failed anchor check on the same anchor is failed evidence.
+    evaluation = evaluate_unperformed_check_recovery(
+        record,
+        [_doc(
+            "mumei.signature-verification/v1",
+            registry_authentic=False,
+            revocation_list_authentic=False,
+            registry_digest=anchor,
+            revocation_digest=anchor,
+        )],
+    )
+    assert evaluation["checks"] == {
+        "registry_authenticity": "evidence_failed",
+        "revocation_list_authenticity": "evidence_failed",
+    }
+
+    # A record that names no anchor digest cannot bind a shared
+    # performer — the check stays no_evidence -> evidence_failed since
+    # the schema was supplied.
+    evaluation = evaluate_unperformed_check_recovery(
+        _record("registry_authenticity"),
+        [authentic_doc],
+        record_digest="e" * 64,
+    )
+    assert evaluation["checks"]["registry_authenticity"] == (
+        "evidence_failed"
+    )
+
+
 def test_attempt_report_recovers_five_checks():
     digest = "a" * 64
     record = _record(
@@ -1051,19 +1127,21 @@ def test_envelope_freshness_recovers_through_bound_fold_docs():
         )
 
 
-def test_anchor_authenticity_is_not_composable_through_the_fold():
+def test_anchor_authenticity_binds_the_anchor_digest_not_the_record():
     # `registry_authentic` / `revocation_list_authentic` on a
-    # signature-verification doc are bound only to the signed record's
-    # digest — they do not pin WHICH anchor document was assessed, so
-    # a doc authenticating a different registry must not recover this
-    # record's anchor check. The checks stay unperformable by
-    # composition: no performer entries exist.
+    # signature-verification doc pin WHICH anchor document was
+    # assessed through `registry_digest`/`revocation_digest` — a doc
+    # bound to the record's bytes but naming no anchor (or a
+    # different one) can never recover this record's anchor check.
     digest = "a" * 64
-    for check, field in (
-        ("registry_authenticity", "registry_authentic"),
-        ("revocation_list_authenticity", "revocation_list_authentic"),
+    for check, field, digest_field in (
+        ("registry_authenticity", "registry_authentic",
+         "registry_digest"),
+        ("revocation_list_authenticity", "revocation_list_authentic",
+         "revocation_digest"),
     ):
         record = _record(check)
+        # Record bound to the doc's bytes but no shared anchor pin.
         doc = _doc(
             "mumei.signature-verification/v1",
             envelope_match=True,
@@ -1073,4 +1151,16 @@ def test_anchor_authenticity_is_not_composable_through_the_fold():
         evaluation = evaluate_unperformed_check_recovery(
             record, [doc], record_digest=digest,
         )
-        assert evaluation["checks"][check] == "no_evidence"
+        assert evaluation["checks"][check] == "evidence_failed"
+
+        # The doc authenticates a DIFFERENT anchor than the record's
+        # declared one — the shared digest must name the same bytes.
+        record = {**_record(check), digest_field: "b" * 64}
+        doc = _doc(
+            "mumei.signature-verification/v1",
+            **{field: True, digest_field: "c" * 64},
+        )
+        evaluation = evaluate_unperformed_check_recovery(
+            record, [doc],
+        )
+        assert evaluation["checks"][check] == "evidence_failed"

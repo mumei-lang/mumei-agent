@@ -6004,17 +6004,17 @@ the anchor's) while `registry_authenticity` /
 `revocation_list_authenticity` stay not-performed — the eval fold
 binds signatures, never verifies them.
 
-Neither check name joins `_CHECK_PERFORMERS`: a verification doc's
-anchor outcomes are bound only to the signed record's digest — they
-do not pin WHICH anchor document was assessed, so a doc that
-authenticated a different registry would wrongly recover this
-record's anchor check. `registry_authenticity` /
-`revocation_list_authenticity` are therefore observable on the
-verify route but not composable through `recovery-eval` until the
-verification doc can pin the anchor bytes it assessed. The producer
-side needs no Core change: `mumei evidence sign` already accepts any
-record file — the registry is just a record. Revocation of the root
-keys themselves and rotation policy stay deferred.
+Both check names now join `_CHECK_PERFORMERS`: a verification doc
+emits `registry_digest`/`revocation_digest` whenever it assesses an
+anchor — pinning WHICH anchor document its outcome covered — and a
+new `shared:<field>` bind-path convention binds a performer to a
+record only when both docs declare the same anchor digest. A doc
+that authenticated a different registry can never recover this
+record's anchor check; the checks compose through `recovery-eval`
+while staying anchored to the exact bytes each fold assessed. The
+producer side needs no Core change: `mumei evidence sign` already
+accepts any record file — the registry is just a record. Revocation
+of the root keys themselves and rotation policy stay deferred.
 
 ### C11 declared unperformed-check recovery
 

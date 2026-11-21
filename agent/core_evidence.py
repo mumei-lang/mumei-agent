@@ -1121,6 +1121,13 @@ def evaluate_signature_envelope(
             >= reference[1]
         )
         evaluation["checks_not_performed"].remove("envelope_freshness")
+    if key_registry is not None:
+        # Pin which anchor bytes the fold assessed: `recovery-eval`
+        # binds a `signature-verification/v1` document to this
+        # descriptor only when both name the same registry digest.
+        evaluation["registry_digest"] = registry_digest
+    if revoked_keys is not None:
+        evaluation["revocation_digest"] = revocation_digest
     if registry_signature is not None:
         # Representation-level only: the wrapper envelope's declared
         # `subject_digest` is compared to the registry's digest — the
@@ -1329,6 +1336,13 @@ def verify_signature_envelope(
             >= reference[1]
         )
         verification["checks_not_performed"].remove("envelope_freshness")
+    if key_registry is not None:
+        # Pin which anchor bytes the fold assessed: `recovery-eval`
+        # binds a bound verifying document to this descriptor only
+        # when both name the same registry digest.
+        verification["registry_digest"] = registry_digest
+    if revoked_keys is not None:
+        verification["revocation_digest"] = revocation_digest
     if registry_signature is not None:
         # The consumer-pinned root key authenticates the declared
         # registry itself: the wrapper envelope must match the closed
@@ -1601,6 +1615,19 @@ _CHECK_PERFORMERS: dict = {
             "subject_digest",
         ),
     ],
+    # A signature-verification doc that authenticated the same anchor
+    # bytes performs the anchor check on a descriptor that left it
+    # unperformed — `shared:` binds both docs to the declared anchor
+    # digest they each assessed (`registry_digest`/`revocation_digest`),
+    # never to each other's bytes.
+    "registry_authenticity": [
+        ("mumei.signature-verification/v1", "registry_authentic", True,
+         "shared:registry_digest"),
+    ],
+    "revocation_list_authenticity": [
+        ("mumei.signature-verification/v1", "revocation_list_authentic",
+         True, "shared:revocation_digest"),
+    ],
     "descriptor_freshness": [
         ("mumei.freshness-evaluation/v1", "within_window", True, None),
     ],
@@ -1798,7 +1825,10 @@ def _dotted(doc: dict, path: str) -> object:
 
 
 def _performer_document_applies(
-    bind_path: str | None, doc: dict, bound_digest: str | None
+    bind_path: str | None,
+    doc: dict,
+    bound_digest: str | None,
+    record: dict | None = None,
 ) -> bool:
     """Whether a performer-schema document counts for *this* record.
 
@@ -1809,9 +1839,27 @@ def _performer_document_applies(
     declared digest equals the record's bound digest (an anonymous
     descriptor, e.g. an artifact acceptance with no record input,
     applies to nothing). A `None` bind path applies record-agnostically
-    (the document's own binding is a separate, still-declared check)."""
+    (the document's own binding is a separate, still-declared check).
+
+    A ``shared:<field>`` bind path instead pins the performer to a
+    third artifact both documents assess: it applies only when the
+    record and the document both declare a fingerprint under the same
+    field name and those digests are equal — e.g. two
+    signature-verification docs that each assessed a key registry
+    bind through their shared ``registry_digest``, never through the
+    record's own bytes."""
     if bind_path is None:
         return True
+    if bind_path.startswith("shared:"):
+        field = bind_path[len("shared:"):]
+        if record is None:
+            return False
+        doc_digest = _dotted(doc, field)
+        record_digest_value = _dotted(record, field)
+        return (
+            _is_fingerprint(doc_digest)
+            and doc_digest == record_digest_value
+        )
     return (
         bound_digest is not None
         and _dotted(doc, bind_path) == bound_digest
@@ -1930,7 +1978,7 @@ def evaluate_unperformed_check_recovery(
                 doc
                 for doc in schema_to_docs[schema]
                 if _performer_document_applies(
-                    bind_path, doc, comparison_digest
+                    bind_path, doc, comparison_digest, record
                 )
             ]
             if bind_path is None:
