@@ -79,7 +79,7 @@ import hashlib
 import json
 import sys
 from collections.abc import Iterable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Any
 
 from agent import control_flow
@@ -1985,6 +1985,40 @@ class _Builder:
                 holder_id, locals_
             )
         return deps
+
+    def _chan_group_join(
+        self,
+        member_id: str,
+        root_id: str,
+        pre_root_set: frozenset | None = None,
+    ) -> None:
+        """`member_id` joins the container share group anchored at
+        `root_id`: its token lands in the root's member set AND in
+        every current sharer's own set — never just the root's (a
+        `b := s` copy's set lists ITS members only, so minting into
+        the root alone would leave `<-b[i]` blind to the member's
+        sends). `pre_root_set` is the root's member set snapshotted
+        before a parallel assignment — `s, d = t, s[0]` joins `d`
+        to the OLD group's surviving sharers (found by intersecting
+        the snapshot), not to the reseated `s`'s new set."""
+        toks = self._opaque_container_tokens
+        toks[member_id] = toks.get(member_id, frozenset()) | frozenset(
+            {member_id}
+        )
+        current = toks.get(root_id, frozenset())
+        if pre_root_set is not None and not pre_root_set <= current:
+            # The root reseated earlier in this statement — its set
+            # now anchors a different group. The old group's
+            # surviving sharers still carry the snapshot's members.
+            holder_ids = self._opaque_container_holders(pre_root_set)
+        else:
+            holder_ids = self._opaque_container_holders(current) | {
+                root_id
+            }
+        for holder_id in holder_ids:
+            toks[holder_id] = toks.get(holder_id, frozenset()) | frozenset(
+                {member_id}
+            )
 
     def _opaque_container_fact(self, fact: Any) -> bool:
         """A `[]T`/`[N]T`/`map[K]T` local bound from a call result —
@@ -5606,6 +5640,22 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 self._opaque_container_tokens[hid] = (
                     toks - {binding_id}
                 ) | {sur}
+        # An `e := d` alias recorded before the reseat still names
+        # the OLD queue — redirect it to the surrogate so `e <- x`
+        # keeps landing in the group the descriptor stayed in. A
+        # reseated external name parks an external queue, so the
+        # surrogate inherits the external marker too. Registering a
+        # synthetic binding under the surrogate's id keeps the
+        # shared `_chan_binding`/`_is_chan_binding` resolution
+        # paths working on it like on a declared channel.
+        for name, target in list(self.chan_aliases.items()):
+            if target == binding_id:
+                self.chan_aliases[name] = sur
+        owner = self.bindings.get(binding_id)
+        if owner is not None:
+            self.bindings.setdefault(sur, replace(owner, id=sur))
+        if binding_id in self.external_chan_locals:
+            self.external_chan_locals.add(sur)
 
     def _chan_alias_target(
         self, node: Any, locals_: dict, params: dict
@@ -8790,6 +8840,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 )
                 for i in range(len(lefts))
             ]
+            # Element-extraction binds resolve the pre-state too —
+            # `s, d := t, s[0]` joins `d` to the group `s` named
+            # BEFORE its own slot reseated onto `t`, so each
+            # target's root member set is snapshotted here.
+            chan_elem_targets: list = [
+                (
+                    self._chan_elem_index_target(rights[i])
+                    if len(lefts) == len(rights)
+                    else None
+                )
+                for i in range(len(lefts))
+            ]
+            chan_elem_root_sets: dict = {
+                t[0]: self._opaque_container_tokens.get(t[0])
+                for t in chan_elem_targets
+                if t is not None
+            }
             for i, (lhs, value) in enumerate(zip(lefts, values)):
                 # `_` discards its value — the RHS was still evaluated.
                 if lhs.text == b"_":
@@ -9066,8 +9133,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     if pre_target is not None:
                         self.chan_aliases[binding.id] = pre_target.id
                     elif (
-                        elem_root := self._chan_elem_index_target(
-                            chan_rhs
+                        elem_root := (
+                            chan_elem_targets[i]
+                            if len(lefts) == len(rights)
+                            else None
                         )
                     ) is not None:
                         # `d := s[i]` — d names a queue inside the
@@ -9082,16 +9151,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # diverge from d's own.
                         self.chan_aliases.pop(binding.id, None)
                         self.external_chan_locals.discard(binding.id)
-                        self._opaque_container_tokens[
-                            binding.id
-                        ] = self._opaque_container_tokens.get(
-                            binding.id, frozenset()
-                        ) | frozenset({binding.id})
-                        self._opaque_container_tokens[
-                            elem_root[0]
-                        ] = self._opaque_container_tokens.get(
-                            elem_root[0], frozenset()
-                        ) | frozenset({binding.id})
+                        self._chan_group_join(
+                            binding.id,
+                            elem_root[0],
+                            chan_elem_root_sets.get(elem_root[0]),
+                        )
                     else:
                         # `c, ok := <-cc` reusing an existing `c` —
                         # `:=` may rebind a name in the same scope
@@ -9822,16 +9886,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             self.external_chan_locals.discard(
                                 binding.id
                             )
-                            self._opaque_container_tokens[
-                                binding.id
-                            ] = self._opaque_container_tokens.get(
-                                binding.id, frozenset()
-                            ) | frozenset({binding.id})
-                            self._opaque_container_tokens[
-                                elem_root[0]
-                            ] = self._opaque_container_tokens.get(
-                                elem_root[0], frozenset()
-                            ) | frozenset({binding.id})
+                            self._chan_group_join(
+                                binding.id, elem_root[0]
+                            )
                         elif self._chan_result_call(value_nodes[i]) is not None:
                             passthrough = self._chan_result_passthrough(
                                 value_nodes[i], locals_, params
@@ -11160,6 +11217,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 )
                 for i in range(len(refs))
             ]
+            # `s, d = t, s[0]` — a `d = s[i]` element reseat joins
+            # the group `s` named at eval time, not the group an
+            # earlier slot's store reseated `s` onto: snapshot each
+            # element target's root member set before the loop.
+            chan_elem_targets = [
+                (
+                    self._chan_elem_index_target(rights[i])
+                    if len(lefts) == len(rights)
+                    else None
+                )
+                for i in range(len(refs))
+            ]
+            chan_elem_root_sets = {
+                t[0]: self._opaque_container_tokens.get(t[0])
+                for t in chan_elem_targets
+                if t is not None
+            }
             # `a, b = b, g(a)` — passthrough reseats resolve against
             # the pre-state too: `g(a)` hands back the queue `a`
             # named BEFORE `a`'s own store redirects it. A
@@ -11348,11 +11422,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # conflated dep set cannot model — all stay
                     # closed.
                     chan_alias = chan_alias_targets[i]
-                    elem_target = (
-                        self._chan_elem_index_target(rights[i])
-                        if len(lefts) == len(rights)
-                        else None
-                    )
+                    elem_target = chan_elem_targets[i]
                     fresh_make = (
                         len(lefts) == len(rights)
                         and self._is_make_chan_call(rights[i])
@@ -11546,16 +11616,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 | (old_queue or frozenset())
                                 | value
                             )
-                            self._opaque_container_tokens[
-                                ref.binding_id
-                            ] = self._opaque_container_tokens.get(
-                                ref.binding_id, frozenset()
-                            ) | frozenset({ref.binding_id})
-                            self._opaque_container_tokens[
-                                elem_target[0]
-                            ] = self._opaque_container_tokens.get(
-                                elem_target[0], frozenset()
-                            ) | frozenset({ref.binding_id})
+                            self._chan_group_join(
+                                ref.binding_id,
+                                elem_target[0],
+                                chan_elem_root_sets.get(
+                                    elem_target[0]
+                                ),
+                            )
                             continue
                         if fresh_make and (
                             ref.binding_id not in self.chan_aliases
@@ -11745,11 +11812,25 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # Copy the old queue's contents onto each
                         # alias's own slot and detach it: `<-ch`
                         # keeps the queued sends while `<-q` reads
-                        # only the fresh queue.
+                        # only the fresh queue. A share-group
+                        # member's old queue stays alive inside the
+                        # group instead — `_chan_queue_detach`
+                        # redirects these aliases to its surrogate,
+                        # so skip the copy-out for them.
+                        group_member = any(
+                            ref.binding_id in toks
+                            for hid, toks in (
+                                self._opaque_container_tokens.items()
+                            )
+                            if hid != ref.binding_id
+                        )
                         for alias_id, target in list(
                             self.chan_aliases.items()
                         ):
-                            if target != ref.binding_id:
+                            if (
+                                target != ref.binding_id
+                                or group_member
+                            ):
                                 continue
                             del self.chan_aliases[alias_id]
                             old_queue = locals_.get(ref.binding_id)
@@ -11859,16 +11940,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             self.external_chan_locals.discard(
                                 ref.binding_id
                             )
-                            self._opaque_container_tokens[
-                                ref.binding_id
-                            ] = self._opaque_container_tokens.get(
-                                ref.binding_id, frozenset()
-                            ) | frozenset({ref.binding_id})
-                            self._opaque_container_tokens[
-                                elem_join[0]
-                            ] = self._opaque_container_tokens.get(
-                                elem_join[0], frozenset()
-                            ) | frozenset({ref.binding_id})
+                            self._chan_group_join(
+                                ref.binding_id,
+                                elem_join[0],
+                                chan_elem_root_sets.get(elem_join[0]),
+                            )
                     self._store(
                         locals_, params, ref.binding_id, value,
                         conditional,
@@ -13758,6 +13834,29 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                         chan.id, scope
                                     )
                                 )
+                            else:
+                                elem_root = (
+                                    self._chan_elem_index_target(
+                                        right
+                                    )
+                                )
+                                if elem_root is not None:
+                                    # `for v := range s[i]` — the
+                                    # element queue lives in the
+                                    # container's share group, so
+                                    # the range operand resolves
+                                    # like any other member: the
+                                    # group union feeds `v` once
+                                    # per pass through the rejoin.
+                                    chan = self.bindings.get(
+                                        elem_root[0]
+                                    )
+                                    rdeps = (
+                                        rdeps
+                                        | self._chan_group_read_deps(
+                                            elem_root[0], scope
+                                        )
+                                    )
                             iter_operand = right
                             while (
                                 iter_operand is not None
@@ -13983,7 +14082,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             if elem_static
                             else (
                                 (
-                                    inner.get(elem_chan, frozenset())
+                                    self._chan_group_read_deps(
+                                        elem_chan, inner
+                                    )
                                     | (
                                         self.indirect_writes
                                         if (
@@ -15243,6 +15344,40 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     locals_.get(binding.id, frozenset()) | value_deps,
                     conditional,
                 )
+                # `d <- x` where `d` sits in a share group holding
+                # a caller-owned queue (`s := []chan{param}`,
+                # `d := s[i]`) mutates that queue too — record the
+                # external send on each external member and
+                # broadcast the deps like `s[i] <- x` does, so the
+                # summary's effects and a later external `<-ch`
+                # observe the value.
+                member_external = {
+                    token
+                    for holder_id in self._opaque_container_holders(
+                        frozenset({binding.id})
+                    )
+                    for token in self._opaque_container_tokens.get(
+                        holder_id, frozenset()
+                    )
+                    if token in params
+                    or token in self.external_chan_locals
+                }
+                if member_external:
+                    self.indirect_writes |= value_deps
+                    for token in member_external:
+                        transfers.append(
+                            CallTransfer(
+                                FileSpan(
+                                    self.current_file,
+                                    node.start_byte,
+                                    node.end_byte,
+                                ),
+                                token,
+                                (),
+                                frozenset(),
+                                imported=True,
+                            )
+                        )
             return
         raise _Unsupported("unsupported_statement", _span(node))
 
@@ -15756,9 +15891,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # may hold, so it reads the SOURCE binding's
                     # slot (plus a shared queue's send broadcast),
                     # not the snapshot `locals_[ch2]` froze at the
-                    # copy.
+                    # copy. A share-group member resolves the whole
+                    # group's deps — `G(e)` where `e := d` sees a
+                    # `c <- x` fellow-member send, like `<-e` does.
                     if chan_root in locals_:
-                        deps = locals_[chan_root]
+                        deps = self._chan_group_read_deps(
+                            chan_root, locals_
+                        )
                         if chan_root in self.external_chan_locals:
                             deps |= self.indirect_writes
                         return deps
@@ -15767,13 +15906,22 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             frozenset({params[chan_root]})
                             | self.indirect_writes
                         )
-                    return frozenset()
+                    return self._chan_group_read_deps(
+                        chan_root, locals_
+                    )
                 deps = locals_[ref.binding_id]
                 if ref.binding_id in self.external_chan_locals:
                     # `ch := g()` names a callee-produced queue —
                     # contents live in `indirect_writes`, like a
                     # channel parameter's.
                     deps |= self.indirect_writes
+                elif self._is_chan_binding(ref.binding_id):
+                    # `G(e)` where `e := d` names a share-group
+                    # member — the read surfaces every member's
+                    # sends, like `<-e` does.
+                    deps = self._chan_group_read_deps(
+                        ref.binding_id, locals_
+                    )
                 self._queue_func_arg_invocation(node, ref.binding_id)
                 return deps
             if ref is not None and ref.binding_id in params:
@@ -21044,6 +21192,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             True,
                         )
                     self.indirect_writes |= stored
+                else:
+                    chan_elem = self._chan_elem_index_target(arg_node)
+                    if chan_elem is not None:
+                        # `lib.S(s[i])` — `s[i]` hands the callee a
+                        # share-group member's queue; the callee's
+                        # sends land in every member's dep set like
+                        # a caller-side `s[i] <- x`.
+                        for holder_id in self._opaque_container_holders(
+                            self._opaque_container_tokens.get(
+                                chan_elem[0], frozenset()
+                            )
+                        ):
+                            self._store(
+                                locals_, params, holder_id, stored,
+                                True,
+                            )
+                        self.indirect_writes |= stored
             elif self._external_chan_operand(arg_node, params) is not None:
                 # `G(lib.GC)` — a chan operand in external state
                 # (imported member): the callee may send into the
