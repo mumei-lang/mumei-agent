@@ -3108,7 +3108,17 @@ reference is a send-channel, receive, builtin
 `close`/`len`/`cap` argument, or range operand, and the literal is
 invoked synchronously as a direct call of its bound name or an
 immediately invoked literal; `go`, `defer`, and callback invocations
-stay closed. A function name
+stay closed. Synchronous literals also admit queue/container sends
+(`cc <- d`, `s[i] <- v`, and `(<-cc) <- v`), receives (`<-cc`,
+`<-s[i]`, including nested receives), and `close`/`len`/`cap` of
+those operands. Queue groups must remain local and unescaped; plain
+containers must be tracked local scalar-leaf containers (not params,
+package values or escaped roots) and every enclosing reference must be
+a supported indexed channel operation. Aliases, enclosing channel
+values sent into a queue,
+non-operation uses (including call arguments, returns, assignments,
+composite values, range, address-of, and comparisons), `select`, and
+asynchronous, deferred, or callback invocations stay closed. A function name
 read in a call's argument list admits dep-free (the
 possible invocation folds through the call's own record); a
 func literal passed directly as an argument folds its
