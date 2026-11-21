@@ -1657,7 +1657,12 @@ def build_rust_bindings(source: str, *, pointer_width: int) -> LexicalBindingRep
         raise LexicalReportError("Rust source could not be parsed") from exc
     if root.has_error or any(node.is_missing for node in _walk(root)):
         raise LexicalReportError("Rust source has parse errors or missing nodes")
-    return _RustBindings(source, raw, pointer_width, root).build()
+    try:
+        return _RustBindings(source, raw, pointer_width, root).build()
+    except RecursionError:
+        raise LexicalReportError(
+            "Rust source nesting exceeds the lexical report limit"
+        ) from None
 
 
 def _walk(root: Any):

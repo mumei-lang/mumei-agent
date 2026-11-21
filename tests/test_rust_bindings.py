@@ -871,6 +871,16 @@ def test_static_mut_write_parse_limits_source_hash_and_determinism():
             build_rust_bindings("fn f(){}", pointer_width=invalid)
 
 
+def test_deep_expression_recursion_is_reported_as_a_source_limit_error():
+    expression = " + ".join("1" for _ in range(2000))
+    source = f"fn f() {{ let value = {expression}; }}"
+    with pytest.raises(
+        LexicalReportError,
+        match="Rust source nesting exceeds the lexical report limit",
+    ):
+        build_rust_bindings(source, pointer_width=64)
+
+
 def test_explicit_function_const_static_and_unit_types_and_extern_calls():
     source = """
 const fn counted() -> u16 { 2 }
