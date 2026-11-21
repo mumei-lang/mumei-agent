@@ -24562,7 +24562,7 @@ class _Builder:
     ) -> Any | None:
         binding = self.bindings.get(chan_id)
         span = getattr(binding, "span", None)
-        if span is None or getattr(span, "file", None) != self.current_file:
+        if span is None:
             return None
         current = literal_node
         while current is not None:
