@@ -286,3 +286,130 @@ def test_mcp_server_doc_table_descriptions_avoid_forbidden_aliases() -> None:
                     )
                     break
     assert failures == [], "; ".join(failures)
+
+
+NATIVE_CHECK_VOCABULARY_NAMES = {
+    "OBJECT_CHECK_VOCABULARY",
+    "RUNTIME_CHECK_VOCABULARY",
+    "MACHINE_TV_ASSUMPTION_MARKERS",
+}
+NATIVE_CHECK_NAME_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_])"
+    r"(machine_code_[a-z0-9_]+|os_(?:exit_status|stdout|stderr)_[a-z_]+)"
+    r"(?![A-Za-z0-9_])"
+)
+
+
+def _frozenset_constants(path: Path, names: set[str]) -> dict[str, set[str]]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    requested_names = set(names)
+    values: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        value = node.value
+        if (
+            not isinstance(target, ast.Name)
+            or target.id not in requested_names
+            or not isinstance(value, ast.Call)
+            or not isinstance(value.func, ast.Name)
+            or value.func.id != "frozenset"
+            or len(value.args) != 1
+            or value.keywords
+        ):
+            continue
+        try:
+            constant = ast.literal_eval(value.args[0])
+        except (TypeError, ValueError):
+            continue
+        if isinstance(constant, (set, frozenset)) and all(
+            isinstance(item, str) for item in constant
+        ):
+            values[target.id] = set(constant)
+    return values
+
+
+@pytest.fixture(scope="module")
+def native_check_vocabularies() -> dict[str, set[str]]:
+    values = _frozenset_constants(
+        REPO_ROOT / "agent" / "core_evidence.py",
+        NATIVE_CHECK_VOCABULARY_NAMES,
+    )
+    assert set(values) == NATIVE_CHECK_VOCABULARY_NAMES
+    assert all(values[name] for name in NATIVE_CHECK_VOCABULARY_NAMES)
+    return values
+
+
+def test_machine_tv_assumption_markers_are_object_vocabulary(
+    native_check_vocabularies: dict[str, set[str]],
+) -> None:
+    object_checks = native_check_vocabularies["OBJECT_CHECK_VOCABULARY"]
+    runtime_checks = native_check_vocabularies["RUNTIME_CHECK_VOCABULARY"]
+    assumption_markers = native_check_vocabularies["MACHINE_TV_ASSUMPTION_MARKERS"]
+
+    assert assumption_markers <= object_checks
+    assert object_checks.isdisjoint(runtime_checks)
+
+
+def test_documented_machine_code_check_names_are_known(
+    native_check_vocabularies: dict[str, set[str]],
+) -> None:
+    allowed_names = (
+        native_check_vocabularies["OBJECT_CHECK_VOCABULARY"]
+        | native_check_vocabularies["RUNTIME_CHECK_VOCABULARY"]
+    )
+    paths = {
+        *REPO_ROOT.glob("docs/*.md"),
+        REPO_ROOT / "README.md",
+        REPO_ROOT / "agent" / "mcp_server.py",
+        REPO_ROOT / "agent" / "__main__.py",
+        *REPO_ROOT.glob("agent/native_*.py"),
+    }
+    unknown_files: dict[str, set[str]] = {}
+    for path in sorted(paths):
+        text = path.read_text(encoding="utf-8")
+        for match in NATIVE_CHECK_NAME_PATTERN.finditer(text):
+            name = match.group(0)
+            if name not in allowed_names:
+                unknown_files.setdefault(name, set()).add(
+                    str(path.relative_to(REPO_ROOT))
+                )
+
+    failures = [
+        f"{name}: {', '.join(sorted(files))}"
+        for name, files in sorted(unknown_files.items())
+    ]
+    assert failures == [], "Unknown native check names:\n" + "\n".join(failures)
+
+
+def test_mcp_server_doc_names_every_object_and_runtime_check(
+    native_check_vocabularies: dict[str, set[str]],
+) -> None:
+    documented_names = (
+        native_check_vocabularies["OBJECT_CHECK_VOCABULARY"]
+        | native_check_vocabularies["RUNTIME_CHECK_VOCABULARY"]
+    )
+    text = (REPO_ROOT / "docs" / "MCP_SERVER.md").read_text(encoding="utf-8")
+    missing = sorted(name for name in documented_names if name not in text)
+
+    assert missing == []
+
+
+def test_native_surfaces_avoid_overclaim_labels() -> None:
+    paths = {
+        *REPO_ROOT.glob("agent/native_*.py"),
+        REPO_ROOT / "agent" / "mcp_server.py",
+        REPO_ROOT / "docs" / "MCP_SERVER.md",
+        REPO_ROOT / "docs" / "CLI_REFERENCE.md",
+        REPO_ROOT / "docs" / "DESIGN_OBJECT_TV_CONSUMPTION.md",
+    }
+    forbidden_labels = ("TRUSTLESS", "Correct code proven")
+    violations = [
+        f"{path.relative_to(REPO_ROOT)} contains {label!r}"
+        for path in sorted(paths)
+        for label in forbidden_labels
+        if label in path.read_text(encoding="utf-8")
+    ]
+
+    assert violations == []
