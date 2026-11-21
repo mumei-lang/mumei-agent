@@ -2993,15 +2993,15 @@ whole group becomes external at the return point so deferred
 work observes the caller-visible identity. Storing such a
 queue in a package or imported `chan chan T` variable also
 promotes its group and broadcasts its dependencies to later
-external reads. Storing into struct fields, slices, maps, or
-composite literals, capturing a local queue, or taking its
-address remains closed, as do `[]chan chan T`,
-`chan chan chan T` and deeper nesting, non-scalar inner
-elements, and unsupported converted/interface/method/
-variadic call forms. `select` continues to admit each communication
-case's receive (`v := <-ch`, `v, ok := <-ch`, `v = <-ch`,
-a bare `<-ch`) or send (`ch <- v`); operands run in a fresh
-alternative scope and every alternative joins back by union —
+external reads. The container value itself still cannot be returned,
+stored, passed, captured, or addressed; struct fields, local queue
+escapes other than the admitted return/package-store paths,
+`chan chan chan T` and deeper nesting, non-scalar inner elements,
+and unsupported converted/interface/method/variadic call forms stay
+closed. `select` continues to admit each communication case's
+receive (`v := <-ch`, `v, ok := <-ch`, `v = <-ch`, a bare `<-ch`)
+or send (`ch <- v`); operands run in a fresh alternative scope and
+every alternative joins back by union —
 an if/else chain whose guards are comm ops;
 `break` exits the select like a switch clause, an
 empty `select {}` blocks forever and stays closed,
@@ -4278,10 +4278,9 @@ backing, so it keeps the group's tokens, and each appended
 `[]chan{c2}` literal seed — carrying the queue's token in the
 result's set is not enough, since a member only reads and
 writes through the group once its own token entry exists.
-The honest
-closures stay: `[]chan chan T` stays closed (a channel value
-travelling the group would alias under a second dep set), and
-`[N][M]chan` nests stay opaque.
+The remaining closures are nested containers such as
+`[N][M]chan`; scalar-element `chan chan T` containers use the
+separate queue-group model below.
 
 Extracting a bound channel element — `d := s[i]`,
 `var d chan T = s[i]` or a plain `d = s[i]` reseat, on a
@@ -4303,9 +4302,9 @@ serves. The honest closures stay: `d := s[0][0]` on a
 `[][]chan` extracts nothing (the nested-element gate already
 declines it), `[N]chan T` arrays admit the same way — the copy
 `b := a` still names the same queues, so it joins `a`'s share
-group like a slice copy. `[]chan chan T` stays closed (a
-channel value travelling the group would alias under a second
-dep set), and so do `[][]chan`/`[N][M]chan` nests.
+group like a slice copy. `[]chan chan T` uses the separate
+queue-valued element group model described below; `[][]chan` and
+`[N][M]chan` nests remain closed.
 `close(s[i])` admits — an untracked synchronization fact on a
 local group, and a caller-visible effect recorded on each
 param/external member like `s[i] <- x`. `for v := range s[i]`
@@ -4323,7 +4322,8 @@ share group (sibling `[]chan` params share one group like
 group and lands in `indirect_writes` — a callee's send through a
 `[]chan` parameter reaches caller memory exactly like `s[0] =
 v` does. A `[]chan` result binds like the local `s :=` form.
-`[N]chan` and `[]chan chan` signatures stay closed.
+`[N]chan` signatures stay closed here; scalar-element chan-chan
+container signatures are described below.
 
 The same conflation covers a chan-element container living in
 *external* state — a package-level `var GS []chan T` /
@@ -4354,9 +4354,40 @@ select, and channel-call arguments) join `indirect_writes` and
 record the corresponding imported transfer; group merges and copies
 preserve that external marker.
 The honest closures mirror the bound case — `[][]chan` nests,
-`[]chan chan` non-scalar elements, comma-ok `d, ok := GM[k]`,
-and a `map[string]chan` variable key stay closed or unreachable
-(a `string` value is never producible).
+non-scalar payloads other than the scalar-element chan-chan queue
+form below, comma-ok `d, ok := GM[k]`, and a
+`map[string]chan` variable key stay closed or unreachable (a
+`string` value is never producible).
+
+### C07 scalar-element chan-chan containers
+
+Local `[]chan chan T`, `[N]chan chan T`, and
+`map[K]chan chan T` containers model one conflated local
+chan-chan queue group, identified by the container binding.
+Elements from literals, `make`, zero-value arrays, `append`, and
+indexed stores join that group; an element that is already an
+external queue promotes the group and carries its selectors and
+parameter origins. Conditional stores union possible members and
+externality. Indexing the container in a queue position therefore
+acts like the same queue group: sends, receives (including
+comma-ok), nested receives, received-channel operation targets,
+`close`, `len`/`cap`, `range`, `select`, and extracted aliases all
+resolve through the group. `len`/`cap` of the container itself
+remain pure. Range-bound elements alias the same conflated group.
+
+Chan-chan container parameters and package/imported
+`[]chan chan T`, `[N]chan chan T`, and `map[K]chan chan T`
+sources act like external indexed queue sources. Element reads
+retain the container's parameter origin and index dependencies;
+external stores and operations propagate through the container
+identity. As with named local queues, local-only operations keep
+`none_in_supported_fragment` effects.
+
+The container value itself does not escape through this model:
+returning, storing, passing, capturing, or taking the address of
+the container remains closed, as do struct fields, `[][]chan chan
+T`, `[]chan chan chan T` and deeper nesting, and non-scalar
+elements such as `[]chan chan []T`.
 
 ### C07 scalar-element *nested* local containers
 
