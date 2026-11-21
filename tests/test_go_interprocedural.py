@@ -6328,6 +6328,17 @@ def test_interface_method_value_non_scalar_result_stays_closed(
     assert not result.available
 
 
+def test_interface_dispatch_pointer_result_is_admitted(go_types_helper):
+    declarations = (
+        "type I interface{ M() *int64 }\n"
+        "func F(i I) int64 { p := i.M(); return *p }\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
 def test_promoted_interface_method_stays_closed(go_types_helper):
     # `struct{ I }` — a method promoted from an embedded interface
     # dispatches dynamically even though the outer receiver is

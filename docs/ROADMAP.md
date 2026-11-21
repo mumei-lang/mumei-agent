@@ -4859,9 +4859,9 @@ collected identities ride on the call
 record's `type_arg_type_ids`, the same wire key an instantiated callee
 uses, so a type-argument redeclare stales every admitted caller.
 Interface dispatch admits method expressions and method-value calls
-on interface-typed parameters and their plain copies with scalar
-results; interface results, concrete-to-interface uses and promoted
-methods stay closed.
+on interface-typed parameters and their plain copies with integer,
+boolean or pointer results; interface results, concrete-to-interface
+uses and promoted methods stay closed.
 
 ### C06 multi-valued imported results
 
