@@ -3523,6 +3523,63 @@ def verify_plan(
 
 
 @mcp.tool()
+def evidence_check_adapter(
+    core_path: str,
+    manifest_path: str,
+    attempt_timeout_ms: int = 30000,
+) -> str:
+    """Check a saved adapter manifest's static Core representation.
+
+    Feeds the declared manifest bytes to `evidence check-adapter
+    --stdin --json` as one declared attempt — the same wiring as the
+    `evidence-check-adapter` CLI route. Selection requires Core's exact
+    representation diagnostic and agreement with the local
+    `AdapterDescriptor.from_manifest` view of attempt argv, stdin and
+    verdict-marker count. The report does not echo adapter ids, argv,
+    stdin, markers or manifest content. Selection does not execute an
+    adapter, assess command safety, accept Evidence or promote a grade.
+
+    Args:
+        core_path: Absolute path to the mumei Core executable.
+        manifest_path: Absolute path to the saved
+            `mumei.verifier-adapter/v1` manifest (at most 64 KiB).
+        attempt_timeout_ms: Declared attempt bound in milliseconds
+            (at most 60000).
+
+    Returns:
+        JSON with `report` — the
+        `mumei.evidence-check-adapter-report/v1` document — on success,
+        or `error` on a declared failure.
+    """
+    try:
+        from agent.evidence_check_adapter import run_check_adapter
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+
+    for name, path in (
+        ("core_path", core_path),
+        ("manifest_path", manifest_path),
+    ):
+        if not _valid_declared_path(path):
+            return _err(f"{name} must be a nonempty single-line path")
+    if type(attempt_timeout_ms) is not int or attempt_timeout_ms < 1:
+        return _err("attempt_timeout_ms must be a positive integer")
+
+    args = argparse.Namespace(
+        core=core_path,
+        manifest=manifest_path,
+        attempt_timeout=attempt_timeout_ms,
+        memory_bound_mb=None,
+        output=None,
+    )
+    try:
+        report = run_check_adapter(args)
+    except (OSError, ValueError, UnicodeDecodeError) as exc:
+        return _err(_redact_declared_paths(str(exc), [core_path, manifest_path]))
+    return _ok({"report": report})
+
+
+@mcp.tool()
 def evidence_check_schedule(
     core_path: str,
     schedule_path: str,

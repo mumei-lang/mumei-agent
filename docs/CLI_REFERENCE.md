@@ -48,6 +48,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `go-summaries-reuse-attempt` | 10 | Run the go-summaries-reuse route as one declared attempt and emit the reconciled lineage descriptors. |
 | `evidence-check` | 6 | Run a declared Core Evidence representation check as one attempt and emit the reconciled lineage plus the declared representation outcome. |
 | `evidence-check-schedule` | 5 | Run a declared Core attempt-schedule representation check as one attempt and emit the reconciled lineage plus the declared schedule outcome. |
+| `evidence-check-adapter` | 5 | Run a declared Core adapter-manifest representation check as one attempt and emit the reconciled lineage and bounded diagnostic. |
 | `evidence-check-list` | 6 | Run a declared Core Evidence list-envelope representation check as one attempt and emit the reconciled lineage plus the declared representation outcome. |
 | `evidence-check-accept` | 3 | Evaluate a declared evidence-check record against a restored attempt-sequence snapshot and emit the representation-level acceptance descriptor. |
 | `evidence-check-consistency` | 6 | Run a declared Core Evidence list cross-record consistency check as one attempt and emit the reconciled lineage plus the declared consistency outcome. |
@@ -304,7 +305,7 @@ Audit existing code by extracting specs, verifying contracts, emitting cross_val
 | `--schedule-max-attempts` | `<<N>>` | no | — | Bounded schedule attempts per unit for --enable-scheduled-verification (default: 8). |
 | `--schedule-success-exit-code` | `<<N>>` | no | — | Declared exit code counting as a scheduling success for --enable-scheduled-verification (repeatable; default {0}). |
 | `--schedule-memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling per scheduled attempt child. |
-| `--schedule-core` | `<PATH>` | no | — | Optional Core executable: when a scheduled verification selects an attempt, run the Core representation check on its captured output and record the mumei.evidence-check-acceptance/v1 descriptor on the schedule record (use --json for the full record; text output shows only the schedule outcome). |
+| `--schedule-core` | `<PATH>` | no | — | Optional Core executable: when a scheduled verification selects an attempt, run the Core representation check on its captured output and record the mumei.evidence-check-acceptance/v1 descriptor on the schedule record; also record Core's schedule representation and consistency diagnostic under scheduled_verification_check (advisory only, not a verdict or Evidence acceptance). Use --json for the full record; text output shows the schedule outcome and check status. |
 | `--schedule-core-requirement` | `<PATH>` | no | — | Optional mumei.evidence-requirement/v1 document: with --schedule-core, run the Core evidence-acceptance check (`core evidence accept --stdin --json --requirement PATH`) on the selected attempt's captured output instead of the representation check, and record Core's declared verdict as the evidence_check outcome. |
 | `--schedule-core-requirement-list` | `<PATH>` | no | — | Optional mumei.evidence-requirement-list/v1 document: with --schedule-core, run the conjunctive Core evidence-acceptance check (`core evidence accept --stdin --json --requirement-list PATH`) on the selected attempt's captured output instead of the representation check, and record Core's declared verdict as the evidence_check outcome. Conflicts with --schedule-core-requirement. |
 
@@ -732,6 +733,21 @@ Run a declared Core attempt-schedule representation check as one attempt and emi
 |---|---|---|---|---|
 | `--core` | `<PATH>` | yes | — | Declared Core executable (absolute path) used to run `evidence check-schedule`. |
 | `--schedule` | `<PATH>` | yes | — | Declared saved mumei.attempt-schedule/v1 document (absolute regular-file path, at most 65536 bytes); its bytes are fed to the check on stdin. |
+| `--attempt-timeout` | `<<MS>>` | no | 30000 | Declared attempt bound in ms (max 60000). |
+| `--memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling applied to the attempt child's whole address space. |
+| `--output` | `<PATH>` | no | — | Write the check report JSON here instead of stdout. |
+
+
+## `mumei-agent evidence-check-adapter`
+
+Run a declared Core adapter-manifest representation check as one attempt and emit the reconciled lineage and bounded diagnostic.
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--core` | `<PATH>` | yes | — | Declared Core executable (absolute path) used to run `evidence check-adapter`. |
+| `--manifest` | `<PATH>` | yes | — | Declared saved mumei.verifier-adapter/v1 manifest (absolute regular-file path, at most 65536 bytes); its bytes are fed to the check on stdin. |
 | `--attempt-timeout` | `<<MS>>` | no | 30000 | Declared attempt bound in ms (max 60000). |
 | `--memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling applied to the attempt child's whole address space. |
 | `--output` | `<PATH>` | no | — | Write the check report JSON here instead of stdout. |

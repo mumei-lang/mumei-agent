@@ -6834,6 +6834,21 @@ suppresses selection.
 C11 stays partial; this route adds no Evidence acceptance or grade
 promotion.
 
+### C11 Core adapter-manifest representation check
+
+The `evidence-check-adapter` CLI route and `evidence_check_adapter` MCP
+tool send a declared `mumei.verifier-adapter/v1` manifest to Core's
+`evidence check-adapter --stdin --json`. Selection requires Core's exact
+closed diagnostic and local `AdapterDescriptor.from_manifest` agreement
+on attempt argv, stdin and verdict-marker count. These fields remain
+declarations only: argv/stdin need host opt-in, markers are self-report
+vocabulary, and `max_memory_mb` is a declared ceiling. This route does
+not execute adapters, assess command safety, accept Evidence or promote
+grades.
+
+C11 stays partial; this route adds no Evidence acceptance or grade
+promotion.
+
 ### C11 audit scheduled-attempt evidence check
 
 `audit --schedule-core PATH` (with `--enable-scheduled-verification`)
@@ -6845,6 +6860,15 @@ record carries `evidence_check` / `evidence_acceptance`, matching the
 `verify-schedule --core` route. `--schedule-core` must be an absolute
 path to a regular file; a failed or cancelled check records its
 outcome with `accepted: false` — it never blocks the selection.
+
+With `--schedule-core`, audit also serializes each generated schedule in
+the same format as `verify-schedule` and records Core's
+`evidence check-schedule --stdin --json` diagnostic separately as
+`scheduled_verification_check`. This is an advisory representation and
+consistency diagnostic only; it is not a verdict or Evidence acceptance
+and does not change `verification_status` or `success`. It adds no
+Evidence acceptance or grade promotion. Like `scheduled_verification`,
+it remains outside the fixed MCP `audit_schema` finding vocabulary.
 
 C11 stays partial; Core meaning and acceptance, C12's demand gate and
 any default audit/CLI/MCP route are unchanged — Evidence acceptance

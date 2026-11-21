@@ -124,6 +124,26 @@ def _assert_unselected(report: dict, *, exit_code: int | None = None) -> None:
         assert report["normalized"]["exit_code"] == exit_code
 
 
+def test_check_schedule_bytes_returns_diagnostic_fields(tmp_path: Path) -> None:
+    core = _write_core(tmp_path, hashlib.sha256(SCHEDULE_BYTES).hexdigest())
+
+    report = evidence_check_schedule.check_schedule_bytes(
+        str(core),
+        SCHEDULE_BYTES,
+        30_000,
+        None,
+    )
+
+    assert report["normalized"]["exit_code"] == 0
+    assert report["representation"] == "valid"
+    assert report["acceptance"] == "not_evaluated"
+    assert report["schedule_outcome"] == "selected"
+    assert report["attempt_count"] == 1
+    assert report["reported_outcome_meaning"] == "adapter_self_report"
+    assert report["checks_performed"] == CHECKS_PERFORMED
+    assert report["checks_not_performed"] == CHECKS_NOT_PERFORMED
+
+
 def test_exact_diagnostic_selects_and_hands_off_candidate(
     tmp_path: Path, capsys
 ) -> None:
