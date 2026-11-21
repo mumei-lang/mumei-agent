@@ -1004,10 +1004,10 @@ Core executable, the bundle record and every declared member, the
 source and the trusted-channel build ID. `observations_recheck` is
 claimed only for uniquely-mapped exit codes (`0 → reproduced`,
 `3 → inconclusive`); other exits claim nothing, and mid-run drift
-reports `inputs_changed` without an outcome. The Core JSON descriptor
-is retained in normalized stdout; the route adds
-`runtime_observation_schema` only when that parsed descriptor names
-`mumei.runtime-observation/v1`. Every report outcome echoes the
+reports `inputs_changed` without an outcome. Normalized stdout keeps
+only the captured descriptor's digest and size, not its body; the route
+parses the captured stdout and adds `runtime_observation_schema` only
+when the descriptor names `mumei.runtime-observation/v1`. Every report outcome echoes the
 declared `expected_build_id`.
 
 A `reproduced` run reports `artifact_semantics`, `claim_truth` and all
@@ -6231,9 +6231,9 @@ including outcomes without an acceptance or reproduced result.
 Single-channel rechecks remain non-performers because their stdout is
 a fixed diagnostic line with no bound carrier. The
 `native-observations-recheck-report/v1` is also deliberately
-non-performing: with `--json` it carries the raw
-`mumei.runtime-observation/v1` descriptor in stdout, but that recheck
-is not acceptance. The accepted
+non-performing: Core prints the `mumei.runtime-observation/v1`
+descriptor with `--json` (the report keeps its digest and schema name,
+not the body), but that recheck is not acceptance. The accepted
 `native-observations-accept-report/v1` performs all three channel checks
 and `runtime_observation_semantics` through its bound stdout digest or
 shared expected build ID: one Core invocation has observed every
