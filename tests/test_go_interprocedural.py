@@ -30246,6 +30246,131 @@ def test_struct_collection_rhs_and_copy_parity(
     assert result.return_dependencies == expected
 
 
+def test_parallel_struct_collection_assignment_uses_prestate(
+    go_types_helper,
+):
+    def dependencies(source):
+        result = named(*unit(go_types_helper, source))
+        assert result.available, result.gaps
+        return result.return_dependencies
+
+    header = (
+        "type S struct { A []int64 }\n"
+        "func F(x int64) int64 {\n"
+        "\ta1 := []int64{0}\n"
+        "\ta2 := []int64{0}\n"
+        "\ta3 := []int64{0}\n"
+        "\ts := S{A: a1}\n"
+        "\tt := S{A: a2}\n"
+    )
+    two_way_header = (
+        "type S struct { A []int64 }\n"
+        "func F(x int64) int64 {\n"
+        "\ta1 := []int64{0}\n"
+        "\ta2 := []int64{0}\n"
+        "\ts := S{A: a1}\n"
+        "\tt := S{A: a2}\n"
+    )
+    assert dependencies(
+        header
+        + "\tw := S{A: a3}\n"
+        "\ts, t, w = t, w, s\n"
+        "\tb := w.A\n"
+        "\tb[0] = x\n"
+        "\treturn a1[0]\n}\n"
+    ) == frozenset({0})
+    assert dependencies(
+        header
+        + "\tw := S{A: a3}\n"
+        "\ts, t, w = t, w, s\n"
+        "\tb := w.A\n"
+        "\tb[0] = x\n"
+        "\treturn a2[0]\n}\n"
+    ) == frozenset()
+    assert dependencies(
+        two_way_header
+        + "\tu := s\n"
+        "\t_ = u\n"
+        "\ts, t = t, s\n"
+        "\tb := t.A\n"
+        "\tb[0] = x\n"
+        "\treturn a1[0]\n}\n"
+    ) == frozenset({0})
+    assert dependencies(
+        two_way_header
+        + "\tu := s\n"
+        "\ts, t = t, s\n"
+        "\tc := u.A\n"
+        "\tc[0] = x\n"
+        "\treturn a1[0]\n}\n"
+    ) == frozenset({0})
+
+    assert dependencies(
+        two_way_header
+        + "\ts, t = t, s\n"
+        "\tb := t.A\n"
+        "\tb[0] = x\n"
+        "\treturn a1[0]\n}\n"
+    ) == frozenset({0})
+    assert dependencies(
+        two_way_header
+        + "\ts, t = t, s\n"
+        "\tb := t.A\n"
+        "\tb[0] = x\n"
+        "\treturn a2[0]\n}\n"
+    ) == frozenset()
+    assert dependencies(
+        two_way_header
+        + "\ts = t\n"
+        "\tb := s.A\n"
+        "\tb[0] = x\n"
+        "\treturn a2[0]\n}\n"
+    ) == frozenset({0})
+
+    conditional = named(
+        *unit(
+            go_types_helper,
+            "type S struct { A []int64 }\n"
+            "func F(x int64, c bool) int64 {\n"
+            "\ta1 := []int64{0}\n"
+            "\ta2 := []int64{0}\n"
+            "\ts := S{A: a1}\n"
+            "\tt := S{A: a2}\n"
+            "\tif c { s, t = t, s }\n"
+            "\tb := t.A\n"
+            "\tb[0] = x\n"
+            "\treturn a1[0]\n}\n",
+        )
+    )
+    assert conditional.available
+    assert conditional.return_dependencies == frozenset({0})
+
+    assert dependencies(
+        header
+        + "\ts, t = t, S{A: a3}\n"
+        "\tb := s.A\n"
+        "\tb[0] = x\n"
+        "\treturn a2[0]\n}\n"
+    ) == frozenset({0})
+
+    unsupported = named(
+        *unit(
+            go_types_helper,
+            "type S struct { A []int64 }\n"
+            "func id(s S) S { return s }\n"
+            "func F(x int64) int64 {\n"
+            "\ta := []int64{0}\n"
+            "\tb := []int64{0}\n"
+            "\ts := S{A: a}\n"
+            "\tt := S{A: b}\n"
+            "\ts, t = t, id(s)\n"
+            "\treturn a[0]\n}\n",
+        )
+    )
+    assert not unsupported.available
+    assert unsupported.gaps[0].reason == "unsupported_expression"
+
+
 def test_imported_struct_call_result_shares_argument_backing(
     go_types_helper,
 ):

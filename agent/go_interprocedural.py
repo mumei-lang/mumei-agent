@@ -2549,6 +2549,41 @@ class _Builder:
                 )
         self._opaque_container_tokens.pop(binding_id, None)
 
+    def _bind_struct_container_snapshot(
+        self,
+        binding_id: str,
+        snapshot: tuple[frozenset, dict[str, frozenset]],
+        *,
+        conditional: bool = False,
+    ) -> None:
+        binding = self.bindings.get(binding_id)
+        if binding is None:
+            return
+        members = self._struct_collection_members(
+            binding.type, binding
+        )
+        root_tokens, field_tokens = snapshot
+        if {member.id for member in members} != set(field_tokens):
+            raise _Unsupported("unsupported_expression")
+        conditional = conditional or self._may_skip > 0
+        old_tokens = self._opaque_container_tokens.get(
+            binding_id, frozenset()
+        )
+        if not conditional:
+            self._detach_struct_container_aliases(binding_id)
+        self._opaque_container_tokens[binding_id] = (
+            root_tokens | old_tokens
+            if conditional
+            else root_tokens
+        )
+        for member in members:
+            self._set_opaque_container_field_tokens(
+                binding_id,
+                member.id,
+                field_tokens[member.id],
+                conditional=conditional,
+            )
+
     def _struct_literal_field_values(
         self, literal: Any, fact: Any, anchor: Any | None
     ) -> tuple[tuple[Any, Any], ...] | None:
@@ -16467,107 +16502,127 @@ class _Builder:
                         tok for tok in pre_set if isinstance(tok, str)
                     }
             lhs_binding_ids = {
-                getattr(ref, "binding_id", None) for ref in refs
+                getattr(ref, "binding_id")
+                for ref in refs
+                if getattr(ref, "binding_id", None) is not None
             }
-            struct_swap = None
-            if (
-                not conditional
-                and self._may_skip == 0
-                and len(lefts) == 2
-                and len(rights) == 2
-            ):
-                swap_ids = [
-                    getattr(ref, "binding_id", None)
-                    for ref in refs
-                ]
-                swap_sources = []
-                for rhs in rights:
-                    source_ref = (
-                        self.references.get(self.node_key(rhs))
-                        if rhs.type == "identifier"
-                        else None
+            struct_rhs_snapshots: dict[
+                int, tuple[frozenset, dict[str, frozenset]]
+            ] = {}
+            if not compound and len(lefts) == len(rights):
+                for rhs_index, rhs in enumerate(rights):
+                    snapshot_rhs = rhs
+                    while (
+                        snapshot_rhs is not None
+                        and snapshot_rhs.type
+                        == "parenthesized_expression"
+                    ):
+                        snapshot_rhs = next(
+                            (
+                                child
+                                for child in snapshot_rhs.named_children
+                                if child.type != "comment"
+                            ),
+                            None,
+                        )
+                    if (
+                        snapshot_rhs is None
+                        or snapshot_rhs.type != "identifier"
+                    ):
+                        continue
+                    source_ref = self.references.get(
+                        self.node_key(snapshot_rhs)
                     )
-                    swap_sources.append(
-                        source_ref.binding_id
+                    source_binding = (
+                        self.bindings.get(source_ref.binding_id)
                         if source_ref is not None
                         else None
                     )
-                if (
-                    all(swap_ids)
-                    and swap_sources == [swap_ids[1], swap_ids[0]]
-                ):
-                    swap_bindings = [
-                        self.bindings.get(binding_id)
-                        for binding_id in swap_ids
-                    ]
-                    if (
-                        all(swap_bindings)
-                        and swap_bindings[0].type
-                        == swap_bindings[1].type
-                    ):
-                        swap_members = self._struct_collection_members(
-                            swap_bindings[0].type, swap_bindings[0]
+                    source_members = (
+                        self._struct_collection_members(
+                            source_binding.type, source_binding
                         )
-                        if swap_members:
-                            self._opaque_container_bind(
-                                rights[0], params
+                        if source_binding is not None
+                        else ()
+                    )
+                    target_id = getattr(
+                        refs[rhs_index], "binding_id", None
+                    )
+                    target_binding = self.bindings.get(target_id)
+                    target_members = (
+                        self._struct_collection_members(
+                            target_binding.type, target_binding
+                        )
+                        if target_binding is not None
+                        else ()
+                    )
+                    if not source_members or not target_members:
+                        continue
+                    if tuple(
+                        member.id for member in source_members
+                    ) != tuple(member.id for member in target_members):
+                        raise _Unsupported(
+                            "unsupported_expression", _span(rhs)
+                        )
+                    source_tokens = self._opaque_container_bind(
+                        snapshot_rhs, params
+                    )
+                    if source_tokens is None:
+                        raise _Unsupported(
+                            "unsupported_expression", _span(rhs)
+                        )
+                    field_tokens = {}
+                    for member in source_members:
+                        field_key = self._opaque_container_field_key(
+                            source_ref.binding_id, member.id
+                        )
+                        field_tokens[member.id] = (
+                            self._opaque_container_tokens.get(
+                                field_key, source_tokens
                             )
-                            self._opaque_container_bind(
-                                rights[1], params
+                        )
+                    struct_rhs_snapshots[rhs_index] = (
+                        frozenset(source_tokens),
+                        field_tokens,
+                    )
+            if struct_rhs_snapshots:
+                for rhs in rights:
+                    snapshot_rhs = rhs
+                    while (
+                        snapshot_rhs is not None
+                        and snapshot_rhs.type
+                        == "parenthesized_expression"
+                    ):
+                        snapshot_rhs = next(
+                            (
+                                child
+                                for child in snapshot_rhs.named_children
+                                if child.type != "comment"
+                            ),
+                            None,
+                        )
+                    if (
+                        snapshot_rhs is None
+                        or snapshot_rhs.type == "identifier"
+                    ):
+                        continue
+                    pending = [snapshot_rhs]
+                    while pending:
+                        candidate = pending.pop()
+                        if candidate.type == "identifier":
+                            candidate_ref = self.references.get(
+                                self.node_key(candidate)
                             )
-                            root_sharers = [
-                                {
-                                    holder_id
-                                    for holder_id in (
-                                        self._opaque_container_sharers(
-                                            binding_id
-                                        )
-                                    )
-                                    if "\x00" not in holder_id
-                                    and getattr(
-                                        self.bindings.get(holder_id),
-                                        "type",
-                                        None,
-                                    )
-                                    == swap_bindings[index].type
-                                }
-                                for index, binding_id in enumerate(
-                                    swap_ids
+                            if (
+                                candidate_ref is not None
+                                and candidate_ref.binding_id
+                                in lhs_binding_ids
+                            ):
+                                raise _Unsupported(
+                                    "unsupported_expression",
+                                    _span(rhs),
                                 )
-                            ]
-                            if root_sharers == [
-                                {swap_ids[0]},
-                                {swap_ids[1]},
-                            ]:
-                                roots_before = {
-                                    binding_id: self._opaque_container_tokens.get(
-                                        binding_id, frozenset()
-                                    )
-                                    for binding_id in swap_ids
-                                }
-                                fields_before = {}
-                                for source_id in swap_ids:
-                                    fields_before[source_id] = {}
-                                    for member in swap_members:
-                                        field_key = (
-                                            self._opaque_container_field_key(
-                                                source_id, member.id
-                                            )
-                                        )
-                                        fields_before[source_id][
-                                            member.id
-                                        ] = (
-                                            self._opaque_container_tokens.get(
-                                                field_key,
-                                                roots_before[source_id],
-                                            )
-                                        )
-                                struct_swap = (
-                                    swap_ids,
-                                    swap_members,
-                                    roots_before,
-                                    fields_before,
-                                )
+                        pending.extend(candidate.named_children)
             for i, alias_target in enumerate(chan_alias_targets):
                 source_id = (
                     alias_target.id if alias_target is not None else None
@@ -17583,54 +17638,29 @@ class _Builder:
                             or getattr(bound.type, "kind", None)
                             == "struct"
                         )
-                        and not (
-                            struct_swap is not None
-                            and ref.binding_id in struct_swap[0]
-                        )
                     ):
-                        self._bind_struct_container_value(
-                            ref.binding_id,
-                            (
-                                rights[i]
-                                if len(lefts) == len(rights)
-                                else None
-                            ),
-                            params,
-                            conditional=conditional or self._may_skip > 0,
-                            reseat=True,
-                        )
-                    if (
-                        struct_swap is not None
-                        and i == len(lefts) - 1
-                    ):
-                        (
-                            swap_ids,
-                            swap_members,
-                            roots_before,
-                            fields_before,
-                        ) = struct_swap
-                        for root_id in swap_ids:
-                            for member in swap_members:
-                                self._opaque_container_tokens.pop(
-                                    f"{root_id}\x00{member.id}",
-                                    None,
-                                )
-                        self._opaque_container_tokens[
-                            swap_ids[0]
-                        ] = roots_before[swap_ids[1]]
-                        self._opaque_container_tokens[
-                            swap_ids[1]
-                        ] = roots_before[swap_ids[0]]
-                        for target_id, source_id in (
-                            (swap_ids[0], swap_ids[1]),
-                            (swap_ids[1], swap_ids[0]),
-                        ):
-                            for member in swap_members:
-                                self._set_opaque_container_field_tokens(
-                                    target_id,
-                                    member.id,
-                                    fields_before[source_id][member.id],
-                                )
+                        if i in struct_rhs_snapshots:
+                            self._bind_struct_container_snapshot(
+                                ref.binding_id,
+                                struct_rhs_snapshots[i],
+                                conditional=(
+                                    conditional or self._may_skip > 0
+                                ),
+                            )
+                        else:
+                            self._bind_struct_container_value(
+                                ref.binding_id,
+                                (
+                                    rights[i]
+                                    if len(lefts) == len(rights)
+                                    else None
+                                ),
+                                params,
+                                conditional=(
+                                    conditional or self._may_skip > 0
+                                ),
+                                reseat=True,
+                            )
                     if bound is not None and bound.type.kind in {
                         "slice",
                         "array",
