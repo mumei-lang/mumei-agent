@@ -20852,6 +20852,122 @@ def test_chan_elem_external_unsupported_stays_closed(
 @pytest.mark.parametrize(
     ("declarations", "expected"),
     [
+        # `s = append(s, c2)` — the appended queue joins the
+        # result's share group like a `[]chan{c}` literal seed:
+        # `c2 <- x` reaches `<-s[1]`.
+        (
+            "func F(x int64) int64 {\n"
+            "\tc1 := make(chan int64, 4)\n"
+            "\tc2 := make(chan int64, 4)\n"
+            "\ts := []chan int64{c1}\n"
+            "\ts = append(s, c2)\n"
+            "\tc2 <- x\n"
+            "\treturn <-s[1]\n}\n",
+            frozenset({0}),
+        ),
+        # `b := append(s, c2)` — the bound result's group holds the
+        # appended queue the same way.
+        (
+            "func F(x int64) int64 {\n"
+            "\tc1 := make(chan int64, 4)\n"
+            "\tc2 := make(chan int64, 4)\n"
+            "\ts := []chan int64{c1}\n"
+            "\tb := append(s, c2)\n"
+            "\tc2 <- x\n"
+            "\treturn <-b[1]\n}\n",
+            frozenset({0}),
+        ),
+        # A send THROUGH the appended element lands in the group —
+        # `<-c2` observes it like a `[]chan{c2}` member read.
+        (
+            "func F(x int64) int64 {\n"
+            "\tc1 := make(chan int64, 4)\n"
+            "\tc2 := make(chan int64, 4)\n"
+            "\ts := []chan int64{c1}\n"
+            "\ts = append(s, c2)\n"
+            "\ts[1] <- x\n"
+            "\treturn <-c2\n}\n",
+            frozenset({0}),
+        ),
+        # `b := s` before the append — the result may reuse `s`'s
+        # backing, so `b`'s group gains the appended queue too.
+        (
+            "func F(x int64) int64 {\n"
+            "\tc1 := make(chan int64, 4)\n"
+            "\tc2 := make(chan int64, 4)\n"
+            "\ts := []chan int64{c1}\n"
+            "\tb := s\n"
+            "\ts = append(s, c2)\n"
+            "\tc2 <- x\n"
+            "\treturn <-b[0]\n}\n",
+            frozenset({0}),
+        ),
+        # A param queue appended in — the external member's send
+        # records the caller-visible effect and the read conflates
+        # the ordinal like any group receive.
+        (
+            "func F(c2 chan int64, x int64) int64 {\n"
+            "\tc1 := make(chan int64, 4)\n"
+            "\ts := []chan int64{c1}\n"
+            "\ts = append(s, c2)\n"
+            "\tc2 <- x\n"
+            "\treturn <-s[1]\n}\n",
+            frozenset({0, 1}),
+        ),
+        # `var s = append(s0, c2)` binds like `s :=`.
+        (
+            "func F(x int64) int64 {\n"
+            "\tc1 := make(chan int64, 4)\n"
+            "\tc2 := make(chan int64, 4)\n"
+            "\ts0 := []chan int64{c1}\n"
+            "\tvar s = append(s0, c2)\n"
+            "\tc2 <- x\n"
+            "\treturn <-s[1]\n}\n",
+            frozenset({0}),
+        ),
+        # `s[i] = c2` element store already joined the queue —
+        # `append` carrying a second queue adds it too.
+        (
+            "func F(x int64) int64 {\n"
+            "\tc1 := make(chan int64, 4)\n"
+            "\tc2 := make(chan int64, 4)\n"
+            "\tc3 := make(chan int64, 4)\n"
+            "\ts := []chan int64{c1}\n"
+            "\ts[0] = c2\n"
+            "\ts = append(s, c3)\n"
+            "\tc3 <- x\n"
+            "\treturn <-s[1]\n}\n",
+            frozenset({0}),
+        ),
+    ],
+)
+def test_chan_elem_append(go_types_helper, declarations, expected):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available
+    assert result.return_dependencies == expected
+
+
+def test_chan_elem_append_param_transfer(go_types_helper):
+    # `s = append(s, c2)` with a param queue — `c2 <- x` is a
+    # caller-visible effect: an imported transfer lands on the
+    # param's identity.
+    declarations = (
+        "func F(c2 chan int64, x int64) int64 {\n"
+        "\ts := []chan int64{make(chan int64, 1)}\n"
+        "\ts = append(s, c2)\n"
+        "\tc2 <- x\n"
+        "\treturn 0\n}\n"
+    )
+    source, snapshot, summaries = unit(go_types_helper, declarations)
+    result = named(source, snapshot, summaries)
+    assert result.available
+    c2 = next(b for b in snapshot.bindings if b.name == "c2")
+    assert any(t.imported and t.target == c2.id for t in result.calls)
+
+
+@pytest.mark.parametrize(
+    ("declarations", "expected"),
+    [
         # `s.V = <-ch` — a field store on a local composite folds the
         # receive into the base binding like the plain assignment.
         (
