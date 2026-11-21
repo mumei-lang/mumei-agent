@@ -5988,6 +5988,38 @@ def test_interface_method_value_bindings_match_direct_dispatch(
     assert value.return_dependencies == frozenset({0, 1})
 
 
+@pytest.mark.parametrize(
+    "binding",
+    [
+        "var f, g = i.M, i.M",
+        "h := i.M; var f, g = h, h",
+    ],
+)
+def test_interface_method_values_in_multi_name_var_specs(
+    go_types_helper, binding
+):
+    value = named(
+        *unit(
+            go_types_helper,
+            "type I interface{ M(int64) int64 }\n"
+            "func F(i I, x int64) int64 { "
+            f"{binding}; return f(x) + g(x) }}",
+        )
+    )
+    direct = named(
+        *unit(
+            go_types_helper,
+            "type I interface{ M(int64) int64 }\n"
+            "func F(i I, x int64) int64 { "
+            "return i.M(x) + i.M(x) }",
+        )
+    )
+    assert value.available, value.gaps
+    assert direct.available, direct.gaps
+    assert value.return_dependencies == direct.return_dependencies
+    assert value.return_dependencies == frozenset({0, 1})
+
+
 def test_interface_method_expression_value_matches_direct_dispatch(
     go_types_helper,
 ):

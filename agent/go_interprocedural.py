@@ -3872,20 +3872,27 @@ class _Builder:
         }:
             left = statement.child_by_field_name("left")
         elif statement.type == "var_spec":
-            left = statement.child_by_field_name("name")
+            left = None
         else:
             return False
-        if left is None:
-            return False
-        targets = (
-            [
+        if statement.type == "var_spec":
+            targets = [
                 child
-                for child in left.named_children
+                for child in statement.children_by_field_name("name")
                 if child.type != "comment"
             ]
-            if left.type == "expression_list"
-            else [left]
-        )
+        elif left is None:
+            return False
+        else:
+            targets = (
+                [
+                    child
+                    for child in left.named_children
+                    if child.type != "comment"
+                ]
+                if left.type == "expression_list"
+                else [left]
+            )
         if index >= len(targets) or targets[index].type != "identifier":
             return False
         target = targets[index]
@@ -3970,7 +3977,7 @@ class _Builder:
             statement.child_by_field_name("left")
             if statement.type
             in {"short_var_declaration", "assignment_statement"}
-            else statement.child_by_field_name("name")
+            else None
         )
         targets = (
             (
@@ -3986,20 +3993,11 @@ class _Builder:
             else []
         )
         if statement.type == "var_spec":
-            names = statement.child_by_field_name("name")
-            targets = (
-                (
-                    [
-                        child
-                        for child in names.named_children
-                        if child.type != "comment"
-                    ]
-                    if names.type == "expression_list"
-                    else [names]
-                )
-                if names is not None
-                else []
-            )
+            targets = [
+                child
+                for child in statement.children_by_field_name("name")
+                if child.type != "comment"
+            ]
         if value_index >= len(targets):
             return False
         target = targets[value_index]
