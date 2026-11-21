@@ -7257,6 +7257,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             inner, fn, params, locals_, transfers, count, depth + 1
         )
         self._promote_chan_call_args(inner, "", locals_, params)
+        self.indirect_writes |= deps
         self._chan_chan_container_call_deps[key] = deps
         return deps
 
@@ -10719,6 +10720,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
         # enclosing frame) — a nested statement's reads belong to the
         # outer statement too, like dep flow itself. A statement closed
         # by `_Unsupported` records nothing; the function gaps anyway.
+        saved_container_call_deps = (
+            self._chan_chan_container_call_deps
+        )
+        self._chan_chan_container_call_deps = {}
         self._read_stack.append([])
         try:
             self._statement(
@@ -10727,6 +10732,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
             )
         finally:
             frame = self._read_stack.pop()
+            self._chan_chan_container_call_deps = (
+                saved_container_call_deps
+            )
         # Same addressing `CallTransfer.span` uses — the file index is
         # part of the identity in a multi-file package.
         span = FileSpan(

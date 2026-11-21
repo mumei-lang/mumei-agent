@@ -18031,6 +18031,188 @@ def test_chan_chan_call_result_container_operations_evaluate_call_once(
     assert not mismatches, mismatches
 
 
+def test_chan_chan_container_call_recomputes_dependencies_in_loop(
+    go_types_helper,
+):
+    shapes = (
+        (
+            "slice",
+            "[]chan chan int64",
+            "[]chan chan int64{q}",
+            "chan chan int64",
+            False,
+        ),
+        (
+            "map",
+            "map[int]chan chan int64",
+            "map[int]chan chan int64{0: q}",
+            "chan chan int64",
+            False,
+        ),
+        (
+            "depth3",
+            "[]chan chan chan int64",
+            "[]chan chan chan int64{q}",
+            "chan chan chan int64",
+            True,
+        ),
+    )
+    operations = ("receive", "send", "close", "len", "range")
+    declarations = ["var GC chan int64"]
+    comparisons = []
+    for shape, container_type, literal, queue_type, depth3 in shapes:
+        g_name = f"G_{shape}"
+        if depth3:
+            g_body = (
+                "q := make(chan chan chan int64, 1); "
+                "cc := make(chan chan int64, 1); "
+                "c := make(chan int64, 1); c <- x; "
+                "cc <- c; q <- cc; "
+            )
+        else:
+            g_body = (
+                "q := make(chan chan int64, 1); "
+                "c := make(chan int64, 1); c <- x; q <- c; "
+            )
+        declarations.append(
+            f"func {g_name}(x int64) {container_type} {{ "
+            f"{g_body}s := {literal}; return s }}"
+        )
+        for operation in operations:
+            direct_name = f"F_{shape}_{operation}"
+            bound_name = f"FB_{shape}_{operation}"
+            for name, target in (
+                (direct_name, f"{g_name}(r)[0]"),
+                (bound_name, "s[0]"),
+            ):
+                body = []
+                if name == bound_name:
+                    body.append(f"s := {g_name}(r)")
+                if operation == "receive":
+                    if depth3:
+                        body.extend(
+                            [
+                                f"cc := <-{target}",
+                                "c := <-cc",
+                                "ret = <-c",
+                            ]
+                        )
+                    else:
+                        body.extend(
+                            [f"c := <-{target}", "ret = <-c"]
+                        )
+                elif operation == "send":
+                    if depth3:
+                        body.extend(
+                            [
+                                "cc := make(chan chan int64, 1)",
+                                "c := make(chan int64, 1)",
+                                "c <- 0",
+                                "cc <- c",
+                                f"{target} <- cc",
+                                "ret = <-c",
+                            ]
+                        )
+                    else:
+                        body.extend(
+                            [
+                                "c := make(chan int64, 1)",
+                                "c <- 0",
+                                f"{target} <- c",
+                                "ret = <-c",
+                            ]
+                        )
+                elif operation == "close":
+                    body.extend([f"close({target})", "ret = <-GC"])
+                elif operation == "len":
+                    body.append(f"ret = int64(len({target}))")
+                elif depth3:
+                    body.extend(
+                        [
+                            f"for cc := range {target} {{",
+                            "\t c := <-cc",
+                            "\t ret = <-c",
+                            "}",
+                        ]
+                    )
+                else:
+                    body.extend(
+                        [
+                            f"for c := range {target} {{",
+                            "\t ret = <-c",
+                            "}",
+                        ]
+                    )
+                loop_body = "\n".join(f"\t\t{line}" for line in body)
+                declarations.append(
+                    f"func {name}(x int64) int64 {{\n"
+                    "\tr := int64(0)\n"
+                    "\tret := int64(0)\n"
+                    "\tfor i := 0; i < 2; i++ {\n"
+                    f"\t{loop_body}\n"
+                    "\t\tr = x\n"
+                    "\t}\n"
+                    "\treturn ret\n"
+                    "}"
+                )
+            comparisons.append((direct_name, bound_name, g_name))
+
+    source, snapshot, summaries = unit(
+        go_types_helper, "\n".join(declarations)
+    )
+    for direct_name, bound_name, g_name in comparisons:
+        direct = named(source, snapshot, summaries, direct_name)
+        bound = named(source, snapshot, summaries, bound_name)
+        g_id = named(source, snapshot, summaries, g_name).binding_id
+        direct_calls = [
+            transfer
+            for transfer in direct.calls
+            if transfer.target == g_id
+        ]
+        bound_calls = [
+            transfer
+            for transfer in bound.calls
+            if transfer.target == g_id
+        ]
+        assert direct.available, (direct_name, direct.gaps)
+        assert bound.available, (bound_name, bound.gaps)
+        assert direct_calls and bound_calls
+        direct_call_deps = {
+            (transfer.arguments, transfer.result)
+            for transfer in direct_calls
+        }
+        bound_call_deps = {
+            (transfer.arguments, transfer.result)
+            for transfer in bound_calls
+        }
+        assert direct_call_deps == bound_call_deps, (
+            direct_name,
+            bound_name,
+            direct_call_deps,
+            bound_call_deps,
+        )
+        assert any(
+            0 in transfer.arguments[0]
+            for transfer in direct_calls
+        ), (
+            direct_name,
+            [transfer.arguments for transfer in direct_calls],
+        )
+        assert any(
+            0 in transfer.result for transfer in direct_calls
+        ), (
+            direct_name,
+            [transfer.result for transfer in direct_calls],
+        )
+        assert direct.effects == bound.effects
+        assert direct.return_dependencies == bound.return_dependencies, (
+            direct_name,
+            bound_name,
+            direct.return_dependencies,
+            bound.return_dependencies,
+        )
+
+
 def test_chan_chan_call_result_container_rejects_unsupported_call(
     go_types_helper,
 ):
