@@ -17121,6 +17121,57 @@ def test_deep_chan_chan_sent_nested_queue_promotes_external_group(
     assert not mismatches, mismatches
 
 
+def test_deep_chan_chan_nested_receive_evaluates_operands_once(
+    go_types_helper,
+):
+    source = (
+        "var GCCC chan chan chan int64\n"
+        "var GCS []chan chan chan int64\n"
+        "var GI chan int64\n"
+        "func G() chan chan chan int64 {\n"
+        "\tclose(GCCC)\n"
+        "\treturn GCCC\n"
+        "}\n"
+        "func I() int {\n"
+        "\tclose(GI)\n"
+        "\treturn 0\n"
+        "}\n"
+        "func F_call_direct() int64 {\n"
+        "\treturn <-(<-(<-G()))\n"
+        "}\n"
+        "func F_call_named() int64 {\n"
+        "\tq := G()\n"
+        "\tnext := <-q\n"
+        "\tvalue := <-next\n"
+        "\treturn <-value\n"
+        "}\n"
+        "func F_index_direct() int64 {\n"
+        "\treturn <-(<-(<-GCS[I()]))\n"
+        "}\n"
+        "func F_index_named() int64 {\n"
+        "\ti := I()\n"
+        "\treturn <-(<-(<-GCS[i]))\n"
+        "}\n"
+    )
+    data = unit(go_types_helper, source)
+    mismatches = []
+    for direct_name, named_name in [
+        ("F_call_direct", "F_call_named"),
+        ("F_index_direct", "F_index_named"),
+    ]:
+        direct = named(*data, direct_name)
+        named_levels = named(*data, named_name)
+        assert direct.available, direct.gaps
+        assert named_levels.available, named_levels.gaps
+        direct_transfers = len(direct.calls)
+        named_transfers = len(named_levels.calls)
+        if direct_transfers != named_transfers:
+            mismatches.append(
+                (direct_name, direct_transfers, named_transfers)
+            )
+    assert not mismatches, mismatches
+
+
 def test_deep_chan_chan_external_receive_and_send_match_named_levels(
     go_types_helper,
 ):

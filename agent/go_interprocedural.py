@@ -1007,6 +1007,9 @@ class _Builder:
         self._external_chan_elem_index_deps: dict[
             tuple[int, int, int], frozenset[int]
         ] = {}
+        self._chan_operation_operand_cache: dict[
+            tuple[int, int, int], Any
+        ] = {}
         # Bindings that died at a scope join — a branch-local `t`
         # captured by a stored literal (`fs[0] = func() { return t }`)
         # still names the value its last write gave it. `_join`
@@ -6485,6 +6488,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
             )
         if inner is None:
             return None
+        cached = self._chan_operation_operand_cache.get(
+            self.node_key(node)
+        )
+        if cached is not None:
+            return cached
         operator = (
             inner.child_by_field_name("operator")
             if inner.type == "unary_expression"
@@ -6583,6 +6591,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
 
         queue = inner.child_by_field_name("operand")
         local_queue = self._local_chan_chan_id(queue)
+        received_queue = None
         if local_queue is not None:
             outer = self.bindings.get(local_queue)
             outer_fact = outer.type if outer is not None else None
@@ -6635,9 +6644,24 @@ member, or one explicit dereference of one (`(*t).F` — the same
         ):
             return None
 
-        deps = self.expression(
-            node, fn, params, locals_, transfers, count, depth + 1
-        )
+        if received_queue is None:
+            deps = self.expression(
+                node, fn, params, locals_, transfers, count, depth + 1
+            )
+        else:
+            key = self.node_key(queue)
+            previous = self._chan_operation_operand_cache.get(key)
+            self._chan_operation_operand_cache[key] = received_queue
+            try:
+                deps = self.expression(
+                    node, fn, params, locals_, transfers, count,
+                    depth + 1,
+                )
+            finally:
+                if previous is None:
+                    self._chan_operation_operand_cache.pop(key, None)
+                else:
+                    self._chan_operation_operand_cache[key] = previous
         binding_id = (
             f"{self.current_file}/chan_queue/"
             f"{inner.start_byte}-{inner.end_byte}"
