@@ -5359,6 +5359,24 @@ Seal Grade, runtime, or proof claim.
 Compiler intrinsics with no declaration, such as `undefined` and `globalThis`,
 are reported as builtins; a reference with no symbol still fails closed.
 
+### C06 first compiler-backed Rust binding slice
+
+The pure reader consumes operator-produced LSIF envelopes from pinned
+rust-analyzer `1.100.0 (0ef1bc3 2026-11-09)`; the agent never launches
+rust-analyzer, Cargo, or rustc and adds no CLI or MCP route. It accepts one
+root Cargo package with no dependencies, no build script, no proc-macro crate,
+and no workspace members beyond the root. Cargo lock packages must be local.
+The envelope carries project-document bytes and hashes; exact target-source
+equality detects stale output, not producer authenticity.
+
+Target-file local declaration spans are compared with the same-source lexical
+report. Cross-file definitions are recorded with project-relative paths and
+spans; external definitions are recorded by moniker only. Neither category is
+compared with lexical bindings or asserts lexical resolution. Macro invocation,
+macro definition, and conditional-compilation gaps make lexical comparison
+fail closed. This is metadata only and makes no trust, audit, Evidence
+acceptance, Seal Grade, ABI, runtime, or proof claim.
+
 ### C06 TypeScript lexical binding report (`ts-bindings`)
 
 `python -m agent ts-bindings <file>` emits
