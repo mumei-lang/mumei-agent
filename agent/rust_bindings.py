@@ -487,6 +487,13 @@ class _RustBindings:
             if candidate.type in {"scoped_identifier", "scoped_type_identifier"}:
                 self._record_qualified_path(candidate)
                 continue
+            if candidate.type == "type_arguments":
+                for child in reversed(self._children(candidate)):
+                    if child.type in {"identifier", "type_identifier"}:
+                        self._generic_argument_reference(child)
+                    else:
+                        stack.append(child)
+                continue
             candidates.append(candidate)
             stack.extend(reversed(self._children(candidate)))
         for candidate in candidates:
@@ -517,6 +524,37 @@ class _RustBindings:
             reference = Reference(self.span(candidate), record.binding.id, "read")
             if reference not in self.references:
                 self.references.append(reference)
+
+    def _generic_argument_reference(self, node: Any) -> None:
+        name = self._normalize_identifier(self.text(node))
+        type_record, type_boundary = self._lookup_with_boundary(
+            name, node.start_byte, "type"
+        )
+        if type_record is not None:
+            record = type_record
+        else:
+            value_record, value_boundary = self._lookup_with_boundary(
+                name, node.start_byte, "value"
+            )
+            if value_record is not None and (
+                value_record.binding.kind in {"const", "import"}
+                or (
+                    value_record.binding.kind == "generic_parameter"
+                    and value_record.generic_kind == "const"
+                )
+            ):
+                record = value_record
+            else:
+                reason = type_boundary or value_boundary or (
+                    "prelude_name" if name in _PRELUDE_NAMES else "unknown_name"
+                )
+                unresolved = Unresolved(self.span(node), name, reason)
+                if unresolved not in self.unresolved:
+                    self.unresolved.append(unresolved)
+                return
+        reference = Reference(self.span(node), record.binding.id, "read")
+        if reference not in self.references:
+            self.references.append(reference)
 
     def _record_macro_invocations(self, node: Any | None) -> None:
         for candidate in self._descendants(node):

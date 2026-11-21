@@ -724,6 +724,72 @@ fn outside(value: Missing) {
     assert not _refs(report, source, "Missing")
 
 
+def test_bare_generic_arguments_search_type_then_const_value_namespaces():
+    source = """
+type N = u8;
+const N: usize = 1;
+const K: usize = 2;
+struct TypeArg<T>(T);
+struct ConstArg<const M: usize>;
+fn take<const M: usize>() {}
+fn uses_type() { let _: TypeArg<N>; }
+fn uses_const<const M: usize>() {
+    let _: ConstArg<M>;
+    take::<M>();
+}
+fn uses_const_item() { let _: ConstArg<K>; }
+fn missing() { let _: TypeArg<Unknown>; }
+fn local_is_not_a_const_argument() {
+    let M = 1;
+    let _: ConstArg<M>;
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    alias = _bindings(report, "N", "type_alias")[0]
+    type_argument_position = source.index("TypeArg<N>") + len("TypeArg<")
+    type_argument_reference = next(
+        reference
+        for reference in report.references
+        if reference.span.start == type_argument_position
+    )
+    assert type_argument_reference.binding_id == alias.id
+    const_generic = next(
+        binding
+        for binding in _bindings(report, "M", "generic_parameter")
+        if binding.scope is not None
+        and binding.scope.start <= source.index("fn uses_const") < binding.scope.end
+    )
+    for token in ("ConstArg<M>", "take::<M>"):
+        position = source.index(token) + token.index("M")
+        reference = next(
+            reference
+            for reference in report.references
+            if reference.span.start == position
+        )
+        assert reference.binding_id == const_generic.id
+    const_item = _bindings(report, "K", "const")[0]
+    const_item_position = source.index("ConstArg<K>") + len("ConstArg<")
+    const_item_reference = next(
+        reference
+        for reference in report.references
+        if reference.span.start == const_item_position
+    )
+    assert const_item_reference.binding_id == const_item.id
+    unknown_position = source.index("TypeArg<Unknown>") + len("TypeArg<")
+    unknown = next(
+        unresolved
+        for unresolved in report.unresolved
+        if unresolved.span.start == unknown_position
+    )
+    assert (unknown.name, unknown.reason) == ("Unknown", "unknown_name")
+    local_position = source.rindex("ConstArg<M>") + len("ConstArg<")
+    assert not any(
+        reference.span.start == local_position for reference in report.references
+    )
+    assert raw[unknown.span.start : unknown.span.end] == b"Unknown"
+
+
 def test_qualified_rust_paths_stay_unresolved_as_whole_paths():
     source = """
 type T = u8;
