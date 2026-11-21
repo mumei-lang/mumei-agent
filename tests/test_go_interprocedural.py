@@ -3068,11 +3068,11 @@ def test_multi_result_chan_slot_var_local_alias_broadcasts(
     assert result.return_dependencies == frozenset({0, 1})
 
 
-def test_multi_result_chan_slot_var_non_scalar_closed(
+def test_multi_result_chan_slot_received_operation_matches_temporary(
     go_types_helper,
 ):
-    # `var q, n = G()` where slot 0 declares `chan chan int64` —
-    # the bound name's element is non-scalar; stays closed.
+    # A chan-chan value from a multi-result call is admitted by
+    # `d := <-q`, so a nested receive has the same summary.
     files = {
         "a.go": "package p\n"
         "func G() (chan chan int64, int64) {\n"
@@ -3081,12 +3081,27 @@ def test_multi_result_chan_slot_var_non_scalar_closed(
         "\tvar q, n = G()\n"
         "\t_ = n\n"
         "\treturn <-<-q\n}\n"
+        "func FTemp() int64 {\n"
+        "\tvar q, n = G()\n"
+        "\t_ = n\n"
+        "\td := <-q\n"
+        "\treturn <-d\n}\n"
     }
     snapshot = _snapshot_for(go_types_helper, files)
-    result = named_package(
-        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
-    )
-    assert not result.available
+    summaries = ip.summarize_go_package(files, snapshot)
+    nested = named_package(files, snapshot, summaries, "F")
+    temporary = named_package(files, snapshot, summaries, "FTemp")
+    assert nested.available
+    assert temporary.available
+    assert nested.return_dependencies == temporary.return_dependencies
+    assert nested.effects == temporary.effects
+    assert [
+        (call.imported, call.arguments, call.result)
+        for call in nested.calls
+    ] == [
+        (call.imported, call.arguments, call.result)
+        for call in temporary.calls
+    ]
 
 
 def test_assign_multi_result_chan_slot_reseats(
@@ -15583,8 +15598,7 @@ def test_local_chan_chan_group_keeps_imported_member_external(
         ),
         (
             "scalar channel receive can be sent to another queue",
-            # Sending a received channel value is supported; using that
-            # receive as an operation target remains closed.
+            # Sending a received channel value is supported.
             "func F(x int64) int64 {\n"
             "\tin := make(chan int64, 1)\n"
             "\tout := make(chan int64, 1)\n"
@@ -15604,6 +15618,202 @@ def test_local_chan_chan_review_regressions(
     assert result.available, case
     assert result.return_dependencies == expected, case
     assert result.effects == effects, case
+
+
+@pytest.mark.parametrize(
+    "queue_source",
+    ("local", "local-with-external-member", "parameter", "promoted"),
+)
+def test_received_channel_operation_targets_match_temporary(
+    go_types_helper, queue_source
+):
+    forms = {
+        "send_target": (
+            "(<-q) <- x\n\treturn <-c\n",
+            "tmp := <-q\n\ttmp <- x\n\treturn <-c\n",
+        ),
+        "return_receive": (
+            "return <-(<-q)\n",
+            "tmp := <-q\n\treturn <-tmp\n",
+        ),
+        "short_declaration": (
+            "v := <-(<-q)\n\treturn v\n",
+            "tmp := <-q\n\tv := <-tmp\n\treturn v\n",
+        ),
+        "assignment": (
+            "var v int64\n\tv = <-(<-q)\n\treturn v\n",
+            "tmp := <-q\n\tvar v int64\n\tv = <-tmp\n\treturn v\n",
+        ),
+        "var_initialization": (
+            "var v int64 = <-(<-q)\n\treturn v\n",
+            "tmp := <-q\n\tvar v int64 = <-tmp\n\treturn v\n",
+        ),
+        "comma_ok": (
+            "v, ok := <-(<-q)\n\tif ok {\n\t\treturn v\n\t}\n\treturn 0\n",
+            "tmp := <-q\n\tv, ok := <-tmp\n\tif ok {\n\t\treturn v\n\t}\n\treturn 0\n",
+        ),
+        "bare_receive": (
+            "<-(<-q)\n\treturn <-c\n",
+            "tmp := <-q\n\t<-tmp\n\treturn <-c\n",
+        ),
+        "send_value": (
+            "dst := make(chan int64, 1)\n\tdst <- <-(<-q)\n"
+            "\treturn <-dst\n",
+            "tmp := <-q\n\tdst := make(chan int64, 1)\n"
+            "\tdst <- <-tmp\n\treturn <-dst\n",
+        ),
+        "close": (
+            "close(<-q)\n\treturn <-c\n",
+            "tmp := <-q\n\tclose(tmp)\n\treturn <-c\n",
+        ),
+        "len": (
+            "_ = len(<-q)\n\treturn <-c\n",
+            "tmp := <-q\n\t_ = len(tmp)\n\treturn <-c\n",
+        ),
+        "cap": (
+            "_ = cap(<-q)\n\treturn <-c\n",
+            "tmp := <-q\n\t_ = cap(tmp)\n\treturn <-c\n",
+        ),
+        "range": (
+            "for v := range <-q {\n\t\treturn v\n\t}\n\treturn <-c\n",
+            "tmp := <-q\n\tfor v := range tmp {\n\t\treturn v\n"
+            "\t}\n\treturn <-c\n",
+        ),
+        "select_send": (
+            "select {\n\tcase (<-q) <- x:\n\t\treturn <-c\n"
+            "\tdefault:\n\t\treturn <-c\n\t}\n",
+            "tmp := <-q\n\tselect {\n\tcase tmp <- x:\n"
+            "\t\treturn <-c\n\tdefault:\n\t\treturn <-c\n\t}\n",
+        ),
+        "select_receive": (
+            "select {\n\tcase v := <-(<-q):\n\t\treturn v\n"
+            "\tdefault:\n\t\treturn <-c\n\t}\n",
+            "tmp := <-q\n\tselect {\n\tcase v := <-tmp:\n"
+            "\t\treturn v\n\tdefault:\n\t\treturn <-c\n\t}\n",
+        ),
+        "select_comma_ok": (
+            "select {\n\tcase v, ok := <-(<-q):\n\t\tif ok {\n"
+            "\t\t\treturn v\n\t\t}\n\t\treturn 0\n"
+            "\tdefault:\n\t\treturn <-c\n\t}\n",
+            "tmp := <-q\n\tselect {\n\tcase v, ok := <-tmp:\n"
+            "\t\tif ok {\n\t\t\treturn v\n\t\t}\n\t\treturn 0\n"
+            "\tdefault:\n\t\treturn <-c\n\t}\n",
+        ),
+        "select_bare_receive": (
+            "select {\n\tcase <-(<-q):\n\t\treturn <-c\n"
+            "\tdefault:\n\t\treturn <-c\n\t}\n",
+            "tmp := <-q\n\tselect {\n\tcase <-tmp:\n"
+            "\t\treturn <-c\n\tdefault:\n\t\treturn <-c\n\t}\n",
+        ),
+    }
+    prelude = "package p\n"
+    if queue_source == "promoted":
+        prelude += (
+            "func Promote(cc chan chan int64, x int64) {\n"
+            "\td := <-cc\n"
+            "\td <- x\n"
+            "}\n"
+        )
+    functions = []
+    for form, (nested, temporary) in forms.items():
+        for variant, body in (("nested", nested), ("temporary", temporary)):
+            setup = (
+                "\tc := make(chan int64, 1)\n"
+                "\tc <- x\n"
+            )
+            if queue_source == "parameter":
+                setup += "\tp <- c\n"
+                queue_name = "p"
+            else:
+                setup += (
+                    "\tcc := make(chan chan int64, 2)\n"
+                    "\tcc <- c\n"
+                )
+                if queue_source == "local-with-external-member":
+                    setup += "\tcc <- ec\n"
+                if queue_source == "promoted":
+                    setup += "\tPromote(cc, x)\n"
+                setup += "\tq := cc\n"
+                queue_name = "q"
+            functions.append(
+                f"func F_{form}_{variant}("
+                "x int64, ec chan int64, p chan chan int64"
+                ") int64 {\n"
+                + setup
+                + "\t"
+                + body.replace("q", queue_name)
+                .replace("\n", "\n\t")
+                .rstrip()
+                + "\n}\n"
+            )
+    files = {"a.go": prelude + "".join(functions)}
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+
+    def transfer_shape(summary):
+        return sorted(
+            (
+                transfer.imported,
+                tuple(
+                    tuple(sorted(argument))
+                    for argument in transfer.arguments
+                ),
+                tuple(sorted(transfer.result)),
+            )
+            for transfer in summary.calls
+        )
+
+    for form in forms:
+        nested = named_package(
+            files, snapshot, summaries, f"F_{form}_nested"
+        )
+        temporary = named_package(
+            files, snapshot, summaries, f"F_{form}_temporary"
+        )
+        assert nested.available, (queue_source, form, nested.gaps)
+        assert temporary.available, (queue_source, form, temporary.gaps)
+        assert nested.return_dependencies == temporary.return_dependencies, (
+            queue_source,
+            form,
+        )
+        assert nested.effects == temporary.effects, (queue_source, form)
+        if queue_source == "local":
+            assert nested.effects == "none_in_supported_fragment", form
+        assert transfer_shape(nested) == transfer_shape(temporary), (
+            queue_source,
+            form,
+        )
+
+
+def test_received_channel_operation_target_expected_dependencies(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "func Local(x int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tcc <- c\n"
+        "\t(<-cc) <- x\n"
+        "\treturn <-c\n"
+        "}\n"
+        "func F(cc chan chan int64) int64 {\n"
+        "\treturn <-(<-(cc))\n"
+        "}\n"
+        "func FTemp(cc chan chan int64) int64 {\n"
+        "\td := <-(cc)\n"
+        "\treturn <-d\n"
+        "}\n"
+    }
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    local = named_package(files, snapshot, summaries, "Local")
+    assert local.available
+    assert local.return_dependencies == frozenset({0})
+    assert local.effects == "none_in_supported_fragment"
+    for name in ("F", "FTemp"):
+        result = named_package(files, snapshot, summaries, name)
+        assert result.available
+        assert result.return_dependencies == frozenset({0})
+        assert result.effects == "unknown"
 
 
 def test_chan_chan_boundaries_stay_closed(go_types_helper):
@@ -15698,13 +15908,16 @@ def test_chan_chan_boundaries_stay_closed(go_types_helper):
         "\tcc = p\n"
         "\t_ = cc\n"
         "\treturn 0\n}\n",
-        "func F(x int64) int64 {\n"
-        "\tcc := make(chan chan int64, 1)\n"
-        "\treturn <-(<-cc)\n}\n",
-        "func F(x int64) int64 {\n"
-        "\tcc := make(chan chan int64, 1)\n"
-        "\t(<-cc) <- x\n"
-        "\treturn 0\n}\n",
+        "func F(ccc chan chan chan int64) int64 {\n"
+        "\treturn <-(<-(<-ccc))\n}\n",
+        "func F(cc chan chan []int64) int64 {\n"
+        "\treturn int64(len(<-cc))\n}\n",
+        "func F(cc chan chan int64) int64 {\n"
+        "\ts := []chan chan int64{cc}\n"
+        "\treturn <-(<-s[0])\n}\n",
+        "func Q() chan chan int64 { return make(chan chan int64) }\n"
+        "func F() int64 {\n"
+        "\treturn <-(<-Q())\n}\n",
         "func F() int64 {\n"
         "\tccc := make(chan chan chan int64)\n"
         "\t_ = ccc\n"

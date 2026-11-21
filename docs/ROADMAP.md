@@ -2955,19 +2955,23 @@ remain closed. Returns, stores, func-literal captures,
 and reseats from a call result or parameter remain
 closed too.
 Deeper nesting (`chan chan chan T`), `[]chan chan T`,
-and direct nested channel operations stay closed:
-passing a channel received from one local queue as a
-value to another (`dst <- <-src`) is supported and
-joins their share groups, but using that receive as
-the operation target (`(<-src) <- x`) or nesting a
-receive (`<-(<-src)`) remains closed.
-Still
-closed: non-scalar elements — while `select` now
-admits: each communication case's
-receive (`v := <-ch`, `v, ok := <-ch`, `v = <-ch`,
-a bare `<-ch`) or send (`ch <- v`) runs in a fresh
-alternative scope and every alternative joins back by
-union — an if/else chain whose guards are comm ops;
+call-result queue operands, and non-scalar channel
+elements remain closed. For an admitted scalar-element
+queue, a channel received directly from the queue may
+be used as an operation target without a named binding:
+`(<-src) <- x`, `<-(<-src)`, `close(<-src)`,
+`len(<-src)`, `cap(<-src)`, and channel operands in
+`range` and `select`. These carry the same share-group,
+externality, and origin facts as a same-point temporary
+receive. Passing a received channel as a value to another
+local queue (`dst <- <-src`) remains supported and joins
+their share groups. The direct operation-target support
+does not admit deeper nested receives or unsupported
+queue expressions. `select` continues to admit each communication
+case's receive (`v := <-ch`, `v, ok := <-ch`, `v = <-ch`,
+a bare `<-ch`) or send (`ch <- v`); operands run in a fresh
+alternative scope and every alternative joins back by union —
+an if/else chain whose guards are comm ops;
 `break` exits the select like a switch clause, an
 empty `select {}` blocks forever and stays closed,
 and a non-identifier receive target admits the way the

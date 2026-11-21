@@ -337,6 +337,12 @@ class _AnonymousPointee:
     type: Any
 
 
+@dataclass(frozen=True)
+class _AnonymousChannelBinding:
+    id: str
+    type: Any
+
+
 def _span_dict(span: ByteSpan | FileSpan | None) -> dict | None:
     if span is None:
         return None
@@ -5994,6 +6000,74 @@ member, or one explicit dereference of one (`(*t).F` — the same
         ):
             return None
         return self.bindings.get(self._chan_root(binding.id))
+
+    def _chan_operation_operand(
+        self,
+        node: Any,
+        fn: Function,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+        transfers: list[CallTransfer],
+        count: list[int],
+        depth: int = 0,
+    ) -> Any:
+        """Resolve an operation's channel operand, including an
+        anonymous channel received from an admitted chan-chan queue."""
+        inner = node
+        while (
+            inner is not None
+            and inner.type == "parenthesized_expression"
+        ):
+            inner = next(
+                (c for c in inner.named_children if c.type != "comment"),
+                None,
+            )
+        operator = (
+            inner.child_by_field_name("operator")
+            if inner is not None and inner.type == "unary_expression"
+            else None
+        )
+        if operator is None or operator.type != "<-":
+            return self._chan_binding(node, locals_, params)
+
+        queue = inner.child_by_field_name("operand")
+        local_queue = self._local_chan_chan_id(queue)
+        if local_queue is not None:
+            outer = self.bindings.get(local_queue)
+            outer_fact = outer.type if outer is not None else None
+            if not self._chan_chan_fact(outer_fact):
+                return None
+        else:
+            external = self._external_chan_operand(queue, params)
+            if (
+                external is None
+                or not self._chan_chan_fact(external[1])
+            ):
+                return None
+            outer_fact = external[1]
+
+        channel_fact = outer_fact.elem
+        if not self._scalar_chan_fact(channel_fact):
+            return None
+
+        deps = self.expression(
+            node, fn, params, locals_, transfers, count, depth + 1
+        )
+        binding_id = (
+            f"{self.current_file}/chan_queue/"
+            f"{inner.start_byte}-{inner.end_byte}"
+        )
+        origins = self._chan_chan_param_origin(node, params)
+        if local_queue is not None:
+            self._chan_group_join(binding_id, local_queue)
+        else:
+            self.external_chan_locals.add(binding_id)
+        self._record_external_chan_selectors(binding_id, queue)
+        locals_[binding_id] = deps
+        self._set_chan_chan_param_origins(
+            binding_id, origins, False, locals_
+        )
+        return _AnonymousChannelBinding(binding_id, channel_fact)
 
     def _chan_root(self, binding_id: str) -> str:
         """Resolve a channel name's alias chain to the queue binding.
@@ -14755,6 +14829,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             and range_ref is not None
                             and range_ref.binding_id
                             in self._opaque_container_tokens
+                            and not self._scalar_chan_binding(
+                                range_ref.binding_id
+                            )
                         ):
                             # `for range s` on `s := lib.G(a)`
                             # — the elements carry the bound
@@ -15309,7 +15386,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         raise _Unsupported(
                             "unsupported_statement", _span(clause)
                         )
-                    chan = self._chan_binding(right, scope, params)
+                    chan = self._chan_operation_operand(
+                        right, fn, params, scope, transfers, count
+                    )
                     if local_chan_chan_range is not None:
                         chan = self.bindings.get(
                             local_chan_chan_range
@@ -16980,7 +17059,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
             value = node.child_by_field_name("value")
             if channel is None or value is None:
                 raise _Unsupported("unsupported_statement", _span(node))
-            binding = self._chan_binding(channel, locals_, params)
+            binding = self._chan_operation_operand(
+                channel, fn, params, locals_, transfers, count
+            )
             local_chan_chan = self._local_chan_chan_id(channel)
             if local_chan_chan is not None:
                 received_chan_chan = self._local_chan_chan_receive(value)
@@ -18798,8 +18879,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # selector, a param or a package channel stays
                     # closed.
                     operand = node.child_by_field_name("operand")
-                    binding = self._chan_binding(
-                        operand, locals_, params
+                    binding = self._chan_operation_operand(
+                        operand, fn, params, locals_, transfers, count,
+                        depth + 1,
                     )
                     if binding is None:
                         local_chan_chan = self._local_chan_chan_id(
@@ -19467,8 +19549,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         raise _Unsupported(
                             "unresolved_or_opaque_call", _span(node)
                         )
-                    binding = self._chan_binding(
-                        arguments[0], locals_, params
+                    binding = self._chan_operation_operand(
+                        arguments[0], fn, params, locals_, transfers,
+                        count, depth + 1,
                     )
                     if binding is None:
                         local_chan_chan = self._local_chan_chan_id(
@@ -20012,8 +20095,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 local_binding.type
                             )
                         return frozenset()
-                    chan = self._chan_binding(
-                        arguments[0], locals_, params
+                    chan = self._chan_operation_operand(
+                        arguments[0], fn, params, locals_, transfers,
+                        count, depth + 1,
                     )
                     if chan is not None:
                         # `len(ch)`/`cap(ch)` — the queue length and
