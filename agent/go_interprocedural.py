@@ -19168,12 +19168,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # `indirect_writes` — a later `<-ch` CAN observe
                 # this exact value, so dropping them would
                 # under-approximate.
+                selector_ids = set(external_ids)
+                for channel_id in external_ids:
+                    selector_ids.update(
+                        self._chan_group_external_tokens(channel_id)
+                    )
                 stored_deps = value_deps | frozenset().union(
                     *(
                         self.external_chan_selectors.get(
                             channel_id, frozenset()
                         )
-                        for channel_id in external_ids
+                        for channel_id in selector_ids
                     )
                 )
                 self.indirect_writes |= stored_deps

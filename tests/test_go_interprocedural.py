@@ -25587,6 +25587,169 @@ def test_chan_elem_external(go_types_helper, declarations, expected):
     assert any(t.imported for t in result.calls)
 
 
+def test_chan_elem_external_member_sends_keep_group_selectors(
+    go_types_helper,
+):
+    source = (
+        "var GS []chan int64\n"
+        "var GA [2]chan int64\n"
+        "var GM map[int]chan int64\n"
+        "func F_slice_direct(i int, x int64) int64 {\n"
+        "\tq := GS[i]\n"
+        "\tq <- x\n"
+        "\treturn <-GS[0]\n"
+        "}\n"
+        "func F_slice_member(i int, x int64) int64 {\n"
+        "\tq := GS[i]\n"
+        "\ts := []chan int64{q}\n"
+        "\td := s[0]\n"
+        "\td <- x\n"
+        "\treturn <-GS[0]\n"
+        "}\n"
+        "func F_slice_index(i int, x int64) int64 {\n"
+        "\tGS[i] <- x\n"
+        "\treturn <-GS[0]\n"
+        "}\n"
+        "func F_slice_select_direct(i int, x int64) int64 {\n"
+        "\tq := GS[i]\n"
+        "\tselect { case q <- x: default: }\n"
+        "\treturn <-GS[0]\n"
+        "}\n"
+        "func F_slice_select_member(i int, x int64) int64 {\n"
+        "\tq := GS[i]\n"
+        "\ts := []chan int64{q}\n"
+        "\td := s[0]\n"
+        "\tselect { case d <- x: default: }\n"
+        "\treturn <-GS[0]\n"
+        "}\n"
+        "func F_slice_receive_direct(i int) int64 {\n"
+        "\tq := GS[i]\n"
+        "\treturn <-q\n"
+        "}\n"
+        "func F_slice_receive_member(i int) int64 {\n"
+        "\tq := GS[i]\n"
+        "\ts := []chan int64{q}\n"
+        "\td := s[0]\n"
+        "\treturn <-d\n"
+        "}\n"
+        "func F_slice_close_direct(i int) {\n"
+        "\tq := GS[i]\n"
+        "\tclose(q)\n"
+        "}\n"
+        "func F_slice_close_member(i int) {\n"
+        "\tq := GS[i]\n"
+        "\ts := []chan int64{q}\n"
+        "\td := s[0]\n"
+        "\tclose(d)\n"
+        "}\n"
+        "func F_array_direct(i int, x int64) int64 {\n"
+        "\tq := GA[i]\n"
+        "\tq <- x\n"
+        "\treturn <-GA[0]\n"
+        "}\n"
+        "func F_array_member(i int, x int64) int64 {\n"
+        "\tq := GA[i]\n"
+        "\ts := [1]chan int64{q}\n"
+        "\td := s[0]\n"
+        "\td <- x\n"
+        "\treturn <-GA[0]\n"
+        "}\n"
+        "func F_map_direct(k int, x int64) int64 {\n"
+        "\tq := GM[k]\n"
+        "\tq <- x\n"
+        "\treturn <-GM[0]\n"
+        "}\n"
+        "func F_map_member(k int, x int64) int64 {\n"
+        "\tq := GM[k]\n"
+        "\ts := map[int]chan int64{0: q}\n"
+        "\td := s[0]\n"
+        "\td <- x\n"
+        "\treturn <-GM[0]\n"
+        "}\n"
+        "func F_local_nonshared(i int, x int64) int64 {\n"
+        "\tq := GS[i]\n"
+        "\tc := make(chan int64, 1)\n"
+        "\ts := []chan int64{c}\n"
+        "\td := s[0]\n"
+        "\td <- x\n"
+        "\treturn <-q\n"
+        "}\n"
+    )
+    data = unit(go_types_helper, source)
+    mismatches = []
+    for direct_name, member_name, expected_deps in [
+        ("F_slice_direct", "F_slice_member", frozenset({0, 1})),
+        ("F_array_direct", "F_array_member", frozenset({0, 1})),
+        ("F_map_direct", "F_map_member", frozenset({0, 1})),
+        (
+            "F_slice_select_direct",
+            "F_slice_select_member",
+            frozenset({0, 1}),
+        ),
+        (
+            "F_slice_receive_direct",
+            "F_slice_receive_member",
+            frozenset({0}),
+        ),
+        (
+            "F_slice_close_direct",
+            "F_slice_close_member",
+            None,
+        ),
+    ]:
+        direct = named(*data, direct_name)
+        member = named(*data, member_name)
+        if not direct.available or not member.available:
+            mismatches.append(
+                (direct_name, direct.gaps, member_name, member.gaps)
+            )
+            continue
+        if direct.effects != member.effects or direct.effects != "unknown":
+            mismatches.append(
+                (
+                    direct_name,
+                    "effects",
+                    direct.effects,
+                    member_name,
+                    member.effects,
+                )
+            )
+        if expected_deps is not None and (
+            direct.return_dependencies != expected_deps
+            or member.return_dependencies != direct.return_dependencies
+        ):
+            mismatches.append(
+                (
+                    direct_name,
+                    direct.return_dependencies,
+                    member_name,
+                    member.return_dependencies,
+                    expected_deps,
+                )
+            )
+    local = named(*data, "F_local_nonshared")
+    if (
+        not local.available
+        or local.return_dependencies != frozenset({0})
+    ):
+        mismatches.append(
+            ("F_local_nonshared", local.gaps, local.return_dependencies)
+        )
+    direct_index = named(*data, "F_slice_index")
+    if (
+        not direct_index.available
+        or direct_index.return_dependencies != frozenset({0, 1})
+    ):
+        mismatches.append(
+            (
+                "F_slice_index",
+                direct_index.gaps,
+                direct_index.return_dependencies,
+            )
+        )
+    assert not mismatches, mismatches
+
+
 def test_chan_elem_external_pins_container_type(go_types_helper):
     # The operand's WHOLE container fact pins — a named container
     # type's redeclare churns its identity, so an unchanged-looking
