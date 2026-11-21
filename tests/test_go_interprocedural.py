@@ -15315,6 +15315,44 @@ def test_bound_closure_local_channel_send_folds_dependencies(
     assert result.return_dependencies == expected
 
 
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        pytest.param(
+            "func F(x int64) int64 { c := make(chan int64, 1); "
+            "g := (func() { c <- x }); g(); return <-c }",
+            id="parenthesized-bound-channel",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { c := make(chan int64, 1); "
+            "var g = (func() { c <- x }); g(); return <-c }",
+            id="parenthesized-var-channel",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { y := int64(0); "
+            "g := (func() { y = x }); g(); return y }",
+            id="parenthesized-bound-write",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { y := int64(0); "
+            "var g = func() { y = x }; g(); return y }",
+            id="var-bound-write",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { y := int64(0); "
+            "var g = (func() { y = x }); g(); return y }",
+            id="parenthesized-var-write",
+        ),
+    ],
+)
+def test_bound_closure_parenthesized_and_var_literals_keep_records(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
 def test_bound_closure_local_channel_send_imported_callback(
     go_types_helper,
 ):

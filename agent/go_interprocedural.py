@@ -24311,7 +24311,11 @@ class _Builder:
                 names = _children(left)
                 values = _children(right)
                 index = next(
-                    (i for i, v in enumerate(values) if v == node),
+                    (
+                        i
+                        for i, value in enumerate(values)
+                        if self._strip_parens(value) == node
+                    ),
                     None,
                 )
                 if index is not None and index < len(names):
@@ -25340,7 +25344,11 @@ class _Builder:
                 )
             ]
             index = next(
-                (i for i, value in enumerate(value_nodes) if value == node),
+                (
+                    i
+                    for i, value in enumerate(value_nodes)
+                    if self._strip_parens(value) == node
+                ),
                 None,
             )
             if index is None and in_composite:
