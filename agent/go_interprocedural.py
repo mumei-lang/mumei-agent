@@ -12495,6 +12495,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 ),
                                 None,
                             )
+                        if (
+                            self._chan_elem_collection(bound.type)
+                            and not conditional
+                            and self._may_skip == 0
+                        ):
+                            # `t, s = u, append(s, t[0])` — a chan-
+                            # element container named in this
+                            # statement's pre-state sets (or already
+                            # sharing) parks its member identity
+                            # under a surrogate like a reseated
+                            # `chan` does: `t`'s token in `s`'s
+                            # pre-state capture must keep meaning
+                            # `t`'s OLD group, not the `u` members
+                            # `t` lands on.
+                            self._chan_queue_detach(
+                                ref.binding_id, locals_, params
+                            )
                         if conditional or self._may_skip > 0:
                             # `if c { s = t }` — the untaken path
                             # keeps `s` aimed at its old backing, so
@@ -12582,10 +12599,22 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             # `_opaque_container_deps`, and a member
                             # only counts once its own token entry
                             # exists. Join each appended `chan`
-                            # argument like a `[]chan{c}` literal
-                            # seed does.
-                            for appended in self._chan_append_args(
-                                reseat_rhs
+                            # member like a `[]chan{c}` literal
+                            # seed does — from the just-stored set,
+                            # which carried the pre-state capture
+                            # through `_chan_detached_toks`: joining
+                            # `s`'s own members again is a no-op,
+                            # while re-resolving the extras now
+                            # would read `t`'s group AFTER a
+                            # parallel `t = u` reseat, so
+                            # `t, s = u, append(s, t[0])` would join
+                            # `u`'s members instead of `t`'s.
+                            for appended in sorted(
+                                tok
+                                for tok in self._opaque_container_tokens[
+                                    ref.binding_id
+                                ]
+                                if isinstance(tok, str)
                             ):
                                 self._chan_group_join(
                                     self._chan_detached.get(

@@ -21006,6 +21006,49 @@ def test_chan_elem_external_unsupported_stays_closed(
             "\treturn <-s[1]\n}\n",
             frozenset({0}),
         ),
+        # `t, s = u, append(s, t[0])` — the appended element's
+        # members are `t`'s PRE-state group (`c2`), not the `u`
+        # members `t` lands on: `c3 <- x` must not reach `<-s[1]`
+        # and `s[1] <- x` must not reach `<-c3`.
+        (
+            "func F(x int64) int64 {\n"
+            "\tc1 := make(chan int64, 4)\n"
+            "\tc2 := make(chan int64, 4)\n"
+            "\tc3 := make(chan int64, 4)\n"
+            "\ts := []chan int64{c1}\n"
+            "\tt := []chan int64{c2}\n"
+            "\tu := []chan int64{c3}\n"
+            "\tt, s = u, append(s, t[0])\n"
+            "\tc2 <- x\n"
+            "\treturn <-s[1]\n}\n",
+            frozenset({0}),
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\tc1 := make(chan int64, 4)\n"
+            "\tc2 := make(chan int64, 4)\n"
+            "\tc3 := make(chan int64, 4)\n"
+            "\ts := []chan int64{c1}\n"
+            "\tt := []chan int64{c2}\n"
+            "\tu := []chan int64{c3}\n"
+            "\tt, s = u, append(s, t[0])\n"
+            "\tc3 <- x\n"
+            "\treturn <-s[1]\n}\n",
+            frozenset(),
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\tc1 := make(chan int64, 4)\n"
+            "\tc2 := make(chan int64, 4)\n"
+            "\tc3 := make(chan int64, 4)\n"
+            "\ts := []chan int64{c1}\n"
+            "\tt := []chan int64{c2}\n"
+            "\tu := []chan int64{c3}\n"
+            "\tt, s = u, append(s, t[0])\n"
+            "\ts[1] <- x\n"
+            "\treturn <-c3\n}\n",
+            frozenset(),
+        ),
     ],
 )
 def test_chan_elem_append(go_types_helper, declarations, expected):
