@@ -4858,50 +4858,10 @@ is basic, named, alias or a composite constructor of those — the
 collected identities ride on the call
 record's `type_arg_type_ids`, the same wire key an instantiated callee
 uses, so a type-argument redeclare stales every admitted caller.
-Boundaries: interface receivers classify as a separate
-`interface_dispatch` record — only the method expression
-`lib.I.M(recv, args)` admits. Dispatch is dynamic, so no callee
-identity pins, but the call itself admits under the
-opaque-external model: the receiver and argument deps union with
-every recorded effect the call site folds (indirect writes,
-escapes, promoted chan args) and a write-back fold lands on
-arg-or-receiver deps, exactly like a func-typed call. The record
-carries `method_expr` and its `target` pins the named
-interface's own declaration id (`lib.I`) so a method-set
-redeclare stales every admitted caller; an unnamed
-`interface{ M() }` receiver records an empty target and an alias
-to one carries the alias's declaration — with the underlying
-named interface's identity riding `type_arg_type_ids` too when
-the alias names one (`type A = I`), so regenerating `I` in
-another file still stales the caller. A method-value call
-`i.M(x)` names an interface-typed operand — always an
-unsupported binding the receiver read cannot survive — so it
-keeps `method_generic_or_variadic`, and a method promoted
-through an embedded interface or struct names a receiver the
-gate cannot see and stays closed the same way. Results must be
-scalar — a `func`/`chan`/composite result is a value the dep
-model cannot read and stays closed — and an instantiated
-interface (`I[N]`) pins its named/alias type arguments as
-`type_arg_type_ids`, with an unpinnable argument shape staying
-closed. Local
-methods and generic methods are
-unchanged and closed — as are receivers still declared on type
-parameters (`lib.GT[P]` where `P` is unresolved) and instantiated
-receivers whose type arguments contain an unpinnable shape
-(a signature, struct or interface literal); composite constructors
-inside them pin their elements (`lib.GT[*lib.T]` pins `T`). Promoted
-selections (`s.GM` through `struct{ GT[T] }`, or an embedded
-interface's method) stay closed too: the static receiver is the
-outer type, so the embedded instantiation's type arguments — or the
-dynamic dispatch itself — escape the gate. The scalar-result check
-reads the *instantiated* signature `go/types` reports for the
-selection, so a result mentioning the receiver's own type parameter
-(`func (t GT[P]) MR() P`) is judged after substitution — `GT[int64]`
-yields a scalar `int64` result and admits. Multi-valued
-method results are admitted like plain function results when every
-result is scalar. The `method` key is optional on the wire:
-reports predating it keep validating, and it is rejected on any
-non-`direct_import` call.
+Interface dispatch admits method expressions and method-value calls
+on interface-typed parameters and their plain copies with integer,
+boolean or pointer results; interface results, concrete-to-interface
+uses and promoted methods stay closed.
 
 ### C06 multi-valued imported results
 

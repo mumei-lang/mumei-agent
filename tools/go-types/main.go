@@ -84,12 +84,9 @@ type binding struct {
 	Span  span     `json:"span"`
 	Scope *span    `json:"scope"`
 	Type  typeFact `json:"type"`
-	// SignatureTypeIDs lists the named/alias type identities a
-	// func-typed binding's signature mentions — `func F(f func(N)
-	// int64)` or `var f MyFn`. The func type fact itself carries no
-	// inner facts, so a caller pinning the callee's declared type
-	// relies on this record to flag its own summary stale when N
-	// regenerates.
+	// SignatureTypeIDs lists named/alias identities carried by
+	// function- and interface-typed bindings whose type fact does not
+	// expose the full signature.
 	SignatureTypeIDs []string `json:"signature_type_ids,omitempty"`
 	// Embedded marks a field binding declared as an anonymous
 	// (embedded) struct member — `type S struct{ *Q; R Q }`
@@ -137,9 +134,8 @@ type call struct {
 	Owner     string `json:"owner"`
 	Target    string `json:"target"`
 	Kind      string `json:"kind"`
-	// Method marks a `direct_import` call whose callee is a method on a
-	// named type of an imported unit — the consumer must also evaluate
-	// the receiver expression (`recv.M(args)`), not just the arguments.
+	// Method marks a method-value call (`recv.M(args)`) whose receiver
+	// expression must be evaluated separately from the arguments.
 	Method bool `json:"method,omitempty"`
 	// Results declares the result arity of a `direct_import` callee when
 	// it is greater than one — the consumer needs it to admit tuple
@@ -913,6 +909,9 @@ func (ix *indexer) signatureTypeIDs(sig *types.Signature) []string {
 				ids = append(ids, id)
 			}
 		}
+		if alias, ok := t.(*types.Alias); ok {
+			add(alias.Rhs())
+		}
 		// A channel's element type names a dependency too — `chan N`
 		// (or `type QC chan N`) pins N as surely as a parameter or
 		// result of type `N` does.
@@ -969,6 +968,54 @@ func (ix *indexer) signatureTypeIDs(sig *types.Signature) []string {
 	for i := 0; i < sig.Results().Len(); i++ {
 		add(sig.Results().At(i).Type())
 	}
+	sort.Strings(ids)
+	return ids
+}
+
+func (ix *indexer) interfaceTypeIDs(t types.Type) []string {
+	seenTypes := map[types.Type]bool{}
+	seenIDs := map[string]bool{}
+	var ids []string
+	var visit func(types.Type)
+	visit = func(current types.Type) {
+		if current == nil || seenTypes[current] {
+			return
+		}
+		seenTypes[current] = true
+		switch typ := current.(type) {
+		case *types.Named:
+			if id := ix.typeID(typ.Obj()); id != "" && !seenIDs[id] {
+				seenIDs[id] = true
+				ids = append(ids, id)
+			}
+		case *types.Alias:
+			if id := ix.typeID(typ.Obj()); id != "" && !seenIDs[id] {
+				seenIDs[id] = true
+				ids = append(ids, id)
+			}
+			visit(typ.Rhs())
+			return
+		}
+		if iface, ok := current.Underlying().(*types.Interface); ok {
+			iface.Complete()
+			for i := 0; i < iface.NumEmbeddeds(); i++ {
+				visit(iface.EmbeddedType(i))
+			}
+			for i := 0; i < iface.NumMethods(); i++ {
+				sig, ok := iface.Method(i).Type().(*types.Signature)
+				if !ok {
+					continue
+				}
+				for _, id := range ix.signatureTypeIDs(sig) {
+					if !seenIDs[id] {
+						seenIDs[id] = true
+						ids = append(ids, id)
+					}
+				}
+			}
+		}
+	}
+	visit(t)
 	sort.Strings(ids)
 	return ids
 }
@@ -1157,6 +1204,10 @@ func (ix *indexer) typeOfRec(t types.Type, seen map[types.Type]bool) typeFact {
 		f.Kind = "struct"
 		return f
 	}
+	if _, ok := t.Underlying().(*types.Interface); ok {
+		f.Kind = "interface"
+		return f
+	}
 	if c, ok := t.Underlying().(*types.Chan); ok {
 		// `chan T` — named or anonymous. `elem` carries the element
 		// fact so a `<-ch` read can classify what it returns and a
@@ -1239,6 +1290,8 @@ func (ix *indexer) addBinding(obj types.Object, seen map[string]bool) {
 	if t := obj.Type(); t != nil {
 		if sig, ok := t.Underlying().(*types.Signature); ok {
 			bnd.SignatureTypeIDs = ix.signatureTypeIDs(sig)
+		} else if _, ok := t.Underlying().(*types.Interface); ok {
+			bnd.SignatureTypeIDs = ix.interfaceTypeIDs(t)
 		}
 	}
 	ix.out.Bindings = append(ix.out.Bindings, bnd)
@@ -1345,19 +1398,14 @@ func (ix *indexer) classify(c *ast.CallExpr, functions map[string]function) (str
 					}
 				}
 				// An interface receiver dispatches dynamically, so no
-				// callee identity can pin — but the method-expression
-				// call still admits under the opaque-external model:
-				// `I.M(recv, x)` unions the receiver and argument deps
-				// and records an external effect, like a func-typed
-				// parameter call. Only a direct method EXPRESSION
-				// admits: a method-value call `i.M(x)` names an
-				// interface-typed operand, and an interface-typed value
-				// is always an unsupported binding — the call would
-				// die at the receiver read anyway, so it keeps the
-				// `method_generic_or_variadic` record, and a method
-				// promoted through an embedded interface or struct
-				// names a receiver the gate cannot see and stays closed
-				// the same way. The target carries the named
+				// callee identity can pin — both a method expression
+				// (`I.M(recv, x)`) and a method value (`i.M(x)`) admit
+				// under the opaque-external model. The method-value flag
+				// tells the consumer to evaluate the selector operand
+				// separately and prepend it as the receiver actual.
+				// A method promoted through an embedded interface or
+				// struct names a receiver the gate cannot see and stays
+				// closed. The target carries the named
 				// interface's identity (`lib.I`) so a method-set
 				// redeclare stales every admitted caller; an unnamed
 				// `interface{ M() }` receiver records an empty target
@@ -1371,7 +1419,8 @@ func (ix *indexer) classify(c *ast.CallExpr, functions map[string]function) (str
 				// type arguments as `type_arg_type_ids`, exactly like
 				// an instantiated callee — an unpinnable argument
 				// shape stays closed.
-				if len(selection.Index()) == 1 && selection.Kind() == types.MethodExpr {
+				if len(selection.Index()) == 1 &&
+					(selection.Kind() == types.MethodExpr || selection.Kind() == types.MethodVal) {
 					rt := selection.Recv()
 					id := ""
 					if alias, ok := rt.(*types.Alias); ok {

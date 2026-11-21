@@ -421,7 +421,6 @@ def test_callee_change_invalidates_entire_unit_even_with_unchanged_caller_body(
     "fragment",
     [
         "func F(a any) { switch x := a.(type) { case int64: _ = x; case string: _ = x } }",
-        "type I interface{M() int64}; func F(x I) int64 { return x.M() }",
         "func Id[T any](x T) T { return x }; func F(x int64) int64 { return Id[int64](x) }",
         "func Ext(int64) int64; func F(x int64) int64 { return Ext(x) }",
         "func F(x int64) uint64 { return uint64(x) }",

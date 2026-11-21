@@ -122,7 +122,7 @@ func TestOpaqueCalls(t *testing.T) {
 		{"func F(x int64) uint64 { return uint64(x) }", "conversion"},
 		{"func Ext(int64) int64; func F(x int64) int64 { return Ext(x) }", "external_or_bodyless"},
 		{"type I interface{M() int}; func F(x I) int { return I.M(x) }", "interface_dispatch"},
-		{"type I interface{M() int}; func F(x I) int { return x.M() }", "method_generic_or_variadic"},
+		{"type I interface{M() int}; func F(x I) int { return x.M() }", "interface_dispatch"},
 		{"func Id[T any](x T) T { return x }; func F(x int64) int64 { return Id[int64](x) }", "method_generic_or_variadic"},
 		{"func Id[T any](x T) T { return x }; func F(x int64) int64 { return Id(x) }", "method_generic_or_variadic"},
 		{"func V(x ...int) int { return 1 }; func F() int { return V(1) }", "method_generic_or_variadic"},
@@ -140,6 +140,45 @@ func TestOpaqueCalls(t *testing.T) {
 				t.Fatal("an unsupported call acquired a direct target")
 			}
 		})
+	}
+	out := checked(
+		t,
+		"package p; type N int64; type R = N; "+
+			"type I interface{ M(R) R }; type A = I; "+
+			"func F(i I, a any, j interface{ M(R) R }, alias A) int { return 0 }",
+		"amd64",
+	)
+	if len(out.Functions) != 1 || len(out.Functions[0].Parameters) != 4 {
+		t.Fatal("interface parameter facts were not reported")
+	}
+	for _, parameter := range out.Functions[0].Parameters {
+		if parameter.Type.Kind != "interface" {
+			t.Fatalf("interface parameter was not classified: %+v", parameter.Type)
+		}
+	}
+	typeIDs := map[string]string{}
+	bindings := map[string]binding{}
+	for _, b := range out.Bindings {
+		bindings[b.ID] = b
+		if b.Kind == "type" {
+			typeIDs[b.Name] = b.ID
+		}
+	}
+	hasTypeID := func(ids []string, want string) bool {
+		for _, id := range ids {
+			if id == want {
+				return true
+			}
+		}
+		return false
+	}
+	aliasBinding := bindings[out.Functions[0].Parameters[3].BindingID]
+	if aliasBinding.Type.Kind != "interface" ||
+		!hasTypeID(aliasBinding.SignatureTypeIDs, typeIDs["A"]) ||
+		!hasTypeID(aliasBinding.SignatureTypeIDs, typeIDs["I"]) ||
+		!hasTypeID(aliasBinding.SignatureTypeIDs, typeIDs["R"]) ||
+		!hasTypeID(aliasBinding.SignatureTypeIDs, typeIDs["N"]) {
+		t.Fatalf("interface signature identities were not pinned: %+v", aliasBinding)
 	}
 }
 
@@ -793,10 +832,9 @@ func TestInterfaceDispatchRecordsOpaqueCall(t *testing.T) {
 	// no callee identity pins; the method expression records
 	// `interface_dispatch` marked `method_expr` with the named
 	// interface's identity as the target. A method-value call
-	// `i.M(x)` names an interface-typed operand — always an
-	// unsupported binding — and a promoted selection through an
-	// embedded interface names a receiver the gate cannot see:
-	// both stay `method_generic_or_variadic`.
+	// `i.M(x)` uses the same dispatch record with `method` set, while
+	// a promoted selection through an embedded interface names a
+	// receiver the gate cannot see and stays `method_generic_or_variadic`.
 	src := "package p\ntype I interface{ M(int64) int64 }\n" +
 		"type S int64\nfunc (s S) M(v int64) int64 { return v }\n" +
 		"type EI struct{ I }\n" +
@@ -808,17 +846,27 @@ func TestInterfaceDispatchRecordsOpaqueCall(t *testing.T) {
 		t.Fatalf("type checker did not produce a snapshot: %s", out.Status)
 	}
 	kinds := map[string]int{}
+	methodValues, methodExpressions := 0, 0
 	for _, c := range out.Calls {
 		kinds[c.Kind]++
+		if c.Kind == "interface_dispatch" {
+			if c.Target == "" {
+				t.Fatal("interface dispatch did not pin its named interface")
+			}
+			if c.Method && !c.MethodExpr {
+				methodValues++
+			} else if !c.Method && c.MethodExpr {
+				methodExpressions++
+			} else {
+				t.Fatalf("invalid interface dispatch method flags: %+v", c)
+			}
+		}
 	}
-	if kinds["interface_dispatch"] != 1 {
-		t.Fatalf("expected one interface_dispatch record: %+v", out.Calls)
+	if kinds["interface_dispatch"] != 2 || methodValues != 1 || methodExpressions != 1 {
+		t.Fatalf("expected method-value and method-expression dispatch records: %+v", out.Calls)
 	}
-	if kinds["method_generic_or_variadic"] != 2 {
-		t.Fatalf(
-			"method values on interfaces and promoted embedded methods must stay closed: %+v",
-			out.Calls,
-		)
+	if kinds["method_generic_or_variadic"] != 1 {
+		t.Fatalf("promoted embedded methods must stay closed: %+v", out.Calls)
 	}
 }
 

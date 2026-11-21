@@ -249,8 +249,8 @@ class CallTransfer:
     target: str
     arguments: tuple[frozenset[int], ...]
     result: frozenset[int]
-    # `imported` marks a `direct_import` call: the callee body is opaque to
-    # the fragment, so its effects cannot be claimed `none`.
+    # `imported` marks an opaque `direct_import` or `interface_dispatch`
+    # call, so its effects cannot be claimed `none`.
     imported: bool = False
     # `folded_targets` records the callee identities a
     # `--summary-aware-calls` fold embedded into `result` — the declared
@@ -10276,6 +10276,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             or any(
                 p.type.kind
                 not in {"integer", "boolean", "pointer", "struct",
+                        "interface",
                         "function"}
                 and not (
                     # A `chan T` parameter admits under the
@@ -10583,9 +10584,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # fact, so redeclaring the element type still flags
             # this summary stale.
             self._pin_fact_identities(p.type)
-            # A func-typed slot (`f func(N) int64`) declares its inner
-            # named types on the binding record — the func fact tree
-            # holds none.
+            # A func-typed slot (`f func(N) int64`) and an interface
+            # parameter declare their named contract types on the
+            # binding record — the fact tree holds no inner identities.
             pb = self.bindings.get(p.binding_id)
             if pb is not None:
                 self.pinned.update(pb.signature_type_ids)
@@ -11272,6 +11273,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # carries one conflated set of every sent
                         # value's deps; `<-ch` returns the union.
                         "chan",
+                        "interface",
                     }
                     # `st := P{...}` — a named composite local carries
                     # one conflated dep set for every field, and
@@ -11284,6 +11286,20 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     )
                 ):
                     raise _Unsupported("binding_unavailable", _span(node))
+                if (
+                    binding.type.kind == "interface"
+                    and self._interface_value_binding(
+                        rights[i]
+                        if len(lefts) == len(rights)
+                        else None,
+                        params,
+                        locals_,
+                    )
+                    is None
+                ):
+                    raise _Unsupported("binding_unavailable", _span(node))
+                if binding.type.kind == "interface":
+                    self.pinned.update(binding.signature_type_ids)
                 if binding.type.kind == "chan" and not (
                     (
                         self._scalar_chan_binding(binding.id)
@@ -11983,6 +11999,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         raise _Unsupported(
                             "binding_unavailable", _span(spec)
                         )
+                    if binding.type.kind == "interface" and value_nodes:
+                        rhs = (
+                            value_nodes[i]
+                            if len(names) == len(value_nodes)
+                            else None
+                        )
+                        if (
+                            rhs is None
+                            or self._interface_value_binding(
+                                rhs, params, locals_
+                            )
+                            is None
+                        ):
+                            raise _Unsupported(
+                                "binding_unavailable", _span(spec)
+                            )
+                        self.pinned.update(binding.signature_type_ids)
                     # `var s = lib.G(a)` — a bare composite binding
                     # admits only a backed source like `s := lib.G(a)`:
                     # a container-returning call (fresh backing) or
@@ -12208,6 +12241,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             # `var ch chan T` — a local channel like
                             # the make(chan) form.
                             "chan",
+                            "interface",
                         }
                         # `var fs = mk()` / `var fs []func() T` — a
                         # `[]func`/`[N]func` container like the
@@ -13163,6 +13197,98 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         raise _Unsupported(
                             "binding_unavailable", _span(node)
                         )
+            if not compound:
+                for index, lhs in enumerate(lefts):
+                    rhs = (
+                        rights[index]
+                        if len(lefts) == len(rights)
+                        else None
+                    )
+                    source_interface = self._interface_value_binding(
+                        rhs, params, locals_
+                    )
+                    if source_interface is not None:
+                        if lhs.type == "identifier" and lhs.text == b"_":
+                            pass
+                        else:
+                            target_ref = (
+                                self.references.get(
+                                    self.node_key(lhs)
+                                )
+                                if lhs.type == "identifier"
+                                else None
+                            )
+                            target_binding = (
+                                self.bindings.get(
+                                    target_ref.binding_id
+                                )
+                                if target_ref is not None
+                                and target_ref.binding_id
+                                else None
+                            )
+                            if (
+                                target_binding is None
+                                or target_binding.type is None
+                                or target_binding.type.kind != "interface"
+                                or self._package_level(target_binding)
+                            ):
+                                raise _Unsupported(
+                                    "unsupported_statement", _span(node)
+                                )
+                            self.pinned.update(
+                                target_binding.signature_type_ids
+                            )
+                    if lhs.type == "identifier":
+                        lhs_ref = self.references.get(
+                            self.node_key(lhs)
+                        )
+                        lhs_binding = (
+                            self.bindings.get(lhs_ref.binding_id)
+                            if lhs_ref is not None
+                            and lhs_ref.binding_id
+                            else None
+                        )
+                        if (
+                            lhs_binding is not None
+                            and lhs_binding.type is not None
+                            and lhs_binding.type.kind == "interface"
+                            and lhs.text != b"_"
+                            and (
+                                self._package_level(lhs_binding)
+                                or self._interface_value_binding(
+                                    rhs, params, locals_
+                                )
+                                is None
+                            )
+                        ):
+                            raise _Unsupported(
+                                "unsupported_statement", _span(node)
+                            )
+                    elif lhs.type == "selector_expression":
+                        field_node = lhs.child_by_field_name("field")
+                        field_ref = (
+                            self.references.get(
+                                self.node_key(field_node)
+                            )
+                            if field_node is not None
+                            else None
+                        )
+                        field = self._field_identity(field_ref)
+                        member_write = self._imported_member_write(lhs)
+                        member = (
+                            member_write[0]
+                            if member_write is not None
+                            else None
+                        )
+                        if any(
+                            value is not None
+                            and value.type is not None
+                            and value.type.kind == "interface"
+                            for value in (field, member)
+                        ):
+                            raise _Unsupported(
+                                "unsupported_statement", _span(node)
+                            )
             # Every LHS must be a bound identifier or `_` before any RHS
             # runs, matching the single-assignment check's error order.
             refs: list[Any] = []
@@ -20967,6 +21093,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
         if kind == "func_literal":
             return self._func_literal(node, params, locals_)
         if kind in {"literal_value", "literal_element"}:
+            if (
+                kind == "literal_element"
+                and self._interface_value_binding(
+                    node, params, locals_
+                )
+                is not None
+            ):
+                raise _Unsupported(
+                    "unsupported_expression", _span(node)
+                )
             deps: frozenset[int] = frozenset()
             for child in children:
                 deps |= self.expression(
@@ -20984,6 +21120,19 @@ member, or one explicit dereference of one (`(*t).F` — the same
             if value_node is None:
                 raise _Unsupported("unsupported_expression", _span(node))
             key_node = node.child_by_field_name("key")
+            if (
+                self._interface_value_binding(
+                    value_node, params, locals_
+                )
+                is not None
+                or self._interface_value_binding(
+                    key_node, params, locals_
+                )
+                is not None
+            ):
+                raise _Unsupported(
+                    "unsupported_expression", _span(node)
+                )
             while (
                 key_node is not None
                 and key_node.type == "literal_element"
@@ -21022,6 +21171,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # and anything not addressable fails the producer's own
             # type check. Binary `&` stays bitwise.
             operator = node.child_by_field_name("operator")
+            if kind == "binary_expression" and (
+                self._interface_value_binding(
+                    node.child_by_field_name("left"),
+                    params,
+                    locals_,
+                )
+                is not None
+                or self._interface_value_binding(
+                    node.child_by_field_name("right"),
+                    params,
+                    locals_,
+                )
+                is not None
+            ):
+                raise _Unsupported(
+                    "unsupported_expression", _span(node)
+                )
             allowed = _BINARY if kind == "binary_expression" else _UNARY
             if operator is None or operator.type not in allowed:
                 if (
@@ -23937,6 +24103,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     )
                 if ref is not None and ref.kind != "universe":
                     bid = ref.binding_id
+                    binding = self.bindings.get(bid)
+                    if (
+                        binding is not None
+                        and binding.type is not None
+                        and binding.type.kind == "interface"
+                        and (bid in locals_ or bid in params)
+                    ):
+                        raise _Unsupported(
+                            "unsupported_expression", _span(cur)
+                        )
                     # `locals_` wins over the parameter ordinal: a
                     # reassigned parameter (`x = g()` or a `G(&x, y)`
                     # call fold) carries its CURRENT deps there —
@@ -25112,6 +25288,46 @@ member, or one explicit dereference of one (`(*t).F` — the same
             self.opaque_callees.add(target)
         return deps
 
+    def _interface_value_binding(
+        self,
+        node: Any,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+    ) -> str | None:
+        while (
+            node is not None
+            and node.type
+            in {"parenthesized_expression", "literal_element"}
+        ):
+            node = next(
+                (
+                    child
+                    for child in node.named_children
+                    if child.type != "comment"
+                ),
+                None,
+            )
+        if node is None or node.type != "identifier":
+            return None
+        ref = self.references.get(self.node_key(node))
+        if (
+            ref is None
+            or not ref.binding_id
+            or (
+                ref.binding_id not in params
+                and ref.binding_id not in locals_
+            )
+        ):
+            return None
+        binding = self.bindings.get(ref.binding_id)
+        if (
+            binding is None
+            or binding.type is None
+            or binding.type.kind != "interface"
+        ):
+            return None
+        return binding.id
+
     def _interface_dispatch_call(
         self,
         node: Any,
@@ -25124,8 +25340,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         count: list[int],
         depth: int,
     ) -> frozenset[int]:
-        """`I.M(recv, args)` — a method-expression call on an
-        interface-typed receiver.
+        """`I.M(recv, args)` or `i.M(args)` on an interface receiver.
 
         Dispatch is dynamic: which implementation runs is
         unknowable here, so the call runs opaque like a func-typed
@@ -25138,28 +25353,78 @@ member, or one explicit dereference of one (`(*t).F` — the same
         external effect records on the receiver's root binding
         (the value the dynamic implementation is reached through).
         A named interface's identity (`call.target`) pins so a
-        method-set redeclare stales the caller; a receiver that
-        names no root binding stays closed. A `method`-flagged
-        record (`i.M(args)`) never reaches here — an interface-typed
-        operand is always an unsupported binding, so the unit only
-        emits `method_expr` dispatches."""
+        method-set redeclare stales the caller; a method-value
+        receiver must be a local or parameter interface binding."""
         receiver_node = None
         if call.method:
+            function_node = node.child_by_field_name("function")
+            if (
+                function_node is None
+                or function_node.type != "selector_expression"
+            ):
+                raise _Unsupported(
+                    "call_mapping_unavailable",
+                    _span(node),
+                    call.target,
+                )
+            receiver_node = function_node.child_by_field_name("operand")
+            receiver_id = receiver_node
+            while (
+                receiver_id is not None
+                and receiver_id.type == "parenthesized_expression"
+            ):
+                receiver_id = next(
+                    (
+                        child
+                        for child in receiver_id.named_children
+                        if child.type != "comment"
+                    ),
+                    None,
+                )
+            if receiver_id is None or receiver_id.type != "identifier":
+                raise _Unsupported(
+                    "unresolved_or_opaque_call",
+                    _span(node),
+                )
+            if (
+                self._interface_value_binding(
+                    receiver_id, params, locals_
+                )
+                is None
+            ):
+                raise _Unsupported(
+                    "unresolved_or_opaque_call",
+                    _span(node),
+                )
+            value_arguments = arguments
+        elif call.method_expr and arguments:
+            # `I.M(recv, args)` — the receiver is already the
+            # leading argument.
+            receiver_node = arguments[0]
+            value_arguments = arguments[1:]
+        else:
             raise _Unsupported(
                 "call_mapping_unavailable",
                 _span(node),
                 call.target,
             )
-        if call.method_expr and arguments:
-            # `I.M(recv, args)` — the receiver is already the
-            # leading argument, evaluated below like every argument.
-            receiver_node = arguments[0]
-        receiver_deps: frozenset[int] = frozenset()
+        receiver_deps = self.expression(
+            receiver_node,
+            fn,
+            params,
+            locals_,
+            transfers,
+            count,
+            depth + 1,
+        )
+        actuals = [receiver_deps]
         arg_deps: frozenset[int] = frozenset()
-        for arg in arguments:
-            arg_deps |= self.expression(
+        for arg in value_arguments:
+            actual = self.expression(
                 arg, fn, params, locals_, transfers, count, depth + 1
             )
+            actuals.append(actual)
+            arg_deps |= actual
         deps = receiver_deps | arg_deps | self.indirect_writes
         for escaped_id in self.escaped:
             if escaped_id in locals_:
@@ -25199,8 +25464,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     node.end_byte,
                 ),
                 target_id,
-                (),
-                frozenset(),
+                tuple(actuals),
+                deps,
                 imported=True,
             )
         )
@@ -25213,7 +25478,73 @@ member, or one explicit dereference of one (`(*t).F` — the same
             self._store(
                 locals_, params, escaped_id, write_deps, True
             )
+        self._store_call_writes(
+            [receiver_node, *value_arguments],
+            deps,
+            locals_,
+            params,
+        )
+        self._escape_interface_dispatch_containers(
+            [receiver_node, *value_arguments], params, locals_
+        )
         return deps
+
+    def _escape_interface_dispatch_containers(
+        self,
+        arguments: list[Any],
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+    ) -> None:
+        binding_ids = set()
+        for argument in arguments:
+            while (
+                argument is not None
+                and argument.type == "parenthesized_expression"
+            ):
+                argument = next(
+                    (
+                        child
+                        for child in argument.named_children
+                        if child.type != "comment"
+                    ),
+                    None,
+                )
+            if argument is None:
+                continue
+            if argument.type == "identifier":
+                ref = self.references.get(self.node_key(argument))
+                if ref is not None and ref.binding_id:
+                    binding_ids.add(ref.binding_id)
+            elif argument.type == "index_expression":
+                sharers = self._opaque_container_index_sharer_toks(
+                    argument
+                )
+                binding_ids.update(
+                    self._opaque_container_holders(sharers)
+                )
+        for binding_id in binding_ids:
+            if binding_id not in locals_ and binding_id not in params:
+                continue
+            binding = self.bindings.get(binding_id)
+            fact = binding.type if binding is not None else None
+            if (
+                fact is None
+                or not (
+                    fact.kind in {"slice", "map"}
+                    or (
+                        fact.kind == "array"
+                        and self._array_arg_shares_memory(fact)
+                    )
+                    or self._func_elem_collection(fact)
+                    or self._func_elem_nested_collection(fact)
+                    or (
+                        binding_id in self._opaque_container_tokens
+                        and fact.kind != "array"
+                    )
+                )
+            ):
+                continue
+            self.escaped.add(binding_id)
 
     def _bound_method_call(
         self,

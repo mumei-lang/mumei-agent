@@ -94,9 +94,10 @@ class Binding:
     scope: ByteSpan | None
     type: GoType
     # A func-typed binding's declared named/alias signature type
-    # identities (`func F(f func(N) int64)`, `var f MyFn`) — the
-    # func type fact carries no inner facts, so callers pin these
-    # for staleness exactly like a member's signature_type_ids.
+    # identities (`func F(f func(N) int64)`, `var f MyFn`), or an
+    # interface binding's named interface/method-signature identities.
+    # These types carry no inner facts, so callers pin them for
+    # staleness exactly like a member's signature_type_ids.
     signature_type_ids: tuple[str, ...] = ()
     # An anonymous (embedded) struct member field —
     # `type S struct{ *Q; R Q }` embeds `*Q` but not `R`.
@@ -491,6 +492,7 @@ def _go_type(value: Any, arch: str) -> GoType:
                 "array",
                 "map",
                 "struct",
+                "interface",
                 "chan",
             }
             and width == 0
@@ -513,6 +515,7 @@ def _go_type(value: Any, arch: str) -> GoType:
             "array",
             "map",
             "struct",
+            "interface",
             "chan",
         }:
             # A pointer fact's identity lives in `type_id` (the
@@ -758,13 +761,15 @@ def load_go_snapshot(
             )
             method = _boolean(c.get("method", False))
             method_expr = _boolean(c.get("method_expr", False))
-            # `method` only travels on a `direct_local` record here —
-            # a single file declares no imports — while `method_expr`
-            # may also ride an `interface_dispatch` record (`I.M`); a
-            # method-value call (receiver operand) never doubles as a
-            # method-expression call (leading receiver argument).
+            # `method` may also ride an `interface_dispatch` record
+            # (`i.M`) — a single file declares no imports — while
+            # `method_expr` uses the leading receiver argument. The
+            # flags are mutually exclusive.
             _require(
-                (not method or kind == "direct_local")
+                (
+                    not method
+                    or kind in ("direct_local", "interface_dispatch")
+                )
                 and (
                     not method_expr
                     or (
@@ -1178,13 +1183,13 @@ def load_go_package_snapshot(
             _require(kind in _CALL_KINDS and (not owner or owner in fn_by_id))
             method = _boolean(c.get("method", False))
             # `method` travels on a method call — `lib.VS.PF(args)` on
-            # an imported member or `st.M(args)` on a same-package
-            # one — never on a plain function call. An `i.M(args)`
-            # interface dispatch stays `method_generic_or_variadic`:
-            # an interface-typed operand is always an unsupported
-            # binding, so only `method_expr` dispatches record here.
+            # an imported member, `st.M(args)` on a same-package one,
+            # or `i.M(args)` on an interface dispatch — never on a
+            # plain function call.
             _require(
-                not method or kind in ("direct_import", "direct_local")
+                not method
+                or kind
+                in ("direct_import", "direct_local", "interface_dispatch")
             )
             method_expr = _boolean(c.get("method_expr", False))
             # `method_expr` likewise only travels on a method-expression
