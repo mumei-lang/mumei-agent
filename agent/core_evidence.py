@@ -1555,17 +1555,27 @@ _CHECK_PERFORMERS: dict = {
     "os_exit_status_observation": [
         ("mumei.native-exit-status-accept-report/v1", "acceptance",
          "accepted", "normalized.stdout.sha256"),
+        ("mumei.native-exit-status-accept-report/v1", "acceptance",
+         "accepted", "shared:expected_build_id"),
     ],
     "os_stdout_observation": [
         ("mumei.native-stdout-accept-report/v1", "acceptance",
          "accepted", "normalized.stdout.sha256"),
+        ("mumei.native-stdout-accept-report/v1", "acceptance",
+         "accepted", "shared:expected_build_id"),
     ],
     "os_stderr_observation": [
         ("mumei.native-stderr-accept-report/v1", "acceptance",
          "accepted", "normalized.stdout.sha256"),
+        ("mumei.native-stderr-accept-report/v1", "acceptance",
+         "accepted", "shared:expected_build_id"),
     ],
-    # runtime_observation_semantics has no performer until the Core slice
-    # emits the runtime-observation descriptor.
+    # Accepted Core runs authenticate this build ID against the bundle
+    # record, so it pins sibling reports to the same record. Rechecks
+    # remain non-performers because their stdout has no bound carrier.
+    # runtime_observation_semantics awaits the Core descriptor for one
+    # invocation observing all channels; it is not a conjunction of
+    # channel reports.
     "attempt_binding": [
         ("mumei.core-acceptance-evaluation/v1", "attempt_bound", True, None),
     ],

@@ -3568,7 +3568,9 @@ def native_exit_status_recheck(
     `artifact_semantics`, `claim_truth` and
     `os_exit_status_observation` — with the remaining C02 and runtime
     checks in `checks_not_performed`. The fixed diagnostic stdout has
-    no bound carrier and is not a recovery performer.
+    no bound carrier and is not a recovery performer. Every outcome
+    echoes `expected_build_id`, so the report can serve as the record
+    for accepted sibling evidence with the same Core-authenticated ID.
 
     Args:
         core_path: Absolute path to the mumei Core executable.
@@ -3643,7 +3645,9 @@ def native_exit_status_accept(
     `discharged_checks` — `artifact_semantics`, `claim_truth` and
     `os_exit_status_observation` — with the remaining C02 and runtime
     checks in `checks_not_performed`. Its bound acceptance descriptor
-    can recover that observation through `recovery-eval`.
+    can recover that observation through `recovery-eval`. Every outcome
+    echoes `expected_build_id`; accepted sibling reports sharing that
+    Core-authenticated ID can recover one another's channel checks.
 
     Args:
         core_path: Absolute path to the mumei Core executable.
@@ -3718,7 +3722,9 @@ def native_stdout_recheck(
     `artifact_semantics`, `claim_truth` and `os_stdout_observation` —
     with the remaining C02 and runtime checks in
     `checks_not_performed`. The fixed diagnostic stdout has no bound
-    carrier and is not a recovery performer.
+    carrier and is not a recovery performer. Every outcome echoes
+    `expected_build_id`, so the report can serve as the record for
+    accepted sibling evidence with the same Core-authenticated ID.
 
     Args:
         core_path: Absolute path to the mumei Core executable.
@@ -3793,7 +3799,9 @@ def native_stdout_accept(
     `discharged_checks` — `artifact_semantics`, `claim_truth` and
     `os_stdout_observation` — with the remaining C02 and runtime
     checks in `checks_not_performed`. Its bound acceptance descriptor
-    can recover that observation through `recovery-eval`.
+    can recover that observation through `recovery-eval`. Every outcome
+    echoes `expected_build_id`; accepted sibling reports sharing that
+    Core-authenticated ID can recover one another's channel checks.
 
     Args:
         core_path: Absolute path to the mumei Core executable.
@@ -3868,7 +3876,9 @@ def native_stderr_recheck(
     `artifact_semantics`, `claim_truth` and `os_stderr_observation` —
     with the remaining C02 and runtime checks in
     `checks_not_performed`. The fixed diagnostic stdout has no bound
-    carrier and is not a recovery performer.
+    carrier and is not a recovery performer. Every outcome echoes
+    `expected_build_id`, so the report can serve as the record for
+    accepted sibling evidence with the same Core-authenticated ID.
 
     Args:
         core_path: Absolute path to the mumei Core executable.
@@ -3943,7 +3953,9 @@ def native_stderr_accept(
     `discharged_checks` — `artifact_semantics`, `claim_truth` and
     `os_stderr_observation` — with the remaining C02 and runtime
     checks in `checks_not_performed`. Its bound acceptance descriptor
-    can recover that observation through `recovery-eval`.
+    can recover that observation through `recovery-eval`. Every outcome
+    echoes `expected_build_id`; accepted sibling reports sharing that
+    Core-authenticated ID can recover one another's channel checks.
 
     Args:
         core_path: Absolute path to the mumei Core executable.
