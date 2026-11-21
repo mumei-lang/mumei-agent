@@ -275,11 +275,13 @@ class _TypeScriptBindings:
 
     def _declaration_scope(self, node: Any, *, var: bool = False) -> ByteSpan:
         if var:
-            function = self._nearest_function(node)
-            if function is None:
-                return self.span(self.root)
-            body = function.child_by_field_name("body")
-            return self.span(body if body is not None else function)
+            for parent in self._ancestors(node):
+                if parent.type in _FUNCTION_NODES:
+                    body = parent.child_by_field_name("body")
+                    return self.span(body if body is not None else parent)
+                if parent.type in {"internal_module", "class_static_block"}:
+                    return self.span(parent)
+            return self.span(self.root)
         loop = self._loop_head_scope(node)
         return self.span(loop if loop is not None else self._nearest_block(node))
 

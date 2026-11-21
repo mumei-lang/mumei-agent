@@ -262,6 +262,26 @@ function assign(iterable) {
     assert all(reference.kind == "read" for reference in iterable_refs)
 
 
+def test_var_scope_stops_at_namespaces_and_class_static_blocks():
+    source = """
+var outer = 1;
+namespace N { var namespaceLocal = 2; namespaceLocal; }
+namespaceLocal;
+class C { static { var staticLocal = 3; staticLocal; } }
+staticLocal;
+outer;
+"""
+    report = build_ts_bindings(source)
+    namespace_local = _bindings(report, "namespaceLocal", "local")[0]
+    static_local = _bindings(report, "staticLocal", "local")[0]
+    outer = _bindings(report, "outer", "local")[0]
+    assert _refs(report, source, "namespaceLocal")[0].binding_id == namespace_local.id
+    assert _refs(report, source, "staticLocal")[0].binding_id == static_local.id
+    assert _refs(report, source, "outer")[0].binding_id == outer.id
+    assert any(item.name == "namespaceLocal" for item in _unresolved(report))
+    assert any(item.name == "staticLocal" for item in _unresolved(report))
+
+
 def test_destructured_parameters_defaults_and_rest_are_bound():
     source = """
 function f(first = 1, second = first, {item: renamed = second, plain, ...rest}: Shape, ...tail: number[]) {
