@@ -4454,9 +4454,74 @@ class _Builder:
         root = self.bindings.get(root_ref.binding_id)
         if root is not None and self._type_fact_has_type_args(root.type):
             return True
-        return any(
+        if any(
             self._type_fact_has_type_args(member.type) for member in members
+        ):
+            return True
+        if len(members) < 2:
+            return False
+        field_member = members[-1]
+        container_member = next(
+            (
+                member
+                for member in reversed(members[:-1])
+                if member.kind == "type"
+            ),
+            None,
         )
+        container = (
+            self.bindings.get(container_member.id)
+            if container_member is not None
+            else None
+        )
+        if container is None or container.kind != "type":
+            return False
+        direct_fields = self._struct_fields(container)
+        if field_member.id in {field.id for field in direct_fields}:
+            return False
+        pending = [
+            (field, frozenset())
+            for field in direct_fields
+            if getattr(field, "embedded", None) is not False
+            and (
+                getattr(field, "embedded", None) is True
+                or self._embed_name_compatible(field)
+            )
+        ]
+        while pending:
+            field, seen = pending.pop()
+            field_type = getattr(field, "type", None)
+            if field_type is None:
+                continue
+            if self._type_fact_has_type_args(field_type) and (
+                self._promotion_path((field,), field_member, frozenset())
+                is not None
+            ):
+                return True
+            pointee = (
+                field_type.elem
+                if field_type.kind == "pointer"
+                else field_type
+            )
+            type_id = getattr(pointee, "type_id", "")
+            embedded_type = self._pointee_type(type_id) if type_id else None
+            if (
+                embedded_type is None
+                or getattr(embedded_type, "span", None) is None
+                or embedded_type.id in seen
+            ):
+                continue
+            next_seen = seen | {embedded_type.id}
+            pending.extend(
+                (nested, next_seen)
+                for nested in self._struct_fields(embedded_type)
+                if getattr(nested, "embedded", None) is not False
+                and (
+                    getattr(nested, "embedded", None) is True
+                    or self._embed_name_compatible(nested)
+                )
+            )
+        return False
 
     def _bound_selector_pointees(
         self,

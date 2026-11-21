@@ -11134,6 +11134,124 @@ def test_generic_struct_intermediates_stay_closed_across_instantiations(
     )
 
 
+@pytest.mark.parametrize(
+    ("form", "imported"),
+    [
+        ("concrete_alias", False),
+        ("concrete_alias", True),
+        ("generic_alias", False),
+        ("generic_alias", True),
+        ("embedded_value", False),
+        ("embedded_pointer", False),
+        ("embedded_value", True),
+        ("embedded_pointer", True),
+    ],
+)
+def test_generic_struct_intermediates_stay_closed_through_aliases_and_embedding(
+    go_types_helper, form, imported
+):
+    qualifier = "lib." if imported else ""
+    imports = (
+        {
+            "lib": {
+                "lib.go": (
+                    "package lib\n"
+                    "type S3 struct{ B int64 }\n"
+                    "type Box[T any] struct{ A T }\n"
+                )
+            }
+        }
+        if imported
+        else None
+    )
+    if form == "concrete_alias":
+        declarations = f"type P = {qualifier}Box[{qualifier}S3]\n"
+        parameter = "P"
+    elif form == "generic_alias":
+        declarations = f"type P[T any] = {qualifier}Box[T]\n"
+        parameter = "P[S3]" if not imported else "P[lib.S3]"
+    else:
+        embedded_pointer = "*" if form == "embedded_pointer" else ""
+        declarations = (
+            f"type W struct{{ {embedded_pointer}"
+            f"{qualifier}Box[{qualifier}S3] }}\n"
+        )
+        parameter = "W"
+    local_types = (
+        ""
+        if imported
+        else "type S3 struct{ B int64 }\ntype Box[T any] struct{ A T }\n"
+    )
+    files = {
+        "a.go": (
+            "package p\n"
+            + ('import "lib"\n' if imported else "")
+            + local_types
+            + declarations
+            + f"func F(t *{parameter}) int64 {{ return t.A.B }}\n"
+        )
+    }
+    if imported:
+        snapshot = load_go_package_snapshot(
+            package_report_imports(go_types_helper, files, imports),
+            files,
+            target_arch="amd64",
+        )
+        summaries = ip.summarize_go_package(files, snapshot)
+    else:
+        _, snapshot, summaries = package_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert not result.available, (form, imported, result.gaps)
+
+
+def test_non_generic_struct_alias_intermediate_stays_admitted(go_types_helper):
+    files = {
+        "a.go": (
+            "package p\n"
+            "type S3 struct{ B int64 }\n"
+            "type S struct{ A S3 }\n"
+            "type P = S\n"
+            "func F(t *P) int64 { return t.A.B }\n"
+        )
+    }
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_defined_generic_instantiation_intermediate_pins_actual_field_type(
+    go_types_helper,
+):
+    files = {
+        "a.go": (
+            'package p\nimport "lib"\n'
+            "type N lib.Box[lib.S3]\n"
+            "func F(t *N) int64 { return t.A.B }\n"
+        )
+    }
+    lib = {
+        "lib": {
+            "types.go": (
+                "package lib\n"
+                "type S3 struct{ B int64 }\n"
+                "type Box[T any] struct{ A T }\n"
+            )
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    members = {member.name: member.id for member in snapshot.imported_members}
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert members["S3"] in result.pinned
+
+
 def test_bound_base_field_read_pins_nested_imported_type_staleness(
     go_types_helper,
 ):
