@@ -7721,16 +7721,14 @@ def test_local_struct_value_empty_literal(
 
 
 @pytest.mark.parametrize(
-    "addr", ["&st", "&st.V", "&st.A.N", "&P{V: x}", "&(P{V: x})"]
+    "addr", ["&st", "&st.V", "&st.A.N"]
 )
 def test_local_struct_value_address_of_stays_closed(
     go_types_helper, addr
 ):
     # `&st`/`&st.V` stay closed: the dep-free bound-pointer field
     # read never sees st's conflated set, so letting a pointer
-    # alias it would under-approximate the read. `&P{...}` stays
-    # closed for the same reason — the literal's initializer deps
-    # would be invisible to the dep-free read of the fresh value.
+    # alias it would under-approximate the read.
     files = {
         "a.go": "package p\ntype N2 struct{ N int64 }\n"
         "type P struct{ V int64; A N2 }\n"
@@ -7743,6 +7741,233 @@ def test_local_struct_value_address_of_stays_closed(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert not result.available
+    assert result.gaps[0].reason == "unsupported_operator"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "p := &S{V: x}; return p.V",
+        "p := &S{}; p.V = x; return p.V",
+        "p := &(S{V: x}); return p.V",
+        "var p *S = &S{V: x}; return p.V",
+        "p := &S{}; p = &S{V: x}; return p.V",
+    ],
+)
+def test_struct_literal_address_of_named_struct_field_read_and_store(
+    go_types_helper, body
+):
+    files = {
+        "a.go": "package p\n"
+        "type S struct{ V int64 }\n"
+        f"func F(x int64) int64 {{ {body} }}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_struct_literal_address_of_anonymous_struct_field(
+    go_types_helper,
+):
+    data = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "\tp := &struct{ V int64 }{V: x}\n"
+        "\treturn p.V\n"
+        "}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_struct_literal_address_of_imported_struct_field(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tp := &lib.S{F: x}\n"
+        "\treturn p.F\n"
+        "}\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_struct_literal_address_passed_to_local_callee(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "type S struct{ V int64 }\n"
+        "func G(p *S) { p.V = 0 }\n"
+        "func F(x int64) int64 {\n"
+        "\tp := &S{V: x}\n"
+        "\tG(p)\n"
+        "\treturn p.V\n"
+        "}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_struct_literal_address_pointer_receiver_method(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "type S struct{ V int64 }\n"
+        "func (p *S) Set() { p.V = 0 }\n"
+        "func F(x int64) int64 {\n"
+        "\tp := &S{V: x}\n"
+        "\tp.Set()\n"
+        "\treturn p.V\n"
+        "}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_struct_literal_address_returned_pointer_read_by_caller(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "type S struct{ V int64 }\n"
+        "func G(x int64) *S { return &S{V: x} }\n"
+        "func F(x int64) int64 { return G(x).V }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_struct_literal_address_nested_pointer_field(
+    go_types_helper,
+):
+    data = unit(
+        go_types_helper,
+        "type S struct{ P *int64 }\n"
+        "func F(x int64) int64 {\n"
+        "\ty := x\n"
+        "\tp := &S{P: &y}\n"
+        "\treturn *p.P\n"
+        "}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_struct_literal_addresses_conflate_initializer_dependencies(
+    go_types_helper,
+):
+    data = unit(
+        go_types_helper,
+        "type S struct{ V int64 }\n"
+        "func F(x, y int64) int64 {\n"
+        "\tp := &S{V: x}\n"
+        "\tq := &S{V: y}\n"
+        "\t_ = q\n"
+        "\treturn p.V\n"
+        "}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+
+
+def test_struct_literal_address_in_loop(
+    go_types_helper,
+):
+    data = unit(
+        go_types_helper,
+        "type S struct{ V int64 }\n"
+        "func F(x int64) int64 {\n"
+        "\tvar out int64\n"
+        "\tfor i := 0; i < 1; i++ {\n"
+        "\t\tp := &S{V: x}\n"
+        "\t\tout = p.V\n"
+        "\t}\n"
+        "\treturn out\n"
+        "}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_struct_literal_address_of_non_struct_literals_stays_closed(
+    go_types_helper,
+):
+    for expr in (
+        "&[]int64{x}",
+        "&[1]int64{x}",
+        "&map[int64]int64{0: x}",
+    ):
+        files = {
+            "a.go": "package p\n"
+            f"func F(x int64) int64 {{ p := {expr}; _ = p; return x }}\n"
+        }
+        snapshot = _snapshot_for(go_types_helper, files)
+        result = named_package(
+            files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+        )
+        assert not result.available, expr
+        assert result.gaps[0].reason == "unsupported_operator", expr
+
+
+def test_struct_literal_address_pins_named_type_staleness(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "func F(x int64) int64 { p := &S{V: x}; return p.V }\n",
+        "t.go": "package p\ntype S struct{ V int64 }\n",
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    files2 = {
+        **files,
+        "t.go": "package p\n\ntype S struct{ V int64 }\n",
+    }
+    snapshot2 = _snapshot_for(go_types_helper, files2)
+    known = {binding.id for binding in snapshot2.bindings}
+    f_id = next(
+        function.binding_id
+        for function in snapshot.functions
+        if snapshot.binding(function.binding_id).name == "F"
+    )
+    assert summaries.stale_dependents(known) == frozenset({f_id})
 
 
 def test_local_struct_value_pointer_field_chain_stays_closed(
