@@ -36,6 +36,7 @@ _SUBCOMMANDS = {
     "go-summaries-reuse-attempt",
     "summaries-plan",
     "rust-summaries",
+    "rust-bindings",
     "rust-summaries-accept",
     "rust-summaries-check",
     "rust-summaries-reuse",
@@ -1257,6 +1258,23 @@ def main() -> None:
         native_eac_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(native_eac_main(args))
+    elif command == "rust-bindings":
+        import argparse
+        from agent.rust_bindings import (
+            build_parser as rust_bindings_build_parser,
+            main as rust_bindings_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent rust-bindings",
+            description=(
+                "Emit a conservative Rust lexical binding report as JSON; "
+                "this is lexical metadata, not a type check, proof, or verdict."
+            ),
+        )
+        rust_bindings_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(rust_bindings_main(args))
     elif command == "rust-summaries":
         import argparse
         from agent.rust_interprocedural import (

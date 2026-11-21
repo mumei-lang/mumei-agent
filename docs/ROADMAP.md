@@ -5135,6 +5135,32 @@ fingerprint cannot bind undeclared bytes. Receiver dispatch
 `pub use` re-exports, glob `use b::*`, `#[path]` attributes and
 macro-generated callables stay closed.
 
+### C06 Rust lexical binding report (`rust-bindings`)
+
+`python -m agent rust-bindings <file> --pointer-width {16,32,64}`
+emits `mumei.rust-lexical-bindings/v1`, a bounded, single-file
+tree-sitter report of lexical declaration identities and scopes,
+references and writes, explicit scalar type facts, functions, calls,
+unresolved names, and analysis gaps. It models Rust's local lexical
+scope and item visibility, including shadowing and nested functions;
+its stable binding IDs pin declaration and scope byte offsets to the
+source digest. Pointer width is required because `isize` and `usize`
+cannot be assigned a width without a declared target.
+
+This report is lexical, not type-checked: it does not infer types from
+initializers, resolve qualified paths or imported declarations, or
+claim dynamic, macro, and other unsupported behavior. Such symbols
+remain unresolved and unsupported syntax is recorded as a gap; either
+makes the report incomplete. Attribute handling is explicit: inert
+compiler/tool attributes and standard derives do not create gaps,
+`cfg`/`cfg_attr` create `conditional_compilation` gaps, and unknown
+procedural attributes or non-standard derives create `macro_invocation`
+gaps. The fail-closed reader rejects stale, malformed, or internally
+inconsistent reports. It is metadata only, not a proof or verdict. It
+adds no default route and changes no audit, Seal Grade, or Lean
+behavior. C06 remains partially delivered; Solidity and TypeScript
+lexical reports are follow-on work.
+
 ### rust-summaries `--summary-aware-calls`
 
 `--summary-aware-calls <MANIFEST>` (all rust-summaries routes)
