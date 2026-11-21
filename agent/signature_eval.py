@@ -16,10 +16,11 @@ names what the fold leaves unassessed, including
 `signature_verification`, `key_authenticity` and `envelope_freshness`
 (`key_revocation` too, unless the caller supplies a declared
 `mumei.key-revocation-list/v1` document with `--revocation-list`, which
-performs it and emits `key_not_revoked`). A malformed or foreign
-document fails statically rather than matching nothing; a matched
-envelope whose declared pins disagree reports `false` observations,
-never an error.
+performs it and emits `key_not_revoked`). A malformed or non-object
+document fails statically; a well-formed JSON object outside the
+envelope family reports `envelope_match: false` (both pins `false`, no
+`subject_digest` echo); a matched envelope whose declared pins disagree
+reports `false` observations, never an error.
 """
 
 from __future__ import annotations
