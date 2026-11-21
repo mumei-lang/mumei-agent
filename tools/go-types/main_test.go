@@ -307,6 +307,37 @@ func TestImportedStructFieldDeclaresNamedValueType(t *testing.T) {
 	}
 }
 
+func TestImportedGenericStructFieldDoesNotImportLocalTypeArgument(t *testing.T) {
+	unit := []namedSource{{
+		"a.go",
+		"package p\nimport \"lib\"\ntype S struct{ B int64 }\nfunc F(t *lib.Box[S]) int64 { return t.A.B }",
+	}}
+	imports := []importedUnit{{"lib", []namedSource{{
+		"box.go",
+		"package lib\ntype Box[T any] struct{ A T }",
+	}}}}
+	out := analyze(request{Sources: unit, Imports: imports, TargetArch: "amd64"})
+	if out.Status != "ok" {
+		t.Fatalf("type checker did not produce a snapshot: %s", out.Status)
+	}
+	localS := named(out, "S")[0]
+	for _, m := range out.ImportedMembers {
+		if m.ID == localS.ID {
+			t.Fatalf("local type S was emitted as imported member: %+v", m)
+		}
+	}
+	var fieldA *member
+	for i := range out.ImportedMembers {
+		if out.ImportedMembers[i].Name == "A" {
+			fieldA = &out.ImportedMembers[i]
+			break
+		}
+	}
+	if fieldA == nil || fieldA.Type.Kind != "struct" || fieldA.Type.TypeID != localS.ID {
+		t.Fatalf("the instantiated field did not retain its local type identity: %+v", fieldA)
+	}
+}
+
 func TestImportedMethodChanResultAdmits(t *testing.T) {
 	// `ch, n := st.M()` — an imported method whose signature
 	// declares a scalar-element `chan` among its results records

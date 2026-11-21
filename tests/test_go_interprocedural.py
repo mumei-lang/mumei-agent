@@ -11028,6 +11028,29 @@ def test_bound_base_field_read_named_struct_intermediate_is_admitted(
     )
 
 
+def test_imported_generic_struct_field_with_local_type_argument_loads(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "type S struct{ B int64 }\n"
+        "func F(t *lib.Box[S]) int64 { return t.A.B }\n"
+    }
+    lib = {
+        "lib": {
+            "box.go": "package lib\ntype Box[T any] struct{ A T }\n",
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available or result.gaps
+
+
 def test_bound_base_field_read_pins_nested_imported_type_staleness(
     go_types_helper,
 ):

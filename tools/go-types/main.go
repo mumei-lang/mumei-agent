@@ -830,17 +830,21 @@ func (ix *indexer) recordMember(obj types.Object, id string) {
 func (ix *indexer) recordPointeeMembers(t types.Type, seen map[string]bool) {
 	switch tt := t.(type) {
 	case *types.Named:
-		if id := ix.typeID(tt.Obj()); id != "" && !seen[id] {
-			seen[id] = true
-			ix.recordMember(tt.Obj(), id)
+		if ix.id(tt.Obj()) == "" {
+			if id := ix.typeID(tt.Obj()); id != "" && !seen[id] {
+				seen[id] = true
+				ix.recordMember(tt.Obj(), id)
+			}
 		}
 		for i := 0; i < tt.TypeArgs().Len(); i++ {
 			ix.recordPointeeMembers(tt.TypeArgs().At(i), seen)
 		}
 	case *types.Alias:
-		if id := ix.typeID(tt.Obj()); id != "" && !seen[id] {
-			seen[id] = true
-			ix.recordMember(tt.Obj(), id)
+		if ix.id(tt.Obj()) == "" {
+			if id := ix.typeID(tt.Obj()); id != "" && !seen[id] {
+				seen[id] = true
+				ix.recordMember(tt.Obj(), id)
+			}
 		}
 		for i := 0; i < tt.TypeArgs().Len(); i++ {
 			ix.recordPointeeMembers(tt.TypeArgs().At(i), seen)
