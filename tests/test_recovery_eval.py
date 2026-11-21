@@ -8,6 +8,8 @@ import pytest
 
 from agent.core_evidence import (
     _CHECK_PERFORMERS,
+    RUNTIME_CHECK_VOCABULARY,
+    RUNTIME_OBSERVATION_SCHEMA,
     UNPERFORMED_CHECK_RECOVERY_SCHEMA,
     evaluate_unperformed_check_recovery,
 )
@@ -298,6 +300,241 @@ def _attempt_report(
             "output_fingerprint": manifest_fingerprint,
         },
         acceptance={"accepted": accepted},
+    )
+
+
+def _native_accept_report(
+    record_digest,
+    accepted=True,
+    schema="mumei.native-accept-report/v1",
+):
+    """A minimal realistic native accept-route report.
+
+    The native accept routes carry the same lineage surface as the
+    verify-attempt report — the published sequence plus
+    `normalized.stdout.sha256` naming the acceptance descriptor's
+    bytes — but surface the outcome as the string `acceptance:
+    "accepted"` rather than an `acceptance.accepted` boolean.
+    """
+    return _doc(
+        schema,
+        sequence={
+            "schema_version": "mumei.verifier-attempt-sequence/v1",
+            "request_fingerprint": "e" * 64,
+            "timeout_ms": 60000,
+            "attempts": [
+                {
+                    "request_fingerprint": "e" * 64,
+                    "attempt_number": 1,
+                    "state": "exited",
+                }
+            ],
+            "selected_result": {
+                "attempt_number": 1,
+                "output_fingerprint": "f" * 64,
+            },
+        },
+        normalized={
+            "schema_version": "mumei.verifier-run-result/v1",
+            "request_fingerprint": "e" * 64,
+            "attempt_number": 1,
+            "outcome": "exited",
+            "stdout": {"sha256": record_digest, "size_bytes": 2},
+        },
+        acceptance="accepted" if accepted else "inconclusive",
+    )
+
+
+def test_native_accept_report_recovers_historical_execution():
+    """An accepted native accept-route report is the recorded
+    execution lineage for the descriptor its run produced — it
+    performs `historical_execution` on that descriptor, which the
+    descriptor itself declares as unperformed (one run is an
+    observation, not a history)."""
+    digest = "a" * 64
+    record = _record("historical_execution")
+    for schema in (
+        "mumei.native-accept-report/v1",
+        "mumei.native-exit-status-accept-report/v1",
+        "mumei.native-stdout-accept-report/v1",
+        "mumei.native-stderr-accept-report/v1",
+    ):
+        evaluation = evaluate_unperformed_check_recovery(
+            record,
+            [_native_accept_report(digest, schema=schema)],
+            record_digest=digest,
+        )
+        assert evaluation["checks"]["historical_execution"] == "recovered", (
+            schema
+        )
+
+    # A non-accepted run produced no descriptor — the lineage binds
+    # nothing and the outcome is not the declared "accepted" string.
+    evaluation = evaluate_unperformed_check_recovery(
+        record, [_native_accept_report(digest, accepted=False)],
+        record_digest=digest,
+    )
+    assert evaluation["checks"]["historical_execution"] == "evidence_failed"
+
+    # An accepted report bound to other bytes never recovers this
+    # descriptor — `normalized.stdout.sha256` must name the record's
+    # digest.
+    evaluation = evaluate_unperformed_check_recovery(
+        record, [_native_accept_report("b" * 64)], record_digest=digest,
+    )
+    assert evaluation["checks"]["historical_execution"] == "evidence_failed"
+
+
+def test_native_accept_reports_recover_only_bound_channel_observations():
+    digest = "a" * 64
+    performers = {
+        "os_exit_status_observation": (
+            "mumei.native-exit-status-accept-report/v1",
+        ),
+        "os_stdout_observation": ("mumei.native-stdout-accept-report/v1",),
+        "os_stderr_observation": ("mumei.native-stderr-accept-report/v1",),
+    }
+    assert RUNTIME_OBSERVATION_SCHEMA == "mumei.runtime-observation/v1"
+    assert set(performers) | {"runtime_observation_semantics"} == set(
+        RUNTIME_CHECK_VOCABULARY
+    )
+
+    for check, (schema,) in performers.items():
+        record = _record(check)
+        report = _native_accept_report(digest, schema=schema)
+        evaluation = evaluate_unperformed_check_recovery(
+            record, [report], record_digest=digest,
+        )
+        assert evaluation["checks"] == {check: "recovered"}
+        assert evaluation["recovered"] == [check]
+
+        mismatched = _native_accept_report("b" * 64, schema=schema)
+        evaluation = evaluate_unperformed_check_recovery(
+            record, [mismatched], record_digest=digest,
+        )
+        assert evaluation["checks"] == {check: "evidence_failed"}
+        assert evaluation["recovered"] == []
+
+    record = _record(
+        "os_exit_status_observation",
+        "os_stdout_observation",
+        "os_stderr_observation",
+        "runtime_observation_semantics",
+    )
+    reports = [
+        _native_accept_report(digest, schema=schema)
+        for schema in (
+            "mumei.native-exit-status-accept-report/v1",
+            "mumei.native-stdout-accept-report/v1",
+            "mumei.native-stderr-accept-report/v1",
+        )
+    ]
+    evaluation = evaluate_unperformed_check_recovery(
+        record, reports, record_digest=digest,
+    )
+    assert evaluation["checks"] == {
+        "os_exit_status_observation": "recovered",
+        "os_stdout_observation": "recovered",
+        "os_stderr_observation": "recovered",
+        "runtime_observation_semantics": "no_evidence",
+    }
+
+    recheck = _doc(
+        "mumei.native-exit-status-recheck-report/v1",
+        exit_status_recheck="reproduced",
+        normalized={"stdout": {"sha256": digest}},
+    )
+    evaluation = evaluate_unperformed_check_recovery(
+        _record("os_exit_status_observation"), [recheck],
+        record_digest=digest,
+    )
+    assert evaluation["checks"]["os_exit_status_observation"] == "no_evidence"
+
+    foreign = _doc(
+        "mumei.foreign-runtime-observation/v1",
+        os_exit_status_observation=True,
+        normalized={"stdout": {"sha256": digest}},
+    )
+    evaluation = evaluate_unperformed_check_recovery(
+        _record("os_exit_status_observation"), [foreign],
+        record_digest=digest,
+    )
+    assert evaluation["checks"]["os_exit_status_observation"] == "no_evidence"
+
+
+def test_anchor_authenticity_recovers_through_shared_digest():
+    """A signature-verification doc that authenticated an anchor
+    performs `registry_authenticity`/`revocation_list_authenticity`
+    on a descriptor that declared the same anchor digest — the
+    `shared:` binding pins both docs to the anchor bytes, never to
+    each other's."""
+    anchor = "c" * 64
+    record = {
+        "schema_version": "mumei.signature-envelope-evaluation/v1",
+        "checks_not_performed": [
+            "registry_authenticity", "revocation_list_authenticity",
+        ],
+        "registry_digest": anchor,
+        "revocation_digest": anchor,
+    }
+    authentic_doc = _doc(
+        "mumei.signature-verification/v1",
+        registry_authentic=True,
+        revocation_list_authentic=True,
+        registry_digest=anchor,
+        revocation_digest=anchor,
+    )
+    evaluation = evaluate_unperformed_check_recovery(
+        record, [authentic_doc],
+    )
+    assert evaluation["checks"] == {
+        "registry_authenticity": "recovered",
+        "revocation_list_authenticity": "recovered",
+    }
+
+    # A doc that authenticated DIFFERENT anchor bytes never counts —
+    # the shared digest must name the same anchor the record assessed.
+    evaluation = evaluate_unperformed_check_recovery(
+        record,
+        [_doc(
+            "mumei.signature-verification/v1",
+            registry_authentic=True,
+            revocation_list_authentic=True,
+            registry_digest="d" * 64,
+            revocation_digest="d" * 64,
+        )],
+    )
+    assert evaluation["checks"] == {
+        "registry_authenticity": "evidence_failed",
+        "revocation_list_authenticity": "evidence_failed",
+    }
+
+    # A failed anchor check on the same anchor is failed evidence.
+    evaluation = evaluate_unperformed_check_recovery(
+        record,
+        [_doc(
+            "mumei.signature-verification/v1",
+            registry_authentic=False,
+            revocation_list_authentic=False,
+            registry_digest=anchor,
+            revocation_digest=anchor,
+        )],
+    )
+    assert evaluation["checks"] == {
+        "registry_authenticity": "evidence_failed",
+        "revocation_list_authenticity": "evidence_failed",
+    }
+
+    # A record that names no anchor digest cannot bind a shared
+    # performer — the check stays no_evidence -> evidence_failed since
+    # the schema was supplied.
+    evaluation = evaluate_unperformed_check_recovery(
+        _record("registry_authenticity"),
+        [authentic_doc],
+        record_digest="e" * 64,
+    )
+    assert evaluation["checks"]["registry_authenticity"] == (
+        "evidence_failed"
     )
 
 
@@ -969,19 +1206,21 @@ def test_envelope_freshness_recovers_through_bound_fold_docs():
         )
 
 
-def test_anchor_authenticity_is_not_composable_through_the_fold():
+def test_anchor_authenticity_binds_the_anchor_digest_not_the_record():
     # `registry_authentic` / `revocation_list_authentic` on a
-    # signature-verification doc are bound only to the signed record's
-    # digest — they do not pin WHICH anchor document was assessed, so
-    # a doc authenticating a different registry must not recover this
-    # record's anchor check. The checks stay unperformable by
-    # composition: no performer entries exist.
+    # signature-verification doc pin WHICH anchor document was
+    # assessed through `registry_digest`/`revocation_digest` — a doc
+    # bound to the record's bytes but naming no anchor (or a
+    # different one) can never recover this record's anchor check.
     digest = "a" * 64
-    for check, field in (
-        ("registry_authenticity", "registry_authentic"),
-        ("revocation_list_authenticity", "revocation_list_authentic"),
+    for check, field, digest_field in (
+        ("registry_authenticity", "registry_authentic",
+         "registry_digest"),
+        ("revocation_list_authenticity", "revocation_list_authentic",
+         "revocation_digest"),
     ):
         record = _record(check)
+        # Record bound to the doc's bytes but no shared anchor pin.
         doc = _doc(
             "mumei.signature-verification/v1",
             envelope_match=True,
@@ -991,4 +1230,16 @@ def test_anchor_authenticity_is_not_composable_through_the_fold():
         evaluation = evaluate_unperformed_check_recovery(
             record, [doc], record_digest=digest,
         )
-        assert evaluation["checks"][check] == "no_evidence"
+        assert evaluation["checks"][check] == "evidence_failed"
+
+        # The doc authenticates a DIFFERENT anchor than the record's
+        # declared one — the shared digest must name the same bytes.
+        record = {**_record(check), digest_field: "b" * 64}
+        doc = _doc(
+            "mumei.signature-verification/v1",
+            **{field: True, digest_field: "c" * 64},
+        )
+        evaluation = evaluate_unperformed_check_recovery(
+            record, [doc],
+        )
+        assert evaluation["checks"][check] == "evidence_failed"

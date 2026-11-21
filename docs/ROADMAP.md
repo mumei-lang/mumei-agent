@@ -788,11 +788,14 @@ exit 1 conflates a mismatched exit status with every static failure
 and claims nothing, mid-run drift reports `inputs_changed` with no
 claimed outcome, and the drift check re-enumerates the member set from
 the current record. A `reproduced` run reports `discharged_checks` —
-`artifact_semantics` and `claim_truth` — with the remaining checks in
+`artifact_semantics`, `claim_truth` and
+`os_exit_status_observation` — with the remaining checks in
 `checks_not_performed`; the exit-status match itself is an OS-level
-observation bound by the record pin, discharging no additional
-category since the vocabulary has no runtime/ABI/process-semantics
-claim for it. The command's stdout is a fixed diagnostic line rather
+observation bound by the record pin and discharges the named
+`os_exit_status_observation` check. The other runtime-observation checks
+remain in `checks_not_performed`, including
+`runtime_observation_semantics`, which awaits the Core descriptor. The
+command's stdout is a fixed diagnostic line rather
 than an evidence record, so no `candidate` is emitted and a successful
 run selects only lineage. The route is also the
 `native_exit_status_recheck` MCP tool (same `run_exit_status_recheck`
@@ -814,11 +817,14 @@ is claimed only for uniquely-mapped exit codes (`0 → accepted`,
 every static failure and claims nothing, mid-run drift reports
 `inputs_changed` with no claimed outcome, and the drift check
 re-enumerates the member set from the current record. An `accepted`
-run reports `discharged_checks` — `artifact_semantics` and
-`claim_truth` — with the remaining checks in `checks_not_performed`;
+run reports `discharged_checks` — `artifact_semantics`, `claim_truth`
+and `os_exit_status_observation` — with the remaining checks in
+`checks_not_performed`;
 the exit-status match itself is an OS-level observation bound by the
-record pin, discharging no additional category since the vocabulary
-has no runtime/ABI/process-semantics claim for it. Only an `exited`
+record pin and discharges the named `os_exit_status_observation` check.
+The other runtime-observation checks remain in `checks_not_performed`,
+including `runtime_observation_semantics`, which awaits the Core
+descriptor. Only an `exited`
 run with `exit_code == 0` selects the produced
 `mumei.native-evidence-acceptance/v1` descriptor — it is anonymous by
 design, so no `candidate` is emitted. The route is also the
@@ -841,11 +847,14 @@ exit 1 conflates a mismatched stdout digest with every static failure
 and claims nothing, mid-run drift reports `inputs_changed` with no
 claimed outcome, and the drift check re-enumerates the member set from
 the current record. A `reproduced` run reports `discharged_checks` —
-`artifact_semantics` and `claim_truth` — with the remaining checks in
+`artifact_semantics`, `claim_truth` and `os_stdout_observation` — with
+the remaining checks in
 `checks_not_performed`; the stdout digest match itself is an OS-level
-observation bound by the record pin, discharging no additional
-category since the vocabulary has no runtime/ABI/process-semantics
-claim for it. The command's stdout is a fixed diagnostic line rather
+observation bound by the record pin and discharges the named
+`os_stdout_observation` check. The other runtime-observation checks
+remain in `checks_not_performed`, including
+`runtime_observation_semantics`, which awaits the Core descriptor. The
+command's stdout is a fixed diagnostic line rather
 than an evidence record, so no `candidate` is emitted and a successful
 run selects only lineage. The route is also the
 `native_stdout_recheck` MCP tool (same `run_stdout_recheck`
@@ -867,11 +876,14 @@ is claimed only for uniquely-mapped exit codes (`0 → accepted`,
 every static failure and claims nothing, mid-run drift reports
 `inputs_changed` with no claimed outcome, and the drift check
 re-enumerates the member set from the current record. An `accepted`
-run reports `discharged_checks` — `artifact_semantics` and
-`claim_truth` — with the remaining checks in `checks_not_performed`;
+run reports `discharged_checks` — `artifact_semantics`, `claim_truth`
+and `os_stdout_observation` — with the remaining checks in
+`checks_not_performed`;
 the stdout digest match itself is an OS-level observation bound by the
-record pin, discharging no additional category since the vocabulary
-has no runtime/ABI/process-semantics claim for it. Only an `exited`
+record pin and discharges the named `os_stdout_observation` check.
+The other runtime-observation checks remain in `checks_not_performed`,
+including `runtime_observation_semantics`, which awaits the Core
+descriptor. Only an `exited`
 run with `exit_code == 0` selects the produced
 `mumei.native-evidence-acceptance/v1` descriptor — it is anonymous by
 design, so no `candidate` is emitted. The route is also the
@@ -894,11 +906,14 @@ exit 1 conflates a mismatched stderr digest with every static failure
 and claims nothing, mid-run drift reports `inputs_changed` with no
 claimed outcome, and the drift check re-enumerates the member set from
 the current record. A `reproduced` run reports `discharged_checks` —
-`artifact_semantics` and `claim_truth` — with the remaining checks in
+`artifact_semantics`, `claim_truth` and `os_stderr_observation` — with
+the remaining checks in
 `checks_not_performed`; the stderr digest match itself is an OS-level
-observation bound by the record pin, discharging no additional
-category since the vocabulary has no runtime/ABI/process-semantics
-claim for it. The command's stdout is a fixed diagnostic line rather
+observation bound by the record pin and discharges the named
+`os_stderr_observation` check. The other runtime-observation checks
+remain in `checks_not_performed`, including
+`runtime_observation_semantics`, which awaits the Core descriptor. The
+command's stdout is a fixed diagnostic line rather
 than an evidence record, so no `candidate` is emitted and a successful
 run selects only lineage. The route is also the
 `native_stderr_recheck` MCP tool (same `run_stderr_recheck`
@@ -920,11 +935,14 @@ is claimed only for uniquely-mapped exit codes (`0 → accepted`,
 every static failure and claims nothing, mid-run drift reports
 `inputs_changed` with no claimed outcome, and the drift check
 re-enumerates the member set from the current record. An `accepted`
-run reports `discharged_checks` — `artifact_semantics` and
-`claim_truth` — with the remaining checks in `checks_not_performed`;
+run reports `discharged_checks` — `artifact_semantics`, `claim_truth`
+and `os_stderr_observation` — with the remaining checks in
+`checks_not_performed`;
 the stderr digest match itself is an OS-level observation bound by the
-record pin, discharging no additional category since the vocabulary
-has no runtime/ABI/process-semantics claim for it. Only an `exited`
+record pin and discharges the named `os_stderr_observation` check.
+The other runtime-observation checks remain in `checks_not_performed`,
+including `runtime_observation_semantics`, which awaits the Core
+descriptor. Only an `exited`
 run with `exit_code == 0` selects the produced
 `mumei.native-evidence-acceptance/v1` descriptor — it is anonymous by
 design, so no `candidate` is emitted. The route is also the
@@ -6031,17 +6049,17 @@ the anchor's) while `registry_authenticity` /
 `revocation_list_authenticity` stay not-performed — the eval fold
 binds signatures, never verifies them.
 
-Neither check name joins `_CHECK_PERFORMERS`: a verification doc's
-anchor outcomes are bound only to the signed record's digest — they
-do not pin WHICH anchor document was assessed, so a doc that
-authenticated a different registry would wrongly recover this
-record's anchor check. `registry_authenticity` /
-`revocation_list_authenticity` are therefore observable on the
-verify route but not composable through `recovery-eval` until the
-verification doc can pin the anchor bytes it assessed. The producer
-side needs no Core change: `mumei evidence sign` already accepts any
-record file — the registry is just a record. Revocation of the root
-keys themselves and rotation policy stay deferred.
+Both check names now join `_CHECK_PERFORMERS`: a verification doc
+emits `registry_digest`/`revocation_digest` whenever it assesses an
+anchor — pinning WHICH anchor document its outcome covered — and a
+new `shared:<field>` bind-path convention binds a performer to a
+record only when both docs declare the same anchor digest. A doc
+that authenticated a different registry can never recover this
+record's anchor check; the checks compose through `recovery-eval`
+while staying anchored to the exact bytes each fold assessed. The
+producer side needs no Core change: `mumei evidence sign` already
+accepts any record file — the registry is just a record. Revocation
+of the root keys themselves and rotation policy stay deferred.
 
 ### C11 declared unperformed-check recovery
 
@@ -6095,7 +6113,22 @@ and all five non-artifact checks — `file_identity`,
 `claim_truth` — ← an accepted `verify-attempt-report/v1`, whose
 attempt sequence is also the recorded execution lineage, so the
 same bound report performs `historical_execution` on the record its
-run produced. `producer_authenticity` also recovers through a
+run produced. The native accept routes' reports
+(`native-accept-report/v1`, `native-exit-status-accept-report/v1`,
+`native-stdout-accept-report/v1`, `native-stderr-accept-report/v1`)
+perform the same check through their own outcome surface — the
+string `acceptance: "accepted"` — since an accepted run's stdout is
+the acceptance descriptor itself and `normalized.stdout.sha256`
+binds the report's lineage to those bytes; a descriptor that kept
+`historical_execution` unperformed ("one run is an observation, not
+a history") recovers it through the route's published sequence. The
+exit-status/stdout/stderr accept reports also perform their matching
+`os_*_observation` check, bound by `normalized.stdout.sha256`.
+Recheck reports are not performers: their stdout is a fixed diagnostic
+line with no bound carrier. `runtime_observation_semantics` remains
+`no_evidence` until the Core slice emits the reserved
+`mumei.runtime-observation/v1` descriptor. `producer_authenticity` also
+recovers through a
 `mumei.signature-verification/v1` doc — the only multi-outcome
 performer: a verifying signature alone binds SOME key to the digest,
 so the doc must hold `signature_valid` AND `key_pinned` (the
@@ -6696,6 +6729,22 @@ Planning only: nothing is spawned, dispatched or accepted. Declared
 inputs join the path validation and error redaction applied to the
 other declared-path tools.
 
+
+### C10 runtime/ABI assurance — design memo
+
+The remaining research-level C10 item — the object/ABI/runtime/final-binary
+assurance chain — has a design memo:
+[`docs/DESIGN_RUNTIME_ABI_ASSURANCE.md`](DESIGN_RUNTIME_ABI_ASSURANCE.md).
+Option A slice 1 has landed agent-side: the exit-status/stdout/stderr
+recheck and accept routes name their OS observations with dedicated
+`RUNTIME_CHECK_VOCABULARY` checks, and accepted reports compose those
+checks through `recovery-eval`. The reserved
+`mumei.runtime-observation/v1` schema and
+`runtime_observation_semantics` await the Core recheck-runtime slice;
+acceptance composition in slices 2–3 remains. The named check describes
+bounded observed behavior, never ABI semantics of the program.
+Object-code translation validation (Option B) stays the deep endpoint.
+No grade or audit surface changes.
 
 ## Roadmap authority and vocabulary
 
@@ -7610,6 +7659,8 @@ mumei 側の `analyze_std_gaps` MCP ツール（提案を吐き出す）と mume
     - 提案は difficulty + 未充足依存数でランキングし先頭 3 件に priority を付与
   - `generate_specs_from_gaps(gaps, max_count)` — `propose.build_spec_from_proposal` を再利用して forge 互換 spec を生成
   - `check_blast_radius(mumei_client, repo_dir, new_file_path, code)` — 新規 `.mm` を `std/` に仮配置 → 既存 `std/*.mm` を全検証 → 仮ファイルを自動除去（例外時も cleanup）
+    - ✅ 深層レイヤー（cross-file dependencies）: token-level import scan が複数行・複数宣言を検出し、`agent/dependency_invalidation.py` が compiler と同じ importer-relative → std fallback の順で import を解決して暗黙の `std/prelude.mm` 依存 edge を加える。解決不能・malformed import はファイルとその推移的 dependents を fail-closed で `undetermined` に分類する。`mumei.std-dependency-invalidation/v1` 記述子には symlink / path alias を統合した依存関係を含め、`check_blast_radius` は各 broken_files エントリに `dependency_relation`（`re_derive` / `undetermined` / `unaffected`）を付記し、各 per-spec/per-member 結果および `summary.json` にも `dependency_invalidation` を保持する。検出のみで再検証・契約差分・シンボル解決・サイクル解析・外部 std path 解決は `checks_not_performed` に列挙（C07 stale_dependents と同じ「検出≠再計算」方針）。
+    - ✅ 依存チェック継承レイヤー: `mumei.std-dependency-checks/v1` は依存 closure（暗黙 prelude と real-path alias を含む）をたどり、report が未回収の `checks_not_performed` を依存キー付きで各 dependent record に継承する。report 欠落は `dependency_verification`、closure 内の unresolved import は `dependency_resolution` として fail-closed に追加し、出力 record はそのまま recovery-eval に渡せる。再検証・evidence binding・symbol resolution・external std path resolution は `checks_not_performed` に残す。
   - `attempt_heal(client, model, broken_info, mumei_client, max_retries=3)` — 既存 `fix_strategy.get_fix` を再利用し、壊れた既存ファイルを自動修復
   - `proliferate(mumei_repo_dir, max_proposals=3, dry_run=False)` — 全体オーケストレーター
     - 各提案を独立処理（1 件の失敗が他をブロックしない）
@@ -7625,6 +7676,8 @@ mumei 側の `analyze_std_gaps` MCP ツール（提案を吐き出す）と mume
   - `analyze_gaps` の依存グラフ、trusted atom、TODO 検出、ランキング
   - `generate_specs_from_gaps` の `max_count` リスペクト + forge 互換性
   - `check_blast_radius` の broken_files 報告、例外時 cleanup
+  - `tests/test_dependency_invalidation.py` — 45 ケース: token-level import scan、compiler-mirrored resolution、symlink aliases、暗黙 prelude edge、unresolved / unreadable import の fail-closed 分類、blast-radius join（`dependency_relation` 分類 + 記述子同封）
+  - `tests/test_dependency_checks.py` — 依存 closure の未回収チェック継承、recovery report、alias / prelude / cycle、fail-closed marker と recovery-eval 接続
   - `attempt_heal` の already-verified ショートサーキット、固定点検出、fix 適用後成功
   - `proliferate` の dry_run end-to-end（`generate_code` / `MumeiClient` をモック）
   - Lean fallback CLI フラグ伝搬と `summary.json` 内 `lean_fallback` 監査フィールドの保持を検証
@@ -8670,23 +8723,35 @@ canonical 上位ロードマップは mumei `docs/CROSS_PROJECT_ROADMAP.md` の
 2. **MCP sampling** — `USE_MCP_SAMPLING` の capability detection、sampling
    fallback、tool-enabled sampling、`maxTokens` 上限、および text-only request
    の回帰は `tests/test_mcp_server.py` と
-   `tests/test_llm_provider_sampling_tools.py` で検査する。ただし、sampling
-   provider と OpenAI-compatible provider の間で戻り値キーおよび
-   `budget_policy_fingerprint` が同一になることを直接検査するテストはまだなく、
-   provider-independent contract としては未実装である。
+   `tests/test_llm_provider_sampling_tools.py` で検査する。sampling
+   provider と OpenAI-compatible provider が同一の戻り値 surface
+   （`response.choices[0].message.content` と token accounting）を出すことは
+   `tests/test_llm_provider_contract.py` が provider-independent contract
+   として固定する。`budget_policy_fingerprint` は LLM 応答ではなく
+   certificate artifact 由来のため、ここでは対象外とする。
 3. **Proof artifact** — mumei が配布する per-module certificate と bundle は
    canonical な `artifact_paths` で参照し、`MUMEI_PROOF_CERTS` /
    `MUMEI_PROOF_BUNDLE` と `mumei verify-cert --strict` による distribution-only
    再検証手順を [`docs/VERIFICATION_WORKFLOW_GUIDE.md`](VERIFICATION_WORKFLOW_GUIDE.md)
-   に同期した。agent 側に独立した bundle intake / `artifact_paths` 検査を追加した
-   ものではなく、consumer wiring の追加は未実装として残る。
+   に同期した。consumer wiring は `agent/proofcert.py` の
+   `artifact_paths_of` / `validate_artifact_paths` と
+   `ProofCertificate` の P5-A metadata accessors（`harness_contract` /
+   `intent_fidelity` / `artifact_paths` / `budget_policy_fingerprint` /
+   `lean_provenance`）で実装し、`agent/publish.py` が `--proof-cert` で
+   生成した証明書ファイルから宣言された `artifact_paths` を収集し
+   `artifact_paths_status` として検証（verify --json レポートは
+   これらを持たないため証明書ファイルが正典ソース）、
+   `proliferate --output-json` の `proof_certificate_summary` /
+   `upgraded_cert_summary` が certificate の canonical keys をそのまま
+   参照する。独立した bundle intake や新しい artifact key / alias は
+   追加しない。
 4. **CI 常時化** — mumei の `.github/workflows/stdlib-proof-gate.yml` が
    certificate-derived baseline `scripts/std_proof_baseline.json` と shared
    `scripts/verify_packaged_certs.py` を使って証明書・bundle・metrics の gate を
    常時実行する。metrics の `proven` / proof density は source-count heuristic
    であり、certificate-derived count との density 比較は意図的に行わない。
 
-**回帰ゲート**: `uv run pytest tests/test_contract_vocabulary.py tests/test_mcp_server.py tests/test_mcp_tool_contract.py -q`
+**回帰ゲート**: `uv run pytest tests/test_contract_vocabulary.py tests/test_mcp_server.py tests/test_mcp_tool_contract.py tests/test_llm_provider_contract.py -q`
 
 ## 大規模ケースでの合成性報告（agent 側 local checkpoint）— ✅ Implemented
 

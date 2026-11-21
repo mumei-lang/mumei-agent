@@ -3565,9 +3565,10 @@ def native_exit_status_recheck(
     only for uniquely-mapped exit codes (0 `reproduced`, 3
     `inconclusive`); mid-run drift reports `inputs_changed` with no
     claimed outcome. A `reproduced` run reports `discharged_checks` —
-    `artifact_semantics` and `claim_truth` — with the remaining checks
-    in `checks_not_performed`. The produced stdout is a fixed
-    diagnostic line, so no evidence candidate is emitted.
+    `artifact_semantics`, `claim_truth` and
+    `os_exit_status_observation` — with the remaining C02 and runtime
+    checks in `checks_not_performed`. The fixed diagnostic stdout has
+    no bound carrier and is not a recovery performer.
 
     Args:
         core_path: Absolute path to the mumei Core executable.
@@ -3639,10 +3640,10 @@ def native_exit_status_accept(
     `acceptance` is claimed only for uniquely-mapped exit codes
     (0 `accepted`, 3 `inconclusive`); mid-run drift reports
     `inputs_changed` with no claimed outcome. An `accepted` run reports
-    `discharged_checks` — `artifact_semantics` and `claim_truth` — with
-    the remaining checks in `checks_not_performed`. The produced
-    acceptance descriptor is anonymous, so no evidence candidate is
-    emitted.
+    `discharged_checks` — `artifact_semantics`, `claim_truth` and
+    `os_exit_status_observation` — with the remaining C02 and runtime
+    checks in `checks_not_performed`. Its bound acceptance descriptor
+    can recover that observation through `recovery-eval`.
 
     Args:
         core_path: Absolute path to the mumei Core executable.
@@ -3714,9 +3715,10 @@ def native_stdout_recheck(
     claimed only for uniquely-mapped exit codes (0 `reproduced`, 3
     `inconclusive`); mid-run drift reports `inputs_changed` with no
     claimed outcome. A `reproduced` run reports `discharged_checks` —
-    `artifact_semantics` and `claim_truth` — with the remaining checks
-    in `checks_not_performed`. The produced stdout is a fixed
-    diagnostic line, so no evidence candidate is emitted.
+    `artifact_semantics`, `claim_truth` and `os_stdout_observation` —
+    with the remaining C02 and runtime checks in
+    `checks_not_performed`. The fixed diagnostic stdout has no bound
+    carrier and is not a recovery performer.
 
     Args:
         core_path: Absolute path to the mumei Core executable.
@@ -3788,10 +3790,10 @@ def native_stdout_accept(
     `acceptance` is claimed only for uniquely-mapped exit codes
     (0 `accepted`, 3 `inconclusive`); mid-run drift reports
     `inputs_changed` with no claimed outcome. An `accepted` run reports
-    `discharged_checks` — `artifact_semantics` and `claim_truth` — with
-    the remaining checks in `checks_not_performed`. The produced
-    acceptance descriptor is anonymous, so no evidence candidate is
-    emitted.
+    `discharged_checks` — `artifact_semantics`, `claim_truth` and
+    `os_stdout_observation` — with the remaining C02 and runtime
+    checks in `checks_not_performed`. Its bound acceptance descriptor
+    can recover that observation through `recovery-eval`.
 
     Args:
         core_path: Absolute path to the mumei Core executable.
@@ -3863,9 +3865,10 @@ def native_stderr_recheck(
     claimed only for uniquely-mapped exit codes (0 `reproduced`, 3
     `inconclusive`); mid-run drift reports `inputs_changed` with no
     claimed outcome. A `reproduced` run reports `discharged_checks` —
-    `artifact_semantics` and `claim_truth` — with the remaining checks
-    in `checks_not_performed`. The produced stdout is a fixed
-    diagnostic line, so no evidence candidate is emitted.
+    `artifact_semantics`, `claim_truth` and `os_stderr_observation` —
+    with the remaining C02 and runtime checks in
+    `checks_not_performed`. The fixed diagnostic stdout has no bound
+    carrier and is not a recovery performer.
 
     Args:
         core_path: Absolute path to the mumei Core executable.
@@ -3937,10 +3940,10 @@ def native_stderr_accept(
     `acceptance` is claimed only for uniquely-mapped exit codes
     (0 `accepted`, 3 `inconclusive`); mid-run drift reports
     `inputs_changed` with no claimed outcome. An `accepted` run reports
-    `discharged_checks` — `artifact_semantics` and `claim_truth` — with
-    the remaining checks in `checks_not_performed`. The produced
-    acceptance descriptor is anonymous, so no evidence candidate is
-    emitted.
+    `discharged_checks` — `artifact_semantics`, `claim_truth` and
+    `os_stderr_observation` — with the remaining C02 and runtime
+    checks in `checks_not_performed`. Its bound acceptance descriptor
+    can recover that observation through `recovery-eval`.
 
     Args:
         core_path: Absolute path to the mumei Core executable.
