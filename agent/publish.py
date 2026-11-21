@@ -260,6 +260,11 @@ def publish(
     # report itself never carries those keys.
     certificate_path = generated_path.with_suffix(".proof.json")
     cert_args = ["--proof-cert", "--output", str(certificate_path)]
+    # Drop a certificate left by a previous run so the wiring below can
+    # only consume the file THIS verification produced — under the MCP
+    # path the verdict call and the cert-emitting call are separate,
+    # and a stale file would otherwise be reported as current.
+    certificate_path.unlink(missing_ok=True)
     # ``--proof-cert`` is a CLI-only flag — the MCP ``validate_logic``
     # tool cannot emit a certificate file — so on an MCP-routed client
     # the publish verdict still comes from the MCP path and a second,
@@ -329,10 +334,15 @@ def publish(
     if certificate_path.is_file():
         cert_doc = proofcert.ProofCertificate.from_path(certificate_path)
         # Repo-relative so the JSON result stays portable across
-        # environments (the absolute runner path means nothing off-box).
-        result["proof_certificate_file"] = str(
-            certificate_path.relative_to(cwd)
-        )
+        # environments (the absolute runner path means nothing
+        # off-box).  An absolute ``target_file`` can place the cert
+        # outside the repo — keep the absolute path then rather than
+        # crash after a passing verification.
+        try:
+            cert_file_display = str(certificate_path.relative_to(cwd))
+        except ValueError:
+            cert_file_display = str(certificate_path)
+        result["proof_certificate_file"] = cert_file_display
         declared_paths = proofcert.artifact_paths_of(cert_doc)
         if declared_paths:
             result["artifact_paths_status"] = (

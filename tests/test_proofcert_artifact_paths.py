@@ -252,3 +252,57 @@ class TestPublishCertificateWiring:
         assert result["success"] is True
         assert "proof_certificate_file" not in result
         assert "artifact_paths_status" not in result
+
+    def test_stale_cert_from_prior_run_is_not_consumed(self, tmp_path):
+        # A certificate left by an earlier run must not be reported as
+        # this run's — unlink happens before verify, so a client that
+        # writes no cert leaves the keys absent even with a file
+        # already on disk.
+        (tmp_path / "test_mod.proof.json").write_text(
+            json.dumps(_cert(artifact_paths=["stale.json"]))
+        )
+        client = MagicMock()
+        client.verify.return_value = {
+            "success": True, "report": {}, "stdout": "", "stderr": "",
+        }
+        client.build_with_emit.return_value = {
+            "success": True, "stdout": "ok", "stderr": "",
+        }
+        result = self._run_publish(tmp_path, client)
+        assert result["success"] is True
+        assert "artifact_paths_status" not in result
+
+    def test_mcp_verdict_governs_even_when_cli_cert_passes(
+        self, tmp_path,
+    ):
+        # The MCP verdict path must decide publishability: when the
+        # MCP verify fails, a succeeding CLI-only cert pass cannot
+        # publish.  spec'd MagicMock satisfies the isinstance check.
+        from agent.mcp_client import MumeiMCPClient
+
+        calls = []
+
+        def _verify(path, report_dir=None, extra_args=None,
+                    spec_code_mapping=None,
+                    collect_decidable_metrics=False):
+            calls.append(bool(extra_args))
+            if extra_args:
+                out = Path(extra_args[extra_args.index("--output") + 1])
+                out.write_text(json.dumps(_cert()), encoding="utf-8")
+                return {
+                    "success": True, "report": {}, "stdout": "",
+                    "stderr": "",
+                }
+            return {
+                "success": False, "report": None,
+                "stdout": "", "stderr": "mcp verify failed",
+            }
+
+        client = MagicMock(spec=MumeiMCPClient)
+        client.mode = "in-process"
+        client.verify.side_effect = _verify
+        result = self._run_publish(tmp_path, client)
+        assert result["success"] is False
+        assert "verify_error" in result
+        assert calls == [False, True]  # MCP verdict, then CLI cert pass
+        assert "artifact_paths_status" not in result
