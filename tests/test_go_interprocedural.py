@@ -6104,7 +6104,6 @@ def test_interface_method_value_pointer_argument_matches_direct_dispatch(
     assert value.available, value.gaps
     assert direct.available, direct.gaps
     assert value.return_dependencies == direct.return_dependencies
-    assert value.return_dependencies == frozenset({0})
     assert value.return_dependencies == frozenset({0, 1})
 
 
