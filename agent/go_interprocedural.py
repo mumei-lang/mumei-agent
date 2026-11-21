@@ -1029,6 +1029,19 @@ class _Builder:
         self._func_elem_inner_donors: dict[str, dict[str, set[str]]] = {}
         self._func_elem_surrogate_seq = 0
         self._chan_queue_seq = 0
+        # binding_id -> the surrogate `_chan_queue_detach` parked its
+        # old queue under, recorded only for the assignment statement
+        # currently storing. A token set captured at that statement's
+        # pre-state still writes the member's OLD id while the group
+        # it joined already renamed it to the surrogate — cleared per
+        # `=` statement before its pre-state capture.
+        self._chan_detached: dict[str, str] = {}
+        # Chan member identities captured in the CURRENT `=`
+        # statement's pre-state token sets — `c, s = make(chan),
+        # append(s, c)` joins `c` into `s`'s group only AFTER `c`'s
+        # own slot reseated, so `_chan_queue_detach` parks the old
+        # queue even though it is not in a holder set yet.
+        self._chan_prestate_members: set[str] = set()
         # For an anonymous-`struct{...}` binding whose fields do not
         # follow its own name span, the span that DOES precede them:
         # `cp := st` copies st's (anonymous) type, so cp's fields are
@@ -1495,9 +1508,10 @@ class _Builder:
         bound opaque-container model: the element queues conflate
         into the root's share group, so `s[i] <- x` deposits into
         every sharer's set like an element store and `<-s[i]` reads
-        the whole group. An `[N]chan` array stays closed: its copy
-        would still share the queues, which this slice does not
-        track. A `chan chan` payload is refused like
+        the whole group. An `[N]chan` array admits the same way —
+        a Go array copy still points at the same queues, so `b := a`
+        shares the group like a bound slice copy does. A `chan chan`
+        payload is refused like
         `_scalar_chan_binding` — a channel VALUE travelling the
         group would alias under a second dep set."""
         collection = (
@@ -2252,8 +2266,13 @@ class _Builder:
                     arg_binding is not None
                     and arg_binding.type is not None
                     and arg_binding.type.kind == "slice"
-                    and self._scalar_elem_collection(
-                        arg_binding.type
+                    and (
+                        self._scalar_elem_collection(
+                            arg_binding.type
+                        )
+                        or self._chan_elem_collection(
+                            arg_binding.type
+                        )
                     )
                 ):
                     toks |= self._opaque_container_tokens.get(
@@ -2280,7 +2299,18 @@ class _Builder:
                         ),
                         None,
                     )
-                if extra is None or extra.type != "identifier":
+                if extra is None:
+                    continue
+                if extra.type == "index_expression":
+                    # `s = append(s, t[0])` — the appended queue is a
+                    # member of `t`'s chan share group; the result
+                    # carries that group's member identities like a
+                    # `[]chan{t[0]}` literal seed would.
+                    target = self._chan_elem_index_target(extra)
+                    if target is not None:
+                        toks |= set(self._chan_group_members(target[0]))
+                    continue
+                if extra.type != "identifier":
                     continue
                 extra_ref = self.references.get(self.node_key(extra))
                 extra_binding = (
@@ -2297,7 +2327,96 @@ class _Builder:
                         extra_ref.binding_id,
                         frozenset({extra_ref.binding_id}),
                     )
+                elif (
+                    extra_binding is not None
+                    and extra_binding.type is not None
+                    and extra_binding.type.kind == "chan"
+                ):
+                    # `s = append(s, c)` — the appended queue joins
+                    # the result's share group like the
+                    # `[]chan{c}` literal seed does, so `c <- x`
+                    # keeps reaching `<-s[j]` reads.
+                    toks.add(
+                        self._chan_root(extra_ref.binding_id)
+                    )
         return frozenset(toks)
+
+    def _chan_append_args(self, rhs: Any) -> list[str]:
+        """Binding ids of `chan`-typed extra arguments in a builtin
+        `append(s, ...)` call — the queues an `s = append(s, c)`
+        reseat or `b := append(s, c)` bind joins into the result's
+        share group like a `[]chan{c}` literal seed does."""
+        args_node = rhs.child_by_field_name("arguments")
+        if args_node is None:
+            return []
+        out: list[str] = []
+        for extra in _children(args_node)[1:]:
+            while (
+                extra is not None
+                and extra.type == "parenthesized_expression"
+            ):
+                extra = next(
+                    (
+                        c
+                        for c in extra.named_children
+                        if c.type != "comment"
+                    ),
+                    None,
+                )
+            if extra is None:
+                continue
+            if extra.type == "index_expression":
+                # `s = append(s, t[0])` — under the element
+                # conflation every member of `t`'s group may be the
+                # appended queue, so all of them join the result's.
+                target = self._chan_elem_index_target(extra)
+                if target is not None:
+                    out.extend(self._chan_group_members(target[0]))
+                continue
+            if extra.type != "identifier":
+                continue
+            extra_ref = self.references.get(self.node_key(extra))
+            extra_binding = (
+                self.bindings.get(extra_ref.binding_id)
+                if extra_ref is not None
+                else None
+            )
+            if (
+                extra_binding is not None
+                and extra_binding.type is not None
+                and extra_binding.type.kind == "chan"
+            ):
+                out.append(self._chan_root(extra_ref.binding_id))
+        return out
+
+    def _chan_group_members(self, root_id: str) -> list[str]:
+        """Member queue identities of a chan-element container's share
+        group — the tokens inside the holders' sets that own a token
+        entry of their own (the entry is what makes them members; a
+        backing key or a holder's own id does not)."""
+        members: set[str] = set()
+        for holder in self._opaque_container_holders(
+            self._opaque_container_tokens.get(root_id, frozenset())
+        ) | {root_id}:
+            for tok in self._opaque_container_tokens.get(holder, ()):
+                if (
+                    isinstance(tok, str)
+                    and tok in self._opaque_container_tokens
+                ):
+                    members.add(tok)
+        return sorted(members)
+
+    def _chan_detached_toks(self, toks: Any) -> Any:
+        """Translate a token set captured at an assignment statement's
+        pre-state through the chan-queue detaches that ran during its
+        earlier stores — the member id it carries still writes `c`
+        where the group it joins renamed that member to `c`'s parked
+        surrogate."""
+        if not self._chan_detached:
+            return toks
+        return frozenset(
+            self._chan_detached.get(tok, tok) for tok in toks
+        )
 
     def _opaque_container_bind(
         self, rhs: Any
@@ -5658,12 +5777,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
             if hid != binding_id and binding_id in toks:
                 shared = True
         if not shared:
-            return
+            # `c, s = make(chan), append(s, c)` — a later slot of
+            # THIS statement joins `c` into a group from its
+            # pre-state snapshot, so the queue must park under a
+            # surrogate even though no holder names it yet.
+            if binding_id not in self._chan_prestate_members:
+                return
         self._chan_queue_seq += 1
         sur = (
             binding_id + "/chan_queue/" + str(self._chan_queue_seq)
         )
         self._opaque_container_tokens[sur] = frozenset({sur})
+        # The statement that reseated `c` may later consume a token
+        # set captured at its pre-state (`a, b = b, a` parallel
+        # stores, `s = append(s, c)` joins) — those still write `c`
+        # where they mean the OLD queue. Map it for the rest of this
+        # statement; the FIRST detach in it is the pre-state queue.
+        self._chan_detached.setdefault(binding_id, sur)
         locals_[sur] = locals_.get(binding_id, frozenset())
         if binding_id in params:
             locals_[sur] = locals_[sur] | frozenset(
@@ -8597,6 +8727,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
         saved_stmt_reads = self._stmt_reads
         saved_ptr_deps = self._ptr_deps
         saved_chan_aliases = self.chan_aliases
+        saved_chan_detached = self._chan_detached
+        saved_chan_prestate = self._chan_prestate_members
         saved_field_queues = self.field_chan_queues
         saved_external_chans = self.external_chan_locals
         saved_defer_result_deps = self._defer_result_deps
@@ -8619,6 +8751,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
         self._stmt_reads = {}
         self._ptr_deps = {}
         self.chan_aliases = {}
+        self._chan_detached = {}
+        self._chan_prestate_members = set()
         self.field_chan_queues = {}
         self.external_chan_locals = set()
         self._defer_result_deps = frozenset()
@@ -8693,6 +8827,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
             self._stmt_reads = saved_stmt_reads
             self._ptr_deps = saved_ptr_deps
             self.chan_aliases = saved_chan_aliases
+            self._chan_detached = saved_chan_detached
+            self._chan_prestate_members = saved_chan_prestate
             self.field_chan_queues = saved_field_queues
             self.external_chan_locals = saved_external_chans
             self._caller_visible_params = saved_caller_visible
@@ -9168,6 +9304,44 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     self._opaque_container_tokens[binding.id] = (
                         new_container_toks
                     )
+                    append_rhs = (
+                        rights[i]
+                        if len(lefts) == len(rights)
+                        else None
+                    )
+                    while (
+                        append_rhs is not None
+                        and append_rhs.type
+                        == "parenthesized_expression"
+                    ):
+                        append_rhs = next(
+                            (
+                                c
+                                for c in append_rhs.named_children
+                                if c.type != "comment"
+                            ),
+                            None,
+                        )
+                    if (
+                        opaque_toks is not None
+                        and self._chan_elem_collection(binding.type)
+                        and append_rhs is not None
+                        and append_rhs.type == "call_expression"
+                        and self._opaque_append_bind_toks(append_rhs)
+                        is not None
+                    ):
+                        # `b := append(s, c)` — the appended queue
+                        # joins the result's share group like the
+                        # `s = append(s, c)` reseat does: carrying
+                        # its token is not enough for `<-b[j]` to
+                        # see `c <- x` — the member's own token
+                        # entry has to exist.
+                        for appended in self._chan_append_args(
+                            append_rhs
+                        ):
+                            self._chan_group_join(
+                                appended, binding.id
+                            )
                 elif (
                     binding.type.kind
                     not in {
@@ -9881,6 +10055,44 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         self._opaque_container_tokens[binding.id] = (
                             new_container_toks
                         )
+                        append_rhs = (
+                            value_nodes[i]
+                            if len(names) == len(value_nodes)
+                            else None
+                        )
+                        while (
+                            append_rhs is not None
+                            and append_rhs.type
+                            == "parenthesized_expression"
+                        ):
+                            append_rhs = next(
+                                (
+                                    c
+                                    for c in append_rhs.named_children
+                                    if c.type != "comment"
+                                ),
+                                None,
+                            )
+                        if (
+                            opaque_toks is not None
+                            and self._chan_elem_collection(
+                                binding.type
+                            )
+                            and append_rhs is not None
+                            and append_rhs.type == "call_expression"
+                            and self._opaque_append_bind_toks(
+                                append_rhs
+                            )
+                            is not None
+                        ):
+                            # `var s = append(s0, c)` — joins the
+                            # appended queue like `s := append` does.
+                            for appended in self._chan_append_args(
+                                append_rhs
+                            ):
+                                self._chan_group_join(
+                                    appended, binding.id
+                                )
                     elif (
                         binding.type.kind
                         not in {
@@ -11501,6 +11713,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # resolves against the pre-state like the dep set does:
             # the per-slot reseat hands `b` the backing `a` named
             # BEFORE `a`'s own store redirected it to `b`'s.
+            self._chan_detached.clear()
+            self._chan_prestate_members = set()
             pre_container_toks: dict[int, Any] = {}
             if len(lefts) == len(rights):
                 for pre_i in range(len(refs)):
@@ -11559,6 +11773,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         )
                         if pre_bind is not None:
                             pre_container_toks[pre_i] = pre_bind
+            for pre_set in pre_container_toks.values():
+                if pre_set:
+                    self._chan_prestate_members |= {
+                        tok for tok in pre_set if isinstance(tok, str)
+                    }
             for i, (ref, value) in enumerate(zip(refs, values)):
                 if ref is None:
                     if i in external_write_targets:
@@ -12095,12 +12314,21 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # group instead — `_chan_queue_detach`
                         # redirects these aliases to its surrogate,
                         # so skip the copy-out for them.
-                        group_member = any(
-                            ref.binding_id in toks
-                            for hid, toks in (
-                                self._opaque_container_tokens.items()
+                        group_member = (
+                            any(
+                                ref.binding_id in toks
+                                for hid, toks in (
+                                    self._opaque_container_tokens.items()
+                                )
+                                if hid != ref.binding_id
                             )
-                            if hid != ref.binding_id
+                            # A pending same-statement join keeps
+                            # the OLD queue under the surrogate
+                            # `_chan_queue_detach` parks — the alias
+                            # then redirects to it there instead of
+                            # detaching to a private copy here.
+                            or ref.binding_id
+                            in self._chan_prestate_members
                         )
                         for alias_id, target in list(
                             self.chan_aliases.items()
@@ -12223,6 +12451,29 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 elem_join[0],
                                 chan_elem_root_sets.get(elem_join[0]),
                             )
+                    reseat_bound = self.bindings.get(ref.binding_id)
+                    if (
+                        reseat_bound is not None
+                        and reseat_bound.type is not None
+                        and self._chan_elem_collection(reseat_bound.type)
+                        and not conditional
+                        and self._may_skip == 0
+                    ):
+                        # `t, s = u, append(s, t[0])` — a chan-
+                        # element container named in this
+                        # statement's pre-state sets (or already
+                        # sharing, like `b := s` then `s = u`)
+                        # parks its member identity under a
+                        # surrogate like a reseated `chan` does:
+                        # `t`'s token in `s`'s pre-state capture
+                        # must keep meaning `t`'s OLD group, not
+                        # the `u` members `t` lands on. Running
+                        # before `_store` keeps the parked queue
+                        # on the OLD dep set — after the store it
+                        # would pick up the reseated value's deps.
+                        self._chan_queue_detach(
+                            ref.binding_id, locals_, params
+                        )
                     self._store(
                         locals_, params, ref.binding_id, value,
                         conditional,
@@ -12281,12 +12532,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                     self._opaque_container_tokens.get(
                                         ref.binding_id, frozenset()
                                     )
-                                    | new_toks
+                                    | self._chan_detached_toks(new_toks)
                                 )
                         elif new_toks is not None:
                             self._opaque_container_tokens[
                                 ref.binding_id
-                            ] = new_toks
+                            ] = self._chan_detached_toks(new_toks)
                         elif (
                             (
                                 self._scalar_elem_collection(bound.type)
@@ -12305,12 +12556,32 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             # drops the token below instead. A nested
                             # literal's inner-container elements join
                             # the group like at bind time.
-                            fresh_toks = {self.node_key(reseat_rhs)}
-                            fresh_toks |= (
-                                self._opaque_container_elem_toks(
+                            append_toks = (
+                                self._opaque_append_bind_toks(
                                     reseat_rhs
                                 )
                             )
+                            if append_toks is not None:
+                                # `s = append(s, c)` — the result
+                                # may reuse the argument's backing
+                                # and carries the appended queue's
+                                # token, so the argument's whole
+                                # group unions in beside the fresh
+                                # backing.
+                                fresh_toks = set(
+                                    self._chan_detached_toks(
+                                        append_toks
+                                    )
+                                )
+                            else:
+                                fresh_toks = {
+                                    self.node_key(reseat_rhs)
+                                }
+                                fresh_toks |= (
+                                    self._opaque_container_elem_toks(
+                                        reseat_rhs
+                                    )
+                                )
                             self._opaque_container_tokens[
                                 ref.binding_id
                             ] = frozenset(fresh_toks)
@@ -12318,6 +12589,45 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             self._opaque_container_tokens.pop(
                                 ref.binding_id, None
                             )
+                        if (
+                            ref.binding_id
+                            in self._opaque_container_tokens
+                            and self._chan_elem_collection(bound.type)
+                            and reseat_rhs is not None
+                            and reseat_rhs.type == "call_expression"
+                            and self._opaque_append_bind_toks(reseat_rhs)
+                            is not None
+                        ):
+                            # `s = append(s, c)` — carrying the
+                            # queue's token in the result's set is
+                            # not enough: `<-s[j]` unions every
+                            # sharer's slot through
+                            # `_opaque_container_deps`, and a member
+                            # only counts once its own token entry
+                            # exists. Join each appended `chan`
+                            # member like a `[]chan{c}` literal
+                            # seed does — from the just-stored set,
+                            # which carried the pre-state capture
+                            # through `_chan_detached_toks`: joining
+                            # `s`'s own members again is a no-op,
+                            # while re-resolving the extras now
+                            # would read `t`'s group AFTER a
+                            # parallel `t = u` reseat, so
+                            # `t, s = u, append(s, t[0])` would join
+                            # `u`'s members instead of `t`'s.
+                            for appended in sorted(
+                                tok
+                                for tok in self._opaque_container_tokens[
+                                    ref.binding_id
+                                ]
+                                if isinstance(tok, str)
+                            ):
+                                self._chan_group_join(
+                                    self._chan_detached.get(
+                                        appended, appended
+                                    ),
+                                    ref.binding_id,
+                                )
                 if broadcast:
                     self.indirect_writes |= value
                 member = field_chan_lhs.get(i)
@@ -17937,6 +18247,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             node, locals_,
                             self._scalar_elem_collection,
                             allow_index=True,
+                        )
+                        scalar_cont = append_cont is not None
+                    if append_cont is None:
+                        # `append(s, c)` on a bound chan-element
+                        # container — the same element-dep fold as
+                        # the scalar arm; the appended queue joins
+                        # the container's share group through
+                        # `_opaque_append_bind_toks` at the bind.
+                        append_cont = self._func_elem_append_target(
+                            node, locals_,
+                            self._chan_elem_collection,
                         )
                         scalar_cont = append_cont is not None
                         if append_cont is None:

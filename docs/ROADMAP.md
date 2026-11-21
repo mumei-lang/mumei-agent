@@ -4125,7 +4125,16 @@ side lands in the shared set: `s[i] <- x` deposits
 `indirect_writes`, since the backing may alias escaped memory),
 and `c <- x` shows up in `<-s[j]`; `<-s[i]` reads the group's
 conflated union, FIFO order unmodelled like `<-ch`. `b := s`
-shares the group like any bound container copy. The honest
+shares the group like any bound container copy. `append` on a
+chan-element collection — `s = append(s, c2)`, `b := append(s,
+c2)` and `var b = append(s, c2)` — admits like the scalar
+`append(a, v)` slice: the result may reuse the argument's
+backing, so it keeps the group's tokens, and each appended
+`chan` argument joins the result's share group exactly like a
+`[]chan{c2}` literal seed — carrying the queue's token in the
+result's set is not enough, since a member only reads and
+writes through the group once its own token entry exists.
+The honest
 closures stay: `[]chan chan T` stays closed (a channel value
 travelling the group would alias under a second dep set), and
 `[N][M]chan` nests stay opaque.
