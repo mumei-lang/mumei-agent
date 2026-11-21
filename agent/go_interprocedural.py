@@ -6631,7 +6631,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
         ext = self._external_chan_operand(
             inner.child_by_field_name("operand"), params
         )
-        return ext is not None and self._chan_chan_fact(ext[1])
+        if ext is not None and self._chan_chan_fact(ext[1]):
+            return True
+        queue = inner.child_by_field_name("operand")
+        call_fact = self._call_result_type(queue)
+        return (
+            self._chan_result_call(queue, self._chan_chan_fact)
+            is not None
+            and call_fact is not None
+            and self._chan_chan_fact(call_fact)
+        )
 
     def _chan_chan_param_origin(
         self, node: Any, params: dict
@@ -17697,6 +17706,21 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 or channel_id in self.external_chan_locals
             }
             if external_ids:
+                if self._chan_chan_fact(binding.type):
+                    # A call-result queue is already external, but it
+                    # reaches this binding path rather than the
+                    # `_external_chan_operand` path above. Sending a
+                    # channel through it exposes that queue to the
+                    # caller just like `cc <- ch` on an external name.
+                    sent = self._chan_alias_target(
+                        value, locals_, params
+                    )
+                    if sent is not None:
+                        self.external_chan_locals.add(sent.id)
+                    else:
+                        self._promote_chan_call_args(
+                            value, "", locals_, params
+                        )
                 # `ch <- x` on a channel parameter or a
                 # callee-produced queue (`ch := g()`) — the queue is
                 # shared beyond this function, so the send is an

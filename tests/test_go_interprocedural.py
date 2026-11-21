@@ -16146,6 +16146,56 @@ def test_direct_chan_chan_call_result_operands_match_temporary(
             "(<-{G}) <- x\nreturn x",
             "(<-cc) <- x\nreturn x",
         ),
+        "send_queue_target": (
+            "c := make(chan int64, 1)\n"
+            "{G} <- c\n"
+            "d := <-{Queue}\nd <- x\nreturn <-c",
+            "c := make(chan int64, 1)\n"
+            "cc <- c\n"
+            "d := <-{Queue}\nd <- x\nreturn <-c",
+        ),
+        "select_send_queue_target": (
+            "c := make(chan int64, 1)\n"
+            "select {{\n\tcase {G} <- c:\n"
+            "\tdefault:\n}}\n"
+            "d := <-{Queue}\nd <- x\nreturn <-c",
+            "c := make(chan int64, 1)\n"
+            "select {{\n\tcase cc <- c:\n"
+            "\tdefault:\n}}\n"
+            "d := <-{Queue}\nd <- x\nreturn <-c",
+        ),
+        "send_received_value": (
+            "c := make(chan int64, 1)\n"
+            "{Queue} <- c\n"
+            "dst := make(chan chan int64, 1)\n"
+            "dst <- <-{G}\nd := <-dst\nd <- x\nreturn <-c",
+            "c := make(chan int64, 1)\n"
+            "{Queue} <- c\n"
+            "dst := make(chan chan int64, 1)\n"
+            "t := <-cc\ndst <- t\nd := <-dst\nd <- x\nreturn <-c",
+        ),
+        "receive_binding": (
+            "d := <-{G}\nd <- x\nreturn <-d",
+            "d := <-cc\nd <- x\nreturn <-d",
+        ),
+        "receive_comma_ok": (
+            "d, ok := <-{G}\nif ok {{ d <- x }}\nreturn <-d",
+            "d, ok := <-cc\nif ok {{ d <- x }}\nreturn <-d",
+        ),
+        "receive_assignment": (
+            "d := make(chan int64, 1)\nd = <-{G}\n"
+            "d <- x\nreturn <-d",
+            "d := make(chan int64, 1)\nd = <-cc\n"
+            "d <- x\nreturn <-d",
+        ),
+        "select_receive_binding": (
+            "select {{\n\tcase d := <-{G}:\n"
+            "\t\td <- x\n\t\treturn <-d\n"
+            "\tdefault:\n\t\treturn x\n}}",
+            "select {{\n\tcase d := <-cc:\n"
+            "\t\td <- x\n\t\treturn <-d\n"
+            "\tdefault:\n\t\treturn x\n}}",
+        ),
         "close": (
             "close(<-{G})\nreturn x",
             "close(<-cc)\nreturn x",
@@ -16203,12 +16253,15 @@ def test_direct_chan_chan_call_result_operands_match_temporary(
     ]
     for source in ("local", "imported"):
         call = "G()" if source == "local" else "lib.G()"
+        queue = "GCC" if source == "local" else "lib.GCC"
         for operation, (direct_body, temporary_body) in operations.items():
             declarations.append(
                 f"func F_{source}_{operation}_direct(x int64) int64 {{\n"
                 + "\n".join(
                     f"\t{line}"
-                    for line in direct_body.format(G=call).splitlines()
+                    for line in direct_body.format(
+                        G=call, Queue=queue
+                    ).splitlines()
                 )
                 + "\n}\n"
             )
@@ -16217,7 +16270,9 @@ def test_direct_chan_chan_call_result_operands_match_temporary(
                 f"\tcc := {call}\n"
                 + "\n".join(
                     f"\t{line}"
-                    for line in temporary_body.format().splitlines()
+                    for line in temporary_body.format(
+                        G=call, Queue=queue
+                    ).splitlines()
                 )
                 + "\n}\n"
             )
@@ -16253,6 +16308,7 @@ def test_direct_chan_chan_call_result_operands_match_temporary(
             for transfer in summary.calls
         )
 
+    differences = []
     for source in ("local", "imported"):
         for operation in operations:
             direct = named_package(
@@ -16267,15 +16323,66 @@ def test_direct_chan_chan_call_result_operands_match_temporary(
                 summaries,
                 f"F_{source}_{operation}_temporary",
             )
-            assert direct.available, (source, operation, direct.gaps)
-            assert temporary.available, (
+            if not direct.available or not temporary.available:
+                differences.append(
+                    (
+                        source,
+                        operation,
+                        "availability",
+                        direct.available,
+                        direct.gaps,
+                        temporary.available,
+                        temporary.gaps,
+                    )
+                )
+            else:
+                for label, direct_value, temporary_value in (
+                    (
+                        "return_dependencies",
+                        direct.return_dependencies,
+                        temporary.return_dependencies,
+                    ),
+                    ("effects", direct.effects, temporary.effects),
+                    (
+                        "transfers",
+                        transfer_shape(direct),
+                        transfer_shape(temporary),
+                    ),
+                ):
+                    if direct_value != temporary_value:
+                        differences.append(
+                            (
+                                source,
+                                operation,
+                                label,
+                                direct_value,
+                                temporary_value,
+                            )
+                        )
+    assert not differences, "\n".join(
+        repr(difference) for difference in differences
+    )
+    for source in ("local", "imported"):
+        for operation in (
+            "send_queue_target",
+            "select_send_queue_target",
+            "send_received_value",
+            "receive_binding",
+            "receive_comma_ok",
+            "receive_assignment",
+            "select_receive_binding",
+        ):
+            result = named_package(
+                files,
+                snapshot,
+                summaries,
+                f"F_{source}_{operation}_direct",
+            )
+            assert result.return_dependencies == {0}, (
                 source,
                 operation,
-                temporary.gaps,
+                result.return_dependencies,
             )
-            assert direct.return_dependencies == temporary.return_dependencies
-            assert direct.effects == temporary.effects
-            assert transfer_shape(direct) == transfer_shape(temporary)
 
 
 def test_received_external_channel_value_joins_local_queue(
