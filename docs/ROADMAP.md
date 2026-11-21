@@ -8655,8 +8655,10 @@ canonical 上位ロードマップは mumei `docs/CROSS_PROJECT_ROADMAP.md` の
    `artifact_paths_of` / `validate_artifact_paths` と
    `ProofCertificate` の P5-A metadata accessors（`harness_contract` /
    `intent_fidelity` / `artifact_paths` / `budget_policy_fingerprint` /
-   `lean_provenance`）で実装し、`agent/publish.py` が宣言された
-   `artifact_paths` の存在を `artifact_paths_status` として検証、
+   `lean_provenance`）で実装し、`agent/publish.py` が `--proof-cert` で
+   生成した証明書ファイルから宣言された `artifact_paths` を収集し
+   `artifact_paths_status` として検証（verify --json レポートは
+   これらを持たないため証明書ファイルが正典ソース）、
    `proliferate --output-json` の `proof_certificate_summary` /
    `upgraded_cert_summary` が certificate の canonical keys をそのまま
    参照する。独立した bundle intake や新しい artifact key / alias は

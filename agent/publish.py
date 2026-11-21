@@ -254,9 +254,15 @@ def publish(
     mapper = SpecCodeMapper()
     mapping_result = mapper.build_mapping(spec, code)
     spec_code_mapping = mapper.to_json(mapping_result.mappings)
+    # Generate the proof certificate alongside the JSON report: it is the
+    # canonical document carrying the P5-A harness metadata (the declared
+    # ``artifact_paths`` the consumer validates below). The verify --json
+    # report itself never carries those keys.
+    certificate_path = generated_path.with_suffix(".proof.json")
     verify_result = client.verify(
         str(generated_path),
         spec_code_mapping=spec_code_mapping,
+        extra_args=["--proof-cert", "--output", str(certificate_path)],
     )
     if not verify_result["success"]:
         logger.error("Verification failed: %s", verify_result.get("stderr", ""))
@@ -293,13 +299,20 @@ def publish(
         spec_code_mapping = mapper.to_json(mapping_result.mappings)
         report["spec_code_mapping"] = spec_code_mapping
         result["proof_certificate"] = report
-        # Consumer wiring for the canonical ``artifact_paths`` contract: a
-        # mumei-produced certificate or bundle records the paths the harness
-        # should collect or validate; verify each declared path resolves.
-        declared_paths = proofcert.artifact_paths_of(report)
+    # Consumer wiring for the canonical ``artifact_paths`` contract: a
+    # mumei-produced certificate or bundle records the paths the harness
+    # should collect or validate; verify each declared path resolves.
+    # Paths are read from the certificate file — the verify --json report
+    # never carries them.
+    if certificate_path.is_file():
+        cert_doc = proofcert.ProofCertificate.from_path(certificate_path)
+        result["proof_certificate_file"] = str(certificate_path)
+        declared_paths = proofcert.artifact_paths_of(cert_doc)
         if declared_paths:
-            result["artifact_paths_status"] = proofcert.validate_artifact_paths(
-                declared_paths, base_dir=cwd
+            result["artifact_paths_status"] = (
+                proofcert.validate_artifact_paths(
+                    declared_paths, base_dir=cwd
+                )
             )
     result["spec_code_mapping"] = spec_code_mapping
 

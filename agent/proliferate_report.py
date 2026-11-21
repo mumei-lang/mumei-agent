@@ -348,6 +348,7 @@ def _jsonify_result(
                         "generation_error",
                         "verified_at_generation",
                         "artifact_paths_status",
+                        "proof_certificate_file",
                     )
                     if k in value
                 }

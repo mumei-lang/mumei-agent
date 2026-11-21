@@ -141,6 +141,26 @@ class TestPublishResultSummaryWiring:
         assert upgraded["artifact_paths"] == ["std/certs/math.json"]
         assert upgraded["lean_provenance"] == {"bridge": "x"}
 
+    def test_jsonify_keeps_artifact_paths_status(self) -> None:
+        from agent.proliferate_report import _jsonify_result
+
+        out = _jsonify_result(
+            {
+                "publish_result": {
+                    "success": True,
+                    "proof_certificate_file": "gen.proof.json",
+                    "artifact_paths_status": [
+                        {"path": "a.json", "exists": True, "resolved": "a.json"}
+                    ],
+                }
+            }
+        )
+        short = out["publish_result"]
+        assert short["proof_certificate_file"] == "gen.proof.json"
+        assert short["artifact_paths_status"] == [
+            {"path": "a.json", "exists": True, "resolved": "a.json"}
+        ]
+
     def test_jsonify_omits_absent_metadata(self) -> None:
         from agent.proliferate_report import _jsonify_result
 
