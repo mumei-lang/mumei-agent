@@ -304,6 +304,7 @@ class _DeferredExit:
     span: FileSpan
     captured: frozenset[str]
     writes: frozenset[str]
+    roots: frozenset[str]
     star_or_external: bool
     arg_deps: frozenset[int]
 
@@ -8509,12 +8510,59 @@ class _Builder:
         fact = self._deferred_expression_type(node)
         return fact is not None and fact.kind == "pointer"
 
+    def _deferred_root_binding(
+        self,
+        node: Any,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+    ) -> str | None:
+        node = self._strip_parens(node)
+        if node is None:
+            return None
+        if node.type == "identifier":
+            ref = self.references.get(self.node_key(node))
+            if (
+                ref is not None
+                and ref.binding_id
+                and (
+                    ref.binding_id in params
+                    or ref.binding_id in locals_
+                )
+            ):
+                return ref.binding_id
+            return None
+        if node.type in {"selector_expression", "index_expression"}:
+            return self._deferred_root_binding(
+                node.child_by_field_name("operand"),
+                params,
+                locals_,
+            )
+        if node.type == "unary_expression":
+            operator = node.child_by_field_name("operator")
+            if operator is None or operator.text not in {b"&", b"*"}:
+                return None
+            return self._deferred_root_binding(
+                node.child_by_field_name("operand"),
+                params,
+                locals_,
+            )
+        if node.type == "type_conversion_expression":
+            return self._deferred_root_binding(
+                node.child_by_field_name("operand"),
+                params,
+                locals_,
+            )
+        return None
+
     def _deferred_exit_shape(
         self,
         node: Any,
         call: Any | None,
         params: dict[str, int],
-    ) -> tuple[frozenset[str], frozenset[str], bool]:
+        locals_: dict[str, frozenset[int]],
+    ) -> tuple[
+        frozenset[str], frozenset[str], frozenset[str], bool
+    ]:
         function_node = self._strip_parens(
             node.child_by_field_name("function")
         )
@@ -8528,6 +8576,18 @@ class _Builder:
         writes = frozenset(
             self.closure_writes.get(callee_id, frozenset())
         )
+        roots: set[str] = set()
+        if (
+            function_node is not None
+            and function_node.type == "selector_expression"
+        ):
+            receiver_id = self._deferred_root_binding(
+                function_node.child_by_field_name("operand"),
+                params,
+                locals_,
+            )
+            if receiver_id is not None:
+                roots.add(receiver_id)
         star_or_external = (
             callee_id in self.closure_star_writes
             or callee_id in self.closure_inner_calls
@@ -8577,12 +8637,16 @@ class _Builder:
             ):
                 star_or_external = True
         arguments = node.child_by_field_name("arguments")
-        if arguments is not None and any(
-            self._deferred_argument_is_pointer(argument)
-            for argument in _children(arguments)
-        ):
-            star_or_external = True
-        return captured, writes, star_or_external
+        if arguments is not None:
+            for argument in _children(arguments):
+                if self._deferred_argument_is_pointer(argument):
+                    star_or_external = True
+                    root_id = self._deferred_root_binding(
+                        argument, params, locals_
+                    )
+                    if root_id is not None:
+                        roots.add(root_id)
+        return captured, writes, frozenset(roots), star_or_external
 
     def _record_deferred_exit(self, record: _DeferredExit) -> None:
         for index, existing in enumerate(self._deferred_exits):
@@ -8592,6 +8656,7 @@ class _Builder:
                 record.span,
                 existing.captured | record.captured,
                 existing.writes | record.writes,
+                existing.roots | record.roots,
                 existing.star_or_external or record.star_or_external,
                 existing.arg_deps | record.arg_deps,
             )
@@ -8623,6 +8688,21 @@ class _Builder:
                         record.captured, params, scratch
                     )
                 if record.star_or_external:
+                    for root_id in record.roots:
+                        if root_id in scratch:
+                            rec_deps |= scratch[root_id]
+                        elif root_id in params:
+                            rec_deps |= frozenset({params[root_id]})
+                        binding = self.bindings.get(root_id)
+                        if (
+                            binding is not None
+                            and binding.type.kind == "pointer"
+                        ):
+                            # Bound struct-field reads observe both the
+                            # root's folded pointee deps and indirect
+                            # stores, which are the model's remaining
+                            # approximation of pointer contents.
+                            rec_deps |= self.indirect_writes
                     for escaped_id in self.escaped:
                         if escaped_id in scratch:
                             rec_deps |= scratch[escaped_id]
@@ -19608,7 +19688,7 @@ class _Builder:
             )
             deferred_shape = (
                 self._deferred_exit_shape(
-                    inner[0], defer_call, params
+                    inner[0], defer_call, params, locals_
                 )
                 if kind == "defer_statement"
                 else None
@@ -19648,7 +19728,12 @@ class _Builder:
                     if arg_list is not None and _children(arg_list):
                         defer_arg_deps = ret
                 if deferred_shape is not None:
-                    captured, writes, star_or_external = deferred_shape
+                    (
+                        captured,
+                        writes,
+                        roots,
+                        star_or_external,
+                    ) = deferred_shape
                     self._record_deferred_exit(
                         _DeferredExit(
                             FileSpan(
@@ -19658,6 +19743,7 @@ class _Builder:
                             ),
                             captured,
                             writes,
+                            roots,
                             star_or_external,
                             defer_arg_deps,
                         )

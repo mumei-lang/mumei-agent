@@ -34058,6 +34058,62 @@ def test_defer_pointer_arguments_read_exit_state(go_types_helper):
     assert result.available and 0 in result.return_dependencies
 
 
+def test_defer_pointer_method_receiver_reads_pointee_exit_state(
+    go_types_helper,
+):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "type T struct{ v int64 }; "
+        "func (t *T) M(p *int64) { *p = t.v }; "
+        "func F(x int64) (r int64) { t := &T{}; "
+        "defer t.M(&r); t.v = x; return 0 }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and 0 in result.return_dependencies
+
+
+def test_defer_pointer_argument_reads_local_pointee_exit_state(
+    go_types_helper,
+):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "type T struct{ v int64 }; "
+        "func cp(p *int64, t *T) { *p = t.v }; "
+        "func F(x int64) (r int64) { t := &T{}; "
+        "defer cp(&r, t); t.v = x; return 0 }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and 0 in result.return_dependencies
+
+
+def test_defer_named_pointer_argument_reads_local_pointee_exit_state(
+    go_types_helper,
+):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "type P struct{ V int64 }; "
+        "func cp2(r *int64, p *P) { *r = p.V }; "
+        "func F(x int64) (r int64) { p := &P{}; "
+        "defer cp2(&r, p); p.V = x; return 0 }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and 0 in result.return_dependencies
+
+
+def test_defer_pointer_argument_without_later_pointee_write(
+    go_types_helper,
+):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "type P struct{ V int64 }; "
+        "func cp2(r *int64, p *P) { *r = p.V }; "
+        "func F(x int64) (r int64) { p := &P{V: x}; "
+        "defer cp2(&r, p); return 0 }",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
 def test_defer_captured_pointer_write_reaches_caller(
     go_types_helper,
 ):
