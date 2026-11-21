@@ -21023,6 +21023,69 @@ def test_chan_elem_external_close(go_types_helper):
             "\treturn <-GS[0]\n}\n",
             frozenset({0}),
         ),
+        # A callee returning an external element hands its caller the
+        # external queue (`c := Mk()` is an external name).
+        (
+            "var GS []chan int64\n"
+            "func Mk() chan int64 { return GS[0] }\n"
+            "func F(x int64) int64 {\n"
+            "\tc := Mk()\n"
+            "\tc <- x\n"
+            "\treturn <-GS[1]\n}\n",
+            frozenset({0}),
+        ),
+        # Parenthesized extraction.
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\td := (GS[0])\n"
+            "\td <- x\n"
+            "\treturn <-GS[1]\n}\n",
+            frozenset({0}),
+        ),
+        # An extracted name stored back into the container.
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\td := GS[0]\n"
+            "\tGS[1] = d\n"
+            "\tGS[1] <- x\n"
+            "\treturn <-d\n}\n",
+            frozenset({0}),
+        ),
+        # An element assigned to a package-level chan var.
+        (
+            "var GS []chan int64\n"
+            "var GC chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\tGC = GS[0]\n"
+            "\tGC <- x\n"
+            "\treturn <-GS[0]\n}\n",
+            frozenset({0}),
+        ),
+        # An extracted name joining a local chan-element literal.
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\td := GS[0]\n"
+            "\ts := []chan int64{d}\n"
+            "\ts[0] <- x\n"
+            "\treturn <-GS[0]\n}\n",
+            frozenset({0}),
+        ),
+        # A select send arm through the extracted name.
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\td := GS[0]\n"
+            "\tselect {\n"
+            "\tcase d <- x:\n"
+            "\tcase c <- 1:\n"
+            "\t}\n"
+            "\treturn <-GS[0]\n}\n",
+            frozenset({0}),
+        ),
     ],
 )
 def test_chan_elem_external_extract(go_types_helper, declarations, expected):
@@ -21108,6 +21171,11 @@ def test_chan_elem_external_imported_extract(go_types_helper):
         # Function-literal calls with extracted channel arguments stay closed.
         "var GS []chan int64\nfunc F(x int64) int64 {\n"
         "\tfunc(c chan int64) { c <- x }(GS[0])\n"
+        "\treturn <-GS[0]\n}\n",
+        # A closure capturing an extracted name stays closed, like a
+        # captured `d := GC`.
+        "var GS []chan int64\nfunc F(x int64) int64 {\n"
+        "\td := GS[0]\n\tgo func() { d <- x }()\n"
         "\treturn <-GS[0]\n}\n",
     ],
 )
