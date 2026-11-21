@@ -577,6 +577,25 @@ def test_recheck_and_raw_observation_documents_never_perform(check, schema):
     assert evaluation["checks"][check] == "no_evidence"
 
 
+def test_native_observations_recheck_does_not_perform_same_build():
+    build_id = "a" * 64
+    record = _record(*sorted(RUNTIME_CHECK_VOCABULARY))
+    record["expected_build_id"] = build_id
+    evidence = _doc(
+        "mumei.native-observations-recheck-report/v1",
+        observations_recheck="reproduced",
+        expected_build_id=build_id,
+        runtime_observation_schema=RUNTIME_OBSERVATION_SCHEMA,
+        normalized={"stdout": {"sha256": "b" * 64}},
+    )
+    evaluation = evaluate_unperformed_check_recovery(
+        record, [evidence], record_digest="c" * 64,
+    )
+    assert evaluation["checks"] == {
+        check: "no_evidence" for check in sorted(RUNTIME_CHECK_VOCABULARY)
+    }
+
+
 def test_native_accept_reports_recover_sibling_channels_by_shared_build_id():
     build_id = "a" * 64
     record = _native_accept_report(
