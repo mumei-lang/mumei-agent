@@ -2070,6 +2070,29 @@ class _Builder:
         to the OLD group's surviving sharers (found by intersecting
         the snapshot), not to the reseated `s`'s new set."""
         toks = self._opaque_container_tokens
+        chan_chan_group = (
+            member_id in self.local_chan_chans
+            or root_id in self.local_chan_chans
+        )
+        external_group = chan_chan_group and (
+            member_id in self.external_chan_locals
+            or member_id in self._external_chan_group_tokens
+            or root_id in self.external_chan_locals
+            or root_id in self._external_chan_group_tokens
+            or bool(self._chan_group_external_tokens(member_id))
+            or bool(self._chan_group_external_tokens(root_id))
+        )
+        if chan_chan_group and pre_root_set is not None:
+            external_group = external_group or any(
+                isinstance(token, str)
+                and (
+                    token in self.external_chan_locals
+                    or token in self._external_chan_group_tokens
+                )
+                for token in pre_root_set
+            )
+        if external_group:
+            self._mark_external_chan_group_member(member_id)
         if member_id not in self._external_chan_group_tokens:
             toks[member_id] = (
                 toks.get(member_id, frozenset())
@@ -6307,6 +6330,56 @@ member, or one explicit dereference of one (`(*t).F` — the same
         ):
             return None
         return root
+
+    def _local_chan_chan_call_arg_roots(
+        self, call: Any, arguments: list[Any]
+    ) -> tuple[str, ...] | None:
+        roots = []
+        for argument in arguments:
+            root = self._local_chan_chan_id(argument)
+            if root is not None:
+                roots.append(root)
+                continue
+            nested_call = (
+                self.calls.get(self.node_key(argument))
+                if argument is not None
+                and argument.type
+                in {"call_expression", "type_conversion_expression"}
+                else None
+            )
+            if nested_call is None or nested_call.kind != "conversion":
+                continue
+            descendants = list(_children(argument))
+            while descendants:
+                nested_argument = descendants.pop()
+                if self._local_chan_chan_id(nested_argument) is not None:
+                    return None
+                descendants.extend(_children(nested_argument))
+        roots = tuple(roots)
+        if not roots:
+            return ()
+        if (
+            call is None
+            or call.kind != "direct_local"
+            or call.method
+            or call.method_expr
+        ):
+            return None
+        target = self.functions.get(call.target)
+        if (
+            target is None
+            or target.method
+            or target.variadic
+            or len(arguments) != len(target.parameters)
+        ):
+            return None
+        if any(
+            self._local_chan_chan_id(argument) is not None
+            and not self._chan_chan_fact(target.parameters[index].type)
+            for index, argument in enumerate(arguments)
+        ):
+            return None
+        return roots
 
     def _local_chan_chan_receive(self, node: Any) -> str | None:
         """The local `chan chan T` root read by a `<-cc` expression."""
@@ -18736,17 +18809,27 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 if function_node is not None
                 else b""
             )
-            if not (
+            builtin_chan_queue = (
                 call.kind == "builtin"
                 and builtin_name in {b"close", b"len", b"cap"}
+            )
+            method_receiver = (
+                function_node.child_by_field_name("operand")
+                if call.method
+                and function_node is not None
+                and function_node.type == "selector_expression"
+                else None
+            )
+            if not builtin_chan_queue and (
+                self._local_chan_chan_call_arg_roots(
+                    call, arguments
+                )
+                is None
+                or self._local_chan_chan_id(method_receiver) is not None
             ):
-                if any(
-                    self._local_chan_chan_id(argument) is not None
-                    for argument in arguments
-                ):
-                    raise _Unsupported(
-                        "unresolved_or_opaque_call", _span(node)
-                    )
+                raise _Unsupported(
+                    "unresolved_or_opaque_call", _span(node)
+                )
             if call.kind == "interface_dispatch":
                 return self._interface_dispatch_call(
                     node, call, arguments, fn, params, locals_,
@@ -20076,6 +20159,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     actual[0] | self.indirect_writes,
                     *actual[1:],
                 )
+        for root_id in (
+            self._local_chan_chan_call_arg_roots(call, arguments) or ()
+        ):
+            for token in self._chan_group_members(root_id):
+                self._mark_external_chan_group_member(token)
         callee = self.summarize(target_id)
         if not callee.available:
             reason = (
