@@ -31055,6 +31055,27 @@ def test_struct_field_range_summary_stays_fresh(go_types_helper):
     assert direct_result.binding_id not in stale
     assert direct_result.binding_id not in missing
 
+    changed_source = source.replace(
+        "[]int64", "[]int32"
+    ).replace("r += v", "r += int64(v)")
+    changed_report = compiler_report(go_types_helper, changed_source)
+    changed_snapshot = load_go_snapshot(
+        changed_report, changed_source, target_arch="amd64"
+    )
+    changed_summaries = ip.summarize_go(
+        changed_source, changed_snapshot
+    )
+    changed_reusable, changed_stale, changed_missing = (
+        go_summaries._reuse_partition(
+            restored, changed_summaries, changed_report
+        )
+    )
+    assert direct_result.binding_id not in changed_reusable
+    assert (
+        direct_result.binding_id in changed_stale
+        or direct_result.binding_id in changed_missing
+    )
+
 
 def test_struct_array_slice_field_store_keeps_backing_dependencies(
     go_types_helper,
