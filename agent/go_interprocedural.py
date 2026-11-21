@@ -4679,6 +4679,100 @@ member, or one explicit dereference of one (`(*t).F` — the same
             if field.type == "field_declaration"
         )
 
+    def _struct_literal_type_id(self, node: Any) -> str | None:
+        """Pin a struct composite-literal type and return its identity,
+        or an empty string for an anonymous struct."""
+        current = node
+        while (
+            current is not None
+            and current.type == "parenthesized_type"
+        ):
+            current = next(
+                (
+                    child
+                    for child in current.named_children
+                    if child.type != "comment"
+                ),
+                None,
+            )
+        if current is None:
+            return None
+        if current.type == "struct_type":
+            return "" if self._pin_struct_fields(current) else None
+
+        named = (
+            current.child_by_field_name("type")
+            if current.type == "generic_type"
+            else current
+        )
+        if named is None:
+            return None
+        if named.type == "qualified_type":
+            identity = self._qualified_type_member(named)
+        elif named.type == "type_identifier":
+            ref = self.references.get(self.node_key(named))
+            if ref is None:
+                return None
+            identity = (
+                self.members.get(ref.binding_id)
+                if ref.kind == "import"
+                else self.bindings.get(ref.binding_id)
+                if ref.binding_id
+                else None
+            )
+        else:
+            return None
+        if (
+            identity is None
+            or identity.kind != "type"
+            or identity.type is None
+            or identity.type.kind != "struct"
+            or not self._pin_type_node(current)
+        ):
+            return None
+        return identity.type.type_id or identity.id
+
+    def _struct_literal_initializer_fields_supported(
+        self, literal: Any
+    ) -> bool:
+        body = literal.child_by_field_name("body")
+        elements = (
+            tuple(
+                child
+                for child in _children(body)
+                if child.type in {"literal_element", "keyed_element"}
+            )
+            if body is not None
+            else ()
+        )
+        for element in elements:
+            if element.type != "keyed_element":
+                return False
+            key = element.child_by_field_name("key")
+            key_ref = (
+                self.references.get(self.node_key(key))
+                if key is not None
+                else None
+            )
+            member = (
+                self.members.get(key_ref.binding_id)
+                if key_ref is not None and key_ref.kind == "import"
+                else self._local_field(key_ref)
+            )
+            if (
+                member is None
+                or key is None
+                or member.name.encode("utf-8") != key.text
+                or member.kind not in {"var", "variable"}
+                or member.type is None
+                or member.type.kind
+                not in {"integer", "boolean", "pointer"}
+            ):
+                return False
+            self._pin_member_type(member)
+            self._pin_fact_identities(member.type)
+        return True
+
     def result(
         self,
         fn: Function,
@@ -9937,10 +10031,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
         # member — or the unit's own `type` binding — it names is;
         # an unnamed one (`*int64`) classifies by
         # the pointer fact's own `elem`, and composite shapes
-        # (`*[]int64`, `*struct{...}`) stay closed. Any other operand
-        # — a computed pointer or a nested deref — stays closed too:
-        # dep sets track binding indices, not
-        # pointee contents.
+        # (`*[]int64`, `*struct{...}`) stay closed. Pointer-typed
+        # fields are admitted only through a bound struct pointer below;
+        # other computed pointers and nested dereferences stay closed
+        # because dep sets track binding indices, not pointee contents.
         # Comments appear among a node's named children; they are not
         # operands.
         children = tuple(
@@ -9968,6 +10062,58 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     self.pinned.add(base.id)
                     self._pin_fact_identities(base.type)
                     member = field_member
+                else:
+                    # `*p.P` — a pointer field read through a bound
+                    # pointer to a struct. The field's dep set carries
+                    # the initializer or stores; the pointee read also
+                    # observes escaped locals and indirect stores.
+                    bound = self._bound_field_read(
+                        inner, locals_, params
+                    )
+                    if (
+                        bound is not None
+                        and bound[1].type.kind == "pointer"
+                    ):
+                        pointees, field_member, _root_ref = bound
+                        pointee_fact = field_member.type.elem
+                        if (
+                            pointee_fact is None
+                            or pointee_fact.kind
+                            not in {"integer", "boolean", "pointer"}
+                        ):
+                            raise _Unsupported(
+                                "non_parameter_reference", _span(node)
+                            )
+                        for pointee in pointees:
+                            self._pin_fact_identities(pointee.type)
+                        self._pin_fact_identities(field_member.type)
+                        self._pin_fact_identities(pointee_fact)
+                        pointee_id = field_member.type.type_id or (
+                            f"{field_member.id}/pointee"
+                        )
+                        transfers.append(
+                            CallTransfer(
+                                FileSpan(
+                                    self.current_file,
+                                    node.start_byte,
+                                    node.end_byte,
+                                ),
+                                pointee_id,
+                                (),
+                                frozenset(),
+                                imported=True,
+                            )
+                        )
+                        result = self.expression(
+                            operand, fn, params, locals_,
+                            transfers, count, depth + 1,
+                        )
+                        for escaped_id in self.escaped:
+                            if escaped_id in locals_:
+                                result |= locals_[escaped_id]
+                            elif escaped_id in params:
+                                result |= {params[escaped_id]}
+                        return result | self.indirect_writes
         elif inner is not None and inner.type == "identifier":
             # A dot-imported `*PV` classifies by the declared member
             # exactly like `*lib.PV` — a bare `import` reference whose
@@ -21166,10 +21312,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
             )
             return deps | key_deps
         if kind in {"binary_expression", "unary_expression"}:
-            # `&x` is the one unary with pointer semantics: the result
-            # inherits the operand's deps exactly like a `p := t` bind,
-            # and anything not addressable fails the producer's own
-            # type check. Binary `&` stays bitwise.
+            # `&x` inherits the operand's deps like a pointer binding;
+            # a struct-literal address `&P{...}` carries its
+            # initializer's deps and also folds them into the pointee
+            # set below. Binary `&` stays bitwise.
             operator = node.child_by_field_name("operator")
             if kind == "binary_expression" and (
                 self._interface_value_binding(
@@ -21597,12 +21743,78 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         if root.type == "index_expression":
                             saw_index = True
                         root = root.child_by_field_name("operand")
-                # `&P{...}` stays closed too: the literal carries the
-                # initializer's deps, but the bound-pointer field read
-                # reports dep-free — the fresh value's contents are
-                # not caller memory, so admitting would understate.
                 if root is not None and root.type == "composite_literal":
-                    raise _Unsupported("unsupported_operator", _span(node))
+                    literal_operand = operand
+                    while (
+                        literal_operand is not None
+                        and literal_operand.type
+                        == "parenthesized_expression"
+                    ):
+                        literal_operand = next(
+                            (
+                                child
+                                for child in literal_operand.named_children
+                                if child.type != "comment"
+                            ),
+                            None,
+                        )
+                    if (
+                        literal_operand is None
+                        or literal_operand.type != "composite_literal"
+                    ):
+                        raise _Unsupported(
+                            "unsupported_operator", _span(node)
+                        )
+                    type_node = root.child_by_field_name("type")
+                    pointee_id = self._struct_literal_type_id(type_node)
+                    if pointee_id is None:
+                        raise _Unsupported(
+                            "unsupported_operator", _span(node)
+                        )
+                    if not self._struct_literal_initializer_fields_supported(
+                        root
+                    ):
+                        raise _Unsupported(
+                            "unsupported_operator", _span(node)
+                        )
+                    # The pointer value carries the initializer deps;
+                    # also fold them into the shared pointee set like a
+                    # store through a fresh pointer.
+                    literal_deps = self.expression(
+                        root, fn, params, locals_, transfers, count,
+                        depth + 1,
+                    )
+                    body = root.child_by_field_name("body")
+                    elements = (
+                        tuple(
+                            child
+                            for child in _children(body)
+                            if child.type
+                            in {"literal_element", "keyed_element"}
+                        )
+                        if body is not None
+                        else ()
+                    )
+                    if elements:
+                        target = pointee_id or (
+                            f"{self.current_file}:"
+                            f"{root.start_byte}:{root.end_byte}/pointee"
+                        )
+                        transfers.append(
+                            CallTransfer(
+                                FileSpan(
+                                    self.current_file,
+                                    node.start_byte,
+                                    node.end_byte,
+                                ),
+                                target,
+                                (),
+                                frozenset(),
+                                imported=True,
+                            )
+                        )
+                        self.indirect_writes |= literal_deps
+                    return literal_deps
                 root_ref = (
                     self.references.get(self.node_key(root))
                     if root is not None and root.type == "identifier"
@@ -26464,6 +26676,25 @@ member, or one explicit dereference of one (`(*t).F` — the same
         seen.discard(summary.binding_id)
         return tuple(sorted(seen))
 
+    def _fold_pointer_call_writes(
+        self,
+        stored: frozenset[int],
+        locals_: dict[Any, Any],
+        params: dict[Any, int],
+    ) -> None:
+        self.indirect_writes |= stored
+        for escaped_id in self.escaped:
+            self._store(locals_, params, escaped_id, stored, True)
+            eb = self.bindings.get(escaped_id)
+            if eb is not None and eb.type.kind == "pointer":
+                # A callee `*q = r` store may reseat an escaped
+                # pointer — its provenance gains the stored deps like
+                # a caller-side `p = q` does.
+                self._ptr_deps[escaped_id] = (
+                    self._pointer_deps(escaped_id, params, locals_)
+                    | stored
+                )
+
     def _store_call_writes(
         self,
         arguments: list[Any],
@@ -26501,6 +26732,28 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 and arg_node.children[0].type == "&"
             ):
                 (operand,) = _children(arg_node)
+                literal_operand = operand
+                while (
+                    literal_operand is not None
+                    and literal_operand.type
+                    == "parenthesized_expression"
+                ):
+                    literal_operand = next(
+                        (
+                            child
+                            for child in literal_operand.named_children
+                            if child.type != "comment"
+                        ),
+                        None,
+                    )
+                if (
+                    literal_operand is not None
+                    and literal_operand.type == "composite_literal"
+                ):
+                    self._fold_pointer_call_writes(
+                        stored, locals_, params
+                    )
+                    continue
                 ref = (
                     self.references.get(self.node_key(operand))
                     if operand.type == "identifier"
@@ -26544,26 +26797,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     else None
                 )
                 if binding is not None and binding.type.kind == "pointer":
-                    self.indirect_writes |= stored
-                    for escaped_id in self.escaped:
-                        self._store(
-                            locals_, params, escaped_id, stored, True
-                        )
-                        eb = self.bindings.get(escaped_id)
-                        if (
-                            eb is not None
-                            and eb.type.kind == "pointer"
-                        ):
-                            # A callee `*q = r` store may reseat an
-                            # escaped pointer — its provenance gains
-                            # the stored deps like a caller-side
-                            # `p = q` does.
-                            self._ptr_deps[escaped_id] = (
-                                self._pointer_deps(
-                                    escaped_id, params, locals_
-                                )
-                                | stored
-                            )
+                    self._fold_pointer_call_writes(
+                        stored, locals_, params
+                    )
                 elif (
                     binding is not None
                     and binding.type.kind == "chan"

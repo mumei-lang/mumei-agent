@@ -3015,7 +3015,11 @@ each records an imported transfer like a receive does —
 `make` —
 `new(T)` now admits as a dep-free `*T` allocation whose type
 argument pins, with the pointee's own use-site gates classifying
-what `*p`/`p.V`/`(*p)[i]` admit — and bound function values:
+what `*p`/`p.V`/`(*p)[i]` admit; `&P{...}` admits for struct
+composite literals (named, imported, anonymous) as a fresh pointer
+whose value carries the initializer's deps, which also fold into
+the pointee dependency set like stores through it — and bound
+function values:
 a function literal bound to a local name
 (`h := func(...)...` / `var h = func(...)...`) now admits as a
 function-typed binding whose deps capture the enclosing bindings
@@ -4109,7 +4113,8 @@ Struct params/results stay closed at the signature gate.
 
 The hard boundary is the aliasing invariant the dep-free bound-
 pointer field read relies on: a bound pointer must never alias a
-tracked composite. `&st` and `&st.V` therefore raise
+tracked composite. `&P{...}` admits only for struct literals;
+`&st`, `&st.V` and non-struct composite literals stay
 `unsupported_operator` (the `&` operand's root is walked through
 parens/selectors/indexes), and a chain through a *pointer-typed*
 intermediate field (`st.A.N` where `A *P2`) stays closed — the
