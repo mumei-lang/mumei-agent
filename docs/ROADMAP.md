@@ -748,8 +748,9 @@ runtime/OS semantics stay outside the profile; the link
 argument-vector is recorded-but-not-reproduced inside Core and adds no
 claim). `object_translation_correspondence` stays in
 `checks_not_performed` until a Core object-stage TV accept route exists.
-The bounded `object_symbol_correspondence` and
-`object_call_edge_correspondence` checks also stay unperformed by
+The bounded `object_symbol_correspondence`,
+`object_call_edge_correspondence` and `object_link_correspondence` checks
+also stay unperformed by
 `native-accept`; the separate `native-object-recheck` report is
 non-performing in recovery.
 The route is also the `native_accept` MCP tool (same
@@ -777,8 +778,9 @@ stdout is a fixed diagnostic line rather than an evidence record, so
 no `candidate` is emitted and a successful run selects only lineage.
 `object_translation_correspondence` stays in `checks_not_performed`
 until a Core object-stage TV accept route exists.
-The bounded `object_symbol_correspondence` and
-`object_call_edge_correspondence` checks also stay unperformed by
+The bounded `object_symbol_correspondence`,
+`object_call_edge_correspondence` and `object_link_correspondence` checks
+also stay unperformed by
 `native-artifact-recheck`; the separate `native-object-recheck` report
 is non-performing in recovery.
 The route is also the `native_artifact_recheck` MCP tool (same
@@ -6969,7 +6971,7 @@ a separate `object_translation_correspondence` check (never a reuse of
 recheck route, and no end-to-end source-to-executable check composed from
 stage reports. Core's `recheck-object` command and
 `mumei.object-symbol-correspondence/v1` descriptor have landed; the
-`native-object-recheck` agent route consumes its two bounded checks without
+`native-object-recheck` agent route consumes its three bounded checks without
 registering a recovery performer. Full object translation validation and an
 `accept-object` performer remain deferred.
 
@@ -6979,15 +6981,17 @@ registering a recovery performer. Full object translation validation and an
 --source <path> --expected-build-id <sha256>` runs Core's
 `native-bundle recheck-object --expected-build-id <id> --json <bundle>
 <source>` in the C11 declared-attempt lifecycle. A `corresponds` outcome
-discharges `artifact_semantics`, `claim_truth`, `object_symbol_correspondence`,
-and `object_call_edge_correspondence`; it leaves
-`object_translation_correspondence` unperformed. The matching
-`mumei.object-symbol-correspondence/v1` schema is exposed only when the
-descriptor's schema and build ID match the declared request. Other outcomes
-leave the full C02 and object-check vocabularies unperformed, and mid-run
-input drift claims no outcome. The report is deliberately not a
+always discharges `artifact_semantics` and `claim_truth`. Its bounded object
+checks are derived only from `checks_performed` in a descriptor whose schema
+and build ID match the declared request; only listed checks among
+`object_symbol_correspondence`, `object_call_edge_correspondence` and
+`object_link_correspondence` are discharged. Older Core descriptors may
+omit `object_link_correspondence`, so exit code 0 alone cannot imply that
+check. `object_translation_correspondence` stays unperformed. Other
+outcomes leave the full C02 and object-check vocabularies unperformed, and
+mid-run input drift claims no outcome. The report is deliberately not a
 `recovery-eval` performer and makes no instruction-selection,
-register-allocation, relocation-arithmetic, linker, ABI, runtime or
+register-allocation, general linker-semantics, ABI, runtime or
 historical-execution claim.
 
 ## Roadmap authority and vocabulary

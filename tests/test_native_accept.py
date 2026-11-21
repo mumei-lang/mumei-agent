@@ -135,6 +135,7 @@ def test_accepted_run_selects_descriptor(tmp_path, capsys):
         "file_identity",
         "freshness",
         "object_call_edge_correspondence",
+        "object_link_correspondence",
         "object_symbol_correspondence",
         "object_translation_correspondence",
         "producer_authenticity",

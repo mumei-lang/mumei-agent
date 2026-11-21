@@ -1547,12 +1547,14 @@ RUNTIME_CHECK_VOCABULARY = frozenset(
     }
 )
 
-# Core's object-symbol and direct-call-edge checks are bounded
-# correspondences. object_translation_correspondence is the full object-TV
-# check; none has a performer or makes a linker, loader, ABI, or runtime claim.
+# Core's object-symbol, direct-call-edge and object-to-executable checks are
+# bounded correspondences. object_translation_correspondence is the full
+# object-TV check; none has a performer or makes a linker, loader, ABI, or
+# runtime claim.
 OBJECT_CHECK_VOCABULARY = frozenset(
     {
         "object_call_edge_correspondence",
+        "object_link_correspondence",
         "object_symbol_correspondence",
         "object_translation_correspondence",
     }

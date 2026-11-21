@@ -9,10 +9,12 @@ lineage compare-and-set.
 
 Core reproduces the pinned artifacts, then checks the object's non-local
 defined text symbols against externally visible IR function definitions
-and checks direct call edges. This is bounded symbol-surface and direct
-call-edge correspondence only: it makes no instruction-selection,
-register-allocation, relocation-arithmetic, linker, ABI, runtime or
-historical-execution claim. `object_translation_correspondence` stays
+and checks direct call edges plus bounded object-to-executable function
+bytes and resolved PC-relative call targets. Object checks are discharged
+only when a matching descriptor lists them; an older Core may exit 0
+without listing `object_link_correspondence`. This makes no
+instruction-selection, register-allocation, linker-semantics, ABI, runtime
+or historical-execution claim. `object_translation_correspondence` stays
 unperformed. This recheck report is never a recovery performer.
 """
 
@@ -56,14 +58,12 @@ CHECK_VOCABULARY = frozenset(
 
 
 class DischargedChecks:
-    """Semantic checks a successful object recheck discharges."""
+    """Checks established by a successful artifact reproduction."""
 
     RECHECKED = frozenset(
         {
             "artifact_semantics",
             "claim_truth",
-            "object_symbol_correspondence",
-            "object_call_edge_correspondence",
         }
     )
 
@@ -296,24 +296,34 @@ def run_object_recheck(args: argparse.Namespace) -> dict:
     elif exit_code in OBJECT_RECHECK_OUTCOMES:
         report["object_recheck"] = OBJECT_RECHECK_OUTCOMES[exit_code]
         if report["object_recheck"] == "corresponds":
-            report["discharged_checks"] = sorted(DischargedChecks.RECHECKED)
-            report["checks_not_performed"] = sorted(
-                (CHECK_VOCABULARY - DischargedChecks.RECHECKED)
-                | (OBJECT_CHECK_VOCABULARY - DischargedChecks.RECHECKED)
-            )
             try:
                 descriptor = json.loads(dispatch.run.stdout)
             except (ValueError, UnicodeDecodeError, RecursionError):
                 descriptor = None
-            if (
+            valid_descriptor = (
                 isinstance(descriptor, dict)
                 and descriptor.get("schema_version")
                 == OBJECT_SYMBOL_CORRESPONDENCE_SCHEMA
                 and descriptor.get("build_id") == args.expected_build_id
-            ):
+            )
+            discharged = set(DischargedChecks.RECHECKED)
+            if valid_descriptor:
                 report["object_correspondence_schema"] = (
                     OBJECT_SYMBOL_CORRESPONDENCE_SCHEMA
                 )
+                checks_performed = descriptor.get("checks_performed")
+                if isinstance(checks_performed, list):
+                    discharged.update(
+                        check
+                        for check in checks_performed
+                        if isinstance(check, str)
+                        and check in OBJECT_CHECK_VOCABULARY
+                        and check != "object_translation_correspondence"
+                    )
+            report["discharged_checks"] = sorted(discharged)
+            report["checks_not_performed"] = sorted(
+                (CHECK_VOCABULARY | OBJECT_CHECK_VOCABULARY) - discharged
+            )
     return report
 
 

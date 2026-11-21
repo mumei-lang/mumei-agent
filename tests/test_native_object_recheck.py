@@ -33,6 +33,7 @@ DESCRIPTOR = {
         "toolchain_object_executable_reproduction",
         "object_symbol_correspondence",
         "object_call_edge_correspondence",
+        "object_link_correspondence",
     ],
     "checks_not_performed": [
         "optimizer_semantics",
@@ -54,14 +55,11 @@ MULTIFILE_RECORD = {
 
 SOURCE = "atom main() -> i64 requires: true; ensures: result == 0; body: { 0 };\n"
 
-EXPECTED_DISCHARGED = frozenset(
-    {
-        "artifact_semantics",
-        "claim_truth",
-        "object_symbol_correspondence",
-        "object_call_edge_correspondence",
-    }
-)
+BASE_DISCHARGED = frozenset({"artifact_semantics", "claim_truth"})
+BOUNDED_OBJECT_CHECKS = OBJECT_CHECK_VOCABULARY - {
+    "object_translation_correspondence"
+}
+EXPECTED_DISCHARGED = BASE_DISCHARGED | BOUNDED_OBJECT_CHECKS
 
 
 def _write_core(tmp_path: Path, recheck_exit: int = 0, stdout=DESCRIPTOR) -> Path:
@@ -130,13 +128,20 @@ def _args(core: Path, bundle: Path, source: Path, extra=()):
     ]
 
 
-def _assert_check_partition(report, expected_build_id=BUILD_ID):
+def _assert_check_partition(
+    report,
+    expected_build_id=BUILD_ID,
+    expected_discharged=None,
+):
     assert report["expected_build_id"] == expected_build_id
     discharged = set(report.get("discharged_checks", []))
-    if report.get("object_recheck") == "corresponds":
-        assert discharged == EXPECTED_DISCHARGED
-    else:
-        assert discharged == set()
+    if expected_discharged is None:
+        expected_discharged = (
+            EXPECTED_DISCHARGED
+            if report.get("object_recheck") == "corresponds"
+            else frozenset()
+        )
+    assert discharged == set(expected_discharged)
     assert report["checks_not_performed"] == sorted(
         (CHECK_VOCABULARY | OBJECT_CHECK_VOCABULARY) - discharged
     )
@@ -159,13 +164,69 @@ def test_corresponding_run_selects_descriptor_and_bounded_checks(
     assert report["sequence"]["selected_result"] is not None
     assert report["discharged_checks"] == sorted(EXPECTED_DISCHARGED)
     assert report["checks_not_performed"] == sorted(
-        (CHECK_VOCABULARY - {"artifact_semantics", "claim_truth"})
-        | {"object_translation_correspondence"}
+        (CHECK_VOCABULARY | OBJECT_CHECK_VOCABULARY) - EXPECTED_DISCHARGED
     )
     assert "object_translation_correspondence" not in report["discharged_checks"]
     assert "historical_execution" not in report["discharged_checks"]
     assert "defined_functions" not in report
     _assert_check_partition(report)
+
+
+@pytest.mark.parametrize(
+    ("checks_performed", "expected_object_checks"),
+    [
+        (
+            [
+                "toolchain_object_executable_reproduction",
+                "object_symbol_correspondence",
+                "object_call_edge_correspondence",
+            ],
+            {
+                "object_symbol_correspondence",
+                "object_call_edge_correspondence",
+            },
+        ),
+        (
+            [
+                "object_symbol_correspondence",
+                "object_call_edge_correspondence",
+                "object_link_correspondence",
+                "object_translation_correspondence",
+            ],
+            BOUNDED_OBJECT_CHECKS,
+        ),
+        (
+            [
+                "object_symbol_correspondence",
+                "object_link_correspondence",
+                "unknown_check",
+                17,
+                None,
+            ],
+            {"object_symbol_correspondence", "object_link_correspondence"},
+        ),
+        ({"not": "a list"}, set()),
+        (None, set()),
+    ],
+)
+def test_descriptor_checks_performed_control_object_discharge(
+    tmp_path, capsys, checks_performed, expected_object_checks
+):
+    descriptor = {**DESCRIPTOR, "checks_performed": checks_performed}
+    core = _write_core(tmp_path, stdout=descriptor)
+    bundle = _write_bundle(tmp_path)
+    source = _write_source(tmp_path)
+    code, out, _ = _run(capsys, _args(core, bundle, source))
+    assert code == 0
+    report = json.loads(out)
+    assert report["object_recheck"] == "corresponds"
+    assert report["object_correspondence_schema"] == (
+        OBJECT_SYMBOL_CORRESPONDENCE_SCHEMA
+    )
+    expected_discharged = BASE_DISCHARGED | expected_object_checks
+    assert report["discharged_checks"] == sorted(expected_discharged)
+    assert "object_translation_correspondence" not in report["discharged_checks"]
+    _assert_check_partition(report, expected_discharged=expected_discharged)
 
 
 @pytest.mark.parametrize(
@@ -191,8 +252,10 @@ def test_correspondence_schema_requires_matching_object_descriptor(
     report = json.loads(out)
     assert report["object_recheck"] == "corresponds"
     assert "object_correspondence_schema" not in report
-    assert report["discharged_checks"] == sorted(EXPECTED_DISCHARGED)
-    _assert_check_partition(report)
+    assert report["discharged_checks"] == sorted(BASE_DISCHARGED)
+    _assert_check_partition(
+        report, expected_discharged=BASE_DISCHARGED
+    )
 
 
 def test_inconclusive_recheck_records_outcome(tmp_path, capsys):
@@ -419,7 +482,7 @@ def _build_real_bundle(tmp_path: Path, real_core: str) -> tuple[Path, Path]:
 
 
 @pytest.mark.integration
-def test_real_core_rechecks_object_symbol_and_call_edge_correspondence(
+def test_real_core_rechecks_object_symbol_call_edge_and_link_correspondence(
     tmp_path, capsys, real_core
 ):
     bundle, source = _build_real_bundle(tmp_path, real_core)
@@ -435,9 +498,9 @@ def test_real_core_rechecks_object_symbol_and_call_edge_correspondence(
         OBJECT_SYMBOL_CORRESPONDENCE_SCHEMA
     )
     assert report["discharged_checks"] == sorted(EXPECTED_DISCHARGED)
+    assert "object_link_correspondence" in report["discharged_checks"]
     assert report["checks_not_performed"] == sorted(
-        (CHECK_VOCABULARY - {"artifact_semantics", "claim_truth"})
-        | {"object_translation_correspondence"}
+        (CHECK_VOCABULARY | OBJECT_CHECK_VOCABULARY) - EXPECTED_DISCHARGED
     )
     _assert_check_partition(report, build_id)
 
