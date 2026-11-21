@@ -20775,6 +20775,129 @@ def test_imported_call_received_queue_arg_matches_direct_queue_arg(
     assert 0 in received.return_dependencies
 
 
+def _chan_chan_imported_queue_library():
+    return (
+        "func G(cc chan chan int64, v int64) {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tc <- v\n"
+        "\tcc <- c\n"
+        "}\n"
+        "func GS(s []chan chan int64, v int64) {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tc <- v\n"
+        "\ts[0] <- c\n"
+        "}\n"
+        "func J(cc chan chan int64, c chan int64) {\n"
+        "\tcc <- c\n"
+        "}\n"
+        "func P(c chan int64, v int64) {}\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("setup", "call", "read"),
+    (
+        (
+            "s := []chan chan int64{q}\n",
+            "lib.G(s[0], x)",
+            "<-(<-s[0])",
+        ),
+        (
+            "s := []chan chan int64{q}\n",
+            "lib.G(s[0], x)",
+            "<-(<-q)",
+        ),
+        (
+            "s := [1]chan chan int64{q}\n",
+            "lib.G(s[0], x)",
+            "<-(<-s[0])",
+        ),
+        (
+            "s := map[int]chan chan int64{0: q}\n",
+            "lib.G(s[0], x)",
+            "<-(<-s[0])",
+        ),
+        (
+            "s := []chan chan int64{q}\n",
+            "lib.GS(s, x)",
+            "<-(<-s[0])",
+        ),
+        (
+            "s := []chan chan int64{q}\n",
+            "go lib.G(s[0], x)",
+            "<-(<-s[0])",
+        ),
+    ),
+)
+def test_imported_chan_chan_queue_calls_broadcast_result_deps(
+    go_types_helper, setup, call, read
+):
+    result = _imported_chan_chan_summary(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "\tq := make(chan chan int64, 1)\n"
+        + "\t" + setup
+        + f"\t{call}\n"
+        + f"\treturn {read}\n"
+        + "}\n",
+        _chan_chan_imported_queue_library(),
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_imported_chan_chan_call_promotes_co_passed_channel(
+    go_types_helper,
+):
+    result = _imported_chan_chan_summary(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "\tq := make(chan chan int64, 1)\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tlib.J(q, c)\n"
+        "\tc <- x\n"
+        "\treturn <-(<-q)\n"
+        "}\n",
+        _chan_chan_imported_queue_library(),
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_imported_external_chan_chan_call_promotes_co_passed_channel(
+    go_types_helper,
+):
+    result = _imported_chan_chan_summary(
+        go_types_helper,
+        "func F(p chan chan int64, x int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tlib.J(p, c)\n"
+        "\tc <- x\n"
+        "\treturn <-(<-p)\n"
+        "}\n",
+        _chan_chan_imported_queue_library(),
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_imported_call_without_chan_chan_argument_keeps_local_channel(
+    go_types_helper,
+):
+    result = _imported_chan_chan_summary(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tlib.P(c, 0)\n"
+        "\tc <- x\n"
+        "\treturn <-c\n"
+        "}\n",
+        _chan_chan_imported_queue_library(),
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+
 def test_local_chan_chan_non_escape_remains_local(go_types_helper):
     result = named(
         *unit(

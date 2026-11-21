@@ -25976,6 +25976,48 @@ member, or one explicit dereference of one (`(*t).F` — the same
         # conservatively depends on every argument (its own old deps are
         # already inside `result` because `&x` contributed them).
         self._store_call_writes(arguments, result, locals_, params)
+        chan_chan_argument = bool(local_chan_chan_roots)
+        if not chan_chan_argument:
+            for arg in arguments:
+                inner = arg
+                while (
+                    inner is not None
+                    and inner.type == "parenthesized_expression"
+                ):
+                    inner = next(
+                        (
+                            child
+                            for child in inner.named_children
+                            if child.type != "comment"
+                        ),
+                        None,
+                    )
+                if inner is None or inner.type != "identifier":
+                    continue
+                ref = self.references.get(self.node_key(inner))
+                binding = (
+                    self.bindings.get(ref.binding_id)
+                    if ref is not None and ref.binding_id
+                    else None
+                )
+                fact = binding.type if binding is not None else None
+                if (
+                    self._chan_chan_fact(fact)
+                    or self._chan_chan_elem_collection(fact)
+                ):
+                    chan_chan_argument = True
+                    break
+        if (
+            chan_chan_argument
+            and not call.method
+            and not call.method_expr
+        ):
+            # An opaque queue call may send any argument into the queue
+            # and retain co-passed channels for later sends.
+            self.indirect_writes |= result
+            self._promote_chan_arg_roots(
+                arguments, "", locals_, params
+            )
         # The callee's declared named/alias signature types are pinned
         # the same way a member read's declared type is: redeclaring one
         # flags this summary even when the callee's own identity is
