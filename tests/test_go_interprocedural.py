@@ -11256,6 +11256,121 @@ def test_bound_pointer_method_store_through_named_struct_value_field(
 
 
 @pytest.mark.parametrize(
+    "method",
+    [
+        "func (s *S3) M() { s.B = 1 }\n",
+        "func (s S3) M() { s.B = 1 }\n",
+    ],
+)
+def test_bound_pointer_named_struct_intermediate_method_call_stays_closed(
+    go_types_helper, method
+):
+    files = {
+        "a.go": "package p\n"
+        "type S3 struct{ B int64 }\ntype S struct{ A S3 }\n"
+        + method
+        + "func F(t *S) int64 { t.A.M(); return t.A.B }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+    assert result.gaps[0].reason == "non_parameter_reference"
+
+
+def test_imported_call_write_through_named_struct_intermediate_is_admitted(
+    go_types_helper,
+):
+    lib = {
+        "lib": {
+            "s.go": "package lib\n"
+            "type S3 struct{ B int64 }\ntype S struct{ A S3 }\n"
+            "func G(t *S, x int64) { t.A.B = x }\n"
+        }
+    }
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t *lib.S, x int64) int64 {\n"
+        "\tlib.G(t, x)\n"
+        "\treturn t.A.B\n"
+        "}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+
+
+def test_local_call_write_through_named_struct_intermediate_is_admitted(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "type S3 struct{ B int64 }\ntype S struct{ A S3 }\n"
+        "func G(t *S, x int64) { t.A.B = x }\n"
+        "func F(t *S, x int64) int64 {\n"
+        "\tG(t, x)\n"
+        "\treturn t.A.B\n"
+        "}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+
+
+def test_struct_valued_initializer_in_struct_literal_address_stays_closed(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "type S3 struct{ B int64 }\ntype S struct{ A S3 }\n"
+        "func F(x int64) int64 {\n"
+        "\tt := &S{A: S3{B: x}}\n"
+        "\treturn t.A.B\n"
+        "}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+    assert result.gaps[0].reason == "unsupported_operator"
+
+
+def test_empty_struct_literal_address_supports_nested_field_write(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "type S3 struct{ B int64 }\ntype S struct{ A S3 }\n"
+        "func F(x int64) int64 {\n"
+        "\tt := &S{}\n"
+        "\tt.A.B = x\n"
+        "\treturn t.A.B\n"
+        "}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+@pytest.mark.parametrize(
     ("types", "field_expr"),
     [
         ("type S struct{ A struct{ B int64 } }\n", "t.A.B"),
