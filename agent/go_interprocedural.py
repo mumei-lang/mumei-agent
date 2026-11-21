@@ -5770,11 +5770,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 and local_chan_chan_root is not None
                 and self._scalar_chan_binding(binding.id)
             ):
+                old_root = self._chan_root(binding.id)
                 pending.append(
                     (
                         "local_chan_group",
                         binding,
                         local_chan_chan_root,
+                        old_root
+                        if (conditional or self._may_skip > 0)
+                        and old_root != binding.id
+                        else None,
                     )
                 )
                 continue
@@ -5845,8 +5850,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         esc_base | recv_deps, conditional,
                     )
             elif entry[0] == "local_chan_group":
-                _, binding, chan_group = entry
-                self.chan_aliases.pop(binding.id, None)
+                _, binding, chan_group, old_root = entry
+                if old_root is not None:
+                    self._chan_group_join(old_root, chan_group)
+                    self.chan_aliases[binding.id] = old_root
+                else:
+                    self.chan_aliases.pop(binding.id, None)
                 self.external_chan_locals.discard(binding.id)
                 self._store(
                     locals_, params, binding.id, recv_deps, conditional
@@ -12618,9 +12627,24 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             self._local_chan_chan_receive(rhs_node)
                         )
                         if local_chan_chan_root is not None:
-                            self.chan_aliases.pop(
-                                ref.binding_id, None
+                            old_root = self._chan_root(
+                                ref.binding_id
                             )
+                            preserve_old_root = (
+                                (conditional or self._may_skip > 0)
+                                and old_root != ref.binding_id
+                            )
+                            if preserve_old_root:
+                                self._chan_group_join(
+                                    old_root, local_chan_chan_root
+                                )
+                                self.chan_aliases[
+                                    ref.binding_id
+                                ] = old_root
+                            else:
+                                self.chan_aliases.pop(
+                                    ref.binding_id, None
+                                )
                             self.external_chan_locals.discard(
                                 ref.binding_id
                             )
@@ -15345,6 +15369,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 # scalar-`chan` name — detach its old
                                 # channel alias before joining the
                                 # local or external queue's group.
+                                old_root = self._chan_root(
+                                    ref.binding_id
+                                )
+                                if (
+                                    local_chan_chan_range is not None
+                                    and old_root != ref.binding_id
+                                ):
+                                    self._chan_group_join(
+                                        old_root,
+                                        local_chan_chan_range,
+                                    )
                                 self.chan_aliases.pop(ref.binding_id, None)
                                 if local_chan_chan_range is not None:
                                     self._chan_group_join(
@@ -16368,7 +16403,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         self._select_receive_store(
                             lefts, recv, recv_deps, clause, fn,
                             params, branch, transfers, count,
-                            conditional,
+                            conditional or len(clauses) > 1,
                         )
                     body = next(
                         (

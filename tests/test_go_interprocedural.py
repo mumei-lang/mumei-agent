@@ -15451,6 +15451,105 @@ def test_local_chan_chan_group_keeps_imported_member_external(
             "none_in_supported_fragment",
         ),
         (
+            "select with default preserves the skipped receive alias",
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\te := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- e\n"
+            "\td := c\n"
+            "\tselect {\n"
+            "\tcase d = <-cc:\n"
+            "\tdefault:\n"
+            "\t}\n"
+            "\td <- x\n"
+            "\treturn <-c\n"
+            "}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "if receive reassignment preserves the skipped alias",
+            "func F(x int64, b bool) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\te := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- e\n"
+            "\td := c\n"
+            "\tif b {\n"
+            "\t\td = <-cc\n"
+            "\t}\n"
+            "\td <- x\n"
+            "\treturn <-c\n"
+            "}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "comma-ok receive reassignment preserves the skipped alias",
+            "func F(x int64, b bool) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\te := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- e\n"
+            "\td := c\n"
+            "\tif b {\n"
+            "\t\td, _ = <-cc\n"
+            "\t}\n"
+            "\td <- x\n"
+            "\treturn <-c\n"
+            "}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "closed empty chan chan range preserves the old alias",
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64)\n"
+            "\tclose(cc)\n"
+            "\td := c\n"
+            "\tfor d = range cc {\n"
+            "\t}\n"
+            "\td <- x\n"
+            "\treturn <-c\n"
+            "}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+        (
+            "single-case select receive drops the old alias",
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\te := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- e\n"
+            "\td := c\n"
+            "\tselect {\n"
+            "\tcase d = <-cc:\n"
+            "\t}\n"
+            "\td <- x\n"
+            "\treturn <-c\n"
+            "}\n",
+            frozenset(),
+            "none_in_supported_fragment",
+        ),
+        (
+            "unconditional receive reassignment drops the old alias",
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\te := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- e\n"
+            "\td := c\n"
+            "\td = <-cc\n"
+            "\td <- x\n"
+            "\treturn <-c\n"
+            "}\n",
+            frozenset(),
+            "none_in_supported_fragment",
+        ),
+        (
             "multi-value var receive joins the local chan chan group",
             "func F(x int64) int64 {\n"
             "\tc := make(chan int64, 1)\n"
