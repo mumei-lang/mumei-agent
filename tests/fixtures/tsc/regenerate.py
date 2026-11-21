@@ -17,6 +17,7 @@ FIXTURE_NAMES = {
     "function_param_call": ".ts",
     "import_source": ".ts",
     "intrinsic_globals": ".ts",
+    "mapped_property": ".ts",
     "state_write_operators": ".ts",
     "tsx_fragment": ".tsx",
     "type_error": ".ts",

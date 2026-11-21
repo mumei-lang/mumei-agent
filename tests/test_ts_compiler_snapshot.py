@@ -28,6 +28,7 @@ FIXTURE_NAMES = (
     "export_local",
     "import_source",
     "intrinsic_globals",
+    "mapped_property",
     "state_write_operators",
     "tsx_fragment",
     "type_error",
@@ -246,6 +247,7 @@ def test_duplicate_lexical_references_must_all_match_a_compiler_declaration():
     ("name", "source"),
     [
         ("import_source", _source("import_source")),
+        ("mapped_property", _source("mapped_property")),
         ("type_error", _source("type_error")),
     ],
 )

@@ -14,6 +14,7 @@ const COMPILER_OPTIONS = Object.freeze({
   noResolve: true,
   jsx: "preserve",
 });
+const INTRINSIC_GLOBALS = new Set(["undefined", "globalThis", "arguments"]);
 
 function typescriptOptions() {
   return {
@@ -255,12 +256,27 @@ function createEnvelope(source, extension) {
       } else {
         const declarations = symbol.declarations ?? [];
         if (declarations.length === 0) {
-          references.push({
-            span: span(node.getStart(sourceFile), node.getEnd()),
-            name: node.text,
-            declarations: [],
-            library: true,
-          });
+          const isBindingElementPropertyName =
+            ts.isBindingElement(node.parent) &&
+            node.parent.propertyName === node;
+          if (
+            INTRINSIC_GLOBALS.has(node.text) &&
+            !isBindingElementPropertyName
+          ) {
+            references.push({
+              span: span(node.getStart(sourceFile), node.getEnd()),
+              name: node.text,
+              declarations: [],
+              library: true,
+            });
+          } else {
+            references.push({
+              span: span(node.getStart(sourceFile), node.getEnd()),
+              name: node.text,
+              declarations: null,
+              library: false,
+            });
+          }
         } else {
           const inSource = declarations.filter(
             (declaration) =>
