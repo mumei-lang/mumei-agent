@@ -17482,6 +17482,10 @@ def test_chan_chan_range_assignment_preserves_external_queue_state(
         key_deps=frozenset(),
         chan_group=None,
         external_chan_chan_origins=None,
+        *,
+        fn,
+        transfers,
+        count,
     ):
         q = next((name for name in names if name.text == b"q"), None)
         ref = (
@@ -17516,6 +17520,9 @@ def test_chan_chan_range_assignment_preserves_external_queue_state(
             key_deps,
             chan_group,
             external_chan_chan_origins,
+            fn=fn,
+            transfers=transfers,
+            count=count,
         )
         if preserve_chan_chan_state:
             assert old_deps <= scope.get(binding_id, frozenset())
@@ -17648,6 +17655,68 @@ def test_chan_chan_local_range_assignment_keeps_externality(
         assert ranged.available, ranged.gaps
         assert baseline.effects == "unknown"
         assert ranged.effects == baseline.effects
+
+
+def test_chan_chan_package_range_assignment_matches_package_store(
+    go_types_helper,
+):
+    files = {
+        "a.go": (
+            "package p\n"
+            "var GCC chan chan int64\n"
+            "func F_package_store() {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tq := make(chan chan int64, 1)\n"
+            "\tq <- c\n"
+            "\ts := []chan chan int64{q}\n"
+            "\tGCC = s[0]\n"
+            "}\n"
+            "func F_package_range() {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tq := make(chan chan int64, 1)\n"
+            "\tq <- c\n"
+            "\ts := []chan chan int64{q}\n"
+            "\tfor _, GCC = range s {}\n"
+            "}\n"
+            "func F_package_store_read(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tc <- x\n"
+            "\tq := make(chan chan int64, 1)\n"
+            "\tq <- c\n"
+            "\ts := []chan chan int64{q}\n"
+            "\tGCC = s[0]\n"
+            "\treturn <-(<-GCC)\n"
+            "}\n"
+            "func F_package_range_read(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tc <- x\n"
+            "\tq := make(chan chan int64, 1)\n"
+            "\tq <- c\n"
+            "\ts := []chan chan int64{q}\n"
+            "\tfor _, GCC = range s {}\n"
+            "\treturn <-(<-GCC)\n"
+            "}\n"
+        )
+    }
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    store = named_package(files, snapshot, summaries, "F_package_store")
+    ranged = named_package(files, snapshot, summaries, "F_package_range")
+    assert store.available, store.gaps
+    assert ranged.available, ranged.gaps
+    assert store.effects == "unknown"
+    assert ranged.effects == store.effects
+    store_read = named_package(
+        files, snapshot, summaries, "F_package_store_read"
+    )
+    range_read = named_package(
+        files, snapshot, summaries, "F_package_range_read"
+    )
+    assert store_read.available, store_read.gaps
+    assert range_read.available, range_read.gaps
+    assert store_read.effects == "unknown"
+    assert range_read.effects == store_read.effects
+    assert store_read.return_dependencies == frozenset({0})
+    assert range_read.return_dependencies == store_read.return_dependencies
 
 
 @pytest.mark.parametrize("copy_kind", ["short_declaration", "assignment"])

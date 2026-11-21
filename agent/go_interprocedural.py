@@ -5406,6 +5406,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
         key_deps: frozenset[int] = frozenset(),
         chan_group: str | None = None,
         external_chan_chan_origins: frozenset[int] | None = None,
+        *,
+        fn: Function,
+        transfers: list[CallTransfer],
+        count: list[int],
     ) -> None:
         """Bind `for` range names to dep-free (external-state) values.
 
@@ -5528,6 +5532,33 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     and self._chan_chan_fact(rb.type)
                 ):
                     root_id = self._chan_root(ref.binding_id)
+                    if package_channel:
+                        package_write = self._package_var_write(name)
+                        if package_write is None:
+                            raise _Unsupported(
+                                "binding_unavailable", _span(name)
+                            )
+                        package_binding, extras, _ = package_write
+                        self._record_package_write(
+                            name,
+                            package_binding,
+                            extras,
+                            fn,
+                            params,
+                            scope,
+                            transfers,
+                            count,
+                        )
+                        stored_deps = (
+                            value_deps
+                            | self._chan_group_read_deps(
+                                chan_group, scope
+                            )
+                        )
+                        self._promote_local_chan_chan_group(
+                            chan_group
+                        )
+                        self.indirect_writes |= stored_deps
                     external_queue = (
                         ref.binding_id in params
                         or ref.binding_id in self.external_chan_locals
@@ -16378,6 +16409,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 else None
                             )
                         ),
+                        fn=fn,
+                        transfers=transfers,
+                        count=count,
                     )
                     if (
                         (
