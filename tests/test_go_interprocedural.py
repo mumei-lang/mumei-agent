@@ -16385,6 +16385,44 @@ def test_chan_chan_package_var_send_carries_arg_deps(go_types_helper):
     assert result.effects == "unknown"
 
 
+@pytest.mark.parametrize("builtin", ["len", "cap"])
+def test_chan_chan_len_cap_conversion_argument_stays_supported(
+    go_types_helper, builtin
+):
+    files = {
+        "a.go": "package p\n"
+        "func G(n int64) int64 { return n }\n"
+        "func F() int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        f"\treturn G(int64({builtin}(cc)))\n"
+        "}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset()
+
+
+def test_local_chan_chan_direct_conversion_argument_stays_closed(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "type CC chan chan int64\n"
+        "func G(cc CC) {}\n"
+        "func F() {\n"
+        "\tcc := make(chan chan int64, 1)\n\tG(CC(cc))\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+    assert result.gaps and result.gaps[0].reason == "unresolved_or_opaque_call"
+
+
 def test_chan_chan_call_result_receive_carries_queue_deps(go_types_helper):
     # `cc := G(x, p)` — the received channel `c := <-cc` pulls from
     # the outer queue, so `c` carries the queue's own deps

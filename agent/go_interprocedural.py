@@ -6414,12 +6414,21 @@ member, or one explicit dereference of one (`(*t).F` — the same
             )
             if nested_call is None or nested_call.kind != "conversion":
                 continue
-            descendants = list(_children(argument))
-            while descendants:
-                nested_argument = descendants.pop()
-                if self._local_chan_chan_id(nested_argument) is not None:
-                    return None
-                descendants.extend(_children(nested_argument))
+            operand = argument.child_by_field_name("operand")
+            while (
+                operand is not None
+                and operand.type == "parenthesized_expression"
+            ):
+                operand = next(
+                    (
+                        child
+                        for child in operand.named_children
+                        if child.type != "comment"
+                    ),
+                    None,
+                )
+            if self._local_chan_chan_id(operand) is not None:
+                return None
         roots = tuple(roots)
         if not roots:
             return ()
