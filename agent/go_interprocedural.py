@@ -4545,6 +4545,41 @@ member, or one explicit dereference of one (`(*t).F` — the same
         # statement level and lands here as the same read, and
         # imported-state writes (`lib.VA[i] = v`) match the
         # imported-var-write rule.
+        ext_elem = self._external_chan_elem_index(node, params)
+        if ext_elem is not None:
+            # `GS[i]` / `lib.GS[i]` naming an element queue of an
+            # external chan-element container as a value (`d :=
+            # GS[i]`, `G(GS[i])`): the queue has no identity of its
+            # own, so the read records on the container's identity
+            # like `<-GS[i]` does — a callee that extracts one makes
+            # its caller broadcast through `indirect_writes` — and
+            # the value surfaces what the queue may hold
+            # (`indirect_writes`) plus the index's own deps, like a
+            # bare external `GC` read.
+            target_id, _fact, index_node = ext_elem
+            transfers.append(
+                CallTransfer(
+                    FileSpan(
+                        self.current_file, node.start_byte, node.end_byte
+                    ),
+                    target_id,
+                    (),
+                    frozenset(),
+                    imported=True,
+                )
+            )
+            base_deps = (
+                self.expression(
+                    index_node, fn, params, locals_, transfers, count,
+                    depth,
+                )
+                if (
+                    index_node is not None
+                    and index_node.type not in _INDEX_LITERALS
+                )
+                else frozenset()
+            )
+            return self.indirect_writes | base_deps
         operand = node.child_by_field_name("operand")
         index = node.child_by_field_name("index")
         # `lib.VA[i][j]` — a nested index chain: the outer index reads
@@ -9398,6 +9433,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                         rights[i]
                                     )
                                     is not None
+                                    # `d := GS[i]` — an element queue
+                                    # of an external chan-element
+                                    # container binds an external name.
+                                    or self._external_chan_elem_index(
+                                        rights[i], params
+                                    )
+                                    is not None
                                 )
                             )
                             # A multi-valued call's slot has no per-result
@@ -10191,6 +10233,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                     value_nodes[i]
                                 )
                                 is None
+                                and self._external_chan_elem_index(
+                                    value_nodes[i], params
+                                )
+                                is None
                                 and not chan_chan_declared
                             )
                         )
@@ -10274,6 +10320,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             self._chan_group_join(
                                 binding.id, elem_root[0]
                             )
+                        elif (
+                            self._external_chan_elem_index(
+                                value_nodes[i], params
+                            )
+                            is not None
+                        ):
+                            # `var d = GS[i]` — an external
+                            # container's element queue binds an
+                            # external name like `d := GS[i]`.
+                            self.chan_aliases.pop(binding.id, None)
+                            self.external_chan_locals.add(binding.id)
                         elif self._chan_result_call(value_nodes[i]) is not None:
                             passthrough = self._chan_result_passthrough(
                                 value_nodes[i], locals_, params
@@ -11932,6 +11989,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         len(rights) == 1
                         and len(lefts) > 1
                         and self._chan_result_call_at(rights[0], i)
+                        is not None
+                    ) or (
+                        # `d = GS[i]` reseats the name onto an
+                        # external container's element queue — the
+                        # same external hand-off `ch = g()` performs.
+                        len(lefts) == len(rights)
+                        and self._external_chan_elem_index(
+                            rights[i], params
+                        )
                         is not None
                     )
                     chan_chan_result = self._chan_chan_fact(
@@ -22096,6 +22162,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 locals_, params, holder_id, stored,
                                 True,
                             )
+                        self.indirect_writes |= stored
+                    elif (
+                        self._external_chan_elem_index(arg_node, params)
+                        is not None
+                    ):
+                        # `G(GS[i])` — an external container's
+                        # element queue: the callee's sends land in
+                        # the shared queue, broadcast like
+                        # `GS[i] <- x`.
                         self.indirect_writes |= stored
             elif self._external_chan_operand(arg_node, params) is not None:
                 # `G(lib.GC)` — a chan operand in external state

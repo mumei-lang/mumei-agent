@@ -4192,10 +4192,19 @@ CallTransfer on the *container's* identity exactly like a
 broadcast into `indirect_writes`, the read returns
 `indirect_writes` plus the index's own deps, and select
 alternatives resolve through the same send/receive operand
-paths. The honest closures mirror the bound case — `[][]chan`
-nests, `[]chan chan` non-scalar elements, and a `d := GS[i]`
-extraction all stay closed, and a `map[string]chan` variable
-key stays unreachable (a `string` value is never producible).
+paths. Extracting `d := GS[i]` (or `var d = GS[i]` /
+`var d chan T = GS[i]`) binds `d` as an external name: sends
+through it broadcast into `indirect_writes`, while reads union
+that set with the index's dependencies. The extraction itself
+records a transfer on the container identity, so a callee's
+extraction propagates to callers just like `ch = g()` does.
+Plain reseats (`d = GS[i]`) and conditional reseats are admitted
+through the same external-name path. A reseated group member
+keeps its old group membership as a sound over-approximation.
+The honest closures mirror the bound case — `[][]chan` nests,
+`[]chan chan` non-scalar elements, comma-ok `d, ok := GM[k]`,
+and a `map[string]chan` variable key stay closed or unreachable
+(a `string` value is never producible).
 
 ### C07 scalar-element *nested* local containers
 

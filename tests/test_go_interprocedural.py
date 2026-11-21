@@ -20786,13 +20786,14 @@ def test_chan_elem_external(go_types_helper, declarations, expected):
 def test_chan_elem_external_pins_container_type(go_types_helper):
     # The operand's WHOLE container fact pins — a named container
     # type's redeclare churns its identity, so an unchanged-looking
-    # `GS[i]` op must flag the summary stale.
+    # extraction `GS[i]` must flag the summary stale.
     source, snapshot, summaries = unit(
         go_types_helper,
         "type CS []chan int64\n"
         "var GS CS\n"
         "func F(x int64) int64 {\n"
-        "\tGS[0] <- x\n"
+        "\td := GS[0]\n"
+        "\td <- x\n"
         "\treturn <-GS[0]\n}\n",
     )
     result = named(source, snapshot, summaries)
@@ -20830,6 +20831,266 @@ def test_chan_elem_external_close(go_types_helper):
 
 
 @pytest.mark.parametrize(
+    ("declarations", "expected"),
+    [
+        # An extracted external queue reads prior container sends.
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\tGS[0] <- x\n"
+            "\td := GS[0]\n"
+            "\treturn <-d\n}\n",
+            frozenset({0}),
+        ),
+        # Sends through the extracted name broadcast to the container.
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\td := GS[0]\n"
+            "\td <- x\n"
+            "\treturn <-GS[0]\n}\n",
+            frozenset({0}),
+        ),
+        # Different element indices are conflated in external state.
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\td := GS[0]\n"
+            "\td <- x\n"
+            "\treturn <-GS[1]\n}\n",
+            frozenset({0}),
+        ),
+        # The map key's dependencies join the extracted queue read.
+        (
+            "var GM map[int64]chan int64\n"
+            "func F(k int64) int64 {\n"
+            "\td := GM[k]\n"
+            "\treturn <-d\n}\n",
+            frozenset({0}),
+        ),
+        # Package-level arrays support extraction too.
+        (
+            "var GA [4]chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\tGA[1] <- x\n"
+            "\td := GA[1]\n"
+            "\treturn <-d\n}\n",
+            frozenset({0}),
+        ),
+        # Both var declaration forms bind an external channel name.
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\tGS[0] <- x\n"
+            "\tvar d = GS[0]\n"
+            "\treturn <-d\n}\n",
+            frozenset({0}),
+        ),
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\tGS[0] <- x\n"
+            "\tvar d chan int64 = GS[0]\n"
+            "\treturn <-d\n}\n",
+            frozenset({0}),
+        ),
+        # Reseating a local channel onto an external element is admitted.
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\td := make(chan int64, 1)\n"
+            "\td = GS[0]\n"
+            "\tGS[1] <- x\n"
+            "\treturn <-d\n}\n",
+            frozenset({0}),
+        ),
+        # A conditional reseat remains visible through the old alias.
+        (
+            "var GS []chan int64\n"
+            "func F(x int64, f bool) int64 {\n"
+            "\td := make(chan int64, 1)\n"
+            "\te := d\n"
+            "\tif f { d = GS[0] }\n"
+            "\tGS[1] <- x\n"
+            "\treturn <-e\n}\n",
+            frozenset({0}),
+        ),
+        # Range over the bound name sees sends through the container.
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\tGS[0] <- x\n"
+            "\td := GS[0]\n"
+            "\tvar r int64\n"
+            "\tfor v := range d {\n"
+            "\t\tr = v\n"
+            "\t\tbreak\n"
+            "\t}\n"
+            "\treturn r\n}\n",
+            frozenset({0}),
+        ),
+        # A close through an extracted name is a caller-visible effect.
+        (
+            "var GS []chan int64\n"
+            "func F() {\n"
+            "\td := GS[0]\n"
+            "\tclose(d)\n}\n",
+            frozenset(),
+        ),
+        # Select receives use the extracted channel's external queue.
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\tGS[0] <- x\n"
+            "\td := GS[0]\n"
+            "\tselect {\n"
+            "\tcase v := <-d:\n"
+            "\t\treturn v\n"
+            "\tdefault:\n"
+            "\t\treturn 0\n"
+            "\t}\n}\n",
+            frozenset({0}),
+        ),
+        # Each name in a multi-short-declaration extraction is external.
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\td, e := GS[0], GS[1]\n"
+            "\td <- x\n"
+            "\treturn <-e\n}\n",
+            frozenset({0}),
+        ),
+        # Extracting a queue stored from a local channel preserves its
+        # identity with the original local name.
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tGS[0] = c\n"
+            "\td := GS[0]\n"
+            "\td <- x\n"
+            "\treturn <-c\n}\n",
+            frozenset({0}),
+        ),
+        # A callee's extraction transfer makes its send visible to callers.
+        (
+            "var GS []chan int64\n"
+            "func Put(x int64) {\n"
+            "\td := GS[0]\n"
+            "\td <- x\n"
+            "}\n"
+            "func F(x int64) int64 {\n"
+            "\tPut(x)\n"
+            "\treturn <-GS[0]\n}\n",
+            frozenset({0}),
+        ),
+        # A queue extracted and passed to a callee's chan param
+        # receives that callee's send effects.
+        (
+            "var GS []chan int64\n"
+            "func G(c chan int64, x int64) { c <- x }\n"
+            "func F(x int64) int64 {\n"
+            "\td := GS[0]\n"
+            "\tG(d, x)\n"
+            "\treturn <-GS[1]\n}\n",
+            frozenset({0}),
+        ),
+        # A map element passed as an argument also carries its index deps.
+        (
+            "var GM map[int64]chan int64\n"
+            "func G(c chan int64, x int64) { c <- x }\n"
+            "func F(k int64, x int64) int64 {\n"
+            "\tG(GM[k], x)\n"
+            "\treturn <-GM[0]\n}\n",
+            frozenset({0, 1}),
+        ),
+        # An external element passed to a goroutine call is broadcast too.
+        (
+            "var GS []chan int64\n"
+            "func G(c chan int64, x int64) { c <- x }\n"
+            "func F(x int64) int64 {\n"
+            "\tgo G(GS[0], x)\n"
+            "\treturn <-GS[0]\n}\n",
+            frozenset({0}),
+        ),
+        # An extracted external queue passed directly to a callee's chan
+        # param receives that callee's send effects.
+        (
+            "var GS []chan int64\n"
+            "func G(c chan int64, x int64) { c <- x }\n"
+            "func F(x int64) int64 {\n"
+            "\tG(GS[0], x)\n"
+            "\treturn <-GS[0]\n}\n",
+            frozenset({0}),
+        ),
+    ],
+)
+def test_chan_elem_external_extract(go_types_helper, declarations, expected):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available
+    assert result.return_dependencies == expected
+    assert result.effects == "unknown"
+    assert any(t.imported for t in result.calls)
+
+
+def test_chan_elem_external_extract_callee_read_matches_direct_read(
+    go_types_helper,
+):
+    extracted = named(
+        *unit(
+            go_types_helper,
+            "var GS []chan int64\n"
+            "func Get() int64 {\n"
+            "\td := GS[0]\n"
+            "\treturn <-d\n}\n",
+        ),
+        name="Get",
+    )
+    direct = named(
+        *unit(
+            go_types_helper,
+            "var GS []chan int64\n"
+            "func Get() int64 { return <-GS[0] }\n",
+        ),
+        name="Get",
+    )
+    assert extracted.available and direct.available
+    assert extracted.return_dependencies == direct.return_dependencies
+    assert extracted.effects == direct.effects == "unknown"
+    assert any(t.imported for t in extracted.calls)
+
+
+def test_chan_elem_external_imported_extract(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(k int64, x int64) int64 {\n"
+        "\tlib.GS[0] <- x\n"
+        "\td := lib.GS[k]\n"
+        "\treturn <-d\n}\n"
+    }
+    lib = {"lib": {"g.go": "package lib\nvar GS []chan int64\n"}}
+    report = json.loads(package_report_imports(go_types_helper, files, lib))
+    members = {m["name"]: m for m in report["imported_members"]}
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+    transfers = [
+        c
+        for c in result.calls
+        if c.imported and c.target == members["GS"]["id"]
+    ]
+    assert len(transfers) >= 1
+
+
+@pytest.mark.parametrize(
     "declarations",
     [
         # `[][]chan` nests stay closed — the operand of the inner
@@ -20837,9 +21098,17 @@ def test_chan_elem_external_close(go_types_helper):
         "var GS [][]chan int64\nfunc F(x int64) {\n\tGS[0][0] <- x\n}\n",
         # `[]chan chan` non-scalar elements stay closed.
         "var GS []chan chan int64\nfunc F(c chan int64) {\n\tGS[0] <- c\n}\n",
-        # `d := GS[i]` extraction stays closed — the element queue
-        # has no declared identity of its own.
-        "var GS []chan int64\nfunc F() int64 {\n\td := GS[0]\n\treturn <-d\n}\n",
+        # A second index into a nested element container stays closed.
+        "var GS [][]chan int64\nfunc F() int64 {\n\td := GS[0][0]\n\treturn <-d\n}\n",
+        # Chan-valued chan elements remain non-scalar and closed.
+        "var GS []chan chan int64\nfunc F(x chan int64) {\n\td := GS[0]\n\td <- x\n}\n",
+        # Comma-ok map extraction remains closed.
+        "var GM map[int64]chan int64\nfunc F(k int64) int64 {\n\td, ok := GM[k]\n"
+        "\tif ok { return <-d }\n\treturn 0\n}\n",
+        # Function-literal calls with extracted channel arguments stay closed.
+        "var GS []chan int64\nfunc F(x int64) int64 {\n"
+        "\tfunc(c chan int64) { c <- x }(GS[0])\n"
+        "\treturn <-GS[0]\n}\n",
     ],
 )
 def test_chan_elem_external_unsupported_stays_closed(
