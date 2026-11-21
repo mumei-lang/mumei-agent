@@ -1455,6 +1455,25 @@ class _TypeScriptBindings:
             if local is not None:
                 self._resolve(local, namespace, "read", with_scopes)
 
+    def _scan_jsx_tag(
+        self,
+        name: Any | None,
+        with_scopes: tuple[ByteSpan, ...],
+    ) -> None:
+        if name is None:
+            return
+        if name.type == "member_expression":
+            root = name
+            while root.type == "member_expression":
+                root = root.child_by_field_name("object")
+            if root is not None and root.type == "identifier":
+                self._resolve(root, "value", "read", with_scopes)
+            return
+        if name.type == "identifier":
+            text = self.text(name)
+            if text and not text[0].islower() and "-" not in text:
+                self._resolve(name, "value", "read", with_scopes)
+
     def _scan(
         self,
         node: Any | None,
@@ -1467,6 +1486,20 @@ class _TypeScriptBindings:
         node_type = node.type
         if node_type in _FUNCTION_NODES:
             self._scan_function(node, owner, with_scopes)
+            return
+        if node_type == "jsx_element":
+            for child in self.children(node):
+                if child.type != "jsx_closing_element":
+                    self._scan(child, owner, function_context, with_scopes)
+            return
+        if node_type in {"jsx_opening_element", "jsx_self_closing_element"}:
+            name = node.child_by_field_name("name")
+            self._scan_jsx_tag(name, with_scopes)
+            for child in self.children(node):
+                if child != name:
+                    self._scan(child, owner, function_context, with_scopes)
+            return
+        if node_type == "jsx_closing_element":
             return
         if node_type in {"class_declaration", "class"}:
             self._scan_class(node, owner, with_scopes)

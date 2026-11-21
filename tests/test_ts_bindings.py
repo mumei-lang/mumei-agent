@@ -758,6 +758,41 @@ class Missing extends missingBase {}
     )
 
 
+def test_jsx_intrinsic_tags_are_ignored_and_components_resolve_roots():
+    source = """
+function Foo() {}
+const child = 1;
+const r = <div attr={child}>{missingChild}</div>;
+const component = <Foo.Bar attr={child} />;
+const custom = <my-widget attr={missingAttr} />;
+const namespaced = <a:b />;
+"""
+    report = build_ts_bindings(source, tsx=True)
+    foo = _bindings(report, "Foo", "function")[0]
+    child = _bindings(report, "child", "local")[0]
+    assert len(_refs(report, source, "Foo")) == 1
+    assert _refs(report, source, "Foo")[0].binding_id == foo.id
+    child_refs = _refs(report, source, "child")
+    assert len(child_refs) == 2
+    assert all(reference.binding_id == child.id for reference in child_refs)
+    assert not _refs(report, source, "div")
+    assert not _refs(report, source, "my-widget")
+    assert not _refs(report, source, "a")
+    assert not _refs(report, source, "b")
+    assert {
+        item.name for item in _unresolved(report)
+    } >= {"missingChild", "missingAttr"}
+    assert not _unresolved(report, "div")
+    assert not _unresolved(report, "my-widget")
+    assert not _unresolved(report, "a:b")
+
+
+def test_jsx_intrinsic_element_does_not_make_report_incomplete():
+    report = build_ts_bindings("const r = <div />;", tsx=True)
+    assert report.complete
+    assert not report.unresolved
+
+
 def test_multibyte_spans_hash_and_output_are_deterministic():
     source = 'const greeting = "💡"; function f() { return greeting; }'
     report = build_ts_bindings(source)
