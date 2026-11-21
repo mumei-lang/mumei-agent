@@ -30599,6 +30599,26 @@ def test_pointer_crossing_struct_field_read_stays_closed(
 
 
 @pytest.mark.parametrize(
+    "literal",
+    ["S{A: nil}", "S{nil, x}"],
+)
+def test_nil_struct_collection_field_literal_is_supported(
+    go_types_helper, literal
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type S struct { A []int64; V int64 }\n"
+            "func F(x int64) int64 {\n"
+            f"\ts := {literal}\n"
+            "\treturn s.V + x\n}\n",
+        )
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+
+@pytest.mark.parametrize(
     ("declarations", "expected"),
     [
         # Writes through a local struct argument reach post-call extraction.

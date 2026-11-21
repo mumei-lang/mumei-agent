@@ -2686,7 +2686,7 @@ class _Builder:
                         source_tokens = frozenset(
                             {self.node_key(value_node)}
                         )
-                    elif (
+                    elif value_node.type == "nil" or (
                         value_node.type == "identifier"
                         and value_node.text == b"nil"
                     ):
