@@ -204,6 +204,64 @@ index;
     assert any(item.name == "index" for item in _unresolved(report, "index"))
 
 
+def test_for_in_and_for_of_declarations_use_loop_or_var_scope():
+    source = """
+function loops(values, record) {
+    for (let key in record) { key; }
+    key;
+    for (const [a, b] of values) { a; b; }
+    a; b;
+    for (var item of values) { item; }
+    item;
+}
+"""
+    report = build_ts_bindings(source)
+    key = _bindings(report, "key", "local")[0]
+    a = _bindings(report, "a", "local")[0]
+    b = _bindings(report, "b", "local")[0]
+    item = _bindings(report, "item", "local")[0]
+    assert any(
+        reference.binding_id == key.id and reference.kind == "read"
+        for reference in _refs(report, source, "key")
+    )
+    assert any(reference.binding_id == a.id for reference in _refs(report, source, "a"))
+    assert any(reference.binding_id == b.id for reference in _refs(report, source, "b"))
+    assert item.scope is not None
+    assert item.scope.start <= source.index("item;", source.index("for (var")) < item.scope.end
+    assert {name for name in ("key", "a", "b")} <= {
+        item.name for item in _unresolved(report, reason="unknown_name")
+    }
+    iterable_refs = _refs(report, source, "values")
+    assert len(iterable_refs) == 2
+    assert all(reference.kind == "read" for reference in iterable_refs)
+
+
+def test_for_in_and_for_of_bare_targets_write_existing_bindings():
+    source = """
+function assign(iterable) {
+    let x = 0, a = 0, b = 0;
+    const fixed = 0;
+    for (x of iterable) {}
+    for ([a, b] of iterable) {}
+    for (fixed of iterable) {}
+    for (missing of iterable) {}
+}
+"""
+    report = build_ts_bindings(source)
+    for name in ("x", "a", "b", "fixed"):
+        binding = _bindings(report, name, "local")[0]
+        reference = _refs(report, source, name, "write")[0]
+        assert reference.binding_id == binding.id
+    assert any(
+        item.name == "missing" and item.reason == "implicit_global"
+        for item in _unresolved(report)
+    )
+    assert any(gap.reason == "const_reassignment" for gap in report.gaps)
+    iterable_refs = _refs(report, source, "iterable")
+    assert len(iterable_refs) == 4
+    assert all(reference.kind == "read" for reference in iterable_refs)
+
+
 def test_destructured_parameters_defaults_and_rest_are_bound():
     source = """
 function f(first = 1, second = first, {item: renamed = second, plain, ...rest}: Shape, ...tail: number[]) {

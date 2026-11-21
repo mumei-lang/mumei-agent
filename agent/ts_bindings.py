@@ -344,6 +344,8 @@ class _TypeScriptBindings:
     def _predeclare_node(self, node: Any) -> None:
         if node.type in {"variable_declaration", "lexical_declaration"}:
             self._predeclare_variables(node)
+        elif node.type == "for_in_statement":
+            self._predeclare_for_in(node)
         elif node.type in {
             "function_declaration", "generator_function_declaration",
         }:
@@ -424,6 +426,34 @@ class _TypeScriptBindings:
                     tdz=not is_var,
                     declaration_function=declaration_function,
                 )
+
+    def _predeclare_for_in(self, node: Any) -> None:
+        kind = node.child_by_field_name("kind")
+        pattern = node.child_by_field_name("left")
+        if kind is None or pattern is None:
+            return
+        is_var = kind.type == "var"
+        is_const = kind.type == "const"
+        function = self._nearest_function(node)
+        declaration_function = None if function is None else function.id
+        scope = (
+            self._declaration_scope(node, var=True)
+            if is_var
+            else self.span(node)
+        )
+        type_node = self._pattern_type_node(node, pattern)
+        names = self._pattern_names(pattern)
+        for name in names:
+            self.add_binding(
+                name,
+                "local",
+                scope,
+                frozenset({"value"}),
+                type_node=type_node if len(names) == 1 else None,
+                mutable=not is_const,
+                tdz=not is_var,
+                declaration_function=declaration_function,
+            )
 
     def _is_readonly_parameter(self, node: Any) -> bool:
         parent = node.parent
@@ -1431,6 +1461,35 @@ class _TypeScriptBindings:
             return
         if node_type == "export_statement":
             self._scan_export(node, owner, function_context, with_scopes)
+            return
+        if node_type == "for_in_statement":
+            left = node.child_by_field_name("left")
+            if node.child_by_field_name("kind") is None:
+                self._scan_assignment_target(
+                    left,
+                    owner,
+                    function_context,
+                    with_scopes,
+                    compound=False,
+                    assignment_node=node,
+                )
+            else:
+                self._scan_type(node.child_by_field_name("type"))
+                self._scan_pattern_defaults(
+                    left, owner, function_context, with_scopes
+                )
+            self._scan(
+                node.child_by_field_name("right"),
+                owner,
+                function_context,
+                with_scopes,
+            )
+            self._scan(
+                node.child_by_field_name("body"),
+                owner,
+                function_context,
+                with_scopes,
+            )
             return
         if node_type in {"variable_declaration", "lexical_declaration"}:
             self._scan_variable_declaration(
