@@ -1979,6 +1979,10 @@ class _Builder:
             else None
         )
         member = self._field_identity(f_ref)
+        # `s[i].F` — the field's operand may reach the root through
+        # an index chain when the root is a bound struct-element
+        # container: every element conflates into the root's group,
+        # so the field's slot joins it like `s.F` on a composite.
         root = sel.child_by_field_name("operand")
         while root is not None and root.type in {
             "parenthesized_expression",
@@ -2012,12 +2016,55 @@ class _Builder:
             )
             or root_ref is None
             or root_ref.binding_id is None
-            or not self._is_local_composite(
-                self.bindings.get(root_ref.binding_id)
+            or not (
+                self._is_local_composite(
+                    self.bindings.get(root_ref.binding_id)
+                )
+                or root_ref.binding_id
+                in self._opaque_container_tokens
             )
         ):
             return None, None
-        return root_ref.binding_id, member
+        # `t := s` aliases the container header — `t[i].F` and
+        # `s[i].F` name the same field slot. A slot already riding
+        # this share group wins: the canonical name below shifts
+        # when the representative reseats, but the slot's tokens
+        # stay attached to the surviving aliases, so reusing the
+        # existing owner keeps extractions on one group.
+        slot_suffix = f"\x00{member.id}"
+        existing = min(
+            (
+                sid
+                for sid in self._opaque_container_sharers(
+                    root_ref.binding_id
+                )
+                if sid.endswith(slot_suffix)
+            ),
+            default=None,
+        )
+        if existing is not None:
+            return existing[: -len(slot_suffix)], member
+        # First mint under a canonical root: the first-sorting
+        # same-typed name in the root's share group. Extracted
+        # names (`b`'s type is the member's, not the container's)
+        # never qualify, so the choice is stable no matter which
+        # alias minted the slot first. A composite root's only
+        # same-typed holder is itself.
+        root_binding = self.bindings.get(root_ref.binding_id)
+        root_type = getattr(root_binding, "type", None)
+        canonical = min(
+            (
+                sid
+                for sid in self._opaque_container_sharers(
+                    root_ref.binding_id
+                )
+                if "\x00" not in sid
+                and (sb := self.bindings.get(sid)) is not None
+                and sb.type == root_type
+            ),
+            default=root_ref.binding_id,
+        )
+        return canonical, member
 
     def _opaque_append_bind_toks(
         self, rhs: Any
@@ -2333,12 +2380,30 @@ class _Builder:
             # the group so `a[i] = x` lands on the slot `s.F[j]`
             # reads. Different fields mint different token sets but
             # all reach `s`, matching the composite's own conflation.
-            self._opaque_container_tokens[root_id] = (
-                self._opaque_container_tokens.get(
-                    root_id, frozenset()
-                )
-                | toks
+            # The slot rides every CONTAINER sharer's set — not only
+            # the canonical name it was minted under — so that name
+            # reseating away leaves the slot attached to the
+            # surviving aliases' group. Extracted member names are
+            # sharers too but never gain tokens: their set IS their
+            # backing's identity.
+            root_t = getattr(
+                self.bindings.get(root_id), "type", None
             )
+            for holder_id in self._opaque_container_sharers(root_id):
+                if (
+                    "\x00" in holder_id
+                    or getattr(
+                        self.bindings.get(holder_id), "type", None
+                    )
+                    != root_t
+                ):
+                    continue
+                self._opaque_container_tokens[holder_id] = (
+                    self._opaque_container_tokens.get(
+                        holder_id, frozenset()
+                    )
+                    | toks
+                )
             return toks
         return None
 
@@ -2398,6 +2463,25 @@ class _Builder:
         if ref is None or ref.binding_id is None:
             return frozenset()
         binding = self.bindings.get(ref.binding_id)
+        if (
+            binding is not None
+            and getattr(binding.type, "kind", None) == "struct"
+        ):
+            # `[]St{v}` / `s[i] = v` — the stored struct's fields
+            # keep sharing `v`'s memory, so `v`'s own group (its
+            # field slots' tokens live under it once extracted)
+            # joins the container's. Seeding `{v}` keeps a later
+            # `a := v.F` connected even when `v` had no tokens
+            # yet.
+            toks = self._opaque_container_tokens.get(
+                ref.binding_id
+            )
+            if toks is None:
+                toks = frozenset({ref.binding_id})
+                self._opaque_container_tokens[
+                    ref.binding_id
+                ] = toks
+            return toks
         if binding is None or not self._type_embeds_collection(
             binding.type
         ):
@@ -8672,13 +8756,22 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     )
                     if (
                         opaque_toks is None
-                        and self._scalar_elem_nested_collection(
-                            binding.type
+                        and (
+                            self._scalar_elem_collection(
+                                binding.type
+                            )
+                            or self._scalar_elem_nested_collection(
+                                binding.type
+                            )
                         )
                     ):
                         # `a := [][]int64{s}` — `a[0]` shares `s`'s
                         # backing: its tokens join `a`'s group so
                         # `s[0] = x` and `a[0][0] = x` reach both.
+                        # `s := []St{{F: v}}` — the field operand's
+                        # slice header shares `v`'s backing the
+                        # same way; scalar elements contribute no
+                        # tokens.
                         new_container_toks |= (
                             self._opaque_container_elem_toks(rhs_node)
                         )
@@ -9340,12 +9433,19 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         if (
                             opaque_toks is None
                             and value_nodes
-                            and self._scalar_elem_nested_collection(
-                                binding.type
+                            and (
+                                self._scalar_elem_collection(
+                                    binding.type
+                                )
+                                or self._scalar_elem_nested_collection(
+                                    binding.type
+                                )
                             )
                         ):
                             # `var a [][]int64 = {s}` — same
-                            # inner-backing share as `a :=`.
+                            # inner-backing share as `a :=`, and
+                            # `var s []St = {{F: v}}` picks up `v`'s
+                            # group like the short-decl form.
                             new_container_toks |= (
                                 self._opaque_container_elem_toks(
                                     rhs_node
@@ -10598,6 +10698,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
             reseat_roots: set[str] = set()
             for fkey, root_id, old_toks, new_toks in reseat_plan:
                 reseat_roots.add(root_id)
+                # Only container-typed sharers gain the new
+                # backing's tokens — an extracted member name's set
+                # is its backing's identity and stays put.
+                root_t = getattr(
+                    self.bindings.get(root_id), "type", None
+                )
                 if conditional or self._may_skip > 0:
                     # `if c { s.F = v }` — the untaken path keeps
                     # `s.F` aimed at its old backing, so the reseat
@@ -10610,12 +10716,26 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             )
                             | new_toks
                         )
-                        self._opaque_container_tokens[root_id] = (
-                            self._opaque_container_tokens.get(
-                                root_id, frozenset()
-                            )
-                            | new_toks
-                        )
+                        for holder_id in (
+                            self._opaque_container_sharers(root_id)
+                        ):
+                            if (
+                                "\x00" not in holder_id
+                                and getattr(
+                                    self.bindings.get(holder_id),
+                                    "type",
+                                    None,
+                                )
+                                == root_t
+                            ):
+                                self._opaque_container_tokens[
+                                    holder_id
+                                ] = (
+                                    self._opaque_container_tokens.get(
+                                        holder_id, frozenset()
+                                    )
+                                    | new_toks
+                                )
                     continue
                 if new_toks is None:
                     # `s.F = nil` or an untracked RHS — the field's
@@ -10624,6 +10744,26 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     self._opaque_container_tokens.pop(fkey, None)
                 else:
                     self._opaque_container_tokens[fkey] = new_toks
+                    for holder_id in (
+                        self._opaque_container_sharers(root_id)
+                    ):
+                        if (
+                            "\x00" not in holder_id
+                            and getattr(
+                                self.bindings.get(holder_id),
+                                "type",
+                                None,
+                            )
+                            == root_t
+                        ):
+                            self._opaque_container_tokens[
+                                holder_id
+                            ] = (
+                                self._opaque_container_tokens.get(
+                                    holder_id, frozenset()
+                                )
+                                | new_toks
+                            )
             if not (conditional or self._may_skip > 0):
                 # The root's token set is exactly the union of its
                 # live field keys — a subtract-per-field update
@@ -11490,14 +11630,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             # literal's inner-container elements join
                             # the group like at bind time.
                             fresh_toks = {self.node_key(reseat_rhs)}
-                            if self._scalar_elem_nested_collection(
-                                bound.type
-                            ):
-                                fresh_toks |= (
-                                    self._opaque_container_elem_toks(
-                                        reseat_rhs
-                                    )
+                            fresh_toks |= (
+                                self._opaque_container_elem_toks(
+                                    reseat_rhs
                                 )
+                            )
                             self._opaque_container_tokens[
                                 ref.binding_id
                             ] = frozenset(fresh_toks)

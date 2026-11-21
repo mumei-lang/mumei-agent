@@ -19500,6 +19500,75 @@ def test_scalar_container_array_copy_isolates(go_types_helper):
             "\treturn s[1].P.V\n}\n",
             frozenset({0, 1}),
         ),
+        # `b := s[i].F` on a COLLECTION field — the element's field
+        # slot joins the root's share group like `a := st.F` on a
+        # composite, so a store through the extraction reaches every
+        # other extraction's reads.
+        (
+            "type St struct { F []int64 }\n"
+            "func F(s []St, i int, x int64) int64 {\n"
+            "\tb := s[i].F\n"
+            "\tb[0] = x\n"
+            "\tc := s[0].F\n"
+            "\treturn c[0]\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # The same on a LOCAL container.
+        (
+            "type St struct { F []int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := []St{{F: []int64{0}}}\n"
+            "\tb := s[0].F\n"
+            "\tb[0] = x\n"
+            "\tc := s[0].F\n"
+            "\treturn c[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `b = s[i].F` — the reseat form joins the field's group too.
+        (
+            "type St struct { F []int64 }\n"
+            "func F(s []St, i int, x int64) int64 {\n"
+            "\tvar b []int64\n"
+            "\tb = s[i].F\n"
+            "\tb[0] = x\n"
+            "\tc := s[0].F\n"
+            "\treturn c[0]\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # `b := s[i].F.G` — a collection field under a struct field
+        # resolves through the same root walk.
+        (
+            "type In struct { G []int64 }\n"
+            "type St struct { F In }\n"
+            "func F(s []St, x int64) int64 {\n"
+            "\tb := s[0].F.G\n"
+            "\tb[0] = x\n"
+            "\tc := s[0].F.G\n"
+            "\treturn c[0]\n}\n",
+            frozenset({0, 1}),
+        ),
+        # `s[i].F = v` — a whole-field reseat on an element lands the
+        # slice's deps in the root's group like the element store.
+        (
+            "type St struct { F []int64 }\n"
+            "func F(s []St, v []int64) int64 {\n"
+            "\ts[0].F = v\n"
+            "\tb := s[0].F\n"
+            "\treturn b[0]\n}\n",
+            frozenset({0, 1}),
+        ),
+        # `s[0].A = y` before the extraction — the conflated element
+        # set keeps the scalar field store visible to the later
+        # `s[1].A` read.
+        (
+            "type St struct { A int64; F []int64 }\n"
+            "func F(s []St, x int64, y int64) int64 {\n"
+            "\ts[0].A = y\n"
+            "\tb := s[0].F\n"
+            "\tb[0] = x\n"
+            "\treturn s[1].A\n}\n",
+            frozenset({0, 1, 2}),
+        ),
     ],
 )
 def test_scalar_container_bind_read_write_admits(
@@ -19771,6 +19840,13 @@ def test_container_builtin_dep_free_param_write_marks_effects(
         "\tb = s[0]\n"
         "\tb.A = x\n"
         "\treturn s[0].A\n}\n",
+        # `s[i].F[j]` — a direct index on the element's field stays
+        # closed exactly like `st.F[j]` on a composite (the field
+        # slot is reachable only through extraction).
+        "type St struct { F []int64 }\n"
+        "func F(s []St, i int, j int, x int64) int64 {\n"
+        "\ts[i].F[0] = x\n"
+        "\treturn s[i].F[j]\n}\n",
     ],
 )
 def test_scalar_container_unsupported_stays_closed(
@@ -19797,6 +19873,52 @@ def test_scalar_container_nested_index_eval_order(go_types_helper):
             "\tvar v int64\n"
             "\ts := [][]St{{St{A: W{V: 0}}}}\n"
             "\treturn s[Set(&v, x)][Get(v)].A.V\n"
+            "}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_scalar_container_alias_field_slot(go_types_helper):
+    # `t := s` — the aliases share one backing, so a store through
+    # `s`'s field extraction must be visible to `t`'s. The field
+    # slot resolves to the canonical (mint-earliest) root name, so
+    # either alias can seed it first.
+    result = named(
+        *unit(
+            go_types_helper,
+            "type St struct{ F []int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := []St{{F: make([]int64, 2)}}\n"
+            "\tt := s\n"
+            "\tb := s[0].F\n"
+            "\tb[0] = x\n"
+            "\tc := t[0].F\n"
+            "\treturn c[0]\n"
+            "}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_scalar_container_literal_elem_operand(go_types_helper):
+    # `s := []St{{F: v}}` — a field operand embedded in the element
+    # literal shares `v`'s backing, so `v[0] = x` must reach the
+    # field extraction's reads like a direct `s := []St{v2}` does
+    # not (a whole-struct operand copies `v2`'s header, matching the
+    # composite model's own conflated deps).
+    result = named(
+        *unit(
+            go_types_helper,
+            "type St struct{ F []int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\tv := make([]int64, 2)\n"
+            "\ts := []St{{F: v}}\n"
+            "\tv[0] = x\n"
+            "\tb := s[0].F\n"
+            "\treturn b[0]\n"
             "}\n",
         )
     )
