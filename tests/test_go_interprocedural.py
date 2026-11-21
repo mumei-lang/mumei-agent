@@ -165,7 +165,6 @@ def test_recursive_edges_never_supply_a_summary(go_types_helper, declarations):
         "func F(x int64) int64 {return 1.0}",
         "func G(){}; func F(x int64) int64 {defer G(); return x}",
         "func G(){}; func F(x int64) int64 {go G(); return x}",
-        "type I interface{Get()int64}; func F(x I) int64 {return x.Get()}",
         "func G[T ~int64](x T)T{return x}; func F(x int64)int64{return G(x)}",
         "func G(x ...int64)int64{return x[0]}; func F(x int64)int64{return G(x)}",
     ],
@@ -5280,15 +5279,9 @@ def test_imported_pointer_receiver_method_is_admitted(go_types_helper):
     assert result.available and result.return_dependencies == frozenset({0, 1})
 
 
-def test_imported_interface_method_stays_closed(go_types_helper):
-    # Interface dispatch is dynamic: the recorded method identity would
-    # not cover the implementations actually reached. A method-value
-    # call `i.M(x)` names an interface-typed operand — always an
-    # unsupported binding — so only the `I.M(recv, ...)` method
-    # expression records `interface_dispatch`; `i.M` keeps
-    # `method_generic_or_variadic`, and an interface-typed *parameter*
-    # is unsupported at the signature regardless, so the function
-    # stays closed.
+def test_imported_interface_method_value_is_admitted(go_types_helper):
+    # A method-value call on an interface parameter records the
+    # receiver as actuals[0] and runs under opaque effects.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(i lib.I, x int64) int64 { return i.M(x) }\n"
@@ -5298,12 +5291,21 @@ def test_imported_interface_method_stays_closed(go_types_helper):
     )
     assert report["status"] == "ok"
     (call,) = report["calls"]
-    assert call["kind"] == "method_generic_or_variadic"
+    assert call["kind"] == "interface_dispatch"
+    assert call["method"] is True
+    assert not call.get("method_expr", False)
     snapshot = _method_snapshot_for(go_types_helper, files)
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+    (transfer,) = result.calls
+    assert transfer.imported
+    assert transfer.arguments == (frozenset({0}), frozenset({1}))
+    assert transfer.result == frozenset({0, 1})
+    assert call["target"] in result.pinned
 
 
 def test_interface_dispatch_method_expression_admitted(go_types_helper):
@@ -5381,12 +5383,33 @@ def test_interface_dispatch_promoted_method_stays_closed(go_types_helper):
     assert not result.available
 
 
+def test_embedded_interface_method_value_pins_outer_interface(
+    go_types_helper,
+):
+    data = unit(
+        go_types_helper,
+        "type J interface{ M(int64) int64 }\n"
+        "type I interface{ J }\n"
+        "func F(i I, x int64) int64 { return i.M(x) }",
+    )
+    result = named(*data)
+    interface_ids = {
+        binding.name: binding.id
+        for binding in data[1].bindings
+        if binding.kind == "type" and binding.name in {"I", "J"}
+    }
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    (call,) = data[1].calls
+    assert call.kind == "interface_dispatch"
+    assert call.target == interface_ids["I"]
+    assert interface_ids["I"] in result.pinned
+    assert interface_ids["J"] in result.pinned
+
+
 def test_interface_dispatch_method_value_receiver_stays_closed(go_types_helper):
-    # `lib.I(t).M(x)` — a method-VALUE dispatch on an interface
-    # receiver. An interface-typed operand is always an unsupported
-    # binding (the receiver would die at the read), so the record
-    # keeps `method_generic_or_variadic` and only `I.M(recv, ...)`
-    # method expressions admit under `interface_dispatch`.
+    # `lib.I(t).M(x)` has an interface receiver produced by converting
+    # a concrete value, not an admitted interface binding.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(t lib.T, x int64) int64 { return lib.I(t).M(x) }\n"
@@ -5398,22 +5421,21 @@ def test_interface_dispatch_method_value_receiver_stays_closed(go_types_helper):
     (call,) = [
         c for c in report["calls"] if c["kind"] != "conversion"
     ]
-    assert call["kind"] == "method_generic_or_variadic"
+    assert call["kind"] == "interface_dispatch"
+    assert call["method"] is True
     snapshot = _method_snapshot_for(go_types_helper, files)
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert not result.available
+    assert any(g.reason == "unresolved_or_opaque_call" for g in result.gaps)
 
 
 def test_interface_dispatch_func_result_stays_closed(go_types_helper):
     # `I2.Iter(recv)` — a method EXPRESSION whose result is a `func`
     # value: the opaque-external dep model cannot read a func/chan/
     # composite result (a caller would then call or range it), so the
-    # scalar-result gate keeps it `method_generic_or_variadic`. A
-    # method-value `i.Iter()` stays closed regardless — an
-    # interface-typed operand never admits — which is why this test
-    # must reach the gate through the method-expression shape.
+    # scalar-result gate keeps it `method_generic_or_variadic`.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(t lib.T) func() int64 { return lib.I2.Iter(t) }\n"
@@ -5705,12 +5727,13 @@ def test_pointer_method_expression_records_and_summarizes(
     assert result.available and result.return_dependencies == frozenset({0, 1})
 
 
-def test_interface_method_expression_stays_closed(go_types_helper):
+def test_interface_method_expression_with_interface_parameter_is_admitted(
+    go_types_helper,
+):
     # `lib.I.M` — dispatch through an interface type is dynamic; the
     # call records `interface_dispatch` (a `method_expr` — the leading
     # argument IS the receiver) and admits under the opaque-external
-    # model, but an interface-typed parameter is unsupported at the
-    # signature, so this function still stays closed.
+    # model; its receiver and argument occupy actuals 0 and 1.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(i lib.I, x int64) int64 { return lib.I.M(i, x) }\n"
@@ -5726,7 +5749,324 @@ def test_interface_method_expression_stays_closed(go_types_helper):
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+    (transfer,) = result.calls
+    assert transfer.arguments == (frozenset({0}), frozenset({1}))
+
+
+def test_interface_dispatch_method_flag_loader_validation(go_types_helper):
+    source = (
+        "package p\n"
+        "type I interface{ M(int64) int64 }\n"
+        "func F(i I, x int64) int64 { return i.M(x) }\n"
+    )
+    report = json.loads(compiler_report(go_types_helper, source))
+    (call,) = report["calls"]
+    assert call["kind"] == "interface_dispatch"
+    assert call["method"] is True
+    assert not call.get("method_expr", False)
+    snapshot = load_go_snapshot(
+        json.dumps(report).encode(), source, target_arch="amd64"
+    )
+    assert snapshot.calls[0].method
+
+    both_flags = json.loads(json.dumps(report))
+    both_flags["calls"][0]["method_expr"] = True
+    with pytest.raises(SnapshotError):
+        load_go_snapshot(
+            json.dumps(both_flags).encode(), source, target_arch="amd64"
+        )
+
+    other_kind = json.loads(json.dumps(report))
+    other_kind["calls"][0]["kind"] = "indirect_or_selector"
+    other_kind["calls"][0]["target"] = ""
+    with pytest.raises(SnapshotError):
+        load_go_snapshot(
+            json.dumps(other_kind).encode(), source, target_arch="amd64"
+        )
+
+
+@pytest.mark.parametrize(
+    "call_expr,method,method_expr",
+    [
+        ("i.M(x)", True, False),
+        ("(i).M(x)", True, False),
+        ("I.M(i, x)", False, True),
+    ],
+)
+def test_local_interface_method_value_and_expression_calls_are_admitted(
+    go_types_helper, call_expr, method, method_expr
+):
+    data = unit(
+        go_types_helper,
+        "type I interface{ M(int64) int64 }\n"
+        f"func F(i I, x int64) int64 {{ return {call_expr} }}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+    (call,) = data[1].calls
+    assert call.kind == "interface_dispatch"
+    assert call.method is method
+    assert call.method_expr is method_expr
+    (transfer,) = result.calls
+    assert transfer.arguments == (frozenset({0}), frozenset({1}))
+
+
+@pytest.mark.parametrize(
+    "setup,receiver",
+    [
+        ("", "i"),
+        ("j := i", "j"),
+        ("var j I = i", "j"),
+        ("var j I; j = i", "j"),
+    ],
+)
+def test_interface_parameter_alias_and_copy_forms_are_admitted(
+    go_types_helper, setup, receiver
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type I interface{ M(int64) int64 }\n"
+            "func F(i I, x int64) int64 {\n"
+            f"\t{setup}\n"
+            f"\treturn {receiver}.M(x)\n"
+            "}",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+
+
+def test_interface_alias_and_unnamed_parameter_dispatch_are_admitted(
+    go_types_helper,
+):
+    alias = named(
+        *unit(
+            go_types_helper,
+            "type I interface{ M(int64) int64 }\ntype A = I\n"
+            "func F(i A, x int64) int64 { return i.M(x) }",
+        )
+    )
+    assert alias.available and alias.return_dependencies == frozenset({0, 1})
+
+    unnamed = named(
+        *unit(
+            go_types_helper,
+            "func F(i interface{ M(int64) int64 }, x int64) int64 { "
+            "return i.M(x) }",
+        )
+    )
+    assert unnamed.available and unnamed.return_dependencies == frozenset({0, 1})
+
+
+def test_unused_any_parameter_is_admitted_as_opaque_value(go_types_helper):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(i any, x int64) int64 { return x }",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
+    assert result.effects == "none_in_supported_fragment"
+
+
+def test_interface_parameter_composes_through_local_and_func_calls(
+    go_types_helper,
+):
+    data = unit(
+        go_types_helper,
+        "type I interface{ M(int64) int64 }\n"
+        "func G(i I, x int64) int64 { return i.M(x) }\n"
+        "func F(i I, x int64) int64 { return G(i, x) }",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+
+    func_value = named(
+        *unit(
+            go_types_helper,
+            "type I interface{ M(int64) int64 }\n"
+            "func F(g func(I, int64) int64, i I, x int64) int64 { "
+            "return g(i, x) }",
+        )
+    )
+    assert func_value.available
+    assert func_value.return_dependencies == frozenset({0, 1, 2})
+    assert func_value.effects == "unknown"
+
+
+def test_interface_parameter_passes_to_imported_call(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(i lib.I, x int64) int64 { return lib.G(i, x) }\n"
+    }
+    lib = {
+        "lib": {
+            "m.go": "package lib\n"
+            "type I interface{ M(int64) int64 }\n"
+            "func G(i I, x int64) int64 { return x }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+
+
+def test_void_interface_method_value_call_is_admitted(go_types_helper):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type I interface{ M(int64) }\n"
+            "func F(i I, x int64) int64 { i.M(x); return x }",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
+    assert result.effects == "unknown"
+
+
+@pytest.mark.parametrize(
+    "declarations,reason",
+    [
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "type T int64\nfunc (T) M(int64) int64 { return 0 }\n"
+            "func F(i I, x int64) int64 { return i.(T).M(x) }",
+            "unsupported_expression",
+        ),
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "type T int64\nfunc (T) M(int64) int64 { return 0 }\n"
+            "func F(i I, x int64) int64 { switch v := i.(type) { "
+            "case T: return v.M(x); default: return x } }",
+            "unsupported_statement",
+        ),
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "func F(i I) bool { return i == nil }",
+            "unsupported_expression",
+        ),
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "type T struct{}\nfunc (T) M(int64) int64 { return 0 }\n"
+            "func F(x int64) int64 { var i I = T{}; return i.M(x) }",
+            "binding_unavailable",
+        ),
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "var Global I\n"
+            "func F(i I, x int64) int64 { Global = i; return x }",
+            "unsupported_statement",
+        ),
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "type Box struct{ V I }\n"
+            "func F(i I, x int64) int64 { b := Box{V: i}; _ = b; return x }",
+            "unsupported_expression",
+        ),
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "func F(i I) I { return i }",
+            "unsupported_signature",
+        ),
+        (
+            "type I interface{ M() int64 }\n"
+            "func F(i I) int64 { f := func() int64 { return i.M() }; return f() }",
+            "unsupported_expression",
+        ),
+    ],
+)
+def test_interface_parameter_unsupported_uses_stay_closed(
+    go_types_helper, declarations, reason
+):
+    result = named(*unit(go_types_helper, declarations))
     assert not result.available
+    assert any(g.reason == reason for g in result.gaps)
+
+
+def test_interface_parameter_signature_pin_flags_stale_dependents(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "func F(i I, x int64) int64 { return x }\n",
+        "i.go": "package p\ntype I interface{ M(int64) int64 }\n",
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    interface_id = next(
+        b.id for b in snapshot.bindings if b.name == "I" and b.kind == "type"
+    )
+    assert interface_id in result.pinned
+
+    files2 = {
+        "a.go": files["a.go"],
+        "i.go": "package p\n",
+        "j.go": "package p\ntype I interface{ M(int64) int64 }\n",
+    }
+    snapshot2 = _snapshot_for(go_types_helper, files2)
+    known = {b.id for b in snapshot2.bindings}
+    f_id = next(
+        f.binding_id
+        for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "F"
+    )
+    assert f_id in known
+    assert interface_id not in known
+    assert summaries.stale_dependents(known) == frozenset({f_id})
+
+
+def test_interface_alias_parameter_pins_underlying_identity(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "type A = I\n"
+        "func F(i A, x int64) int64 { return x }\n",
+        "i.go": "package p\ntype I interface{ M(int64) int64 }\n",
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    interface_id = next(
+        b.id for b in snapshot.bindings if b.name == "I" and b.kind == "type"
+    )
+    assert interface_id in result.pinned
+
+    files2 = {
+        "a.go": files["a.go"],
+        "i.go": "package p\n",
+        "j.go": "package p\ntype I interface{ M(int64) int64 }\n",
+    }
+    snapshot2 = _snapshot_for(go_types_helper, files2)
+    known = {b.id for b in snapshot2.bindings}
+    f_id = next(
+        f.binding_id
+        for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "F"
+    )
+    assert interface_id not in known
+    assert summaries.stale_dependents(known) == frozenset({f_id})
 
 
 def test_alias_receiver_method_is_admitted(go_types_helper):
@@ -5756,6 +6096,20 @@ def test_promoted_instantiated_method_stays_closed(go_types_helper):
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
+    assert not result.available
+
+
+def test_interface_method_value_non_scalar_result_stays_closed(
+    go_types_helper,
+):
+    declarations = (
+        "type I interface{ M() func() int64 }\n"
+        "func F(i I) int64 { f := i.M(); return f() }\n"
+    )
+    source = "package p\n" + declarations
+    report = json.loads(compiler_report(go_types_helper, source))
+    assert report["calls"][0]["kind"] == "method_generic_or_variadic"
+    result = named(*unit(go_types_helper, declarations))
     assert not result.available
 
 
@@ -20465,17 +20819,8 @@ def test_local_chan_chan_call_args_promote_groups(
         "type Q chan chan int64\n"
         "func (Q) M() {}\n"
         "func F() int64 { var cc Q; Q.M(cc); return 0 }\n",
-        "type I interface { M(chan chan int64) }\n"
-        "type T struct{}\n"
-        "func (T) M(chan chan int64) {}\n"
         "func F() int64 {\n"
-        "\tvar i I = T{}\n"
-        "\tcc := make(chan chan int64, 1)\n"
-        "\ti.M(cc)\n"
-        "\treturn 0\n"
-        "}\n",
-        "func F() int64 {\n"
-        "\tcc := make(chan chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
         "\tf := func(q chan chan int64) {}\n"
         "\tf(cc)\n"
         "\treturn 0\n"
@@ -23999,9 +24344,6 @@ def test_struct_parameter_boundaries_stay_closed(go_types_helper):
         "func F(s P, x int64) int64 {\n"
         "\ts.A[0] = x\n"
         "\treturn s.A[0]\n}\n",
-        "type I interface{ M() }\n"
-        "func F(s I, x int64) int64 {\n"
-        "\treturn x\n}\n",
     ):
         result = named(*unit(go_types_helper, decls))
         assert not result.available
