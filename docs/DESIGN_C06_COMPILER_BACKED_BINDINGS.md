@@ -51,9 +51,13 @@ mumei-agent の環境で実出力を採取していない。実装スライス�
   - 入力 JSON のソース本文が対象ファイルのバイト列と完全一致すること（不一致は stale として拒否）。
   - 出力に severity `error` があれば拒否。部分的な束縛は返さない。
   - `import` を含むソースは拒否（単一ファイル限定。Go 側と同じ）。
-  - コンパイラバージョンを記録し、許可リスト外なら拒否。
+  - コンパイラバージョンを記録し、許可リスト外なら拒否。standard-JSON の出力自体にはバージョン欄がないため、
+    operator は同じバイナリの `solc --version` の出力を入力・出力 JSON と一緒に渡す（3点を1つの封筒にまとめる）。
+    出力に contract の `metadata` が含まれる場合は、その `compiler.version` との一致も検査し、不一致は拒否する。
 - **出力はメタデータのみ**: 識別子の span → 宣言 span の対応を、既存の lexical report の binding ID に
   突き合わせた結果（一致 / 不一致 / lexical 側が未解決）として出す。
+  `require` や `msg` などの組み込みは対象ソース内に宣言位置がないため、span の照合とは別に `builtin` として記録する
+  （固定版の AST での組み込み参照の表現は、fixture 採取時に確認してから決める）。組み込みへの解決は宣言 span の一致として扱わない。
 - **trust を上げない**: compiler-backed で解決できても、`complete`、trusted-safe、audit 判定、Seal Grade、
   Lean の trust/freshness は変えない。不一致は gap として記録する。ソースの一致は staleness の検出であり、
   producer の真正性や意味の正しさは主張しない。
