@@ -11204,6 +11204,152 @@ def test_generic_struct_intermediates_stay_closed_through_aliases_and_embedding(
     assert not result.available, (form, imported, result.gaps)
 
 
+@pytest.mark.parametrize(
+    ("form", "imported"),
+    [
+        ("embedded_value", False),
+        ("embedded_pointer", False),
+        ("embedded_value", True),
+        ("embedded_pointer", True),
+    ],
+)
+def test_non_generic_embedding_controls_remain_admitted(
+    go_types_helper, form, imported
+):
+    qualifier = "lib." if imported else ""
+    imports = (
+        {
+            "lib": {
+                "lib.go": (
+                    "package lib\n"
+                    "type S3 struct{ B int64 }\n"
+                    "type B3 struct{ A S3 }\n"
+                )
+            }
+        }
+        if imported
+        else None
+    )
+    local_types = (
+        ""
+        if imported
+        else "type S3 struct{ B int64 }\ntype B3 struct{ A S3 }\n"
+    )
+    embedded_pointer = "*" if form == "embedded_pointer" else ""
+    files = {
+        "a.go": (
+            "package p\n"
+            + ('import "lib"\n' if imported else "")
+            + local_types
+            + f"type W struct{{ {embedded_pointer}{qualifier}B3 }}\n"
+            + "func F(t *W) int64 { return t.A.B }\n"
+        )
+    }
+    if imported:
+        snapshot = load_go_package_snapshot(
+            package_report_imports(go_types_helper, files, imports),
+            files,
+            target_arch="amd64",
+        )
+        summaries = ip.summarize_go_package(files, snapshot)
+    else:
+        _, snapshot, summaries = package_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available, (form, imported, result.gaps)
+    assert result.return_dependencies == frozenset({0})
+
+
+@pytest.mark.parametrize("generic_shallow", [False, True])
+def test_generic_embed_gate_obeys_shallowest_selector_depth(
+    go_types_helper, generic_shallow
+):
+    if generic_shallow:
+        declarations = (
+            "type X struct{ Y }\n"
+            "type Y struct{ A lib.S3 }\n"
+            "type W struct{ lib.Box[lib.S3]; X }\n"
+        )
+    else:
+        declarations = (
+            "type X struct{ A lib.S3 }\n"
+            "type Y struct{ lib.Box[lib.S3] }\n"
+            "type W struct{ X; Y }\n"
+        )
+    files = {
+        "a.go": (
+            'package p\nimport "lib"\n'
+            + declarations
+            + "func F(t *W) int64 { return t.A.B }\n"
+        )
+    }
+    lib = {
+        "lib": {
+            "lib.go": (
+                "package lib\n"
+                "type S3 struct{ B int64 }\n"
+                "type Box[T any] struct{ A T }\n"
+            )
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    if generic_shallow:
+        assert not result.available, result.gaps
+    else:
+        members = {member.name: member.id for member in snapshot.imported_members}
+        assert result.available, result.gaps
+        assert result.return_dependencies == frozenset({0})
+        assert members["S3"] in result.pinned
+
+
+def test_generic_embed_walk_visits_shared_diamonds_once(
+    go_types_helper, monkeypatch
+):
+    declarations = [
+        "package p",
+        "type S3 struct{ B int64 }",
+        "type Target20 struct{ A S3 }",
+        "type Noise20A struct{}",
+        "type Noise20B struct{}",
+    ]
+    for level in reversed(range(20)):
+        next_level = level + 1
+        declarations.extend(
+            (
+                f"type Target{level} struct{{ Target{next_level} }}",
+                f"type Noise{level}A struct{{ Noise{next_level}A; Noise{next_level}B }}",
+                f"type Noise{level}B struct{{ Noise{next_level}A; Noise{next_level}B }}",
+            )
+        )
+    declarations.extend(
+        (
+            "type W struct{ Target0; Noise0A }",
+            "func F(t *W) int64 { return t.A.B }",
+        )
+    )
+    files = {"a.go": "\n".join(declarations) + "\n"}
+    _, snapshot, _ = package_unit(go_types_helper, files)
+    original_struct_fields = ip._Builder._struct_fields
+    struct_fields_calls = 0
+
+    def count_struct_fields(self, type_binding):
+        nonlocal struct_fields_calls
+        struct_fields_calls += 1
+        return original_struct_fields(self, type_binding)
+
+    monkeypatch.setattr(ip._Builder, "_struct_fields", count_struct_fields)
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+    assert struct_fields_calls < 500
+
+
 def test_non_generic_struct_alias_intermediate_stays_admitted(go_types_helper):
     files = {
         "a.go": (
