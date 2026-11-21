@@ -8100,6 +8100,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     or self._scalar_elem_nested_collection(
                         fn.receiver.type
                     )
+                    or self._chan_elem_collection(fn.receiver.type)
                 )
             )
             # Pointer-typed parameters/results are admitted too: the
@@ -8151,6 +8152,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     or (
                         self._scalar_elem_collection(p.type)
                         or self._scalar_elem_nested_collection(p.type)
+                        # A `[]chan T`/`map[K]chan T` parameter
+                        # admits like the scalar-element form: the
+                        # element queues are caller-shared memory,
+                        # so `s[i] <- x` reaches `indirect_writes`
+                        # like any element store does.
+                        or self._chan_elem_collection(p.type)
                     )
                 )
                 for p in fn.parameters
@@ -8205,6 +8212,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     or (
                         self._scalar_elem_collection(r.type)
                         or self._scalar_elem_nested_collection(r.type)
+                        # A `[]chan T`/`map[K]chan T` result binds
+                        # like the local `s :=` form — the caller
+                        # names the group's backing.
+                        or self._chan_elem_collection(r.type)
                     )
                 )
                 for r in fn.results
@@ -8280,6 +8291,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             and (
                 self._scalar_elem_collection(p.type)
                 or self._scalar_elem_nested_collection(p.type)
+                or self._chan_elem_collection(p.type)
             )
             and self._param_container_shares_memory(p.type)
         )
@@ -8287,6 +8299,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             if p.binding_id and (
                 self._scalar_elem_collection(p.type)
                 or self._scalar_elem_nested_collection(p.type)
+                or self._chan_elem_collection(p.type)
             ):
                 self._opaque_container_tokens[p.binding_id] = (
                     shared_container_ids

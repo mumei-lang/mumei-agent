@@ -19779,7 +19779,7 @@ def test_container_builtin_dep_free_param_write_marks_effects(
     [
         # `delete(m, k)` on an UNBOUND map — no share group
         # exists, so the builtin stays opaque.
-        "func F(m map[int64]chan int64, x int64) int64 {\n"
+        "func F(m map[int64][]chan int64, x int64) int64 {\n"
         "\tdelete(m, 1)\n"
         "\treturn x\n}\n",
         # `a = nil` drops the backing token — `a[0]` afterwards
@@ -20132,6 +20132,82 @@ def test_chan_elem_container_send_receive(
     ],
 )
 def test_chan_elem_container_unsupported_stays_closed(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available
+
+
+@pytest.mark.parametrize(
+    ("declarations", "expected"),
+    [
+        # A `[]chan T` parameter — the element queues are
+        # caller-shared memory: `s[i] <- x` deposits into the
+        # param's share group like an element store and `<-s[i]`
+        # reads it back.
+        (
+            "func F(s []chan int64, x int64) int64 {\n"
+            "\ts[0] <- x\n"
+            "\treturn <-s[0]\n}\n",
+            frozenset({1}),
+        ),
+        # `map[K]chan T` parameters ride the same group.
+        (
+            "func F(m map[int64]chan int64, x int64) int64 {\n"
+            "\tm[0] <- x\n"
+            "\treturn <-m[0]\n}\n",
+            frozenset({1}),
+        ),
+        # A callee's send through a `[]chan` parameter reaches
+        # caller memory — `G` records the write like `s[0] = v`,
+        # so `<-a[0]` in the caller observes `x`.
+        (
+            "func G(s []chan int64, v int64) {\n"
+            "\ts[0] <- v\n"
+            "}\n"
+            "func F(a []chan int64, x int64) int64 {\n"
+            "\tG(a, x)\n"
+            "\treturn <-a[0]\n}\n",
+            frozenset({0, 1}),
+        ),
+        # A `[]chan T` result binds like the local `s :=` form —
+        # the caller names the group's backing.
+        (
+            "func G() []chan int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\treturn []chan int64{c}\n"
+            "}\n"
+            "func F(x int64) int64 {\n"
+            "\ts := G()\n"
+            "\ts[0] <- x\n"
+            "\treturn <-s[0]\n}\n",
+            frozenset({0}),
+        ),
+    ],
+)
+def test_chan_elem_container_param_result(
+    go_types_helper, declarations, expected
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available
+    assert result.return_dependencies == expected
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        # An `[N]chan` parameter stays closed like the local
+        # array form — the copy detaches the names but the
+        # queues inside still share.
+        "func F(a [1]chan int64, x int64) int64 {\n"
+        "\ta[0] <- x\n"
+        "\treturn <-a[0]\n}\n",
+        # `[]chan chan T` params stay closed like the local form.
+        "func F(s []chan chan int64, x int64) int64 {\n"
+        "\treturn 0\n}\n",
+    ],
+)
+def test_chan_elem_container_param_stays_closed(
     go_types_helper, declarations
 ):
     result = named(*unit(go_types_helper, declarations))
