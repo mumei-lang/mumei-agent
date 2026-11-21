@@ -845,6 +845,7 @@ class _RustBindings:
             return [record.binding.id]
         pattern = node.child_by_field_name("pattern")
         annotation = node.child_by_field_name("type")
+        self._generic_references(annotation)
         fact = _UNKNOWN if annotation is None else self._type_fact(annotation)
         identifiers = []
         names = self._pattern_names(pattern, scope)
@@ -1211,6 +1212,7 @@ class _RustBindings:
         annotation = node.child_by_field_name("type")
         if value is not None:
             self._expr(value)
+        self._generic_references(annotation)
         fact = _UNKNOWN if annotation is None else self._type_fact(annotation)
         alternative = node.child_by_field_name("alternative")
         if alternative is not None:
@@ -1251,6 +1253,10 @@ class _RustBindings:
         if kind in {"scoped_identifier", "scoped_type_identifier", "generic_function"}:
             self._record_qualified_path(node)
             return
+        if kind == "type_cast_expression":
+            self._expr(node.child_by_field_name("value"))
+            self._generic_references(node.child_by_field_name("type"))
+            return
         if kind == "call_expression":
             self._call(node)
             return
@@ -1265,7 +1271,14 @@ class _RustBindings:
         if kind == "struct_expression":
             name_node = node.child_by_field_name("name")
             if name_node is not None:
-                self._reference(name_node, "read", "type")
+                path_node = name_node
+                if name_node.type in {"generic_type", "generic_type_with_turbofish"}:
+                    self._generic_references(
+                        name_node.child_by_field_name("type_arguments")
+                    )
+                    path_node = name_node.child_by_field_name("type")
+                if path_node is not None:
+                    self._reference(path_node, "read", "type")
             fields = node.child_by_field_name("body")
             if fields is not None:
                 for initializer in self._children(fields):
@@ -1607,6 +1620,7 @@ class _RustBindings:
             self.unresolved.append(Unresolved(self.span(callee), self.text(callee), "qualified_path"))
             kind = "opaque_path"
         elif callee is not None and callee.type == "generic_function":
+            self._generic_references(callee.child_by_field_name("type_arguments"))
             inner = callee.child_by_field_name("function")
             if inner is not None and inner.type == "identifier":
                 record = self._reference(inner, "call")
@@ -1666,6 +1680,7 @@ class _RustBindings:
         self.calls.append(Call(span, args, self.call_owner, target, kind))
 
     def _method_call(self, node: Any) -> None:
+        self._generic_references(node.child_by_field_name("type_arguments"))
         receiver = node.child_by_field_name("receiver")
         if receiver is None:
             children = self._children(node)

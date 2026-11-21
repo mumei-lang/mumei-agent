@@ -683,6 +683,47 @@ fn unrelated<T>() where Outside: Copy {}
     assert not _refs(report, source, "Outside")
 
 
+def test_body_type_positions_record_generic_parameter_references():
+    source = """
+struct S<T>(T);
+fn make<T>(value: T) {}
+fn caller<T>(value: T) {
+    let local: T = value;
+    let cast = value as T;
+    let closure = |parameter: T| parameter;
+    make::<T>(value);
+    value.method::<T>();
+    let _ = S::<T>(value);
+    let _ = S::<T>{0: value};
+    let _: S<T>;
+}
+fn outside(value: Missing) {
+    let _: Missing = value;
+    let _ = value as Missing;
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    caller_start = source.index("fn caller")
+    outside_start = source.index("fn outside")
+    caller_generic = next(
+        binding
+        for binding in _bindings(report, "T", "generic_parameter")
+        if binding.scope is not None
+        and binding.scope.start <= caller_start < binding.scope.end
+    )
+    caller_type_references = [
+        reference
+        for reference in _refs(report, source, "T")
+        if caller_start < reference.span.start < outside_start
+    ]
+    assert len(caller_type_references) == 9
+    assert all(
+        reference.binding_id == caller_generic.id
+        for reference in caller_type_references
+    )
+    assert not _refs(report, source, "Missing")
+
+
 def test_qualified_rust_paths_stay_unresolved_as_whole_paths():
     source = """
 type T = u8;
