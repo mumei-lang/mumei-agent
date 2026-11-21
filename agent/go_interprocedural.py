@@ -2567,7 +2567,11 @@ class _Builder:
         return True
 
     def _opaque_container_field_target(
-        self, sel: Any, params: dict | None = None
+        self,
+        sel: Any,
+        params: dict | None = None,
+        *,
+        allow_struct_elements: bool = False,
     ) -> tuple[str, str, Any, frozenset, Any] | None:
         root_id, member = self._scalar_container_field(sel)
         if root_id is None or member is None:
@@ -2654,6 +2658,13 @@ class _Builder:
             fact is not None
             and self._scalar_elem_nested_collection(fact)
         )
+        struct_element_collection = (
+            allow_struct_elements
+            and fact is not None
+            and fact.kind in {"slice", "array", "map"}
+            and getattr(fact, "elem", None) is not None
+            and self._named_value_struct_supported(fact.elem)
+        )
         if (
             root_ref.kind == "import"
             or root_binding is None
@@ -2672,7 +2683,11 @@ class _Builder:
                     sel, root_binding
                 )
             )
-            or not (scalar_collection or nested_scalar_collection)
+            or not (
+                scalar_collection
+                or nested_scalar_collection
+                or struct_element_collection
+            )
             or (
                 fact.kind == "array"
                 and not self._type_embeds_collection(fact)
@@ -2754,6 +2769,7 @@ class _Builder:
         tokens: frozenset | None,
         *,
         conditional: bool = False,
+        join_root_tokens: bool = True,
     ) -> str:
         """Update a field slot and its struct roots using the shared
         field-store model."""
@@ -2774,20 +2790,21 @@ class _Builder:
         self._opaque_container_tokens[field_key] = tokens
         root_binding = self.bindings.get(root_id)
         root_type = getattr(root_binding, "type", None)
-        for holder_id in self._opaque_container_sharers(root_id):
-            if (
-                "\x00" not in holder_id
-                and getattr(
-                    self.bindings.get(holder_id), "type", None
-                )
-                == root_type
-            ):
-                self._opaque_container_tokens[holder_id] = (
-                    self._opaque_container_tokens.get(
-                        holder_id, frozenset()
+        if join_root_tokens:
+            for holder_id in self._opaque_container_sharers(root_id):
+                if (
+                    "\x00" not in holder_id
+                    and getattr(
+                        self.bindings.get(holder_id), "type", None
                     )
-                    | tokens
-                )
+                    == root_type
+                ):
+                    self._opaque_container_tokens[holder_id] = (
+                        self._opaque_container_tokens.get(
+                            holder_id, frozenset()
+                        )
+                        | tokens
+                    )
         return field_key
 
     def _struct_value_fact(self, fact: Any) -> Any | None:
@@ -2824,6 +2841,282 @@ class _Builder:
             if span is not None:
                 return self._fields_declared_after(span)
         return ()
+
+    def _scalar_value_fact(self, fact: Any) -> bool:
+        return fact is not None and not self._type_fact_has_type_args(
+            fact
+        ) and (
+            fact.kind in {"integer", "boolean"}
+            or (
+                fact.kind == "unsupported"
+                and fact.basic_name
+                in {
+                    "string",
+                    "float32",
+                    "float64",
+                    "complex64",
+                    "complex128",
+                }
+            )
+        )
+
+    def _named_value_struct_supported(
+        self,
+        fact: Any,
+        anchor: Any | None = None,
+        seen: frozenset[str] = frozenset(),
+    ) -> bool:
+        struct_fact = self._struct_value_fact(fact)
+        if (
+            struct_fact is None
+            or not struct_fact.type_id
+            or self._type_fact_has_type_args(fact)
+            or struct_fact.type_id in seen
+        ):
+            return False
+        type_binding = self._pointee_type(struct_fact.type_id)
+        if (
+            type_binding is None
+            or getattr(type_binding.type, "kind", None) != "struct"
+        ):
+            return False
+        seen = seen | {struct_fact.type_id}
+        for member in self._struct_fields_for_fact(
+            struct_fact, anchor
+        ):
+            field_type = getattr(member, "type", None)
+            if self._scalar_value_fact(field_type):
+                continue
+            if (
+                field_type is not None
+                and field_type.kind in {"slice", "map"}
+                and not self._type_fact_has_type_args(field_type)
+                and self._scalar_value_fact(field_type.elem)
+                and (
+                    field_type.kind != "map"
+                    or self._scalar_value_fact(field_type.key)
+                )
+            ):
+                continue
+            nested = self._struct_value_fact(field_type)
+            if nested is None or not self._named_value_struct_supported(
+                nested, member, seen
+            ):
+                return False
+        return True
+
+    def _pin_named_value_struct(
+        self,
+        fact: Any,
+        anchor: Any | None = None,
+        seen: frozenset[str] = frozenset(),
+    ) -> None:
+        struct_fact = self._struct_value_fact(fact)
+        if (
+            struct_fact is None
+            or not struct_fact.type_id
+            or struct_fact.type_id in seen
+        ):
+            return
+        self._pin_fact_identities(struct_fact)
+        seen = seen | {struct_fact.type_id}
+        for member in self._struct_fields_for_fact(
+            struct_fact, anchor
+        ):
+            field_type = getattr(member, "type", None)
+            self._pin_fact_identities(field_type)
+            if getattr(field_type, "key", None) is not None:
+                self._pin_fact_identities(field_type.key)
+            nested = self._struct_value_fact(field_type)
+            if nested is not None:
+                self._pin_named_value_struct(
+                    nested, member, seen
+                )
+
+    def _struct_element_container_target(
+        self, node: Any, params: dict | None = None
+    ) -> tuple[Any, Any, str, frozenset, frozenset] | None:
+        current = node
+        while (
+            current is not None
+            and current.type == "parenthesized_expression"
+        ):
+            current = next(
+                (
+                    child
+                    for child in current.named_children
+                    if child.type != "comment"
+                ),
+                None,
+            )
+        if current is None:
+            return None
+        container = (
+            current.child_by_field_name("operand")
+            if current.type == "index_expression"
+            else current
+        )
+        while (
+            container is not None
+            and container.type == "parenthesized_expression"
+        ):
+            container = next(
+                (
+                    child
+                    for child in container.named_children
+                    if child.type != "comment"
+                ),
+                None,
+            )
+        if container is None or container.type == "index_expression":
+            return None
+        root_id = None
+        root_node = container
+        container_fact = None
+        if container.type == "identifier":
+            ref = self.references.get(self.node_key(container))
+            root_id = ref.binding_id if ref is not None else None
+            binding = self.bindings.get(root_id)
+            if (
+                ref is None
+                or ref.kind == "import"
+                or binding is None
+                or self._package_level(binding)
+            ):
+                return None
+            container_fact = binding.type
+        elif container.type in {
+            "selector_expression",
+            "field_expression",
+        }:
+            while root_node is not None and root_node.type in {
+                "selector_expression",
+                "field_expression",
+                "index_expression",
+                "parenthesized_expression",
+            }:
+                root_node = (
+                    next(
+                        (
+                            child
+                            for child in root_node.named_children
+                            if child.type != "comment"
+                        ),
+                        None,
+                    )
+                    if root_node.type == "parenthesized_expression"
+                    else root_node.child_by_field_name("operand")
+                )
+            root_ref = (
+                self.references.get(self.node_key(root_node))
+                if root_node is not None and root_node.type == "identifier"
+                else None
+            )
+            root_binding = (
+                self.bindings.get(root_ref.binding_id)
+                if root_ref is not None
+                else None
+            )
+            if (
+                root_ref is None
+                or root_ref.kind == "import"
+                or root_binding is None
+                or self._package_level(root_binding)
+            ):
+                return None
+            self._opaque_container_bind(root_node, params)
+            target = self._opaque_container_field_target(
+                container,
+                params,
+                allow_struct_elements=True,
+            )
+            if target is None:
+                return None
+            _field_key, root_id, member, _tokens, root_ref = target
+            binding = self.bindings.get(root_id)
+            if (
+                root_ref.kind == "import"
+                or binding is None
+                or self._package_level(binding)
+            ):
+                return None
+            container_fact = member.type
+        else:
+            return None
+        if (
+            root_id is None
+            or container_fact is None
+            or container_fact.kind not in {"slice", "array", "map"}
+            or container_fact.elem is None
+            or not self._named_value_struct_supported(
+                container_fact.elem
+            )
+        ):
+            return None
+        container_tokens = self._opaque_container_bind(
+            container, params
+        )
+        value_tokens = (
+            self._opaque_container_bind(current, params)
+            if current.type == "index_expression"
+            else container_tokens
+        )
+        root_tokens = (
+            self._opaque_container_bind(root_node, params)
+            if root_node is not None
+            else None
+        )
+        if not root_tokens:
+            root_anchor = (
+                root_node if root_node is not None else current
+            )
+            root_tokens = (
+                container_tokens
+                or value_tokens
+                or frozenset({self.node_key(root_anchor)})
+            )
+        collection_members = self._struct_collection_members(
+            container_fact.elem
+        )
+        if not value_tokens:
+            value_tokens = (
+                root_tokens
+                if collection_members
+                else frozenset({self.node_key(current)})
+            )
+        self._pin_fact_identities(container_fact)
+        self._pin_named_value_struct(container_fact.elem)
+        return (
+            container_fact,
+            container_fact.elem,
+            root_id,
+            frozenset(root_tokens),
+            frozenset(value_tokens),
+        )
+
+    def _struct_element_container_snapshot(
+        self, node: Any, params: dict | None = None
+    ) -> tuple[Any, tuple[frozenset, dict[str, frozenset]]] | None:
+        target = self._struct_element_container_target(node, params)
+        if target is None:
+            return None
+        _container_fact, elem, root_id, root_tokens, container_tokens = (
+            target
+        )
+        field_tokens: dict[str, frozenset] = {}
+        for member in self._struct_collection_members(elem):
+            field_key = self._opaque_container_field_key(
+                root_id, member.id
+            )
+            tokens = self._opaque_container_tokens.get(field_key)
+            if not tokens:
+                tokens = root_tokens or container_tokens
+                self._set_opaque_container_field_tokens(
+                    root_id, member.id, tokens
+                )
+            field_tokens[member.id] = tokens
+        value_root_tokens = frozenset({self.node_key(node)})
+        return elem, (value_root_tokens, field_tokens)
 
     def _struct_collection_members(
         self,
@@ -2904,6 +3197,7 @@ class _Builder:
         snapshot: tuple[frozenset, dict[str, frozenset]],
         *,
         conditional: bool = False,
+        copy_root: bool = False,
     ) -> None:
         binding = self.bindings.get(binding_id)
         if binding is None:
@@ -2931,6 +3225,7 @@ class _Builder:
                 member.id,
                 field_tokens[member.id],
                 conditional=conditional,
+                join_root_tokens=not copy_root,
             )
 
     def _struct_literal_field_values(
@@ -3321,6 +3616,28 @@ class _Builder:
                 None,
             )
             if rhs is None:
+                return
+        if getattr(binding.type, "kind", None) == "struct":
+            element_snapshot = self._struct_element_container_snapshot(
+                rhs, params
+            )
+            target_fact = (
+                self._struct_value_fact(binding.type)
+                if binding.type is not None
+                else None
+            )
+            if (
+                element_snapshot is not None
+                and target_fact is not None
+                and target_fact.type_id
+                == element_snapshot[0].type_id
+            ):
+                self._bind_struct_container_snapshot(
+                    binding_id,
+                    element_snapshot[1],
+                    conditional=conditional,
+                    copy_root=True,
+                )
                 return
         members = self._struct_collection_members(
             binding.type, binding
@@ -7178,7 +7495,9 @@ class _Builder:
             member = self._package_member(inner)
             if member is None:
                 opaque_field = self._opaque_container_field_target(
-                    inner, params
+                    inner,
+                    params,
+                    allow_struct_elements=True,
                 )
         elif inner is not None and inner.type in (
             "call_expression",
@@ -7321,6 +7640,101 @@ class _Builder:
             if fact is not None and fact.kind in container_kinds
             else None
         )
+        struct_element_container_fact = fact
+        if (
+            inner is not None
+            and inner.type == "identifier"
+            and package_var is None
+            and member is None
+            and bound_pointer is None
+            and package_pointee is None
+            and call_operand is None
+        ):
+            inner_ref = self.references.get(self.node_key(inner))
+            root_binding = (
+                self.bindings.get(inner_ref.binding_id)
+                if inner_ref is not None and inner_ref.binding_id
+                else None
+            )
+            if (
+                inner_ref is not None
+                and inner_ref.kind != "import"
+                and root_binding is not None
+                and not self._package_level(root_binding)
+            ):
+                struct_element_container_fact = root_binding.type
+        elif (
+            inner is not None
+            and inner.type == "selector_expression"
+            and opaque_field is not None
+        ):
+            struct_element_container_fact = opaque_field[2].type
+        struct_element_candidate = (
+            len(indexes) == 1
+            and call_operand is None
+            and package_var is None
+            and member is None
+            and bound_pointer is None
+            and package_pointee is None
+            and struct_element_container_fact is not None
+            and struct_element_container_fact.kind in container_kinds
+            and struct_element_container_fact.elem is not None
+            and self._named_value_struct_supported(
+                struct_element_container_fact.elem
+            )
+        )
+        struct_element_index_deps = None
+        struct_element_operand_deps = None
+        struct_element_target = None
+        if struct_element_candidate:
+            if opaque_field is not None:
+                struct_element_operand_deps = self.expression(
+                    inner,
+                    fn,
+                    params,
+                    locals_,
+                    transfers,
+                    count,
+                    depth + 1,
+                )
+            struct_element_index_deps = frozenset()
+            for idx in reversed(indexes):
+                if idx is None:
+                    raise _Unsupported(
+                        "non_parameter_reference", _span(node)
+                    )
+                if idx.type not in _INDEX_LITERALS:
+                    struct_element_index_deps |= self.expression(
+                        idx,
+                        fn,
+                        params,
+                        locals_,
+                        transfers,
+                        count,
+                        depth + 1,
+                    )
+            struct_element_target = (
+                self._struct_element_container_target(node, params)
+            )
+        if struct_element_target is not None:
+            fact = struct_element_target[0]
+            elem = struct_element_target[1]
+            if (
+                opaque_field is None
+                and inner is not None
+                and inner.type == "selector_expression"
+            ):
+                opaque_field = self._opaque_container_field_target(
+                    inner, params, allow_struct_elements=True
+                )
+        if (
+            struct_element_target is not None
+            and opaque_composite is None
+            and opaque_field is None
+            and inner is not None
+            and inner.type == "identifier"
+        ):
+            opaque_composite = struct_element_target[2]
         if (
             index is None
             or (
@@ -7339,16 +7753,19 @@ class _Builder:
             or (
                 elem.kind not in {"integer", "boolean", "pointer"}
                 and not (
-                    (
-                        opaque_composite is not None
-                        or opaque_field is not None
-                    )
-                    and (
-                        self._scalar_elem_collection(elem)
-                        or self._scalar_elem_nested_collection(
-                            elem
+                    struct_element_target is not None
+                    or (
+                        (
+                            opaque_composite is not None
+                            or opaque_field is not None
                         )
-                        or self._chan_elem_collection(fact)
+                        and (
+                            self._scalar_elem_collection(elem)
+                            or self._scalar_elem_nested_collection(
+                                elem
+                            )
+                            or self._chan_elem_collection(fact)
+                        )
                     )
                 )
             )
@@ -7496,7 +7913,10 @@ class _Builder:
                 call_operand, fn, params, locals_, transfers, count,
                 depth + 1,
             )
-        if opaque_composite is not None:
+        if (
+            opaque_composite is not None
+            and struct_element_index_deps is None
+        ):
             # `s[i]` — the element's provenance is the bound
             # container's conflated set across every sharer (a store
             # through any alias reaches this memory).
@@ -7505,35 +7925,47 @@ class _Builder:
             )
         if opaque_field is not None:
             field_key = opaque_field[0]
-            deps |= self.expression(
-                inner, fn, params, locals_, transfers, count, depth + 1
-            )
-            deps |= self._opaque_container_deps(field_key, locals_)
-        for idx in reversed(indexes):
-            if idx is None:
-                raise _Unsupported(
-                    "non_parameter_reference", _span(node)
+            if struct_element_index_deps is not None:
+                if struct_element_operand_deps is not None:
+                    deps |= struct_element_operand_deps
+            else:
+                deps |= self.expression(
+                    inner, fn, params, locals_, transfers, count,
+                    depth + 1,
                 )
-            if idx.type in {
-                "int_literal",
-                "float_literal",
-                "imaginary_literal",
-                "rune_literal",
-                "interpreted_string_literal",
-                "raw_string_literal",
-            }:
-                # A literal index carries no dependencies —
-                # `lib.VM["k"]` reads the entry at a constant key
-                # like any other modelled index shape.
-                # `true`/`false` are excluded: Go allows shadowing
-                # the predeclared constants as variable names, so
-                # the node alone cannot prove a constant — the
-                # expression path resolves the `universe` reference
-                # (still dep-free) or the shadowing binding's deps.
-                continue
-            deps |= self.expression(
-                idx, fn, params, locals_, transfers, count, depth + 1
-            )
+                deps |= self._opaque_container_deps(field_key, locals_)
+        if struct_element_index_deps is None:
+            for idx in reversed(indexes):
+                if idx is None:
+                    raise _Unsupported(
+                        "non_parameter_reference", _span(node)
+                    )
+                if idx.type in _INDEX_LITERALS:
+                    # A literal index carries no dependencies —
+                    # `lib.VM["k"]` reads the entry at a constant key
+                    # like any other modelled index shape.
+                    # `true`/`false` are excluded: Go allows shadowing
+                    # the predeclared constants as variable names, so
+                    # the node alone cannot prove a constant — the
+                    # expression path resolves the `universe` reference
+                    # (still dep-free) or the shadowing binding's deps.
+                    continue
+                deps |= self.expression(
+                    idx, fn, params, locals_, transfers, count,
+                    depth + 1,
+                )
+        else:
+            deps |= struct_element_index_deps
+            if opaque_composite is not None:
+                # Index calls may write through an alias to the
+                # container, so read the element provenance afterward.
+                deps |= self._opaque_container_deps(
+                    opaque_composite, locals_
+                )
+            if opaque_field is not None:
+                deps |= self._opaque_container_deps(
+                    opaque_field[0], locals_
+                )
         if bound_pointer is not None:
             # `(*p)[i]` — the loaded element also depends on where
             # the pointer was aimed (its own deps) and on every
@@ -7638,17 +8070,20 @@ class _Builder:
         key_deps: frozenset[int] = frozenset(),
         chan_group: str | None = None,
         external_chan_chan_origins: frozenset[int] | None = None,
+        struct_snapshot: tuple[
+            frozenset, dict[str, frozenset]
+        ] | None = None,
         *,
         fn: Function,
         transfers: list[CallTransfer],
         count: list[int],
     ) -> None:
-        """Bind `for` range names to dep-free (external-state) values.
+        """Bind `for` range names to their iteration dependencies.
 
         `_` slots skip; a fresh `:=` name uses the compiler's binding
-        record (its declared type must be scalar-or-pointer — a map's
-        string key or a struct element stays closed); an `=` name
-        reuses the referenced binding through `_store`. `value_deps`
+        record (its declared type must be scalar-or-pointer, or a
+        supported named struct with a collection-field snapshot); an
+        `=` name reuses the referenced binding through `_store`. `value_deps`
         applies to the element name — the second of a two-name range
         — when the container lives in caller memory a bound pointer's
         aim selects (`for range *p`): those elements carry the
@@ -7698,6 +8133,19 @@ class _Builder:
                     scope[binding.id] = deps
                     self._chan_group_join(binding.id, chan_group)
                     continue
+                if (
+                    pos == 1
+                    and binding.type.kind == "struct"
+                    and struct_snapshot is not None
+                ):
+                    scope[binding.id] = deps
+                    self._bind_struct_container_snapshot(
+                        binding.id,
+                        struct_snapshot,
+                        conditional=conditional,
+                        copy_root=True,
+                    )
+                    continue
                 if binding.type.kind not in {
                     "integer",
                     "boolean",
@@ -7732,6 +8180,26 @@ class _Builder:
                     raise _Unsupported(
                         "binding_unavailable", _span(name)
                     )
+                if (
+                    pos == 1
+                    and rb is not None
+                    and rb.type.kind == "struct"
+                    and struct_snapshot is not None
+                ):
+                    self._store(
+                        scope,
+                        params,
+                        ref.binding_id,
+                        deps,
+                        True,
+                    )
+                    self._bind_struct_container_snapshot(
+                        ref.binding_id,
+                        struct_snapshot,
+                        conditional=True,
+                        copy_root=True,
+                    )
+                    continue
                 if (
                     external_chan_chan_origins is not None
                     and pos == 1
@@ -7976,7 +8444,12 @@ class _Builder:
         fact = member.type
         for _ in range(levels):
             fact = fact.elem if fact is not None else None
-        if fact is None or fact.kind != "map":
+        if (
+            fact is None
+            or fact.kind != "map"
+            or getattr(fact, "elem", None) is None
+            or fact.elem.kind == "struct"
+        ):
             return None
         return member
 
@@ -8006,7 +8479,12 @@ class _Builder:
         _, fact = self._call_result_fact(inner)
         for _ in range(levels):
             fact = fact.elem if fact is not None else None
-        if fact is None or fact.kind != "map":
+        if (
+            fact is None
+            or fact.kind != "map"
+            or getattr(fact, "elem", None) is None
+            or fact.elem.kind == "struct"
+        ):
             return None
         return node
 
@@ -8045,6 +8523,8 @@ class _Builder:
             binding is not None
             and binding.type is not None
             and binding.type.kind == "map"
+            and getattr(binding.type, "elem", None) is not None
+            and binding.type.elem.kind != "struct"
         )
 
     def _call_result_fact(self, node: Any) -> tuple[Any | None, Any | None]:
@@ -13797,6 +14277,21 @@ class _Builder:
                     and rights[i].type == "call_expression"
                     else None
                 )
+                element_snapshot = (
+                    self._struct_element_container_snapshot(
+                        rights[i], params
+                    )
+                    if len(lefts) == len(rights)
+                    else None
+                )
+                target_struct = self._struct_value_fact(binding.type)
+                struct_element_binding = (
+                    binding.type.kind == "struct"
+                    and element_snapshot is not None
+                    and target_struct is not None
+                    and target_struct.type_id
+                    == element_snapshot[0].type_id
+                )
                 if binding.type.kind in {
                     "slice",
                     "array",
@@ -14025,6 +14520,7 @@ class _Builder:
                         and struct_call_result is not None
                         and struct_call_result.kind == "struct"
                     )
+                    and not struct_element_binding
                     and not self._func_elem_collection(binding.type)
                     and not self._func_elem_nested_collection(
                         binding.type
@@ -14813,6 +15309,23 @@ class _Builder:
                         and value_nodes[i].type == "call_expression"
                         else None
                     )
+                    element_snapshot = (
+                        self._struct_element_container_snapshot(
+                            value_nodes[i], params
+                        )
+                        if len(names) == len(value_nodes)
+                        else None
+                    )
+                    target_struct = self._struct_value_fact(
+                        binding.type
+                    )
+                    struct_element_binding = (
+                        binding.type.kind == "struct"
+                        and element_snapshot is not None
+                        and target_struct is not None
+                        and target_struct.type_id
+                        == element_snapshot[0].type_id
+                    )
                     if binding.type.kind in {
                         "slice",
                         "array",
@@ -15037,6 +15550,13 @@ class _Builder:
                             binding.type.kind == "struct"
                             and struct_call_result is not None
                             and struct_call_result.kind == "struct"
+                        )
+                        and not struct_element_binding
+                        and not (
+                            not value_nodes
+                            and self._named_value_struct_supported(
+                                binding.type, binding
+                            )
                         )
                         and not self._func_elem_collection(binding.type)
                         and not self._func_elem_nested_collection(
@@ -17295,6 +17815,7 @@ class _Builder:
             struct_rhs_snapshots: dict[
                 int, tuple[frozenset, dict[str, frozenset]]
             ] = {}
+            struct_rhs_element_snapshots: set[int] = set()
             if not compound and len(lefts) == len(rights):
                 for rhs_index, rhs in enumerate(rights):
                     snapshot_rhs = rhs
@@ -17311,10 +17832,40 @@ class _Builder:
                             ),
                             None,
                         )
-                    if (
-                        snapshot_rhs is None
-                        or snapshot_rhs.type != "identifier"
-                    ):
+                    if snapshot_rhs is None:
+                        continue
+                    target_id = getattr(
+                        refs[rhs_index], "binding_id", None
+                    )
+                    target_binding = self.bindings.get(target_id)
+                    target_struct = (
+                        self._struct_value_fact(target_binding.type)
+                        if target_binding is not None
+                        else None
+                    )
+                    if snapshot_rhs.type == "index_expression":
+                        element_snapshot = (
+                            self._struct_element_container_snapshot(
+                                snapshot_rhs, params
+                            )
+                        )
+                        if (
+                            element_snapshot is not None
+                            and target_binding is not None
+                            and getattr(
+                                target_binding.type, "kind", None
+                            )
+                            == "struct"
+                            and target_struct is not None
+                            and target_struct.type_id
+                            == element_snapshot[0].type_id
+                        ):
+                            struct_rhs_snapshots[rhs_index] = (
+                                element_snapshot[1]
+                            )
+                            struct_rhs_element_snapshots.add(rhs_index)
+                        continue
+                    if snapshot_rhs.type != "identifier":
                         continue
                     source_ref = self.references.get(
                         self.node_key(snapshot_rhs)
@@ -17331,10 +17882,6 @@ class _Builder:
                         if source_binding is not None
                         else ()
                     )
-                    target_id = getattr(
-                        refs[rhs_index], "binding_id", None
-                    )
-                    target_binding = self.bindings.get(target_id)
                     target_members = (
                         self._struct_collection_members(
                             target_binding.type, target_binding
@@ -18440,6 +18987,9 @@ class _Builder:
                                 struct_rhs_snapshots[i],
                                 conditional=(
                                     conditional or self._may_skip > 0
+                                ),
+                                copy_root=(
+                                    i in struct_rhs_element_snapshots
                                 ),
                             )
                         else:
@@ -19626,6 +20176,13 @@ class _Builder:
                 computed = None
                 local_chan_chan_range = None
                 local_chan_chan_range_fact = None
+                struct_range_value = (
+                    self._struct_element_container_snapshot(
+                        right, params
+                    )
+                    if right is not None
+                    else None
+                )
                 # `range G()` where `G` returns `*[N]T` iterates the
                 # pointee's live elements like `range p` (verified
                 # `go run`): a mid-iteration `(*p)[i] = x` IS
@@ -20370,6 +20927,11 @@ class _Builder:
                                 )
                                 else None
                             )
+                        ),
+                        (
+                            struct_range_value[1]
+                            if struct_range_value is not None
+                            else None
                         ),
                         fn=fn,
                         transfers=transfers,
