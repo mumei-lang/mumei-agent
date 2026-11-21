@@ -335,6 +335,9 @@ def run_accept_list(args: argparse.Namespace) -> dict:
 
     The report contains only the validated aggregate verdict and counts,
     never the descriptor, per-record checks or consistency-conflict list.
+    A descriptor larger than the attempt stdout capture bound
+    (`MAX_STDOUT_BYTES`) is reported as `descriptor_truncated` with no
+    verdict and no selection.
     A selected result is Core's declared-success exit, not a grade promotion.
     """
     from agent.attempt_runner import dispatch_attempt
@@ -415,6 +418,10 @@ def run_accept_list(args: argparse.Namespace) -> dict:
     }
     if inputs_changed:
         report["inputs_changed"] = True
+    elif exit_code is not None and not dispatch.run.complete:
+        # Per-record descriptors can exceed the attempt capture bound;
+        # a truncated descriptor yields no verdict and never selects.
+        report["descriptor_truncated"] = True
     elif descriptor is not None:
         report["acceptance_schema"] = descriptor["schema_version"]
         report["verdict"] = descriptor["verdict"]

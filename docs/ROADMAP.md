@@ -6846,7 +6846,9 @@ descriptor and unchanged inputs; rejected and inconclusive verdicts do
 not select. The verdict is Core's declared-requirement normalization
 over representation plus cross-record pin agreement, not claim truth,
 producer authenticity, freshness, tool execution or grade promotion.
-Selection is a declared-success exit, not a grade promotion. C11 stays
+Selection is a declared-success exit, not a grade promotion. A
+descriptor larger than the 64 KiB attempt capture bound is reported as
+`descriptor_truncated` with no verdict and no selection. C11 stays
 partial.
 
 ### C11 audit scheduled-attempt evidence check

@@ -586,6 +586,32 @@ def test_input_drift_suppresses_verdict_and_selection(
     _no_verdict(report)
 
 
+def test_oversized_descriptor_is_reported_as_truncated(tmp_path: Path) -> None:
+    from agent.verification_attempt import MAX_STDOUT_BYTES
+
+    list_path, list_bytes, requirement_path, requirement_bytes = _inputs(
+        tmp_path
+    )
+    descriptor = _descriptor("requirement", list_bytes, requirement_bytes)
+    descriptor["records"] = [{"pad": "x" * 1024}] * (
+        MAX_STDOUT_BYTES // 1024 + 1
+    )
+    core = _write_core(
+        tmp_path,
+        list_path,
+        list_bytes,
+        requirement_path,
+        requirement_bytes,
+        descriptor,
+    )
+
+    report = run_accept_list(_args(core, list_path, requirement_path))
+
+    assert report["descriptor_truncated"] is True
+    assert report["normalized"]["exit_code"] == 0
+    _no_verdict(report)
+
+
 def test_parser_requires_exactly_one_requirement_mode() -> None:
     parser = build_accept_list_parser()
     with pytest.raises(SystemExit):
