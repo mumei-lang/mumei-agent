@@ -2463,7 +2463,10 @@ class _Builder:
             return ()
         if struct_fact.type_id:
             type_binding = self._pointee_type(struct_fact.type_id)
-            if type_binding is not None:
+            if (
+                type_binding is not None
+                and getattr(type_binding, "span", None) is not None
+            ):
                 return self._struct_fields(type_binding)
         if anchor is not None:
             span = self.anon_struct_anchor.get(anchor.id) or getattr(
