@@ -200,7 +200,7 @@ mumei `docs/MCP_TOOL_CONTRACT.md` table remains canonical.
 | `evidence_check_consistency` | `core_path: str, evidence_path: str, attempt_timeout_ms: int = 30000, expected_adapter: str \| None = None` | `report` |
 | `evidence_check_accept` | `sequence_json: str, check_json: str` | `acceptance` |
 | `evidence_acceptance_eval` | `descriptor_path: str, expected_fingerprint: str \| None = None` | `evaluation` |
-| `freshness_eval` | `record_path: str, reference_time: str, max_age_seconds: int` | `evaluation` |
+| `freshness_eval` | `record_path: str, reference_time: str, max_age_seconds: StrictInt` | `evaluation` |
 | `binding_eval` | `record_path: str, evidence_path: str` | `binding` |
 | `recovery_eval` | `record_path: str, evidence_paths: list[str]` | `recovery` |
 | `evidence_compare` | `evidence_a_path: str, evidence_b_path: str` | `comparison` |
