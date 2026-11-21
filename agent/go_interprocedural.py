@@ -8418,6 +8418,18 @@ class _Builder:
             )
             if root in locals_:
                 resolved |= locals_[root]
+                binding = self.bindings.get(root)
+                if root in self.local_chan_chans:
+                    resolved |= self._chan_group_read_deps(
+                        root, locals_
+                    )
+                elif (
+                    binding is not None
+                    and self._chan_elem_collection(binding.type)
+                ):
+                    resolved |= self._opaque_container_deps(
+                        root, locals_
+                    )
                 if root in self.external_chan_locals:
                     resolved |= self.indirect_writes
             elif root in params:
@@ -8427,6 +8439,118 @@ class _Builder:
                 # frozen deps are the value the stored closure sees.
                 resolved |= self._dead_local_deps[root]
         return resolved
+
+    def _fold_closure_channel_writes(
+        self,
+        writes: frozenset[str] | set[str],
+        deps: frozenset[int],
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+        transfers: list[CallTransfer],
+        site: Any,
+    ) -> None:
+        queue_roots = {
+            target
+            for target in writes
+            if target in self.local_chan_chans
+        }
+        queue_members = {
+            target
+            for target in writes
+            if target not in queue_roots
+            and target not in params
+            and target not in locals_
+            and (
+                (binding := self.bindings.get(target)) is not None
+                and binding.type is not None
+                and binding.type.kind == "chan"
+            )
+        }
+        for root in queue_roots:
+            for member in queue_members:
+                self._chan_group_join(member, root)
+            root_old = locals_.get(root, frozenset())
+            if root in params:
+                root_old |= frozenset({params[root]})
+            self._store(
+                locals_,
+                params,
+                root,
+                root_old | deps,
+                True,
+            )
+            external_members = self._chan_group_external_tokens(root)
+            if external_members:
+                self.indirect_writes |= (
+                    deps | self._chan_group_read_deps(root, locals_)
+                )
+                for token in sorted(external_members):
+                    transfers.append(
+                        CallTransfer(
+                            FileSpan(
+                                self.current_file,
+                                site.start_byte,
+                                site.end_byte,
+                            ),
+                            token,
+                            (),
+                            frozenset(),
+                            imported=True,
+                        )
+                    )
+
+        for target in writes:
+            binding = self.bindings.get(target)
+            if (
+                binding is None
+                or not self._chan_elem_collection(binding.type)
+            ):
+                continue
+            tokens = self._opaque_container_tokens.get(
+                target, frozenset()
+            )
+            target_old = locals_.get(target, frozenset())
+            if target in params:
+                target_old |= frozenset({params[target]})
+            self._store(
+                locals_,
+                params,
+                target,
+                target_old | deps,
+                True,
+            )
+            holders = self._opaque_container_holders(tokens)
+            for holder_id in holders:
+                holder_old = locals_.get(holder_id, frozenset())
+                if holder_id in params:
+                    holder_old |= frozenset({params[holder_id]})
+                self._store(
+                    locals_,
+                    params,
+                    holder_id,
+                    holder_old | deps,
+                    True,
+                )
+            self.indirect_writes |= deps
+            for token in sorted(tokens, key=repr):
+                if (
+                    token in params
+                    or token in self.external_chan_locals
+                    or token in self._external_chan_group_tokens
+                ):
+                    transfers.append(
+                        CallTransfer(
+                            FileSpan(
+                                self.current_file,
+                                site.start_byte,
+                                site.end_byte,
+                            ),
+                            token,
+                            (),
+                            frozenset(),
+                            imported=True,
+                        )
+                    )
 
     def _deferred_expression_type(self, node: Any) -> Any | None:
         node = self._strip_parens(node)
@@ -24789,8 +24913,199 @@ class _Builder:
             )
         return node
 
+    def _literal_channel_expression_type(self, node: Any) -> Any | None:
+        node = self._strip_parens(node)
+        if node is None:
+            return None
+        if node.type == "unary_expression":
+            operator = node.child_by_field_name("operator")
+            if operator is not None and operator.type == "<-":
+                channel_type = self._literal_channel_expression_type(
+                    node.child_by_field_name("operand")
+                )
+                return (
+                    channel_type.elem
+                    if channel_type is not None
+                    and channel_type.kind == "chan"
+                    else None
+                )
+        return self._deferred_expression_type(node)
+
+    def _channel_reference_operation(
+        self, node: Any
+    ) -> tuple[str, Any, int, int] | None:
+        current = node
+        index_depth = 0
+        receive_depth = 0
+        while current is not None and current.parent is not None:
+            parent = current.parent
+            if (
+                parent.type == "parenthesized_expression"
+                and self._strip_parens(parent) == current
+            ):
+                current = parent
+            elif (
+                parent.type == "index_expression"
+                and self._strip_parens(
+                    parent.child_by_field_name("operand")
+                )
+                == self._strip_parens(current)
+            ):
+                current = parent
+                index_depth += 1
+            elif parent.type == "unary_expression":
+                operator = parent.child_by_field_name("operator")
+                if (
+                    operator is None
+                    or operator.type != "<-"
+                    or self._strip_parens(
+                        parent.child_by_field_name("operand")
+                    )
+                    != self._strip_parens(current)
+                ):
+                    break
+                current = parent
+                receive_depth += 1
+            else:
+                break
+
+        parent = current.parent if current is not None else None
+        if parent is not None and parent.type == "send_statement":
+            channel = parent.child_by_field_name("channel")
+            if (
+                channel is not None
+                and channel.start_byte <= current.start_byte
+                and current.end_byte <= channel.end_byte
+            ):
+                return "send", parent, index_depth, receive_depth
+        if parent is not None and parent.type in {
+            "argument_list",
+            "arguments",
+        }:
+            call = parent.parent
+            arguments = [
+                child
+                for child in _children(parent)
+                if child.type != "comment"
+            ]
+            function = (
+                self._strip_parens(
+                    call.child_by_field_name("function")
+                )
+                if call is not None and call.type == "call_expression"
+                else None
+            )
+            function_ref = (
+                self.references.get(self.node_key(function))
+                if function is not None and function.type == "identifier"
+                else None
+            )
+            if (
+                len(arguments) == 1
+                and self._strip_parens(arguments[0])
+                == self._strip_parens(current)
+                and function_ref is not None
+                and function_ref.kind == "universe"
+                and function.text in {b"close", b"len", b"cap"}
+            ):
+                return (
+                    function.text.decode("ascii"),
+                    call,
+                    index_depth,
+                    receive_depth,
+                )
+        if receive_depth:
+            result = current
+            if (
+                parent is not None
+                and parent.type == "expression_list"
+                and parent.parent is not None
+                and parent.parent.type == "return_statement"
+            ):
+                parent = parent.parent
+            if parent is not None and parent.type == "return_statement":
+                result_type = self._literal_channel_expression_type(
+                    result
+                )
+                if result_type is not None and result_type.kind in {
+                    "integer",
+                    "boolean",
+                }:
+                    return "return", parent, index_depth, receive_depth
+            if (
+                parent is not None
+                and parent.type == "expression_statement"
+            ):
+                return "receive", parent, index_depth, receive_depth
+            if (
+                parent is not None
+                and parent.type == "receive_statement"
+            ):
+                return "receive", parent, index_depth, receive_depth
+        return None
+
+    @staticmethod
+    def _inside_select_operation(node: Any) -> bool:
+        current = node
+        while current is not None:
+            if current.type in {"select_statement", "select_clause"}:
+                return True
+            current = current.parent
+        return False
+
+    def _chan_container_only_operations(
+        self, container_id: str, literal_node: Any
+    ) -> bool:
+        function_node = literal_node
+        while function_node is not None and function_node.type not in {
+            "function_declaration",
+            "method_declaration",
+        }:
+            function_node = function_node.parent
+        if function_node is None:
+            return False
+        body = function_node.child_by_field_name("body")
+        if body is None:
+            return False
+        stack = [body]
+        while stack:
+            cur = stack.pop()
+            if cur.type == "identifier":
+                ref = self.references.get(self.node_key(cur))
+                if ref is not None and ref.binding_id == container_id:
+                    scope = cur.parent
+                    while scope is not None and scope.type not in {
+                        "func_literal",
+                        "function_declaration",
+                        "method_declaration",
+                    }:
+                        scope = scope.parent
+                    if (
+                        scope is not None
+                        and scope.type == "func_literal"
+                        and self.node_key(scope)
+                        != self.node_key(literal_node)
+                    ):
+                        return False
+                    operation = self._channel_reference_operation(cur)
+                    if operation is None:
+                        return False
+                    kind, operation_node, index_depth, _ = operation
+                    if self._inside_select_operation(operation_node):
+                        return False
+                    if kind in {"send", "receive", "return", "close"}:
+                        if index_depth == 0:
+                            return False
+                    elif kind not in {"len", "cap"}:
+                        return False
+            stack.extend(_children(cur))
+        return True
+
     def _chan_only_operations(
-        self, chan_id: str, literal_node: Any
+        self,
+        chan_id: str,
+        literal_node: Any,
+        allowed_send_value_refs: set[Any] | None = None,
     ) -> bool:
         function_node = literal_node
         while function_node is not None and function_node.type not in {
@@ -24818,11 +25133,19 @@ class _Builder:
                         parent = parent.parent
                     allowed = False
                     if parent is not None and parent.type == "send_statement":
-                        allowed = (
-                            self._strip_parens(
-                                parent.child_by_field_name("channel")
-                            )
-                            == cur
+                        channel = parent.child_by_field_name("channel")
+                        value = parent.child_by_field_name("value")
+                        allowed = bool(
+                            channel is not None
+                            and channel.start_byte <= cur.start_byte
+                            and cur.end_byte <= channel.end_byte
+                        ) or bool(
+                            allowed_send_value_refs
+                            and self.node_key(cur)
+                            in allowed_send_value_refs
+                            and value is not None
+                            and value.start_byte <= cur.start_byte
+                            and cur.end_byte <= value.end_byte
                         )
                     elif parent is not None and parent.type == "unary_expression":
                         operator = parent.child_by_field_name("operator")
@@ -25094,6 +25417,28 @@ class _Builder:
         stack = [body]
         while stack:
             cur = stack.pop()
+            if cur.type in {
+                "assignment_statement",
+                "short_var_declaration",
+            } and self.node_key(cur) != self.node_key(declaration):
+                left = cur.child_by_field_name("left")
+                for left_node in _children(left) if left is not None else []:
+                    if left_node.type != "identifier":
+                        continue
+                    left_binding = self.bindings_by_span.get(
+                        self.node_key(left_node)
+                    )
+                    left_ref = self.references.get(
+                        self.node_key(left_node)
+                    )
+                    if (
+                        left_binding is not None
+                        and left_binding.id == binding_id
+                    ) or (
+                        left_ref is not None
+                        and left_ref.binding_id == binding_id
+                    ):
+                        return False
             if cur.type == "identifier":
                 ref = self.references.get(self.node_key(cur))
                 if ref is not None and ref.binding_id == binding_id:
@@ -25151,9 +25496,10 @@ class _Builder:
         invocation as an opaque effectful callee — the write targets
         (`x = e`, `p.V = e`, `*p = e`) and the inner-call flag ride
         out in the returned record. A send to a literal-local channel
-        can fold at the call site; a captured local scalar channel
-        can fold only when its literal is invoked synchronously.
-        Other sends, `go` and `defer` stay closed."""
+        can fold at the call site; captured scalar channels and
+        scalar-leaf queue/container operations fold only when their
+        literal is invoked synchronously. Other sends, `go` and
+        `defer` stay closed."""
         deps: frozenset[int] = frozenset()
         captured: set[str] = set()
         captures_pointer = False
@@ -25328,6 +25674,7 @@ class _Builder:
                                     self.escaped.add(rref.binding_id)
 
         literal_local_ids: set[str] = set()
+        literal_parameter_ids: set[str] = set()
         literal_stack = [node]
         while literal_stack:
             current = literal_stack.pop()
@@ -25350,7 +25697,286 @@ class _Builder:
                             )
                             if binding is not None:
                                 literal_local_ids.add(binding.id)
+                                if field == "parameters":
+                                    literal_parameter_ids.add(binding.id)
             literal_stack.extend(_children(current))
+
+        def channel_root(operand: Any) -> tuple[str, str] | None:
+            operand = self._strip_parens(operand)
+            if operand is None:
+                return None
+            if operand.type == "unary_expression":
+                operator = operand.child_by_field_name("operator")
+                if operator is not None and operator.type == "<-":
+                    return channel_root(
+                        operand.child_by_field_name("operand")
+                    )
+            if operand.type == "index_expression":
+                queue_target = self._chan_chan_elem_index_target(
+                    operand
+                )
+                if queue_target is not None:
+                    return "queue", self._chan_root(queue_target[0])
+                container_target = self._chan_elem_index_target(
+                    operand, params
+                )
+                if container_target is not None:
+                    return "container", container_target[0]
+            if operand.type != "identifier":
+                return None
+            ref = self.references.get(self.node_key(operand))
+            if ref is None or not ref.binding_id:
+                return None
+            binding = self.bindings.get(ref.binding_id)
+            fact = binding.type if binding is not None else None
+            root = self._chan_root(ref.binding_id)
+            root_binding = self.bindings.get(root)
+            root_fact = (
+                root_binding.type
+                if root_binding is not None
+                else fact
+            )
+            if (
+                root not in params
+                and root not in self.external_chan_locals
+                and root not in self._external_chan_group_tokens
+                and (
+                    root in self.local_chan_chans
+                    or (
+                        root_fact is not None
+                        and root_fact.kind == "chan"
+                        and root_fact.elem is not None
+                        and root_fact.elem.kind == "chan"
+                    )
+                )
+            ):
+                return "queue", root
+            if (
+                root in locals_
+                and root not in params
+                and root not in literal_local_ids
+                and root_fact is not None
+                and root_fact.kind in {"slice", "array", "map"}
+                and getattr(root_fact, "elem", None) is not None
+                and root_fact.elem.kind == "chan"
+            ):
+                return "container", root
+            return None
+
+        def local_channel_root(root: str, kind: str) -> bool:
+            root = self._chan_root(root)
+            binding = self.bindings.get(root)
+            if (
+                root not in locals_
+                or root in params
+                or root in self.escaped
+                or root in self.external_chan_locals
+                or root in self._external_chan_group_tokens
+                or binding is None
+            ):
+                return False
+            if kind == "queue":
+                if (
+                    root not in self.local_chan_chans
+                    or not (
+                        self._chan_chan_fact(binding.type)
+                        or self._chan_chan_elem_collection(binding.type)
+                    )
+                ):
+                    return False
+                members = set(self._chan_group_members(root))
+                members.update(self._chan_group_external_tokens(root))
+            else:
+                if not self._chan_elem_collection(binding.type):
+                    return False
+                members = set()
+                for holder in self._opaque_container_sharers(root):
+                    members.update(
+                        self._opaque_container_tokens.get(
+                            holder, frozenset()
+                        )
+                    )
+            return not any(
+                isinstance(member, str)
+                and (
+                    member in params
+                    or member in self.escaped
+                    or member in self.external_chan_locals
+                    or member in self._external_chan_group_tokens
+                )
+                for member in members
+            )
+
+        def literal_local_channel(binding_id: str) -> bool:
+            binding = self.bindings.get(binding_id)
+            return bool(
+                binding is not None
+                and binding.type is not None
+                and binding.type.kind == "chan"
+                and binding_id not in literal_parameter_ids
+                and getattr(binding.span, "file", self.current_file)
+                == self.current_file
+                and node.start_byte
+                <= binding.span.start
+                <= binding.span.end
+                <= node.end_byte
+                and self._literal_channel_has_local_origin(
+                    binding_id, node
+                )
+            )
+
+        def current_literal_context(current: Any) -> bool:
+            scope = current
+            while scope is not None and scope.type not in {
+                "func_literal",
+                "function_declaration",
+                "method_declaration",
+            }:
+                scope = scope.parent
+            return (
+                scope is not None
+                and scope.type == "func_literal"
+                and self.node_key(scope) == self.node_key(node)
+            )
+
+        def queue_send_members(value: Any) -> set[str] | None:
+            channel_refs: list[str] = []
+            value_stack = [value] if value is not None else []
+            while value_stack:
+                current = value_stack.pop()
+                if current.type == "identifier":
+                    ref = self.references.get(self.node_key(current))
+                    binding = (
+                        self.bindings.get(ref.binding_id)
+                        if ref is not None and ref.binding_id
+                        else None
+                    )
+                    if (
+                        binding is not None
+                        and binding.type is not None
+                        and binding.type.kind == "chan"
+                    ):
+                        channel_refs.append(binding.id)
+                value_stack.extend(_children(current))
+            channel_type = self._literal_channel_expression_type(value)
+            if channel_type is None or channel_type.kind != "chan":
+                if any(
+                    not literal_local_channel(binding_id)
+                    for binding_id in channel_refs
+                ):
+                    return None
+                return set()
+            value = self._strip_parens(value)
+            ref = (
+                self.references.get(self.node_key(value))
+                if value is not None and value.type == "identifier"
+                else None
+            )
+            binding_id = (
+                ref.binding_id
+                if ref is not None and ref.binding_id
+                else None
+            )
+            if (
+                binding_id is None
+                or not literal_local_channel(binding_id)
+                or any(item != binding_id for item in channel_refs)
+            ):
+                return None
+            return {self._chan_root(binding_id)}
+
+        queue_send_nodes: dict[Any, tuple[str, str]] = {}
+        allowed_send_value_refs: set[Any] = set()
+        send_stack = [node]
+        while send_stack:
+            current = send_stack.pop()
+            send_stack.extend(_children(current))
+            if current.type != "send_statement":
+                continue
+            channel = current.child_by_field_name("channel")
+            target = channel_root(channel)
+            if (
+                target is None
+                or not current_literal_context(current)
+                or not self._literal_invoked_synchronously(node)
+                or not local_channel_root(target[1], target[0])
+                or self._inside_select_operation(current)
+            ):
+                continue
+            kind, root = target
+            if kind == "container" and not self._chan_container_only_operations(
+                root, node
+            ):
+                continue
+            value = current.child_by_field_name("value")
+            members = queue_send_members(value)
+            if members is None:
+                continue
+            queue_send_nodes[self.node_key(current)] = target
+            writes.add(root)
+            writes.update(members)
+            if value is not None:
+                value_stack = [value]
+                while value_stack:
+                    value_node = value_stack.pop()
+                    if value_node.type == "identifier":
+                        ref = self.references.get(
+                            self.node_key(value_node)
+                        )
+                        if (
+                            ref is not None
+                            and ref.binding_id in members
+                        ):
+                            allowed_send_value_refs.add(
+                                self.node_key(value_node)
+                            )
+                    value_stack.extend(_children(value_node))
+
+        allowed_channel_refs: set[Any] = set()
+        validated_container_roots: dict[str, bool] = {}
+        channel_ref_stack = [node]
+        while channel_ref_stack:
+            current = channel_ref_stack.pop()
+            channel_ref_stack.extend(_children(current))
+            if current.type != "identifier":
+                continue
+            target = channel_root(current)
+            if target is None:
+                continue
+            kind, root = target
+            if (
+                not current_literal_context(current)
+                or not self._literal_invoked_synchronously(node)
+                or not local_channel_root(root, kind)
+            ):
+                continue
+            operation = self._channel_reference_operation(current)
+            if operation is None:
+                continue
+            operation_kind, operation_node, _, _ = operation
+            if self._inside_select_operation(operation_node):
+                continue
+            if (
+                operation_kind == "send"
+                and self.node_key(operation_node) not in queue_send_nodes
+            ):
+                continue
+            if kind == "container":
+                validated = validated_container_roots.get(root)
+                if validated is None:
+                    validated = self._chan_container_only_operations(
+                        root, node
+                    )
+                    validated_container_roots[root] = validated
+                if not validated:
+                    continue
+            allowed_channel_refs.add(self.node_key(current))
+            if operation[3]:
+                deps |= (
+                    self._chan_group_read_deps(root, locals_)
+                    if kind == "queue"
+                    else self._opaque_container_deps(root, locals_)
+                )
 
         stack = [node]
         while stack:
@@ -25359,75 +25985,93 @@ class _Builder:
                 channel = self._strip_parens(
                     cur.child_by_field_name("channel")
                 )
-                ref = (
-                    self.references.get(self.node_key(channel))
-                    if channel is not None and channel.type == "identifier"
-                    else None
-                )
-                binding = (
-                    self.bindings.get(ref.binding_id)
-                    if ref is not None and ref.binding_id
-                    else None
-                )
-                origin_body = (
-                    self._local_channel_origin_body(
-                        node, ref.binding_id
-                    )
-                    if ref is not None
-                    else None
-                )
-                literal_internal = (
-                    binding is not None
-                    and ref is not None
-                    and binding.id not in literal_local_ids
-                    and getattr(binding.span, "file", self.current_file)
-                    == self.current_file
-                    and node.start_byte
-                    <= binding.span.start
-                    <= binding.span.end
-                    <= node.end_byte
-                    and binding.type is not None
-                    and binding.type.kind == "chan"
-                    and binding.type.elem is not None
-                    and binding.type.elem.kind in {"integer", "boolean"}
-                    and self._local_chan_chan_id(channel) is None
-                    and binding.id not in self.local_chan_chans
-                    and binding.id not in self.external_chan_locals
-                    and binding.id not in self.escaped
-                    and self._literal_channel_has_local_origin(
-                        binding.id, node
-                    )
-                    and self._chan_only_operations(binding.id, node)
-                )
-                elem = (
-                    binding.type.elem
-                    if binding is not None and binding.type is not None
-                    else None
-                )
-                captured_local_plain_channel = (
-                    binding is not None
-                    and ref is not None
-                    and ref.binding_id in locals_
-                    and ref.binding_id not in params
-                    and elem is not None
-                    and self._scalar_chan_binding(ref.binding_id)
-                    and self._local_chan_chan_id(channel) is None
-                    and ref.binding_id not in self.local_chan_chans
-                    and ref.binding_id not in self.external_chan_locals
-                    and ref.binding_id not in self.escaped
-                    and origin_body is not None
-                    and self._literal_channel_has_local_origin(
-                        ref.binding_id, origin_body
-                    )
-                    and self._chan_only_operations(ref.binding_id, node)
-                    and self._literal_invoked_synchronously(node)
-                )
-                if literal_internal:
+                if self.node_key(cur) in queue_send_nodes:
                     pass
-                elif captured_local_plain_channel:
-                    writes.add(ref.binding_id)
                 else:
-                    raise _Unsupported("unsupported_expression", _span(cur))
+                    ref = (
+                        self.references.get(self.node_key(channel))
+                        if channel is not None
+                        and channel.type == "identifier"
+                        else None
+                    )
+                    binding = (
+                        self.bindings.get(ref.binding_id)
+                        if ref is not None and ref.binding_id
+                        else None
+                    )
+                    origin_body = (
+                        self._local_channel_origin_body(
+                            node, ref.binding_id
+                        )
+                        if ref is not None
+                        else None
+                    )
+                    literal_internal = (
+                        binding is not None
+                        and ref is not None
+                        and binding.id not in literal_local_ids
+                        and getattr(
+                            binding.span, "file", self.current_file
+                        )
+                        == self.current_file
+                        and node.start_byte
+                        <= binding.span.start
+                        <= binding.span.end
+                        <= node.end_byte
+                        and binding.type is not None
+                        and binding.type.kind == "chan"
+                        and binding.type.elem is not None
+                        and binding.type.elem.kind in {
+                            "integer",
+                            "boolean",
+                        }
+                        and self._local_chan_chan_id(channel) is None
+                        and binding.id not in self.local_chan_chans
+                        and binding.id not in self.external_chan_locals
+                        and binding.id not in self.escaped
+                        and self._literal_channel_has_local_origin(
+                            binding.id, node
+                        )
+                        and self._chan_only_operations(
+                            binding.id,
+                            node,
+                            allowed_send_value_refs,
+                        )
+                    )
+                    elem = (
+                        binding.type.elem
+                        if binding is not None
+                        and binding.type is not None
+                        else None
+                    )
+                    captured_local_plain_channel = (
+                        binding is not None
+                        and ref is not None
+                        and ref.binding_id in locals_
+                        and ref.binding_id not in params
+                        and elem is not None
+                        and self._scalar_chan_binding(ref.binding_id)
+                        and self._local_chan_chan_id(channel) is None
+                        and ref.binding_id not in self.local_chan_chans
+                        and ref.binding_id not in self.external_chan_locals
+                        and ref.binding_id not in self.escaped
+                        and origin_body is not None
+                        and self._literal_channel_has_local_origin(
+                            ref.binding_id, origin_body
+                        )
+                        and self._chan_only_operations(
+                            ref.binding_id, node
+                        )
+                        and self._literal_invoked_synchronously(node)
+                    )
+                    if literal_internal:
+                        pass
+                    elif captured_local_plain_channel:
+                        writes.add(ref.binding_id)
+                    else:
+                        raise _Unsupported(
+                            "unsupported_expression", _span(cur)
+                        )
             elif cur.type in {"go_statement", "defer_statement"}:
                 raise _Unsupported("unsupported_expression", _span(cur))
             if cur.type == "call_expression" or (
@@ -25480,7 +26124,18 @@ class _Builder:
                 # `var v T`) carries no value read, so it is
                 # skipped rather than treated as an unbound dep.
                 ref = self.references.get(self.node_key(cur))
-                if self._local_chan_chan_id(cur) is not None:
+                channel_target = channel_root(cur)
+                if (
+                    channel_target is not None
+                    and self.node_key(cur) not in allowed_channel_refs
+                ):
+                    raise _Unsupported(
+                        "unsupported_expression", _span(cur)
+                    )
+                if (
+                    self._local_chan_chan_id(cur) is not None
+                    and self.node_key(cur) not in allowed_channel_refs
+                ):
                     raise _Unsupported(
                         "unsupported_expression", _span(cur)
                     )
@@ -26257,6 +26912,9 @@ class _Builder:
             # call may reach any escaped binding or a shared queue,
             # folded like the opaque external write below.
             write_deps = deps | callee_deps
+            self._fold_closure_channel_writes(
+                writes, write_deps, params, locals_, transfers, node
+            )
             for target in writes:
                 self._store(locals_, params, target, write_deps, True)
                 # `g = func(){...}` / `g = G` inside the body
@@ -26735,6 +27393,9 @@ class _Builder:
             )
         else:
             nested_writes = self.closure_writes.get(target_id, ())
+        self._fold_closure_channel_writes(
+            nested_writes, write_deps, params, locals_, transfers, node
+        )
         for target in nested_writes:
             self._store(
                 locals_, params, target, write_deps, True
@@ -27541,6 +28202,9 @@ class _Builder:
             # the captured targets' dep sets now, and a `*p` store or
             # an inner call folds like an opaque callee's write.
             write_deps = deps
+            self._fold_closure_channel_writes(
+                writes, write_deps, params, locals_, transfers, node
+            )
             for target in writes:
                 self._store(locals_, params, target, write_deps, True)
                 # Same stale-resolution drop as the bound-literal

@@ -15319,6 +15319,254 @@ def test_bound_closure_local_channel_send_folds_dependencies(
     "declarations",
     [
         pytest.param(
+            "func F(x int64) int64 { "
+            "cc := make(chan chan int64, 1); "
+            "d := make(chan int64, 1); d <- x; cc <- d; "
+            "g := func() int64 { return <-(<-cc) }; return g() }",
+            id="queue-read",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { "
+            "cc := make(chan chan int64, 1); "
+            "c := make(chan int64, 1); cc <- c; "
+            "g := func() { (<-cc) <- x }; g(); return <-(<-cc) }",
+            id="queue-received-send-target",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { "
+            "cc := make(chan chan int64, 1); "
+            "g := func() { d := make(chan int64, 1); "
+            "d <- x; cc <- d }; g(); return <-(<-cc) }",
+            id="literal-local-queue-member",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { "
+            "s := []chan chan int64{make(chan chan int64, 1)}; "
+            "c := make(chan int64, 1); s[0] <- c; "
+            "g := func() { (<-s[0]) <- x }; "
+            "g(); return <-(<-s[0]) }",
+            id="queue-container-received-send-target",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { "
+            "s := [1]chan chan int64{make(chan chan int64, 1)}; "
+            "c := make(chan int64, 1); s[0] <- c; "
+            "g := func() { (<-s[0]) <- x }; "
+            "g(); return <-(<-s[0]) }",
+            id="array-queue-container",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { "
+            "s := map[int64]chan chan int64{"
+            "0: make(chan chan int64, 1)}; "
+            "c := make(chan int64, 1); s[0] <- c; "
+            "g := func() { (<-s[0]) <- x }; "
+            "g(); return <-(<-s[0]) }",
+            id="map-queue-container",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { "
+            "s := []chan int64{make(chan int64, 1)}; "
+            "g := func() { s[0] <- x }; g(); return <-s[0] }",
+            id="plain-channel-container",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { "
+            "s := []chan int64{make(chan int64, 1)}; "
+            "s[0] <- x; "
+            "g := func() int64 { return <-s[0] }; return g() }",
+            id="plain-channel-container-read",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { "
+            "s := [1]chan int64{make(chan int64, 1)}; "
+            "g := func() { s[0] <- x }; g(); return <-s[0] }",
+            id="array-channel-container",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { "
+            "s := map[int64]chan int64{0: make(chan int64, 1)}; "
+            "g := func() { s[0] <- x }; g(); return <-s[0] }",
+            id="map-channel-container",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { "
+            "s := []chan int64{make(chan int64, 1)}; "
+            "func() { s[0] <- x }(); return <-s[0] }",
+            id="immediate-literal",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { "
+            "s := []chan int64{make(chan int64, 1)}; "
+            "g := (func() { s[0] <- x }); "
+            "g(); return <-s[0] }",
+            id="parenthesized-literal",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { "
+            "s := []chan int64{make(chan int64, 1)}; "
+            "var g = func() { s[0] <- x }; "
+            "g(); return <-s[0] }",
+            id="var-bound-literal",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { "
+            "s := []chan int64{make(chan int64, 1)}; "
+            "g := func() { s[0] <- x }; "
+            "for i := 0; i < 1; i++ { g() }; return <-s[0] }",
+            id="loop-invocation",
+        ),
+        pytest.param(
+            "func set(p *int64, v int64) int64 { *p = v; return 0 }\n"
+            "func F(x int64) int64 { y := int64(0); "
+            "s := []chan int64{make(chan int64, 1)}; "
+            "g := func(_ int64) { s[0] <- y }; "
+            "g(set(&y, x)); return <-s[0] }",
+            id="post-argument-capture",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { "
+            "cc := make(chan chan int64, 1); "
+            "c := make(chan int64, 1); cc <- c; "
+            "func() { (<-cc) <- x }(); return <-(<-cc) }",
+            id="immediate-queue-write",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { "
+            "s := []chan int64{make(chan int64, 1)}; "
+            "g := func() { _ = len(s); _ = cap(s); "
+            "_ = len(s[0]); _ = cap(s[0]); close(s[0]) }; "
+            "g(); return x }",
+            id="container-builtins",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { "
+            "cc := make(chan chan int64, 1); "
+            "g := func() { _ = len(cc); _ = cap(cc); close(cc) }; "
+            "g(); return x }",
+            id="queue-builtins",
+        ),
+    ],
+)
+def test_bound_closure_local_channel_container_operations_fold_dependencies(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        pytest.param(
+            "func F(x int64) int64 { cc := make(chan chan int64, 1); "
+            "g := func() { d := make(chan int64, 1); cc <- d }; "
+            "go g(); return x }",
+            id="queue-go",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { cc := make(chan chan int64, 1); "
+            "g := func() { d := make(chan int64, 1); cc <- d }; "
+            "defer g(); return x }",
+            id="queue-defer",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { cc := make(chan chan int64, 1); "
+            "g := func() { d := make(chan int64, 1); "
+            "d <- x; cc <- d }; "
+            "g = func() {}; g(); return x }",
+            id="reassigned-bound-name",
+        ),
+        pytest.param(
+            "func G(f func()) { f() }\n"
+            "func F(x int64) int64 { cc := make(chan chan int64, 1); "
+            "G(func() { d := make(chan int64, 1); cc <- d }); return x }",
+            id="passed-literal-callback",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { cc := make(chan chan int64, 1); "
+            "g := func() { d := cc; _ = d }; g(); return x }",
+            id="queue-alias",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { cc := make(chan chan int64, 1); "
+            "g := func() { c := <-cc; _ = c }; g(); return x }",
+            id="queue-receive-alias",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { cc := make(chan chan int64, 1); "
+            "c := make(chan int64, 1); "
+            "g := func() { cc <- c }; g(); return x }",
+            id="enclosing-channel-sent-to-queue",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { "
+            "s := []chan int64{make(chan int64, 1)}; "
+            "d := s[0]; _ = d; "
+            "g := func() { s[0] <- x }; g(); return x }",
+            id="plain-container-alias",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { "
+            "s := []chan int64{make(chan int64, 1)}; "
+            "g := func() { d := s[0]; _ = d }; g(); return x }",
+            id="plain-container-alias-in-literal",
+        ),
+        pytest.param(
+            "func G(ch chan chan int64) {}\n"
+            "func F(x int64) int64 { cc := make(chan chan int64, 1); "
+            "g := func() { G(cc) }; g(); return x }",
+            id="queue-call-argument",
+        ),
+        pytest.param(
+            "func F(cc chan chan int64, x int64) int64 { "
+            "g := func() { d := make(chan int64, 1); "
+            "d <- x; cc <- d }; g(); return x }",
+            id="parameter-queue",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { "
+            "cc := make(chan chan *int64, 1); "
+            "g := func() { cc <- make(chan *int64, 1) }; "
+            "g(); return x }",
+            id="non-scalar-leaf",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { cc := make(chan chan int64, 1); "
+            "c := make(chan int64, 1); cc <- c; "
+            "g := func() { select { case <-cc: default: } }; "
+            "g(); return x }",
+            id="queue-select",
+        ),
+        pytest.param(
+            "var GC chan chan int64\n"
+            "func expose(ch chan chan int64) { GC = ch }\n"
+            "func F(x int64) int64 { "
+            "cc := make(chan chan int64, 1); expose(cc); "
+            "g := func() { d := make(chan int64, 1); "
+            "d <- x; cc <- d }; g(); return x }",
+            id="escaped-queue-group",
+        ),
+    ],
+)
+def test_bound_closure_local_channel_container_unsupported_uses_stay_closed(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available
+    expected_reason = (
+        "binding_unavailable"
+        if "chan chan *int64" in declarations
+        else "unsupported_expression"
+    )
+    assert any(gap.reason == expected_reason for gap in result.gaps)
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        pytest.param(
             "func F(x int64) int64 { c := make(chan int64, 1); "
             "g := (func() { c <- x }); g(); return <-c }",
             id="parenthesized-bound-channel",
@@ -15643,13 +15891,6 @@ def test_bound_closure_local_channel_immediate_go_literal_stays_closed(
             "g := func() { c <- p }; g(); return *p }",
             None,
             id="pointer-element",
-        ),
-        pytest.param(
-            "func F(x int64) int64 { "
-            "s := []chan int64{make(chan int64, 1)}; "
-            "g := func() { s[0] <- x }; g(); return <-s[0] }",
-            None,
-            id="indexed-channel",
         ),
         pytest.param(
             "func F(x int64) int64 { c := make(chan int64, 1); "
