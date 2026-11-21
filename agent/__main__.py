@@ -60,6 +60,7 @@ _SUBCOMMANDS = {
     "evidence-check-schedule",
     "evidence-check-accept",
     "evidence-check-list",
+    "evidence-accept-list",
     "evidence-check-consistency",
     "evidence-acceptance-eval",
     "signature-eval",
@@ -726,6 +727,23 @@ def main() -> None:
         evidence_check_list_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(evidence_check_list_main(args))
+    elif command == "evidence-accept-list":
+        import argparse
+        from agent.evidence_accept_list import (
+            build_accept_list_parser as evidence_accept_list_build_parser,
+            main_accept_list as evidence_accept_list_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent evidence-accept-list",
+            description=(
+                "Run Core's declared-requirement normalization over an "
+                "Evidence list and emit one attempt lineage and verdict."
+            ),
+        )
+        evidence_accept_list_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(evidence_accept_list_main(args))
     elif command == "evidence-check-accept":
         import argparse
         from agent.evidence_check import (

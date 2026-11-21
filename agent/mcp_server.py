@@ -3706,6 +3706,82 @@ def evidence_check_list(
 
 
 @mcp.tool()
+def evidence_accept_list(
+    core_path: str,
+    list_path: str,
+    requirement_path: str = "",
+    requirement_list_path: str = "",
+    attempt_timeout_ms: int = 30000,
+) -> str:
+    """Run Core's declared-requirement acceptance over a saved Evidence list.
+
+    The list bytes are fed to `evidence accept-list --stdin --json` as
+    one declared attempt. Supply exactly one of a single requirement
+    or a conjunctive requirement list. A validated aggregate verdict
+    is Core's declared-requirement normalization over representation
+    plus cross-record pin agreement; it does not establish claim truth,
+    producer authenticity, freshness, tool execution or grade promotion.
+    Selection is a declared-success exit, not a grade promotion.
+
+    Args:
+        core_path: Absolute path to the mumei Core executable.
+        list_path: Absolute path to the saved
+            `mumei.verification-evidence-list/v1` envelope (at most
+            64 KiB).
+        requirement_path: Optional absolute path to one
+            `mumei.evidence-requirement/v1` document. Mutually exclusive
+            with `requirement_list_path`.
+        requirement_list_path: Optional absolute path to one conjunctive
+            `mumei.evidence-requirement-list/v1` document. Mutually exclusive
+            with `requirement_path`.
+        attempt_timeout_ms: Declared attempt bound in milliseconds
+            (at most 60000).
+
+    Returns:
+        JSON with `report` — the `mumei.evidence-accept-list-report/v1`
+        document — on success, or `error` on a declared failure.
+    """
+    try:
+        from agent.evidence_accept_list import run_accept_list
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+
+    if not _valid_declared_path(core_path):
+        return _err("core_path must be a nonempty single-line path")
+    if not _valid_declared_path(list_path):
+        return _err("list_path must be a nonempty single-line path")
+    if bool(requirement_path) == bool(requirement_list_path):
+        return _err(
+            "exactly one of requirement_path or requirement_list_path is required"
+        )
+    declared_requirement = requirement_path or requirement_list_path
+    if not _valid_declared_path(declared_requirement):
+        return _err("requirement path must be a nonempty single-line path")
+    if type(attempt_timeout_ms) is not int or attempt_timeout_ms < 1:
+        return _err("attempt_timeout_ms must be a positive integer")
+
+    args = argparse.Namespace(
+        core=core_path,
+        list_path=list_path,
+        requirement=requirement_path or None,
+        requirement_list=requirement_list_path or None,
+        attempt_timeout=attempt_timeout_ms,
+        memory_bound_mb=None,
+        output=None,
+    )
+    try:
+        report = run_accept_list(args)
+    except (OSError, ValueError, UnicodeDecodeError) as exc:
+        return _err(
+            _redact_declared_paths(
+                str(exc),
+                [core_path, list_path, declared_requirement],
+            )
+        )
+    return _ok({"report": report})
+
+
+@mcp.tool()
 def evidence_check_consistency(
     core_path: str,
     evidence_path: str,

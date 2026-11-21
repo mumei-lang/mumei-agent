@@ -6834,6 +6834,21 @@ suppresses selection.
 C11 stays partial; this route adds no Evidence acceptance or grade
 promotion.
 
+### C11 Evidence accept-list consumer route
+
+The `evidence-accept-list` CLI route and `evidence_accept_list` MCP
+tool consume Core's `evidence accept-list` verdict over a declared
+Evidence list and exactly one single or conjunctive requirement. The
+route validates the duplicate-free, input-fingerprinted Core descriptor
+and reports only its aggregate verdict, consistency, counts and check
+lists. Accepted selection requires exit 0, an accepted verdict, a valid
+descriptor and unchanged inputs; rejected and inconclusive verdicts do
+not select. The verdict is Core's declared-requirement normalization
+over representation plus cross-record pin agreement, not claim truth,
+producer authenticity, freshness, tool execution or grade promotion.
+Selection is a declared-success exit, not a grade promotion. C11 stays
+partial.
+
 ### C11 audit scheduled-attempt evidence check
 
 `audit --schedule-core PATH` (with `--enable-scheduled-verification`)
