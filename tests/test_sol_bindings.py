@@ -729,8 +729,13 @@ def test_parse_and_source_limits_fail_closed():
 def test_deep_expression_recursion_fails_closed():
     expression = "+".join("1" for _ in range(2000))
     source = f"contract C {{ function f() public {{ uint x = {expression}; }} }}"
-    with pytest.raises(LexicalReportError):
-        build_sol_bindings(source)
+    previous_limit = sys.getrecursionlimit()
+    try:
+        sys.setrecursionlimit(1000)
+        with pytest.raises(LexicalReportError):
+            build_sol_bindings(source)
+    finally:
+        sys.setrecursionlimit(previous_limit)
 
 
 def test_cli_preserves_crlf_bytes_and_emits_loadable_report(tmp_path):
