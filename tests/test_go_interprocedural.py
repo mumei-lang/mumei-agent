@@ -20107,14 +20107,6 @@ def test_chan_elem_container_send_receive(
         "\ts := []chan chan int64{}\n"
         "\ts[0] <- q\n"
         "\treturn 0\n}\n",
-        # `d := s[i]` — the extracted queue binds no channel name
-        # (the same closure `c := a[i]` keeps for scalar elements).
-        "func F(x int64) int64 {\n"
-        "\tc := make(chan int64, 1)\n"
-        "\ts := []chan int64{c}\n"
-        "\td := s[0]\n"
-        "\td <- x\n"
-        "\treturn <-d\n}\n",
         # `close(s[i])` stays closed — the element queue's lifecycle
         # is not tracked by the conflated group.
         "func F(x int64) int64 {\n"
@@ -20234,6 +20226,196 @@ def test_chan_elem_container_param_stays_closed(
 ):
     result = named(*unit(go_types_helper, declarations))
     assert not result.available
+
+
+@pytest.mark.parametrize(
+    ("declarations", "expected"),
+    [
+        # `d := s[i]` — the extracted name joins the share group:
+        # a send through the member `c` reaches `<-d`.
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 4)\n"
+            "\ts := []chan int64{c}\n"
+            "\td := s[0]\n"
+            "\tc <- x\n"
+            "\treturn <-d\n}\n",
+            frozenset({0}),
+        ),
+        # `d <- x` deposits into the group — `<-s[0]` reads it.
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 4)\n"
+            "\ts := []chan int64{c}\n"
+            "\td := s[0]\n"
+            "\td <- x\n"
+            "\treturn <-s[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `d <- x` reaches the member `c` too — the group union is
+        # symmetric like the `s[i] <- x` holder deposit.
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 4)\n"
+            "\ts := []chan int64{c}\n"
+            "\td := s[0]\n"
+            "\td <- x\n"
+            "\treturn <-c\n}\n",
+            frozenset({0}),
+        ),
+        # `d = t[0]` — an unconditional reseat detaches d from
+        # s's group (its old queue lives on under a surrogate) and
+        # joins t's: only `c2`'s send reaches `<-d`.
+        (
+            "func F(x, y int64) int64 {\n"
+            "\tc := make(chan int64, 4)\n"
+            "\tc2 := make(chan int64, 4)\n"
+            "\ts := []chan int64{c}\n"
+            "\tt := []chan int64{c2}\n"
+            "\td := s[0]\n"
+            "\td = t[0]\n"
+            "\tc <- x\n"
+            "\tc2 <- y\n"
+            "\treturn <-d\n}\n",
+            frozenset({1}),
+        ),
+        # `if f { d = t[0] }` — a maybe-skipped reseat keeps d's
+        # old membership AND adds the new one: the two groups
+        # conflate through the name.
+        (
+            "func F(x, y int64, f bool) int64 {\n"
+            "\tc := make(chan int64, 4)\n"
+            "\tc2 := make(chan int64, 4)\n"
+            "\ts := []chan int64{c}\n"
+            "\tt := []chan int64{c2}\n"
+            "\td := s[0]\n"
+            "\tif f {\n"
+            "\t\td = t[0]\n"
+            "\t}\n"
+            "\tc <- x\n"
+            "\tc2 <- y\n"
+            "\treturn <-d\n}\n",
+            frozenset({0, 1}),
+        ),
+        # `e := d` — an alias of the extracted name resolves to its
+        # root, so `<-e` reads the group like `<-d`.
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 4)\n"
+            "\ts := []chan int64{c}\n"
+            "\td := s[0]\n"
+            "\te := d\n"
+            "\td <- x\n"
+            "\treturn <-e\n}\n",
+            frozenset({0}),
+        ),
+        # `var d chan int64 = s[0]` — the var-decl form joins the
+        # group like the short declaration.
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 4)\n"
+            "\ts := []chan int64{c}\n"
+            "\tvar d chan int64 = s[0]\n"
+            "\td <- x\n"
+            "\treturn <-c\n}\n",
+            frozenset({0}),
+        ),
+        # `d := m[k]` — a map element's queue joins its group.
+        (
+            "func F(x int64) int64 {\n"
+            "\tm := map[int64]chan int64{\n"
+            "\t\t0: make(chan int64, 4),\n"
+            "\t}\n"
+            "\td := m[0]\n"
+            "\td <- x\n"
+            "\treturn <-m[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `for v := range d` — the channel operand is the member's
+        # queue: elements read the whole group.
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 4)\n"
+            "\ts := []chan int64{c}\n"
+            "\td := s[0]\n"
+            "\tc <- x\n"
+            "\tvar r int64\n"
+            "\tfor v := range d {\n"
+            "\t\tr = v\n"
+            "\t}\n"
+            "\treturn r\n}\n",
+            frozenset({0}),
+        ),
+        # `d = make(chan)` — a member's make-reseat parks the
+        # group's membership under a surrogate: `<-s[0]` still
+        # reads the queue `c` serves, while the fresh queue's own
+        # send stays out of the group.
+        (
+            "func F(x, y int64) int64 {\n"
+            "\tc := make(chan int64, 4)\n"
+            "\ts := []chan int64{c}\n"
+            "\td := s[0]\n"
+            "\td = make(chan int64, 1)\n"
+            "\td <- y\n"
+            "\tc <- x\n"
+            "\treturn <-s[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `d, e := s[0], s[1]` — each slot joins the group.
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 4)\n"
+            "\tc2 := make(chan int64, 4)\n"
+            "\ts := []chan int64{c, c2}\n"
+            "\td, e := s[0], s[1]\n"
+            "\td <- x\n"
+            "\treturn <-e\n}\n",
+            frozenset({0}),
+        ),
+        # `s[i] <- x` lands in every holder — the extracted name's
+        # own slot included.
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 4)\n"
+            "\ts := []chan int64{c}\n"
+            "\td := s[0]\n"
+            "\ts[0] <- x\n"
+            "\treturn <-d\n}\n",
+            frozenset({0}),
+        ),
+    ],
+)
+def test_chan_elem_container_extract(
+    go_types_helper, declarations, expected
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available
+    assert result.return_dependencies == expected
+
+
+def test_chan_elem_detach_surrogate_never_stale(go_types_helper):
+    # Reseating an external channel parks its queue under a
+    # `/chan_queue/` surrogate so the old alias's sends still land —
+    # the synthetic id must not leak into `call_targets`, or
+    # `stale_dependents` would flag the summary against its own
+    # snapshot forever.
+    source = (
+        "func F(ch chan int64, x int64) int64 {\n"
+        "\te := ch\n"
+        "\tch = make(chan int64, 1)\n"
+        "\te <- x\n"
+        "\treturn <-ch\n}\n"
+    )
+    source_, snapshot, summaries = unit(go_types_helper, source)
+    result = named(source_, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset()
+    assert any(t.imported for t in result.calls)
+    assert not any("/chan_queue/" in t for t in result.call_targets)
+    own = {f.binding_id for f in snapshot.functions} | {
+        b.id for b in snapshot.bindings
+    }
+    assert summaries.stale_dependents(own) == frozenset()
 
 
 @pytest.mark.parametrize(
