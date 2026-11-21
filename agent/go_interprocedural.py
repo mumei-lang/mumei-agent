@@ -10215,49 +10215,6 @@ member, or one explicit dereference of one (`(*t).F` — the same
         result |= self.indirect_writes
         return result
 
-    def _nil_only_unsupported_result(
-        self, fn: Function, result_index: int
-    ) -> bool:
-        if fn.results[result_index].binding_id:
-            return False
-        binding = self.bindings.get(fn.binding_id)
-        body = (
-            self.blocks.get(_key3(binding.span))
-            if binding is not None
-            else None
-        )
-        if body is None:
-            return False
-        pending = [body]
-        saw_return = False
-        while pending:
-            node = pending.pop()
-            if node.type == "func_literal":
-                continue
-            if node.type == "return_statement":
-                expressions_node = next(
-                    (
-                        child
-                        for child in _children(node)
-                        if child.type == "expression_list"
-                    ),
-                    None,
-                )
-                expressions = (
-                    _children(expressions_node)
-                    if expressions_node is not None
-                    else []
-                )
-                if (
-                    len(expressions) != len(fn.results)
-                    or expressions[result_index].text != b"nil"
-                ):
-                    return False
-                saw_return = True
-                continue
-            pending.extend(_children(node))
-        return saw_return
-
     def summarize(self, binding_id: str) -> FunctionSummary:
         fn = self.functions[binding_id]
         if binding_id in self.cache:
@@ -10432,12 +10389,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             or self._chan_chan_elem_collection(r.type)
                         )
                     )
-                    or (
-                        r.type.kind == "unsupported"
-                        and self._nil_only_unsupported_result(fn, i)
-                    )
                 )
-                for i, r in enumerate(fn.results)
+                for r in fn.results
             )
         ):
             raise _Unsupported("unsupported_signature", fn.body)

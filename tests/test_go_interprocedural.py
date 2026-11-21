@@ -18563,21 +18563,38 @@ def test_chan_chan_composite_literal_return_matches_bound_container(
             "return s\n"
             "}\n",
             "func F_composite_multi_result(x int64) "
-            "([]chan chan int64, error) {\n"
+            "([]chan chan int64, int64) {\n"
             "q := make(chan chan int64, 1)\n"
             "c := make(chan int64, 1)\n"
             "q <- c\n"
             "c <- x\n"
-            "return []chan chan int64{q}, nil\n"
+            "return []chan chan int64{q}, x\n"
             "}\n",
             "func F_bound_multi_result(x int64) "
-            "([]chan chan int64, error) {\n"
+            "([]chan chan int64, int64) {\n"
             "q := make(chan chan int64, 1)\n"
             "c := make(chan int64, 1)\n"
             "q <- c\n"
             "c <- x\n"
             "s := []chan chan int64{q}\n"
-            "return s, nil\n"
+            "return s, x\n"
+            "}\n",
+            "func F_bound_multi_result_zero(x int64) "
+            "([]chan chan int64, int64) {\n"
+            "q := make(chan chan int64, 1)\n"
+            "c := make(chan int64, 1)\n"
+            "q <- c\n"
+            "c <- x\n"
+            "s := []chan chan int64{q}\n"
+            "return s, 0\n"
+            "}\n",
+            "func F_composite_multi_result_zero(x int64) "
+            "([]chan chan int64, int64) {\n"
+            "q := make(chan chan int64, 1)\n"
+            "c := make(chan int64, 1)\n"
+            "q <- c\n"
+            "c <- x\n"
+            "return []chan chan int64{q}, 0\n"
             "}\n",
             "func F_composite_conditional(x int64) []chan chan int64 {\n"
             "q := make(chan chan int64, 1)\n"
@@ -18631,6 +18648,7 @@ def test_chan_chan_composite_literal_return_matches_bound_container(
             ("F_composite_multiple", "F_bound_multiple"),
             ("F_composite_mixed", "F_bound_mixed"),
             ("F_composite_multi_result", "F_bound_multi_result"),
+            ("F_composite_multi_result_zero", "F_bound_multi_result_zero"),
             ("F_composite_conditional", "F_bound_conditional"),
         )
     )
