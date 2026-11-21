@@ -689,7 +689,10 @@ def load_lexical_report(
                 if target_function is None:
                     _fail(False)
                 elif kind == "opaque_generic":
-                    _fail(target_function.generic)
+                    _fail(
+                        binding_kinds[target_id]
+                        in {"function", "associated_function"}
+                    )
                 elif kind == "opaque_async":
                     _fail(target_function.is_async)
                 elif kind == "opaque_bodyless":
