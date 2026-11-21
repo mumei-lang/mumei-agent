@@ -4281,6 +4281,10 @@ binding of a supported named struct element preserves Go's
 value-copy semantics while reusing collection-field share groups,
 including struct-field roots such as `o.A[i]`/`range o.A` and
 one-level nested roots such as `s[0][i]`/`range s[0]`.
+Scalar-field reads and writes on supported struct elements also
+resolve through struct-field container roots (`o.A[i].V`,
+`o.M[k].V`, and nested named fields), reusing the same field slot
+as identifier aliases while preserving array value copies.
 A COLLECTION field on the element extracts like `a := st.F` on a
 composite: `b := s[i].F` /
 `b = s[i].F` (and deeper `s[i].F.G`) binds the field's own
