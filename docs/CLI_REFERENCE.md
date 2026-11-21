@@ -82,7 +82,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `native-observations-accept` | 7 | Run a declared Core native observations acceptance as one attempt and emit the reconciled lineage plus the declared acceptance outcome. |
 | `native-observations-recheck` | 7 | Run a declared Core native observations recheck as one attempt and emit the reconciled lineage plus the declared recheck outcome. |
 | `native-object-recheck` | 7 | Run a declared Core native object correspondence recheck as one attempt and emit the reconciled lineage plus declared outcome. |
-| `native-machine-tv-recheck` | 7 | Run Core's bounded leaf straight-line, forward-branch and acyclic backward-branch machine-code TV recheck; direct calls are uninterpreted sites; cyclic control flow, loops, ABI/runtime semantics and full object TV stay outside. |
+| `native-machine-tv-recheck` | 7 | Run Core's bounded leaf straight-line, forward-branch, acyclic backward-branch and conditional-call machine-code TV recheck; direct calls remain uninterpreted sites, including inside branching functions with per-path guarded call matching; cyclic control flow, loops, ABI/runtime semantics and full object TV stay outside. |
 | `native-check` | 7 | Run a declared Core native bundle identity check as one attempt and emit the reconciled lineage plus the declared check outcome. |
 | `native-source-recheck` | 7 | Run a declared Core native bundle source recheck as one attempt and emit the reconciled lineage plus the declared source recheck outcome. |
 | `native-evidence-recheck` | 8 | Replay a saved native consumer Evidence envelope against a fresh pinned recheck as one declared attempt and emit the reconciled lineage plus the declared outcome. |
@@ -1301,7 +1301,7 @@ Run a declared Core native object correspondence recheck as one attempt and emit
 
 ## `mumei-agent native-machine-tv-recheck`
 
-Run Core's bounded leaf straight-line, forward-branch and acyclic backward-branch machine-code TV recheck; direct calls are uninterpreted sites; cyclic control flow, loops, ABI/runtime semantics and full object TV stay outside.
+Run Core's bounded leaf straight-line, forward-branch, acyclic backward-branch and conditional-call machine-code TV recheck; direct calls remain uninterpreted sites, including inside branching functions with per-path guarded call matching; cyclic control flow, loops, ABI/runtime semantics and full object TV stay outside.
 
 ### Options
 

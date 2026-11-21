@@ -1551,10 +1551,12 @@ RUNTIME_CHECK_VOCABULARY = frozenset(
 # bounded correspondences. Leaf and direct-call-site machine-code checks
 # cover straight-line TV under an assumed register convention; calls are
 # compared as uninterpreted sites. Forward-branch and acyclic backward-branch
-# function TV are also bounded; cyclic control flow (loops) remains outside
-# the profile. These checks do not establish ABI behavior or full object TV.
-# object_translation_correspondence is the full object-TV check; none has a
-# performer or makes a linker, loader, ABI, or runtime claim.
+# function TV are also bounded. Conditional-call TV matches uninterpreted
+# call sites along each guarded path in branching functions. Cyclic control
+# flow (loops) remains outside the profile. These checks do not establish ABI
+# behavior or full object TV. object_translation_correspondence is the full
+# object-TV check; none is a recovery performer or makes a linker, loader,
+# ABI, or runtime claim.
 OBJECT_CHECK_VOCABULARY = frozenset(
     {
         "object_call_edge_correspondence",
@@ -1565,6 +1567,7 @@ OBJECT_CHECK_VOCABULARY = frozenset(
         "machine_code_direct_call_site_tv",
         "machine_code_forward_branch_function_tv",
         "machine_code_acyclic_branch_function_tv",
+        "machine_code_conditional_call_function_tv",
     }
 )
 

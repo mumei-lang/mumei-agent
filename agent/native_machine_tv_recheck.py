@@ -10,11 +10,16 @@ lineage compare-and-set.
 Core runs the object reproduction and correspondence pipeline, then compares
 leaf straight-line, forward-branch, and acyclic backward-branch functions
 with pure-i64 source models under an assumed register convention. Direct
-calls are compared as uninterpreted call sites. Cyclic control flow and loops
-remain outside the profile. This is not an ABI, full object translation, runtime or
-historical-execution claim. The C `main` wrapper, CRT, loader and libc are
-outside the profile; `object_translation_correspondence` stays unperformed.
-This recheck report is never a recovery performer.
+calls, including calls inside branching functions, are compared as
+uninterpreted call sites; conditional-call functions use per-path guarded
+call matching. The agent consumes
+`machine_code_conditional_call_function_tv` only when the matching
+`mumei.machine-code-tv/v1` descriptor lists it in `checks_performed`. Cyclic
+control flow and loops remain outside the profile. This is not an ABI, full
+object translation, runtime or historical-execution claim. The C `main`
+wrapper, CRT, loader and libc are outside the profile;
+`object_translation_correspondence` stays unperformed. This recheck report is
+never a recovery performer.
 """
 
 from __future__ import annotations
@@ -168,10 +173,11 @@ def build_machine_tv_recheck_parser(
     if parser is None:
         parser = argparse.ArgumentParser(prog="native-machine-tv-recheck")
     parser.description = (
-        "Run Core's bounded leaf straight-line, forward-branch and acyclic "
-        "backward-branch machine-code TV recheck; direct calls are "
-        "uninterpreted sites; cyclic control flow, loops, ABI/runtime "
-        "semantics and full object TV stay outside."
+        "Run Core's bounded leaf straight-line, forward-branch, acyclic "
+        "backward-branch and conditional-call machine-code TV recheck; direct "
+        "calls remain uninterpreted sites, including inside branching "
+        "functions with per-path guarded call matching; cyclic control flow, "
+        "loops, ABI/runtime semantics and full object TV stay outside."
     )
     parser.add_argument(
         "--core",
