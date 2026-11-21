@@ -83,6 +83,7 @@ _SUBCOMMANDS = {
     "native-stdout-accept",
     "native-stderr-recheck",
     "native-stderr-accept",
+    "native-observations-accept",
     "native-check",
     "native-evidence-accept",
     "native-source-recheck",
@@ -1186,6 +1187,24 @@ def main() -> None:
         native_oxa_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(native_oxa_main(args))
+    elif command == "native-observations-accept":
+        import argparse
+        from agent.native_observations_accept import (
+            build_observations_accept_parser as native_oa_build_parser,
+            main_observations_accept as native_oa_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent native-observations-accept",
+            description=(
+                "Run a declared Core native observations acceptance as "
+                "one attempt and emit the reconciled lineage plus the "
+                "declared acceptance outcome."
+            ),
+        )
+        native_oa_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(native_oa_main(args))
     elif command == "native-check":
         import argparse
         from agent.native_check import (

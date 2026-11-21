@@ -1557,11 +1557,19 @@ _CHECK_PERFORMERS: dict = {
          "accepted", "normalized.stdout.sha256"),
         ("mumei.native-exit-status-accept-report/v1", "acceptance",
          "accepted", "shared:expected_build_id"),
+        ("mumei.native-observations-accept-report/v1", "acceptance",
+         "accepted", "normalized.stdout.sha256"),
+        ("mumei.native-observations-accept-report/v1", "acceptance",
+         "accepted", "shared:expected_build_id"),
     ],
     "os_stdout_observation": [
         ("mumei.native-stdout-accept-report/v1", "acceptance",
          "accepted", "normalized.stdout.sha256"),
         ("mumei.native-stdout-accept-report/v1", "acceptance",
+         "accepted", "shared:expected_build_id"),
+        ("mumei.native-observations-accept-report/v1", "acceptance",
+         "accepted", "normalized.stdout.sha256"),
+        ("mumei.native-observations-accept-report/v1", "acceptance",
          "accepted", "shared:expected_build_id"),
     ],
     "os_stderr_observation": [
@@ -1569,13 +1577,23 @@ _CHECK_PERFORMERS: dict = {
          "accepted", "normalized.stdout.sha256"),
         ("mumei.native-stderr-accept-report/v1", "acceptance",
          "accepted", "shared:expected_build_id"),
+        ("mumei.native-observations-accept-report/v1", "acceptance",
+         "accepted", "normalized.stdout.sha256"),
+        ("mumei.native-observations-accept-report/v1", "acceptance",
+         "accepted", "shared:expected_build_id"),
     ],
     # Accepted Core runs authenticate this build ID against the bundle
     # record, so it pins sibling reports to the same record. Rechecks
     # remain non-performers because their stdout has no bound carrier.
-    # runtime_observation_semantics awaits the Core descriptor for one
-    # invocation observing all channels; it is not a conjunction of
-    # channel reports.
+    # runtime_observation_semantics is performed only by the one-
+    # invocation observations acceptance; it is never a conjunction of
+    # the three single-channel reports.
+    "runtime_observation_semantics": [
+        ("mumei.native-observations-accept-report/v1", "acceptance",
+         "accepted", "normalized.stdout.sha256"),
+        ("mumei.native-observations-accept-report/v1", "acceptance",
+         "accepted", "shared:expected_build_id"),
+    ],
     "attempt_binding": [
         ("mumei.core-acceptance-evaluation/v1", "attempt_bound", True, None),
     ],
