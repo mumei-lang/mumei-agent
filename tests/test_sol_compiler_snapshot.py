@@ -90,6 +90,10 @@ def _assert_rejected(envelope, source, *, raw=None):
             "state_write",
             ["agree", "agree"],
         ),
+        (
+            "state_write_operators",
+            ["agree", "agree"],
+        ),
     ],
 )
 def test_captured_references_have_exact_lexical_comparison_statuses(name, statuses):
@@ -190,6 +194,47 @@ def test_state_variable_writes_agree_with_the_compiler_declaration():
         == {"start": declaration_start, "end": declaration_start + len("count")}
         for item in count_references
     )
+
+
+def test_duplicate_lexical_references_at_a_span_must_all_agree():
+    source = _source("state_write_operators")
+    snapshot = load_sol_compiler_snapshot(
+        _payload(_envelope("state_write_operators")),
+        source,
+    )
+    report = build_sol_bindings(source)
+    lexical_references_by_span = {}
+    for reference in report.references:
+        lexical_references_by_span.setdefault(reference.span, []).append(reference)
+    target = next(
+        reference
+        for reference in snapshot.references
+        if reference.name == "count"
+        and len(lexical_references_by_span.get(reference.span, ())) == 2
+    )
+    same_span_references = lexical_references_by_span[target.span]
+    other_binding = next(
+        binding for binding in report.bindings if binding.span != target.declaration
+    )
+    changed_reference = same_span_references[0]
+    inconsistent_report = replace(
+        report,
+        references=tuple(
+            replace(reference, binding_id=other_binding.id)
+            if reference == changed_reference
+            else reference
+            for reference in report.references
+        ),
+    )
+
+    comparison = compare_with_lexical(snapshot, inconsistent_report)
+
+    assert len(same_span_references) == 2
+    assert next(
+        item
+        for item in comparison["references"]
+        if item["span"] == target.span.to_dict()
+    )["status"] == "disagree"
 
 
 def test_comparison_reports_disagreement_and_missing_lexical_records():

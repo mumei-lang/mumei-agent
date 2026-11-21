@@ -14,6 +14,7 @@ FIXTURE_NAMES = (
     "inheritance_override",
     "require_builtin",
     "state_write",
+    "state_write_operators",
     "compile_error",
     "import_source",
 )

@@ -12,6 +12,7 @@ from agent.lexical_bindings import (
     MAX_REPORT_BYTES,
     ByteSpan,
     LexicalBindingReport,
+    Reference,
 )
 
 ALLOWED_SOLC_VERSIONS = frozenset({"0.8.39+commit.ce47f2c8"})
@@ -267,9 +268,12 @@ def compare_with_lexical(
         "lexical report source does not match compiler snapshot",
     )
 
-    references_by_span = {reference.span: reference for reference in report.references}
+    references_by_span: dict[ByteSpan, list[Reference]] = {}
+    for lexical_reference in report.references:
+        references_by_span.setdefault(lexical_reference.span, []).append(
+            lexical_reference
+        )
     unresolved_by_span = {item.span: item for item in report.unresolved}
-    _require(len(references_by_span) == len(report.references))
     _require(len(unresolved_by_span) == len(report.unresolved))
     _require(not set(references_by_span) & set(unresolved_by_span))
     bindings_by_id = {binding.id: binding for binding in report.bindings}
@@ -290,13 +294,12 @@ def compare_with_lexical(
         if reference.builtin:
             status = "builtin"
         elif reference.span in references_by_span:
-            lexical_reference = references_by_span[reference.span]
-            binding = bindings_by_id.get(lexical_reference.binding_id)
-            status = (
-                "agree"
-                if binding is not None and binding.span == reference.declaration
-                else "disagree"
-            )
+            status = "agree"
+            for lexical_reference in references_by_span[reference.span]:
+                binding = bindings_by_id.get(lexical_reference.binding_id)
+                if binding is None or binding.span != reference.declaration:
+                    status = "disagree"
+                    break
         elif reference.span in unresolved_by_span:
             status = "lexical_unresolved"
             item["reason"] = unresolved_by_span[reference.span].reason
