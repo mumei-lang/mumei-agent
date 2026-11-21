@@ -4095,14 +4095,18 @@ class _Builder:
         """May a container parameter's backing be caller memory a
         sibling argument also reaches? A slice or map hands over its
         header; an array copies — but its elements still share when
-        they are slices, maps or pointers (`[N][]T`, `[N]*T`), while
-        a pure `[N]int64` copies cleanly."""
+        they are slices, maps or pointers (`[N][]T`, `[N]*T`), or
+        named structs with collection fields; scalar-only arrays
+        remain value copies."""
         if t is None or t.kind is None:
             return False
         if t.kind in {"slice", "map", "pointer"}:
             return True
         if t.kind == "array":
-            return self._param_container_shares_memory(t.elem)
+            return (
+                self._param_container_shares_memory(t.elem)
+                or bool(self._struct_collection_members(t.elem))
+            )
         return False
 
     def _opaque_container_ident_toks(
@@ -4196,12 +4200,18 @@ class _Builder:
     def _type_embeds_collection(self, fact: Any) -> bool:
         """Whether a value of this type shares memory when copied —
         a slice/map header shares directly; an array shares when
-        the headers inside it are copied along (`[1][]int64`
-        shares its inner slice, `[1][1]int64` shares nothing)."""
+        its copied elements contain slice/map headers, directly or
+        through named struct fields."""
         t = fact
+        array_element = False
         while t is not None and t.kind == "array":
+            array_element = True
             t = getattr(t, "elem", None)
-        return t is not None and t.kind in {"slice", "map"}
+        if t is None:
+            return False
+        if t.kind in {"slice", "map"}:
+            return True
+        return array_element and bool(self._struct_collection_members(t))
 
     def _opaque_container_elem_toks(
         self, node: Any, params: dict | None = None

@@ -30291,6 +30291,156 @@ def test_external_container_reads_observe_indirect_writes(
     assert required <= result.return_dependencies
 
 
+@pytest.mark.parametrize(
+    (
+        "type_definitions",
+        "element_type",
+        "callee_write",
+        "caller_read",
+    ),
+    [
+        (
+            "type E struct { F []int64; V int64 }\n",
+            "[2]E",
+            "ss[0].F[0] = x",
+            "return a[0].F[0]",
+        ),
+        (
+            "type E struct { F []int64; V int64 }\n",
+            "[2]E",
+            "b := ss[0].F; b[0] = x",
+            "c := a[0].F; return c[0]",
+        ),
+        (
+            "type E struct { F []int64; V int64 }\n",
+            "[2]E",
+            "b := ss[0].F; b[0] = x",
+            "return a[0].F[0]",
+        ),
+        (
+            "type E struct { F []int64; V int64 }\n",
+            "[2][3]E",
+            "ss[0][1].F[0] = x",
+            "return a[0][1].F[0]",
+        ),
+        (
+            "type Inner struct { F []int64 }\n"
+            "type E struct { I Inner }\n",
+            "[2][3]E",
+            "b := ss[0][1].I.F; b[0] = x",
+            "return a[0][1].I.F[0]",
+        ),
+        (
+            "type Inner struct { F []int64 }\n"
+            "type E struct { I Inner }\n",
+            "[2][3]E",
+            "ss[0][1].I.F[0] = x",
+            "return a[0][1].I.F[0]",
+        ),
+    ],
+    ids=[
+        "arr_dir",
+        "arr_ext",
+        "arr_ext2",
+        "nested_array",
+        "nested_struct_array",
+        "nested_struct_array_ext",
+    ],
+)
+def test_array_struct_collection_field_call_writes_reach_caller(
+    go_types_helper,
+    type_definitions,
+    element_type,
+    callee_write,
+    caller_read,
+):
+    declarations = (
+        type_definitions
+        + f"func G(ss {element_type}, x int64) {{ {callee_write} }}\n"
+        + f"func F(a {element_type}, x int64) int64 {{ "
+        + f"G(a, x); {caller_read} }}\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_array_scalar_struct_field_call_write_is_not_caller_visible(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type P struct { V int64 }\n"
+            "func G(ss [2]P, x int64) { ss[0].V = x }\n"
+            "func F(a [2]P, x int64) int64 {\n"
+            "\tG(a, x)\n"
+            "\treturn a[0].V\n}\n",
+        )
+    )
+    assert result.available, result.gaps
+    assert 1 not in result.return_dependencies
+
+
+@pytest.mark.parametrize(
+    (
+        "type_definitions",
+        "initialization",
+        "write",
+        "read",
+    ),
+    [
+        (
+            "type E struct { F []int64 }\n",
+            "a := [2]E{{F: make([]int64, 1)}}",
+            "b[0].F[0] = x",
+            "return a[0].F[0]",
+        ),
+        (
+            "type E struct { F []int64 }\n",
+            "a := [2]E{{F: make([]int64, 1)}}",
+            "c := b[0].F; c[0] = x",
+            "return a[0].F[0]",
+        ),
+        (
+            "type Inner struct { F []int64 }\n"
+            "type E struct { I Inner }\n",
+            "a := [2][3]E{}; a[0][1].I.F = make([]int64, 1)",
+            "b[0][1].I.F[0] = x",
+            "return a[0][1].I.F[0]",
+        ),
+        (
+            "type Inner struct { F []int64 }\n"
+            "type E struct { I Inner }\n",
+            "a := [2][3]E{}; a[0][1].I.F = make([]int64, 1)",
+            "c := b[0][1].I.F; c[0] = x",
+            "return a[0][1].I.F[0]",
+        ),
+    ],
+    ids=["direct", "extracted", "nested_direct", "nested_extracted"],
+)
+def test_local_array_struct_field_copy_shares_collection_backing(
+    go_types_helper,
+    type_definitions,
+    initialization,
+    write,
+    read,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            type_definitions
+            + f"func F(x int64) int64 {{\n\t{initialization}\n"
+            + "\tb := a\n"
+            + f"\t{write}\n"
+            + f"\t{read}\n"
+            + "}\n",
+        )
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+
 def test_interface_field_call_writes_reach_container_field_read(
     go_types_helper,
 ):
