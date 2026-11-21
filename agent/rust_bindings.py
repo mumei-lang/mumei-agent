@@ -823,13 +823,13 @@ class _RustBindings:
         for outer_scope in self.scopes[:-1]:
             for records in outer_scope.bindings.values():
                 for generic in records:
-                if (
-                    generic.binding.kind != "generic_parameter"
-                    or (
-                        generic.owner_function
-                        and generic.owner_function != record.binding.id
-                    )
-                    or generic.binding.id in inherited_generics
+                    if (
+                        generic.binding.kind != "generic_parameter"
+                        or (
+                            generic.owner_function
+                            and generic.owner_function != record.binding.id
+                        )
+                        or generic.binding.id in inherited_generics
                         or generic.binding.scope is None
                         or not (
                             generic.binding.scope.start
