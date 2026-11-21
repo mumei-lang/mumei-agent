@@ -8012,6 +8012,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
         locals_: dict[str, frozenset[int]],
         transfers: list[Any],
         count: list[int],
+        *,
+        result_type: Any = None,
     ) -> frozenset[int]:
         """One `return` expression's deps. A bound closure name re-
         resolves its captured bindings at the return — a captured local
@@ -8019,7 +8021,30 @@ member, or one explicit dereference of one (`(*t).F` — the same
         CURRENT value (`y = x` after `cl := func(){return y}` hands x's
         deps to the caller, not the empty set the literal captured)."""
         local_chan_chan = self._local_chan_chan_id(expr)
+        returned_chan_chan_groups: set[str] = set()
         if expr.type == "composite_literal":
+            direct_queue_nodes: set[tuple[int, int, int]] = set()
+            if self._chan_chan_elem_collection(result_type):
+                body = expr.child_by_field_name("body")
+                for element in _children(body) if body is not None else ():
+                    if element.type == "literal_element":
+                        value = next(iter(_children(element)), None)
+                    elif element.type == "keyed_element":
+                        value = element.child_by_field_name("value")
+                        if (
+                            value is not None
+                            and value.type == "literal_element"
+                        ):
+                            value = next(iter(_children(value)), None)
+                    else:
+                        value = None
+                    if value is not None and value.type == "identifier":
+                        binding_id = self._local_chan_chan_id(value)
+                        if binding_id is not None:
+                            direct_queue_nodes.add(
+                                self.node_key(value)
+                            )
+                            returned_chan_chan_groups.add(binding_id)
             pending = [
                 expr.child_by_field_name("body")
             ]
@@ -8030,6 +8055,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 if (
                     candidate.type == "identifier"
                     and self._local_chan_chan_id(candidate) is not None
+                    and self.node_key(candidate)
+                    not in direct_queue_nodes
                 ):
                     raise _Unsupported(
                         "unsupported_return", _span(expr)
@@ -8061,6 +8088,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
         if local_chan_chan is not None:
             deps |= self._return_local_chan_chan_deps(
                 local_chan_chan, locals_
+            )
+        for binding_id in sorted(returned_chan_chan_groups):
+            deps |= self._return_local_chan_chan_deps(
+                binding_id, locals_
             )
         idents = [expr] if expr.type == "identifier" else []
         if not idents and expr.type == "composite_literal":
@@ -10184,6 +10215,49 @@ member, or one explicit dereference of one (`(*t).F` — the same
         result |= self.indirect_writes
         return result
 
+    def _nil_only_unsupported_result(
+        self, fn: Function, result_index: int
+    ) -> bool:
+        if fn.results[result_index].binding_id:
+            return False
+        binding = self.bindings.get(fn.binding_id)
+        body = (
+            self.blocks.get(_key3(binding.span))
+            if binding is not None
+            else None
+        )
+        if body is None:
+            return False
+        pending = [body]
+        saw_return = False
+        while pending:
+            node = pending.pop()
+            if node.type == "func_literal":
+                continue
+            if node.type == "return_statement":
+                expressions_node = next(
+                    (
+                        child
+                        for child in _children(node)
+                        if child.type == "expression_list"
+                    ),
+                    None,
+                )
+                expressions = (
+                    _children(expressions_node)
+                    if expressions_node is not None
+                    else []
+                )
+                if (
+                    len(expressions) != len(fn.results)
+                    or expressions[result_index].text != b"nil"
+                ):
+                    return False
+                saw_return = True
+                continue
+            pending.extend(_children(node))
+        return saw_return
+
     def summarize(self, binding_id: str) -> FunctionSummary:
         fn = self.functions[binding_id]
         if binding_id in self.cache:
@@ -10358,8 +10432,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             or self._chan_chan_elem_collection(r.type)
                         )
                     )
+                    or (
+                        r.type.kind == "unsupported"
+                        and self._nil_only_unsupported_result(fn, i)
+                    )
                 )
-                for r in fn.results
+                for i, r in enumerate(fn.results)
             )
         ):
             raise _Unsupported("unsupported_signature", fn.body)
@@ -10850,7 +10928,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 self._record_read(result_deps)
             elif len(expressions) == 1:
                 deps[0] |= self._return_expr_deps(
-                    expressions[0], fn, params, locals_, transfers, count
+                    expressions[0],
+                    fn,
+                    params,
+                    locals_,
+                    transfers,
+                    count,
+                    result_type=(
+                        fn.results[0].type
+                        if len(fn.results) == 1
+                        else None
+                    ),
                 )
             elif len(expressions) == len(fn.results):
                 # `return a, b` — every expression's deps fold into the
@@ -10858,9 +10946,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # sibling slots' provenance too (the same
                 # over-approximation the imported multi-result unpack
                 # uses).
-                for e in expressions:
+                for i, e in enumerate(expressions):
                     deps[0] |= self._return_expr_deps(
-                        e, fn, params, locals_, transfers, count
+                        e,
+                        fn,
+                        params,
+                        locals_,
+                        transfers,
+                        count,
+                        result_type=fn.results[i].type,
                     )
             else:
                 raise _Unsupported("unsupported_return", _span(node))

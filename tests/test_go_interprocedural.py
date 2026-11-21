@@ -18463,6 +18463,264 @@ def test_chan_chan_container_conditional_return_and_store_match_queue(
     assert container_store.effects == queue_store.effects == "unknown"
 
 
+def test_chan_chan_composite_literal_return_matches_bound_container(
+    go_types_helper,
+):
+    declarations = []
+    pairs = []
+    shapes = (
+        (
+            "slice",
+            "[]chan chan int64",
+            "[]chan chan int64{q}",
+            "q := make(chan chan int64, 1)\n"
+            "c := make(chan int64, 1)\n"
+            "q <- c\n"
+            "c <- x\n",
+        ),
+        (
+            "array",
+            "[1]chan chan int64",
+            "[1]chan chan int64{q}",
+            "q := make(chan chan int64, 1)\n"
+            "c := make(chan int64, 1)\n"
+            "q <- c\n"
+            "c <- x\n",
+        ),
+        (
+            "map",
+            "map[int]chan chan int64",
+            "map[int]chan chan int64{0: q}",
+            "q := make(chan chan int64, 1)\n"
+            "c := make(chan int64, 1)\n"
+            "q <- c\n"
+            "c <- x\n",
+        ),
+        (
+            "depth3",
+            "[]chan chan chan int64",
+            "[]chan chan chan int64{q3}",
+            "q3 := make(chan chan chan int64, 1)\n"
+            "q2 := make(chan chan int64, 1)\n"
+            "c := make(chan int64, 1)\n"
+            "q3 <- q2\n"
+            "q2 <- c\n"
+            "c <- x\n",
+        ),
+    )
+    for name, result_type, literal, setup in shapes:
+        direct_name = f"F_composite_{name}"
+        bound_name = f"F_bound_{name}"
+        declarations.extend(
+            (
+                f"func {direct_name}(x int64) {result_type} {{\n"
+                f"{setup}"
+                f"return {literal}\n"
+                "}\n",
+                f"func {bound_name}(x int64) {result_type} {{\n"
+                f"{setup}"
+                f"s := {literal}\n"
+                "return s\n"
+                "}\n",
+            )
+        )
+        pairs.append((direct_name, bound_name))
+
+    multiple_setup = (
+        "q1 := make(chan chan int64, 1)\n"
+        "q2 := make(chan chan int64, 1)\n"
+        "c1 := make(chan int64, 1)\n"
+        "c2 := make(chan int64, 1)\n"
+        "q1 <- c1\n"
+        "q2 <- c2\n"
+        "c1 <- x\n"
+        "c2 <- y\n"
+    )
+    declarations.extend(
+        (
+            "func F_composite_multiple(x, y int64) []chan chan int64 {\n"
+            f"{multiple_setup}"
+            "return []chan chan int64{q1, q2}\n"
+            "}\n",
+            "func F_bound_multiple(x, y int64) []chan chan int64 {\n"
+            f"{multiple_setup}"
+            "s := []chan chan int64{q1, q2}\n"
+            "return s\n"
+            "}\n",
+            "func F_composite_mixed(x int64) []chan chan int64 {\n"
+            "q := make(chan chan int64, 1)\n"
+            "c := make(chan int64, 1)\n"
+            "q <- c\n"
+            "c <- x\n"
+            "return []chan chan int64{q, make(chan chan int64, 1)}\n"
+            "}\n",
+            "func F_bound_mixed(x int64) []chan chan int64 {\n"
+            "q := make(chan chan int64, 1)\n"
+            "c := make(chan int64, 1)\n"
+            "q <- c\n"
+            "c <- x\n"
+            "s := []chan chan int64{q, make(chan chan int64, 1)}\n"
+            "return s\n"
+            "}\n",
+            "func F_composite_multi_result(x int64) "
+            "([]chan chan int64, error) {\n"
+            "q := make(chan chan int64, 1)\n"
+            "c := make(chan int64, 1)\n"
+            "q <- c\n"
+            "c <- x\n"
+            "return []chan chan int64{q}, nil\n"
+            "}\n",
+            "func F_bound_multi_result(x int64) "
+            "([]chan chan int64, error) {\n"
+            "q := make(chan chan int64, 1)\n"
+            "c := make(chan int64, 1)\n"
+            "q <- c\n"
+            "c <- x\n"
+            "s := []chan chan int64{q}\n"
+            "return s, nil\n"
+            "}\n",
+            "func F_composite_conditional(x int64) []chan chan int64 {\n"
+            "q := make(chan chan int64, 1)\n"
+            "c := make(chan int64, 1)\n"
+            "q <- c\n"
+            "c <- x\n"
+            "if x > 0 { return []chan chan int64{q} }\n"
+            "return []chan chan int64{q}\n"
+            "}\n",
+            "func F_bound_conditional(x int64) []chan chan int64 {\n"
+            "q := make(chan chan int64, 1)\n"
+            "c := make(chan int64, 1)\n"
+            "q <- c\n"
+            "c <- x\n"
+            "s := []chan chan int64{q}\n"
+            "if x > 0 { return s }\n"
+            "return s\n"
+            "}\n",
+            "func G_composite_caller(x int64) []chan chan int64 {\n"
+            "q := make(chan chan int64, 1)\n"
+            "c := make(chan int64, 1)\n"
+            "q <- c\n"
+            "c <- x\n"
+            "return []chan chan int64{q}\n"
+            "}\n",
+            "func G_bound_caller(x int64) []chan chan int64 {\n"
+            "q := make(chan chan int64, 1)\n"
+            "c := make(chan int64, 1)\n"
+            "q <- c\n"
+            "c <- x\n"
+            "s := []chan chan int64{q}\n"
+            "return s\n"
+            "}\n",
+            "func F_composite_caller(x int64) int64 {\n"
+            "s := G_composite_caller(x)\n"
+            "return <-(<-s[0])\n"
+            "}\n",
+            "func F_bound_caller(x int64) int64 {\n"
+            "s := G_bound_caller(x)\n"
+            "return <-(<-s[0])\n"
+            "}\n",
+            "func F_local_literal_only() int64 {\n"
+            "q := make(chan chan int64, 1)\n"
+            "s := []chan chan int64{q}\n"
+            "return int64(len(s))\n"
+            "}\n",
+        )
+    )
+    pairs.extend(
+        (
+            ("F_composite_multiple", "F_bound_multiple"),
+            ("F_composite_mixed", "F_bound_mixed"),
+            ("F_composite_multi_result", "F_bound_multi_result"),
+            ("F_composite_conditional", "F_bound_conditional"),
+        )
+    )
+    source, snapshot, summaries = unit(
+        go_types_helper, "\n".join(declarations)
+    )
+    for direct_name, bound_name in pairs:
+        direct = named(source, snapshot, summaries, direct_name)
+        bound = named(source, snapshot, summaries, bound_name)
+        assert direct.available, (direct_name, direct.gaps)
+        assert bound.available, (bound_name, bound.gaps)
+        assert direct.return_dependencies == bound.return_dependencies
+        assert direct.effects == bound.effects
+        assert direct.calls == bound.calls
+        assert direct.gaps == bound.gaps
+        expected = (
+            frozenset({0, 1})
+            if direct_name.endswith("_multiple")
+            else frozenset({0})
+        )
+        assert direct.return_dependencies == expected
+
+    multiple = named(
+        source, snapshot, summaries, "F_composite_multiple"
+    )
+    assert multiple.return_dependencies == frozenset({0, 1})
+    for direct_name, bound_name in (
+        ("G_composite_caller", "G_bound_caller"),
+        ("F_composite_caller", "F_bound_caller"),
+    ):
+        direct = named(source, snapshot, summaries, direct_name)
+        bound = named(source, snapshot, summaries, bound_name)
+        assert direct.available, (direct_name, direct.gaps)
+        assert bound.available, (bound_name, bound.gaps)
+        assert direct.return_dependencies == bound.return_dependencies
+        assert direct.effects == bound.effects
+        assert direct.return_dependencies == frozenset({0})
+    caller = named(source, snapshot, summaries, "F_composite_caller")
+    assert caller.return_dependencies == frozenset({0})
+    local = named(source, snapshot, summaries, "F_local_literal_only")
+    assert local.available, local.gaps
+    assert local.effects == "none_in_supported_fragment"
+
+
+def test_chan_chan_composite_literal_return_rejects_nested_boundaries(
+    go_types_helper,
+):
+    unsupported = (
+        "type Box struct{ S []chan chan int64 }\n"
+        "func F() Box {\n"
+        "q := make(chan chan int64, 1)\n"
+        "return Box{S: []chan chan int64{q}}\n"
+        "}\n",
+        "func F() map[chan chan int64]chan chan int64 {\n"
+        "q := make(chan chan int64, 1)\n"
+        "return map[chan chan int64]chan chan int64{q: "
+        "make(chan chan int64, 1)}\n"
+        "}\n",
+        "func F() []any {\n"
+        "q := make(chan chan int64, 1)\n"
+        "return []any{q}\n"
+        "}\n",
+        "func F() []chan chan int64 {\n"
+        "q := make(chan chan int64, 1)\n"
+        "return []chan chan int64{(q)}\n"
+        "}\n",
+    )
+    for source in unsupported:
+        result = named(*unit(go_types_helper, source))
+        assert not result.available, (source, result.gaps)
+        assert all(
+            gap.reason in {"unsupported_return", "unsupported_signature"}
+            for gap in result.gaps
+        ), (source, result.gaps)
+
+    nested = named(
+        *unit(
+            go_types_helper,
+            "func F() [][]chan chan int64 {\n"
+            "q := make(chan chan int64, 1)\n"
+            "return [][]chan chan int64{{q}}\n"
+            "}\n",
+        )
+    )
+    assert not nested.available, nested.gaps
+    assert any(
+        gap.reason == "unsupported_signature" for gap in nested.gaps
+    ), nested.gaps
+
+
 def test_chan_chan_container_store_broadcasts_later_group_joins(
     go_types_helper,
 ):
@@ -18616,12 +18874,6 @@ def test_chan_chan_boundaries_stay_closed(go_types_helper):
         "\treturn 0\n}\n",
         "func F(p chan chan []int64) int64 {\n"
         "\tq := p\n\t_ = q\n\treturn 0\n}\n",
-        "func F() []chan chan int64 {\n"
-        "\tcc := make(chan chan int64, 1)\n"
-        "\treturn []chan chan int64{cc}\n}\n",
-        "func F() map[int]chan chan int64 {\n"
-        "\tcc := make(chan chan int64, 1)\n"
-        "\treturn map[int]chan chan int64{0: cc}\n}\n",
         "type St struct{ C chan chan int64 }\n"
         "func F() St {\n"
         "\tcc := make(chan chan int64, 1)\n"
