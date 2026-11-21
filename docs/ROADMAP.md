@@ -4530,9 +4530,16 @@ to the same slots used by field extraction and assignment
 copies of memory-sharing structs retain those slots. Writes
 through effectful call arguments, receivers, and collection
 field arguments flow to the slot holders and later field
-reads. Plain array fields and scalar-only structs remain
-value copies. Pointer-root or otherwise untracked field shapes
-stay closed rather than inventing a backing relationship.
+reads. Struct call results (`s := mk(a)`, `lib.Mk(...)`,
+methods) mint a fresh backing joined with the backings of
+memory-sharing arguments; reseating one alias re-keys its
+field slots to a surviving alias; parallel assignments
+(`s, t = t, s`, rotations) read every struct RHS from the
+pre-assignment state, and a non-identifier RHS that reads a
+struct LHS of the same statement stays closed. Plain array
+fields and scalar-only structs remain value copies.
+Pointer-root or otherwise untracked field shapes stay closed
+rather than inventing a backing relationship.
 
 ### C07 per-statement read attribution
 

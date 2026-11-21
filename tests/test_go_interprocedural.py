@@ -41849,3 +41849,42 @@ def test_len_call_result_pointer_operand_stays_closed(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert not result.available
+
+
+def test_parallel_struct_assignment_mixed_rhs(go_types_helper):
+    header = "type S struct { A []int64 }\n"
+    scalar = named(
+        *unit(
+            go_types_helper,
+            header
+            + "func F(x int64) int64 {\n"
+            "\tn := int64(0)\n"
+            "\ts := S{A: []int64{0}}\n"
+            "\tt := S{A: []int64{x}}\n"
+            "\ts, n = t, n+1\n"
+            "\tb := s.A\n"
+            "\treturn b[0] + n\n}\n",
+        )
+    )
+    assert scalar.available, scalar.gaps
+    assert scalar.return_dependencies == frozenset({0})
+
+    # `id(s)` reads a struct LHS rebound by the same statement; it
+    # stays closed rather than reading post-assignment state.
+    nested = named(
+        *unit(
+            go_types_helper,
+            header
+            + "func id(v S) S { return v }\n"
+            "func F(x int64) int64 {\n"
+            "\ta1 := []int64{0}\n"
+            "\ts := S{A: a1}\n"
+            "\tt := S{A: []int64{0}}\n"
+            "\ts, t = t, id(s)\n"
+            "\tb := t.A\n"
+            "\tb[0] = x\n"
+            "\treturn a1[0]\n}\n",
+        )
+    )
+    assert not nested.available
+    assert "unsupported_expression" in {gap.reason for gap in nested.gaps}

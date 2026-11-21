@@ -16613,10 +16613,19 @@ class _Builder:
                             candidate_ref = self.references.get(
                                 self.node_key(candidate)
                             )
-                            if (
-                                candidate_ref is not None
+                            candidate_binding = (
+                                self.bindings.get(candidate_ref.binding_id)
+                                if candidate_ref is not None
                                 and candidate_ref.binding_id
                                 in lhs_binding_ids
+                                else None
+                            )
+                            if (
+                                candidate_binding is not None
+                                and self._struct_collection_members(
+                                    candidate_binding.type,
+                                    candidate_binding,
+                                )
                             ):
                                 raise _Unsupported(
                                     "unsupported_expression",
