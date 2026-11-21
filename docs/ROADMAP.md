@@ -3016,8 +3016,10 @@ each records an imported transfer like a receive does —
 `new(T)` now admits as a dep-free `*T` allocation whose type
 argument pins, with the pointee's own use-site gates classifying
 what `*p`/`p.V`/`(*p)[i]` admit; `&P{...}` admits for struct
-composite literals as the same dep-free pointer plus initializer
-field stores folded into the pointee dependency set — and bound function values:
+composite literals (named, imported, anonymous) as a fresh pointer
+whose value carries the initializer's deps, which also fold into
+the pointee dependency set like stores through it — and bound
+function values:
 a function literal bound to a local name
 (`h := func(...)...` / `var h = func(...)...`) now admits as a
 function-typed binding whose deps capture the enclosing bindings

@@ -15479,10 +15479,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             ref.binding_id, locals_, params
                         )
                     self._store(
-                        locals_,
-                        params,
-                        ref.binding_id,
-                        value,
+                        locals_, params, ref.binding_id, value,
                         conditional,
                     )
                     bound = self.bindings.get(ref.binding_id)
@@ -21275,9 +21272,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
             return deps | key_deps
         if kind in {"binary_expression", "unary_expression"}:
             # `&x` inherits the operand's deps like a pointer binding;
-            # a struct-literal address instead creates a dep-free
-            # pointer and folds its initializer below. Binary `&`
-            # stays bitwise.
+            # a struct-literal address `&P{...}` carries its
+            # initializer's deps and also folds them into the pointee
+            # set below. Binary `&` stays bitwise.
             operator = node.child_by_field_name("operator")
             if kind == "binary_expression" and (
                 self._interface_value_binding(
