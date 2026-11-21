@@ -209,7 +209,7 @@ See `.env.example` for configuration details.
 | `check-spec-health` | Check a Mumei spec for contradictions, over-constraints, and vacuity | `uv run mumei-agent check-spec-health spec.mm` |
 | `cross-validate` | Cross-validate spec↔code consistency across multiple files | `uv run mumei-agent cross-validate spec.mm src/foo.py --language python` |
 | `proliferate` | Autonomous weekly loop: analyze gaps → spec → generate → blast-radius check → heal → PR | `uv run mumei-agent proliferate --mumei-repo ../mumei --max-proposals 3` |
-| `propose` | Generate forge task specs from `analyze-std-gaps` output | `uv run mumei-agent propose --auto` |
+| `propose` | Generate forge task specs from `analyze-std-gaps` output | `uv run mumei-agent propose --gaps-json gaps.json` (from `analyze-std-gaps --output-json gaps.json`; `--auto` needs the mumei `mcp_server` module on `PYTHONPATH`) |
 | `analyze-std-gaps` | Identify gaps in std/ coverage | `uv run mumei-agent analyze-std-gaps --std-dir ../mumei/std` |
 | `health` | Show agent health status (LLM provider, mumei binary, etc.) | `uv run mumei-agent health` |
 | `mcp-server` | Run mumei-agent as a FastMCP server (forge / heal / health / propose tools) | `uv run mumei-agent mcp-server` |

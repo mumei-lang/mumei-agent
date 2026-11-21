@@ -99,7 +99,7 @@ Generate verified `.mm` code from a JSON specification with `uv run mumei-agent 
 | `check-spec-health` | Check contradictions, over-constraints, and vacuity | `uv run mumei-agent check-spec-health spec.mm` |
 | `cross-validate` | Cross-validate specs and code | `uv run mumei-agent cross-validate spec.mm src/foo.py --language python` |
 | `proliferate` | Analyze gaps, generate, heal, and deliver | `uv run mumei-agent proliferate --mumei-repo ../mumei --max-proposals 3` |
-| `propose` | Generate forge task specs | `uv run mumei-agent propose --auto` |
+| `propose` | Generate forge task specs | `uv run mumei-agent propose --gaps-json gaps.json` (from `analyze-std-gaps --output-json gaps.json`; `--auto` needs the mumei `mcp_server` module on `PYTHONPATH`) |
 | `analyze-std-gaps` | Identify standard-library gaps | `uv run mumei-agent analyze-std-gaps --std-dir ../mumei/std` |
 | `health` | Show provider and binary health | `uv run mumei-agent health` |
 | `mcp-server` | Run the FastMCP server | `uv run mumei-agent mcp-server` |
