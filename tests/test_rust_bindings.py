@@ -687,6 +687,26 @@ def test_explicit_non_macro_types_do_not_create_macro_gaps():
     assert not any(gap.reason == "macro_invocation" for gap in report.gaps)
 
 
+def test_turbofish_method_calls_traverse_the_receiver():
+    source = "fn caller(x: Thing) { x.method::<u8>(); }"
+    report = build_rust_bindings(source, pointer_width=64)
+    assert len(report.calls) == 1
+    assert report.calls[0].kind == "opaque_method"
+    assert report.calls[0].target == ""
+    receiver = next(
+        binding for binding in _bindings(report, "x", "parameter")
+    )
+    assert any(
+        reference.span.start == source.index("x.method")
+        and reference.binding_id == receiver.id
+        and reference.kind == "read"
+        for reference in report.references
+    )
+    assert not any(
+        unresolved.name.startswith("x.method") for unresolved in report.unresolved
+    )
+
+
 def test_macros_and_glob_imports_keep_hidden_names_unresolved_and_incomplete():
     macro_source = 'fn f(x:i32){ println!("{}", x); }'
     macro = build_rust_bindings(macro_source, pointer_width=64)

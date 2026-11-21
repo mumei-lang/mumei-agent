@@ -1533,6 +1533,11 @@ class _RustBindings:
                         if record.binding.kind == "import"
                         else "opaque_generic"
                     )
+            elif inner is not None and inner.type == "field_expression":
+                receiver = inner.child_by_field_name("value")
+                if receiver is not None:
+                    self._expr(receiver)
+                kind = "opaque_method"
             else:
                 self.unresolved.append(
                     Unresolved(self.span(callee), self.text(callee), "qualified_path")
