@@ -4903,6 +4903,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     imported=True,
                 )
             )
+            container_operand = node.child_by_field_name("operand")
+            container_deps = (
+                self.expression(
+                    container_operand,
+                    fn,
+                    params,
+                    locals_,
+                    transfers,
+                    count,
+                    depth + 1,
+                )
+                if self._chan_chan_container_result_call(
+                    container_operand
+                )
+                else frozenset()
+            )
+            self.indirect_writes |= container_deps
             index_deps = (
                 self.expression(
                     index_node, fn, params, locals_, transfers, count,
@@ -4915,7 +4932,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             self._external_chan_elem_index_deps[
                 self.node_key(node)
             ] = index_deps
-            return self.indirect_writes | index_deps
+            return self.indirect_writes | index_deps | container_deps
         ext_elem = self._external_chan_elem_index(node, params)
         if ext_elem is not None:
             # `GS[i]` / `lib.GS[i]` naming an element queue of an
@@ -7056,10 +7073,31 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 )
             ):
                 return (binding.id, binding.type)
+            if (
+                binding is not None
+                and ref is not None
+                and ref.binding_id in self.external_chan_locals
+                and self._chan_chan_elem_collection(binding.type)
+            ):
+                return (binding.id, binding.type)
             member = self._imported_member_operand(inner)
             if member is not None:
                 return (member.id, member.type)
             return None
+        if inner.type in {"call_expression", "type_conversion_expression"}:
+            call = self.calls.get(self.node_key(inner))
+            fact = self._call_result_type(inner)
+            if (
+                call is not None
+                and call.kind == "direct_local"
+                and self._chan_chan_elem_collection(fact)
+            ):
+                target_id = (
+                    f"{self.current_file}/chan_call_container/"
+                    f"{inner.start_byte}-{inner.end_byte}"
+                )
+                self.external_chan_locals.add(target_id)
+                return target_id, fact
         member = self._imported_member_operand(inner)
         if member is not None:
             return (member.id, member.type)
@@ -7132,6 +7170,29 @@ member, or one explicit dereference of one (`(*t).F` — the same
             return None
         self._pin_fact_identities(fact)
         return container[0], elem, index
+
+    def _chan_chan_container_result_call(self, node: Any) -> bool:
+        while (
+            node is not None
+            and node.type == "parenthesized_expression"
+        ):
+            node = next(
+                (c for c in node.named_children if c.type != "comment"),
+                None,
+            )
+        if node is None or node.type not in {
+            "call_expression",
+            "type_conversion_expression",
+        }:
+            return False
+        call = self.calls.get(self.node_key(node))
+        return (
+            call is not None
+            and call.kind == "direct_local"
+            and self._chan_chan_elem_collection(
+                self._call_result_type(node)
+            )
+        )
 
     def _external_chan_chan_source(
         self, node: Any, params: dict
@@ -7455,7 +7516,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
             return None
         if any(
             self._local_chan_chan_id(argument) is not None
-            and not self._chan_chan_fact(target.parameters[index].type)
+            and not (
+                self._chan_chan_fact(
+                    target.parameters[index].type
+                )
+                or self._chan_chan_elem_collection(
+                    target.parameters[index].type
+                )
+            )
             for index, argument in enumerate(arguments)
         ):
             return None
@@ -7688,6 +7756,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             and binding.kind == "variable"
             and (
                 self._chan_chan_fact(binding.type)
+                or self._chan_chan_elem_collection(binding.type)
                 or (
                     (
                         self._package_level(binding)
@@ -7696,6 +7765,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     and (
                         self._scalar_chan_fact(binding.type)
                         or self._chan_elem_collection(binding.type)
+                        or self._chan_chan_elem_collection(
+                            binding.type
+                        )
                     )
                 )
             )
@@ -7706,6 +7778,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             self._scalar_chan_fact(member.type)
             or self._chan_chan_fact(member.type)
             or self._chan_elem_collection(member.type)
+            or self._chan_chan_elem_collection(member.type)
         )
 
     def _chan_chan_id(self, target_id: str) -> bool:
@@ -7733,14 +7806,20 @@ member, or one explicit dereference of one (`(*t).F` — the same
             binding is not None
             and binding.kind == "variable"
             and binding.type is not None
-            and self._chan_elem_collection(binding.type)
+            and (
+                self._chan_elem_collection(binding.type)
+                or self._chan_chan_elem_collection(binding.type)
+            )
         ):
             return True
         member = self.members.get(target_id)
         return (
             member is not None
             and member.type is not None
-            and self._chan_elem_collection(member.type)
+            and (
+                self._chan_elem_collection(member.type)
+                or self._chan_chan_elem_collection(member.type)
+            )
         )
 
     def _chan_call_args(self, node: Any) -> Any | None:
@@ -10204,8 +10283,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # names the group's backing. An `[N]chan`
                         # result stays closed like the parameter.
                         or (
-                            r.type.kind in {"slice", "map"}
-                            and self._chan_elem_collection(r.type)
+                            (
+                                r.type.kind in {"slice", "map"}
+                                and self._chan_elem_collection(r.type)
+                            )
+                            or self._chan_chan_elem_collection(r.type)
                         )
                     )
                 )
@@ -10626,8 +10708,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
             for index, expression in enumerate(expressions):
                 if self._local_chan_chan_id(expression) is not None and (
                     index >= len(fn.results)
-                    or not self._chan_chan_fact(
-                        fn.results[index].type
+                    or not (
+                        self._chan_chan_fact(
+                            fn.results[index].type
+                        )
+                        or self._chan_chan_elem_collection(
+                            fn.results[index].type
+                        )
                     )
                 ):
                     raise _Unsupported(
@@ -10960,12 +11047,24 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         new_container_toks
                     )
                     if self._chan_chan_elem_collection(binding.type):
-                        self._join_chan_chan_container_members(
-                            binding.id,
-                            new_container_toks,
-                            params,
-                            locals_,
+                        result_rhs = (
+                            rights[i]
+                            if len(lefts) == len(rights)
+                            else None
                         )
+                        if self._chan_chan_container_result_call(
+                            result_rhs
+                        ):
+                            self.external_chan_locals.add(binding.id)
+                            self.local_chan_chans.discard(binding.id)
+                            self.indirect_writes |= value
+                        else:
+                            self._join_chan_chan_container_members(
+                                binding.id,
+                                new_container_toks,
+                                params,
+                                locals_,
+                            )
                     append_rhs = (
                         rights[i]
                         if len(lefts) == len(rights)
@@ -11873,12 +11972,28 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         if self._chan_chan_elem_collection(
                             binding.type
                         ):
-                            self._join_chan_chan_container_members(
-                                binding.id,
-                                new_container_toks,
-                                params,
-                                locals_,
+                            result_rhs = (
+                                value_nodes[i]
+                                if len(names) == len(value_nodes)
+                                else None
                             )
+                            if self._chan_chan_container_result_call(
+                                result_rhs
+                            ):
+                                self.external_chan_locals.add(
+                                    binding.id
+                                )
+                                self.local_chan_chans.discard(
+                                    binding.id
+                                )
+                                self.indirect_writes |= value
+                            else:
+                                self._join_chan_chan_container_members(
+                                    binding.id,
+                                    new_container_toks,
+                                    params,
+                                    locals_,
+                                )
                         append_rhs = (
                             value_nodes[i]
                             if len(names) == len(value_nodes)
@@ -12863,8 +12978,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     external_chan_chan_lhs = (
                         external_write is not None
                         and not external_write[2]
-                        and self._chan_chan_fact(
-                            external_write[0].type
+                        and (
+                            self._chan_chan_fact(
+                                external_write[0].type
+                            )
+                            or self._chan_chan_elem_collection(
+                                external_write[0].type
+                            )
                         )
                     )
                     local_chan_chan_elem_lhs = (
@@ -13022,7 +13142,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             )
                             if self._scalar_chan_binding(binding.id):
                                 chan_write_targets.add(len(refs))
-                            elif self._chan_chan_fact(binding.type):
+                            elif (
+                                self._chan_chan_fact(binding.type)
+                                or self._chan_chan_elem_collection(
+                                    binding.type
+                                )
+                            ):
                                 external_chan_chan_write_targets.add(
                                     len(refs)
                                 )
@@ -13049,7 +13174,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         )
                         if self._scalar_chan_fact(member.type):
                             chan_write_targets.add(len(refs))
-                        elif self._chan_chan_fact(member.type):
+                        elif (
+                            self._chan_chan_fact(member.type)
+                            or self._chan_chan_elem_collection(
+                                member.type
+                            )
+                        ):
                             external_chan_chan_write_targets.add(
                                 len(refs)
                             )
@@ -13161,7 +13291,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         chan_write_targets.add(len(refs) - 1)
                     elif (
                         not saw_deref
-                        and self._chan_chan_fact(member.type)
+                        and (
+                            self._chan_chan_fact(member.type)
+                            or self._chan_chan_elem_collection(
+                                member.type
+                            )
+                        )
                     ):
                         external_chan_chan_write_targets.add(
                             len(refs) - 1
@@ -13204,7 +13339,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         chan_write_targets.add(len(refs) - 1)
                     elif (
                         not saw_deref
-                        and self._chan_chan_fact(binding.type)
+                        and (
+                            self._chan_chan_fact(binding.type)
+                            or self._chan_chan_elem_collection(
+                                binding.type
+                            )
+                        )
                     ):
                         external_chan_chan_write_targets.add(
                             len(refs) - 1
@@ -15071,6 +15211,26 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             self._opaque_container_tokens.pop(
                                 ref.binding_id, None
                             )
+                        if (
+                            self._chan_chan_elem_collection(
+                                bound.type
+                            )
+                            and self._chan_chan_container_result_call(
+                                reseat_rhs
+                            )
+                        ):
+                            self.external_chan_locals.add(
+                                ref.binding_id
+                            )
+                            if conditional or self._may_skip > 0:
+                                self._promote_local_chan_chan_group(
+                                    ref.binding_id
+                                )
+                            else:
+                                self.local_chan_chans.discard(
+                                    ref.binding_id
+                                )
+                            self.indirect_writes |= value
                         if (
                             ref.binding_id
                             in self._opaque_container_tokens
@@ -18863,6 +19023,40 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         value, fn, params, locals_, transfers,
                         count, 0,
                     )
+                    container_node = channel
+                    while (
+                        container_node is not None
+                        and container_node.type
+                        == "parenthesized_expression"
+                    ):
+                        container_node = next(
+                            (
+                                child
+                                for child in container_node.named_children
+                                if child.type != "comment"
+                            ),
+                            None,
+                        )
+                    container_operand = (
+                        container_node.child_by_field_name("operand")
+                        if (
+                            container_node is not None
+                            and container_node.type == "index_expression"
+                        )
+                        else None
+                    )
+                    if self._chan_chan_container_result_call(
+                        container_operand
+                    ):
+                        value_deps |= self.expression(
+                            container_operand,
+                            fn,
+                            params,
+                            locals_,
+                            transfers,
+                            count,
+                            0,
+                        )
                     if (
                         index_node is not None
                         and index_node.type not in _INDEX_LITERALS
@@ -20702,6 +20896,27 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 self.node_key(operand), frozenset()
                             )
                         )
+                        container_operand = (
+                            operand.child_by_field_name("operand")
+                            if operand is not None
+                            else None
+                        )
+                        container_deps = (
+                            self.expression(
+                                container_operand,
+                                fn,
+                                params,
+                                locals_,
+                                transfers,
+                                count,
+                                depth + 1,
+                            )
+                            if self._chan_chan_container_result_call(
+                                container_operand
+                            )
+                            else frozenset()
+                        )
+                        self.indirect_writes |= container_deps
                         origin = (
                             frozenset({params[target_id]})
                             if target_id in params
@@ -20710,6 +20925,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         return (
                             self.indirect_writes
                             | index_deps
+                            | container_deps
                             | origin
                         )
                     if binding is None:

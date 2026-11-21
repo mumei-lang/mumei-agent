@@ -4381,11 +4381,23 @@ index dependencies; external stores and operations propagate through
 the container identity. As with named local queues, local-only
 operations keep `none_in_supported_fragment` effects.
 
-The container value itself does not escape through this model:
-returning, storing, passing, capturing, or taking the address of
-the container remains closed, as do struct fields, nested containers
-such as `[][]chan chan T`, and non-scalar leaves such as
-`[]chan chan ... chan []T`.
+Container values of slice, map, and array type can escape while
+retaining the identity of their conflated queue group. Returning a
+local container returns the group's read dependencies and promotes
+the group externally; storing it to a package or imported variable
+records the write, promotes the group, and broadcasts dependencies
+to later joins. A result container from a direct same-package call
+is bound as an external container, so element operations preserve
+the imported-transfer behavior. Passing a local container to a
+same-package direct call, `go` call, or `defer` call promotes the
+group just like passing one queue. Arrays share the referenced
+queues despite value-copying the array header. These escapes apply
+recursively when the container elements are nested queues.
+
+Container-value closure capture, taking its address, struct-field
+store or return, nested containers such as `[][]chan chan T`, and
+non-scalar leaves such as `[]chan chan ... chan []T` remain closed.
+Imported-call container arguments also remain closed.
 
 ### C07 scalar-element *nested* local containers
 
