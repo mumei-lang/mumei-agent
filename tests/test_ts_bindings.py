@@ -473,6 +473,26 @@ function use(value: TypeOnly, second: TypeDefault) {
     assert value_only
 
 
+@pytest.mark.parametrize(
+    ("source", "name", "type_only"),
+    [
+        ('import {type as renamed} from "m";', "renamed", False),
+        ('import type from "m";', "type", False),
+        ('import {type} from "m";', "type", False),
+        ('import type X from "m";', "X", True),
+        ('import {type X} from "m";', "X", True),
+        ('import type {X} from "m";', "X", True),
+    ],
+)
+def test_import_type_only_classification_uses_syntax_nodes(
+    source, name, type_only
+):
+    report = build_ts_bindings(source)
+    binding = _bindings(report, name, "import")[0]
+    assert binding.type_only is type_only
+    assert ("value" in binding.namespaces) is not type_only
+
+
 @pytest.mark.parametrize("prefix", ["export default", "export ="])
 def test_expression_exports_scan_resolved_names(prefix):
     source = f"const known = 1; {prefix} known;"
