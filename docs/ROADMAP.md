@@ -7100,8 +7100,9 @@ recheck route, and no end-to-end source-to-executable check composed from
 stage reports. Core's `recheck-object` command and
 `mumei.object-symbol-correspondence/v1` descriptor have landed; the
 `native-object-recheck` agent route consumes its three bounded checks without
-registering a recovery performer. Full object translation validation and an
-`accept-object` performer remain deferred.
+registering a recovery performer. Core #1228 and the agent's
+`native-object-accept` route add bounded object-stage machine-code acceptance;
+universal object translation validation remains outside the profile.
 
 ### C10 Option B native-object-recheck route
 
@@ -7121,6 +7122,38 @@ mid-run input drift claims no outcome. The report is deliberately not a
 `recovery-eval` performer and makes no instruction-selection,
 register-allocation, general linker-semantics, ABI, runtime or
 historical-execution claim.
+
+### C10 Option B native-object-accept route
+
+`python -m agent native-object-accept --core <path> --bundle <dir>
+--source <path> --expected-build-id <sha256>` runs Core's
+`native-bundle accept-object --expected-build-id <id> --json <bundle>
+<source>` in the C11 declared-attempt lifecycle. Exit 0 selects the captured
+descriptor only when the declared Core, bundle members, source and build ID
+remain unchanged; exit 3 is `inconclusive`, exit 1 claims no outcome, and
+mid-run drift reports `inputs_changed` without an outcome.
+
+The route accepts only `mumei.native-evidence-acceptance/v1` descriptors with
+`acceptance: "evaluated"`, `accepted: true`, the expected build ID, one of the
+two object-acceptance scopes, `object_source_machine_code_correspondence` in
+`checks_performed`, scope-consistent `object_link_correspondence`, disjoint
+performed/not-performed lists and lowercase 64-character LLVM/object SHA-256
+digests. An exit-0 invalid descriptor is marked `descriptor_invalid` and
+discharges nothing. Core's source/object check maps to the agent-owned
+`object_translation_correspondence`; Core's agent-owned name, if present in
+its list, is not a substitute for the Core check. Other object and
+machine-TV checks are discharged only when listed in the validated
+descriptor.
+
+The report exposes the acceptance schema, scope, hashes, bounded
+`register_convention_assumed` and `input_domain` strings, and aggregate
+function-outcome counts without function names. This is bounded object-stage
+machine-code acceptance under an assumed, not validated, register convention
+and stated input domain—not universal object TV. The C `main` wrapper, CRT,
+loader/libc, ABI/runtime semantics, optimizer semantics, producer authenticity
+and historical execution remain outside the claim. The report is not reusable
+Evidence or a certificate, does not promote a grade, emits no evidence
+candidate and is not a recovery performer.
 
 ### C10 Option B native-machine-tv-recheck route
 

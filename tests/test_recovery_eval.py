@@ -82,10 +82,17 @@ def test_native_check_vocabularies_are_pairwise_disjoint():
     assert RUNTIME_CHECK_VOCABULARY.isdisjoint(OBJECT_CHECK_VOCABULARY)
 
 
-def test_object_translation_correspondence_has_no_recovery_performer():
+@pytest.mark.parametrize(
+    "schema",
+    [
+        "mumei.native-accept-report/v1",
+        "mumei.native-object-accept-report/v1",
+    ],
+)
+def test_object_translation_correspondence_has_no_recovery_performer(schema):
     check = "object_translation_correspondence"
     record = {
-        "schema_version": "mumei.native-accept-report/v1",
+        "schema_version": schema,
         "checks_not_performed": [check],
     }
     evaluation = evaluate_unperformed_check_recovery(record, [])

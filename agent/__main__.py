@@ -92,6 +92,7 @@ _SUBCOMMANDS = {
     "native-observations-accept",
     "native-observations-recheck",
     "native-object-recheck",
+    "native-object-accept",
     "native-machine-tv-recheck",
     "native-check",
     "native-evidence-accept",
@@ -1147,6 +1148,31 @@ def main() -> None:
         native_accept_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(native_accept_main(args))
+    elif command == "native-object-accept":
+        import argparse
+        from agent.native_object_accept import (
+            build_object_accept_parser as native_obj_accept_build_parser,
+            main_object_accept as native_obj_accept_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent native-object-accept",
+            description=(
+                "Run bounded object-stage machine-code acceptance under an "
+                "assumed, not validated, register convention and stated "
+                "input domain. It emits no evidence candidate, is not reusable "
+                "Evidence or a certificate, is not a recovery performer, and "
+                "does not promote a grade; the C main wrapper, CRT, loader/"
+                "libc, ABI/runtime, optimizer semantics, producer authenticity "
+                "and historical execution are outside the profile. "
+                "object_translation_correspondence here is only profile-"
+                "bounded source-to-object machine-code correspondence, not "
+                "universal object TV."
+            ),
+        )
+        native_obj_accept_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(native_obj_accept_main(args))
     elif command == "native-artifact-recheck":
         import argparse
         from agent.native_artifact_recheck import (
