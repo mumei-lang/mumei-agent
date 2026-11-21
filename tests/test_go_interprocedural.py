@@ -17916,6 +17916,54 @@ def test_chan_chan_container_result_binding_and_index_dependencies(
     assert direct_receive.effects == queue_receive.effects
 
 
+def test_chan_chan_container_result_promotes_caller_queue_member(
+    go_types_helper,
+):
+    source = (
+        "func G(c chan int64) []chan chan int64 {\n"
+        "\tq := make(chan chan int64, 1)\n"
+        "\tq <- c\n"
+        "\ts := []chan chan int64{q}\n"
+        "\treturn s\n"
+        "}\n"
+        "func G2(c chan int64) chan chan int64 {\n"
+        "\tq := make(chan chan int64, 1)\n"
+        "\tq <- c\n"
+        "\treturn q\n"
+        "}\n"
+        "func F_container(x, y int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tc <- y\n"
+        "\ts := G(c)\n"
+        "\t(<-s[0]) <- x\n"
+        "\treturn <-c\n"
+        "}\n"
+        "func F_queue(x, y int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tc <- y\n"
+        "\tq := G2(c)\n"
+        "\t(<-q) <- x\n"
+        "\treturn <-c\n"
+        "}\n"
+        "func F_local(x, y int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tc <- y\n"
+        "\tc <- x\n"
+        "\treturn <-c\n"
+        "}\n"
+    )
+    data = unit(go_types_helper, source)
+    container_result = named(*data, "F_container")
+    queue_result = named(*data, "F_queue")
+    local_result = named(*data, "F_local")
+    assert container_result.available, container_result.gaps
+    assert queue_result.available, queue_result.gaps
+    assert local_result.available, local_result.gaps
+    assert container_result.return_dependencies == queue_result.return_dependencies
+    assert container_result.effects == queue_result.effects == "unknown"
+    assert container_result.return_dependencies == local_result.return_dependencies
+
+
 def test_chan_chan_container_escape_external_members_and_depth3(
     go_types_helper,
 ):

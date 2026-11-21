@@ -7008,6 +7008,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             conditional,
             locals_,
         )
+        self._promote_chan_call_args(source, "", locals_, params)
 
     def _bind_local_chan_chan_receive(
         self,
@@ -7677,6 +7678,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             conditional,
             locals_,
         )
+        self._promote_chan_call_args(source, "", locals_, params)
 
     def _local_chan_chan_alias(
         self, binding_id: str, target_root: str, conditional: bool
@@ -11058,6 +11060,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             self.external_chan_locals.add(binding.id)
                             self.local_chan_chans.discard(binding.id)
                             self.indirect_writes |= value
+                            self._promote_chan_call_args(
+                                result_rhs, "", locals_, params
+                            )
                         else:
                             self._join_chan_chan_container_members(
                                 binding.id,
@@ -11987,6 +11992,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                     binding.id
                                 )
                                 self.indirect_writes |= value
+                                self._promote_chan_call_args(
+                                    result_rhs, "", locals_, params
+                                )
                             else:
                                 self._join_chan_chan_container_members(
                                     binding.id,
@@ -15231,6 +15239,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                     ref.binding_id
                                 )
                             self.indirect_writes |= value
+                            self._promote_chan_call_args(
+                                reseat_rhs, "", locals_, params
+                            )
                         if (
                             ref.binding_id
                             in self._opaque_container_tokens
