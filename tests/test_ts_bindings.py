@@ -681,7 +681,7 @@ function outside(value: T) { return value; }
     assert generic.scope is not None
 
 
-def test_qualified_and_type_query_names_do_not_resolve_final_segments():
+def test_qualified_names_stay_unresolved_while_type_queries_resolve_values():
     source = """
 namespace NS { export type T = number; }
 type Qualified = NS.T;
@@ -690,9 +690,10 @@ type Queried = typeof value;
 const value = 1;
 """
     report = build_ts_bindings(source)
-    assert sum(item.reason == "qualified_path" for item in report.unresolved) == 3
+    assert sum(item.reason == "qualified_path" for item in report.unresolved) == 2
     assert not _refs(report, source, "T")
-    assert not _refs(report, source, "value")
+    value = _bindings(report, "value", "local")[0]
+    assert _refs(report, source, "value")[0].binding_id == value.id
 
 
 def test_reserved_primitive_alias_syntax_is_handled_without_shadowing_number():
