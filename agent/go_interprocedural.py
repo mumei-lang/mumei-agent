@@ -12235,7 +12235,7 @@ class _Builder:
                     self.func_aliases.pop(binding.id, None)
                     self.opaque_callees.discard(binding.id)
                 elif len(lefts) == len(rights):
-                    if rights[i].type == "func_literal":
+                    if self._strip_parens(rights[i]).type == "func_literal":
                         # `f := func()...` — the literal just wrote
                         # the name's records; only an earlier alias
                         # cannot resolve through it. The fresh
@@ -13358,7 +13358,10 @@ class _Builder:
                         # Non-identifier RHS — any earlier alias drops.
                         self.func_aliases.pop(binding.id, None)
                     elif not multi and value_nodes:
-                        if value_nodes[i].type == "func_literal":
+                        if (
+                            self._strip_parens(value_nodes[i]).type
+                            == "func_literal"
+                        ):
                             # `var f = func()...` — the literal just
                             # wrote the name's records; only a method
                             # pair or alias cannot resolve through it.
@@ -25312,7 +25315,11 @@ class _Builder:
                 names = _children(left)
                 values = _children(right)
                 index = next(
-                    (i for i, v in enumerate(values) if v == node),
+                    (
+                        i
+                        for i, value in enumerate(values)
+                        if self._strip_parens(value) == node
+                    ),
                     None,
                 )
                 if index is None and in_composite:
