@@ -66,6 +66,7 @@ def test_native_check_vocabularies_are_pairwise_disjoint():
     assert OBJECT_CHECK_VOCABULARY == frozenset(
         {
             "object_call_edge_correspondence",
+            "object_link_correspondence",
             "object_symbol_correspondence",
             "object_translation_correspondence",
         }
@@ -667,7 +668,7 @@ def test_native_observations_recheck_does_not_perform_same_build():
     }
 
 
-def test_native_object_recheck_does_not_perform_object_checks():
+def test_native_object_recheck_report_is_not_a_recovery_performer():
     build_id = "a" * 64
     record = _record(*sorted(OBJECT_CHECK_VOCABULARY))
     record["expected_build_id"] = build_id
@@ -681,6 +682,7 @@ def test_native_object_recheck_does_not_perform_object_checks():
             "claim_truth",
             "object_symbol_correspondence",
             "object_call_edge_correspondence",
+            "object_link_correspondence",
         ],
         checks_not_performed=["object_translation_correspondence"],
         normalized={"stdout": {"sha256": "b" * 64}},

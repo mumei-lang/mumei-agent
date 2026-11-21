@@ -12,9 +12,12 @@ exist yet is a **hypothesis** the agent adopts verbatim from Core once it lands.
 ## Status
 
 Core has landed `native-bundle recheck-object` and the
-`mumei.object-symbol-correspondence/v1` descriptor for bounded symbol-surface
-and direct-call-edge correspondence. The agent's `native-object-recheck`
-route consumes those two checks but is not a recovery performer.
+`mumei.object-symbol-correspondence/v1` descriptor for bounded symbol-surface,
+direct-call-edge and object-to-executable linked-placement correspondence.
+The agent's `native-object-recheck` route discharges only bounded checks
+listed in a descriptor with the matching schema and build ID; it does not
+infer `object_link_correspondence` from an older Core's exit code. The route
+is not a recovery performer.
 `accept-object`, full object translation validation, and the
 `object_translation_correspondence` performer remain deferred until Core
 provides that deeper acceptance route.
