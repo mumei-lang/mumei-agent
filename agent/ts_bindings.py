@@ -619,7 +619,7 @@ class _TypeScriptBindings:
 
     def _predeclare_import(self, node: Any) -> None:
         type_only_statement = any(
-            child.type == "type" for child in self.children(node)
+            child.type == "type" for child in node.children
         )
         require_clause = next(
             (child for child in self.children(node) if child.type == "import_require_clause"),
@@ -661,8 +661,7 @@ class _TypeScriptBindings:
                     alias = specifier.child_by_field_name("alias")
                     local_name = alias or specifier.child_by_field_name("name")
                     local_type_only = type_only_statement or any(
-                        item.type == "type" and not item.is_named
-                        for item in self.children(specifier)
+                        item.type == "type" for item in specifier.children
                     )
                     if local_name is not None:
                         self.add_binding(
