@@ -793,6 +793,31 @@ def test_jsx_intrinsic_element_does_not_make_report_incomplete():
     assert not report.unresolved
 
 
+def test_member_and_index_writes_read_object_roots_without_reassigning():
+    source = """
+const o = {x: 1};
+const arr = [1];
+let index = 0;
+o.x = 2;
+arr[index] = 3;
+o.x += 1;
+o.x++;
+delete o.x;
+"""
+    report = build_ts_bindings(source)
+    assert report.complete
+    assert not any(gap.reason == "const_reassignment" for gap in report.gaps)
+    for name, expected in (("o", 4), ("arr", 1), ("index", 1)):
+        references = _refs(report, source, name)
+        assert len(references) == expected
+        assert all(reference.kind == "read" for reference in references)
+
+
+def test_direct_const_reassignment_still_reports_a_gap():
+    report = build_ts_bindings("const fixed = 0; fixed = 1;")
+    assert any(gap.reason == "const_reassignment" for gap in report.gaps)
+
+
 def test_multibyte_spans_hash_and_output_are_deterministic():
     source = 'const greeting = "💡"; function f() { return greeting; }'
     report = build_ts_bindings(source)

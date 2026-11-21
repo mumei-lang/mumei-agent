@@ -1122,30 +1122,10 @@ class _TypeScriptBindings:
                 self.add_gap("const_reassignment", assignment_node)
             return
         if node.type == "member_expression":
-            self._scan_assignment_target(
-                node.child_by_field_name("object"),
-                owner,
-                function_context,
-                with_scopes,
-                compound=compound,
-                assignment_node=assignment_node,
-            )
+            self._scan(node, owner, function_context, with_scopes)
             return
         if node.type == "subscript_expression":
-            self._scan(
-                node.child_by_field_name("index"),
-                owner,
-                function_context,
-                with_scopes,
-            )
-            self._scan_assignment_target(
-                node.child_by_field_name("object"),
-                owner,
-                function_context,
-                with_scopes,
-                compound=compound,
-                assignment_node=assignment_node,
-            )
+            self._scan(node, owner, function_context, with_scopes)
             return
         if node.type in {"object_pattern", "array_pattern"}:
             for child in self.children(node):
