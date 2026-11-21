@@ -353,6 +353,29 @@ func F(t *Box[S3]) int64 { return t.A.B }`, "amd64")
 	}
 }
 
+func TestAliasTypeFactMarksUnderlyingInstantiationArguments(t *testing.T) {
+	unit := []namedSource{{"a.go", `package p
+import "lib"
+type P = lib.Box[lib.S3]
+type Q[T any] = lib.Box[T]
+func F(t *P, u *Q[lib.S3]) int64 { return t.A.B + u.A.B }`}}
+	imports := []importedUnit{{"lib", []namedSource{{"lib.go", `package lib
+type S3 struct{ B int64 }
+type Box[T any] struct{ A T }`}}}}
+	out := analyze(request{
+		Sources: unit, Imports: imports, TargetArch: "amd64",
+	})
+	if len(out.Functions) != 1 || len(out.Functions[0].Parameters) != 2 {
+		t.Fatal("the alias pointer parameters are missing")
+	}
+	for _, param := range out.Functions[0].Parameters {
+		if param.Type.Kind != "pointer" || param.Type.Elem == nil ||
+			!param.Type.Elem.HasTypeArgs {
+			t.Fatalf("the instantiated alias pointee was not marked: %+v", param.Type)
+		}
+	}
+}
+
 func TestImportedMethodChanResultAdmits(t *testing.T) {
 	// `ch, n := st.M()` — an imported method whose signature
 	// declares a scalar-element `chan` among its results records

@@ -1140,6 +1140,11 @@ func (ix *indexer) typeOfRec(t types.Type, seen map[types.Type]bool) typeFact {
 	case *types.Alias:
 		f.TypeID = ix.typeID(typ.Obj())
 		f.HasTypeArgs = typ.TypeArgs().Len() > 0
+		if !f.HasTypeArgs {
+			if named, ok := types.Unalias(typ).(*types.Named); ok {
+				f.HasTypeArgs = named.TypeArgs().Len() > 0
+			}
+		}
 	case *types.TypeParam:
 		f.TypeID = ix.typeID(typ.Obj())
 	case *types.Pointer:
