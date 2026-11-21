@@ -7204,6 +7204,30 @@ member, or one explicit dereference of one (`(*t).F` — the same
             )
         )
 
+    def _chan_chan_container_result_call_at(
+        self, node: Any, index: int
+    ) -> bool:
+        inner = node
+        while (
+            inner is not None
+            and inner.type == "parenthesized_expression"
+        ):
+            inner = next(
+                (c for c in inner.named_children if c.type != "comment"),
+                None,
+            )
+        if inner is None or inner.type != "call_expression":
+            return False
+        call = self.calls.get(self.node_key(inner))
+        return (
+            call is not None
+            and call.kind == "direct_local"
+            and self._chan_result_call_at(
+                inner, index, self._chan_chan_elem_collection
+            )
+            is not None
+        )
+
     def _evaluate_chan_chan_container_call(
         self,
         node: Any,
@@ -11092,19 +11116,28 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             self._opaque_container_index_sharer_toks(
                                 rhs_node
                             )
-                        )
+                    )
                     self._opaque_container_tokens[binding.id] = (
                         new_container_toks
                     )
                     if self._chan_chan_elem_collection(binding.type):
-                        result_rhs = (
-                            rights[i]
-                            if len(lefts) == len(rights)
-                            else None
-                        )
-                        if self._chan_chan_container_result_call(
-                            result_rhs
+                        result_rhs = None
+                        if (
+                            len(lefts) == len(rights)
+                            and self._chan_chan_container_result_call(
+                                rights[i]
+                            )
                         ):
+                            result_rhs = rights[i]
+                        elif (
+                            len(rights) == 1
+                            and len(lefts) > 1
+                            and self._chan_chan_container_result_call_at(
+                                rights[0], i
+                            )
+                        ):
+                            result_rhs = rights[0]
+                        if result_rhs is not None:
                             self.external_chan_locals.add(binding.id)
                             self.local_chan_chans.discard(binding.id)
                             self.indirect_writes |= value
@@ -12018,21 +12051,30 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 self._opaque_container_index_sharer_toks(
                                     rhs_node
                                 )
-                            )
+                        )
                         self._opaque_container_tokens[binding.id] = (
                             new_container_toks
                         )
                         if self._chan_chan_elem_collection(
                             binding.type
                         ):
-                            result_rhs = (
-                                value_nodes[i]
-                                if len(names) == len(value_nodes)
-                                else None
-                            )
-                            if self._chan_chan_container_result_call(
-                                result_rhs
+                            result_rhs = None
+                            if (
+                                len(names) == len(value_nodes)
+                                and self._chan_chan_container_result_call(
+                                    value_nodes[i]
+                                )
                             ):
+                                result_rhs = value_nodes[i]
+                            elif (
+                                len(value_nodes) == 1
+                                and len(names) > 1
+                                and self._chan_chan_container_result_call_at(
+                                    value_nodes[0], i
+                                )
+                            ):
+                                result_rhs = value_nodes[0]
+                            if result_rhs is not None:
                                 self.external_chan_locals.add(
                                     binding.id
                                 )
@@ -15180,6 +15222,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             if len(lefts) == len(rights)
                             else None
                         )
+                        if (
+                            reseat_rhs is None
+                            and len(rights) == 1
+                            and len(lefts) > 1
+                            and self._chan_chan_elem_collection(
+                                bound.type
+                            )
+                            and self._chan_chan_container_result_call_at(
+                                rights[0], i
+                            )
+                        ):
+                            reseat_rhs = rights[0]
                         while (
                             reseat_rhs is not None
                             and reseat_rhs.type
@@ -15271,8 +15325,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             self._chan_chan_elem_collection(
                                 bound.type
                             )
-                            and self._chan_chan_container_result_call(
-                                reseat_rhs
+                            and reseat_rhs is not None
+                            and (
+                                self._chan_chan_container_result_call(
+                                    reseat_rhs
+                                )
+                                or (
+                                    len(rights) == 1
+                                    and len(lefts) > 1
+                                    and self._chan_chan_container_result_call_at(
+                                        reseat_rhs, i
+                                    )
+                                )
                             )
                         ):
                             self.external_chan_locals.add(

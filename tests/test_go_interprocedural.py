@@ -18046,6 +18046,124 @@ def test_chan_chan_call_result_container_rejects_unsupported_call(
     assert result.gaps
 
 
+def test_chan_chan_multi_result_container_bindings_match_queue_results(
+    go_types_helper,
+):
+    shapes = (
+        (
+            "slice",
+            "[]chan chan int64",
+            "[]chan chan int64{q}",
+            "s[0]",
+            "chan chan int64",
+        ),
+        (
+            "map",
+            "map[int]chan chan int64",
+            "map[int]chan chan int64{0: q}",
+            "s[0]",
+            "chan chan int64",
+        ),
+        (
+            "array",
+            "[1]chan chan int64",
+            "[1]chan chan int64{q}",
+            "s[0]",
+            "chan chan int64",
+        ),
+        (
+            "depth3",
+            "[]chan chan chan int64",
+            "[]chan chan chan int64{q}",
+            "s[0]",
+            "chan chan chan int64",
+        ),
+    )
+    forms = ("short_blank", "short_named", "var_blank", "assign_blank")
+    declarations = []
+    comparisons = []
+    for shape, container_type, literal, element, queue_type in shapes:
+        container_call = f"G_{shape}"
+        queue_call = f"GQ_{shape}"
+        declarations.extend(
+            [
+                f"func {container_call}() ({container_type}, bool) {{ "
+                f"q := make({queue_type}, 1); s := {literal}; "
+                f"return s, true }}",
+                f"func {queue_call}() ({queue_type}, bool) {{ "
+                f"q := make({queue_type}, 1); return q, true }}",
+            ]
+        )
+        for form in forms:
+            container_name = f"F_{shape}_{form}"
+            queue_name = f"FQ_{shape}_{form}"
+            queue_parameters = "()"
+            if form == "short_blank":
+                container_body = (
+                    f"s, _ := {container_call}(); close({element})"
+                )
+                queue_body = f"q, _ := {queue_call}(); close(q)"
+            elif form == "short_named":
+                container_body = (
+                    f"s, err := {container_call}(); "
+                    f"close({element}); _ = err"
+                )
+                queue_body = (
+                    f"q, err := {queue_call}(); close(q); _ = err"
+                )
+            elif form == "var_blank":
+                container_body = (
+                    f"var s, _ = {container_call}(); close({element})"
+                )
+                queue_body = (
+                    f"var q, _ = {queue_call}(); close(q)"
+                )
+            else:
+                container_body = (
+                    f"var s {container_type}; s, _ = {container_call}(); "
+                    f"close({element})"
+                )
+                queue_parameters = f"(q {queue_type})"
+                queue_body = (
+                    f"q, _ = {queue_call}(); close(q)"
+                )
+            declarations.extend(
+                [
+                    f"func {container_name}() {{ {container_body} }}",
+                    f"func {queue_name}{queue_parameters} "
+                    f"{{ {queue_body} }}",
+                ]
+            )
+            comparisons.append((container_name, queue_name))
+
+    source, snapshot, summaries = unit(
+        go_types_helper, "\n".join(declarations)
+    )
+    for container_name, queue_name in comparisons:
+        container_result = named(
+            source, snapshot, summaries, container_name
+        )
+        queue_result = named(source, snapshot, summaries, queue_name)
+        assert container_result.available, (
+            container_name,
+            container_result.gaps,
+        )
+        assert queue_result.available, (
+            queue_name,
+            queue_result.gaps,
+        )
+        assert container_result.effects == queue_result.effects, (
+            container_name,
+            queue_name,
+            container_result.effects,
+            queue_result.effects,
+        )
+        assert queue_result.effects == "unknown", (
+            queue_name,
+            queue_result.effects,
+        )
+
+
 def test_chan_chan_container_escape_external_members_and_depth3(
     go_types_helper,
 ):
