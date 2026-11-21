@@ -361,7 +361,7 @@ def test_const_reassignment_and_implicit_global_writes_are_explicit():
     assert any(item.name == "missing" and item.reason == "implicit_global" for item in report.unresolved)
 
 
-def test_nested_place_writes_traverse_indexes_and_skip_this_binding():
+def test_nested_place_writes_read_roots_traverse_indexes_and_skip_this_binding():
     source = """
 function update(array: any, index: number, other: number) {
     array[index].field = 1;
@@ -374,9 +374,7 @@ function update(array: any, index: number, other: number) {
     index_reads = _refs(report, source, "index", "read")
     array_refs = [reference for reference in report.references if reference.binding_id == array.id]
     assert len(index_reads) == 2
-    assert [reference.kind for reference in array_refs] == [
-        "write", "read", "write",
-    ]
+    assert [reference.kind for reference in array_refs] == ["read", "read"]
     assert len(_calls(report, "unresolved")) == 1
     assert any(item.name == "compute" for item in _unresolved(report, "compute"))
     this_start = source.index("this.field")
