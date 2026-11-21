@@ -4399,7 +4399,7 @@ is admitted; container-value closure capture, taking its address,
 struct-field store or return, nested containers such as
 `[][]chan chan T`, and non-scalar leaves such as
 `[]chan chan ... chan []T` remain closed.
-Imported-call container arguments also remain closed.
+Plain imported-call arguments are admitted.
 
 ### C07 scalar-element *nested* local containers
 
