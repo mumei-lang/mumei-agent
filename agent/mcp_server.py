@@ -4150,9 +4150,11 @@ def native_object_accept(
     exceptions, FTZ/DAZ-off assumptions and NaN payload bits remain
     unestablished and not performed; the agent never discharges the
     external-callee, MXCSR, or NaN-payload assumption markers even if a
-    descriptor lists them as performed. Direct calls with f64 arguments fail
-    closed in Core. This is not an IEEE-754 conformance, ABI, runtime, or full
-    object-TV claim.
+    descriptor lists them as performed. Direct-call f64 arguments are
+    admitted only under Core's exact-bits obligation (NaN-aware match, then
+    an exact-bit proof against the XMM argument); computed f64 arguments
+    without provably identical bits and f64 tail calls fail closed. This is
+    not an IEEE-754 conformance, ABI, runtime, or full object-TV claim.
 
     Args:
         core_path: Absolute path to the mumei Core executable.
@@ -4780,9 +4782,12 @@ def native_machine_tv_recheck(
     argument/result registers assumed, not validated. MXCSR RNE, masked
     exceptions, FTZ/DAZ-off assumptions and NaN payload bits remain
     unestablished and not performed; the agent never discharges the MXCSR or
-    NaN-payload markers even if a descriptor lists them as performed. Direct
-    calls with f64 arguments fail closed in Core. This makes no IEEE-754
-    conformance, ABI, runtime or full object-TV claim.
+    NaN-payload markers even if a descriptor lists them as performed.
+    Direct-call f64 arguments are admitted only under Core's exact-bits
+    obligation (NaN-aware match, then an exact-bit proof against the XMM
+    argument); computed f64 arguments without provably identical bits and
+    f64 tail calls fail closed. This makes no IEEE-754 conformance, ABI,
+    runtime or full object-TV claim.
     `machine_tv_recheck` is claimed only for uniquely-mapped exit codes
     (0 `checked`, 3 `inconclusive`); mid-run drift reports `inputs_changed`
     with no claimed outcome. Every outcome echoes `expected_build_id`.

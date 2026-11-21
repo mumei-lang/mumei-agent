@@ -35,9 +35,11 @@ matching descriptor's `checks_performed`; it applies only under Core's f64
 profile with XMM argument/result registers assumed, not validated. MXCSR RNE,
 masked exceptions, FTZ/DAZ-off assumptions, and NaN payload bits remain
 unestablished and not performed; the agent never discharges the MXCSR or
-NaN-payload markers even if a descriptor lists them as performed. Direct
-calls with f64 arguments fail closed in Core. This makes no IEEE-754
-conformance, ABI, runtime, or full object-TV claim.
+NaN-payload markers even if a descriptor lists them as performed. Direct-call
+f64 arguments are admitted only under Core's exact-bits obligation
+(NaN-aware match, then an exact-bit proof against the XMM argument); computed
+f64 arguments without provably identical bits and f64 tail calls fail closed.
+This makes no IEEE-754 conformance, ABI, runtime, or full object-TV claim.
 Executions beyond the bound, cancellation/runtime semantics and other cyclic
 control flow remain outside the profile. This is not an ABI-correctness,
 runtime or full object-TV claim. No broader C entry-wrapper, CRT, loader or
@@ -230,9 +232,12 @@ def build_machine_tv_recheck_parser(
         "not validated. MXCSR RNE, masked exceptions, FTZ/DAZ-off assumptions "
         "and NaN payload bits remain unestablished and not performed; the "
         "agent never discharges the MXCSR or NaN-payload markers even if a "
-        "descriptor lists them as performed. Direct calls with f64 "
-        "arguments fail closed in Core. This makes no "
-        "IEEE-754 conformance, ABI, runtime or full object-TV claim."
+        "descriptor lists them as performed. Direct-call f64 arguments are "
+        "admitted only under Core's exact-bits obligation (NaN-aware match, "
+        "then an exact-bit proof against the XMM argument); computed f64 "
+        "arguments without provably identical bits and f64 tail calls fail "
+        "closed. This makes no IEEE-754 conformance, ABI, runtime or full "
+        "object-TV claim."
     )
     parser.add_argument(
         "--core",
