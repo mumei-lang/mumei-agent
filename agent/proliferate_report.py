@@ -238,6 +238,28 @@ def _attach_dry_run_proof_certificate(
     }
 
 
+def _cert_harness_metadata(cert: dict[str, Any]) -> dict[str, Any]:
+    """P5-A harness metadata present on a proof certificate or bundle.
+
+    Surfaces the canonical keys (``harness_contract``, ``intent_fidelity``,
+    ``artifact_paths``, ``budget_policy_fingerprint``, ``lean_provenance``)
+    when the producer recorded them; absent keys are omitted rather than
+    emitted as ``None``.
+    """
+    metadata: dict[str, Any] = {}
+    for key in (
+        "harness_contract",
+        "intent_fidelity",
+        "artifact_paths",
+        "budget_policy_fingerprint",
+        "lean_provenance",
+    ):
+        value = cert.get(key)
+        if value is not None:
+            metadata[key] = value
+    return metadata
+
+
 def _jsonify_result(
     result: dict[str, Any],
     *,
@@ -286,6 +308,10 @@ def _jsonify_result(
                     else None
                 ),
             }
+            if isinstance(value, dict):
+                out["upgraded_cert_summary"].update(
+                    _cert_harness_metadata(value)
+                )
         elif key == "thought_process":
             if hasattr(value, "to_dict"):
                 try:
@@ -321,6 +347,7 @@ def _jsonify_result(
                         "verify_error",
                         "generation_error",
                         "verified_at_generation",
+                        "artifact_paths_status",
                     )
                     if k in value
                 }
@@ -340,6 +367,7 @@ def _jsonify_result(
                             == Z3CheckResult.LEAN_VERIFIED.value
                         ),
                         "all_verified": cert.get("all_verified"),
+                        **_cert_harness_metadata(cert),
                     }
                 artifacts = value.get("artifacts")
                 if isinstance(artifacts, list):

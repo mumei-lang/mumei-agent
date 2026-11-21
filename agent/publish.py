@@ -30,6 +30,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from agent.config import AgentConfig
+from agent import proofcert
 from agent.mumei_client import create_mumei_client
 from agent.publish_helpers import (
     _SAFE_NAME_RE,
@@ -292,6 +293,14 @@ def publish(
         spec_code_mapping = mapper.to_json(mapping_result.mappings)
         report["spec_code_mapping"] = spec_code_mapping
         result["proof_certificate"] = report
+        # Consumer wiring for the canonical ``artifact_paths`` contract: a
+        # mumei-produced certificate or bundle records the paths the harness
+        # should collect or validate; verify each declared path resolves.
+        declared_paths = proofcert.artifact_paths_of(report)
+        if declared_paths:
+            result["artifact_paths_status"] = proofcert.validate_artifact_paths(
+                declared_paths, base_dir=cwd
+            )
     result["spec_code_mapping"] = spec_code_mapping
 
     logger.info("Verification passed")
