@@ -16413,6 +16413,34 @@ class _Builder:
                     in field_container_reseats.values()
                 }
                 for rhs in rights:
+                    bare_rhs = rhs
+                    while (
+                        bare_rhs is not None
+                        and bare_rhs.type == "parenthesized_expression"
+                    ):
+                        bare_rhs = next(
+                            (
+                                child
+                                for child in bare_rhs.named_children
+                                if child.type != "comment"
+                            ),
+                            None,
+                        )
+                    bare_field = (
+                        self._opaque_container_field_target(
+                            bare_rhs, params
+                        )
+                        if bare_rhs is not None
+                        and bare_rhs.type
+                        in {"selector_expression", "field_expression"}
+                        else None
+                    )
+                    if (
+                        bare_field is not None
+                        and bare_field[1] not in assigned_root_ids
+                        and bare_field[0] in assigned_field_keys
+                    ):
+                        continue
                     pending = [rhs]
                     while pending:
                         current = pending.pop()
