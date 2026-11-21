@@ -97,6 +97,8 @@ def test_dereference_compound_assignment_only_reads_the_pointer_binding():
         ("s.f.g", "s", ["write"], False, False),
         ("s.f", "s", ["read", "write"], False, True),
         ("a[i]", "a", ["read", "write"], True, True),
+        ("a[i].f", "a", ["write"], True, False),
+        ("a[i][j]", "a", ["read", "write"], True, True),
         ("(*p).f", "p", ["read"], False, False),
         ("p.as_mut().f", "p", ["read"], False, False),
     ],
@@ -108,7 +110,7 @@ def test_place_assignments_reference_the_binding_root(
     value = "1" if compound else "2"
     source = (
         "struct S { f: i32 } "
-        "fn f(mut s:S, mut a:[i32;4], mut p:&mut S, i:usize) { "
+        "fn f(mut s:S, mut a:[i32;4], mut p:&mut S, i:usize, j:usize) { "
         f"{place} {operator} {value}; }}"
     )
     report = build_rust_bindings(source, pointer_width=64)
@@ -116,6 +118,22 @@ def test_place_assignments_reference_the_binding_root(
     assert bool(_refs(report, source, "i")) is index_read
     if index_read:
         assert [ref.kind for ref in _refs(report, source, "i")] == ["read"]
+
+
+def test_nested_place_indexes_are_traversed_for_reads_and_calls():
+    source = (
+        "struct S { f: [i32;4] } fn index()->usize {0} "
+        "fn f(mut s:S) { s.f[index()] += 1; }"
+    )
+    report = build_rust_bindings(source, pointer_width=64)
+    assert [ref.kind for ref in _refs(report, source, "s")] == ["read", "write"]
+    assert _call(report, source, "index()").kind == "direct_local"
+
+
+def test_nested_place_index_names_remain_explicitly_unresolved():
+    source = "fn f(mut a:[i32;4]) { a[missing].field = 1; }"
+    report = build_rust_bindings(source, pointer_width=64)
+    assert _unresolved(report, "missing", "unknown_name")
 
 
 def test_assignment_to_const_is_a_read_with_an_unsupported_gap():
@@ -314,6 +332,33 @@ def test_pattern_constructor_paths_are_referenced_or_explicitly_unresolved(
                 assert _unresolved(report, name, "prelude_name")
 
 
+def test_match_guards_resolve_inside_the_arm_after_pattern_bindings():
+    source = (
+        "const K:i32=1; "
+        "fn f(n:i32, flag:bool){ "
+        "match n { n if n > K => n, x if flag => x, _ => 0 } }"
+    )
+    report = build_rust_bindings(source, pointer_width=64)
+    parameter_n = _bindings(report, "n", "parameter")[0]
+    arm_n = _bindings(report, "n", "local")[0]
+    flag = _bindings(report, "flag", "parameter")[0]
+    assert [ref.binding_id for ref in _refs(report, source, "n")] == [
+        parameter_n.id,
+        arm_n.id,
+        arm_n.id,
+    ]
+    assert [ref.binding_id for ref in _refs(report, source, "flag")] == [flag.id]
+    assert len(_bindings(report, "x", "local")) == 1
+    assert len(_refs(report, source, "x")) == 1
+
+
+def test_unresolved_match_guard_does_not_create_a_pattern_binding():
+    source = "fn f(n:i32){ match n { x if missing => x, _ => 0 } }"
+    report = build_rust_bindings(source, pointer_width=64)
+    assert len(_bindings(report, "x", "local")) == 1
+    assert _unresolved(report, "missing", "unknown_name")
+
+
 @pytest.mark.parametrize(
     "attribute",
     [
@@ -459,6 +504,256 @@ fn f(a:B, s:S, e:E) { let x: B = 1; let r: &u8 = &x; let t: (u8,u8)=(1,2); let z
     assert _bindings(cycle, "x", "parameter")[0].type.kind == "unknown"
 
 
+def test_type_lifetime_and_const_generics_resolve_in_item_scopes():
+    source = """
+type T = u8;
+struct S<'a, T, const N: usize> where T: Copy { r: &'a T, values: [T; N] }
+enum E<T> { Value(T) }
+trait Tr<'a, T> { fn borrow(x: &'a T); }
+impl<U> S<'static, U, 4> {
+    fn method<V, const M: usize>(x: V, values: [u8; M]) -> U
+    where V: Copy { let result: U = x; result }
+}
+fn generic<T, const N: usize>(x: T, values: [u8; N]) -> T
+where T: Copy { x }
+fn outside(x: T) {}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    generic_types = _bindings(report, "T", "generic_parameter")
+    assert len(generic_types) == 4
+    assert all(binding.type.kind == "unknown" for binding in generic_types)
+    generic_ids = {binding.id for binding in generic_types}
+    assert _refs(report, source, "T")
+    assert {ref.binding_id for ref in _refs(report, source, "T")} <= generic_ids
+
+    lifetimes = _bindings(report, "'a", "generic_parameter")
+    assert len(lifetimes) == 2
+    assert all(
+        ref.binding_id in {binding.id for binding in lifetimes}
+        for ref in _refs(report, source, "'a")
+    )
+    consts = [
+        binding
+        for binding in report.bindings
+        if binding.kind == "generic_parameter" and binding.name in {"N", "M"}
+    ]
+    assert len(consts) == 3
+    assert all(
+        (binding.type.kind, binding.type.bit_width, binding.type.signed)
+        == ("int", 64, False)
+        for binding in consts
+    )
+    method = next(
+        binding for binding in _bindings(report, "method", "associated_function")
+    )
+    generic_function = next(
+        fn for fn in report.functions if fn.binding_id == method.id
+    )
+    assert generic_function.generic
+
+    generic_start = source.index("fn generic")
+    generic_end = source.index("fn outside")
+    generic_parameter = next(
+        binding
+        for binding in report.bindings
+        if binding.kind == "parameter"
+        and binding.name == "x"
+        and generic_start < binding.span.start < generic_end
+    )
+    assert generic_parameter.type.kind == "unknown"
+    outside = next(
+        binding
+        for binding in _bindings(report, "x", "parameter")
+        if binding.span.start > generic_end
+    )
+    alias = _bindings(report, "T", "type_alias")[0]
+    assert outside.type.type_id == alias.id
+
+
+def test_generic_type_parameters_do_not_leak_outside_their_item_scope():
+    source = "type T=u8; fn generic<T>(x:T){} fn outside(x:T){}"
+    report = build_rust_bindings(source, pointer_width=64)
+    generic = _bindings(report, "T", "generic_parameter")[0]
+    outside = [
+        binding
+        for binding in _bindings(report, "x", "parameter")
+        if binding.span.start > source.index("outside")
+    ][0]
+    alias = _bindings(report, "T", "type_alias")[0]
+    assert generic.scope is not None
+    assert outside.type.type_id == alias.id
+
+
+def test_local_type_alias_precedes_primitive_type_facts():
+    source = """
+type u8 = u16;
+fn shadowed(x: u8) -> u8 { let y: u8 = x; y }
+fn builtin(x: i8) -> i8 { x }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    alias = _bindings(report, "u8", "type_alias")[0]
+    for name in ("x", "y"):
+        shadowed = next(
+            binding
+            for binding in _bindings(report, name, "parameter" if name == "x" else "local")
+            if binding.span.start < source.index("fn builtin")
+        )
+        assert (
+            shadowed.type.kind,
+            shadowed.type.name,
+            shadowed.type.bit_width,
+            shadowed.type.type_id,
+        ) == ("int", "u16", 16, alias.id)
+    builtin = next(
+        binding
+        for binding in _bindings(report, "x", "parameter")
+        if binding.span.start > source.index("fn builtin")
+    )
+    assert (builtin.type.kind, builtin.type.name, builtin.type.bit_width) == (
+        "int",
+        "i8",
+        8,
+    )
+
+
+def test_raw_identifiers_are_normalized_in_declarations_and_references():
+    source = """
+fn r#helper() {}
+fn caller() { helper(); r#helper(); }
+fn raw_parameter(r#type: u8) {
+    let r#match = r#type;
+    r#match;
+}
+fn missing_call() { r#missing(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    helper = _bindings(report, "helper", "function")[0]
+    assert all(call.target == helper.id for call in report.calls[:2])
+    assert all(call.kind == "direct_local" for call in report.calls[:2])
+    assert len(_bindings(report, "type", "parameter")) == 1
+    assert len(_bindings(report, "match", "local")) == 1
+    missing = next(
+        unresolved for unresolved in report.unresolved if unresolved.name == "missing"
+    )
+    assert report.resolve(missing.span) is None
+    assert report.calls[-1].kind == "unresolved"
+
+
+def test_impl_trait_arguments_are_generic_and_turbofish_stays_on_the_callee():
+    source = """
+fn impl_trait(argument: impl Copy) {}
+fn plain(argument: u8) {}
+fn target(argument: u8) {}
+fn caller() { plain(target::<u8>()); impl_trait(1); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    impl_trait = _bindings(report, "impl_trait", "function")[0]
+    plain = _bindings(report, "plain", "function")[0]
+    target = _bindings(report, "target", "function")[0]
+    functions = {function.binding_id: function for function in report.functions}
+    assert functions[impl_trait.id].generic
+    assert not functions[plain.id].generic
+    assert not functions[target.id].generic
+    calls = {call.target: call for call in report.calls}
+    assert calls[impl_trait.id].kind == "opaque_generic"
+    assert calls[target.id].kind == "opaque_generic"
+    assert calls[plain.id].kind == "direct_local"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "struct S { field: make_type!() }",
+        "fn f() { let value: make_type!() = 0; }",
+        "fn f() -> make_type!() { loop {} }",
+        "type Alias = make_type!();",
+    ],
+)
+def test_type_position_macros_create_macro_gaps(source):
+    report = build_rust_bindings(source, pointer_width=64)
+    macro_start = source.encode().index(b"make_type!")
+    assert any(
+        gap.reason == "macro_invocation" and gap.span.start == macro_start
+        for gap in report.gaps
+    )
+    assert not report.complete
+
+
+def test_explicit_non_macro_types_do_not_create_macro_gaps():
+    report = build_rust_bindings(
+        "struct S { field: u8 } type Alias = u16; fn f(x: u8) -> u16 { x as u16 }",
+        pointer_width=64,
+    )
+    assert not any(gap.reason == "macro_invocation" for gap in report.gaps)
+
+
+def test_turbofish_method_calls_traverse_the_receiver():
+    source = "fn caller(x: Thing) { x.method::<u8>(); }"
+    report = build_rust_bindings(source, pointer_width=64)
+    assert len(report.calls) == 1
+    assert report.calls[0].kind == "opaque_method"
+    assert report.calls[0].target == ""
+    receiver = next(
+        binding for binding in _bindings(report, "x", "parameter")
+    )
+    assert any(
+        reference.span.start == source.index("x.method")
+        and reference.binding_id == receiver.id
+        and reference.kind == "read"
+        for reference in report.references
+    )
+    assert not any(
+        unresolved.name.startswith("x.method") for unresolved in report.unresolved
+    )
+
+
+def test_pattern_mutability_is_preserved_per_binding():
+    source = """
+fn parameters((mut c, d): (i32, i32)) {}
+fn locals(pair: (i32, i32), value: S) {
+    let (mut a, b) = pair;
+    let S { mut field, ref mut other } = value;
+    let mut capture @ Some(inner) = None;
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    expected = {
+        ("c", "parameter"): True,
+        ("d", "parameter"): False,
+        ("a", "local"): True,
+        ("b", "local"): False,
+        ("field", "local"): True,
+        ("other", "local"): True,
+        ("capture", "local"): True,
+        ("inner", "local"): False,
+    }
+    for (name, kind), mutable in expected.items():
+        assert _bindings(report, name, kind)[0].mutable is mutable
+
+
+def test_comments_are_skipped_in_call_arguments_and_other_visitor_children():
+    source = """
+fn identity(/* parameter */ value: u8) {
+    /* block */
+    let (left, /* pattern */ right) = (value, value);
+}
+fn caller(value: u8) {
+    identity(/* argument */ value);
+    match value {
+        /* arm */ 0 => {},
+        // next arm
+        _ => {}
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    identity = _bindings(report, "identity", "function")[0]
+    call = next(call for call in report.calls if call.target == identity.id)
+    assert len(call.arguments) == 1
+    assert not any(gap.reason == "unsupported_syntax" for gap in report.gaps)
+    assert not report.unresolved
+
+
 def test_macros_and_glob_imports_keep_hidden_names_unresolved_and_incomplete():
     macro_source = 'fn f(x:i32){ println!("{}", x); }'
     macro = build_rust_bindings(macro_source, pointer_width=64)
@@ -470,6 +765,38 @@ def test_macros_and_glob_imports_keep_hidden_names_unresolved_and_incomplete():
     report = build_rust_bindings(source, pointer_width=64)
     assert _unresolved(report, "bar", "glob_import")
     assert any(g.reason == "glob_import" for g in report.gaps)
+
+
+def test_inner_glob_import_blocks_outer_items_but_not_other_scopes():
+    source = (
+        "fn helper(){} "
+        "fn f(){ { use m::*; helper(); } } "
+        "fn g(){ helper(); }"
+    )
+    report = build_rust_bindings(source, pointer_width=64)
+    helper = _bindings(report, "helper", "function")[0]
+    raw = source.encode()
+    calls = sorted(
+        (
+            call
+            for call in report.calls
+            if raw[call.span.start : call.span.end] == b"helper()"
+        ),
+        key=lambda call: call.span.start,
+    )
+    assert [call.kind for call in calls] == ["unresolved", "direct_local"]
+    assert calls[0].target == ""
+    assert calls[1].target == helper.id
+    assert _unresolved(report, "helper", "glob_import")
+
+
+def test_glob_import_in_inline_module_blocks_outer_name_lookup():
+    source = "fn helper(){} mod m { use other::*; fn f(){ helper(); } }"
+    report = build_rust_bindings(source, pointer_width=64)
+    call = _call(report, source, "helper()")
+    assert call.kind == "unresolved"
+    assert call.target == ""
+    assert _unresolved(report, "helper", "glob_import")
 
 
 def test_use_imports_prelude_qualified_method_and_generic_calls():
@@ -542,6 +869,16 @@ def test_static_mut_write_parse_limits_source_hash_and_determinism():
     for invalid in (8, True, 128):
         with pytest.raises(LexicalReportError):
             build_rust_bindings("fn f(){}", pointer_width=invalid)
+
+
+def test_deep_expression_recursion_is_reported_as_a_source_limit_error():
+    expression = " + ".join("1" for _ in range(2000))
+    source = f"fn f() {{ let value = {expression}; }}"
+    with pytest.raises(
+        LexicalReportError,
+        match="Rust source nesting exceeds the lexical report limit",
+    ):
+        build_rust_bindings(source, pointer_width=64)
 
 
 def test_explicit_function_const_static_and_unit_types_and_extern_calls():
@@ -630,3 +967,33 @@ def test_cli_emits_loadable_json_requires_width_and_fails_closed(tmp_path):
     assert failed.returncode == 2
     assert failed.stdout == ""
     assert failed.stderr
+
+
+def test_cli_preserves_crlf_bytes_for_report_hash_and_spans(tmp_path):
+    source = "fn first() {}\r\nfn second() { first(); }\r\n"
+    source_file = tmp_path / "crlf.rs"
+    source_file.write_bytes(source.encode("utf-8"))
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "agent",
+            "rust-bindings",
+            str(source_file),
+            "--pointer-width",
+            "64",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    restored = load_lexical_report(
+        result.stdout,
+        source,
+        profile=PROFILE,
+        target={"pointer_width": 64},
+    )
+    assert restored.source_sha256 == build_rust_bindings(
+        source, pointer_width=64
+    ).source_sha256

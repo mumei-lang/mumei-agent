@@ -6,7 +6,7 @@ import argparse
 import hashlib
 import re
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -129,6 +129,7 @@ class _Record:
     variadic: bool = False
     extern: bool = False
     struct_constructor: bool = False
+    generic_kind: str = ""
 
 
 class _RustBindings:
@@ -159,6 +160,13 @@ class _RustBindings:
         if node is None:
             return ""
         return self.raw[node.start_byte : node.end_byte].decode("utf-8")
+
+    @staticmethod
+    def _normalize_identifier(name: str) -> str:
+        return "::".join(
+            part[2:] if part.startswith("r#") else part
+            for part in name.split("::")
+        )
 
     def build(self) -> LexicalBindingReport:
         root_scope = _Scope(self.root, 0, "")
@@ -233,8 +241,11 @@ class _RustBindings:
         extern: bool = False,
         struct_constructor: bool = False,
         name_override: str | None = None,
+        generic_kind: str = "",
     ) -> _Record:
-        name = self.text(name_node) if name_override is None else name_override
+        name = self._normalize_identifier(
+            self.text(name_node) if name_override is None else name_override
+        )
         declaration = self.span(name_node)
         scope_start = 0 if scope is None else scope.start
         scope_end = 0 if scope is None else scope.end
@@ -262,6 +273,7 @@ class _RustBindings:
             variadic,
             extern,
             struct_constructor,
+            generic_kind,
         )
         self.bindings.append(binding)
         self.records[identifier] = record
@@ -291,7 +303,7 @@ class _RustBindings:
                 body = node.child_by_field_name("body")
                 if node.type == "function_item":
                     body = node.child_by_field_name("body")
-                generic = node.child_by_field_name("type_parameters") is not None
+                generic = self._is_generic_function(node)
                 signature = self.text(node)
                 is_async = _has_keyword(signature[: signature.find("fn")], "async")
                 variadic = any(c.type == "variadic_parameter" for c in self._descendants(node.child_by_field_name("parameters")))
@@ -322,6 +334,15 @@ class _RustBindings:
                     self._function_records[record.binding.id] = record
                 if kind == "type_alias":
                     record.alias_node = node.child_by_field_name("type")
+                self._add_generic_parameters(
+                    node,
+                    scope,
+                    owner_function=(
+                        record.binding.id if kind == "function" else scope.function_id
+                    ),
+                )
+            elif node.type == "impl_item":
+                self._add_generic_parameters(node, scope)
             elif node.type in {"extern_block", "foreign_mod_item"}:
                 body = node.child_by_field_name("body")
                 if body is None:
@@ -367,7 +388,24 @@ class _RustBindings:
         while stack:
             current = stack.pop()
             yield current
-            stack.extend(reversed(current.named_children))
+            stack.extend(reversed(self._children(current)))
+
+    @staticmethod
+    def _children(node: Any) -> tuple[Any, ...]:
+        return tuple(
+            child
+            for child in node.named_children
+            if child.type not in {"line_comment", "block_comment"}
+        )
+
+    def _is_generic_function(self, node: Any) -> bool:
+        if node.child_by_field_name("type_parameters") is not None:
+            return True
+        parameters = node.child_by_field_name("parameters")
+        return any(
+            candidate.type == "abstract_type"
+            for candidate in self._descendants(parameters)
+        )
 
     def _predeclare_use(self, node: Any, scope: _Scope) -> None:
         for name_node, is_glob, bound_name in self._use_names(node):
@@ -385,6 +423,96 @@ class _RustBindings:
                 name_override=bound_name,
             )
             self._add_to_scope(scope, record)
+
+    def _add_generic_parameters(
+        self,
+        node: Any,
+        scope: _Scope,
+        *,
+        owner_function: str | None = None,
+    ) -> None:
+        parameters = node.child_by_field_name("type_parameters")
+        if parameters is None:
+            return
+        item_scope = self.span(node)
+        for parameter in self._children(parameters):
+            if parameter.type not in {
+                "type_parameter",
+                "lifetime_parameter",
+                "const_parameter",
+            }:
+                continue
+            generic_kind = {
+                "type_parameter": "type",
+                "lifetime_parameter": "lifetime",
+                "const_parameter": "const",
+            }[parameter.type]
+            name_node = parameter.child_by_field_name("name")
+            if name_node is None:
+                continue
+            annotation = (
+                parameter.child_by_field_name("type")
+                if generic_kind == "const"
+                else None
+            )
+            type_fact = _UNKNOWN if annotation is None else self._type_fact(annotation)
+            record = self._make_record(
+                name_node,
+                "generic_parameter",
+                item_scope,
+                scope.function_id if owner_function is None else owner_function,
+                scope.module_depth,
+                item=False,
+                type_fact=type_fact,
+                generic_kind=generic_kind,
+            )
+            self._add_to_scope(scope, record)
+
+    def _generic_references(
+        self, node: Any | None, *, skip_nested_items: bool = False
+    ) -> None:
+        if node is None:
+            return
+        candidates = []
+        stack = [node]
+        while stack:
+            candidate = stack.pop()
+            if (
+                skip_nested_items
+                and candidate is not node
+                and candidate.type
+                in {"function_item", "function_signature_item"}
+            ):
+                continue
+            candidates.append(candidate)
+            stack.extend(reversed(self._children(candidate)))
+        for candidate in candidates:
+            if candidate.type in {"type_identifier", "lifetime"}:
+                namespace = "type"
+            elif candidate.type == "identifier":
+                namespace = "value"
+            else:
+                continue
+            record, _boundary = self._lookup_with_boundary(
+                self.text(candidate), candidate.start_byte, namespace
+            )
+            if (
+                record is None
+                or record.binding.kind != "generic_parameter"
+                or record.binding.span == self.span(candidate)
+            ):
+                continue
+            reference = Reference(self.span(candidate), record.binding.id, "read")
+            if reference not in self.references:
+                self.references.append(reference)
+
+    def _record_macro_invocations(self, node: Any | None) -> None:
+        for candidate in self._descendants(node):
+            if candidate.type != "macro_invocation":
+                continue
+            gap = Gap("macro_invocation", self.span(candidate))
+            if gap not in self.gaps:
+                self.gaps.append(gap)
 
     def _use_names(self, node: Any) -> list[tuple[Any, bool, str | None]]:
         out: list[tuple[Any, bool, str | None]] = []
@@ -449,6 +577,7 @@ class _RustBindings:
                 self._expr(node)
 
     def _scan_item(self, node: Any, scope: _Scope) -> None:
+        self._record_macro_invocations(node)
         if node.type == "macro_definition":
             return
         if node.type == "use_declaration":
@@ -480,6 +609,10 @@ class _RustBindings:
             return
         if node.type in {"impl_item", "trait_item"}:
             body = node.child_by_field_name("body")
+            self._generic_references(node.child_by_field_name("type_parameters"))
+            self._generic_references(node.child_by_field_name("where_clause"))
+            if node.type == "impl_item":
+                self._generic_references(node.child_by_field_name("type"))
             if body is not None:
                 old_extern = self.in_extern
                 self.in_extern = old_extern
@@ -495,8 +628,12 @@ class _RustBindings:
             return
         if node.type == "type_item":
             self._assign_item_type(node, scope)
+            self._generic_references(node)
             return
-        if node.type in {"struct_item", "enum_item", "union_item", "trait_item"}:
+        if node.type in {"struct_item", "enum_item", "union_item"}:
+            self._generic_references(node)
+            return
+        if node.type == "trait_item":
             return
 
     def _find_item_record(self, scope: _Scope, node: Any) -> _Record | None:
@@ -510,7 +647,7 @@ class _RustBindings:
         )
 
     def _scan_associated_container(self, body: Any, parent_scope: _Scope) -> None:
-        for node in body.named_children:
+        for node in self._children(body):
             if node.type in {"function_item", "function_signature_item"}:
                 name_node = self._item_name(node)
                 if name_node is None:
@@ -525,13 +662,16 @@ class _RustBindings:
                     parent_scope.module_depth,
                     item=True,
                     body_node=body_node,
-                    generic=node.child_by_field_name("type_parameters") is not None,
+                    generic=self._is_generic_function(node),
                     is_async=_has_keyword(
                         self.text(node)[: self.text(node).find("fn")], "async"
                     ),
                     extern=self.in_extern or body_node is None,
                 )
                 self._function_records[record.binding.id] = record
+                self._add_generic_parameters(
+                    node, parent_scope, owner_function=record.binding.id
+                )
                 self._function(node, record)
             elif node.type == "const_item":
                 name_node = self._item_name(node)
@@ -554,7 +694,7 @@ class _RustBindings:
                     self.gaps.append(Gap("unsupported_syntax", self.span(node)))
 
     def _scan_extern_container(self, body: Any, parent_scope: _Scope) -> None:
-        for node in body.named_children:
+        for node in self._children(body):
             if node.type in {"function_item", "function_signature_item"}:
                 record = self._find_item_record(parent_scope, node)
                 if record is not None:
@@ -593,12 +733,41 @@ class _RustBindings:
         body_span = None if body is None else self.span(body)
         parameter_ids: list[str] = []
         parameters = node.child_by_field_name("parameters")
+        fn_scope = _Scope(
+            body if body is not None else node,
+            self.module_depth,
+            record.binding.id,
+        )
+        self.scopes.append(fn_scope)
+        inherited_generics: set[str] = set()
+        for outer_scope in self.scopes[:-1]:
+            for records in outer_scope.bindings.values():
+                for generic in records:
+                    if (
+                        generic.binding.kind != "generic_parameter"
+                        or generic.binding.id in inherited_generics
+                        or generic.binding.scope is None
+                        or not (
+                            generic.binding.scope.start
+                            <= node.start_byte
+                            < generic.binding.scope.end
+                        )
+                    ):
+                        continue
+                    inherited_generics.add(generic.binding.id)
+                    self._add_to_scope(
+                        fn_scope,
+                        replace(
+                            generic,
+                            owner_function=record.binding.id,
+                            item=False,
+                        ),
+                    )
+        self._generic_references(node, skip_nested_items=True)
         if body is not None:
             parameter_scope = self.span(body)
-            fn_scope = _Scope(body, self.module_depth, record.binding.id)
-            self.scopes.append(fn_scope)
             if parameters is not None:
-                for parameter in parameters.named_children:
+                for parameter in self._children(parameters):
                     parameter_ids.extend(
                         self._parameter(parameter, fn_scope, parameter_scope)
                     )
@@ -607,7 +776,6 @@ class _RustBindings:
                 self._scan_container(body, fn_scope)
             else:
                 self._expr(body)
-            self.scopes.pop()
         result_node = node.child_by_field_name("return_type")
         result = _UNKNOWN if result_node is None else self._type_fact(result_node)
         is_method = bool(parameter_ids and any(
@@ -624,6 +792,7 @@ class _RustBindings:
             record.variadic,
         )
         self.functions.append(function)
+        self.scopes.pop()
         self.current_function, self.call_owner = old_function, old_call_owner
 
     def _parameter(self, node: Any, scope: _Scope, body_span: ByteSpan) -> list[str]:
@@ -650,9 +819,13 @@ class _RustBindings:
         pattern = node.child_by_field_name("pattern")
         annotation = node.child_by_field_name("type")
         fact = _UNKNOWN if annotation is None else self._type_fact(annotation)
-        mutable = _has_keyword(self.text(node)[: self.text(node).find(":")], "mut")
         identifiers = []
-        for name_node, name_mutable in self._pattern_names(pattern, scope):
+        names = self._pattern_names(pattern, scope)
+        mutable_specifier = any(
+            child.type == "mutable_specifier" for child in self._children(node)
+        )
+        names = self._apply_outer_mutability(names, pattern, mutable_specifier)
+        for name_node, name_mutable in names:
             record = self._make_record(
                 name_node,
                 "parameter",
@@ -661,18 +834,36 @@ class _RustBindings:
                 self.module_depth,
                 item=False,
                 type_fact=fact,
-                mutable=mutable or name_mutable,
+                mutable=name_mutable,
             )
             self._add_to_scope(scope, record)
             identifiers.append(record.binding.id)
         return identifiers
 
     def _type_fact(self, node: Any, aliases: frozenset[str] = frozenset()) -> TypeFact:
+        self._record_macro_invocations(node)
         text = self.text(node).strip()
         if not text:
             return _UNKNOWN
         if text == "()":
             return TypeFact("unit", "()", 0, None, "")
+        if (
+            node.type in {"type_identifier", "identifier", "primitive_type"}
+            and "::" not in text
+        ):
+            resolved = self._lookup(text, node.start_byte, "type")
+            if resolved is not None:
+                record = resolved
+                if record.binding.kind == "type_alias":
+                    if record.binding.id in aliases:
+                        return _UNKNOWN
+                    fact = self._type_fact(record.alias_node, aliases | {record.binding.id})
+                    return TypeFact(
+                        fact.kind, fact.name, fact.bit_width, fact.signed, record.binding.id
+                    )
+                if record.binding.kind in {"struct", "enum"}:
+                    return TypeFact("named", text, 0, None, record.binding.id)
+                return _UNKNOWN
         if node.type == "primitive_type" or text in {
             "i8", "i16", "i32", "i64", "i128", "isize",
             "u8", "u16", "u32", "u64", "u128", "usize", "f32", "f64",
@@ -688,26 +879,15 @@ class _RustBindings:
                 return TypeFact("int", text, int(text[1:]), text[0] == "i", "")
             if text[0] == "f" and text[1:].isdigit():
                 return TypeFact("float", text, int(text[1:]), None, "")
-        if node.type in {"type_identifier", "identifier", "scoped_type_identifier"} and "::" not in text:
-            resolved = self._lookup(text, node.start_byte, "type")
-            if resolved is not None:
-                record = resolved
-                if record.binding.kind == "type_alias":
-                    if record.binding.id in aliases:
-                        return _UNKNOWN
-                    fact = self._type_fact(record.alias_node, aliases | {record.binding.id})
-                    return TypeFact(
-                        fact.kind, fact.name, fact.bit_width, fact.signed, record.binding.id
-                    )
-                if record.binding.kind in {"struct", "enum"}:
-                    return TypeFact("named", text, 0, None, record.binding.id)
         return _UNKNOWN
 
-    def _pattern_names(self, pattern: Any | None, scope: _Scope) -> list[tuple[Any, bool]]:
-        if pattern is None:
+    def _pattern_names(
+        self, pattern: Any | None, scope: _Scope, mutable: bool = False
+    ) -> list[tuple[Any, bool]]:
+        if pattern is None or pattern.type in {"line_comment", "block_comment"}:
             return []
         if pattern.type in {"identifier", "self"}:
-            name = self.text(pattern)
+            name = self._normalize_identifier(self.text(pattern))
             found, _ = self._lookup_with_boundary(name, pattern.start_byte, "value")
             if found is not None and found.binding.kind in {
                 "const", "static", "struct",
@@ -723,14 +903,7 @@ class _RustBindings:
                     Unresolved(self.span(pattern), name, "prelude_name")
                 )
                 return []
-            return [
-                (
-                    pattern,
-                    _has_keyword(self.text(pattern.parent), "mut")
-                    if pattern.parent
-                    else False,
-                )
-            ]
+            return [(pattern, mutable)]
         if pattern.type in {
             "_",
             "wildcard_pattern",
@@ -776,33 +949,45 @@ class _RustBindings:
                 Unresolved(self.span(pattern), self.text(pattern), "qualified_path")
             )
             return []
+        if pattern.type == "mut_pattern":
+            mutable_bindings = []
+            for child in self._children(pattern):
+                if child.type != "mutable_specifier":
+                    mutable_bindings.extend(self._pattern_names(child, scope, True))
+            return mutable_bindings
         if pattern.type == "tuple_struct_pattern":
-            out: list[tuple[Any, bool]] = []
+            tuple_struct_bindings: list[tuple[Any, bool]] = []
             constructor = pattern.child_by_field_name("type")
             if constructor is not None:
                 self._record_pattern_path(constructor, "value", {"struct", "import"})
-            for child in pattern.named_children:
+            for child in self._children(pattern):
                 if child == constructor:
                     continue
-                out.extend(self._pattern_names(child, scope))
-            return out
+                tuple_struct_bindings.extend(
+                    self._pattern_names(child, scope, mutable)
+                )
+            return tuple_struct_bindings
         if pattern.type == "field_pattern":
             value = pattern.child_by_field_name("pattern")
+            field_mutable = mutable or any(
+                child.type == "mutable_specifier" for child in self._children(pattern)
+            ) or _has_keyword(self.text(pattern), "mut")
             if value is not None:
-                return self._pattern_names(value, scope)
+                return self._pattern_names(value, scope, field_mutable)
             field = next(
                 (
                     node
-                    for node in pattern.named_children
+                    for node in self._children(pattern)
                     if node.type in {"field_identifier", "shorthand_field_identifier"}
                 ),
                 None,
             )
-            return [] if field is None else [(field, False)]
+            return [] if field is None else [(field, field_mutable)]
         if pattern.type == "or_pattern":
-            alternatives = pattern.named_children
+            alternatives = self._children(pattern)
             name_sets: list[list[tuple[Any, bool]]] = [
-                self._pattern_names(alternative, scope) for alternative in alternatives
+                self._pattern_names(alternative, scope, mutable)
+                for alternative in alternatives
             ]
             normalized = [tuple(sorted(self.text(n) for n, _ in values)) for values in name_sets]
             if normalized and any(names != normalized[0] for names in normalized[1:]):
@@ -824,36 +1009,64 @@ class _RustBindings:
                     self._record_pattern_path(
                         type_node, "type", {"struct", "enum", "type_alias", "import"}
                     )
-            out = []
-            for child in pattern.named_children:
+            nested_bindings = []
+            for child in self._children(pattern):
                 if pattern.type == "struct_pattern" and child == pattern.child_by_field_name("type"):
                     continue
+                if child.type == "mutable_specifier":
+                    continue
                 if child.type == "field_identifier" and pattern.type == "struct_pattern":
-                    out.append((child, False))
+                    nested_bindings.append((child, mutable))
                     continue
                 if child.type == "type_identifier" and pattern.type == "struct_pattern":
                     continue
-                out.extend(self._pattern_names(child, scope))
-            return out
+                nested_bindings.extend(self._pattern_names(child, scope, mutable))
+            return nested_bindings
         if pattern.type in {"match_pattern", "condition"}:
-            out = []
-            for child in pattern.named_children:
+            condition_bindings = []
+            for child in self._children(pattern):
                 if child.type in {"binary_expression", "call_expression"}:
                     continue
-                out.extend(self._pattern_names(child, scope))
-            return out
+                condition_bindings.extend(
+                    self._pattern_names(child, scope, mutable)
+                )
+            return condition_bindings
         self.gaps.append(Gap("unsupported_syntax", self.span(pattern)))
         return []
+
+    def _apply_outer_mutability(
+        self,
+        names: list[tuple[Any, bool]],
+        pattern: Any | None,
+        is_mutable: bool,
+    ) -> list[tuple[Any, bool]]:
+        if not is_mutable:
+            return names
+        if pattern is not None and pattern.type == "captured_pattern":
+            capture = next(
+                (
+                    child
+                    for child in self._children(pattern)
+                    if child.type in {"identifier", "self"}
+                ),
+                None,
+            )
+            return [(name, mutable or name == capture) for name, mutable in names]
+        return [(name, True) for name, _mutable in names]
 
     def _record_pattern_path(
         self, node: Any, namespace: str, expected_kinds: set[str]
     ) -> None:
         if node.type in {"scoped_identifier", "scoped_type_identifier"}:
             self.unresolved.append(
-                Unresolved(self.span(node), self.text(node), "qualified_path")
+                Unresolved(
+                    self.span(node),
+                    self._normalize_identifier(self.text(node)),
+                    "qualified_path",
+                )
             )
             return
-        name = self.text(node)
+        name = self._normalize_identifier(self.text(node))
         record, boundary = self._lookup_with_boundary(name, node.start_byte, namespace)
         if record is not None and record.binding.kind in expected_kinds:
             self.references.append(Reference(self.span(node), record.binding.id, "read"))
@@ -864,6 +1077,7 @@ class _RustBindings:
         self.unresolved.append(Unresolved(self.span(node), name, reason))
 
     def _lookup_with_boundary(self, name: str, position: int, namespace: str) -> tuple[_Record | None, str | None]:
+        name = self._normalize_identifier(name)
         blocked: str | None = None
         for scope in reversed(self.scopes):
             if scope.module_depth < self.module_depth and self.module_depth > 0:
@@ -871,6 +1085,31 @@ class _RustBindings:
                     blocked = "module_boundary"
                 continue
             records = scope.bindings.get(name, ())
+            generic_records = []
+            for record in records:
+                if (
+                    record.binding.kind != "generic_parameter"
+                    or not self._in_namespace(record, namespace)
+                ):
+                    continue
+                binding_scope = record.binding.scope
+                if binding_scope is None or not (
+                    binding_scope.start <= position < binding_scope.end
+                ):
+                    continue
+                if record.owner_function != self.current_function:
+                    blocked = "item_boundary"
+                    continue
+                generic_records.append(record)
+            if generic_records:
+                return min(
+                    generic_records,
+                    key=lambda record: (
+                        record.binding.scope.end - record.binding.scope.start
+                        if record.binding.scope is not None
+                        else 0
+                    ),
+                ), None
             for record in reversed(records):
                 if record.binding.scope is not None and record.binding.scope != ByteSpan(0, 0) and not (
                     record.binding.scope.start <= position < record.binding.scope.end
@@ -886,7 +1125,7 @@ class _RustBindings:
             if ambiguous is not None and ambiguous[0] <= position < ambiguous[1]:
                 return None, "unknown_name"
             if scope.glob_import:
-                blocked = blocked or "glob_import"
+                return None, "glob_import"
         return None, blocked
 
     def _lookup(self, name: str, position: int, namespace: str) -> _Record | None:
@@ -895,6 +1134,10 @@ class _RustBindings:
     @staticmethod
     def _in_namespace(record: _Record, namespace: str) -> bool:
         kind = record.binding.kind
+        if kind == "generic_parameter":
+            if record.generic_kind == "const":
+                return namespace != "type"
+            return namespace == "type"
         if namespace == "type":
             return kind in {"struct", "enum", "type_alias", "trait", "union", "import"}
         if kind == "struct":
@@ -902,6 +1145,7 @@ class _RustBindings:
         return kind not in {"enum", "trait", "union", "type_alias", "module", "associated_const", "associated_function"}
 
     def _name_imported_or_glob(self, name: str, position: int) -> bool:
+        name = self._normalize_identifier(name)
         for scope in reversed(self.scopes):
             if name in scope.bindings and any(r.binding.kind == "import" for r in scope.bindings[name]):
                 return True
@@ -910,7 +1154,7 @@ class _RustBindings:
         return False
 
     def _reference(self, node: Any, kind: str = "read", namespace: str = "value") -> _Record | None:
-        name = self.text(node)
+        name = self._normalize_identifier(self.text(node))
         if node.type in {"scoped_identifier", "scoped_type_identifier"}:
             self.unresolved.append(Unresolved(self.span(node), name, "qualified_path"))
             return None
@@ -933,8 +1177,11 @@ class _RustBindings:
         if alternative is not None:
             self._expr(alternative)
         names = self._pattern_names(pattern, scope)
-        mutable = _has_keyword(self.text(pattern), "mut") or _has_keyword(
-            self.raw[node.start_byte : pattern.start_byte].decode("utf-8"), "mut"
+        mutable_specifier = any(
+            child.type == "mutable_specifier" for child in self._children(node)
+        )
+        names = self._apply_outer_mutability(
+            names, pattern, mutable_specifier
         )
         for name_node, name_mutable in names:
             record = self._make_record(
@@ -945,7 +1192,7 @@ class _RustBindings:
                 self.module_depth,
                 item=False,
                 type_fact=fact,
-                mutable=mutable or name_mutable,
+                mutable=name_mutable,
             )
             self._add_to_scope(scope, record)
 
@@ -953,8 +1200,11 @@ class _RustBindings:
         if node is None:
             return
         kind = node.type
-        if kind in {"macro_invocation", "macro_definition"}:
-            self.gaps.append(Gap("macro_invocation" if kind == "macro_invocation" else "macro_definition", self.span(node)))
+        if kind == "macro_invocation":
+            self._record_macro_invocations(node)
+            return
+        if kind == "macro_definition":
+            self.gaps.append(Gap("macro_definition", self.span(node)))
             return
         if kind in {"identifier", "self"}:
             self._reference(node)
@@ -979,12 +1229,12 @@ class _RustBindings:
                 self._reference(name_node, "read", "type")
             fields = node.child_by_field_name("body")
             if fields is not None:
-                for initializer in fields.named_children:
+                for initializer in self._children(fields):
                     if initializer.type == "shorthand_field_initializer":
                         identifier = next(
                             (
                                 child
-                                for child in initializer.named_children
+                                for child in self._children(initializer)
                                 if child.type == "identifier"
                             ),
                             None,
@@ -994,7 +1244,7 @@ class _RustBindings:
                     elif initializer.type == "field_initializer":
                         self._expr(initializer.child_by_field_name("value"))
                     elif initializer.type == "base_field_initializer":
-                        for child in initializer.named_children:
+                        for child in self._children(initializer):
                             self._expr(child)
                     else:
                         self.gaps.append(
@@ -1037,18 +1287,18 @@ class _RustBindings:
             self._match(node)
             return
         if kind == "parenthesized_expression":
-            for child in node.named_children:
+            for child in self._children(node):
                 self._expr(child)
             return
         if kind in _TRANSPARENT_NODES:
-            for child in node.named_children:
+            for child in self._children(node):
                 self._expr(child)
             return
         if kind in _EXPR_NODES or kind in {
             "return_expression", "break_expression", "continue_expression",
             "await_expression", "try_expression", "yield_expression",
         }:
-            for child in node.named_children:
+            for child in self._children(node):
                 self._expr(child)
             return
         if kind in {
@@ -1062,7 +1312,7 @@ class _RustBindings:
         if kind in {"type_item", "struct_item", "enum_item", "union_item", "trait_item"}:
             return
         if kind in {"expression_statement"}:
-            for child in node.named_children:
+            for child in self._children(node):
                 self._expr(child)
             return
         # Every syntax node that can conceal a read is surfaced as a gap.
@@ -1070,7 +1320,7 @@ class _RustBindings:
 
     def _place_root(self, node: Any) -> Any | None:
         if node.type == "parenthesized_expression":
-            children = node.named_children
+            children = self._children(node)
             return None if not children else self._place_root(children[0])
         if node.type in {"identifier", "self"}:
             return node
@@ -1078,13 +1328,40 @@ class _RustBindings:
             base = node.child_by_field_name("value")
             return None if base is None else self._place_root(base)
         if node.type == "index_expression":
-            children = node.named_children
+            children = self._children(node)
             return None if not children else self._place_root(children[0])
         return None
 
+    def _visit_place_indices(self, node: Any) -> None:
+        if node.type == "parenthesized_expression":
+            children = self._children(node)
+            if children:
+                self._visit_place_indices(children[0])
+            return
+        if node.type == "field_expression":
+            base = node.child_by_field_name("value")
+            if base is not None:
+                self._visit_place_indices(base)
+            return
+        if node.type == "index_expression":
+            children = self._children(node)
+            if children:
+                self._visit_place_indices(children[0])
+                for index in children[1:]:
+                    self._expr(index)
+            return
+        if node.type == "unary_expression" and self.text(node).lstrip().startswith("*"):
+            children = self._children(node)
+            operand = children[-1] if children else None
+            self._expr(operand)
+            return
+        if node.type in {"identifier", "self"}:
+            return
+        self._expr(node)
+
     def _assign_to_place(self, node: Any, compound: bool, assignment: Any) -> None:
         if node.type == "parenthesized_expression":
-            children = node.named_children
+            children = self._children(node)
             if children:
                 self._assign_to_place(children[0], compound, assignment)
             return
@@ -1092,26 +1369,22 @@ class _RustBindings:
             self._assignment_reference(node, compound, assignment)
             return
         if node.type == "field_expression":
-            base = node.child_by_field_name("value")
-            root = None if base is None else self._place_root(base)
+            root = self._place_root(node)
+            self._visit_place_indices(node)
             if root is None:
-                self._expr(base)
+                return
             else:
                 self._assignment_reference(root, compound, assignment)
             return
         if node.type == "index_expression":
-            children = node.named_children
-            if children:
-                root = self._place_root(children[0])
-                if root is None:
-                    self._expr(children[0])
-                else:
-                    self._assignment_reference(root, compound, assignment)
-                for index in children[1:]:
-                    self._expr(index)
+            root = self._place_root(node)
+            self._visit_place_indices(node)
+            if root is not None:
+                self._assignment_reference(root, compound, assignment)
             return
         if node.type == "unary_expression" and self.text(node).lstrip().startswith("*"):
-            operand = node.named_children[-1] if node.named_children else None
+            children = self._children(node)
+            operand = children[-1] if children else None
             self._expr(operand)
             return
         if node.type in {"scoped_identifier", "scoped_type_identifier"}:
@@ -1149,7 +1422,7 @@ class _RustBindings:
             pattern = condition.child_by_field_name("pattern")
             value = condition.child_by_field_name("value")
             if value is None:
-                named = condition.named_children
+                named = self._children(condition)
                 value = named[-1] if named else None
             if value is not None:
                 self._expr(value)
@@ -1209,16 +1482,32 @@ class _RustBindings:
         body = node.child_by_field_name("body")
         if body is None:
             return
-        for arm in body.named_children:
+        for arm in self._children(body):
             if arm.type != "match_arm":
                 self.gaps.append(Gap("unsupported_syntax", self.span(arm)))
                 continue
             arm_scope = _Scope(arm, self.module_depth, self.current_function)
             self.scopes.append(arm_scope)
-            pattern = arm.child_by_field_name("pattern")
+            match_pattern = arm.child_by_field_name("pattern")
+            guard = (
+                None
+                if match_pattern is None
+                else match_pattern.child_by_field_name("condition")
+            )
+            pattern = (
+                match_pattern
+                if match_pattern is None or guard is None
+                else next(
+                    (
+                        child
+                        for child in self._children(match_pattern)
+                        if child != guard
+                    ),
+                    None,
+                )
+            )
             names = self._pattern_names(pattern, arm_scope)
             self._bind_pattern_names(names, arm_scope, self.span(arm))
-            guard = arm.child_by_field_name("condition")
             if guard is not None:
                 self._expr(guard)
             result = arm.child_by_field_name("value")
@@ -1255,23 +1544,22 @@ class _RustBindings:
         old_owner = self.call_owner
         self.call_owner = ""
         if params is not None:
-            for parameter in params.named_children:
+            for parameter in self._children(params):
                 self._parameter(parameter, closure_scope, self.span(body))
         self._expr(body)
         self.call_owner = old_owner
         self.scopes.pop()
 
     def _callee(self, node: Any) -> Any:
-        while node.type == "parenthesized_expression" and len(node.named_children) == 1:
-            node = node.named_children[0]
+        while node.type == "parenthesized_expression" and len(self._children(node)) == 1:
+            node = self._children(node)[0]
         return node
 
     def _call(self, node: Any) -> None:
         callee = node.child_by_field_name("function")
         arguments_node = node.child_by_field_name("arguments")
-        args = () if arguments_node is None else tuple(
-            self.span(arg) for arg in arguments_node.named_children
-        )
+        arguments = () if arguments_node is None else self._children(arguments_node)
+        args = tuple(self.span(arg) for arg in arguments)
         callee = None if callee is None else self._callee(callee)
         span = self.span(node)
         kind = "opaque_expression"
@@ -1292,6 +1580,11 @@ class _RustBindings:
                         if record.binding.kind == "import"
                         else "opaque_generic"
                     )
+            elif inner is not None and inner.type == "field_expression":
+                receiver = inner.child_by_field_name("value")
+                if receiver is not None:
+                    self._expr(receiver)
+                kind = "opaque_method"
             else:
                 self.unresolved.append(
                     Unresolved(self.span(callee), self.text(callee), "qualified_path")
@@ -1311,7 +1604,7 @@ class _RustBindings:
                 elif binding_kind == "function":
                     if record.extern or record.body_node is None:
                         kind = "opaque_bodyless"
-                    elif record.generic or "::<" in self.text(node):
+                    elif record.generic:
                         kind = "opaque_generic"
                     elif record.is_async:
                         kind = "opaque_async"
@@ -1329,20 +1622,22 @@ class _RustBindings:
         elif callee is not None:
             self._expr(callee)
         if arguments_node is not None:
-            for argument in arguments_node.named_children:
+            for argument in arguments:
                 self._expr(argument)
         self.calls.append(Call(span, args, self.call_owner, target, kind))
 
     def _method_call(self, node: Any) -> None:
         receiver = node.child_by_field_name("receiver")
         if receiver is None:
-            receiver = node.named_children[0] if node.named_children else None
+            children = self._children(node)
+            receiver = children[0] if children else None
         if receiver is not None:
             self._expr(receiver)
         args_node = node.child_by_field_name("arguments")
-        args = () if args_node is None else tuple(self.span(arg) for arg in args_node.named_children)
+        arguments = () if args_node is None else self._children(args_node)
+        args = tuple(self.span(arg) for arg in arguments)
         if args_node is not None:
-            for arg in args_node.named_children:
+            for arg in arguments:
                 self._expr(arg)
         self.calls.append(Call(self.span(node), args, self.call_owner, "", "opaque_method"))
 
@@ -1366,7 +1661,12 @@ def build_rust_bindings(source: str, *, pointer_width: int) -> LexicalBindingRep
         raise LexicalReportError("Rust source could not be parsed") from exc
     if root.has_error or any(node.is_missing for node in _walk(root)):
         raise LexicalReportError("Rust source has parse errors or missing nodes")
-    return _RustBindings(source, raw, pointer_width, root).build()
+    try:
+        return _RustBindings(source, raw, pointer_width, root).build()
+    except RecursionError:
+        raise LexicalReportError(
+            "Rust source nesting exceeds the lexical report limit"
+        ) from None
 
 
 def _walk(root: Any):
@@ -1395,7 +1695,7 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
 
 def main(args: argparse.Namespace) -> int:
     try:
-        source = args.file.read_text(encoding="utf-8")
+        source = args.file.read_bytes().decode("utf-8", errors="strict")
         report = build_rust_bindings(source, pointer_width=args.pointer_width)
         sys.stdout.write(report.to_json())
         return 0

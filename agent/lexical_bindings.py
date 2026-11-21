@@ -67,6 +67,7 @@ BINDING_KINDS = frozenset(
         "local",
         "parameter",
         "self_parameter",
+        "generic_parameter",
         "associated_function",
         "associated_const",
         "contract",
@@ -134,6 +135,7 @@ NON_ASSIGNABLE_WRITE_KINDS = frozenset(
         "event",
         "error",
         "user_type",
+        "generic_parameter",
     }
 )
 UNRESOLVED_REASONS = frozenset(
@@ -650,8 +652,20 @@ def load_lexical_report(
             _fail(not target_id or target_id in ids)
             if kind == "direct_local":
                 target_function = functions_by_id.get(target_id)
-                _fail(target_function is not None and target_function.body is not None)
-            elif kind in CALL_KINDS_WITH_TARGET:
+                _fail(
+                    target_function is not None
+                    and target_function.body is not None
+                    and not target_function.is_async
+                    and not target_function.generic
+                )
+            elif kind in {
+                "opaque_generic",
+                "opaque_async",
+                "opaque_bodyless",
+                "opaque_import",
+                "opaque_value",
+                "constructor",
+            }:
                 _fail(bool(target_id))
             else:
                 _fail(not target_id)
