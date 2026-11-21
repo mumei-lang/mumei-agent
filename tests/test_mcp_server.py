@@ -82,6 +82,7 @@ class TestGetAgentStatus:
             "validate_spec_to_code",
             "validate_code_to_spec",
             "scan_and_fix",
+            "evidence_accept_list",
             "send_latent_message",
             "send_latent_message_batch",
             "async_send_latent_message",
@@ -161,6 +162,7 @@ class TestGetAgentStatus:
         assert "get_spec_guide_summary" in registered
         assert "get_spec_guidelines" in registered
         assert "evidence_check_schedule" in registered
+        assert "evidence_accept_list" in registered
         assert "native_observations_accept" in registered
         assert "native_observations_recheck" in registered
         assert "native_object_recheck" in registered

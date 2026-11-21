@@ -71,6 +71,7 @@ Exported tools:
 | `forge_task(task_json, mumei_repo, dry_run=true)` | Run a single forge spec (drop-in `MumeiForge.forge_one`) |
 | `evidence_check_accept(sequence_json, check_json)` | Restore a declared attempt-sequence snapshot and evidence-check record from inline JSON and emit the `mumei.evidence-check-acceptance/v1` descriptor — `accepted` only when the record binds the sequence's current candidate and is `"valid"`; no Core run, representation-level only |
 | `evidence_acceptance_eval(descriptor_path, expected_fingerprint=None)` | Fold a declared Core acceptance descriptor; representation-level evaluation only, no Core run, and `checks_not_performed` is returned unchanged |
+| `evidence_accept_list(core_path, list_path, requirement_path='', requirement_list_path='', attempt_timeout_ms=30000)` | Run Core's declared-requirement normalization over a saved Evidence list and exactly one single or conjunctive requirement; reports only the aggregate descriptor and selects only an accepted exit with unchanged inputs |
 | `evidence_compare(evidence_a_path, evidence_b_path)` | Compare two declared `mumei.verification-evidence/v1` records' claim surfaces and emit `mumei.evidence-comparison/v1` (`subject_match`/`specification_match`/`claims_match`); record-vs-record comparison only, no Core run |
 | `evidence_identity_check(evidence_path, source_path)` | Compare a declared `mumei.verification-evidence/v1` record's bound `subject.sha256` to the current source bytes and emit `mumei.evidence-file-identity/v1` (`match`/`mismatch`); byte-level file identity only, no Core run |
 | `evidence_producer_check(evidence_path, tool, adapter_id, tool_version='', adapter_version='')` | Compare a declared `mumei.verification-evidence/v1` record's `provenance` block to declared producer expectations and emit `mumei.evidence-producer-identity/v1` (`match`/`mismatch` + `mismatched` fields); representation-level producer pinning only, no Core run |
@@ -205,6 +206,7 @@ mumei `docs/MCP_TOOL_CONTRACT.md` table remains canonical.
 | `evidence_check_schedule` | `core_path: str, schedule_path: str, attempt_timeout_ms: int = 30000` | `report` |
 | `evidence_check_adapter` | `core_path: str, manifest_path: str, attempt_timeout_ms: int = 30000` | `report` |
 | `evidence_check_list` | `core_path: str, evidence_path: str, attempt_timeout_ms: int = 30000, expected_adapter: str \| None = None` | `report` |
+| `evidence_accept_list` | `core_path: str, list_path: str, requirement_path: str = '', requirement_list_path: str = '', attempt_timeout_ms: int = 30000` | `report` |
 | `evidence_check_consistency` | `core_path: str, evidence_path: str, attempt_timeout_ms: int = 30000, expected_adapter: str \| None = None` | `report` |
 | `evidence_check_accept` | `sequence_json: str, check_json: str` | `acceptance` |
 | `evidence_acceptance_eval` | `descriptor_path: str, expected_fingerprint: str \| None = None` | `evaluation` |
