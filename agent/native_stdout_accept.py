@@ -69,8 +69,9 @@ recorded toolchain, the deepest layer the pipeline covers — and
 within the declared profile — both at representation level. The
 stdout digest match itself is the named ``os_stdout_observation``
 check, bound by the record pin. The other runtime-observation checks
-stay in ``checks_not_performed``; the ``runtime_observation_semantics``
-conjunction awaits a Core descriptor. The remaining C02 checks
+stay in ``checks_not_performed``; ``runtime_observation_semantics`` is
+performed only by the one-invocation observations-accept route, never
+by composing channel reports. The remaining C02 checks
 (producer authenticity, freshness, file identity and semantic
 correspondence) remain outside the profile; the raw link
 argument-vector is recorded-but-not-reproduced inside Core and adds

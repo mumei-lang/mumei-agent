@@ -794,7 +794,8 @@ the current record. A `reproduced` run reports `discharged_checks` —
 observation bound by the record pin and discharges the named
 `os_exit_status_observation` check. The other runtime-observation checks
 remain in `checks_not_performed`, including
-`runtime_observation_semantics`, which awaits the Core descriptor. The
+`runtime_observation_semantics`, which is performed only by the
+one-invocation observations-accept route. The
 command's stdout is a fixed diagnostic line rather
 than an evidence record, so no `candidate` is emitted and a successful
 run selects only lineage. The route is also the
@@ -825,8 +826,8 @@ and `os_exit_status_observation` — with the remaining checks in
 the exit-status match itself is an OS-level observation bound by the
 record pin and discharges the named `os_exit_status_observation` check.
 The other runtime-observation checks remain in `checks_not_performed`,
-including `runtime_observation_semantics`, which awaits the Core
-descriptor. Only an `exited`
+including `runtime_observation_semantics`, which is performed only by
+the one-invocation observations-accept route. Only an `exited`
 run with `exit_code == 0` selects the produced
 `mumei.native-evidence-acceptance/v1` descriptor — it is anonymous by
 design, so no `candidate` is emitted. The route is also the
@@ -858,7 +859,8 @@ the remaining checks in
 observation bound by the record pin and discharges the named
 `os_stdout_observation` check. The other runtime-observation checks
 remain in `checks_not_performed`, including
-`runtime_observation_semantics`, which awaits the Core descriptor. The
+`runtime_observation_semantics`, which is performed only by the
+one-invocation observations-accept route. The
 command's stdout is a fixed diagnostic line rather
 than an evidence record, so no `candidate` is emitted and a successful
 run selects only lineage. The route is also the
@@ -889,8 +891,8 @@ and `os_stdout_observation` — with the remaining checks in
 the stdout digest match itself is an OS-level observation bound by the
 record pin and discharges the named `os_stdout_observation` check.
 The other runtime-observation checks remain in `checks_not_performed`,
-including `runtime_observation_semantics`, which awaits the Core
-descriptor. Only an `exited`
+including `runtime_observation_semantics`, which is performed only by
+the one-invocation observations-accept route. Only an `exited`
 run with `exit_code == 0` selects the produced
 `mumei.native-evidence-acceptance/v1` descriptor — it is anonymous by
 design, so no `candidate` is emitted. The route is also the
@@ -922,7 +924,8 @@ the remaining checks in
 observation bound by the record pin and discharges the named
 `os_stderr_observation` check. The other runtime-observation checks
 remain in `checks_not_performed`, including
-`runtime_observation_semantics`, which awaits the Core descriptor. The
+`runtime_observation_semantics`, which is performed only by the
+one-invocation observations-accept route. The
 command's stdout is a fixed diagnostic line rather
 than an evidence record, so no `candidate` is emitted and a successful
 run selects only lineage. The route is also the
@@ -953,8 +956,8 @@ and `os_stderr_observation` — with the remaining checks in
 the stderr digest match itself is an OS-level observation bound by the
 record pin and discharges the named `os_stderr_observation` check.
 The other runtime-observation checks remain in `checks_not_performed`,
-including `runtime_observation_semantics`, which awaits the Core
-descriptor. Only an `exited`
+including `runtime_observation_semantics`, which is performed only by
+the one-invocation observations-accept route. Only an `exited`
 run with `exit_code == 0` selects the produced
 `mumei.native-evidence-acceptance/v1` descriptor — it is anonymous by
 design, so no `candidate` is emitted. The route is also the
@@ -989,6 +992,30 @@ checks stay in `checks_not_performed`. The route is also the
 `native_observations_accept` MCP tool (same report production,
 declared-path validation and basename redaction as the other spawn
 tools). C02/C10 stay partial.
+
+### C02/C10 declared native-observations-recheck route (native-observations-recheck)
+
+`python -m agent native-observations-recheck --core <path> --bundle <dir>
+--source <path> --expected-build-id <sha256>` declares one invocation
+recheck: `<core> native-bundle recheck-observations
+--expected-build-id <id> --json <bundle> <source>` under a
+`mumei.native-observations-recheck-request/v1` fingerprint binding the
+Core executable, the bundle record and every declared member, the
+source and the trusted-channel build ID. `observations_recheck` is
+claimed only for uniquely-mapped exit codes (`0 → reproduced`,
+`3 → inconclusive`); other exits claim nothing, and mid-run drift
+reports `inputs_changed` without an outcome. The Core JSON descriptor
+is retained in normalized stdout; the route adds
+`runtime_observation_schema` only when that parsed descriptor names
+`mumei.runtime-observation/v1`. Every report outcome echoes the
+declared `expected_build_id`.
+
+A `reproduced` run reports `artifact_semantics`, `claim_truth` and all
+four runtime observation checks for that one bounded invocation. It
+does not claim ABI, general runtime or process semantics, or
+`historical_execution`. The descriptor and recheck report are not
+performers in `recovery-eval`; runtime semantics remains performed only
+by the one-invocation observations acceptance. C02/C10 stay partial.
 
 ### C02/C10 declared native-check route (native-check)
 
@@ -6199,10 +6226,14 @@ exit-status/stdout/stderr accept reports also perform their matching
 `shared:expected_build_id` binding: an accepted Core run has authenticated
 that declared ID against the bundle record, so accepted sibling reports
 can perform their channel checks when both reports name the same ID.
-The ID is echoed by all six accept/recheck reports, including outcomes
-without an acceptance or reproduced result. Rechecks remain
-non-performers as evidence because their stdout is a fixed diagnostic
-line with no bound carrier. The accepted
+The ID is echoed by all six per-channel accept/recheck reports,
+including outcomes without an acceptance or reproduced result.
+Single-channel rechecks remain non-performers because their stdout is
+a fixed diagnostic line with no bound carrier. The
+`native-observations-recheck-report/v1` is also deliberately
+non-performing: with `--json` it carries the raw
+`mumei.runtime-observation/v1` descriptor in stdout, but that recheck
+is not acceptance. The accepted
 `native-observations-accept-report/v1` performs all three channel checks
 and `runtime_observation_semantics` through its bound stdout digest or
 shared expected build ID: one Core invocation has observed every
@@ -6818,16 +6849,16 @@ assurance chain — has a design memo:
 [`docs/DESIGN_RUNTIME_ABI_ASSURANCE.md`](DESIGN_RUNTIME_ABI_ASSURANCE.md).
 Core stage 2 has landed in mumei as `native-bundle
 recheck-observations`, which emits `mumei.runtime-observation/v1`.
-Agent-side `native-observations-accept` now accepts all pins from one
-invocation and is the first performer of
-`runtime_observation_semantics`; single-channel accept reports still
-perform only their own observation, and the agent recheck-observations
-route remains. The check describes one bounded invocation, never ABI,
-general runtime or process semantics. The named channel checks remain
-composable through `recovery-eval` when their Core-authenticated
-`expected_build_id` values match.
-Object-code translation validation (Option B) stays the deep endpoint.
-No grade or audit surface changes.
+Both agent routes for Core observation commands have landed:
+`native-observations-accept` is the only performer of
+`runtime_observation_semantics`, while `native-observations-recheck`
+reports but does not perform the raw observation descriptor. These
+checks describe one bounded invocation, never ABI, general runtime or
+process semantics. The named channel checks remain composable through
+`recovery-eval` when their Core-authenticated `expected_build_id`
+values match. The remaining deep endpoint is object-code translation
+validation (Option B); no ABI claim is made. No grade or audit surface
+changes.
 
 ## Roadmap authority and vocabulary
 
