@@ -10520,6 +10520,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # `(*p)[i]` store does. Ref indices collect here
             # because the RHS values evaluate after the LHS pass.
             external_write_targets: set[int] = set()
+            # `GS[i] = c` — a store through an external chan-element
+            # container hands `c`'s queue to caller-visible state
+            # like `cc <- ch` does: the slot records here so the
+            # store loop promotes the RHS channel once the store
+            # lands (RHS evaluation order keeps a `GS[i], c =
+            # c, make(chan T)` pre-state honest).
+            external_chan_elem_targets: set[int] = set()
             # `p.C = ch` reseats which queue the field names: index →
             # the leaf `chan` member, so the store can union the RHS
             # queue's tokens into the member's may-set.
@@ -10737,6 +10744,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         and self._scalar_chan_fact(member.type)
                     ):
                         chan_write_targets.add(len(refs) - 1)
+                    if (
+                        not saw_deref
+                        and self._external_chan_elem_index(lhs, params)
+                        is not None
+                    ):
+                        external_chan_elem_targets.add(len(refs) - 1)
                     continue
                 # A package-level `var` — `G.V = v`, `G[i] = v`,
                 # `*GP = v` — mutates package state the same way: the
@@ -10759,6 +10772,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         and self._scalar_chan_binding(binding.id)
                     ):
                         chan_write_targets.add(len(refs) - 1)
+                    if (
+                        not saw_deref
+                        and self._external_chan_elem_index(lhs, params)
+                        is not None
+                    ):
+                        external_chan_elem_targets.add(len(refs) - 1)
                     continue
                 # `(*p)[i] = v` — a store through a bound pointer
                 # whose pointee is a container writes element memory
@@ -11477,6 +11496,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # emitted keeps `effects` honest about the
                         # untracked reseat itself.
                         self.indirect_writes |= value
+                    if i in external_chan_elem_targets:
+                        # `GS[i] = c` — the stored channel's queue
+                        # now lives in caller-visible state: any
+                        # element send (`GS[j] <- x`) may deposit
+                        # into it and a later `<-c` must observe
+                        # those, so `c` promotes to the external
+                        # channel set like `cc <- ch` does.
+                        rhs_node = (
+                            rights[i]
+                            if len(lefts) == len(rights)
+                            else rights[0]
+                        )
+                        sent = self._chan_alias_target(
+                            rhs_node, locals_, params
+                        )
+                        if sent is not None:
+                            self.external_chan_locals.add(sent.id)
                     continue
                 if ref is _ALIAS_FOLD:
                     # `*lib.PV = v` writes through a member that an
