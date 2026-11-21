@@ -4732,6 +4732,47 @@ member, or one explicit dereference of one (`(*t).F` — the same
             return None
         return identity.type.type_id or identity.id
 
+    def _struct_literal_initializer_fields_supported(
+        self, literal: Any
+    ) -> bool:
+        body = literal.child_by_field_name("body")
+        elements = (
+            tuple(
+                child
+                for child in _children(body)
+                if child.type in {"literal_element", "keyed_element"}
+            )
+            if body is not None
+            else ()
+        )
+        for element in elements:
+            if element.type != "keyed_element":
+                return False
+            key = element.child_by_field_name("key")
+            key_ref = (
+                self.references.get(self.node_key(key))
+                if key is not None
+                else None
+            )
+            member = (
+                self.members.get(key_ref.binding_id)
+                if key_ref is not None and key_ref.kind == "import"
+                else self._local_field(key_ref)
+            )
+            if (
+                member is None
+                or key is None
+                or member.name.encode("utf-8") != key.text
+                or member.kind not in {"var", "variable"}
+                or member.type is None
+                or member.type.kind
+                not in {"integer", "boolean", "pointer"}
+            ):
+                return False
+            self._pin_member_type(member)
+            self._pin_fact_identities(member.type)
+        return True
+
     def result(
         self,
         fn: Function,
@@ -21727,6 +21768,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     type_node = root.child_by_field_name("type")
                     pointee_id = self._struct_literal_type_id(type_node)
                     if pointee_id is None:
+                        raise _Unsupported(
+                            "unsupported_operator", _span(node)
+                        )
+                    if not self._struct_literal_initializer_fields_supported(
+                        root
+                    ):
                         raise _Unsupported(
                             "unsupported_operator", _span(node)
                         )

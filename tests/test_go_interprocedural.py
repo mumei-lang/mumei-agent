@@ -8052,6 +8052,60 @@ def test_address_of_struct_literal_subexpression_stays_closed(
     assert result.gaps[0].reason == "unsupported_operator"
 
 
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        "type S struct{ C chan int64 }\n"
+        "func F(x int64) int64 {\n"
+        "\tch := make(chan int64, 1)\n"
+        "\tp := &S{C: ch}\n"
+        "\tch <- x\n"
+        "\treturn <-p.C\n"
+        "}",
+        "type S struct{ C chan int64 }\n"
+        "func F(x int64) int64 {\n"
+        "\tch := make(chan int64, 1)\n"
+        "\tp := &S{C: ch}\n"
+        "\tp.C <- x\n"
+        "\treturn <-ch\n"
+        "}",
+        "type S struct{ F func() }\n"
+        "func F(x int64) int64 {\n"
+        "\ty := int64(0)\n"
+        "\tp := &S{F: func() { y = x }}\n"
+        "\tp.F()\n"
+        "\treturn y\n"
+        "}",
+        "type S struct{ A []int64 }\n"
+        "func F(x int64) int64 {\n"
+        "\ts := []int64{x}\n"
+        "\tp := &S{A: s}\n"
+        "\treturn p.A[0]\n"
+        "}",
+        "type S struct{ M map[int64]int64 }\n"
+        "func F(x int64) int64 {\n"
+        "\tm := map[int64]int64{0: x}\n"
+        "\tp := &S{M: m}\n"
+        "\treturn p.M[0]\n"
+        "}",
+        "func F(x int64) int64 {\n"
+        "\tch := make(chan int64, 1)\n"
+        "\tp := &struct{ C chan int64 }{C: ch}\n"
+        "\tch <- x\n"
+        "\treturn <-p.C\n"
+        "}",
+        "type S struct{ V int64 }\n"
+        "func F(x int64) int64 { p := &S{x}; return p.V }",
+    ],
+)
+def test_struct_literal_address_non_scalar_or_positional_initializers_stay_closed(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available
+    assert result.gaps[0].reason == "unsupported_operator"
+
+
 def test_struct_literal_address_pins_named_type_staleness(
     go_types_helper,
 ):
