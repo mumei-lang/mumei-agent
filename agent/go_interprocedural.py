@@ -19482,7 +19482,7 @@ class _Builder:
                                     else (
                                         opaque_range
                                         if opaque_range is not None
-                                        else opaque_range_field[0]
+                                        else opaque_range_field[1]
                                     )
                                 )
                             )

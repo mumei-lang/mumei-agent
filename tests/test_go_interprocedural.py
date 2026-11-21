@@ -30990,6 +30990,72 @@ def test_struct_field_range_rejoins_body_writes(
     assert direct_result.effects == extracted_result.effects
 
 
+def test_struct_field_range_summary_stays_fresh(go_types_helper):
+    direct_declarations = (
+        "type S struct { A []int64 }\n"
+        "func F(x int64) int64 {\n"
+        "\ts := S{A: make([]int64, 1)}\n"
+        "\tr := int64(0)\n"
+        "\tfor _, v := range s.A { r += v }\n"
+        "\treturn r + x\n}\n"
+    )
+    extracted_declarations = (
+        "type S struct { A []int64 }\n"
+        "func F(x int64) int64 {\n"
+        "\ts := S{A: make([]int64, 1)}\n"
+        "\ta := s.A\n"
+        "\tr := int64(0)\n"
+        "\tfor _, v := range a { r += v }\n"
+        "\treturn r + x\n}\n"
+    )
+    source = "package p;\n" + direct_declarations
+    report = compiler_report(go_types_helper, source)
+    snapshot = load_go_snapshot(report, source, target_arch="amd64")
+    summaries = ip.summarize_go(source, snapshot)
+    direct_result = named(source, snapshot, summaries)
+    extracted_result = named(
+        *unit(go_types_helper, extracted_declarations)
+    )
+    assert direct_result.available, direct_result.gaps
+    assert direct_result.return_dependencies == (
+        extracted_result.return_dependencies
+    ) == frozenset({0})
+    assert direct_result.effects == extracted_result.effects
+    assert len(direct_result.calls) == len(extracted_result.calls) == 1
+    assert [
+        (call.imported, call.arguments, call.result)
+        for call in direct_result.calls
+    ] == [
+        (call.imported, call.arguments, call.result)
+        for call in extracted_result.calls
+    ]
+    assert len(direct_result.pinned) == len(extracted_result.pinned) > 0
+
+    manifest = summaries.to_dict()
+
+    def strings(value):
+        if isinstance(value, str):
+            yield value
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                yield from strings(key)
+                yield from strings(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                yield from strings(item)
+
+    assert all("\x00" not in value for value in strings(manifest))
+    from agent import go_summaries
+
+    restored = ip.GoSummarySet.from_dict(manifest)
+    reusable, stale, missing = go_summaries._reuse_partition(
+        restored, summaries, report
+    )
+    assert direct_result.binding_id in reusable
+    assert direct_result.binding_id not in stale
+    assert direct_result.binding_id not in missing
+
+
 @pytest.mark.parametrize(
     "declarations",
     [
