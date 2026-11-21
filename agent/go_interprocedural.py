@@ -484,6 +484,9 @@ class FunctionSummary:
             for call in self.calls
             for target in (call.target, *call.folded_targets)
             if not target.endswith(("/pointee", "/caller-backing"))
+            # `<binding>/chan_queue/N` surrogates name a parked queue
+            # no declaration can redeclare either — same exclusion.
+            and "/chan_queue/" not in target
         )
 
     def to_dict(self) -> dict:
