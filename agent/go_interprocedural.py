@@ -3760,6 +3760,8 @@ class _Builder:
                 direct_fields = self._fields_declared_after(span)
             if ident.id in {field.id for field in direct_fields}:
                 continue
+            if self._has_anonymous_struct_member(direct_fields):
+                return None
             promotion = self._promotion_path(
                 direct_fields,
                 ident,
@@ -3773,7 +3775,7 @@ class _Builder:
             ):
                 return None
             found_promotion = True
-            for embedded in promotion[2]:
+            for embedded_index, embedded in enumerate(promotion[2]):
                 embedded_type = embedded.type
                 if (
                     embedded.id not in self.bindings
@@ -3792,8 +3794,36 @@ class _Builder:
                     or self._type_fact_has_type_args(embedded_binding.type)
                 ):
                     return None
+                if (
+                    embedded_index < len(promotion[2]) - 1
+                    and self._has_anonymous_struct_member(
+                        self._struct_fields(embedded_binding)
+                    )
+                ):
+                    return None
                 embedded_members.append(embedded)
         return tuple(embedded_members) if found_promotion else None
+
+    def _has_anonymous_struct_member(self, fields: tuple[Any, ...]) -> bool:
+        pending = [getattr(field, "type", None) for field in fields]
+        seen: set[int] = set()
+        while pending:
+            fact = pending.pop()
+            if fact is None or id(fact) in seen:
+                continue
+            seen.add(id(fact))
+            if (
+                getattr(fact, "kind", None) == "struct"
+                and not getattr(fact, "type_id", "")
+            ):
+                return True
+            pending.extend(
+                (
+                    getattr(fact, "elem", None),
+                    getattr(fact, "key", None),
+                )
+            )
+        return False
 
     def _pin_value_promotion_chain(
         self, ref: Any, embedded_members: tuple[Any, ...]

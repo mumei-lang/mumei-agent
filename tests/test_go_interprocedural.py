@@ -13909,6 +13909,77 @@ def test_anonymous_local_value_embed_promoted_field_is_admitted(
     assert result.return_dependencies == frozenset({0})
 
 
+def test_local_value_promotion_rejects_anonymous_member_field_leaks(
+    go_types_helper,
+):
+    declarations = (
+        "type R struct{ V int64 }\n"
+        "type Q struct{ *R }\n"
+        "type S struct{ Q; A struct{ R } }\n"
+    )
+    store_then_external_read, _ = _local_value_embed_result(
+        go_types_helper,
+        declarations,
+        "func F(p *R, x int64) int64 { "
+        "st := S{Q: Q{R: p}}; st.V = x; return p.V }\n",
+    )
+    assert (
+        not store_then_external_read.available
+        or 1 in store_then_external_read.return_dependencies
+    )
+    pure_store, _ = _local_value_embed_result(
+        go_types_helper,
+        declarations,
+        "func F(p *R, x int64) int64 { "
+        "st := S{Q: Q{R: p}}; st.V = x; return 0 }\n",
+    )
+    assert (
+        not pure_store.available
+        or pure_store.effects != "none_in_supported_fragment"
+    )
+
+
+def test_anonymous_root_value_promotion_rejects_leaked_fields(
+    go_types_helper,
+):
+    result, _ = _local_value_embed_result(
+        go_types_helper,
+        "type R struct{ V int64 }\ntype Q struct{ *R }\n",
+        "func F(p *R, x int64) int64 { "
+        "st := struct{ Q; A struct{ R } }{Q: Q{R: p}}; "
+        "st.V = x; return 0 }\n",
+    )
+    assert not result.available
+
+
+def test_nested_anonymous_member_leak_closes_value_promotion(
+    go_types_helper,
+):
+    result, _ = _local_value_embed_result(
+        go_types_helper,
+        "type R struct{ V int64 }\n"
+        "type Q2 struct{ *R; B struct{ R } }\n"
+        "type S struct{ Q2 }\n",
+        "func F(x int64) int64 { st := S{}; st.V = x; return 0 }\n",
+    )
+    assert not result.available
+
+
+def test_last_embedded_type_may_have_anonymous_struct_fields(
+    go_types_helper,
+):
+    result, _ = _local_value_embed_result(
+        go_types_helper,
+        "type Q0 struct{ V int64; A struct{ W int64 } }\n"
+        "type S struct{ Q0 }\n",
+        "func F(x int64) int64 { "
+        "st := S{}; st.V = x; return st.V }\n",
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "none_in_supported_fragment"
+
+
 @pytest.mark.parametrize(
     ("declarations", "function"),
     [
