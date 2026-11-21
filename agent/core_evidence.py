@@ -1536,11 +1536,36 @@ def evaluate_evidence_binding(record: bytes, document: dict) -> dict:
 # ``checks_not_performed`` a set of supporting documents covers.
 UNPERFORMED_CHECK_RECOVERY_SCHEMA = "mumei.unperformed-check-recovery/v1"
 
+# Reserved for the later Core slice; it is not registered as a performer yet.
+RUNTIME_OBSERVATION_SCHEMA = "mumei.runtime-observation/v1"
+RUNTIME_CHECK_VOCABULARY = frozenset(
+    {
+        "os_exit_status_observation",
+        "os_stdout_observation",
+        "os_stderr_observation",
+        "runtime_observation_semantics",
+    }
+)
+
 # Which emitted schema performs each check name, the outcome field and
 # the value it must hold for the check to count as recovered. A document
 # never gets to declare its own coverage — attribution is pinned to the
 # emitted schema, so a foreign document claiming a check cannot count.
 _CHECK_PERFORMERS: dict = {
+    "os_exit_status_observation": [
+        ("mumei.native-exit-status-accept-report/v1", "acceptance",
+         "accepted", "normalized.stdout.sha256"),
+    ],
+    "os_stdout_observation": [
+        ("mumei.native-stdout-accept-report/v1", "acceptance",
+         "accepted", "normalized.stdout.sha256"),
+    ],
+    "os_stderr_observation": [
+        ("mumei.native-stderr-accept-report/v1", "acceptance",
+         "accepted", "normalized.stdout.sha256"),
+    ],
+    # runtime_observation_semantics has no performer until the Core slice
+    # emits the runtime-observation descriptor.
     "attempt_binding": [
         ("mumei.core-acceptance-evaluation/v1", "attempt_bound", True, None),
     ],

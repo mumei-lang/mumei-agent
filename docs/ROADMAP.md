@@ -788,11 +788,14 @@ exit 1 conflates a mismatched exit status with every static failure
 and claims nothing, mid-run drift reports `inputs_changed` with no
 claimed outcome, and the drift check re-enumerates the member set from
 the current record. A `reproduced` run reports `discharged_checks` —
-`artifact_semantics` and `claim_truth` — with the remaining checks in
+`artifact_semantics`, `claim_truth` and
+`os_exit_status_observation` — with the remaining checks in
 `checks_not_performed`; the exit-status match itself is an OS-level
-observation bound by the record pin, discharging no additional
-category since the vocabulary has no runtime/ABI/process-semantics
-claim for it. The command's stdout is a fixed diagnostic line rather
+observation bound by the record pin and discharges the named
+`os_exit_status_observation` check. The other runtime-observation checks
+remain in `checks_not_performed`, including
+`runtime_observation_semantics`, which awaits the Core descriptor. The
+command's stdout is a fixed diagnostic line rather
 than an evidence record, so no `candidate` is emitted and a successful
 run selects only lineage. The route is also the
 `native_exit_status_recheck` MCP tool (same `run_exit_status_recheck`
@@ -814,11 +817,14 @@ is claimed only for uniquely-mapped exit codes (`0 → accepted`,
 every static failure and claims nothing, mid-run drift reports
 `inputs_changed` with no claimed outcome, and the drift check
 re-enumerates the member set from the current record. An `accepted`
-run reports `discharged_checks` — `artifact_semantics` and
-`claim_truth` — with the remaining checks in `checks_not_performed`;
+run reports `discharged_checks` — `artifact_semantics`, `claim_truth`
+and `os_exit_status_observation` — with the remaining checks in
+`checks_not_performed`;
 the exit-status match itself is an OS-level observation bound by the
-record pin, discharging no additional category since the vocabulary
-has no runtime/ABI/process-semantics claim for it. Only an `exited`
+record pin and discharges the named `os_exit_status_observation` check.
+The other runtime-observation checks remain in `checks_not_performed`,
+including `runtime_observation_semantics`, which awaits the Core
+descriptor. Only an `exited`
 run with `exit_code == 0` selects the produced
 `mumei.native-evidence-acceptance/v1` descriptor — it is anonymous by
 design, so no `candidate` is emitted. The route is also the
@@ -841,11 +847,14 @@ exit 1 conflates a mismatched stdout digest with every static failure
 and claims nothing, mid-run drift reports `inputs_changed` with no
 claimed outcome, and the drift check re-enumerates the member set from
 the current record. A `reproduced` run reports `discharged_checks` —
-`artifact_semantics` and `claim_truth` — with the remaining checks in
+`artifact_semantics`, `claim_truth` and `os_stdout_observation` — with
+the remaining checks in
 `checks_not_performed`; the stdout digest match itself is an OS-level
-observation bound by the record pin, discharging no additional
-category since the vocabulary has no runtime/ABI/process-semantics
-claim for it. The command's stdout is a fixed diagnostic line rather
+observation bound by the record pin and discharges the named
+`os_stdout_observation` check. The other runtime-observation checks
+remain in `checks_not_performed`, including
+`runtime_observation_semantics`, which awaits the Core descriptor. The
+command's stdout is a fixed diagnostic line rather
 than an evidence record, so no `candidate` is emitted and a successful
 run selects only lineage. The route is also the
 `native_stdout_recheck` MCP tool (same `run_stdout_recheck`
@@ -867,11 +876,14 @@ is claimed only for uniquely-mapped exit codes (`0 → accepted`,
 every static failure and claims nothing, mid-run drift reports
 `inputs_changed` with no claimed outcome, and the drift check
 re-enumerates the member set from the current record. An `accepted`
-run reports `discharged_checks` — `artifact_semantics` and
-`claim_truth` — with the remaining checks in `checks_not_performed`;
+run reports `discharged_checks` — `artifact_semantics`, `claim_truth`
+and `os_stdout_observation` — with the remaining checks in
+`checks_not_performed`;
 the stdout digest match itself is an OS-level observation bound by the
-record pin, discharging no additional category since the vocabulary
-has no runtime/ABI/process-semantics claim for it. Only an `exited`
+record pin and discharges the named `os_stdout_observation` check.
+The other runtime-observation checks remain in `checks_not_performed`,
+including `runtime_observation_semantics`, which awaits the Core
+descriptor. Only an `exited`
 run with `exit_code == 0` selects the produced
 `mumei.native-evidence-acceptance/v1` descriptor — it is anonymous by
 design, so no `candidate` is emitted. The route is also the
@@ -894,11 +906,14 @@ exit 1 conflates a mismatched stderr digest with every static failure
 and claims nothing, mid-run drift reports `inputs_changed` with no
 claimed outcome, and the drift check re-enumerates the member set from
 the current record. A `reproduced` run reports `discharged_checks` —
-`artifact_semantics` and `claim_truth` — with the remaining checks in
+`artifact_semantics`, `claim_truth` and `os_stderr_observation` — with
+the remaining checks in
 `checks_not_performed`; the stderr digest match itself is an OS-level
-observation bound by the record pin, discharging no additional
-category since the vocabulary has no runtime/ABI/process-semantics
-claim for it. The command's stdout is a fixed diagnostic line rather
+observation bound by the record pin and discharges the named
+`os_stderr_observation` check. The other runtime-observation checks
+remain in `checks_not_performed`, including
+`runtime_observation_semantics`, which awaits the Core descriptor. The
+command's stdout is a fixed diagnostic line rather
 than an evidence record, so no `candidate` is emitted and a successful
 run selects only lineage. The route is also the
 `native_stderr_recheck` MCP tool (same `run_stderr_recheck`
@@ -920,11 +935,14 @@ is claimed only for uniquely-mapped exit codes (`0 → accepted`,
 every static failure and claims nothing, mid-run drift reports
 `inputs_changed` with no claimed outcome, and the drift check
 re-enumerates the member set from the current record. An `accepted`
-run reports `discharged_checks` — `artifact_semantics` and
-`claim_truth` — with the remaining checks in `checks_not_performed`;
+run reports `discharged_checks` — `artifact_semantics`, `claim_truth`
+and `os_stderr_observation` — with the remaining checks in
+`checks_not_performed`;
 the stderr digest match itself is an OS-level observation bound by the
-record pin, discharging no additional category since the vocabulary
-has no runtime/ABI/process-semantics claim for it. Only an `exited`
+record pin and discharges the named `os_stderr_observation` check.
+The other runtime-observation checks remain in `checks_not_performed`,
+including `runtime_observation_semantics`, which awaits the Core
+descriptor. Only an `exited`
 run with `exit_code == 0` selects the produced
 `mumei.native-evidence-acceptance/v1` descriptor — it is anonymous by
 design, so no `candidate` is emitted. The route is also the
@@ -6076,7 +6094,14 @@ string `acceptance: "accepted"` — since an accepted run's stdout is
 the acceptance descriptor itself and `normalized.stdout.sha256`
 binds the report's lineage to those bytes; a descriptor that kept
 `historical_execution` unperformed ("one run is an observation, not
-a history") recovers it through the route's published sequence. `producer_authenticity` also recovers through a
+a history") recovers it through the route's published sequence. The
+exit-status/stdout/stderr accept reports also perform their matching
+`os_*_observation` check, bound by `normalized.stdout.sha256`.
+Recheck reports are not performers: their stdout is a fixed diagnostic
+line with no bound carrier. `runtime_observation_semantics` remains
+`no_evidence` until the Core slice emits the reserved
+`mumei.runtime-observation/v1` descriptor. `producer_authenticity` also
+recovers through a
 `mumei.signature-verification/v1` doc — the only multi-outcome
 performer: a verifying signature alone binds SOME key to the digest,
 so the doc must hold `signature_valid` AND `key_pinned` (the
@@ -6681,18 +6706,18 @@ other declared-path tools.
 ### C10 runtime/ABI assurance — design memo
 
 The remaining research-level C10 item — the object/ABI/runtime/final-binary
-assurance chain — now has a design memo:
+assurance chain — has a design memo:
 [`docs/DESIGN_RUNTIME_ABI_ASSURANCE.md`](DESIGN_RUNTIME_ABI_ASSURANCE.md).
-The exit-status/stdout/stderr recheck and accept routes currently discharge
-no check category for their OS-level observations because the vocabulary has
-no runtime/ABI/process-semantics claim; the memo evaluates four options and
-recommends an observation-vocabulary extension (Option A): a
-`mumei.runtime-observation/v1` descriptor family plus a dedicated
-`RUNTIME_CHECK_VOCABULARY` whose `runtime_observation_semantics` names
-exactly what the pinned invocation verifies — bounded observed behavior,
-never ABI semantics of the program. Object-code translation validation
-(Option B) stays the named deep endpoint. No route, grade or audit surface
-changes.
+Option A slice 1 has landed agent-side: the exit-status/stdout/stderr
+recheck and accept routes name their OS observations with dedicated
+`RUNTIME_CHECK_VOCABULARY` checks, and accepted reports compose those
+checks through `recovery-eval`. The reserved
+`mumei.runtime-observation/v1` schema and
+`runtime_observation_semantics` await the Core recheck-runtime slice;
+acceptance composition in slices 2–3 remains. The named check describes
+bounded observed behavior, never ABI semantics of the program.
+Object-code translation validation (Option B) stays the deep endpoint.
+No grade or audit surface changes.
 
 ## Roadmap authority and vocabulary
 

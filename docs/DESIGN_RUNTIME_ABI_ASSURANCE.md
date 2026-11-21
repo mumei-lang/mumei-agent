@@ -20,9 +20,8 @@ final executable, but each stage claims a different, strictly weaker thing:
   a semantic claim about what it does.
 - `recheck-exit-status` / `recheck-stdout` / `recheck-stderr` execute the
   reproduced binary and compare pinned OS-level observations (exit status,
-  bounded channel digests). ROADMAP notes on every one of these routes that
-  the observation "discharg[es] no additional category since the vocabulary
-  has no runtime/ABI/process-semantics claim for it."
+  bounded channel digests). Before Option A slice 1, these observations
+  discharged no named runtime check.
 
 The remaining research-level item in the C-roadmap is exactly that gap: the
 **object/ABI/runtime/final-binary assurance chain**. The question this memo
@@ -58,20 +57,21 @@ give the existing pinned observations something honest to discharge:
     channel observations of a reproduced binary hold on one fresh,
     resource-bounded invocation. The name says what it is: semantics of
     the recorded observations, not of the program.
-- A sibling `mumei.runtime-observation/v1` record family that folds the
+- A sibling `mumei.runtime-observation/v1` record family, reserved for the
+  Core slice, that folds the
   three existing `link_build` pins plus a declared invocation envelope
   (argument vector, empty/stdin bytes, `resource_limit`, `timeout_ms`)
-  into one descriptor a consumer can recheck as a unit. `recheck-*` and
-  `accept-*` routes gain the new check names in `checks_not_performed`
-  until a runtime-observation run discharges them; `_CHECK_PERFORMERS`
-  binds `runtime_observation_semantics` to the emitted
-  runtime-observation descriptor so `recovery-eval` can compose it.
+  into one descriptor a consumer can recheck as a unit.
+  `runtime_observation_semantics` remains unperformed until this descriptor
+  exists. Slice 1 names each per-channel OS observation; accepted channel
+  reports recover only their matching check when their bound carrier agrees,
+  while fixed-diagnostic recheck reports are not performers.
 
 Why this is honest: it claims *bounded observed behavior on one declared
 invocation*, which is exactly what the pins already verify. It upgrades
-"an observation we refuse to name" to "a named, bounded, composable claim"
-without asserting anything about unseen inputs, other process states, or
-the ABI itself.
+an unnamed observation to a named, bounded, composable claim without
+asserting anything about unseen inputs, other process states, or the ABI
+itself.
 
 ### Option B — object-code translation validation
 
@@ -118,12 +118,13 @@ rejected as a separate track.
 
 Option A, staged:
 
-1. **Slice 1 (agent-side, docs + vocabulary + fold):** define
-   `mumei.runtime-observation/v1`, the `RUNTIME_CHECK_VOCABULARY`, and
-   `_CHECK_PERFORMERS` bindings. Extend the exit-status/stdout/stderr
-   `recheck`/`accept` routes to name their observation check in
-   `discharged_checks`/`checks_not_performed` instead of discharging
-   nothing. No Core change: the descriptor folds pins that already exist.
+1. **Slice 1 (agent-side, docs + vocabulary + fold):** reserve
+   `mumei.runtime-observation/v1`, define `RUNTIME_CHECK_VOCABULARY`, and
+   register the three native accept reports as performers of their
+   respective channel observations. Extend all six routes to name only
+   their observed channel check on success, keeping the other runtime
+   checks unperformed. Do not register `runtime_observation_semantics`
+   until Core emits its descriptor.
 2. **Slice 2 (Core-side):** a `recheck-runtime` (or folded
    `recheck-observations`) subcommand that runs the reproduced binary once
    under the declared invocation envelope and emits the
@@ -159,23 +160,27 @@ attestation) is absorbed into Option A's invocation envelope.
 
 ## Minimal first implementation slice
 
+Status: Slice 1 has landed agent-side; Core recheck-runtime and acceptance composition remain.
+
 Slice 1 alone is self-contained and agent-side:
 
-- `agent/core_evidence.py`: add `RUNTIME_CHECK_VOCABULARY`
-  (`os_exit_status_observation`, `os_stdout_observation`,
-  `os_stderr_observation`, `runtime_observation_semantics`) and
-  `_CHECK_PERFORMERS` entries binding them to a new
-  `mumei.runtime-observation/v1` descriptor schema.
+- `agent/core_evidence.py`: reserve the
+  `mumei.runtime-observation/v1` schema name for the later Core slice and
+  add `RUNTIME_CHECK_VOCABULARY` (`os_exit_status_observation`,
+  `os_stdout_observation`, `os_stderr_observation`,
+  `runtime_observation_semantics`). The three OS-observation checks are
+  bound to their native accept reports; `runtime_observation_semantics`
+  has no performer until Core emits its descriptor.
 - `agent/native_exit_status_recheck.py` and the five sibling
   observation routes: emit the observation check name in
   `discharged_checks` on `reproduced`/`accepted`, and list the rest of
   the runtime family in `checks_not_performed` — replacing today's
-  "discharges nothing" posture with the honest named claim.
+  previously unnamed posture with the honest named claim.
 - Regression tests: a reproduced run discharges exactly its channel's
-  observation check and no sibling's; a pinless record keeps the whole
-  family not-performed; `recovery-eval` composes a bound
-  runtime-observation descriptor into `runtime_observation_semantics`
-  only when the declared carrier matches.
+  observation check and no sibling's; inconclusive and drifted runs keep
+  the whole runtime family not-performed; `recovery-eval` composes each
+  bound native accept report into only its channel check, while
+  `runtime_observation_semantics` stays unperformed until the Core slice.
 
 Nothing here changes a grade, a Lean gate, an audit verdict or a default
 route — it gives the pipeline's existing, already-verified OS

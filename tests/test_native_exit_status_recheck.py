@@ -9,7 +9,9 @@ from pathlib import Path
 
 import pytest
 
+from agent.core_evidence import RUNTIME_CHECK_VOCABULARY
 from agent.native_exit_status_recheck import (
+    CHECK_VOCABULARY,
     FILE_MEMBERS,
     RECORD_FILE,
     build_exit_status_recheck_parser,
@@ -96,6 +98,13 @@ def _args(core: Path, bundle: Path, source: Path, extra=()):
     ]
 
 
+def _assert_check_partition(report):
+    discharged = set(report.get("discharged_checks", []))
+    assert report["checks_not_performed"] == sorted(
+        (CHECK_VOCABULARY | RUNTIME_CHECK_VOCABULARY) - discharged
+    )
+
+
 def test_reproduced_run_selects_output(tmp_path, capsys):
     core = _write_core(tmp_path)
     bundle = _write_bundle(tmp_path)
@@ -112,11 +121,16 @@ def test_reproduced_run_selects_output(tmp_path, capsys):
     assert report["discharged_checks"] == [
         "artifact_semantics",
         "claim_truth",
+        "os_exit_status_observation",
     ]
+    _assert_check_partition(report)
     assert report["checks_not_performed"] == [
         "file_identity",
         "freshness",
+        "os_stderr_observation",
+        "os_stdout_observation",
         "producer_authenticity",
+        "runtime_observation_semantics",
         "semantic_correspondence",
     ]
     # The stdout line is not an evidence record — no handoff.
@@ -136,6 +150,7 @@ def test_exit_one_publishes_lineage_without_claimed_outcome(
     assert code == 0
     report = json.loads(out)
     assert "exit_status_recheck" not in report
+    _assert_check_partition(report)
     assert report["sequence"].get("selected_result") is None
     assert "candidate" not in report
     assert report["normalized"]["exit_code"] == 1
@@ -150,6 +165,7 @@ def test_inconclusive_recheck_records_outcome(tmp_path, capsys):
     report = json.loads(out)
     assert report["exit_status_recheck"] == "inconclusive"
     assert "discharged_checks" not in report
+    _assert_check_partition(report)
     assert report["sequence"].get("selected_result") is None
     assert report["normalized"]["exit_code"] == 3
 
@@ -185,6 +201,7 @@ def test_mid_run_input_drift_claims_no_outcome(tmp_path, capsys):
     report = json.loads(out)
     assert report["inputs_changed"] is True
     assert "discharged_checks" not in report
+    _assert_check_partition(report)
     assert "exit_status_recheck" not in report
     assert report["sequence"].get("selected_result") is None
 
@@ -208,6 +225,7 @@ def test_multifile_members_enumerated_and_fingerprinted(tmp_path, capsys):
     assert code == 0
     report = json.loads(out)
     assert report["inputs_changed"] is True
+    _assert_check_partition(report)
     assert "exit_status_recheck" not in report
 
 
@@ -237,6 +255,7 @@ def test_mid_run_record_swap_declaring_new_member_is_drift(
     assert code == 0
     report = json.loads(out)
     assert report["inputs_changed"] is True
+    _assert_check_partition(report)
     assert "exit_status_recheck" not in report
 
 
@@ -401,5 +420,6 @@ def test_real_core_end_to_end(tmp_path, capsys):
     assert report["discharged_checks"] == [
         "artifact_semantics",
         "claim_truth",
+        "os_exit_status_observation",
     ]
-
+    _assert_check_partition(report)
