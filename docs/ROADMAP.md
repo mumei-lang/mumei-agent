@@ -6851,6 +6851,21 @@ descriptor larger than the 64 KiB attempt capture bound is reported as
 `descriptor_truncated` with no verdict and no selection. C11 stays
 partial.
 
+### C11 Core adapter-manifest representation check
+
+The `evidence-check-adapter` CLI route and `evidence_check_adapter` MCP
+tool send a declared `mumei.verifier-adapter/v1` manifest to Core's
+`evidence check-adapter --stdin --json`. Selection requires Core's exact
+closed diagnostic and local `AdapterDescriptor.from_manifest` agreement
+on attempt argv, stdin and verdict-marker count. These fields remain
+declarations only: argv/stdin need host opt-in, markers are self-report
+vocabulary, and `max_memory_mb` is a declared ceiling. This route does
+not execute adapters, assess command safety, accept Evidence or promote
+grades.
+
+C11 stays partial; this route adds no Evidence acceptance or grade
+promotion.
+
 ### C11 audit scheduled-attempt evidence check
 
 `audit --schedule-core PATH` (with `--enable-scheduled-verification`)
