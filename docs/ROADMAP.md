@@ -8677,8 +8677,18 @@ canonical 上位ロードマップは mumei `docs/CROSS_PROJECT_ROADMAP.md` の
    canonical な `artifact_paths` で参照し、`MUMEI_PROOF_CERTS` /
    `MUMEI_PROOF_BUNDLE` と `mumei verify-cert --strict` による distribution-only
    再検証手順を [`docs/VERIFICATION_WORKFLOW_GUIDE.md`](VERIFICATION_WORKFLOW_GUIDE.md)
-   に同期した。agent 側に独立した bundle intake / `artifact_paths` 検査を追加した
-   ものではなく、consumer wiring の追加は未実装として残る。
+   に同期した。consumer wiring は `agent/proofcert.py` の
+   `artifact_paths_of` / `validate_artifact_paths` と
+   `ProofCertificate` の P5-A metadata accessors（`harness_contract` /
+   `intent_fidelity` / `artifact_paths` / `budget_policy_fingerprint` /
+   `lean_provenance`）で実装し、`agent/publish.py` が `--proof-cert` で
+   生成した証明書ファイルから宣言された `artifact_paths` を収集し
+   `artifact_paths_status` として検証（verify --json レポートは
+   これらを持たないため証明書ファイルが正典ソース）、
+   `proliferate --output-json` の `proof_certificate_summary` /
+   `upgraded_cert_summary` が certificate の canonical keys をそのまま
+   参照する。独立した bundle intake や新しい artifact key / alias は
+   追加しない。
 4. **CI 常時化** — mumei の `.github/workflows/stdlib-proof-gate.yml` が
    certificate-derived baseline `scripts/std_proof_baseline.json` と shared
    `scripts/verify_packaged_certs.py` を使って証明書・bundle・metrics の gate を

@@ -192,6 +192,34 @@ class ProofCertificate:
     def modules(self) -> dict[str, Any] | None:
         return _mapping(self.raw.get("modules"))
 
+    @property
+    def harness_contract(self) -> str | None:
+        """Harness contract path/identifier recorded by mumei (P5-A metadata)."""
+        return _string(self.raw.get("harness_contract"))
+
+    @property
+    def intent_fidelity(self) -> dict[str, Any] | None:
+        """Natural-language intent-fidelity metadata (P5-A metadata)."""
+        return _mapping(self.raw.get("intent_fidelity"))
+
+    @property
+    def artifact_paths(self) -> list[str]:
+        """Canonical ``artifact_paths`` the harness should collect or validate."""
+        paths = self.raw.get("artifact_paths")
+        if not isinstance(paths, list):
+            return []
+        return [str(path) for path in paths if isinstance(path, str)]
+
+    @property
+    def budget_policy_fingerprint(self) -> str | None:
+        """Fingerprint of the retry/budget policy used by the harness."""
+        return _string(self.raw.get("budget_policy_fingerprint"))
+
+    @property
+    def lean_provenance(self) -> dict[str, Any] | None:
+        """``lean_provenance`` recorded on bundles produced by mumei."""
+        return _mapping(self.raw.get("lean_provenance"))
+
     def iter_atoms(
         self,
         include_candidates: bool = True,
@@ -242,10 +270,85 @@ def iter_atoms(
     yield from _consume(cert_or_payload)
 
 
+def artifact_paths_of(payload: object) -> list[str]:
+    """Collect declared ``artifact_paths`` from a certificate or bundle payload.
+
+    Walks the same nesting as :func:`iter_atoms` — the top-level certificate
+    plus ``modules`` entries and ``certificate`` / ``report`` /
+    ``proof_certificate`` wrappers — and returns each declared
+    ``artifact_paths`` entry exactly once, in declaration order.
+    """
+
+    visited: set[int] = set()
+    seen: set[str] = set()
+    collected: list[str] = []
+
+    def _consume(value: object) -> None:
+        if isinstance(value, ProofCertificate):
+            value = value.raw
+        if not isinstance(value, Mapping):
+            return
+        value_id = id(value)
+        if value_id in visited:
+            return
+        visited.add(value_id)
+
+        paths = value.get("artifact_paths")
+        if isinstance(paths, list):
+            for path in paths:
+                if isinstance(path, str) and path not in seen:
+                    seen.add(path)
+                    collected.append(path)
+
+        modules = value.get("modules")
+        if isinstance(modules, Mapping):
+            for module_cert in modules.values():
+                _consume(module_cert)
+        for key in ("certificate", "report", "proof_certificate"):
+            _consume(value.get(key))
+
+    _consume(payload)
+    return collected
+
+
+def validate_artifact_paths(
+    paths: object,
+    base_dir: str | Path | None = None,
+) -> list[dict[str, Any]]:
+    """Check each declared artifact path exists, per the harness contract.
+
+    ``paths`` is the canonical ``artifact_paths`` list. Relative entries are
+    resolved against ``base_dir`` (default: the current directory). The
+    result preserves declaration order; each row is ``{"path": p, "exists":
+    bool, "resolved": str}`` so consumers can collect or compare per-module
+    certificates and bundles without new artifact keys.
+    """
+
+    root = Path(base_dir) if base_dir is not None else Path.cwd()
+    rows: list[dict[str, Any]] = []
+    if not isinstance(paths, list):
+        return rows
+    for entry in paths:
+        if not isinstance(entry, str):
+            continue
+        candidate = Path(entry)
+        resolved = candidate if candidate.is_absolute() else root / candidate
+        rows.append(
+            {
+                "path": entry,
+                "exists": resolved.exists(),
+                "resolved": str(resolved),
+            }
+        )
+    return rows
+
+
 __all__ = [
     "AtomCertificate",
     "ProofCertificate",
     "VerificationStatus",
     "Z3CheckResult",
+    "artifact_paths_of",
     "iter_atoms",
+    "validate_artifact_paths",
 ]
