@@ -15392,6 +15392,30 @@ def test_bound_closure_local_channel_send_async_call_stays_closed(
     assert not result.available
 
 
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        pytest.param(
+            "func F(x int64) int64 { c := make(chan int64, 1); "
+            "g := func() { h := func(d chan int64) { d <- x }; h(c) }; "
+            "g(); return <-c }",
+            id="nested-literal-parameter",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { c := make(chan int64, 1); "
+            "func() { func(d chan int64) { d <- x }(c) }(); return <-c }",
+            id="immediate-nested-literal-parameter",
+        ),
+    ],
+)
+def test_bound_closure_nested_literal_parameter_channel_send_stays_closed(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available
+    assert any(gap.reason == "unsupported_expression" for gap in result.gaps)
+
+
 def test_bound_closure_local_channel_send_iife_folds_dependencies(
     go_types_helper,
 ):

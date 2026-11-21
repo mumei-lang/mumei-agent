@@ -24928,23 +24928,30 @@ class _Builder:
                                     # or `*p` write can reach it.
                                     self.escaped.add(rref.binding_id)
 
-        literal_parameter_ids: set[str] = set()
-        literal_params = node.child_by_field_name("parameters")
-        if literal_params is not None:
-            for declaration in literal_params.named_children:
-                if declaration.type not in {
-                    "parameter_declaration",
-                    "variadic_parameter_declaration",
-                }:
-                    continue
-                for child in declaration.named_children:
-                    if child.type != "identifier":
+        literal_local_ids: set[str] = set()
+        literal_stack = [node]
+        while literal_stack:
+            current = literal_stack.pop()
+            if current.type == "func_literal":
+                for field in ("parameters", "result", "receiver"):
+                    declarations = current.child_by_field_name(field)
+                    if declarations is None:
                         continue
-                    binding = self.bindings_by_span.get(
-                        self.node_key(child)
-                    )
-                    if binding is not None:
-                        literal_parameter_ids.add(binding.id)
+                    for declaration in declarations.named_children:
+                        if declaration.type not in {
+                            "parameter_declaration",
+                            "variadic_parameter_declaration",
+                        }:
+                            continue
+                        for child in declaration.named_children:
+                            if child.type != "identifier":
+                                continue
+                            binding = self.bindings_by_span.get(
+                                self.node_key(child)
+                            )
+                            if binding is not None:
+                                literal_local_ids.add(binding.id)
+            literal_stack.extend(_children(current))
 
         stack = [node]
         while stack:
@@ -24973,7 +24980,7 @@ class _Builder:
                 literal_internal = (
                     binding is not None
                     and ref is not None
-                    and binding.id not in literal_parameter_ids
+                    and binding.id not in literal_local_ids
                     and getattr(binding.span, "file", self.current_file)
                     == self.current_file
                     and node.start_byte
