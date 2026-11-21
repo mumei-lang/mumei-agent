@@ -6141,17 +6141,26 @@ class _Builder:
                     type_binding.type.type_id or type_binding.id
                 )
         elif operand.type == "selector_expression":
-            interface_member = self._package_member(operand)
-            if (
-                interface_member is None
-                or interface_member.kind != "type"
-                or interface_member.type.kind != "interface"
-                or interface_member.type.has_type_args
-            ):
-                return None
-            interface_id = (
-                interface_member.type.type_id or interface_member.id
+            field_receiver = self._interface_parameter_field_receiver(
+                operand, params
             )
+            if field_receiver is not None:
+                receiver_id, struct_type_ids, interface_id = (
+                    field_receiver
+                )
+                self.pinned.update(struct_type_ids)
+            else:
+                interface_member = self._package_member(operand)
+                if (
+                    interface_member is None
+                    or interface_member.kind != "type"
+                    or interface_member.type.kind != "interface"
+                    or interface_member.type.has_type_args
+                ):
+                    return None
+                interface_id = (
+                    interface_member.type.type_id or interface_member.id
+                )
         else:
             return None
 
