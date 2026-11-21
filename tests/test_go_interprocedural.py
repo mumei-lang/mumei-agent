@@ -31055,26 +31055,62 @@ def test_struct_field_range_summary_stays_fresh(go_types_helper):
     assert direct_result.binding_id not in stale
     assert direct_result.binding_id not in missing
 
-    changed_source = source.replace(
-        "[]int64", "[]int32"
-    ).replace("r += v", "r += int64(v)")
-    changed_report = compiler_report(go_types_helper, changed_source)
-    changed_snapshot = load_go_snapshot(
-        changed_report, changed_source, target_arch="amd64"
+    range_function = (
+        "package p\n"
+        "func F(x int64) int64 {\n"
+        "\tvar s S\n"
+        "\tr := int64(0)\n"
+        "\tfor _, v := range s.A { r += int64(v) }\n"
+        "\treturn r + x\n"
+        "}\n"
     )
-    changed_summaries = ip.summarize_go(
-        changed_source, changed_snapshot
+    old_files = {
+        "types.go": "package p\ntype S struct { A []int64 }\n",
+        "function.go": range_function,
+    }
+    old_report = package_report(go_types_helper, old_files)
+    old_snapshot = load_go_package_snapshot(
+        old_report, old_files, target_arch="amd64"
+    )
+    old_summaries = ip.summarize_go_package(old_files, old_snapshot)
+    old_result = named_package(
+        old_files, old_snapshot, old_summaries, "F"
+    )
+    assert old_result.available, old_result.gaps
+    old_type_id = next(
+        binding.id
+        for binding in old_snapshot.bindings
+        if binding.name == "S" and binding.kind == "type"
+    )
+    assert old_type_id in old_result.pinned
+
+    changed_files = {
+        "types.go": "package p\ntype S struct { A []int32 }\n",
+        "function.go": range_function,
+    }
+    changed_report = package_report(go_types_helper, changed_files)
+    changed_snapshot = load_go_package_snapshot(
+        changed_report, changed_files, target_arch="amd64"
+    )
+    changed_summaries = ip.summarize_go_package(
+        changed_files, changed_snapshot
+    )
+    changed_result = named_package(
+        changed_files, changed_snapshot, changed_summaries, "F"
+    )
+    assert changed_result.available, changed_result.gaps
+    assert changed_result.binding_id == old_result.binding_id
+    restored_package = ip.GoSummarySet.from_dict(
+        old_summaries.to_dict()
     )
     changed_reusable, changed_stale, changed_missing = (
         go_summaries._reuse_partition(
-            restored, changed_summaries, changed_report
+            restored_package, changed_summaries, changed_report
         )
     )
-    assert direct_result.binding_id not in changed_reusable
-    assert (
-        direct_result.binding_id in changed_stale
-        or direct_result.binding_id in changed_missing
-    )
+    assert old_result.binding_id not in changed_reusable
+    assert old_result.binding_id in changed_stale
+    assert old_result.binding_id not in changed_missing
 
 
 def test_struct_array_slice_field_store_keeps_backing_dependencies(
