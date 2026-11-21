@@ -23833,6 +23833,66 @@ def test_bound_field_channel_nested_pointer_admitted(go_types_helper):
     assert result.return_dependencies == frozenset({0, 1})
 
 
+@pytest.mark.parametrize("imported", [False, True])
+@pytest.mark.parametrize(
+    ("params", "body", "expected"),
+    [
+        ("t", "return <-t.A.C", frozenset({0})),
+        (
+            "t, x int64",
+            "t.A.C <- x; return <-t.A.C",
+            frozenset({0, 1}),
+        ),
+        ("t, x int64", "close(t.A.C); return x", frozenset({1})),
+        ("t", "return int64(len(t.A.C))", None),
+    ],
+)
+def test_bound_pointer_value_struct_channel_leaf_matches_pointer(
+    go_types_helper, imported, params, body, expected
+):
+    qualifier = "lib." if imported else ""
+    types = (
+        f"type S3 struct{{ C chan int64 }}\n"
+        f"type S struct{{ A S3 }}\n"
+        f"type SP struct{{ A *S3 }}\n"
+    )
+    prefix = "package p\n"
+    if imported:
+        prefix += 'import "lib"\n'
+        lib = {"lib": {"types.go": "package lib\n" + types}}
+    else:
+        prefix += types
+        lib = None
+    files = {
+        "a.go": prefix
+        + f"func FValue(t *{qualifier}S{params[1:]}) int64 {{ {body} }}\n"
+        + f"func FPointer(t *{qualifier}SP{params[1:]}) int64 {{ {body} }}\n"
+    }
+    if imported:
+        snapshot = load_go_package_snapshot(
+            package_report_imports(go_types_helper, files, lib),
+            files,
+            target_arch="amd64",
+        )
+        summaries = ip.summarize_go_package(files, snapshot)
+    else:
+        _, snapshot, summaries = package_unit(go_types_helper, files)
+    value = named_package(files, snapshot, summaries, "FValue")
+    pointer = named_package(files, snapshot, summaries, "FPointer")
+    if expected is None:
+        assert not value.available and not pointer.available
+        assert value.gaps[0].reason == pointer.gaps[0].reason
+        assert value.gaps[0].reason == "unresolved_or_opaque_call"
+    else:
+        assert value.available and pointer.available
+        assert value.return_dependencies == expected
+        assert pointer.return_dependencies == expected
+        assert value.effects == pointer.effects == "unknown"
+    assert [call.target for call in value.calls] == [
+        call.target for call in pointer.calls
+    ]
+
+
 def test_bound_field_channel_range_rejoins_sends(go_types_helper):
     # `for v := range p.C` re-joins the caller-memory queue each
     # fixed-point pass like `range GC` — deps(p) ride the read.
