@@ -15606,10 +15606,8 @@ def test_bound_closure_local_channel_container_unsupported_uses_stay_closed(
         pytest.param(
             "func F(x int64) int64 { "
             "cc := make(chan chan int64, 1); "
-            "c := make(chan int64, 1); cc <- c; "
-            "p := &cc; _ = p; "
-            "g := func() { (<-cc) <- x }; "
-            "g(); return <-c }",
+            "g := func() { p := &cc; _ = p }; "
+            "g(); return x }",
             id="queue-root-address-taken",
         ),
     ],
@@ -15634,6 +15632,61 @@ def test_queue_reseat_without_closure_stays_available(go_types_helper):
             "cc = dd; (<-cc) <- x; return <-d }",
         )
     )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+@pytest.mark.parametrize(
+    "declarations, may_be_closed",
+    [
+        pytest.param(
+            "func F(x int64) int64 { "
+            "cc := make(chan chan int64, 1); "
+            "c := make(chan int64, 1); cc <- c; "
+            "g := func() { (<-cc) <- x }; "
+            "h := func() int64 { return <-c }; "
+            "g(); return h() }",
+            False,
+            id="captured-member-read-after-queue-write",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { "
+            "cc := make(chan chan int64, 1); "
+            "c := make(chan int64, 1); cc <- c; "
+            "h := func() { c <- x }; "
+            "h(); return <-(<-cc) }",
+            True,
+            id="captured-member-write-visible-through-queue",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { "
+            "c := make(chan int64, 1); "
+            "s := []chan int64{c}; "
+            "h := func() { c <- x }; "
+            "h(); return <-s[0] }",
+            True,
+            id="captured-member-write-visible-through-container",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { "
+            "cc := make(chan chan int64, 1); "
+            "c := make(chan int64, 1); "
+            "g := func() { (<-cc) <- x }; "
+            "cc <- c; g(); return <-c }",
+            False,
+            id="queue-membership-added-after-literal-definition",
+        ),
+    ],
+)
+def test_bound_closure_channel_group_dependencies_are_current(
+    go_types_helper, declarations, may_be_closed
+):
+    result = named(*unit(go_types_helper, declarations))
+    if may_be_closed and not result.available:
+        assert any(
+            gap.reason == "unsupported_expression" for gap in result.gaps
+        )
+        return
     assert result.available
     assert result.return_dependencies == frozenset({0})
 

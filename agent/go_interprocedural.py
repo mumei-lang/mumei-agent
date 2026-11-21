@@ -8419,7 +8419,15 @@ class _Builder:
             if root in locals_:
                 resolved |= locals_[root]
                 binding = self.bindings.get(root)
-                if root in self.local_chan_chans:
+                if (
+                    binding is not None
+                    and binding.type is not None
+                    and binding.type.kind == "chan"
+                ):
+                    resolved |= self._chan_group_read_deps(
+                        root, locals_
+                    )
+                elif root in self.local_chan_chans:
                     resolved |= self._chan_group_read_deps(
                         root, locals_
                     )
@@ -26254,6 +26262,14 @@ class _Builder:
                         deps |= locals_[bid]
                         captured.add(bid)
                         binding = self.bindings.get(bid)
+                        if (
+                            binding is not None
+                            and binding.type is not None
+                            and binding.type.kind == "chan"
+                        ):
+                            deps |= self._chan_group_read_deps(
+                                self._chan_root(bid), locals_
+                            )
                         captures_pointer |= (
                             binding is not None
                             and binding.type.kind == "pointer"
