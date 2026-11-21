@@ -16171,11 +16171,28 @@ class _Builder:
             reseat_roots: set[str] = set()
             for fkey, root_id, new_toks in reseat_plan:
                 reseat_roots.add(root_id)
+                root_binding = self.bindings.get(root_id)
+                root_type = getattr(root_binding, "type", None)
+                has_struct_sharer = any(
+                    holder_id != root_id
+                    and "\x00" not in holder_id
+                    and getattr(
+                        self.bindings.get(holder_id), "type", None
+                    )
+                    == root_type
+                    for holder_id in self._opaque_container_sharers(
+                        root_id
+                    )
+                )
                 self._set_opaque_container_field_tokens(
                     root_id,
                     fkey.rsplit("\x00", 1)[-1],
                     new_toks,
-                    conditional=conditional or self._may_skip > 0,
+                    conditional=(
+                        conditional
+                        or self._may_skip > 0
+                        or has_struct_sharer
+                    ),
                 )
             if not (conditional or self._may_skip > 0):
                 # The root's token set is exactly the union of its

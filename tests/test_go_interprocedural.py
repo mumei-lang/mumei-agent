@@ -30502,6 +30502,80 @@ def test_struct_field_slot_reseat_preserves_only_surviving_aliases(
     assert retained_donor.return_dependencies == frozenset({0})
 
 
+def test_reseating_shared_struct_field_preserves_copied_headers(
+    go_types_helper,
+):
+    sources = (
+        "func F(x int64) int64 {\n"
+        "\ta1 := []int64{0}\n"
+        "\ts := S{A: a1}\n"
+        "\tt := s\n"
+        "\tb := t.A\n"
+        "\ts.A = []int64{0}\n"
+        "\tc := t.A\n"
+        "\tt.A = []int64{0}\n"
+        "\tc[0] = x\n"
+        "\treturn b[0]\n}\n",
+        "func F(x int64) int64 {\n"
+        "\ta1 := []int64{0}\n"
+        "\ts := S{A: a1}\n"
+        "\tt := s\n"
+        "\tb := t.A\n"
+        "\ts.A = []int64{0}\n"
+        "\tc := t.A\n"
+        "\tt = S{A: []int64{0}}\n"
+        "\t_ = t\n"
+        "\tc[0] = x\n"
+        "\treturn b[0]\n}\n",
+        "func F(x int64) int64 {\n"
+        "\ta1 := []int64{0}\n"
+        "\ts := S{A: a1}\n"
+        "\tt := s\n"
+        "\tb := t.A\n"
+        "\ts.A = []int64{0}\n"
+        "\ts = S{A: []int64{0}}\n"
+        "\t_ = s\n"
+        "\tc := t.A\n"
+        "\tc[0] = x\n"
+        "\treturn b[0]\n}\n",
+        "func F(x int64) int64 {\n"
+        "\ta1 := []int64{0}\n"
+        "\ts := S{A: a1}\n"
+        "\tt := s\n"
+        "\tb := t.A\n"
+        "\ts.A = []int64{0}\n"
+        "\tc := t.A\n"
+        "\tt.A = []int64{0}\n"
+        "\tb[0] = x\n"
+        "\treturn c[0]\n}\n",
+    )
+    for body in sources:
+        result = named(
+            *unit(
+                go_types_helper,
+                "type S struct { A []int64; V int64 }\n" + body,
+            )
+        )
+        assert result.available, result.gaps
+        assert result.return_dependencies == frozenset({0})
+
+    strong_update = named(
+        *unit(
+            go_types_helper,
+            "type S struct { A []int64; V int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ta1 := []int64{0}\n"
+            "\ts := S{A: a1}\n"
+            "\ts.A = []int64{0}\n"
+            "\tc := s.A\n"
+            "\tc[0] = x\n"
+            "\treturn a1[0]\n}\n",
+        )
+    )
+    assert strong_update.available, strong_update.gaps
+    assert strong_update.return_dependencies == frozenset()
+
+
 @pytest.mark.parametrize(
     ("declarations", "expected"),
     [
