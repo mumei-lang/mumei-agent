@@ -622,7 +622,7 @@ class _RustBindings:
         if node.type in {"impl_item", "trait_item"}:
             body = node.child_by_field_name("body")
             self._generic_references(node.child_by_field_name("type_parameters"))
-            self._generic_references(node.child_by_field_name("where_clause"))
+            self._generic_references(self._where_clause(node))
             if node.type == "impl_item":
                 self._generic_references(node.child_by_field_name("type"))
             if body is not None:
@@ -655,6 +655,12 @@ class _RustBindings:
         name = self._normalize_identifier(self.text(name_node))
         return next(
             (r for r in scope.bindings.get(name, ()) if r.binding.span == self.span(name_node)),
+            None,
+        )
+
+    def _where_clause(self, node: Any) -> Any | None:
+        return next(
+            (child for child in self._children(node) if child.type == "where_clause"),
             None,
         )
 
@@ -784,7 +790,7 @@ class _RustBindings:
             for parameter in self._children(parameters):
                 self._generic_references(parameter.child_by_field_name("type"))
         self._generic_references(node.child_by_field_name("return_type"))
-        self._generic_references(node.child_by_field_name("where_clause"))
+        self._generic_references(self._where_clause(node))
         if body is not None:
             parameter_scope = self.span(body)
             if parameters is not None:

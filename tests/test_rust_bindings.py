@@ -658,6 +658,31 @@ fn outer<T, const N: usize>() {
     assert {unresolved.name for unresolved in boundary_references} == {"T", "N"}
 
 
+def test_where_clauses_record_generic_parameters_without_binding_other_names():
+    source = """
+type Outside = u8;
+struct S;
+trait Bound<T> where T: Copy {}
+impl<U> Bound<U> for S where U: Copy {}
+fn bounded<T>() where T: Copy {}
+fn unrelated<T>() where Outside: Copy {}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    expected_positions = [
+        source.index("T: Copy"),
+        source.index("U: Copy"),
+        source.rindex("T: Copy"),
+    ]
+    for position in expected_positions:
+        reference = next(
+            reference
+            for reference in report.references
+            if reference.span.start == position
+        )
+        assert report.binding(reference.binding_id).kind == "generic_parameter"
+    assert not _refs(report, source, "Outside")
+
+
 def test_qualified_rust_paths_stay_unresolved_as_whole_paths():
     source = """
 type T = u8;
