@@ -81,7 +81,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `native-observations-accept` | 7 | Run a declared Core native observations acceptance as one attempt and emit the reconciled lineage plus the declared acceptance outcome. |
 | `native-observations-recheck` | 7 | Run a declared Core native observations recheck as one attempt and emit the reconciled lineage plus the declared recheck outcome. |
 | `native-object-recheck` | 7 | Run a declared Core native object correspondence recheck as one attempt and emit the reconciled lineage plus declared outcome. |
-| `native-machine-tv-recheck` | 7 | Run Core's bounded straight-line machine-code TV recheck, with direct calls compared as uninterpreted sites, and emit one attempt. |
+| `native-machine-tv-recheck` | 7 | Run Core's bounded leaf straight-line and forward-branch machine-code TV recheck; direct calls are uninterpreted sites; backward branches, loops, ABI/runtime semantics and full object TV stay outside. |
 | `native-check` | 7 | Run a declared Core native bundle identity check as one attempt and emit the reconciled lineage plus the declared check outcome. |
 | `native-source-recheck` | 7 | Run a declared Core native bundle source recheck as one attempt and emit the reconciled lineage plus the declared source recheck outcome. |
 | `native-evidence-recheck` | 8 | Replay a saved native consumer Evidence envelope against a fresh pinned recheck as one declared attempt and emit the reconciled lineage plus the declared outcome. |
@@ -1285,7 +1285,7 @@ Run a declared Core native object correspondence recheck as one attempt and emit
 
 ## `mumei-agent native-machine-tv-recheck`
 
-Run Core's bounded straight-line machine-code TV recheck, with direct calls compared as uninterpreted sites, and emit one attempt.
+Run Core's bounded leaf straight-line and forward-branch machine-code TV recheck; direct calls are uninterpreted sites; backward branches, loops, ABI/runtime semantics and full object TV stay outside.
 
 ### Options
 
