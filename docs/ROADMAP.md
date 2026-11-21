@@ -4150,9 +4150,9 @@ serves. The honest closures stay: `d := s[0][0]` on a
 `[][]chan` extracts nothing (the nested-element gate already
 declines it), `[]chan chan T` stays closed (a channel value
 travelling the group would alias under a second dep set), and
-`close(s[i])`, a bare `for range s[i]`, `select` and
-param/result shapes stay opaque — though `close(d)` on the
-bound member admits like any local channel operand.
+`close(s[i])`, a bare `for range s[i]` and `select` stay
+opaque — though `close(d)` on the bound member admits like
+any local channel operand.
 
 A chan-element collection PARAMETER or RESULT admits like the
 scalar-element form — `func F(s []chan int64)`, `func G()
