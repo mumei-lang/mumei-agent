@@ -2919,12 +2919,12 @@ class _Builder:
         fact = self._struct_value_fact(binding.type)
         return (fact, binding) if fact is not None else None
 
-    def _struct_selector_container_tokens(
+    def _struct_selector_container(
         self,
         node: Any,
         locals_: dict[str, frozenset[int]],
         params: dict[str, int],
-    ) -> frozenset | None:
+    ) -> tuple[str, frozenset] | None:
         selectors = []
         current = node
         while current is not None:
@@ -2993,7 +2993,7 @@ class _Builder:
             tokens |= self._opaque_container_tokens.get(
                 field_key, frozenset()
             )
-        return tokens
+        return root_ref.binding_id, tokens
 
     def _store_container_holder_writes(
         self,
@@ -3063,9 +3063,14 @@ class _Builder:
                 "selector_expression",
                 "field_expression",
             }:
-                tokens = self._struct_selector_container_tokens(
+                selector_container = self._struct_selector_container(
                     nested, locals_, params
                 )
+                if selector_container is not None:
+                    root_id, tokens = selector_container
+                    self._store(
+                        locals_, params, root_id, stored, True
+                    )
             if tokens:
                 self._store_container_holder_writes(
                     tokens, stored, locals_, params
@@ -31617,14 +31622,18 @@ class _Builder:
                 "selector_expression",
                 "field_expression",
             }:
-                struct_tokens = (
-                    self._struct_selector_container_tokens(
+                struct_container = (
+                    self._struct_selector_container(
                         arg_node, locals_, params
                     )
                 )
-                if struct_tokens is not None:
+                if struct_container is not None:
+                    root_id, struct_tokens = struct_container
                     self._store_container_holder_writes(
                         struct_tokens, stored, locals_, params
+                    )
+                    self._store(
+                        locals_, params, root_id, stored, True
                     )
                     self.indirect_writes |= stored
                 else:

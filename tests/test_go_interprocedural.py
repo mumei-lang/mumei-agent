@@ -32237,6 +32237,37 @@ def test_effectful_calls_store_through_struct_collection_fields(
             "\tw := o.W\n\tw.Set(x)\n\treturn o.W.A[0]",
             frozenset({0, 1}),
         ),
+        (
+            "o O, x int64",
+            "\tG(o.W, x)\n\treturn Read(o)",
+            "\tw := o.W\n\tG(w, x)\n\treturn Read(o)",
+            frozenset({0, 1}),
+        ),
+        (
+            "o O, x int64",
+            "\to.W.Set(x)\n\treturn Read(o)",
+            "\tw := o.W\n\tw.Set(x)\n\treturn Read(o)",
+            frozenset({0, 1}),
+        ),
+        (
+            "oo OO, x int64",
+            "\tG(oo.O.W, x)\n\treturn ReadOO(oo)",
+            "\tw := oo.O.W\n\tG(w, x)\n\treturn ReadOO(oo)",
+            frozenset({0, 1}),
+        ),
+        (
+            "x int64",
+            "\ta := make([]int64, 1)\n"
+            "\to := O{W: WA{A: a}}\n"
+            "\tG(o.W, x)\n"
+            "\treturn Read(o)",
+            "\ta := make([]int64, 1)\n"
+            "\to := O{W: WA{A: a}}\n"
+            "\tw := o.W\n"
+            "\tG(w, x)\n"
+            "\treturn Read(o)",
+            frozenset({0}),
+        ),
     ],
     ids=[
         "keyed-literal",
@@ -32251,6 +32282,10 @@ def test_effectful_calls_store_through_struct_collection_fields(
         "parameter-field",
         "local-field",
         "field-receiver",
+        "parameter-field-whole-struct-read",
+        "field-receiver-whole-struct-read",
+        "nested-parameter-field-whole-struct-read",
+        "local-field-whole-struct-read",
     ],
 )
 def test_struct_expression_call_writes_match_bound_temporaries(
@@ -32261,11 +32296,14 @@ def test_struct_expression_call_writes_match_bound_temporaries(
         "type WA struct { i I; A []int64 }\n"
         "type WM struct { M map[int64]int64 }\n"
         "type O struct { W WA }\n"
+        "type OO struct { O O }\n"
         "func G(w WA, x int64) { w.A[0] = x }\n"
         "func GP(w *WA, x int64) { w.A[0] = x }\n"
         "func GM(w WM, x int64) { w.M[0] = x }\n"
         "func GO(o O, x int64) { o.W.A[0] = x }\n"
         "func (w WA) Set(x int64) { w.A[0] = x }\n"
+        "func Read(o O) int64 { return o.W.A[0] }\n"
+        "func ReadOO(oo OO) int64 { return oo.O.W.A[0] }\n"
     )
 
     def analyze(body):
