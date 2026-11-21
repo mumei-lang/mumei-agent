@@ -15454,6 +15454,7 @@ def test_local_chan_chan_group_keeps_imported_member_external(
             "select with default preserves the skipped receive alias",
             "func F(x int64) int64 {\n"
             "\tc := make(chan int64, 1)\n"
+            "\tc <- 7\n"
             "\te := make(chan int64, 1)\n"
             "\tcc := make(chan chan int64, 1)\n"
             "\tcc <- e\n"
@@ -15521,6 +15522,7 @@ def test_local_chan_chan_group_keeps_imported_member_external(
             "single-case select receive drops the old alias",
             "func F(x int64) int64 {\n"
             "\tc := make(chan int64, 1)\n"
+            "\tc <- 7\n"
             "\te := make(chan int64, 1)\n"
             "\tcc := make(chan chan int64, 1)\n"
             "\tcc <- e\n"
@@ -15538,6 +15540,7 @@ def test_local_chan_chan_group_keeps_imported_member_external(
             "unconditional receive reassignment drops the old alias",
             "func F(x int64) int64 {\n"
             "\tc := make(chan int64, 1)\n"
+            "\tc <- 7\n"
             "\te := make(chan int64, 1)\n"
             "\tcc := make(chan chan int64, 1)\n"
             "\tcc <- e\n"
