@@ -12607,11 +12607,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             self.external_chan_locals.discard(
                                 ref.binding_id
                             )
+                            old_contents = locals_.get(
+                                ref.binding_id, frozenset()
+                            )
+                            if ref.binding_id in params:
+                                old_contents |= frozenset(
+                                    {params[ref.binding_id]}
+                                )
                             self._store(
                                 locals_,
                                 params,
                                 ref.binding_id,
-                                value,
+                                old_contents | value,
                                 conditional,
                             )
                             self._chan_group_join(

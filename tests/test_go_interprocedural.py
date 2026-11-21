@@ -15420,6 +15420,19 @@ def test_local_chan_chan_group_keeps_imported_member_external(
             frozenset({0}),
             "none_in_supported_fragment",
         ),
+        (
+            "aliases retain pre-receive queue contents",
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\te := c\n"
+            "\tc <- x\n"
+            "\tc = <-cc\n"
+            "\treturn <-e\n"
+            "}\n",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
     ],
 )
 def test_local_chan_chan_review_regressions(
