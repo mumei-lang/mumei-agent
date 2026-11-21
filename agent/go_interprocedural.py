@@ -16395,7 +16395,7 @@ class _Builder:
                     )
                     continue
                 raise _Unsupported("unsupported_statement", _span(lhs))
-            if len(lefts) == len(rights):
+            if len(lefts) == len(rights) and len(lefts) > 1:
                 assigned_root_ids: set[str] = set()
                 for lhs in lefts:
                     if lhs.type != "identifier":
