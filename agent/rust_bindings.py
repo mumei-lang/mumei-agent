@@ -1,0 +1,1229 @@
+"""Conservative tree-sitter Rust lexical binding reports."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import re
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from agent.lexical_bindings import (
+    Binding,
+    ByteSpan,
+    Call,
+    Function,
+    Gap,
+    LexicalBindingReport,
+    LexicalReportError,
+    Reference,
+    TypeFact,
+    Unresolved,
+    binding_id,
+)
+
+PROFILE = "mumei.rust-lexical-bindings/v1"
+MAX_SOURCE_BYTES = 64 * 1024
+_UNKNOWN = TypeFact("unknown", "", 0, None, "")
+_PRELUDE_NAMES = frozenset(
+    {
+        "Some", "None", "Ok", "Err", "Vec", "String", "Box", "Option",
+        "Result", "drop", "Default", "Clone", "Copy", "Iterator",
+        "ToString", "ToOwned", "AsRef", "AsMut", "Borrow", "Into",
+        "From", "TryFrom", "TryInto", "Send", "Sync", "Sized", "Unpin",
+        "Fn", "FnMut", "FnOnce", "bool", "char", "str", "i8", "i16",
+        "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64",
+        "u128", "usize", "f32", "f64", "Self",
+    }
+)
+_ITEM_KINDS = {
+    "function_item": "function",
+    "const_item": "const",
+    "static_item": "static",
+    "struct_item": "struct",
+    "enum_item": "enum",
+    "type_item": "type_alias",
+    "trait_item": "trait",
+    "union_item": "union",
+    "mod_item": "module",
+    "extern_crate_declaration": "import",
+}
+_EXPR_NODES = {
+    "array_expression", "assignment_expression", "await_expression",
+    "async_block", "binary_expression", "block", "break_expression", "call_expression",
+    "cast_expression", "closure_expression", "continue_expression",
+    "const_block", "field_expression", "for_expression", "if_expression", "index_expression",
+    "let_declaration", "let_condition", "loop_expression", "match_expression",
+    "method_call_expression", "parenthesized_expression", "range_expression",
+    "reference_expression", "return_expression", "scoped_identifier",
+    "scoped_type_identifier", "try_block", "try_expression", "tuple_expression",
+    "unary_expression", "unsafe_block", "while_expression", "yield_expression",
+}
+_TRANSPARENT_NODES = {
+    "expression_statement", "arguments", "tuple_type", "reference_type",
+    "array_type", "slice_type", "generic_type", "type_arguments",
+    "type_parameters", "where_clause", "parameter", "parameters",
+    "closure_parameters", "else_clause", "mutable_specifier", "mut_pattern",
+}
+
+
+def _has_keyword(text: str, keyword: str) -> bool:
+    return re.search(rf"\b{re.escape(keyword)}\b", text) is not None
+
+
+@dataclass
+class _Scope:
+    node: Any
+    module_depth: int
+    function_id: str
+    bindings: dict[str, list["_Record"]] = field(default_factory=dict)
+    glob_import: bool = False
+    ambiguous_names: dict[str, tuple[int, int]] = field(default_factory=dict)
+
+
+@dataclass
+class _Record:
+    binding: Binding
+    owner_function: str
+    module_depth: int
+    item: bool
+    alias_node: Any = None
+    body_node: Any = None
+    generic: bool = False
+    is_async: bool = False
+    variadic: bool = False
+    extern: bool = False
+    struct_constructor: bool = False
+
+
+class _RustBindings:
+    def __init__(self, source: str, raw: bytes, pointer_width: int, root: Any):
+        self.source = source
+        self.raw = raw
+        self.pointer_width = pointer_width
+        self.root = root
+        self.source_hash = hashlib.sha256(raw).hexdigest()
+        self.bindings: list[Binding] = []
+        self.references: list[Reference] = []
+        self.unresolved: list[Unresolved] = []
+        self.functions: list[Function] = []
+        self.calls: list[Call] = []
+        self.gaps: list[Gap] = []
+        self.scopes: list[_Scope] = []
+        self.records: dict[str, _Record] = {}
+        self.current_function = ""
+        self.call_owner = ""
+        self.module_depth = 0
+        self.in_extern = False
+        self._function_records: dict[str, _Record] = {}
+
+    def span(self, node: Any) -> ByteSpan:
+        return ByteSpan(node.start_byte, node.end_byte)
+
+    def text(self, node: Any | None) -> str:
+        if node is None:
+            return ""
+        return self.raw[node.start_byte : node.end_byte].decode("utf-8")
+
+    def build(self) -> LexicalBindingReport:
+        root_scope = _Scope(self.root, 0, "")
+        self.scopes.append(root_scope)
+        self._predeclare(self.root, root_scope)
+        self._scan_container(self.root, root_scope)
+        return LexicalBindingReport(
+            PROFILE,
+            self.source_hash,
+            {"pointer_width": self.pointer_width},
+            tuple(self.bindings),
+            tuple(self.references),
+            tuple(self.unresolved),
+            tuple(self.functions),
+            tuple(self.calls),
+            tuple(self.gaps),
+        )
+
+    def _make_record(
+        self,
+        name_node: Any,
+        kind: str,
+        scope: ByteSpan | None,
+        owner: str,
+        module_depth: int,
+        *,
+        item: bool,
+        type_fact: TypeFact = _UNKNOWN,
+        mutable: bool = False,
+        alias_node: Any = None,
+        body_node: Any = None,
+        generic: bool = False,
+        is_async: bool = False,
+        variadic: bool = False,
+        extern: bool = False,
+        struct_constructor: bool = False,
+        name_override: str | None = None,
+    ) -> _Record:
+        name = self.text(name_node) if name_override is None else name_override
+        declaration = self.span(name_node)
+        scope_start = 0 if scope is None else scope.start
+        scope_end = 0 if scope is None else scope.end
+        identifier = binding_id(
+            self.source_hash, declaration.start, scope_start, scope_end
+        )
+        binding = Binding(
+            identifier,
+            name,
+            kind,
+            declaration,
+            scope,
+            type_fact,
+            mutable,
+        )
+        record = _Record(
+            binding,
+            owner,
+            module_depth,
+            item,
+            alias_node,
+            body_node,
+            generic,
+            is_async,
+            variadic,
+            extern,
+            struct_constructor,
+        )
+        self.bindings.append(binding)
+        self.records[identifier] = record
+        return record
+
+    def _add_to_scope(self, scope: _Scope, record: _Record) -> None:
+        scope.bindings.setdefault(record.binding.name, []).append(record)
+
+    def _item_name(self, node: Any) -> Any | None:
+        named = node.child_by_field_name("name")
+        if named is not None:
+            return named
+        for child in node.named_children:
+            if child.type in {"identifier", "type_identifier"}:
+                return child
+        return None
+
+    def _predeclare(self, container: Any, scope: _Scope) -> None:
+        for node in container.named_children:
+            kind = _ITEM_KINDS.get(node.type)
+            if kind is not None:
+                name_node = self._item_name(node)
+                if node.type == "use_declaration":
+                    continue
+                if name_node is None:
+                    continue
+                body = node.child_by_field_name("body")
+                if node.type == "function_item":
+                    body = node.child_by_field_name("body")
+                generic = node.child_by_field_name("type_parameters") is not None
+                signature = self.text(node)
+                is_async = _has_keyword(signature[: signature.find("fn")], "async")
+                variadic = any(c.type == "variadic_parameter" for c in self._descendants(node.child_by_field_name("parameters")))
+                extern = self.in_extern or (node.type == "function_item" and body is None)
+                constructor = node.type == "struct_item"
+                if constructor:
+                    struct_body = node.child_by_field_name("body")
+                    constructor = (
+                        struct_body is None
+                        or struct_body.type == "ordered_field_declaration_list"
+                    )
+                record = self._make_record(
+                    name_node,
+                    kind,
+                    self.span(container) if container.type != "source_file" else ByteSpan(0, 0),
+                    scope.function_id,
+                    scope.module_depth,
+                    item=True,
+                    body_node=body,
+                    generic=generic,
+                    is_async=is_async,
+                    variadic=variadic,
+                    extern=extern,
+                    struct_constructor=constructor,
+                )
+                self._add_to_scope(scope, record)
+                if kind == "function":
+                    self._function_records[record.binding.id] = record
+                if kind == "type_alias":
+                    record.alias_node = node.child_by_field_name("type")
+            elif node.type in {"extern_block", "foreign_mod_item"}:
+                body = node.child_by_field_name("body")
+                if body is None:
+                    body = next(
+                    (child for child in node.named_children if child.type == "declaration_list"),
+                    None,
+                )
+                if body is not None:
+                    for function_node in body.named_children:
+                        if function_node.type not in {"function_item", "function_signature_item"}:
+                            continue
+                        name_node = self._item_name(function_node)
+                        if name_node is None:
+                            continue
+                        fn_record = self._make_record(
+                            name_node,
+                            "function",
+                            self.span(container) if container.type != "source_file" else ByteSpan(0, 0),
+                            scope.function_id,
+                            scope.module_depth,
+                            item=True,
+                            body_node=function_node.child_by_field_name("body"),
+                            generic=function_node.child_by_field_name("type_parameters") is not None,
+                            variadic=any(
+                                child.type == "variadic_parameter"
+                                for child in self._descendants(
+                                    function_node.child_by_field_name("parameters")
+                                )
+                            ),
+                            extern=True,
+                        )
+                        self._add_to_scope(scope, fn_record)
+                        self._function_records[fn_record.binding.id] = fn_record
+            elif node.type == "use_declaration":
+                self._predeclare_use(node, scope)
+            elif node.type == "macro_definition":
+                self.gaps.append(Gap("macro_definition", self.span(node)))
+
+    def _descendants(self, node: Any | None):
+        if node is None:
+            return
+        stack = [node]
+        while stack:
+            current = stack.pop()
+            yield current
+            stack.extend(reversed(current.named_children))
+
+    def _predeclare_use(self, node: Any, scope: _Scope) -> None:
+        for name_node, is_glob, bound_name in self._use_names(node):
+            if is_glob:
+                scope.glob_import = True
+                self.gaps.append(Gap("glob_import", self.span(node)))
+                continue
+            record = self._make_record(
+                name_node,
+                "import",
+                self.span(scope.node) if scope.node.type != "source_file" else ByteSpan(0, 0),
+                scope.function_id,
+                scope.module_depth,
+                item=True,
+                name_override=bound_name,
+            )
+            self._add_to_scope(scope, record)
+
+    def _use_names(self, node: Any) -> list[tuple[Any, bool, str | None]]:
+        out: list[tuple[Any, bool, str | None]] = []
+
+        def add_leaf(tree: Any, prefix: tuple[str, ...] = ()) -> None:
+            if tree.type == "use_list":
+                for child in tree.named_children:
+                    add_leaf(child, prefix)
+            elif tree.type == "scoped_use_list":
+                path = tree.child_by_field_name("path")
+                child_list = next((c for c in tree.named_children if c.type == "use_list"), None)
+                new_prefix = prefix + tuple(
+                    part for part in self.text(path).split("::") if part
+                )
+                if child_list is not None:
+                    add_leaf(child_list, new_prefix)
+            elif tree.type == "use_as_clause":
+                alias = tree.child_by_field_name("alias")
+                if alias is not None:
+                    out.append((alias, False, self.text(alias)))
+            elif tree.type in {"use_wildcard", "wildcard_pattern"} or self.text(tree).endswith("*"):
+                out.append((tree, True, None))
+            elif tree.type == "self":
+                out.append((tree, False, prefix[-1] if prefix else "self"))
+            else:
+                candidates = [
+                    child for child in self._descendants(tree)
+                    if child.type in {"identifier", "type_identifier", "self"}
+                ]
+                if candidates:
+                    picked = candidates[-1]
+                    final = self.text(picked)
+                    if final == "self":
+                        final = prefix[-1] if prefix else "self"
+                    out.append((picked, False, final))
+
+        for child in node.named_children:
+            add_leaf(child)
+        if not out and "::" in self.text(node):
+            candidate = next(
+                (c for c in self._descendants(node) if c.type in {"identifier", "type_identifier"}),
+                None,
+            )
+            if candidate is not None:
+                out.append((candidate, False, self.text(candidate)))
+        return out
+
+    def _scan_container(self, container: Any, scope: _Scope) -> None:
+        for node in container.named_children:
+            if node.type in {"attribute_item", "inner_attribute_item", "line_comment", "block_comment"}:
+                continue
+            if node.type in _ITEM_KINDS or node.type in {
+                "use_declaration", "macro_definition", "extern_block", "foreign_mod_item",
+                "impl_item",
+            }:
+                self._scan_item(node, scope)
+            elif node.type == "expression_statement":
+                self._expr(node)
+            elif node.type in {"let_declaration"}:
+                self._let(node, scope)
+            else:
+                self._expr(node)
+
+    def _scan_item(self, node: Any, scope: _Scope) -> None:
+        if node.type == "macro_definition":
+            return
+        if node.type == "use_declaration":
+            return
+        if node.type == "function_item":
+            record = self._find_item_record(scope, node)
+            if record is not None:
+                self._function(node, record)
+            return
+        if node.type in {"const_item", "static_item"}:
+            value = node.child_by_field_name("value")
+            if value is not None:
+                old_owner = self.call_owner
+                self.call_owner = ""
+                self._expr(value)
+                self.call_owner = old_owner
+            self._assign_item_type(node, scope)
+            return
+        if node.type == "mod_item":
+            body = node.child_by_field_name("body")
+            if body is not None:
+                self.module_depth += 1
+                child_scope = _Scope(body, self.module_depth, self.current_function)
+                self.scopes.append(child_scope)
+                self._predeclare(body, child_scope)
+                self._scan_container(body, child_scope)
+                self.scopes.pop()
+                self.module_depth -= 1
+            return
+        if node.type in {"impl_item", "trait_item"}:
+            body = node.child_by_field_name("body")
+            if body is not None:
+                old_extern = self.in_extern
+                self.in_extern = old_extern
+                self._scan_associated_container(body, scope)
+                self.in_extern = old_extern
+            return
+        if node.type in {"extern_block", "foreign_mod_item"}:
+            body = node.child_by_field_name("body")
+            if body is None:
+                body = next((c for c in node.named_children if c.type == "declaration_list"), None)
+            if body is not None:
+                self._scan_extern_container(body, scope)
+            return
+        if node.type == "type_item":
+            self._assign_item_type(node, scope)
+            return
+        if node.type in {"struct_item", "enum_item", "union_item", "trait_item"}:
+            return
+
+    def _find_item_record(self, scope: _Scope, node: Any) -> _Record | None:
+        name_node = self._item_name(node)
+        if name_node is None:
+            return None
+        name = self.text(name_node)
+        return next(
+            (r for r in scope.bindings.get(name, ()) if r.binding.span == self.span(name_node)),
+            None,
+        )
+
+    def _scan_associated_container(self, body: Any, parent_scope: _Scope) -> None:
+        for node in body.named_children:
+            if node.type in {"function_item", "function_signature_item"}:
+                name_node = self._item_name(node)
+                if name_node is None:
+                    self.gaps.append(Gap("unsupported_syntax", self.span(node)))
+                    continue
+                body_node = node.child_by_field_name("body")
+                record = self._make_record(
+                    name_node,
+                    "associated_function",
+                    None,
+                    parent_scope.function_id,
+                    parent_scope.module_depth,
+                    item=True,
+                    body_node=body_node,
+                    generic=node.child_by_field_name("type_parameters") is not None,
+                    is_async=_has_keyword(
+                        self.text(node)[: self.text(node).find("fn")], "async"
+                    ),
+                    extern=self.in_extern or body_node is None,
+                )
+                self._function_records[record.binding.id] = record
+                self._function(node, record)
+            elif node.type == "const_item":
+                name_node = self._item_name(node)
+                if name_node is not None:
+                    annotation = node.child_by_field_name("type")
+                    self._make_record(
+                        name_node, "associated_const", None, parent_scope.function_id,
+                        parent_scope.module_depth, item=True,
+                        type_fact=_UNKNOWN if annotation is None else self._type_fact(annotation),
+                    )
+                value = node.child_by_field_name("value")
+                if value is not None:
+                    self._expr(value)
+            elif node.type in {"macro_definition"}:
+                self.gaps.append(Gap("macro_definition", self.span(node)))
+            else:
+                # Associated type declarations are names, not values, but are not
+                # yet in the public item inventory.
+                if node.type not in {"attribute_item", "line_comment"}:
+                    self.gaps.append(Gap("unsupported_syntax", self.span(node)))
+
+    def _scan_extern_container(self, body: Any, parent_scope: _Scope) -> None:
+        for node in body.named_children:
+            if node.type in {"function_item", "function_signature_item"}:
+                record = self._find_item_record(parent_scope, node)
+                if record is not None:
+                    self._function(node, record)
+            elif node.type not in {"attribute_item", "line_comment", "block_comment"}:
+                self.gaps.append(Gap("unsupported_syntax", self.span(node)))
+
+    def _assign_item_type(self, node: Any, scope: _Scope) -> None:
+        name_node = self._item_name(node)
+        if name_node is None:
+            return
+        record = self._find_item_record(scope, node)
+        if record is None:
+            return
+        annotation = node.child_by_field_name("type")
+        if annotation is not None:
+            fact = self._type_fact(annotation)
+            replacement = Binding(
+                record.binding.id,
+                record.binding.name,
+                record.binding.kind,
+                record.binding.span,
+                record.binding.scope,
+                fact,
+                node.type == "static_item"
+                and _has_keyword(self.text(node)[: self.text(node).find("=")], "mut"),
+            )
+            self.bindings[self.bindings.index(record.binding)] = replacement
+            record.binding = replacement
+
+    def _function(self, node: Any, record: _Record) -> None:
+        old_function, old_call_owner = self.current_function, self.call_owner
+        self.current_function = record.binding.id
+        self.call_owner = record.binding.id
+        body = node.child_by_field_name("body")
+        body_span = None if body is None else self.span(body)
+        parameter_ids: list[str] = []
+        parameters = node.child_by_field_name("parameters")
+        if body is not None:
+            parameter_scope = self.span(body)
+            fn_scope = _Scope(body, self.module_depth, record.binding.id)
+            self.scopes.append(fn_scope)
+            if parameters is not None:
+                for parameter in parameters.named_children:
+                    parameter_ids.extend(
+                        self._parameter(parameter, fn_scope, parameter_scope)
+                    )
+            if body.type == "block":
+                self._predeclare(body, fn_scope)
+                self._scan_container(body, fn_scope)
+            else:
+                self._expr(body)
+            self.scopes.pop()
+        result_node = node.child_by_field_name("return_type")
+        result = _UNKNOWN if result_node is None else self._type_fact(result_node)
+        is_method = bool(parameter_ids and any(
+            b.id == parameter_ids[0] and b.kind == "self_parameter" for b in self.bindings
+        ))
+        function = Function(
+            record.binding.id,
+            body_span,
+            tuple(parameter_ids),
+            result,
+            record.generic,
+            record.is_async,
+            is_method,
+            record.variadic,
+        )
+        self.functions.append(function)
+        self.current_function, self.call_owner = old_function, old_call_owner
+
+    def _parameter(self, node: Any, scope: _Scope, body_span: ByteSpan) -> list[str]:
+        if node.type == "self_parameter":
+            self_node = next((c for c in self._descendants(node) if c.type == "self"), None)
+            if self_node is None:
+                return []
+            mutable = _has_keyword(self.text(node), "mut")
+            record = self._make_record(
+                self_node, "self_parameter", body_span, self.current_function,
+                self.module_depth, item=False, mutable=mutable,
+            )
+            self._add_to_scope(scope, record)
+            return [record.binding.id]
+        if node.type == "variadic_parameter":
+            return []
+        if node.type in {"identifier", "self"}:
+            record = self._make_record(
+                node, "parameter", body_span, self.current_function,
+                self.module_depth, item=False,
+            )
+            self._add_to_scope(scope, record)
+            return [record.binding.id]
+        pattern = node.child_by_field_name("pattern")
+        annotation = node.child_by_field_name("type")
+        fact = _UNKNOWN if annotation is None else self._type_fact(annotation)
+        mutable = _has_keyword(self.text(node)[: self.text(node).find(":")], "mut")
+        identifiers = []
+        for name_node, name_mutable in self._pattern_names(pattern, scope):
+            record = self._make_record(
+                name_node,
+                "parameter",
+                body_span,
+                self.current_function,
+                self.module_depth,
+                item=False,
+                type_fact=fact,
+                mutable=mutable or name_mutable,
+            )
+            self._add_to_scope(scope, record)
+            identifiers.append(record.binding.id)
+        return identifiers
+
+    def _type_fact(self, node: Any, aliases: frozenset[str] = frozenset()) -> TypeFact:
+        text = self.text(node).strip()
+        if not text:
+            return _UNKNOWN
+        if text == "()":
+            return TypeFact("unit", "()", 0, None, "")
+        if node.type == "primitive_type" or text in {
+            "i8", "i16", "i32", "i64", "i128", "isize",
+            "u8", "u16", "u32", "u64", "u128", "usize", "f32", "f64",
+            "bool", "char",
+        }:
+            if text == "bool":
+                return TypeFact("bool", text, 1, None, "")
+            if text == "char":
+                return TypeFact("char", text, 32, None, "")
+            if text in {"isize", "usize"}:
+                return TypeFact("int", text, self.pointer_width, text == "isize", "")
+            if text[0] in "iu" and text[1:].isdigit():
+                return TypeFact("int", text, int(text[1:]), text[0] == "i", "")
+            if text[0] == "f" and text[1:].isdigit():
+                return TypeFact("float", text, int(text[1:]), None, "")
+        if node.type in {"type_identifier", "identifier", "scoped_type_identifier"} and "::" not in text:
+            resolved = self._lookup(text, node.start_byte, "type")
+            if resolved is not None:
+                record = resolved
+                if record.binding.kind == "type_alias":
+                    if record.binding.id in aliases:
+                        return _UNKNOWN
+                    fact = self._type_fact(record.alias_node, aliases | {record.binding.id})
+                    return TypeFact(
+                        fact.kind, fact.name, fact.bit_width, fact.signed, record.binding.id
+                    )
+                if record.binding.kind in {"struct", "enum"}:
+                    return TypeFact("named", text, 0, None, record.binding.id)
+        return _UNKNOWN
+
+    def _pattern_names(self, pattern: Any | None, scope: _Scope) -> list[tuple[Any, bool]]:
+        if pattern is None:
+            return []
+        if pattern.type in {"identifier", "self"}:
+            name = self.text(pattern)
+            found, _ = self._lookup_with_boundary(name, pattern.start_byte, "value")
+            if found is not None and found.binding.kind in {
+                "const", "static", "struct",
+            } and (found.binding.kind != "struct" or found.struct_constructor):
+                self.references.append(Reference(self.span(pattern), found.binding.id, "read"))
+                return []
+            if self._name_imported_or_glob(name, pattern.start_byte):
+                self.gaps.append(Gap("pattern_name_ambiguous", self.span(pattern)))
+                scope.ambiguous_names[name] = (pattern.end_byte, scope.node.end_byte)
+                return []
+            return [
+                (
+                    pattern,
+                    _has_keyword(self.text(pattern.parent), "mut")
+                    if pattern.parent
+                    else False,
+                )
+            ]
+        if pattern.type in {"wildcard_pattern", "integer_literal", "boolean_literal", "char_literal", "string_literal", "negative_literal"}:
+            return []
+        if pattern.type in {"scoped_identifier", "scoped_type_identifier"}:
+            self.unresolved.append(
+                Unresolved(self.span(pattern), self.text(pattern), "qualified_path")
+            )
+            return []
+        if pattern.type == "tuple_struct_pattern":
+            out: list[tuple[Any, bool]] = []
+            children = pattern.named_children
+            for index, child in enumerate(children):
+                if index == 0 and child.type in {
+                    "identifier", "type_identifier", "scoped_identifier",
+                    "scoped_type_identifier",
+                }:
+                    if child.type in {"scoped_identifier", "scoped_type_identifier"}:
+                        self.unresolved.append(
+                            Unresolved(
+                                self.span(child),
+                                self.text(child),
+                                "qualified_path",
+                            )
+                        )
+                    continue
+                out.extend(self._pattern_names(child, scope))
+            return out
+        if pattern.type == "field_pattern":
+            value = pattern.child_by_field_name("pattern")
+            if value is not None:
+                return self._pattern_names(value, scope)
+            field = next(
+                (
+                    node
+                    for node in pattern.named_children
+                    if node.type in {"field_identifier", "shorthand_field_identifier"}
+                ),
+                None,
+            )
+            return [] if field is None else [(field, False)]
+        if pattern.type == "or_pattern":
+            alternatives = pattern.named_children
+            name_sets: list[list[tuple[Any, bool]]] = [
+                self._pattern_names(alternative, scope) for alternative in alternatives
+            ]
+            normalized = [tuple(sorted(self.text(n) for n, _ in values)) for values in name_sets]
+            if normalized and any(names != normalized[0] for names in normalized[1:]):
+                self.gaps.append(Gap("or_pattern_mismatch", self.span(pattern)))
+            if not name_sets:
+                return []
+            first: dict[str, tuple[Any, bool]] = {}
+            for name_node, mutable in name_sets[0]:
+                first.setdefault(self.text(name_node), (name_node, mutable))
+            return list(first.values())
+        if pattern.type in {
+            "tuple_pattern", "slice_pattern", "struct_pattern", "ref_pattern",
+            "mut_pattern", "captured_pattern", "remaining_field_pattern",
+            "field_pattern", "tuple_struct_pattern",
+        }:
+            out = []
+            for child in pattern.named_children:
+                if child.type == "field_identifier" and pattern.type == "struct_pattern":
+                    out.append((child, False))
+                    continue
+                if child.type == "type_identifier" and pattern.type == "struct_pattern":
+                    continue
+                out.extend(self._pattern_names(child, scope))
+            return out
+        if pattern.type in {"match_pattern", "condition"}:
+            out = []
+            for child in pattern.named_children:
+                if child.type in {"binary_expression", "call_expression"}:
+                    continue
+                out.extend(self._pattern_names(child, scope))
+            return out
+        self.gaps.append(Gap("unsupported_syntax", self.span(pattern)))
+        return []
+
+    def _lookup_with_boundary(self, name: str, position: int, namespace: str) -> tuple[_Record | None, str | None]:
+        blocked: str | None = None
+        for scope in reversed(self.scopes):
+            if scope.module_depth < self.module_depth and self.module_depth > 0:
+                if name in scope.bindings:
+                    blocked = "module_boundary"
+                continue
+            records = scope.bindings.get(name, ())
+            for record in reversed(records):
+                if record.binding.scope is not None and record.binding.scope != ByteSpan(0, 0) and not (
+                    record.binding.scope.start <= position < record.binding.scope.end
+                ):
+                    continue
+                if not self._in_namespace(record, namespace):
+                    continue
+                if not record.item and record.owner_function != self.current_function:
+                    blocked = "item_boundary"
+                    continue
+                return record, None
+            ambiguous = scope.ambiguous_names.get(name)
+            if ambiguous is not None and ambiguous[0] <= position < ambiguous[1]:
+                return None, "unknown_name"
+            if scope.glob_import:
+                blocked = blocked or "glob_import"
+        return None, blocked
+
+    def _lookup(self, name: str, position: int, namespace: str) -> _Record | None:
+        return self._lookup_with_boundary(name, position, namespace)[0]
+
+    @staticmethod
+    def _in_namespace(record: _Record, namespace: str) -> bool:
+        kind = record.binding.kind
+        if namespace == "type":
+            return kind in {"struct", "enum", "type_alias", "trait", "union", "import"}
+        if kind == "struct":
+            return record.struct_constructor
+        return kind not in {"enum", "trait", "union", "type_alias", "module", "associated_const", "associated_function"}
+
+    def _name_imported_or_glob(self, name: str, position: int) -> bool:
+        for scope in reversed(self.scopes):
+            if name in scope.bindings and any(r.binding.kind == "import" for r in scope.bindings[name]):
+                return True
+            if scope.glob_import:
+                return True
+        return False
+
+    def _reference(self, node: Any, kind: str = "read", namespace: str = "value") -> _Record | None:
+        name = self.text(node)
+        if node.type in {"scoped_identifier", "scoped_type_identifier"}:
+            self.unresolved.append(Unresolved(self.span(node), name, "qualified_path"))
+            return None
+        record, boundary = self._lookup_with_boundary(name, node.start_byte, namespace)
+        if record is not None:
+            self.references.append(Reference(self.span(node), record.binding.id, kind))
+            return record
+        reason = boundary or ("prelude_name" if name in _PRELUDE_NAMES else "unknown_name")
+        self.unresolved.append(Unresolved(self.span(node), name, reason))
+        return None
+
+    def _let(self, node: Any, scope: _Scope) -> None:
+        pattern = node.child_by_field_name("pattern")
+        value = node.child_by_field_name("value")
+        annotation = node.child_by_field_name("type")
+        if value is not None:
+            self._expr(value)
+        fact = _UNKNOWN if annotation is None else self._type_fact(annotation)
+        alternative = node.child_by_field_name("alternative")
+        if alternative is not None:
+            self._expr(alternative)
+        names = self._pattern_names(pattern, scope)
+        mutable = _has_keyword(self.text(pattern), "mut") or _has_keyword(
+            self.raw[node.start_byte : pattern.start_byte].decode("utf-8"), "mut"
+        )
+        for name_node, name_mutable in names:
+            record = self._make_record(
+                name_node,
+                "local",
+                ByteSpan(node.end_byte, scope.node.end_byte),
+                self.current_function,
+                self.module_depth,
+                item=False,
+                type_fact=fact,
+                mutable=mutable or name_mutable,
+            )
+            self._add_to_scope(scope, record)
+
+    def _expr(self, node: Any | None) -> None:
+        if node is None:
+            return
+        kind = node.type
+        if kind in {"macro_invocation", "macro_definition"}:
+            self.gaps.append(Gap("macro_invocation" if kind == "macro_invocation" else "macro_definition", self.span(node)))
+            return
+        if kind in {"identifier", "self"}:
+            self._reference(node)
+            return
+        if kind in {"scoped_identifier", "scoped_type_identifier", "generic_function"}:
+            self.unresolved.append(Unresolved(self.span(node), self.text(node), "qualified_path"))
+            return
+        if kind == "call_expression":
+            self._call(node)
+            return
+        if kind == "method_call_expression":
+            self._method_call(node)
+            return
+        if kind == "field_expression":
+            base = node.child_by_field_name("value")
+            if base is not None:
+                self._expr(base)
+            return
+        if kind == "struct_expression":
+            name_node = node.child_by_field_name("name")
+            if name_node is not None:
+                self._reference(name_node, "read", "type")
+            fields = node.child_by_field_name("body")
+            if fields is not None:
+                for initializer in fields.named_children:
+                    if initializer.type == "shorthand_field_initializer":
+                        identifier = next(
+                            (
+                                child
+                                for child in initializer.named_children
+                                if child.type == "identifier"
+                            ),
+                            None,
+                        )
+                        if identifier is not None:
+                            self._expr(identifier)
+                    elif initializer.type == "field_initializer":
+                        self._expr(initializer.child_by_field_name("value"))
+                    elif initializer.type == "base_field_initializer":
+                        for child in initializer.named_children:
+                            self._expr(child)
+                    else:
+                        self.gaps.append(
+                            Gap("unsupported_syntax", self.span(initializer))
+                        )
+            return
+        if kind in {"assignment_expression", "compound_assignment_expr"}:
+            left, right = node.child_by_field_name("left"), node.child_by_field_name("right")
+            if left is not None:
+                target = left
+                while target.type in {"parenthesized_expression", "reference_expression"}:
+                    child = target.named_children[-1] if target.named_children else None
+                    if child is None:
+                        break
+                    target = child
+                is_compound = kind == "compound_assignment_expr" or "+=" in self.text(node)[: max(0, target.end_byte - node.start_byte)]
+                if target.type in {"identifier", "self"}:
+                    record = self._reference(target, "read" if is_compound else "write")
+                    if is_compound and record is not None:
+                        self.references.append(
+                            Reference(self.span(target), record.binding.id, "write")
+                        )
+                elif target.type == "unary_expression" and self.text(target).lstrip().startswith("*"):
+                    operand = target.named_children[-1] if target.named_children else None
+                    if operand is not None and operand.type in {"identifier", "self"}:
+                        record = self._reference(
+                            operand, "read" if is_compound else "write"
+                        )
+                        if is_compound and record is not None:
+                            self.references.append(
+                                Reference(self.span(operand), record.binding.id, "write")
+                            )
+                    else:
+                        self._expr(target)
+                else:
+                    self._expr(target)
+            self._expr(right)
+            return
+        if kind == "let_declaration":
+            if self.scopes:
+                self._let(node, self.scopes[-1])
+            return
+        if kind == "let_condition":
+            self.gaps.append(Gap("unsupported_syntax", self.span(node)))
+            return
+        if kind == "block":
+            self._block(node)
+            return
+        if kind == "closure_expression":
+            self._closure(node)
+            return
+        if kind == "if_expression":
+            self._if(node)
+            return
+        if kind == "while_expression":
+            self._while(node)
+            return
+        if kind == "for_expression":
+            self._for(node)
+            return
+        if kind == "match_expression":
+            self._match(node)
+            return
+        if kind == "parenthesized_expression":
+            for child in node.named_children:
+                self._expr(child)
+            return
+        if kind in _TRANSPARENT_NODES:
+            for child in node.named_children:
+                self._expr(child)
+            return
+        if kind in _EXPR_NODES or kind in {
+            "return_expression", "break_expression", "continue_expression",
+            "await_expression", "try_expression", "yield_expression",
+        }:
+            for child in node.named_children:
+                self._expr(child)
+            return
+        if kind in {
+            "integer_literal", "float_literal", "boolean_literal", "char_literal",
+            "string_literal", "raw_string_literal", "byte_string_literal",
+            "unit_expression", "self_parameter", "primitive_type", "type_identifier",
+            "field_identifier", "attribute_item", "inner_attribute_item",
+            "line_comment", "block_comment", "token_tree",
+        }:
+            return
+        if kind in {"type_item", "struct_item", "enum_item", "union_item", "trait_item"}:
+            return
+        if kind in {"expression_statement"}:
+            for child in node.named_children:
+                self._expr(child)
+            return
+        # Every syntax node that can conceal a read is surfaced as a gap.
+        self.gaps.append(Gap("unsupported_syntax", self.span(node)))
+
+    def _block(self, node: Any) -> None:
+        scope = _Scope(node, self.module_depth, self.current_function)
+        self.scopes.append(scope)
+        self._predeclare(node, scope)
+        self._scan_container(node, scope)
+        self.scopes.pop()
+
+    def _condition(
+        self, condition: Any, scope: _Scope
+    ) -> list[tuple[Any, bool]]:
+        if condition.type == "let_condition":
+            pattern = condition.child_by_field_name("pattern")
+            value = condition.child_by_field_name("value")
+            if value is None:
+                named = condition.named_children
+                value = named[-1] if named else None
+            if value is not None:
+                self._expr(value)
+            return self._pattern_names(pattern, scope)
+        if any(node.type == "let_condition" for node in self._descendants(condition)):
+            self.gaps.append(Gap("unsupported_syntax", self.span(condition)))
+            return []
+        self._expr(condition)
+        return []
+
+    def _if(self, node: Any) -> None:
+        condition = node.child_by_field_name("condition")
+        consequence = node.child_by_field_name("consequence")
+        alternative = node.child_by_field_name("alternative")
+        if consequence is not None:
+            scope = _Scope(consequence, self.module_depth, self.current_function)
+            self.scopes.append(scope)
+            names = [] if condition is None else self._condition(condition, scope)
+            self._bind_pattern_names(names, scope, self.span(consequence))
+            self._expr(consequence)
+            self.scopes.pop()
+        elif condition is not None:
+            self._condition(condition, self.scopes[-1])
+        if alternative is not None:
+            self._expr(alternative)
+
+    def _while(self, node: Any) -> None:
+        condition = node.child_by_field_name("condition")
+        body = node.child_by_field_name("body")
+        if body is not None:
+            scope = _Scope(body, self.module_depth, self.current_function)
+            self.scopes.append(scope)
+            names = [] if condition is None else self._condition(condition, scope)
+            self._bind_pattern_names(names, scope, self.span(body))
+            self._expr(body)
+            self.scopes.pop()
+        elif condition is not None:
+            self._condition(condition, self.scopes[-1])
+
+    def _for(self, node: Any) -> None:
+        iterator = node.child_by_field_name("value")
+        pattern = node.child_by_field_name("pattern")
+        body = node.child_by_field_name("body")
+        if iterator is not None:
+            self._expr(iterator)
+        if body is not None:
+            scope = _Scope(body, self.module_depth, self.current_function)
+            self.scopes.append(scope)
+            self._bind_pattern(pattern, scope, self.span(body), _UNKNOWN)
+            self._expr(body)
+            self.scopes.pop()
+
+    def _match(self, node: Any) -> None:
+        value = node.child_by_field_name("value")
+        if value is not None:
+            self._expr(value)
+        body = node.child_by_field_name("body")
+        if body is None:
+            return
+        for arm in body.named_children:
+            if arm.type != "match_arm":
+                self.gaps.append(Gap("unsupported_syntax", self.span(arm)))
+                continue
+            arm_scope = _Scope(arm, self.module_depth, self.current_function)
+            self.scopes.append(arm_scope)
+            pattern = arm.child_by_field_name("pattern")
+            names = self._pattern_names(pattern, arm_scope)
+            self._bind_pattern_names(names, arm_scope, self.span(arm))
+            guard = arm.child_by_field_name("condition")
+            if guard is not None:
+                self._expr(guard)
+            result = arm.child_by_field_name("value")
+            if result is not None:
+                self._expr(result)
+            self.scopes.pop()
+
+    def _bind_pattern_names(
+        self,
+        names: list[tuple[Any, bool]],
+        scope: _Scope,
+        binding_scope: ByteSpan,
+        type_fact: TypeFact = _UNKNOWN,
+    ) -> None:
+        for name_node, mutable in names:
+            record = self._make_record(
+                name_node, "local", binding_scope, self.current_function,
+                self.module_depth, item=False, type_fact=type_fact, mutable=mutable,
+            )
+            self._add_to_scope(scope, record)
+
+    def _bind_pattern(
+        self, pattern: Any, scope: _Scope, binding_scope: ByteSpan, type_fact: TypeFact
+    ) -> None:
+        self._bind_pattern_names(self._pattern_names(pattern, scope), scope, binding_scope, type_fact)
+
+    def _closure(self, node: Any) -> None:
+        params = node.child_by_field_name("parameters")
+        body = node.child_by_field_name("body")
+        if body is None:
+            return
+        closure_scope = _Scope(body, self.module_depth, self.current_function)
+        self.scopes.append(closure_scope)
+        old_owner = self.call_owner
+        self.call_owner = ""
+        if params is not None:
+            for parameter in params.named_children:
+                self._parameter(parameter, closure_scope, self.span(body))
+        self._expr(body)
+        self.call_owner = old_owner
+        self.scopes.pop()
+
+    def _callee(self, node: Any) -> Any:
+        while node.type == "parenthesized_expression" and len(node.named_children) == 1:
+            node = node.named_children[0]
+        return node
+
+    def _call(self, node: Any) -> None:
+        callee = node.child_by_field_name("function")
+        arguments_node = node.child_by_field_name("arguments")
+        args = () if arguments_node is None else tuple(
+            self.span(arg) for arg in arguments_node.named_children
+        )
+        callee = None if callee is None else self._callee(callee)
+        span = self.span(node)
+        kind = "opaque_expression"
+        target = ""
+        if callee is not None and callee.type in {"scoped_identifier", "scoped_type_identifier"}:
+            self.unresolved.append(Unresolved(self.span(callee), self.text(callee), "qualified_path"))
+            kind = "opaque_path"
+        elif callee is not None and callee.type == "generic_function":
+            inner = callee.child_by_field_name("function")
+            if inner is not None and inner.type == "identifier":
+                record = self._reference(inner, "call")
+                if record is None:
+                    kind = "unresolved"
+                else:
+                    target = record.binding.id
+                    kind = (
+                        "opaque_import"
+                        if record.binding.kind == "import"
+                        else "opaque_generic"
+                    )
+            else:
+                self.unresolved.append(
+                    Unresolved(self.span(callee), self.text(callee), "qualified_path")
+                )
+                kind = "opaque_path"
+        elif callee is not None and callee.type == "identifier":
+            record = self._reference(callee, "call")
+            if record is None:
+                kind = "unresolved"
+            else:
+                target = record.binding.id
+                binding_kind = record.binding.kind
+                if binding_kind == "struct":
+                    kind = "constructor"
+                elif binding_kind == "import":
+                    kind = "opaque_import"
+                elif binding_kind == "function":
+                    if record.extern or record.body_node is None:
+                        kind = "opaque_bodyless"
+                    elif record.generic or "::<" in self.text(node):
+                        kind = "opaque_generic"
+                    elif record.is_async:
+                        kind = "opaque_async"
+                    else:
+                        kind = "direct_local"
+                elif binding_kind in {"local", "parameter", "self_parameter", "const", "static"}:
+                    kind = "opaque_value"
+                else:
+                    kind = "opaque_value"
+        elif callee is not None and callee.type == "field_expression":
+            value = callee.child_by_field_name("value")
+            if value is not None:
+                self._expr(value)
+            kind = "opaque_method"
+        elif callee is not None:
+            self._expr(callee)
+        if arguments_node is not None:
+            for argument in arguments_node.named_children:
+                self._expr(argument)
+        self.calls.append(Call(span, args, self.call_owner, target, kind))
+
+    def _method_call(self, node: Any) -> None:
+        receiver = node.child_by_field_name("receiver")
+        if receiver is None:
+            receiver = node.named_children[0] if node.named_children else None
+        if receiver is not None:
+            self._expr(receiver)
+        args_node = node.child_by_field_name("arguments")
+        args = () if args_node is None else tuple(self.span(arg) for arg in args_node.named_children)
+        if args_node is not None:
+            for arg in args_node.named_children:
+                self._expr(arg)
+        self.calls.append(Call(self.span(node), args, self.call_owner, "", "opaque_method"))
+
+
+def build_rust_bindings(source: str, *, pointer_width: int) -> LexicalBindingReport:
+    if pointer_width not in {16, 32, 64} or type(pointer_width) is not int:
+        raise LexicalReportError("pointer width must be 16, 32, or 64")
+    try:
+        raw = source.encode("utf-8")
+    except UnicodeError:
+        raise LexicalReportError("unsupported Rust source encoding") from None
+    if len(raw) > MAX_SOURCE_BYTES:
+        raise LexicalReportError("Rust source exceeds the lexical report limit")
+    try:
+        from tree_sitter import Language, Parser  # type: ignore[import-not-found]
+        import tree_sitter_rust  # type: ignore[import-not-found]
+
+        parser = Parser(Language(tree_sitter_rust.language()))
+        root = parser.parse(raw).root_node
+    except Exception as exc:
+        raise LexicalReportError("Rust source could not be parsed") from exc
+    if root.has_error or any(node.is_missing for node in _walk(root)):
+        raise LexicalReportError("Rust source has parse errors or missing nodes")
+    return _RustBindings(source, raw, pointer_width, root).build()
+
+
+def _walk(root: Any):
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        yield node
+        stack.extend(node.children)
+
+
+def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.ArgumentParser:
+    parser = parser or argparse.ArgumentParser(
+        prog="python -m agent rust-bindings",
+        description="Emit a conservative Rust lexical binding report as JSON.",
+    )
+    parser.add_argument("file", type=Path, help="Rust source file")
+    parser.add_argument(
+        "--pointer-width",
+        type=int,
+        choices=(16, 32, 64),
+        required=True,
+        help="Target pointer width used for isize and usize",
+    )
+    return parser
+
+
+def main(args: argparse.Namespace) -> int:
+    try:
+        source = args.file.read_text(encoding="utf-8")
+        report = build_rust_bindings(source, pointer_width=args.pointer_width)
+        sys.stdout.write(report.to_json())
+        return 0
+    except (OSError, UnicodeError, LexicalReportError) as exc:
+        print(f"rust-bindings: {exc}", file=sys.stderr)
+        return 2

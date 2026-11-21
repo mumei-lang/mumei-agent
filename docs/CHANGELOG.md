@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased: Rust lexical binding report
+
+- Added `rust-bindings`, an opt-in tree-sitter report of single-file Rust
+  lexical bindings, scopes, references, explicit scalar type facts, and
+  conservative call classifications. Unresolved names and unsupported
+  behavior remain explicit; the report is lexical metadata, not a type check,
+  proof, or verdict. C06 remains partially delivered, with no default route,
+  audit, Seal Grade, or Lean changes.
+
 ## Unreleased: Solidity access control
 
 - The Solidity missing-access-control advisory skips functions that act on the

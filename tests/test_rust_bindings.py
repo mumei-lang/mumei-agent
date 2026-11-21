@@ -1,0 +1,385 @@
+import subprocess
+import sys
+
+import pytest
+
+from agent.lexical_bindings import LexicalReportError, load_lexical_report
+from agent.rust_bindings import PROFILE, build_rust_bindings
+
+
+def _bindings(report, name, kind=None):
+    return sorted(
+        (
+            binding
+            for binding in report.bindings
+            if binding.name == name and (kind is None or binding.kind == kind)
+        ),
+        key=lambda binding: binding.span.start,
+    )
+
+
+def _refs(report, source, name):
+    raw = source.encode()
+    return sorted(
+        (
+            ref
+            for ref in report.references
+            if raw[ref.span.start : ref.span.end].decode() == name
+        ),
+        key=lambda ref: (ref.span.start, ref.kind),
+    )
+
+
+def _unresolved(report, name=None, reason=None):
+    return [
+        item
+        for item in report.unresolved
+        if (name is None or item.name == name) and (reason is None or item.reason == reason)
+    ]
+
+
+def _call(report, source, call_text):
+    raw = source.encode()
+    return next(
+        call
+        for call in report.calls
+        if raw[call.span.start : call.span.end].decode() == call_text
+    )
+
+
+def test_shadowing_initializer_resolves_outer_binding_and_spans_are_utf8_bytes():
+    source = "fn f(){ let x = 1; let x = x + 1; x; }"
+    report = build_rust_bindings(source, pointer_width=64)
+    first, second = _bindings(report, "x", "local")
+    refs = _refs(report, source, "x")
+    assert len((first, second)) == 2
+    assert [ref.binding_id for ref in refs] == [first.id, second.id]
+
+    unicode_source = "fn f(){ let λ = 1; λ; }"
+    unicode_report = build_rust_bindings(unicode_source, pointer_width=64)
+    for binding in _bindings(unicode_report, "λ", "local"):
+        assert unicode_source.encode()[binding.span.start : binding.span.end] == "λ".encode()
+    for reference in _refs(unicode_report, unicode_source, "λ"):
+        assert unicode_source.encode()[reference.span.start : reference.span.end] == "λ".encode()
+
+
+def test_reassignment_is_write_and_compound_assignment_is_read_write():
+    source = "fn f(){ let mut x = 1; x = 2; x += 3; x; }"
+    report = build_rust_bindings(source, pointer_width=64)
+    binding = _bindings(report, "x", "local")[0]
+    refs = _refs(report, source, "x")
+    assert binding.mutable
+    assert [ref.kind for ref in refs] == ["write", "read", "write", "read"]
+    assert all(ref.binding_id == binding.id for ref in refs)
+    name_source = "fn f(){ let mutation = 1; }"
+    assert not _bindings(
+        build_rust_bindings(name_source, pointer_width=64), "mutation", "local"
+    )[0].mutable
+
+
+def test_dereference_compound_assignment_reads_and_writes_the_pointer():
+    source = "fn f(mut pointer: &mut i32){ *pointer += 1; }"
+    report = build_rust_bindings(source, pointer_width=64)
+    binding = _bindings(report, "pointer", "parameter")[0]
+    refs = _refs(report, source, "pointer")
+    assert [ref.kind for ref in refs] == ["read", "write"]
+    assert all(ref.binding_id == binding.id for ref in refs)
+
+
+def test_block_scope_and_nested_item_boundary_are_explicit():
+    source = "fn f(x:i32){ { let y = 1; } y; fn nested(){ x; } }"
+    report = build_rust_bindings(source, pointer_width=64)
+    assert _unresolved(report, "y", "unknown_name")
+    assert _unresolved(report, "x", "item_boundary")
+
+
+def test_items_are_visible_before_declaration_and_calls_are_conservative():
+    source = "fn first(){ later(); } fn later(){}"
+    report = build_rust_bindings(source, pointer_width=64)
+    call = _call(report, source, "later()")
+    later = _bindings(report, "later", "function")[0]
+    assert call.kind == "direct_local"
+    assert call.target == later.id
+    assert later.id.endswith(":0:0")
+    assert _refs(report, source, "later")[0].kind == "call"
+
+
+def test_inline_module_does_not_resolve_outer_module_items():
+    source = "fn outer(){} mod inner { fn f(){ outer(); } }"
+    report = build_rust_bindings(source, pointer_width=64)
+    assert _unresolved(report, "outer", "module_boundary")
+
+
+def test_closure_captures_lexically_and_does_not_claim_call_owner():
+    source = "fn target(x:i32){} fn f(x:i32){ let c = |q| target(q + x); c(1); }"
+    report = build_rust_bindings(source, pointer_width=64)
+    target_call = _call(report, source, "target(q + x)")
+    closure_call = _call(report, source, "c(1)")
+    assert target_call.owner == ""
+    assert target_call.kind == "direct_local"
+    assert closure_call.kind == "opaque_value"
+    assert closure_call.owner == _bindings(report, "f", "function")[0].id
+    captured_parameter = _bindings(report, "x", "parameter")[-1]
+    assert any(
+        ref.binding_id == captured_parameter.id
+        for ref in _refs(report, source, "x")
+    )
+
+
+def test_match_const_patterns_imported_names_and_or_patterns():
+    source = "const K:u8=1; fn f(v:u8){ match v { K => (), Some(x) | Other(x) => { x; }, _ => () } }"
+    report = build_rust_bindings(source, pointer_width=64)
+    const = _bindings(report, "K", "const")[0]
+    assert any(ref.binding_id == const.id for ref in _refs(report, source, "K"))
+    assert len(_bindings(report, "x", "local")) == 1
+    assert not any(g.reason == "or_pattern_mismatch" for g in report.gaps)
+
+    mismatch = build_rust_bindings(
+        "fn f(v:u8){ match v { A(x) | B(y) => (), _ => () } }",
+        pointer_width=64,
+    )
+    assert any(g.reason == "or_pattern_mismatch" for g in mismatch.gaps)
+
+    imported_source = "use foo::K; fn f(v:u8){ match v { K => (), _ => () } }"
+    imported = build_rust_bindings(imported_source, pointer_width=64)
+    assert any(g.reason == "pattern_name_ambiguous" for g in imported.gaps)
+    later_use_source = (
+        "use external::K; fn f(value: Option<i32>) { match value { K => K, _ => 0 }; }"
+    )
+    later_use = build_rust_bindings(later_use_source, pointer_width=64)
+    assert _unresolved(later_use, "K", "unknown_name")
+
+
+def test_if_while_for_and_let_else_scopes():
+    source = """
+fn f(xs: Vec<u8>) {
+    if let Some(a) = get() { a; } else { a; }
+    while let Some(b) = get() { b; }
+    for item in item { item; }
+    let Some(c) = get() else { c; };
+    c;
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    assert _unresolved(report, "a", "unknown_name")
+    assert _unresolved(report, "c", "unknown_name")
+    assert _unresolved(report, "item", "unknown_name")
+    assert any(g.reason == "pattern_name_ambiguous" for g in report.gaps) is False
+    assert len(_bindings(report, "b", "local")) == 1
+
+
+@pytest.mark.parametrize(
+    ("width", "typ", "kind", "bits", "signed"),
+    [
+        (64, "i8", "int", 8, True), (64, "i16", "int", 16, True),
+        (64, "i32", "int", 32, True), (64, "i64", "int", 64, True),
+        (64, "i128", "int", 128, True), (64, "u8", "int", 8, False),
+        (64, "u16", "int", 16, False), (64, "u32", "int", 32, False),
+        (64, "u64", "int", 64, False), (64, "u128", "int", 128, False),
+        (16, "isize", "int", 16, True), (32, "isize", "int", 32, True),
+        (64, "isize", "int", 64, True), (16, "usize", "int", 16, False),
+        (32, "usize", "int", 32, False), (64, "usize", "int", 64, False),
+        (64, "f32", "float", 32, None), (64, "f64", "float", 64, None),
+        (64, "bool", "bool", 1, None), (64, "char", "char", 32, None),
+    ],
+)
+def test_explicit_primitive_type_facts(width, typ, kind, bits, signed):
+    report = build_rust_bindings(f"fn f(x: {typ}) {{ let y: {typ} = x; }}", pointer_width=width)
+    assert _bindings(report, "x", "parameter")[0].type.kind == kind
+    fact = _bindings(report, "x", "parameter")[0].type
+    assert (fact.bit_width, fact.signed) == (bits, signed)
+    assert _bindings(report, "y", "local")[0].type == fact
+
+
+def test_alias_chains_named_local_types_and_unsupported_types_stay_unknown():
+    source = """
+type A = u8;
+type B = A;
+struct S;
+enum E { Value }
+fn f(a:B, s:S, e:E) { let x: B = 1; let r: &u8 = &x; let t: (u8,u8)=(1,2); let z=[1u8;4]; let n = 1; }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    alias = _bindings(report, "B", "type_alias")[0]
+    assert _bindings(report, "a", "parameter")[0].type.type_id == alias.id
+    assert _bindings(report, "s", "parameter")[0].type.kind == "named"
+    assert _bindings(report, "e", "parameter")[0].type.kind == "named"
+    assert _bindings(report, "x", "local")[0].type.type_id == alias.id
+    for name in ("r", "t", "z", "n"):
+        assert _bindings(report, name, "local")[0].type.kind == "unknown"
+
+    cycle = build_rust_bindings("type A=B; type B=A; fn f(x:A){}", pointer_width=64)
+    assert _bindings(cycle, "x", "parameter")[0].type.kind == "unknown"
+
+
+def test_macros_and_glob_imports_keep_hidden_names_unresolved_and_incomplete():
+    macro_source = 'fn f(x:i32){ println!("{}", x); }'
+    macro = build_rust_bindings(macro_source, pointer_width=64)
+    assert not _refs(macro, macro_source, "x")
+    assert any(g.reason == "macro_invocation" for g in macro.gaps)
+    assert not macro.complete
+
+    source = "use foo::*; fn f(){ bar(); }"
+    report = build_rust_bindings(source, pointer_width=64)
+    assert _unresolved(report, "bar", "glob_import")
+    assert any(g.reason == "glob_import" for g in report.gaps)
+
+
+def test_use_imports_prelude_qualified_method_and_generic_calls():
+    source = """
+use std::cmp::max;
+fn generic<T>(x:T){}
+async fn asynchronous(){}
+fn f(x:i32){
+  max(x,x); Some(x); Vec::new(); Self::f(); crate::f(); self_call();
+  generic(x); generic::<i32>(x); asynchronous(); x.abs();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    assert _bindings(report, "max", "import")
+    assert _call(report, source, "max(x,x)").kind == "opaque_import"
+    assert _unresolved(report, "Some", "prelude_name")
+    assert any(item.reason == "qualified_path" for item in report.unresolved)
+    assert _call(report, source, "Some(x)").kind == "unresolved"
+    assert _call(report, source, "Vec::new()").kind == "opaque_path"
+    assert _call(report, source, "Self::f()").kind == "opaque_path"
+    assert _call(report, source, "crate::f()").kind == "opaque_path"
+    assert _call(report, source, "x.abs()").kind == "opaque_method"
+    assert _call(report, source, "generic(x)").kind == "opaque_generic"
+    assert _call(report, source, "generic::<i32>(x)").kind == "opaque_generic"
+    assert _call(report, source, "asynchronous()").kind == "opaque_async"
+
+
+def test_tuple_struct_constructor_parenthesized_fn_and_struct_shorthand():
+    source = """
+struct Pair(u8);
+fn f(x:u8){ fn helper(y:u8){} (helper)(x); Pair(x); let p = Point { x }; }
+struct Point { x:u8 }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    assert _call(report, source, "(helper)(x)").kind == "direct_local"
+    assert _call(report, source, "Pair(x)").kind == "constructor"
+    assert _refs(report, source, "x")[-1].binding_id == _bindings(report, "x", "parameter")[0].id
+
+
+def test_struct_pattern_shorthand_creates_a_local_binding():
+    source = "struct Point { value:u8 } fn f(point:Point){ let Point { value }=point; value; }"
+    report = build_rust_bindings(source, pointer_width=64)
+    local = _bindings(report, "value", "local")[0]
+    assert _refs(report, source, "value")[0].binding_id == local.id
+
+
+def test_associated_functions_are_not_bare_names_and_self_is_a_parameter():
+    source = "struct S; impl S { fn method(&mut self){ self_call(); } } fn f(){ method(); }"
+    report = build_rust_bindings(source, pointer_width=64)
+    method = _bindings(report, "method", "associated_function")[0]
+    fn_record = next(fn for fn in report.functions if fn.binding_id == method.id)
+    assert fn_record.method
+    assert _bindings(report, "self", "self_parameter")[0].mutable
+    assert _unresolved(report, "method", "unknown_name")
+
+
+def test_static_mut_write_parse_limits_source_hash_and_determinism():
+    source = "static mut COUNT:u8=0; fn f(){ COUNT = 1; }"
+    report = build_rust_bindings(source, pointer_width=64)
+    assert _bindings(report, "COUNT", "static")[0].mutable
+    assert _refs(report, source, "COUNT")[0].kind == "write"
+    assert report.to_json() == build_rust_bindings(source, pointer_width=64).to_json()
+    changed = build_rust_bindings(source + " ", pointer_width=64)
+    assert report.source_sha256 != changed.source_sha256
+    assert report.bindings[0].id != changed.bindings[0].id
+    with pytest.raises(LexicalReportError):
+        build_rust_bindings("fn broken( {", pointer_width=64)
+    with pytest.raises(LexicalReportError):
+        build_rust_bindings(" " * (64 * 1024 + 1), pointer_width=64)
+    for invalid in (8, True, 128):
+        with pytest.raises(LexicalReportError):
+            build_rust_bindings("fn f(){}", pointer_width=invalid)
+
+
+def test_explicit_function_const_static_and_unit_types_and_extern_calls():
+    source = """
+const fn counted() -> u16 { 2 }
+const COUNT: u16 = counted();
+const fn enabled() -> bool { true }
+static STATE: bool = enabled();
+fn unit() -> () {}
+extern "C" { fn external(value: u8); }
+fn caller() { external(1); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    assert _bindings(report, "COUNT", "const")[0].type.bit_width == 16
+    assert _bindings(report, "STATE", "static")[0].type.kind == "bool"
+    unit = next(fn for fn in report.functions if fn.binding_id == _bindings(report, "unit", "function")[0].id)
+    assert unit.result.kind == "unit"
+    assert _call(report, source, "counted()").owner == ""
+    assert _call(report, source, "enabled()").owner == ""
+    assert _call(report, source, "external(1)").kind == "opaque_bodyless"
+
+
+def test_use_group_self_alias_names_and_report_completeness():
+    source = "use foo::{self, a, b as d}; fn f(){ a(); d(); foo(); }"
+    report = build_rust_bindings(source, pointer_width=64)
+    assert {binding.name for binding in report.bindings if binding.kind == "import"} == {
+        "foo", "a", "d"
+    }
+    assert all(
+        _call(report, source, call_text).kind == "opaque_import"
+        for call_text in ("a()", "d()", "foo()")
+    )
+    assert build_rust_bindings("fn clean(){}", pointer_width=64).complete
+    assert not build_rust_bindings("fn unresolved(){ missing(); }", pointer_width=64).complete
+
+
+def test_every_emitted_target_and_reference_points_to_an_existing_binding():
+    fixtures = [
+        "fn a(){} fn b(){a();}",
+        "fn f(x:i32){ x = 2; }",
+        "struct S(u8); fn f(){ S(1); }",
+        "impl S { fn m(&self){} } struct S;",
+    ]
+    for source in fixtures:
+        report = build_rust_bindings(source, pointer_width=64)
+        identifiers = {binding.id for binding in report.bindings}
+        assert all(ref.binding_id in identifiers for ref in report.references)
+        assert all(call.target == "" or call.target in identifiers for call in report.calls)
+        assert all(call.owner == "" or call.owner in identifiers for call in report.calls)
+        assert all(fn.binding_id in identifiers for fn in report.functions)
+        assert all(parameter in identifiers for fn in report.functions for parameter in fn.parameters)
+        restored = load_lexical_report(
+            report.to_json(), source, profile=PROFILE, target={"pointer_width": 64}
+        )
+        assert restored.to_json() == report.to_json()
+
+
+def test_cli_emits_loadable_json_requires_width_and_fails_closed(tmp_path):
+    source_file = tmp_path / "sample.rs"
+    source_file.write_text("fn f(){}", encoding="utf-8")
+    command = [sys.executable, "-m", "agent", "rust-bindings", str(source_file)]
+    missing = subprocess.run(command, capture_output=True, text=True, check=False)
+    assert missing.returncode == 2
+    success = subprocess.run(
+        [*command, "--pointer-width", "32"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert success.returncode == 0 and success.stderr == ""
+    loaded = load_lexical_report(
+        success.stdout,
+        source_file.read_text(),
+        profile=PROFILE,
+        target={"pointer_width": 32},
+    )
+    assert loaded.profile == PROFILE
+
+    source_file.write_text("fn broken( {", encoding="utf-8")
+    failed = subprocess.run(
+        [*command, "--pointer-width", "32"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert failed.returncode == 2
+    assert failed.stdout == ""
+    assert failed.stderr

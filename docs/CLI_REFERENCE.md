@@ -79,6 +79,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `native-source-recheck` | 7 | Run a declared Core native bundle source recheck as one attempt and emit the reconciled lineage plus the declared source recheck outcome. |
 | `native-evidence-recheck` | 8 | Replay a saved native consumer Evidence envelope against a fresh pinned recheck as one declared attempt and emit the reconciled lineage plus the declared outcome. |
 | `native-evidence-accept` | 8 | Run a declared Core native saved-Evidence acceptance as one attempt and emit the reconciled lineage plus the declared acceptance outcome. |
+| `rust-bindings` | 1 | Emit a conservative Rust lexical binding report as JSON; this is lexical metadata, not a type check, proof, or verdict. |
 | `rust-summaries` | 2 | Emit opt-in Rust interprocedural dependency summaries as JSON — a conservative report, not a proof or verdict. |
 | `rust-summaries-accept` | 4 | Re-derive the Rust summary set for one declared source and accept one function's summary under the strict whole-context gate. |
 | `rust-summaries-check` | 4 | Re-derive the Rust summary set for one declared source and check a declared manifest's functions against it. |
@@ -1241,6 +1242,23 @@ Run a declared Core native saved-Evidence acceptance as one attempt and emit the
 | `--attempt-timeout` | `<<MS>>` | no | 30000 | Declared attempt bound in milliseconds. |
 | `--memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling applied to the attempt child's whole address space. |
 | `--output` | `<PATH>` | no | — | Write the evidence-accept report JSON here instead of stdout. |
+
+
+## `mumei-agent rust-bindings`
+
+Emit a conservative Rust lexical binding report as JSON; this is lexical metadata, not a type check, proof, or verdict.
+
+### Positional arguments
+
+| Argument | Required | Value | Description |
+|---|---|---|---|
+| `file` | yes | `<FILE>` | Rust source file |
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--pointer-width` | `{16, 32, 64}` | yes | — | Target pointer width used for isize and usize |
 
 
 ## `mumei-agent rust-summaries`
