@@ -157,6 +157,23 @@ def _build_import_graph(
     return graph, unresolved
 
 
+def _real_path_aliases(
+    std_dir: Path, file_keys: set[str]
+) -> tuple[dict[Path, set[str]], dict[str, set[str]]]:
+    aliases_by_path: dict[Path, set[str]] = {}
+    for key in file_keys:
+        path = std_dir.parent / key
+        try:
+            real_path = path.resolve()
+        except OSError:
+            real_path = path
+        aliases_by_path.setdefault(real_path, set()).add(key)
+    aliases_by_key = {
+        key: aliases for aliases in aliases_by_path.values() for key in aliases
+    }
+    return aliases_by_path, aliases_by_key
+
+
 def dependency_invalidation_map(std_dir: Path, changed: str) -> dict[str, Any]:
     """Map files to re-derive, undetermined, or unaffected by *changed*.
 
@@ -172,29 +189,45 @@ def dependency_invalidation_map(std_dir: Path, changed: str) -> dict[str, Any]:
     resolution outside the scanned directory.
     """
     graph, unresolved = _build_import_graph(std_dir)
+    aliases_by_path, aliases_by_key = _real_path_aliases(std_dir, set(graph))
+    changed_path = std_dir.parent / changed
+    try:
+        changed_real_path = changed_path.resolve()
+    except OSError:
+        changed_real_path = changed_path
+    changed_aliases = aliases_by_path.get(changed_real_path, set())
 
     dependents: dict[str, set[str]] = {}
     for rel, deps in graph.items():
         for dep in deps:
             dependents.setdefault(dep, set()).add(rel)
 
-    re_derive: set[str] = set()
-    frontier = list(dependents.get(changed, ()))
+    seeds = {changed, *changed_aliases}
+    re_derive = changed_aliases - {changed}
+    frontier = [dependent for seed in seeds for dependent in dependents.get(seed, ())]
+    visited: set[str] = set()
     while frontier:
         node = frontier.pop()
-        if node in re_derive:
+        if node in visited:
             continue
-        re_derive.add(node)
-        frontier.extend(dependents.get(node, ()))
+        visited.add(node)
+        aliases = aliases_by_key.get(node, {node})
+        re_derive.update(aliases)
+        for alias in aliases:
+            frontier.extend(dependents.get(alias, ()))
 
     undetermined: set[str] = set(unresolved)
     frontier = list(undetermined)
+    visited.clear()
     while frontier:
         node = frontier.pop()
-        for dependent in dependents.get(node, ()):
-            if dependent not in undetermined:
-                undetermined.add(dependent)
-                frontier.append(dependent)
+        if node in visited:
+            continue
+        visited.add(node)
+        aliases = aliases_by_key.get(node, {node})
+        undetermined.update(aliases)
+        for alias in aliases:
+            frontier.extend(dependents.get(alias, ()))
 
     files = set(graph)
     undetermined.difference_update(re_derive)

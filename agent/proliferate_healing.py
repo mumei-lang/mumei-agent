@@ -9,6 +9,7 @@ for backwards compatibility.
 from __future__ import annotations
 
 import logging
+import posixpath
 from pathlib import Path
 from typing import Any
 
@@ -31,12 +32,16 @@ logger = logging.getLogger(__name__)
 
 def _repo_key(path: Path, repo: Path) -> str | None:
     try:
-        return path.relative_to(repo).as_posix()
+        relative = path.relative_to(repo).as_posix()
     except ValueError:
         try:
-            return path.resolve().relative_to(repo.resolve()).as_posix()
+            relative = path.resolve().relative_to(repo.resolve()).as_posix()
         except ValueError:
             return None
+    relative = posixpath.normpath(relative)
+    if relative == ".." or relative.startswith("../"):
+        return None
+    return relative
 
 
 def check_blast_radius(

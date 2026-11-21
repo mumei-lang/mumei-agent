@@ -15,7 +15,7 @@ from agent.dependency_invalidation import (
     _scan_import_declarations,
     dependency_invalidation_map,
 )
-from agent.proliferate_healing import check_blast_radius
+from agent.proliferate_healing import _repo_key, check_blast_radius
 
 
 def _mm(std_dir: Path, rel: str, body: str = "") -> Path:
@@ -95,6 +95,31 @@ class TestDeclaredImportTargets:
 
 
 class TestInvalidationMap:
+    @pytest.mark.parametrize(
+        ("changed", "expected_rederive"),
+        [
+            ("std/a.mm", ["std/alias.mm", "std/b.mm"]),
+            ("std/alias.mm", ["std/a.mm", "std/b.mm"]),
+        ],
+    )
+    def test_symlink_aliases_invalidate_symmetrically(
+        self, tmp_path, changed, expected_rederive
+    ):
+        repo = _repo(
+            tmp_path,
+            {
+                "a.mm": "atom a()\n    requires: true;\n",
+                "b.mm": 'import "std/alias" as alias;\n',
+            },
+        )
+        alias = repo / "std" / "alias.mm"
+        try:
+            alias.symlink_to(repo / "std" / "a.mm")
+        except (NotImplementedError, OSError) as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+        m = dependency_invalidation_map(repo / "std", changed)
+        assert m["re_derive"] == expected_rederive
+
     def test_malformed_import_is_undetermined(self, tmp_path):
         repo = _repo(
             tmp_path,
@@ -387,6 +412,13 @@ class _FakeMumeiClient:
 
 
 class TestBlastRadiusJoin:
+    def test_repo_key_normalizes_and_rejects_escaping_paths(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        candidate = repo / "std" / "x" / ".." / "new_mod.mm"
+        assert _repo_key(candidate, repo) == "std/new_mod.mm"
+        assert _repo_key(repo / ".." / "elsewhere.mm", repo) is None
+
     def test_broken_dependent_has_rederive_relation(self, tmp_path):
         std_dir = tmp_path / "std"
         _mm(std_dir, "a.mm", 'import "std/new_mod" as nm;\n')

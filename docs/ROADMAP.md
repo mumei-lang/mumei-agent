@@ -7607,7 +7607,7 @@ mumei 側の `analyze_std_gaps` MCP ツール（提案を吐き出す）と mume
   - `analyze_gaps` の依存グラフ、trusted atom、TODO 検出、ランキング
   - `generate_specs_from_gaps` の `max_count` リスペクト + forge 互換性
   - `check_blast_radius` の broken_files 報告、例外時 cleanup
-  - `tests/test_dependency_invalidation.py` — 35 ケース: import 宣言解析、compiler-mirrored resolution、暗黙 prelude edge、unresolved / unreadable import の fail-closed 分類、blast-radius join（`dependency_relation` 分類 + 記述子同封）
+  - `tests/test_dependency_invalidation.py` — 45 ケース: token-level import scan、compiler-mirrored resolution、symlink aliases、暗黙 prelude edge、unresolved / unreadable import の fail-closed 分類、blast-radius join（`dependency_relation` 分類 + 記述子同封）
   - `attempt_heal` の already-verified ショートサーキット、固定点検出、fix 適用後成功
   - `proliferate` の dry_run end-to-end（`generate_code` / `MumeiClient` をモック）
   - Lean fallback CLI フラグ伝搬と `summary.json` 内 `lean_fallback` 監査フィールドの保持を検証
