@@ -1,16 +1,19 @@
 """Shared data model and strict reader for lexical binding reports.
 
-Call target rules: ``direct_local`` requires a body-bearing function;
-``opaque_generic``, ``opaque_async``, ``opaque_bodyless``,
-``opaque_virtual``, ``opaque_import``, ``opaque_value``,
-``opaque_call_options``, ``opaque_new``, ``constructor``,
-``error_constructor``, ``emit``, ``modifier``, and
-``base_constructor`` require a binding target. ``unresolved``,
-``opaque_overload``, ``opaque_path``, ``opaque_method``,
-``opaque_expression``, ``opaque_member``, ``conversion``, and
-``builtin`` require an empty target. ``opaque_new`` targets a contract,
-``constructor`` a struct, ``error_constructor`` an error, ``emit`` an
-event, ``modifier`` a modifier, and ``base_constructor`` a contract.
+Call target contract:
+
+| Kind | Target |
+| --- | --- |
+| ``direct_local`` | body-bearing, non-generic, non-async function |
+| ``opaque_generic`` / ``opaque_async`` / ``opaque_bodyless`` / ``opaque_virtual`` | function |
+| ``opaque_import`` | import binding |
+| ``opaque_value`` / ``opaque_call_options`` | resolved binding |
+| ``opaque_new`` / ``base_constructor`` | contract |
+| ``constructor`` | struct |
+| ``error_constructor`` | error |
+| ``emit`` | event |
+| ``modifier`` | modifier |
+| ``unresolved`` / ``opaque_overload`` / ``opaque_path`` / ``opaque_method`` / ``opaque_expression`` / ``opaque_member`` / ``conversion`` / ``builtin`` | empty |
 """
 
 from __future__ import annotations
@@ -24,7 +27,9 @@ from typing import Any
 
 MAX_REPORT_BYTES = 8 * 1024 * 1024
 PROFILE_RESOLUTION = "lexical"
-TYPE_KINDS = frozenset({"int", "float", "bool", "char", "unit", "named", "unknown"})
+TYPE_KINDS = frozenset(
+    {"int", "float", "bool", "char", "unit", "address", "fixed_bytes", "named", "unknown"}
+)
 REFERENCE_KINDS = frozenset({"read", "write", "call"})
 CALL_KINDS = frozenset(
     {
@@ -107,6 +112,7 @@ CALL_KINDS_WITH_TARGET = frozenset(
     }
 )
 CALL_TARGET_BINDING_KINDS = {
+    "opaque_virtual": frozenset({"function"}),
     "constructor": frozenset({"struct"}),
     "opaque_import": frozenset({"import"}),
     "opaque_new": frozenset({"contract"}),
@@ -555,6 +561,7 @@ def load_lexical_report(
 
         references: list[Reference] = []
         reference_keys: set[tuple[ByteSpan, str, str]] = set()
+        bindings_by_id = {binding.id: binding for binding in bindings}
         for item in _array(top["references"]):
             record = _object(item, {"span", "binding_id", "kind"})
             span = _span(record["span"], boundaries, len(source_bytes))
@@ -567,6 +574,11 @@ def load_lexical_report(
             _fail(
                 kind != "write"
                 or binding_kinds[identifier] not in NON_ASSIGNABLE_WRITE_KINDS
+            )
+            _fail(
+                kind != "write"
+                or binding_kinds[identifier] != "state_variable"
+                or bindings_by_id[identifier].mutable
             )
             references.append(Reference(span, identifier, kind))
 
@@ -658,21 +670,32 @@ def load_lexical_report(
                 target_function = functions_by_id.get(target_id)
                 _fail(
                     target_function is not None
+                    and binding_kinds[target_id] == "function"
                     and target_function.body is not None
                     and not target_function.is_async
                     and not target_function.generic
                 )
-            elif kind in {
-                "opaque_generic",
-                "opaque_async",
-                "opaque_bodyless",
-                "opaque_import",
-                "opaque_value",
-                "constructor",
-            }:
+            elif kind in CALL_KINDS_WITH_TARGET:
                 _fail(bool(target_id))
             else:
                 _fail(not target_id)
+            if kind in {
+                "opaque_generic",
+                "opaque_async",
+                "opaque_bodyless",
+                "opaque_virtual",
+            }:
+                target_function = functions_by_id.get(target_id)
+                if target_function is None:
+                    _fail(False)
+                elif kind == "opaque_generic":
+                    _fail(target_function.generic)
+                elif kind == "opaque_async":
+                    _fail(target_function.is_async)
+                elif kind == "opaque_bodyless":
+                    _fail(target_function.body is None)
+                else:
+                    _fail(binding_kinds[target_id] == "function")
             target_kinds = CALL_TARGET_BINDING_KINDS.get(kind)
             if target_kinds is not None:
                 _fail(binding_kinds[target_id] in target_kinds)

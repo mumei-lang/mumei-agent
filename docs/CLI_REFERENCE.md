@@ -80,6 +80,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `native-evidence-recheck` | 8 | Replay a saved native consumer Evidence envelope against a fresh pinned recheck as one declared attempt and emit the reconciled lineage plus the declared outcome. |
 | `native-evidence-accept` | 8 | Run a declared Core native saved-Evidence acceptance as one attempt and emit the reconciled lineage plus the declared acceptance outcome. |
 | `rust-bindings` | 1 | Emit a conservative Rust lexical binding report as JSON; this is lexical metadata, not a type check, proof, or verdict. |
+| `sol-bindings` | 0 | Emit a conservative Solidity lexical binding report as JSON; this is lexical metadata, not a type check, proof, or verdict. |
 | `rust-summaries` | 2 | Emit opt-in Rust interprocedural dependency summaries as JSON — a conservative report, not a proof or verdict. |
 | `rust-summaries-accept` | 4 | Re-derive the Rust summary set for one declared source and accept one function's summary under the strict whole-context gate. |
 | `rust-summaries-check` | 4 | Re-derive the Rust summary set for one declared source and check a declared manifest's functions against it. |
@@ -1259,6 +1260,17 @@ Emit a conservative Rust lexical binding report as JSON; this is lexical metadat
 | Option | Value | Required | Default | Description |
 |---|---|---|---|---|
 | `--pointer-width` | `{16, 32, 64}` | yes | — | Target pointer width used for isize and usize |
+
+
+## `mumei-agent sol-bindings`
+
+Emit a conservative Solidity lexical binding report as JSON; this is lexical metadata, not a type check, proof, or verdict.
+
+### Positional arguments
+
+| Argument | Required | Value | Description |
+|---|---|---|---|
+| `file` | yes | `<FILE>` | Solidity source file |
 
 
 ## `mumei-agent rust-summaries`

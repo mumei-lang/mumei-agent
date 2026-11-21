@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import re
 import sys
+import warnings
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -139,7 +141,11 @@ class _SolBindings:
         return "" if node is None else node.text.decode("utf-8", errors="replace")
 
     def children(self, node: Any | None) -> list[Any]:
-        return [] if node is None else list(node.named_children)
+        return (
+            []
+            if node is None
+            else [child for child in node.named_children if child.type != "comment"]
+        )
 
     def _scope_for_id(self, scope: ByteSpan | None) -> tuple[int, int]:
         if scope is None:
@@ -153,6 +159,7 @@ class _SolBindings:
         kind: str,
         *,
         binding_scope: ByteSpan | None,
+        name_override: str | None = None,
         type_node: Any | None = None,
         owner: _Contract | None = None,
         body: Any | None = None,
@@ -163,7 +170,7 @@ class _SolBindings:
         location: str = "",
         underlying: Any | None = None,
     ) -> _Record:
-        name = self.text(name_node)
+        name = name_override or self.text(name_node)
         scope_start, scope_end = self._scope_for_id(binding_scope)
         identifier = binding_id(
             self.digest, name_node.start_byte, scope_start, scope_end
@@ -201,9 +208,7 @@ class _SolBindings:
 
     def _add_ref(self, node: Any, record: _Record, kind: str) -> None:
         ref = Reference(self.span(node), record.binding.id, kind)
-        if not any(
-            item.span == ref.span and item.kind == ref.kind for item in self.references
-        ):
+        if ref not in self.references:
             self.references.append(ref)
 
     def _add_unresolved(self, node: Any, name: str, reason: str) -> None:
@@ -261,6 +266,7 @@ class _SolBindings:
                 "error_declaration",
                 "event_definition",
                 "state_variable_declaration",
+                "constant_variable_declaration",
             }:
                 self._predeclare_item(node, self.file_scope, None)
 
@@ -271,13 +277,14 @@ class _SolBindings:
             contract = self.contracts.get(self.text(name_node))
             if contract is None:
                 continue
-            for child in self.children(contract.body):
+            for child in self.children(contract.node):
                 if child.type == "inheritance_specifier":
                     ancestor = child.child_by_field_name("ancestor")
                     base_name = self._root_type_name(ancestor)
                     if base_name:
                         contract.bases.append((base_name, child))
-                elif child.type == "function_definition":
+            for child in self.children(contract.body):
+                if child.type == "function_definition":
                     self._predeclare_function(child, contract.scope, contract)
                 elif child.type == "constructor_definition":
                     self._predeclare_constructor(child, contract)
@@ -291,6 +298,7 @@ class _SolBindings:
                     "error_declaration",
                     "event_definition",
                     "state_variable_declaration",
+                    "constant_variable_declaration",
                 }:
                     self._predeclare_item(child, contract.scope, contract)
 
@@ -308,42 +316,43 @@ class _SolBindings:
                     contract.external_base = True
 
     def _predeclare_import(self, node: Any) -> None:
-        source = node.child_by_field_name("source")
-        del source
-        aliases = [
-            child
-            for index, child in enumerate(node.children)
-            if node.field_name_for_child(index) == "alias"
-        ]
-        names = [
-            child
-            for index, child in enumerate(node.children)
-            if node.field_name_for_child(index) == "import_name"
-        ]
-        source_text = self.text(node)
-        if names:
-            aliases_iter = iter(aliases)
-            for imported in names:
-                alias = next(aliases_iter, None)
-                binding_node = alias or imported
+        imported_names: list[Any] = []
+        aliases: list[Any] = []
+        pending: list[Any] = []
+        for index, child in enumerate(node.children):
+            field = node.field_name_for_child(index)
+            if field == "import_name":
+                pending.append(child)
+                imported_names.append(child)
+            elif field == "alias":
+                aliases.append(child)
+                preceding = next(
+                    (
+                        imported
+                        for imported in reversed(pending)
+                        if imported.end_byte <= child.start_byte
+                    ),
+                    None,
+                )
+                if preceding is not None:
+                    pending.remove(preceding)
                 self._add(
                     self.file_scope,
-                    binding_node,
+                    child,
                     "import",
                     binding_scope=ByteSpan(0, 0),
                 )
-            return
-        if aliases:
+        for imported in pending:
             self._add(
                 self.file_scope,
-                aliases[0],
+                imported,
                 "import",
                 binding_scope=ByteSpan(0, 0),
             )
+        if imported_names or aliases:
             return
         self.glob_imports.append(node)
         self._add_gap("glob_import", node)
-        del source_text
 
     def _predeclare_function(
         self, node: Any, scope: _Scope, owner: _Contract | None
@@ -374,6 +383,7 @@ class _SolBindings:
             ),
             owner=owner,
             body=node.child_by_field_name("body"),
+            visibility=self._visibility(node),
             virtual=bool(re.search(r"\bvirtual\b", self.text(node))),
             override=bool(re.search(r"\boverride\b", self.text(node))),
         )
@@ -384,6 +394,7 @@ class _SolBindings:
             node,
             "constructor",
             binding_scope=None,
+            name_override="constructor",
             owner=owner,
             body=node.child_by_field_name("body"),
         )
@@ -399,6 +410,7 @@ class _SolBindings:
             "event_definition": "event",
             "modifier_definition": "modifier",
             "state_variable_declaration": "state_variable",
+            "constant_variable_declaration": "const",
         }
         kind = kind_by_node.get(node.type)
         if kind is None:
@@ -408,6 +420,8 @@ class _SolBindings:
             return None
         if kind == "state_variable" and owner is None:
             kind = "const" if "constant" in self.text(node).split() else "state_variable"
+        elif kind == "const" and owner is not None:
+            kind = "state_variable"
         if kind == "modifier":
             return self._add(
                 scope,
@@ -420,7 +434,9 @@ class _SolBindings:
             )
         type_node = node.child_by_field_name("type")
         if kind == "state_variable" or kind == "const":
-            mutable = not bool(re.search(r"\bconstant\b", self.text(node)))
+            mutable = not bool(
+                re.search(r"\b(constant|immutable)\b", self.text(node))
+            )
             location = "storage" if re.search(r"\bstorage\b", self.text(node)) else ""
             return self._add(
                 scope,
@@ -439,7 +455,8 @@ class _SolBindings:
                 (
                     child
                     for child in self.children(node)
-                    if child.type in {"type_name", "user_defined_type"}
+                    if child.type
+                    in {"type_name", "user_defined_type", "primitive_type"}
                     and child is not node.child_by_field_name("name")
                 ),
                 None,
@@ -477,8 +494,12 @@ class _SolBindings:
         stack = [root]
         while stack:
             node = stack.pop()
+            if node.type == "comment":
+                continue
             yield node
-            stack.extend(reversed(node.children))
+            stack.extend(
+                reversed([child for child in node.children if child.type != "comment"])
+            )
 
     def _finalize_types(self) -> None:
         for record in self.records:
@@ -573,8 +594,10 @@ class _SolBindings:
         if record is not None:
             return record
         if owner is not None:
-            found, _reason = self._lookup_contract(name, owner, position, "type")
-            return found
+            inherited, _reason = self._lookup_contract(
+                name, owner, position, "type"
+            )
+            return inherited
         return None
 
     def _lookup_contract(
@@ -590,7 +613,9 @@ class _SolBindings:
             return None, None
         visited.add(contract.record.binding.id)
         own = self._matching_records(
-            contract.scope.records.get(name, []), position, namespace
+            contract.scope.records.get(name, []),
+            contract.body.start_byte,
+            namespace,
         )
         if own:
             return self._choose(own)
@@ -777,7 +802,7 @@ class _SolBindings:
                 self._function_result(return_facts),
                 False,
                 False,
-                owner is not None,
+                owner is not None and kind == "function",
                 False,
             )
         )
@@ -817,27 +842,37 @@ class _SolBindings:
             ancestor = base_node.child_by_field_name("ancestor")
             if ancestor is not None:
                 base_record = self._resolve_type_node(ancestor, contract)
+                has_arguments = any(
+                    base_node.field_name_for_child(index) == "ancestor_arguments"
+                    and self.text(child) == "("
+                    for index, child in enumerate(base_node.children)
+                )
                 args = [
                     child
                     for child in self.children(base_node)
                     if child.type == "call_argument"
                 ]
-                if args:
+                if has_arguments:
                     spans = tuple(
                         self.span(self._argument_expression(arg)) for arg in args
                     )
                     for arg in args:
                         self._visit(self._argument_expression(arg))
+                    target_id = ""
+                    call_kind = "unresolved"
+                    if (
+                        base_record is not None
+                        and base_record.binding.kind == "contract"
+                    ):
+                        target_id = base_record.binding.id
+                        call_kind = "base_constructor"
                     self.calls.append(
                         Call(
                             self.span(base_node),
                             spans,
                             "",
-                            "" if base_record is None else base_record.binding.id,
-                            "base_constructor"
-                            if base_record is not None
-                            and base_record.binding.kind == "contract"
-                            else "unresolved",
+                            target_id,
+                            call_kind,
                         )
                     )
             if contract.external_base and self.contracts.get(name) is None:
@@ -867,7 +902,10 @@ class _SolBindings:
                     self._scan_constructor(node, record)
             elif node.type == "fallback_receive_definition":
                 self._scan_fallback(node)
-            elif node.type == "state_variable_declaration":
+            elif node.type in {
+                "state_variable_declaration",
+                "constant_variable_declaration",
+            }:
                 self._scan_declaration_types(node, contract)
                 self._scan_initializer(node)
             elif node.type in {
@@ -878,6 +916,8 @@ class _SolBindings:
                 "error_declaration",
             }:
                 self._scan_declaration_types(node, contract)
+            elif node.type != "inheritance_specifier":
+                self._add_gap("unsupported_syntax", node)
         self.scopes.pop()
         self.current_contract = old_contract
 
@@ -930,7 +970,11 @@ class _SolBindings:
             self._visit(child)
 
     def _resolve_type_node(
-        self, node: Any, owner: _Contract | None
+        self,
+        node: Any,
+        owner: _Contract | None,
+        *,
+        reference_kind: str | None = "read",
     ) -> _Record | None:
         member = next(
             (item for item in self._walk(node) if item.type == "member_expression"),
@@ -939,14 +983,18 @@ class _SolBindings:
         if member is not None:
             base = member.child_by_field_name("object")
             if base is not None:
-                return self._resolve_name(base, namespace="type", reference_kind="read")
+                return self._resolve_name(
+                    base, namespace="type", reference_kind=reference_kind
+                )
         identifier = next(
             (item for item in self._walk(node) if item.type == "identifier"),
             None,
         )
         if identifier is None:
             return None
-        return self._resolve_name(identifier, namespace="type", reference_kind="read")
+        return self._resolve_name(
+            identifier, namespace="type", reference_kind=reference_kind
+        )
 
     def _scan_file_items(self) -> None:
         for node in self.children(self.root):
@@ -963,7 +1011,10 @@ class _SolBindings:
                 record = self._record_for_declaration(node)
                 if record is not None:
                     self._scan_function(node, record)
-            elif node.type == "state_variable_declaration":
+            elif node.type in {
+                "state_variable_declaration",
+                "constant_variable_declaration",
+            }:
                 self._scan_declaration_types(node, None)
                 self._scan_initializer(node)
             elif node.type in {
@@ -974,6 +1025,8 @@ class _SolBindings:
                 "event_definition",
             }:
                 self._scan_declaration_types(node, None)
+            elif node.type not in {"pragma_directive", "import_directive"}:
+                self._add_gap("unsupported_syntax", node)
 
     def _argument_expression(self, node: Any) -> Any:
         return next(
@@ -982,7 +1035,7 @@ class _SolBindings:
         )
 
     def _expr_children(self, node: Any) -> list[Any]:
-        return list(node.named_children)
+        return self.children(node)
 
     def _unwrap(self, node: Any | None) -> Any | None:
         while node is not None and node.type == "expression":
@@ -1024,6 +1077,14 @@ class _SolBindings:
         if kind == "type_cast_expression":
             self._type_cast(node)
             return
+        if kind == "unary_expression":
+            operator = node.child_by_field_name("operator")
+            argument = node.child_by_field_name("argument")
+            if self.text(operator) == "delete":
+                self._place(argument, "write", assignment_node=node)
+            else:
+                self._expr(argument)
+            return
         if kind == "member_expression":
             obj = node.child_by_field_name("object")
             self._expr(obj)
@@ -1036,7 +1097,11 @@ class _SolBindings:
             self._assignment(node)
             return
         if kind == "update_expression":
-            self._place(node.child_by_field_name("argument"), "read_write")
+            self._place(
+                node.child_by_field_name("argument"),
+                "read_write",
+                assignment_node=node,
+            )
             return
         if kind == "emit_statement":
             self._emit_statement(node)
@@ -1046,6 +1111,13 @@ class _SolBindings:
             return
         if kind == "modifier_invocation":
             self._modifier_invocation(node)
+            return
+        if kind == "struct_field_assignment":
+            value = node.child_by_field_name("value")
+            if value is None:
+                self._add_gap("unsupported_syntax", node)
+            else:
+                self._expr(value)
             return
         if kind == "identifier":
             self._expr_identifier(node)
@@ -1217,7 +1289,13 @@ class _SolBindings:
             self._visit(body)
         self.scopes.pop()
 
-    def _place(self, node: Any | None, mode: str) -> None:
+    def _place(
+        self,
+        node: Any | None,
+        mode: str,
+        *,
+        assignment_node: Any | None = None,
+    ) -> None:
         if node is None:
             return
         node = self._unwrap(node)
@@ -1225,12 +1303,12 @@ class _SolBindings:
             return
         if node.type == "tuple_expression":
             for child in self.children(node):
-                self._place(child, mode)
+                self._place(child, mode, assignment_node=assignment_node)
             return
         if node.type == "expression":
             children = self.children(node)
             if len(children) == 1:
-                self._place(children[0], mode)
+                self._place(children[0], mode, assignment_node=assignment_node)
             else:
                 for child in children:
                     self._expr(child)
@@ -1243,13 +1321,21 @@ class _SolBindings:
                 if mode in {"read", "read_write"}:
                     self._add_ref(node, record, "read")
                 if mode in {"write", "read_write"}:
-                    if record.binding.kind in {
+                    if record.location == "storage":
+                        if mode == "write":
+                            self._add_ref(node, record, "read")
+                    elif record.binding.kind in {
                         "function", "struct", "enum", "const", "type_alias",
                         "trait", "union", "module", "import", "associated_function",
                         "associated_const", "contract", "interface", "library",
                         "modifier", "event", "error", "user_type",
-                    }:
-                        self._add_gap("unsupported_syntax", node)
+                    } or (
+                        record.binding.kind == "state_variable"
+                        and not record.binding.mutable
+                    ):
+                        self._add_gap(
+                            "unsupported_syntax", assignment_node or node
+                        )
                         if mode == "write":
                             self._add_ref(node, record, "read")
                     else:
@@ -1261,14 +1347,14 @@ class _SolBindings:
                 root = root.child_by_field_name("object")
                 root = self._unwrap(root)
             if root is not None and root.type == "array_access":
-                self._place(root, mode)
+                self._place(root, mode, assignment_node=assignment_node)
                 return
             if root is not None and root.type == "identifier":
                 record = self._lookup(root.text.decode(), root.start_byte, "value")[0]
                 if record is not None and record.location == "storage":
                     self._add_ref(root, record, "read")
                 else:
-                    self._place(root, mode)
+                    self._place(root, mode, assignment_node=assignment_node)
             else:
                 self._expr(root)
             return
@@ -1276,7 +1362,7 @@ class _SolBindings:
             base = self._unwrap(node.child_by_field_name("base"))
             index = node.child_by_field_name("index")
             self._expr(index)
-            self._place(base, mode)
+            self._place(base, mode, assignment_node=assignment_node)
             return
         self._expr(node)
 
@@ -1284,7 +1370,11 @@ class _SolBindings:
         left = node.child_by_field_name("left")
         right = node.child_by_field_name("right")
         compound = node.type == "augmented_assignment_expression"
-        self._place(left, "read_write" if compound else "write")
+        self._place(
+            left,
+            "read_write" if compound else "write",
+            assignment_node=node,
+        )
         self._expr(right)
 
     def _call_arguments(self, node: Any) -> tuple[tuple[ByteSpan, ...], list[Any]]:
@@ -1298,13 +1388,18 @@ class _SolBindings:
         current = self._unwrap(node)
         options: list[Any] = []
         has_options = False
-        if current is not None and current.type == "expression":
-            children = self.children(current)
-            option_nodes = [
+        if current is not None and current.type == "struct_expression":
+            options = [
                 child
-                for child in children
+                for child in self.children(current)
                 if child.type == "struct_field_assignment"
             ]
+            if options:
+                has_options = True
+                current = self._unwrap(current.child_by_field_name("type"))
+        if current is not None and current.type == "expression":
+            children = self.children(current)
+            option_nodes = [child for child in children if child.type == "struct_field_assignment"]
             if option_nodes:
                 has_options = True
                 options = option_nodes
@@ -1363,10 +1458,12 @@ class _SolBindings:
             return
         if callee.type == "new_expression":
             type_node = callee.child_by_field_name("name")
-            target = self._resolve_type_node(type_node, self.current_contract)
-            if target is None or target.binding.kind != "contract":
+            target = self._resolve_type_node(
+                type_node, self.current_contract, reference_kind=None
+            )
+            if target is None:
                 self.calls.append(Call(self.span(node), args, self.call_owner, "", "unresolved"))
-            else:
+            elif target.binding.kind in {"contract", "import"}:
                 identifier = next(
                     (child for child in self._walk(type_node) if child.type == "identifier"),
                     None,
@@ -1374,13 +1471,34 @@ class _SolBindings:
                 if identifier is not None:
                     self._add_ref(identifier, target, "call")
                 self.calls.append(
-                    Call(self.span(node), args, self.call_owner, target.binding.id, "opaque_new")
+                    Call(
+                        self.span(node),
+                        args,
+                        self.call_owner,
+                        target.binding.id,
+                        "opaque_new"
+                        if target.binding.kind == "contract"
+                        else "opaque_import",
+                    )
+                )
+            else:
+                self._add_gap("unsupported_syntax", node)
+                self.calls.append(
+                    Call(self.span(node), args, self.call_owner, "", "opaque_expression")
                 )
             return
         if callee.type == "member_expression":
             base = callee.child_by_field_name("object")
             self._expr(base)
-            self.calls.append(Call(self.span(node), args, self.call_owner, "", "opaque_member"))
+            self.calls.append(
+                Call(
+                    self.span(node),
+                    args,
+                    self.call_owner,
+                    "",
+                    "opaque_member",
+                )
+            )
             return
         if callee.type != "identifier":
             self._expr(callee)
@@ -1431,7 +1549,12 @@ class _SolBindings:
         self.calls.append(Call(self.span(node), args, self.call_owner, record.binding.id, kind))
 
     def _type_cast(self, node: Any) -> None:
-        args = [child for child in self.children(node) if child.type == "expression"]
+        args = []
+        for child in self.children(node):
+            if child.type == "expression":
+                args.append(child)
+            elif child.type == "call_argument":
+                args.append(self._argument_expression(child))
         spans = tuple(self.span(self._unwrap(arg) or arg) for arg in args)
         for arg in args:
             self._expr(arg)
@@ -1498,6 +1621,7 @@ class _SolBindings:
         self._predeclare()
         self._finalize_types()
         self._scan_file_items()
+        self._finalize_types()
         return LexicalBindingReport(
             PROFILE,
             self.digest,
@@ -1515,8 +1639,10 @@ def _walk(root: Any):
     stack = [root]
     while stack:
         node = stack.pop()
+        if node.type == "comment":
+            continue
         yield node
-        stack.extend(node.children)
+        stack.extend(child for child in node.children if child.type != "comment")
 
 
 def build_sol_bindings(source: str) -> LexicalBindingReport:
@@ -1527,16 +1653,31 @@ def build_sol_bindings(source: str) -> LexicalBindingReport:
     if len(raw) > MAX_SOURCE_BYTES:
         raise LexicalReportError("Solidity source exceeds the lexical report limit")
     try:
-        from tree_sitter import Language, Parser
-        import tree_sitter_solidity
-
-        parser = Parser(Language(tree_sitter_solidity.language()))
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="int argument support is deprecated",
+                category=DeprecationWarning,
+            )
+            tree_sitter = importlib.import_module("tree_sitter")
+            tree_sitter_solidity = importlib.import_module("tree_sitter_solidity")
+            language = tree_sitter.Language(tree_sitter_solidity.language())
+        parser = tree_sitter.Parser(language)
         root = parser.parse(raw).root_node
+    except RecursionError:
+        raise LexicalReportError(
+            "Solidity source nesting exceeds the lexical report limit"
+        ) from None
     except Exception as exc:
         raise LexicalReportError("Solidity source could not be parsed") from exc
     if root.has_error or any(node.is_missing for node in _walk(root)):
         raise LexicalReportError("Solidity source has parse errors or missing nodes")
-    return _SolBindings(source, raw, root).build()
+    try:
+        return _SolBindings(source, raw, root).build()
+    except RecursionError:
+        raise LexicalReportError(
+            "Solidity source nesting exceeds the lexical report limit"
+        ) from None
 
 
 def build_parser(
@@ -1555,10 +1696,16 @@ def build_parser(
 
 def main(args: argparse.Namespace) -> int:
     try:
-        source = args.file.read_text(encoding="utf-8")
+        source = args.file.read_bytes().decode("utf-8", errors="strict")
         report = build_sol_bindings(source)
         sys.stdout.write(report.to_json())
         return 0
-    except (OSError, UnicodeError, LexicalReportError) as exc:
+    except OSError:
+        print("sol-bindings: could not read source file", file=sys.stderr)
+        return 2
+    except UnicodeError:
+        print("sol-bindings: source file is not valid UTF-8", file=sys.stderr)
+        return 2
+    except LexicalReportError as exc:
         print(f"sol-bindings: {exc}", file=sys.stderr)
         return 2
