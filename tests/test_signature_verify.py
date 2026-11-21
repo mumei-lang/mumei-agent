@@ -565,6 +565,34 @@ def test_envelope_freshness_via_max_age():
     )
 
 
+@pytest.mark.parametrize("max_age_seconds", [10**12, 10**18])
+def test_large_max_age_windows_do_not_overflow(max_age_seconds):
+    verification = verify_signature_envelope(
+        _envelope(produced_at="2026-01-01T00:00:00Z"),
+        _PUBLIC_KEY_HEX,
+        reference_time="2026-01-01T00:00:01Z",
+        max_age_seconds=max_age_seconds,
+    )
+    assert verification["envelope_fresh"] is True
+
+
+@pytest.mark.parametrize(
+    ("produced_at", "expected"),
+    [
+        ("2026-01-01T00:00:00Z", True),
+        ("2025-12-31T23:59:59.999999Z", False),
+    ],
+)
+def test_freshness_window_boundary(produced_at, expected):
+    verification = verify_signature_envelope(
+        _envelope(produced_at=produced_at),
+        _PUBLIC_KEY_HEX,
+        reference_time="2026-01-01T00:00:01Z",
+        max_age_seconds=1,
+    )
+    assert verification["envelope_fresh"] is expected
+
+
 def test_max_age_requires_reference_time():
     import pytest
 

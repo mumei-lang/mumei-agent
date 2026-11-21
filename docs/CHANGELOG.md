@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased: C11 declared producer-signature folds as MCP tools
+
+- Exposed `signature-eval` and `signature-verify` as spawn-free MCP tools
+  with CLI-parity payloads, bounded declared-file reads, redacted path
+  errors, and caller-declared Ed25519 verification. `signature-sign` remains
+  CLI-only because it reads secret key material.
+
 ## Unreleased: C11 declared evidence folds as MCP tools
 
 - Exposed `evidence-acceptance-eval`, `freshness-eval`, `binding-eval`, and

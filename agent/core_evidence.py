@@ -12,6 +12,7 @@ import selectors
 import subprocess
 import threading
 import time
+from datetime import datetime
 
 from agent.verification_attempt import (
     AttemptEvidenceCheck,
@@ -1110,15 +1111,14 @@ def evaluate_signature_envelope(
         # a stamp that could postdate the reference or sit barely
         # outside the window fails closed. An absent or unparseable
         # `produced_at` simply cannot prove freshness.
-        from datetime import timedelta
-
         produced = _parse_rfc3339(envelope.get("produced_at"))
         evaluation["envelope_fresh"] = (
             match
             and produced is not None
             and produced[1] <= reference[0]
-            and produced[0] + timedelta(seconds=max_age_seconds)
-            >= reference[1]
+            and _within_age_window(
+                produced[0], reference[1], max_age_seconds
+            )
         )
         evaluation["checks_not_performed"].remove("envelope_freshness")
     if key_registry is not None:
@@ -1325,15 +1325,14 @@ def verify_signature_envelope(
         )
         verification["checks_not_performed"].remove("key_authenticity")
     if max_age_seconds is not None:
-        from datetime import timedelta
-
         produced = _parse_rfc3339(envelope.get("produced_at"))
         verification["envelope_fresh"] = (
             match
             and produced is not None
             and produced[1] <= reference[0]
-            and produced[0] + timedelta(seconds=max_age_seconds)
-            >= reference[1]
+            and _within_age_window(
+                produced[0], reference[1], max_age_seconds
+            )
         )
         verification["checks_not_performed"].remove("envelope_freshness")
     if key_registry is not None:
@@ -2141,6 +2140,17 @@ def _parse_rfc3339(value: object) -> "tuple | None":
     return low, low + (timedelta(microseconds=1) if sub_micro else timedelta(0))
 
 
+def _within_age_window(
+    produced: datetime, reference: datetime, max_age_seconds: int
+) -> bool:
+    delta = reference - produced
+    delta_us = (
+        (delta.days * 86400 + delta.seconds) * 1_000_000
+        + delta.microseconds
+    )
+    return delta_us <= max_age_seconds * 1_000_000
+
+
 def evaluate_freshness(
     record: dict,
     reference_time: str,
@@ -2168,8 +2178,6 @@ def evaluate_freshness(
     (the record's timestamp is a claim by the producer — only a
     signature-bound timestamp upgrades it) and ``freshness_enforcement``
     (the fold reports; gating on freshness is a host decision)."""
-    from datetime import timedelta
-
     if type(record) is not dict:
         raise ValueError("unsupported freshness evaluation request")
     reference = _parse_rfc3339(reference_time)
@@ -2186,7 +2194,9 @@ def evaluate_freshness(
     within = (
         claimed
         and produced[1] <= reference[0]
-        and produced[0] + timedelta(seconds=max_age_seconds) >= reference[1]
+        and _within_age_window(
+            produced[0], reference[1], max_age_seconds
+        )
     )
     return {
         "schema_version": FRESHNESS_EVALUATION_SCHEMA,

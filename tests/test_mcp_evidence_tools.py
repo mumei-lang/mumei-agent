@@ -25,6 +25,12 @@ from agent import (
     freshness_eval as freshness_route,
     mcp_server,
     recovery_eval as recovery_route,
+    signature_eval as signature_eval_route,
+    signature_verify as signature_verify_route,
+)
+from tests import (
+    test_signature_eval as signature_eval_fixtures,
+    test_signature_verify as signature_verify_fixtures,
 )
 from agent.verification_attempt import (
     AttemptEvidenceCheck,
@@ -1186,6 +1192,27 @@ def _fold_cli_payload(module, argv: list[str], output_path: Path) -> dict:
     return json.loads(output_path.read_text(encoding="utf-8"))
 
 
+def _signature_cli_payload(
+    build_parser, main_route, argv: list[str], output_path: Path
+) -> dict:
+    parser = argparse.ArgumentParser()
+    build_parser(parser)
+    args = parser.parse_args([*argv, "--output", str(output_path)])
+    assert main_route(args) == 0
+    return json.loads(output_path.read_text(encoding="utf-8"))
+
+
+def _signature_cli_error(build_parser, main_route, argv, capsys) -> str:
+    parser = argparse.ArgumentParser()
+    build_parser(parser)
+    assert main_route(parser.parse_args(argv)) == 1
+    error = capsys.readouterr().err.strip()
+    prefix, separator, message = error.partition(": ")
+    assert separator
+    assert prefix in {"signature-eval", "signature-verify"}
+    return message
+
+
 def _fold_assert_error(raw: str) -> dict:
     payload = _fold_payload(raw)
     assert payload["status"] == "error"
@@ -1342,6 +1369,19 @@ class TestFreshnessEvalTool:
             assert cli["within_window"] is expected
             if index == 2:
                 assert cli["freshness_claimed"] is False
+
+    def test_huge_max_age_returns_json_ok(self, tmp_path) -> None:
+        record = _fold_write_json(
+            tmp_path / "record.json",
+            {"produced_at": "2026-01-01T00:00:00Z"},
+        )
+        payload = _fold_payload(
+            mcp_server.freshness_eval(
+                str(record), "2026-01-01T00:00:01Z", 10**18
+            )
+        )
+        assert payload["status"] == "ok"
+        assert payload["evaluation"]["within_window"] is True
 
     @pytest.mark.parametrize("path", ["", "line\nbreak", None, 7])
     def test_invalid_record_paths_are_rejected(self, path) -> None:
@@ -1704,3 +1744,808 @@ class TestMcpPayloadSerialization:
         raw = mcp_server._err("\ud800")
         raw.encode("utf-8")
         assert json.loads(raw)["error"] == "\ud800"
+
+
+class TestSignatureEvalTool:
+    def test_envelope_and_declared_pins_match_cli(self, tmp_path):
+        envelope = _fold_write_json(
+            tmp_path / "envelope.json",
+            signature_eval_fixtures._envelope(),
+        )
+        cases = (
+            ([], {}),
+            (
+                [
+                    "--expected-subject",
+                    signature_eval_fixtures._SUBJECT,
+                    "--expected-producer-key",
+                    signature_eval_fixtures._KEY,
+                ],
+                {
+                    "expected_subject": signature_eval_fixtures._SUBJECT,
+                    "expected_producer_key": signature_eval_fixtures._KEY,
+                },
+            ),
+        )
+        for index, (options, tool_options) in enumerate(cases):
+            cli = _signature_cli_payload(
+                signature_eval_route.build_eval_parser,
+                signature_eval_route.main_eval,
+                ["--envelope", str(envelope), *options],
+                tmp_path / f"eval-{index}.json",
+            )
+            payload = _fold_payload(
+                mcp_server.signature_eval(str(envelope), **tool_options)
+            )
+            assert payload["status"] == "ok"
+            assert payload["evaluation"] == cli
+            assert "checks_not_performed" in payload["evaluation"]
+
+    def test_revocation_list_observations_match_cli(self, tmp_path):
+        envelope = _fold_write_json(
+            tmp_path / "envelope.json",
+            signature_eval_fixtures._envelope(),
+        )
+        for index, (revoked_keys, expected) in enumerate(
+            ((["other-key"], True), ([signature_eval_fixtures._KEY], False))
+        ):
+            revocation_list = _fold_write_json(
+                tmp_path / f"revocation-{index}.json",
+                {
+                    "schema_version": "mumei.key-revocation-list/v1",
+                    "revoked_keys": revoked_keys,
+                },
+            )
+            options = [
+                "--envelope",
+                str(envelope),
+                "--revocation-list",
+                str(revocation_list),
+            ]
+            cli = _signature_cli_payload(
+                signature_eval_route.build_eval_parser,
+                signature_eval_route.main_eval,
+                options,
+                tmp_path / f"revocation-eval-{index}.json",
+            )
+            payload = _fold_payload(
+                mcp_server.signature_eval(
+                    str(envelope), revocation_list_path=str(revocation_list)
+                )
+            )
+            assert payload["evaluation"] == cli
+            assert payload["evaluation"]["key_not_revoked"] is expected
+
+    def test_registry_and_signature_wrappers_are_bound(self, tmp_path):
+        envelope = _fold_write_json(
+            tmp_path / "envelope.json",
+            signature_eval_fixtures._envelope(),
+        )
+        registry = _fold_write_json(
+            tmp_path / "registry.json",
+            signature_eval_fixtures._registry_doc(),
+        )
+        revocation_list = _fold_write_json(
+            tmp_path / "revocation.json",
+            {
+                "schema_version": "mumei.key-revocation-list/v1",
+                "revoked_keys": ["other-key"],
+            },
+        )
+        registry_digest = hashlib.sha256(registry.read_bytes()).hexdigest()
+        revocation_digest = hashlib.sha256(
+            revocation_list.read_bytes()
+        ).hexdigest()
+        registry_signature = _fold_write_json(
+            tmp_path / "registry-signature.json",
+            signature_eval_fixtures._anchor_signature(registry_digest),
+        )
+        revocation_signature = _fold_write_json(
+            tmp_path / "revocation-signature.json",
+            signature_eval_fixtures._anchor_signature(revocation_digest),
+        )
+        options = [
+            "--envelope",
+            str(envelope),
+            "--key-registry",
+            str(registry),
+            "--reference-time",
+            signature_eval_fixtures._REFERENCE,
+            "--revocation-list",
+            str(revocation_list),
+            "--registry-signature",
+            str(registry_signature),
+            "--revocation-signature",
+            str(revocation_signature),
+        ]
+        cli = _signature_cli_payload(
+            signature_eval_route.build_eval_parser,
+            signature_eval_route.main_eval,
+            options,
+            tmp_path / "signature-eval.json",
+        )
+        payload = _fold_payload(
+            mcp_server.signature_eval(
+                str(envelope),
+                key_registry_path=str(registry),
+                reference_time=signature_eval_fixtures._REFERENCE,
+                revocation_list_path=str(revocation_list),
+                registry_signature_path=str(registry_signature),
+                revocation_signature_path=str(revocation_signature),
+            )
+        )
+        assert payload["evaluation"] == cli
+        assert payload["evaluation"]["registry_signature_bound"] is True
+        assert payload["evaluation"]["revocation_signature_bound"] is True
+        assert payload["evaluation"]["key_authentic"] is True
+
+    @pytest.mark.parametrize(
+        ("produced_at", "expected"),
+        [
+            ("2025-12-31T23:30:00Z", True),
+            ("2025-12-31T22:00:00Z", False),
+        ],
+    )
+    def test_fresh_and_stale_envelopes_match_cli(
+        self, tmp_path, produced_at, expected
+    ):
+        envelope = _fold_write_json(
+            tmp_path / "envelope.json",
+            signature_eval_fixtures._envelope(produced_at=produced_at),
+        )
+        options = [
+            "--envelope",
+            str(envelope),
+            "--reference-time",
+            signature_eval_fixtures._REFERENCE,
+            "--max-age-seconds",
+            "3600",
+        ]
+        cli = _signature_cli_payload(
+            signature_eval_route.build_eval_parser,
+            signature_eval_route.main_eval,
+            options,
+            tmp_path / "freshness-eval.json",
+        )
+        payload = _fold_payload(
+            mcp_server.signature_eval(
+                str(envelope),
+                reference_time=signature_eval_fixtures._REFERENCE,
+                max_age_seconds=3600,
+            )
+        )
+        assert payload["evaluation"] == cli
+        assert payload["evaluation"]["envelope_fresh"] is expected
+
+    def test_huge_max_age_returns_json_ok(self, tmp_path):
+        envelope = _fold_write_json(
+            tmp_path / "envelope.json",
+            signature_eval_fixtures._envelope(
+                produced_at="2026-01-01T00:00:00Z"
+            ),
+        )
+        payload = _fold_payload(
+            mcp_server.signature_eval(
+                str(envelope),
+                reference_time="2026-01-01T00:00:01Z",
+                max_age_seconds=10**18,
+            )
+        )
+        assert payload["status"] == "ok"
+        assert payload["evaluation"]["envelope_fresh"] is True
+
+    def test_requires_argument_errors_match_cli(self, tmp_path, capsys):
+        envelope = _fold_write_json(
+            tmp_path / "envelope.json",
+            signature_eval_fixtures._envelope(),
+        )
+        registry = _fold_write_json(
+            tmp_path / "registry.json",
+            signature_eval_fixtures._registry_doc(),
+        )
+        revocation_signature = _fold_write_json(
+            tmp_path / "revocation-signature.json",
+            signature_eval_fixtures._anchor_signature("a" * 64),
+        )
+        cases = (
+            (
+                [
+                    "--envelope",
+                    str(envelope),
+                    "--key-registry",
+                    str(registry),
+                ],
+                lambda: mcp_server.signature_eval(
+                    str(envelope), key_registry_path=str(registry)
+                ),
+            ),
+            (
+                [
+                    "--envelope",
+                    str(envelope),
+                    "--registry-signature",
+                    str(revocation_signature),
+                ],
+                lambda: mcp_server.signature_eval(
+                    str(envelope),
+                    registry_signature_path=str(revocation_signature),
+                ),
+            ),
+            (
+                [
+                    "--envelope",
+                    str(envelope),
+                    "--revocation-signature",
+                    str(revocation_signature),
+                ],
+                lambda: mcp_server.signature_eval(
+                    str(envelope),
+                    revocation_signature_path=str(revocation_signature),
+                ),
+            ),
+        )
+        for argv, tool_call in cases:
+            cli_error = _signature_cli_error(
+                signature_eval_route.build_eval_parser,
+                signature_eval_route.main_eval,
+                argv,
+                capsys,
+            )
+            payload = _fold_assert_error(tool_call())
+            assert payload["error"] == cli_error
+
+    @pytest.mark.parametrize("bad_path", ["", "line\nbreak", 7])
+    def test_invalid_paths_and_optional_values_are_rejected(
+        self, tmp_path, bad_path
+    ):
+        envelope = str(tmp_path / "envelope.json")
+        payload = _fold_assert_error(
+            mcp_server.signature_eval(bad_path)
+        )
+        assert "envelope_path" in payload["error"]
+        payload = _fold_assert_error(
+            mcp_server.signature_eval(envelope, revocation_list_path=bad_path)
+        )
+        assert "revocation_list_path" in payload["error"]
+
+    def test_missing_required_envelope_path_is_rejected(self):
+        payload = _fold_assert_error(mcp_server.signature_eval(None))
+        assert "envelope_path" in payload["error"]
+
+    def test_non_string_optional_value_is_rejected(self, tmp_path):
+        payload = _fold_assert_error(
+            mcp_server.signature_eval(
+                str(tmp_path / "envelope.json"), expected_subject=7
+            )
+        )
+        assert payload["error"] == "expected_subject must be a string"
+
+    def test_bad_max_age_is_rejected(self, tmp_path):
+        envelope = str(tmp_path / "envelope.json")
+        payload = _fold_assert_error(
+            mcp_server.signature_eval(envelope, max_age_seconds=True)
+        )
+        assert payload["error"] == "max_age_seconds must be an integer"
+
+    @pytest.mark.parametrize(
+        "body",
+        [b" " * (1024 * 1024 + 1), b"[]", b"\xff"],
+        ids=["oversized", "non-object", "invalid-utf8"],
+    )
+    def test_invalid_envelope_documents_fail_statically(
+        self, tmp_path, body
+    ):
+        envelope = tmp_path / "bad-envelope.json"
+        envelope.write_bytes(body)
+        payload = _fold_assert_error(
+            mcp_server.signature_eval(str(envelope))
+        )
+        assert payload["status"] == "error"
+
+    def test_missing_backslash_path_is_redacted(self, tmp_path):
+        missing = tmp_path / "a\\b.json"
+        payload = _fold_assert_error(
+            mcp_server.signature_eval(str(missing))
+        )
+        assert str(tmp_path) not in payload["error"]
+        assert repr(str(missing))[1:-1] not in payload["error"]
+
+
+class TestSignatureVerifyTool:
+    def test_good_tampered_and_wrong_key_signatures_match_cli(self, tmp_path):
+        cases = (
+            (
+                signature_verify_fixtures._envelope(),
+                signature_verify_fixtures._PUBLIC_KEY_HEX,
+                True,
+            ),
+            (
+                signature_verify_fixtures._envelope(signature="00" * 64),
+                signature_verify_fixtures._PUBLIC_KEY_HEX,
+                False,
+            ),
+            (
+                signature_verify_fixtures._envelope(),
+                signature_verify_fixtures._OTHER_PUBLIC_KEY_HEX,
+                False,
+            ),
+        )
+        for index, (document, public_key, expected) in enumerate(cases):
+            envelope = _fold_write_json(
+                tmp_path / f"envelope-{index}.json", document
+            )
+            options = [
+                "--envelope",
+                str(envelope),
+                "--producer-key",
+                public_key,
+            ]
+            cli = _signature_cli_payload(
+                signature_verify_route.build_verify_parser,
+                signature_verify_route.main_verify,
+                options,
+                tmp_path / f"verify-{index}.json",
+            )
+            payload = _fold_payload(
+                mcp_server.signature_verify(str(envelope), public_key)
+            )
+            assert payload["status"] == "ok"
+            assert payload["verification"] == cli
+            assert payload["verification"]["signature_valid"] is expected
+
+    def test_revocation_list_observations_match_cli(self, tmp_path):
+        envelope = _fold_write_json(
+            tmp_path / "envelope.json",
+            signature_verify_fixtures._envelope(),
+        )
+        for index, (revoked_keys, expected) in enumerate(
+            (
+                (["other-key"], True),
+                ([signature_verify_fixtures._KEY_ID], False),
+            )
+        ):
+            revocation_list = _fold_write_json(
+                tmp_path / f"revocation-{index}.json",
+                {
+                    "schema_version": "mumei.key-revocation-list/v1",
+                    "revoked_keys": revoked_keys,
+                },
+            )
+            options = [
+                "--envelope",
+                str(envelope),
+                "--producer-key",
+                signature_verify_fixtures._PUBLIC_KEY_HEX,
+                "--revocation-list",
+                str(revocation_list),
+            ]
+            cli = _signature_cli_payload(
+                signature_verify_route.build_verify_parser,
+                signature_verify_route.main_verify,
+                options,
+                tmp_path / f"revocation-verify-{index}.json",
+            )
+            payload = _fold_payload(
+                mcp_server.signature_verify(
+                    str(envelope),
+                    signature_verify_fixtures._PUBLIC_KEY_HEX,
+                    revocation_list_path=str(revocation_list),
+                )
+            )
+            assert payload["verification"] == cli
+            assert payload["verification"]["key_not_revoked"] is expected
+
+    def test_expected_pins_revocation_and_registry_wrappers_match_cli(
+        self, tmp_path
+    ):
+        envelope = _fold_write_json(
+            tmp_path / "envelope.json",
+            signature_verify_fixtures._envelope(),
+        )
+        registry = _fold_write_json(
+            tmp_path / "registry.json",
+            signature_verify_fixtures._registry_doc(),
+        )
+        revocation_list = _fold_write_json(
+            tmp_path / "revocation.json",
+            {
+                "schema_version": "mumei.key-revocation-list/v1",
+                "revoked_keys": ["other-key"],
+            },
+        )
+        registry_digest = hashlib.sha256(registry.read_bytes()).hexdigest()
+        revocation_digest = hashlib.sha256(
+            revocation_list.read_bytes()
+        ).hexdigest()
+        registry_signature = _fold_write_json(
+            tmp_path / "registry-signature.json",
+            signature_verify_fixtures._anchor_signature(registry_digest),
+        )
+        revocation_signature = _fold_write_json(
+            tmp_path / "revocation-signature.json",
+            signature_verify_fixtures._anchor_signature(revocation_digest),
+        )
+        options = [
+            "--envelope",
+            str(envelope),
+            "--producer-key",
+            signature_verify_fixtures._PUBLIC_KEY_HEX,
+            "--expected-subject",
+            signature_verify_fixtures._SUBJECT,
+            "--expected-producer-key",
+            signature_verify_fixtures._KEY_ID,
+            "--key-registry",
+            str(registry),
+            "--reference-time",
+            signature_verify_fixtures._REFERENCE,
+            "--registry-signature",
+            str(registry_signature),
+            "--registry-key",
+            signature_verify_fixtures._ROOT_PUBLIC_KEY_HEX,
+            "--revocation-list",
+            str(revocation_list),
+            "--revocation-signature",
+            str(revocation_signature),
+            "--revocation-key",
+            signature_verify_fixtures._ROOT_PUBLIC_KEY_HEX,
+        ]
+        cli = _signature_cli_payload(
+            signature_verify_route.build_verify_parser,
+            signature_verify_route.main_verify,
+            options,
+            tmp_path / "verify-anchors.json",
+        )
+        payload = _fold_payload(
+            mcp_server.signature_verify(
+                str(envelope),
+                signature_verify_fixtures._PUBLIC_KEY_HEX,
+                expected_subject=signature_verify_fixtures._SUBJECT,
+                expected_producer_key=signature_verify_fixtures._KEY_ID,
+                key_registry_path=str(registry),
+                reference_time=signature_verify_fixtures._REFERENCE,
+                registry_signature_path=str(registry_signature),
+                registry_key=signature_verify_fixtures._ROOT_PUBLIC_KEY_HEX,
+                revocation_list_path=str(revocation_list),
+                revocation_signature_path=str(revocation_signature),
+                revocation_key=signature_verify_fixtures._ROOT_PUBLIC_KEY_HEX,
+            )
+        )
+        assert payload["verification"] == cli
+        assert payload["verification"]["subject_bound"] is True
+        assert payload["verification"]["key_pinned"] is True
+        assert payload["verification"]["registry_authentic"] is True
+        assert payload["verification"]["revocation_list_authentic"] is True
+
+    @pytest.mark.parametrize(
+        ("produced_at", "expected"),
+        [
+            ("2025-12-31T23:30:00Z", True),
+            ("2025-12-31T22:00:00Z", False),
+        ],
+    )
+    def test_fresh_and_stale_signatures_match_cli(
+        self, tmp_path, produced_at, expected
+    ):
+        envelope = _fold_write_json(
+            tmp_path / "envelope.json",
+            signature_verify_fixtures._envelope(produced_at=produced_at),
+        )
+        options = [
+            "--envelope",
+            str(envelope),
+            "--producer-key",
+            signature_verify_fixtures._PUBLIC_KEY_HEX,
+            "--reference-time",
+            signature_verify_fixtures._REFERENCE,
+            "--max-age-seconds",
+            "3600",
+        ]
+        cli = _signature_cli_payload(
+            signature_verify_route.build_verify_parser,
+            signature_verify_route.main_verify,
+            options,
+            tmp_path / "verify-freshness.json",
+        )
+        payload = _fold_payload(
+            mcp_server.signature_verify(
+                str(envelope),
+                signature_verify_fixtures._PUBLIC_KEY_HEX,
+                reference_time=signature_verify_fixtures._REFERENCE,
+                max_age_seconds=3600,
+            )
+        )
+        assert payload["verification"] == cli
+        assert payload["verification"]["envelope_fresh"] is expected
+
+    def test_requires_argument_errors_match_cli(self, tmp_path, capsys):
+        envelope = _fold_write_json(
+            tmp_path / "envelope.json",
+            signature_verify_fixtures._envelope(),
+        )
+        registry = _fold_write_json(
+            tmp_path / "registry.json",
+            signature_verify_fixtures._registry_doc(),
+        )
+        wrapper = _fold_write_json(
+            tmp_path / "wrapper.json",
+            signature_verify_fixtures._anchor_signature("a" * 64),
+        )
+        revocation_list = _fold_write_json(
+            tmp_path / "revocation.json",
+            {
+                "schema_version": "mumei.key-revocation-list/v1",
+                "revoked_keys": [],
+            },
+        )
+        base_cli = [
+            "--envelope",
+            str(envelope),
+            "--producer-key",
+            signature_verify_fixtures._PUBLIC_KEY_HEX,
+        ]
+        base_tool = (
+            str(envelope),
+            signature_verify_fixtures._PUBLIC_KEY_HEX,
+        )
+        cases = (
+            (
+                [*base_cli, "--key-registry", str(registry)],
+                lambda: mcp_server.signature_verify(
+                    *base_tool, key_registry_path=str(registry)
+                ),
+            ),
+            (
+                [
+                    *base_cli,
+                    "--key-registry",
+                    str(registry),
+                    "--reference-time",
+                    signature_verify_fixtures._REFERENCE,
+                    "--registry-signature",
+                    str(wrapper),
+                ],
+                lambda: mcp_server.signature_verify(
+                    *base_tool,
+                    key_registry_path=str(registry),
+                    reference_time=signature_verify_fixtures._REFERENCE,
+                    registry_signature_path=str(wrapper),
+                ),
+            ),
+            (
+                [
+                    *base_cli,
+                    "--key-registry",
+                    str(registry),
+                    "--reference-time",
+                    signature_verify_fixtures._REFERENCE,
+                    "--registry-key",
+                    signature_verify_fixtures._ROOT_PUBLIC_KEY_HEX,
+                ],
+                lambda: mcp_server.signature_verify(
+                    *base_tool,
+                    key_registry_path=str(registry),
+                    reference_time=signature_verify_fixtures._REFERENCE,
+                    registry_key=signature_verify_fixtures._ROOT_PUBLIC_KEY_HEX,
+                ),
+            ),
+            (
+                [*base_cli, "--registry-signature", str(wrapper)],
+                lambda: mcp_server.signature_verify(
+                    *base_tool, registry_signature_path=str(wrapper)
+                ),
+            ),
+            (
+                [
+                    *base_cli,
+                    "--revocation-list",
+                    str(revocation_list),
+                    "--revocation-signature",
+                    str(wrapper),
+                ],
+                lambda: mcp_server.signature_verify(
+                    *base_tool,
+                    revocation_list_path=str(revocation_list),
+                    revocation_signature_path=str(wrapper),
+                ),
+            ),
+            (
+                [
+                    *base_cli,
+                    "--revocation-list",
+                    str(revocation_list),
+                    "--revocation-key",
+                    signature_verify_fixtures._ROOT_PUBLIC_KEY_HEX,
+                ],
+                lambda: mcp_server.signature_verify(
+                    *base_tool,
+                    revocation_list_path=str(revocation_list),
+                    revocation_key=signature_verify_fixtures._ROOT_PUBLIC_KEY_HEX,
+                ),
+            ),
+        )
+        for argv, tool_call in cases:
+            cli_error = _signature_cli_error(
+                signature_verify_route.build_verify_parser,
+                signature_verify_route.main_verify,
+                argv,
+                capsys,
+            )
+            payload = _fold_assert_error(tool_call())
+            assert payload["error"] == cli_error
+
+    @pytest.mark.parametrize("bad_path", ["", "line\nbreak", 7])
+    def test_invalid_paths_and_optional_values_are_rejected(
+        self, tmp_path, bad_path
+    ):
+        envelope = str(tmp_path / "envelope.json")
+        public_key = signature_verify_fixtures._PUBLIC_KEY_HEX
+        payload = _fold_assert_error(
+            mcp_server.signature_verify(bad_path, public_key)
+        )
+        assert "envelope_path" in payload["error"]
+        payload = _fold_assert_error(
+            mcp_server.signature_verify(
+                envelope, public_key, key_registry_path=bad_path
+            )
+        )
+        assert "key_registry_path" in payload["error"]
+
+    def test_missing_required_arguments_are_rejected(self):
+        payload = _fold_assert_error(
+            mcp_server.signature_verify("envelope.json", None)
+        )
+        assert payload["error"] == "producer_key must be a string"
+
+    def test_non_string_optional_value_is_rejected(self, tmp_path):
+        payload = _fold_assert_error(
+            mcp_server.signature_verify(
+                str(tmp_path / "envelope.json"),
+                signature_verify_fixtures._PUBLIC_KEY_HEX,
+                reference_time=7,
+            )
+        )
+        assert payload["error"] == "reference_time must be a string"
+
+    def test_bad_hex_key_is_rejected_without_echo(self, tmp_path):
+        envelope = _fold_write_json(
+            tmp_path / "envelope.json",
+            signature_verify_fixtures._envelope(),
+        )
+        public_key = "not-a-public-key"
+        payload = _fold_assert_error(
+            mcp_server.signature_verify(str(envelope), public_key)
+        )
+        assert payload["error"] == "invalid producer key"
+        assert public_key not in payload["error"]
+
+    @pytest.mark.parametrize(
+        "body",
+        [b" " * (1024 * 1024 + 1), b"[]", b"\xff"],
+        ids=["oversized", "non-object", "invalid-utf8"],
+    )
+    def test_invalid_envelope_documents_fail_statically(
+        self, tmp_path, body
+    ):
+        envelope = tmp_path / "bad-envelope.json"
+        envelope.write_bytes(body)
+        payload = _fold_assert_error(
+            mcp_server.signature_verify(
+                str(envelope), signature_verify_fixtures._PUBLIC_KEY_HEX
+            )
+        )
+        assert payload["status"] == "error"
+
+    def test_missing_backslash_path_is_redacted(self, tmp_path):
+        missing = tmp_path / "a\\b.json"
+        payload = _fold_assert_error(
+            mcp_server.signature_verify(
+                str(missing), signature_verify_fixtures._PUBLIC_KEY_HEX
+            )
+        )
+        assert str(tmp_path) not in payload["error"]
+        assert repr(str(missing))[1:-1] not in payload["error"]
+
+
+class TestSignatureMaxAgeDispatch:
+    @pytest.mark.parametrize("tool_name", ["signature_eval", "signature_verify"])
+    @pytest.mark.parametrize("max_age", [True, "3600"])
+    def test_dispatch_rejects_coerced_max_age_values(
+        self, tmp_path, tool_name, max_age
+    ):
+        envelope = _fold_write_json(
+            tmp_path / f"{tool_name}-{max_age}.json",
+            signature_eval_fixtures._envelope(),
+        )
+        arguments = {
+            "envelope_path": str(envelope),
+            "reference_time": signature_eval_fixtures._REFERENCE,
+            "max_age_seconds": max_age,
+        }
+        if tool_name == "signature_verify":
+            arguments["producer_key"] = signature_verify_fixtures._PUBLIC_KEY_HEX
+        with pytest.raises(ToolError):
+            asyncio.run(mcp_server.mcp.call_tool(tool_name, arguments))
+
+    @pytest.mark.parametrize("tool_name", ["signature_eval", "signature_verify"])
+    def test_dispatch_accepts_strict_integer_max_age(
+        self, tmp_path, tool_name
+    ):
+        envelope = _fold_write_json(
+            tmp_path / f"{tool_name}.json",
+            signature_eval_fixtures._envelope(
+                produced_at="2025-12-31T23:30:00Z"
+            ),
+        )
+        arguments = {
+            "envelope_path": str(envelope),
+            "reference_time": signature_eval_fixtures._REFERENCE,
+            "max_age_seconds": 3600,
+        }
+        response_key = "evaluation"
+        if tool_name == "signature_verify":
+            arguments["producer_key"] = signature_verify_fixtures._PUBLIC_KEY_HEX
+            response_key = "verification"
+        content = asyncio.run(
+            mcp_server.mcp.call_tool(tool_name, arguments)
+        )
+        payload = _fold_payload(content[0][0].text)
+        assert payload["status"] == "ok"
+        assert payload[response_key]["envelope_fresh"] is True
+
+
+class TestSignatureToolsDoNotSpawn:
+    def test_eval_and_verify_are_spawn_free(self, monkeypatch, tmp_path):
+        def forbidden(*args, **kwargs):
+            raise AssertionError("signature MCP tools must not spawn")
+
+        monkeypatch.setattr(subprocess, "Popen", forbidden)
+        monkeypatch.setattr(subprocess, "run", forbidden)
+
+        eval_envelope = _fold_write_json(
+            tmp_path / "eval-envelope.json",
+            signature_eval_fixtures._envelope(),
+        )
+        verify_envelope = _fold_write_json(
+            tmp_path / "verify-envelope.json",
+            signature_verify_fixtures._envelope(),
+        )
+        assert _fold_payload(
+            mcp_server.signature_eval(str(eval_envelope))
+        )["status"] == "ok"
+        assert _fold_payload(
+            mcp_server.signature_verify(
+                str(verify_envelope),
+                signature_verify_fixtures._PUBLIC_KEY_HEX,
+            )
+        )["status"] == "ok"
+
+
+class TestNulDeclaredPaths:
+    def test_signature_and_binding_tools_reject_nul_paths(self) -> None:
+        results = (
+            (
+                mcp_server.signature_eval("envelope\x00.json"),
+                "envelope_path",
+            ),
+            (
+                mcp_server.signature_verify(
+                    "envelope\x00.json",
+                    signature_verify_fixtures._PUBLIC_KEY_HEX,
+                ),
+                "envelope_path",
+            ),
+            (
+                mcp_server.binding_eval("record\x00.json", "evidence.json"),
+                "record_path",
+            ),
+        )
+        for raw, name in results:
+            payload = _fold_assert_error(raw)
+            assert (
+                f"{name} must be a nonempty single-line path"
+                in payload["error"]
+            )
+        assert (
+            mcp_server._redact_declared_paths("unchanged", ["a\x00b"])
+            == "unchanged"
+        )
