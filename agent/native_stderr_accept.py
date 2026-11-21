@@ -74,7 +74,7 @@ conjunction awaits a Core descriptor. The remaining C02 checks
 (producer authenticity, freshness, file identity and semantic
 correspondence) remain outside the profile; the raw link
 argument-vector is recorded-but-not-reproduced inside Core and adds
-no claim here either).
+no claim here either.
 """
 
 from __future__ import annotations
