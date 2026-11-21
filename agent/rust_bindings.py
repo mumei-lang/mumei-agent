@@ -1215,10 +1215,26 @@ class _RustBindings:
                 continue
             arm_scope = _Scope(arm, self.module_depth, self.current_function)
             self.scopes.append(arm_scope)
-            pattern = arm.child_by_field_name("pattern")
+            match_pattern = arm.child_by_field_name("pattern")
+            guard = (
+                None
+                if match_pattern is None
+                else match_pattern.child_by_field_name("condition")
+            )
+            pattern = (
+                match_pattern
+                if match_pattern is None or guard is None
+                else next(
+                    (
+                        child
+                        for child in match_pattern.named_children
+                        if child != guard
+                    ),
+                    None,
+                )
+            )
             names = self._pattern_names(pattern, arm_scope)
             self._bind_pattern_names(names, arm_scope, self.span(arm))
-            guard = arm.child_by_field_name("condition")
             if guard is not None:
                 self._expr(guard)
             result = arm.child_by_field_name("value")

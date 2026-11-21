@@ -314,6 +314,33 @@ def test_pattern_constructor_paths_are_referenced_or_explicitly_unresolved(
                 assert _unresolved(report, name, "prelude_name")
 
 
+def test_match_guards_resolve_inside_the_arm_after_pattern_bindings():
+    source = (
+        "const K:i32=1; "
+        "fn f(n:i32, flag:bool){ "
+        "match n { n if n > K => n, x if flag => x, _ => 0 } }"
+    )
+    report = build_rust_bindings(source, pointer_width=64)
+    parameter_n = _bindings(report, "n", "parameter")[0]
+    arm_n = _bindings(report, "n", "local")[0]
+    flag = _bindings(report, "flag", "parameter")[0]
+    assert [ref.binding_id for ref in _refs(report, source, "n")] == [
+        parameter_n.id,
+        arm_n.id,
+        arm_n.id,
+    ]
+    assert [ref.binding_id for ref in _refs(report, source, "flag")] == [flag.id]
+    assert len(_bindings(report, "x", "local")) == 1
+    assert len(_refs(report, source, "x")) == 1
+
+
+def test_unresolved_match_guard_does_not_create_a_pattern_binding():
+    source = "fn f(n:i32){ match n { x if missing => x, _ => 0 } }"
+    report = build_rust_bindings(source, pointer_width=64)
+    assert len(_bindings(report, "x", "local")) == 1
+    assert _unresolved(report, "missing", "unknown_name")
+
+
 @pytest.mark.parametrize(
     "attribute",
     [
