@@ -13761,6 +13761,254 @@ def test_local_composite_nested_read_pins_intermediate_type(
     assert q_id in result.pinned
 
 
+def _local_value_embed_result(
+    go_types_helper, declarations: str, functions: str, name: str = "F"
+):
+    files = {"a.go": "package p\n" + declarations + functions}
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    return named_package(files, snapshot, summaries, name), snapshot
+
+
+def test_local_value_embed_promoted_read_pins_the_promotion_chain(
+    go_types_helper,
+):
+    result, snapshot = _local_value_embed_result(
+        go_types_helper,
+        "type Q struct{ V int64 }\ntype S struct{ Q; W int64 }\n",
+        "func F(x int64) int64 { "
+        "st := S{Q: Q{V: x}}; return st.V }\n",
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "none_in_supported_fragment"
+    assert not result.calls
+    q_field = next(
+        b
+        for b in snapshot.bindings
+        if b.name == "Q" and b.kind == "variable" and b.scope is None
+    )
+    q_type = next(
+        b for b in snapshot.bindings if b.name == "Q" and b.kind == "type"
+    )
+    s_type = next(
+        b for b in snapshot.bindings if b.name == "S" and b.kind == "type"
+    )
+    assert {q_field.id, q_type.id, s_type.id} <= set(result.pinned)
+
+
+@pytest.mark.parametrize(
+    ("parameters", "body", "expected"),
+    [
+        (
+            "x int64",
+            "st := S{}; st.V = x; return st.V",
+            frozenset({0}),
+        ),
+        (
+            "x int64",
+            "st := S{}; st.V = x; st.V++; return st.V",
+            frozenset({0}),
+        ),
+        (
+            "x, y int64",
+            "st := S{}; st.V = x; st.V += y; return st.V",
+            frozenset({0, 1}),
+        ),
+    ],
+)
+def test_local_value_embed_promoted_stores_accumulate_dependencies(
+    go_types_helper, parameters, body, expected
+):
+    result, _ = _local_value_embed_result(
+        go_types_helper,
+        "type Q struct{ V int64 }\ntype S struct{ Q }\n",
+        f"func F({parameters}) int64 {{ {body} }}\n",
+    )
+    assert result.available
+    assert result.return_dependencies == expected
+    assert result.effects == "none_in_supported_fragment"
+    assert not result.calls
+
+
+def test_local_value_embed_promoted_field_supports_multilevel_and_mixed_access(
+    go_types_helper,
+):
+    declarations = (
+        "type R struct{ V int64 }\n"
+        "type Q struct{ R }\n"
+        "type S struct{ Q }\n"
+    )
+    for body in (
+        "st := S{Q: Q{R: R{V: x}}}; return st.V",
+        "st := S{}; st.Q.R.V = x; return st.V",
+        "st := S{}; st.V = x; return st.Q.R.V",
+    ):
+        result, _ = _local_value_embed_result(
+            go_types_helper,
+            declarations,
+            f"func F(x int64) int64 {{ {body} }}\n",
+        )
+        assert result.available
+        assert result.return_dependencies == frozenset({0})
+        assert result.effects == "none_in_supported_fragment"
+        assert not result.calls
+
+
+def test_local_value_embed_promoted_field_mixes_direct_and_promoted_access(
+    go_types_helper,
+):
+    declarations = "type Q struct{ V int64 }\ntype S struct{ Q }\n"
+    for body in (
+        "st := S{}; st.Q.V = x; return st.V",
+        "st := S{}; st.V = x; return st.Q.V",
+    ):
+        result, _ = _local_value_embed_result(
+            go_types_helper,
+            declarations,
+            f"func F(x int64) int64 {{ {body} }}\n",
+        )
+        assert result.available
+        assert result.return_dependencies == frozenset({0})
+        assert result.effects == "none_in_supported_fragment"
+
+
+def test_local_value_embed_promoted_field_survives_copy_and_value_call(
+    go_types_helper,
+):
+    declarations = "type Q struct{ V int64 }\ntype S struct{ Q }\n"
+    copy_result, _ = _local_value_embed_result(
+        go_types_helper,
+        declarations,
+        "func F(x int64) int64 { "
+        "st := S{Q: Q{V: x}}; cp := st; return cp.V }\n",
+    )
+    assert copy_result.available
+    assert copy_result.return_dependencies == frozenset({0})
+    callee_result, _ = _local_value_embed_result(
+        go_types_helper,
+        declarations,
+        "func G(s S) int64 { return 0 }\n"
+        "func F(x int64) int64 { "
+        "st := S{}; st.Q.V = x; _ = G(st); return st.V }\n",
+    )
+    assert callee_result.available
+    assert callee_result.return_dependencies == frozenset({0})
+
+
+def test_anonymous_local_value_embed_promoted_field_is_admitted(
+    go_types_helper,
+):
+    result, _ = _local_value_embed_result(
+        go_types_helper,
+        "type Q struct{ V int64 }\n",
+        "func F(x int64) int64 { "
+        "st := struct{ Q }{Q: Q{V: x}}; return st.V }\n",
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+@pytest.mark.parametrize(
+    ("declarations", "function"),
+    [
+        (
+            "type Q struct{ V int64 }\ntype S struct{ *Q }\n",
+            "func F(q *Q) int64 { st := S{Q: q}; return st.V }\n",
+        ),
+        (
+            "type R struct{ V int64 }\n"
+            "type Q struct{ *R }\ntype S struct{ Q }\n",
+            "func F() int64 { st := S{}; return st.V }\n",
+        ),
+        (
+            "type G[T any] struct{ V int64 }\n"
+            "type S struct{ G[int64] }\n",
+            "func F(x int64) int64 { "
+            "st := S{}; st.V = x; return st.V }\n",
+        ),
+        (
+            "type Q struct{ V int64 }\n"
+            "func (q Q) M() int64 { return q.V }\n"
+            "type S struct{ Q }\n",
+            "func F() int64 { st := S{}; return st.M() }\n",
+        ),
+    ],
+)
+def test_local_value_embed_keeps_pointer_generic_and_method_paths_closed(
+    go_types_helper, declarations, function
+):
+    result, _ = _local_value_embed_result(
+        go_types_helper, declarations, function
+    )
+    assert not result.available
+    assert result.gaps
+
+
+def test_imported_value_embed_store_stays_closed(go_types_helper):
+    files = {
+        "a.go": 'package p\nimport "lib"\n'
+        "type S struct{ lib.Q }\n"
+        "func F(x int64) int64 { st := S{}; st.V = x; return st.V }\n"
+    }
+    lib = {"lib": {"q.go": "package lib\ntype Q struct{ V int64 }\n"}}
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+    assert result.gaps
+
+
+@pytest.mark.parametrize(
+    ("changed_types", "functions"),
+    [
+        (
+            "type Q struct{ V int64 }\n"
+            "type Q2 struct{ V int64 }\ntype S struct{ *Q }\n",
+            "func F() int64 { st := S{}; return int64(st.V) }\n",
+        ),
+        (
+            "type Q struct{ V int64 }\n"
+            "type Q2 struct{ V int64 }\ntype S struct{ Q2 }\n",
+            "func F() int64 { st := S{}; return int64(st.V) }\n",
+        ),
+        (
+            "type Q struct{ V int32 }\ntype S struct{ Q }\n",
+            "func F() int64 { st := S{}; return int64(st.V) }\n",
+        ),
+    ],
+)
+def test_local_value_embed_promoted_read_flags_stale_type_changes(
+    go_types_helper, changed_types, functions
+):
+    before = {
+        "types.go": (
+            "package p\ntype Q struct{ V int64 }\n"
+            "type Q2 struct{ V int64 }\ntype S struct{ Q }\n"
+        ),
+        "a.go": "package p\n" + functions,
+    }
+    after = {
+        "types.go": "package p\n" + changed_types,
+        "a.go": "package p\n" + functions,
+    }
+    old_snapshot = _snapshot_for(go_types_helper, before)
+    old_summaries = ip.summarize_go_package(before, old_snapshot)
+    old_result = named_package(before, old_snapshot, old_summaries, "F")
+    assert old_result.available
+    assert old_result.return_dependencies == frozenset()
+    new_snapshot = _snapshot_for(go_types_helper, after)
+    live = {binding.id for binding in new_snapshot.bindings}
+    assert old_summaries.stale_dependents(live) == {
+        old_result.binding_id
+    }
+
+
 def test_package_composite_nested_read_pins_intermediate_type(
     go_types_helper,
 ):

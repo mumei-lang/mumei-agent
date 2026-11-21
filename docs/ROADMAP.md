@@ -4113,6 +4113,9 @@ Struct params/results stay closed at the signature gate.
 Bound-pointer field chains also admit named struct-valued
 intermediates (`t.A.B` and `(*t).A.B`), pinning each resolved
 struct type; anonymous struct intermediates remain closed.
+Promoted fields on tracked local structs admit enumerable value-only
+embed paths, pinning each embedded field and type; pointer crossings,
+generic or imported embeds, and promoted methods stay closed.
 
 The hard boundary is the aliasing invariant the dep-free bound-
 pointer field read relies on: a bound pointer must never alias a
