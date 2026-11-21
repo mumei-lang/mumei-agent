@@ -2090,6 +2090,11 @@ class _Builder:
             deps |= self.indirect_writes
         return deps
 
+    def _promote_local_chan_chan_group(self, binding_id: str) -> None:
+        root = self._chan_root(binding_id)
+        for token in set(self._chan_group_members(root)) | {root}:
+            self._mark_external_chan_group_member(token)
+
     def _chan_group_join(
         self,
         member_id: str,
@@ -2513,6 +2518,16 @@ class _Builder:
 
     def _mark_external_chan_group_member(self, token: str) -> None:
         self._external_chan_group_tokens.add(token)
+
+    def _return_local_chan_chan_deps(
+        self,
+        binding_id: str,
+        locals_: dict[str, frozenset[int]],
+    ) -> frozenset[int]:
+        deps = self._chan_group_read_deps(binding_id, locals_)
+        self._promote_local_chan_chan_group(binding_id)
+        self._record_read(deps)
+        return deps
 
     def _chan_group_value_tokens(self, node: Any) -> set[str]:
         while node is not None and node.type == "literal_element":
@@ -7215,9 +7230,26 @@ member, or one explicit dereference of one (`(*t).F` — the same
         reassigned between the literal and the `return cl` reads the
         CURRENT value (`y = x` after `cl := func(){return y}` hands x's
         deps to the caller, not the empty set the literal captured)."""
+        local_chan_chan = self._local_chan_chan_id(expr)
+        if expr.type == "composite_literal":
+            pending = [expr]
+            while pending:
+                candidate = pending.pop()
+                if (
+                    candidate is not expr
+                    and self._local_chan_chan_id(candidate) is not None
+                ):
+                    raise _Unsupported(
+                        "unsupported_return", _span(expr)
+                    )
+                pending.extend(candidate.named_children)
         deps = self.expression(
             expr, fn, params, locals_, transfers, count, 0
         )
+        if local_chan_chan is not None:
+            deps |= self._return_local_chan_chan_deps(
+                local_chan_chan, locals_
+            )
         idents = [expr] if expr.type == "identifier" else []
         if not idents and expr.type == "composite_literal":
             # `return []func(){cl}` — a closure returned as a
@@ -9923,11 +9955,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
             expressions = _children(node)
             if len(expressions) == 1 and expressions[0].type == "expression_list":
                 expressions = _children(expressions[0])
-            if any(
-                self._local_chan_chan_id(expression) is not None
-                for expression in expressions
-            ):
-                raise _Unsupported("unsupported_return", _span(node))
+            for index, expression in enumerate(expressions):
+                if self._local_chan_chan_id(expression) is not None and (
+                    index >= len(fn.results)
+                    or not self._chan_chan_fact(
+                        fn.results[index].type
+                    )
+                ):
+                    raise _Unsupported(
+                        "unsupported_return", _span(node)
+                    )
             if len(expressions) == 0:
                 if not fn.results:
                     # A bare `return` in a void callee carries
@@ -9953,7 +9990,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     # `locals_[r]`) — resolve the queue root like an
                     # identifier read does so `return` carries q's deps.
                     result_root = self._chan_root(result_id)
-                    if result_root in params:
+                    if result_root in self.local_chan_chans:
+                        result_deps |= (
+                            self._return_local_chan_chan_deps(
+                                result_root, locals_
+                            )
+                        )
+                    elif result_root in params:
                         result_deps |= frozenset(
                             {params[result_root]}
                         ) | self.indirect_writes
@@ -11197,13 +11240,21 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         and len(value_nodes) == len(names)
                         and bool(value_nodes)
                         and (
-                            external_queue
-                            := self._external_chan_operand(
-                                value_nodes[i], params
+                            (
+                                external_queue
+                                := self._external_chan_operand(
+                                    value_nodes[i], params
+                                )
                             )
+                            is not None
+                            and self._chan_chan_fact(
+                                external_queue[1]
+                            )
+                            or self._chan_result_call(
+                                value_nodes[i], self._chan_chan_fact
+                            )
+                            is not None
                         )
-                        is not None
-                        and self._chan_chan_fact(external_queue[1])
                     )
                     if (
                         binding.type.kind == "chan"
@@ -11970,13 +12021,33 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         if lhs_ref is not None
                         else None
                     )
-                    if (
-                        lhs_id is None
-                        or (
-                            lhs_id not in self.local_chan_chans
-                            and self._chan_root(lhs_id)
-                            not in self.local_chan_chans
+                    named_chan_chan_result = any(
+                        result.binding_id == lhs_id
+                        and self._chan_chan_fact(result.type)
+                        for result in fn.results
+                    )
+                    external_write = (
+                        self._package_var_write(lhs)
+                        or self._imported_member_write(lhs)
+                    ) if lhs is not None else None
+                    external_chan_chan_lhs = (
+                        external_write is not None
+                        and not external_write[2]
+                        and self._chan_chan_fact(
+                            external_write[0].type
                         )
+                    )
+                    if (
+                        (
+                            lhs_id is None
+                            or (
+                                lhs_id not in self.local_chan_chans
+                                and self._chan_root(lhs_id)
+                                not in self.local_chan_chans
+                                and not named_chan_chan_result
+                            )
+                        )
+                        and not external_chan_chan_lhs
                     ):
                         raise _Unsupported(
                             "binding_unavailable", _span(node)
@@ -11998,6 +12069,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # `(*p)[i]` store does. Ref indices collect here
             # because the RHS values evaluate after the LHS pass.
             external_write_targets: set[int] = set()
+            external_chan_chan_write_targets: set[int] = set()
             # `GS[i] = c` — a store through an external chan-element
             # container hands `c`'s queue to caller-visible state
             # like `cc <- ch` does: the slot records here so the
@@ -12115,6 +12187,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             )
                             if self._scalar_chan_binding(binding.id):
                                 chan_write_targets.add(len(refs))
+                            elif self._chan_chan_fact(binding.type):
+                                external_chan_chan_write_targets.add(
+                                    len(refs)
+                                )
                             elif (
                                 binding.type is not None
                                 and self._chan_elem_collection(
@@ -12138,6 +12214,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         )
                         if self._scalar_chan_fact(member.type):
                             chan_write_targets.add(len(refs))
+                        elif self._chan_chan_fact(member.type):
+                            external_chan_chan_write_targets.add(
+                                len(refs)
+                            )
                         elif (
                             member.type is not None
                             and self._chan_elem_collection(member.type)
@@ -12244,6 +12324,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         and self._scalar_chan_fact(member.type)
                     ):
                         chan_write_targets.add(len(refs) - 1)
+                    elif (
+                        not saw_deref
+                        and self._chan_chan_fact(member.type)
+                    ):
+                        external_chan_chan_write_targets.add(
+                            len(refs) - 1
+                        )
                     if (
                         not saw_deref
                         and self._external_chan_elem_index(lhs, params)
@@ -12280,6 +12367,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         and self._scalar_chan_binding(binding.id)
                     ):
                         chan_write_targets.add(len(refs) - 1)
+                    elif (
+                        not saw_deref
+                        and self._chan_chan_fact(binding.type)
+                    ):
+                        external_chan_chan_write_targets.add(
+                            len(refs) - 1
+                        )
                     if (
                         not saw_deref
                         and self._external_chan_elem_index(lhs, params)
@@ -12891,6 +12985,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 )
                 for i in range(len(refs))
             ]
+            external_chan_chan_roots = {
+                i: local_chan_chan_targets[i]
+                for i in external_chan_chan_write_targets
+            }
             # `s, d = t, s[0]` — a `d = s[i]` element reseat joins
             # the group `s` named at eval time, not the group an
             # earlier slot's store reseated `s` onto: snapshot each
@@ -13069,6 +13167,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # the external-write set a later member or
                         # pointee element read observes.
                         self.indirect_writes |= value
+                        root_id = external_chan_chan_roots.get(i)
+                        if root_id is not None:
+                            group_deps = self._chan_group_read_deps(
+                                root_id, locals_
+                            )
+                            self._promote_local_chan_chan_group(root_id)
+                            self.indirect_writes |= group_deps
                     elif i in chan_write_targets:
                         # `GC = ch` — the RHS read evaluated to the
                         # queue's contents; reseating the external
@@ -13258,6 +13363,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         ref.binding_id in self.local_chan_chans
                         or self._chan_root(ref.binding_id)
                         in self.local_chan_chans
+                        or any(
+                            result.binding_id == ref.binding_id
+                            and self._chan_chan_fact(result.type)
+                            for result in fn.results
+                        )
                     )
                     rhs_node = (
                         rights[i]

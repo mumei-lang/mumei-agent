@@ -16448,9 +16448,348 @@ def test_received_external_channel_value_joins_local_queue(
     assert local.effects == "none_in_supported_fragment"
 
 
+@pytest.mark.parametrize(
+    "variant",
+    [
+        "direct",
+        "alias",
+        "multi-result",
+        "named-result",
+        "branch-return",
+        "external-member",
+        "member-enqueued-before-send",
+        "member-enqueued-after-send",
+        "unbuffered",
+        "defer-after-return",
+    ],
+)
+def test_local_chan_chan_return_escape_matches_inline(
+    go_types_helper, variant
+):
+    capacity = "" if variant == "unbuffered" else ", 1"
+    queue_setup = (
+        f"cc := make(chan chan int64{capacity})\n"
+        f"c := make(chan int64{capacity})\n"
+    )
+    if variant in {"direct", "unbuffered"}:
+        maker = (
+            "func G(x int64) chan chan int64 {\n"
+            + queue_setup
+            + "\tcc <- c\n"
+            "\tc <- x\n"
+            "\treturn cc\n}\n"
+        )
+        uses = (
+            "func Direct(x int64) int64 { return <-(<-G(x)) }\n"
+            "func Bound(x int64) int64 {\n"
+            "\tcc := G(x)\n"
+            "\td := <-cc\n"
+            "\treturn <-d\n}\n"
+        )
+        inline = (
+            "func Inline(x int64) int64 {\n"
+            + queue_setup
+            + "\tcc <- c\n"
+            "\tc <- x\n"
+            "\td := <-cc\n"
+            "\treturn <-d\n}\n"
+        )
+        compare = ("Direct", "Bound")
+        expected = frozenset({0})
+    elif variant == "alias":
+        maker = (
+            "func G(x int64) chan chan int64 {\n"
+            + queue_setup
+            + "\tcc <- c\n"
+            "\tc <- x\n"
+            "\tq := cc\n"
+            "\treturn q\n}\n"
+        )
+        uses = (
+            "func Use(x int64) int64 {\n"
+            "\tcc := G(x)\n"
+            "\td := <-cc\n"
+            "\treturn <-d\n}\n"
+        )
+        inline = (
+            "func Inline(x int64) int64 {\n"
+            + queue_setup
+            + "\tcc <- c\n"
+            "\tc <- x\n"
+            "\td := <-cc\n"
+            "\treturn <-d\n}\n"
+        )
+        compare = ("Use",)
+        expected = frozenset({0})
+    elif variant == "multi-result":
+        maker = (
+            "func G(x int64) (chan chan int64, bool) {\n"
+            + queue_setup
+            + "\tcc <- c\n"
+            "\tc <- x\n"
+            "\treturn cc, true\n}\n"
+        )
+        uses = (
+            "func Use(x int64) int64 {\n"
+            "\tcc, _ := G(x)\n"
+            "\td := <-cc\n"
+            "\treturn <-d\n}\n"
+        )
+        inline = (
+            "func Inline(x int64) int64 {\n"
+            + queue_setup
+            + "\tcc <- c\n"
+            "\tc <- x\n"
+            "\td := <-cc\n"
+            "\treturn <-d\n}\n"
+        )
+        compare = ("Use",)
+        expected = frozenset({0})
+    elif variant == "named-result":
+        maker = (
+            "func G(x int64) (r chan chan int64) {\n"
+            + queue_setup
+            + "\tcc <- c\n"
+            "\tc <- x\n"
+            "\tr = cc\n"
+            "\treturn\n}\n"
+        )
+        uses = (
+            "func Use(x int64) int64 {\n"
+            "\tcc := G(x)\n"
+            "\td := <-cc\n"
+            "\treturn <-d\n}\n"
+        )
+        inline = (
+            "func Inline(x int64) int64 {\n"
+            + queue_setup
+            + "\tcc <- c\n"
+            "\tc <- x\n"
+            "\td := <-cc\n"
+            "\treturn <-d\n}\n"
+        )
+        compare = ("Use",)
+        expected = frozenset({0})
+    elif variant == "branch-return":
+        maker = (
+            "func G(x int64, b bool) chan chan int64 {\n"
+            + queue_setup
+            + "\tcc <- c\n"
+            "\tc <- x\n"
+            "\tif b { return cc }\n"
+            "\treturn cc\n}\n"
+        )
+        uses = (
+            "func Use(x int64, b bool) int64 {\n"
+            "\tcc := G(x, b)\n"
+            "\td := <-cc\n"
+            "\treturn <-d\n}\n"
+        )
+        inline = (
+            "func Inline(x int64, b bool) int64 {\n"
+            + queue_setup
+            + "\tcc <- c\n"
+            "\tc <- x\n"
+            "\td := <-cc\n"
+            "\treturn <-d\n}\n"
+        )
+        compare = ("Use",)
+        expected = frozenset({0})
+    elif variant == "external-member":
+        maker = (
+            "func G(p chan int64, x int64) chan chan int64 {\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- p\n"
+            "\treturn cc\n}\n"
+        )
+        uses = (
+            "func Use(p chan int64, x int64) int64 {\n"
+            "\tcc := G(p, x)\n"
+            "\td := <-cc\n"
+            "\td <- x\n"
+            "\treturn <-d\n}\n"
+        )
+        inline = (
+            "func Inline(p chan int64, x int64) int64 {\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tcc <- p\n"
+            "\td := <-cc\n"
+            "\td <- x\n"
+            "\treturn <-d\n}\n"
+        )
+        compare = ("Use",)
+        expected = frozenset({0, 1})
+    elif variant in {
+        "member-enqueued-before-send",
+        "member-enqueued-after-send",
+    }:
+        member_send = (
+            "\tcc <- c\n\tc <- x\n"
+            if variant == "member-enqueued-before-send"
+            else "\tc <- x\n\tcc <- c\n"
+        )
+        maker = (
+            "func G(x int64) chan chan int64 {\n"
+            + queue_setup
+            + member_send
+            + "\treturn cc\n}\n"
+        )
+        uses = (
+            "func Use(x int64) int64 {\n"
+            "\tcc := G(x)\n"
+            "\td := <-cc\n"
+            "\treturn <-d\n}\n"
+        )
+        inline = (
+            "func Inline(x int64) int64 {\n"
+            + queue_setup
+            + member_send
+            + "\td := <-cc\n"
+            "\treturn <-d\n}\n"
+        )
+        compare = ("Use",)
+        expected = frozenset({0})
+    elif variant == "defer-after-return":
+        maker = (
+            "func Send(c chan int64, x int64) { c <- x }\n"
+            "func G(x int64) chan chan int64 {\n"
+            + queue_setup
+            + "\tcc <- c\n"
+            "\tdefer Send(c, x)\n"
+            "\treturn cc\n}\n"
+        )
+        uses = (
+            "func Use(x int64) int64 {\n"
+            "\tcc := G(x)\n"
+            "\td := <-cc\n"
+            "\treturn <-d\n}\n"
+        )
+        inline = ""
+        compare = ("Use",)
+        expected = frozenset({0})
+    else:
+        raise AssertionError(variant)
+
+    data = unit(go_types_helper, maker + uses + inline)
+    source, snapshot, summaries = data
+    maker_result = named(source, snapshot, summaries, "G")
+    assert maker_result.available, (variant, maker_result.gaps)
+    for function_name in compare:
+        result = named(source, snapshot, summaries, function_name)
+        expected_result = named(source, snapshot, summaries, "Inline") if inline else None
+        assert result.available, (variant, function_name, result.gaps)
+        if expected_result is not None:
+            assert expected_result.available
+            assert result.return_dependencies == expected_result.return_dependencies
+            assert result.effects == "unknown"
+        assert expected <= result.return_dependencies
+    if variant == "direct":
+        assert named(source, snapshot, summaries, "Direct").return_dependencies == frozenset({0})
+        assert named(source, snapshot, summaries, "Bound").return_dependencies == frozenset({0})
+    if variant == "defer-after-return":
+        assert maker_result.effects == "unknown"
+
+
+@pytest.mark.parametrize("imported", [False, True], ids=["package-var", "imported-var"])
+def test_local_chan_chan_package_store_escapes_group(
+    go_types_helper, imported
+):
+    if imported:
+        files = {
+            "a.go": 'package p\nimport "lib"\n'
+            "func Store(x int64) {\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\tlib.V = cc\n"
+            "\tc <- x\n"
+            "}\n"
+            "func Same(x int64) int64 {\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\tlib.V = cc\n"
+            "\tc <- x\n"
+            "\tlib.V = cc\n"
+            "\td := <-lib.V\n"
+            "\treturn <-d\n"
+            "}\n"
+            "func Read() int64 {\n"
+            "\td := <-lib.V\n"
+            "\treturn <-d\n"
+            "}\n"
+            "func Caller(x int64) int64 {\n"
+            "\tStore(x)\n"
+            "\td := <-lib.V\n"
+            "\treturn <-d\n"
+            "}\n",
+        }
+        imports = {"lib": {"lib.go": "package lib\nvar V chan chan int64\n"}}
+        snapshot = load_go_package_snapshot(
+            package_report_imports(go_types_helper, files, imports),
+            files,
+            target_arch="amd64",
+        )
+        summaries = ip.summarize_go_package(files, snapshot)
+        names = {
+            "Store": "Store",
+            "Same": "Same",
+            "Read": "Read",
+            "Caller": "Caller",
+        }
+    else:
+        files = {
+            "a.go": "package p\nvar Global chan chan int64\n"
+            "func Store(x int64) {\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\tGlobal = cc\n"
+            "\tc <- x\n"
+            "}\n"
+            "func Same(x int64) int64 {\n"
+            "\tcc := make(chan chan int64, 1)\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tcc <- c\n"
+            "\tGlobal = cc\n"
+            "\tc <- x\n"
+            "\tGlobal = cc\n"
+            "\td := <-Global\n"
+            "\treturn <-d\n"
+            "}\n"
+            "func Read() int64 {\n"
+            "\td := <-Global\n"
+            "\treturn <-d\n"
+            "}\n"
+            "func Caller(x int64) int64 {\n"
+            "\tStore(x)\n"
+            "\td := <-Global\n"
+            "\treturn <-d\n"
+            "}\n",
+        }
+        _, snapshot, summaries = package_unit(go_types_helper, files)
+        names = {
+            "Store": "Store",
+            "Same": "Same",
+            "Read": "Read",
+            "Caller": "Caller",
+        }
+
+    store = named_package(files, snapshot, summaries, names["Store"])
+    same = named_package(files, snapshot, summaries, names["Same"])
+    read = named_package(files, snapshot, summaries, names["Read"])
+    caller = named_package(files, snapshot, summaries, names["Caller"])
+    assert store.available and store.effects == "unknown"
+    assert same.available and same.return_dependencies == frozenset({0})
+    assert same.effects == "unknown"
+    assert read.available and read.effects == "unknown"
+    assert caller.available and caller.return_dependencies == frozenset({0})
+    assert caller.effects == "unknown"
+
+
 def test_chan_chan_boundaries_stay_closed(go_types_helper):
-    # Local queues cannot escape the share-group model or become
-    # caller-visible through unsupported channel shapes.
+    # Unsupported shapes cannot expose a local queue outside the
+    # admitted return and package-variable paths.
     for src in (
         "func F(ccc chan chan chan int64) int64 {\n"
         "\treturn 0\n}\n",
@@ -16505,14 +16844,6 @@ def test_chan_chan_boundaries_stay_closed(go_types_helper):
         "\tf(cc)\n"
         "\treturn 0\n"
         "}\n",
-        "func F() chan chan int64 {\n"
-        "\tcc := make(chan chan int64, 1)\n"
-        "\treturn cc\n}\n",
-        "var Global chan chan int64\n"
-        "func F() int64 {\n"
-        "\tcc := make(chan chan int64, 1)\n"
-        "\tGlobal = cc\n"
-        "\treturn 0\n}\n",
         "func F() int64 {\n"
         "\tcc := make(chan chan int64, 1)\n"
         "\ts := []chan chan int64{cc}\n"
@@ -16559,6 +16890,29 @@ def test_chan_chan_boundaries_stay_closed(go_types_helper):
         "\tq := p\n\t_ = q\n\treturn 0\n}\n",
         "func F(p chan chan []int64) int64 {\n"
         "\tq := p\n\t_ = q\n\treturn 0\n}\n",
+        "func F() []chan chan int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\treturn []chan chan int64{cc}\n}\n",
+        "func F() map[int]chan chan int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\treturn map[int]chan chan int64{0: cc}\n}\n",
+        "type St struct{ C chan chan int64 }\n"
+        "func F() St {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\treturn St{C: cc}\n}\n",
+        "func F() any {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\treturn cc\n}\n",
+        "func F() chan chan chan int64 {\n"
+        "\tccc := make(chan chan chan int64)\n"
+        "\treturn ccc\n}\n",
+        "func F() chan chan []int64 {\n"
+        "\tcc := make(chan chan []int64)\n"
+        "\treturn cc\n}\n",
+        "type Queue chan chan int64\n"
+        "func F() Queue {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\treturn Queue(cc)\n}\n",
     ):
         result = named(*unit(go_types_helper, src))
         assert not result.available, src
