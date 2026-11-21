@@ -19929,6 +19929,173 @@ def test_scalar_container_literal_elem_operand(go_types_helper):
 @pytest.mark.parametrize(
     ("declarations", "expected"),
     [
+        # `s[i] <- x` / `<-s[i]` — the element queues conflate into
+        # the container's share group, so the send lands in every
+        # sharer's set and the receive reads the union.
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\ts := []chan int64{c}\n"
+            "\ts[0] <- x\n"
+            "\treturn <-s[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `c <- x` sends through the element's own name — the group
+        # carries it, so `<-s[0]` observes the same send.
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\ts := []chan int64{c}\n"
+            "\tc <- x\n"
+            "\treturn <-s[0]\n}\n",
+            frozenset({0}),
+        ),
+        # The mirror image: `s[0] <- x` lands in the group, so a
+        # receive through the element name `<-c` sees it too.
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\ts := []chan int64{c}\n"
+            "\ts[0] <- x\n"
+            "\treturn <-c\n}\n",
+            frozenset({0}),
+        ),
+        # `map[K]chan T` elements ride the same model.
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tm := map[int64]chan int64{0: c}\n"
+            "\tm[0] <- x\n"
+            "\treturn <-m[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `b := s` shares the backing — a send through the copy
+        # lands in the group's set like an element store does.
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\ts := []chan int64{c}\n"
+            "\tb := s\n"
+            "\tb[0] <- x\n"
+            "\treturn <-s[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `s[0] = c` hands `c`'s queue into the container — its
+        # tokens join the group, so `c <- x` reaches `<-s[0]`.
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\ts := []chan int64{make(chan int64, 1)}\n"
+            "\ts[0] = c\n"
+            "\tc <- x\n"
+            "\treturn <-s[0]\n}\n",
+            frozenset({0}),
+        ),
+        # A conditional send still deposits into the group — the
+        # receive reports the deps unconditionally like `<-ch`.
+        (
+            "func F(x int64, f bool) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\ts := []chan int64{c}\n"
+            "\tif f {\n"
+            "\t\ts[0] <- x\n"
+            "\t}\n"
+            "\treturn <-s[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `s = []chan{c2}` reseats the binding: the new literal's
+        # element queue joins the group like the mint-time union.
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tc2 := make(chan int64, 1)\n"
+            "\ts := []chan int64{c}\n"
+            "\ts = []chan int64{c2}\n"
+            "\ts[0] <- x\n"
+            "\treturn <-s[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `var s []chan = {c}` binds the same way `s :=` does.
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tvar s []chan int64 = []chan int64{c}\n"
+            "\ts[0] <- x\n"
+            "\treturn <-s[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `s[i] <- x` — the non-literal index's deps join the
+        # stored value like an element store's do.
+        (
+            "func F(x int64, i int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\ts := []chan int64{c}\n"
+            "\ts[i] <- x\n"
+            "\treturn <-s[0]\n}\n",
+            frozenset({0, 1}),
+        ),
+    ],
+)
+def test_chan_elem_container_send_receive(
+    go_types_helper, declarations, expected
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available
+    assert result.return_dependencies == expected
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        # `[N]chan T` — the array copy detaches the names but the
+        # queues inside still share, which this slice does not
+        # track; it stays closed like a `chan chan` payload.
+        "func F(x int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\ta := [1]chan int64{c}\n"
+        "\ta[0] <- x\n"
+        "\treturn <-a[0]\n}\n",
+        # `[]chan chan T` — a channel value travelling the group
+        # aliases under a second dep set, like `chan chan`.
+        "func F(x int64) int64 {\n"
+        "\tq := make(chan int64, 1)\n"
+        "\ts := []chan chan int64{}\n"
+        "\ts[0] <- q\n"
+        "\treturn 0\n}\n",
+        # `d := s[i]` — the extracted queue binds no channel name
+        # (the same closure `c := a[i]` keeps for scalar elements).
+        "func F(x int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\ts := []chan int64{c}\n"
+        "\td := s[0]\n"
+        "\td <- x\n"
+        "\treturn <-d\n}\n",
+        # `close(s[i])` stays closed — the element queue's lifecycle
+        # is not tracked by the conflated group.
+        "func F(x int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\ts := []chan int64{c}\n"
+        "\tclose(s[0])\n"
+        "\treturn x\n}\n",
+        # A send through an element of a `[N]chan` array bound by
+        # `var` is refused like the `:=` form.
+        "func F(x int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tvar a [1]chan int64 = [1]chan int64{c}\n"
+        "\ta[0] <- x\n"
+        "\treturn <-a[0]\n}\n",
+    ],
+)
+def test_chan_elem_container_unsupported_stays_closed(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available
+
+
+@pytest.mark.parametrize(
+    ("declarations", "expected"),
+    [
         # `s.V = <-ch` — a field store on a local composite folds the
         # receive into the base binding like the plain assignment.
         (

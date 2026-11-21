@@ -1484,6 +1484,47 @@ class _Builder:
             self._pin_fact_identities(fact)
         return collection
 
+    def _chan_elem_collection(self, fact: Any) -> bool:
+        """A `[]chan T`/`map[K]chan T` local whose element queues
+        carry scalar payloads — `s := []chan int64{make(chan
+        int64, 1)}`, `m := map[int64]chan int64{...}`. It rides the
+        bound opaque-container model: the element queues conflate
+        into the root's share group, so `s[i] <- x` deposits into
+        every sharer's set like an element store and `<-s[i]` reads
+        the whole group. An `[N]chan` array stays closed: its copy
+        would still share the queues, which this slice does not
+        track. A `chan chan` payload is refused like
+        `_scalar_chan_binding` — a channel VALUE travelling the
+        group would alias under a second dep set."""
+        collection = (
+            fact is not None
+            and fact.kind in {"slice", "map"}
+            and getattr(fact, "elem", None) is not None
+            and fact.elem.kind == "chan"
+            and getattr(fact.elem, "elem", None) is not None
+            and fact.elem.elem.kind in {"integer", "boolean"}
+        )
+        if collection:
+            self._pin_fact_identities(fact)
+        return collection
+
+    def _chan_elem_index_target(
+        self, node: Any
+    ) -> tuple[str, Any] | None:
+        """`s[i]`/`m[k]` naming an element queue of a bound
+        chan-element container — (root binding id, index node),
+        or None for any other operand."""
+        target = self._opaque_container_index_target(node)
+        if target is None or target[2]:
+            return None
+        ref, index, _ = target
+        bound = self.bindings.get(ref.binding_id)
+        if bound is None or not self._chan_elem_collection(
+            bound.type
+        ):
+            return None
+        return ref.binding_id, index
+
     def _scalar_elem_nested_collection(self, fact: Any) -> bool:
         """A `[][]T`/`map[K][]T`/`[N][]T`... local — one OR MORE
         levels of nesting over a scalar-element collection. It
@@ -2316,12 +2357,17 @@ class _Builder:
             ):
                 return None
             elem = getattr(binding.type, "elem", None)
-            if elem is not None and elem.kind in {
-                "function",
-                "chan",
-            }:
+            if elem is not None and (
+                elem.kind == "function"
+                or (
+                    elem.kind == "chan"
+                    and not self._chan_elem_collection(binding.type)
+                )
+            ):
                 # Func-element and channel containers have their own
                 # backing models — never mint an opaque token for one.
+                # A `[]chan T`/`map[K]chan T` with scalar payload IS
+                # in the opaque model — `b := s` shares the group.
                 return None
             if binding.type.kind == "array":
                 # `s = a` copies the array — the reseat never
@@ -2481,6 +2527,20 @@ class _Builder:
                 self._opaque_container_tokens[
                     ref.binding_id
                 ] = toks
+            return toks
+        if (
+            binding is not None
+            and self._scalar_chan_binding(binding.id)
+        ):
+            # `[]chan{c}` / `s[i] = c` — the stored queue keeps its
+            # own identity: seed its root's token set so `c` joins
+            # the container's share group and `s[j] <- x` lands on
+            # `c`'s queue deps (and `c <- y` on the group's reads).
+            root_id = self._chan_root(binding.id)
+            toks = self._opaque_container_tokens.get(root_id)
+            if not toks:
+                toks = frozenset({root_id})
+                self._opaque_container_tokens[root_id] = toks
             return toks
         if binding is None or not self._type_embeds_collection(
             binding.type
@@ -8695,6 +8755,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         or self._scalar_elem_nested_collection(
                             binding.type
                         )
+                        or self._chan_elem_collection(binding.type)
                     ):
                         raise _Unsupported(
                             "binding_unavailable", _span(node)
@@ -8763,6 +8824,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             or self._scalar_elem_nested_collection(
                                 binding.type
                             )
+                            or self._chan_elem_collection(
+                                binding.type
+                            )
                         )
                     ):
                         # `a := [][]int64{s}` — `a[0]` shares `s`'s
@@ -8771,7 +8835,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         # `s := []St{{F: v}}` — the field operand's
                         # slice header shares `v`'s backing the
                         # same way; scalar elements contribute no
-                        # tokens.
+                        # tokens. `a := []chan{c}` — `c`'s queue
+                        # joins the group so `s[i] <- x` lands on
+                        # `<-c` and `c <- y` shows in `<-a[j]`.
                         new_container_toks |= (
                             self._opaque_container_elem_toks(rhs_node)
                         )
@@ -9374,6 +9440,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             or self._scalar_elem_nested_collection(
                                 binding.type
                             )
+                            or self._chan_elem_collection(binding.type)
                         ):
                             raise _Unsupported(
                                 "binding_unavailable", _span(spec)
@@ -9438,6 +9505,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                     binding.type
                                 )
                                 or self._scalar_elem_nested_collection(
+                                    binding.type
+                                )
+                                or self._chan_elem_collection(
                                     binding.type
                                 )
                             )
@@ -11618,6 +11688,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 or self._scalar_elem_nested_collection(
                                     bound.type
                                 )
+                                or self._chan_elem_collection(bound.type)
                             )
                             and reseat_rhs is not None
                             and reseat_rhs.type
@@ -14650,10 +14721,68 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     if external is None
                     else None
                 )
-                if external is None and field_chan is None:
+                chan_elem = (
+                    self._chan_elem_index_target(channel)
+                    if external is None and field_chan is None
+                    else None
+                )
+                if (
+                    external is None
+                    and field_chan is None
+                    and chan_elem is None
+                ):
                     raise _Unsupported(
                         "unsupported_statement", _span(node)
                     )
+                if chan_elem is not None:
+                    # `s[i] <- x` on a bound chan-element container —
+                    # the element queues conflate into the root's
+                    # share group: the send's deps land on every
+                    # sharer's set like an element store, so `<-s[j]`
+                    # and `<-c` (for `s := []chan{c}`) observe them.
+                    root_id, index_node = chan_elem
+                    value_deps = self.expression(
+                        value,
+                        fn,
+                        params,
+                        locals_,
+                        transfers,
+                        count,
+                        0,
+                    )
+                    if (
+                        index_node is not None
+                        and index_node.type
+                        not in {
+                            "int_literal",
+                            "interpreted_string_literal",
+                            "raw_string_literal",
+                            "nil",
+                        }
+                    ):
+                        value_deps |= self.expression(
+                            index_node,
+                            fn,
+                            params,
+                            locals_,
+                            transfers,
+                            count,
+                            0,
+                        )
+                    for holder_id in self._opaque_container_holders(
+                        self._opaque_container_tokens.get(
+                            root_id, frozenset()
+                        )
+                    ):
+                        self._store(
+                            locals_,
+                            params,
+                            holder_id,
+                            value_deps,
+                            conditional,
+                        )
+                    self.indirect_writes |= value_deps
+                    return
                 if external is not None:
                     target_id, fact = external
                 else:
@@ -16182,10 +16311,49 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             if external is None
                             else None
                         )
-                        if external is None and field_chan is None:
+                        chan_elem = (
+                            self._chan_elem_index_target(operand)
+                            if external is None and field_chan is None
+                            else None
+                        )
+                        if (
+                            external is None
+                            and field_chan is None
+                            and chan_elem is None
+                        ):
                             raise _Unsupported(
                                 "non_parameter_reference", _span(node)
                             )
+                        if chan_elem is not None:
+                            # `<-s[i]` reads the container's whole
+                            # conflated group — every element queue's
+                            # sends land in it, FIFO order unmodelled
+                            # like `<-ch`. The index's own deps join
+                            # like any element read's.
+                            root_id, index_node = chan_elem
+                            recv_deps = self._opaque_container_deps(
+                                root_id, locals_
+                            )
+                            if (
+                                index_node is not None
+                                and index_node.type
+                                not in {
+                                    "int_literal",
+                                    "interpreted_string_literal",
+                                    "raw_string_literal",
+                                    "nil",
+                                }
+                            ):
+                                recv_deps |= self.expression(
+                                    index_node,
+                                    fn,
+                                    params,
+                                    locals_,
+                                    transfers,
+                                    count,
+                                    depth,
+                                )
+                            return recv_deps
                         if external is not None:
                             target_id, fact = external
                             if self._chan_chan_fact(fact):
