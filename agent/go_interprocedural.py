@@ -7241,6 +7241,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
         for member_id in members:
             if not isinstance(member_id, str) or member_id == binding_id:
                 continue
+            if member_id in params:
+                self._mark_external_chan_group_member(member_id)
             self._chan_group_join(member_id, binding_id)
             if member_id in params:
                 origins.add(params[member_id])
@@ -18079,6 +18081,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
             )
             local_chan_chan = self._local_chan_chan_id(channel)
             if local_chan_chan is not None:
+                external_members = self._chan_group_external_tokens(
+                    local_chan_chan
+                )
                 received_chan_chan = self._local_chan_chan_receive(value)
                 received_channel = None
                 if received_chan_chan is not None:
@@ -18133,6 +18138,20 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     self.indirect_writes |= self._chan_group_read_deps(
                         local_chan_chan, locals_
                     )
+                    for token in sorted(external_members):
+                        transfers.append(
+                            CallTransfer(
+                                FileSpan(
+                                    self.current_file,
+                                    node.start_byte,
+                                    node.end_byte,
+                                ),
+                                token,
+                                (),
+                                frozenset(),
+                                imported=True,
+                            )
+                        )
                 return
             if binding is None:
                 # `GC <- x` / `lib.GC <- x` — a channel living in

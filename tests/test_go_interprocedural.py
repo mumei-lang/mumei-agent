@@ -17572,6 +17572,114 @@ def test_chan_chan_container_external_elements_join_the_group(
     assert result.effects == "unknown"
 
 
+@pytest.mark.parametrize("operation", ["send", "receive", "close"])
+def test_chan_chan_container_external_member_operations_match_named_queue(
+    go_types_helper, operation
+):
+    if operation == "send":
+        container_operation = "s[0] <- c"
+        named_operation = "q <- c"
+        parameters = "p chan chan int64, c chan int64"
+    elif operation == "receive":
+        container_operation = "_ = <-s[0]"
+        named_operation = "_ = <-q"
+        parameters = "p chan chan int64"
+    else:
+        container_operation = "close(s[0])"
+        named_operation = "close(q)"
+        parameters = "p chan chan int64"
+    source = (
+        f"func F_container({parameters}) {{\n"
+        "\ts := []chan chan int64{p}\n"
+        f"\t{container_operation}\n"
+        "}\n"
+        f"func F_named({parameters}) {{\n"
+        "\tq := p\n"
+        f"\t{named_operation}\n"
+        "}\n"
+    )
+    unit_result = unit(go_types_helper, source)
+    container_result = named(*unit_result, "F_container")
+    named_result = named(*unit_result, "F_named")
+    assert container_result.available, container_result.gaps
+    assert named_result.available, named_result.gaps
+    assert container_result.effects == named_result.effects, operation
+    assert container_result.effects == "unknown", operation
+
+
+@pytest.mark.parametrize(
+    ("container_setup", "container_queue"),
+    [
+        (
+            "s := []chan chan int64{p}\n",
+            "s[0]",
+        ),
+        (
+            "s := make([]chan chan int64, 0, 1)\n"
+            "s = append(s, p)\n",
+            "s[0]",
+        ),
+        (
+            "s := make([]chan chan int64, 1)\n"
+            "s[0] = p\n",
+            "s[0]",
+        ),
+    ],
+)
+def test_chan_chan_container_external_member_stores_are_external(
+    go_types_helper, container_setup, container_queue
+):
+    source = (
+        "func F_container(p chan chan int64, c chan int64) {\n"
+        + "\t"
+        + container_setup.replace("\n", "\n\t")
+        + "\t"
+        + container_queue
+        + " <- c\n"
+        + "}\n"
+        "func F_named(p chan chan int64, c chan int64) {\n"
+        "\tq := p\n"
+        "\tq <- c\n"
+        "}\n"
+    )
+    unit_result = unit(go_types_helper, source)
+    container_result = named(*unit_result, "F_container")
+    named_result = named(*unit_result, "F_named")
+    assert container_result.available, container_result.gaps
+    assert named_result.available, named_result.gaps
+    assert container_result.effects == named_result.effects
+    assert container_result.effects == "unknown"
+
+
+def test_chan_chan_container_external_package_member_store_is_external(
+    go_types_helper,
+):
+    files = {
+        "a.go": (
+            "package p\n"
+            "var GCC chan chan int64\n"
+            "func F_container(c chan int64) {\n"
+            "\tm := make(map[int]chan chan int64)\n"
+            "\tm[0] = GCC\n"
+            "\tm[0] <- c\n"
+            "}\n"
+            "func F_named(c chan int64) {\n"
+            "\tq := GCC\n"
+            "\tq <- c\n"
+            "}\n"
+        )
+    }
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    container_result = named_package(
+        files, snapshot, summaries, "F_container"
+    )
+    named_result = named_package(files, snapshot, summaries, "F_named")
+    assert container_result.available, container_result.gaps
+    assert named_result.available, named_result.gaps
+    assert container_result.effects == named_result.effects
+    assert container_result.effects == "unknown"
+
+
 @pytest.mark.parametrize("imported", [False, True])
 def test_chan_chan_container_call_result_and_global_elements(
     go_types_helper, imported
