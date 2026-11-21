@@ -2556,8 +2556,7 @@ class _Builder:
             struct_fact = self._struct_value_fact(element)
             if struct_fact is not None:
                 if (
-                    fact.kind == "array"
-                    or not struct_fact.type_id
+                    not struct_fact.type_id
                     or self._type_fact_has_type_args(element)
                 ):
                     return False
@@ -2633,6 +2632,18 @@ class _Builder:
                 operand = operand.child_by_field_name("operand")
             else:
                 break
+        indexed_struct_root_clause = (
+            indexed_struct_root
+            and root_binding.type is not None
+            and root_binding.type.kind == "struct"
+        )
+        param_container_of_struct_clause = (
+            root_ref.binding_id in (params or {})
+            and root_binding.type is not None
+            and root_binding.type.kind in {"slice", "array", "map"}
+            and getattr(root_binding.type, "elem", None) is not None
+            and root_binding.type.elem.kind == "struct"
+        )
         scalar_collection = (
             fact is not None
             and fact.kind in {"slice", "array", "map"}
@@ -2653,7 +2664,10 @@ class _Builder:
                 and not root_binding.type.type_id
             )
             or (
-                indexed_struct_root
+                (
+                    indexed_struct_root_clause
+                    or param_container_of_struct_clause
+                )
                 and not self._opaque_container_field_index_path_supported(
                     sel, root_binding
                 )

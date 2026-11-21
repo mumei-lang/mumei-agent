@@ -31559,6 +31559,18 @@ def test_struct_field_element_direct_index_is_supported(go_types_helper):
             1,
         ),
         (
+            "ss [2]E, i int64, x int64",
+            "return ss[i].F[0]",
+            "b := ss[i].F; return b[0]",
+            1,
+        ),
+        (
+            "ss [2]E, i int64, x int64",
+            "ss[i].F[0] = x; c := ss[0].F; return c[0]",
+            "b := ss[i].F; b[0] = x; c := ss[0].F; return c[0]",
+            1,
+        ),
+        (
             "mm map[int64]E, i int64, x int64",
             "return mm[i].F[0]",
             "b := mm[i].F; return b[0]",
@@ -31640,6 +31652,71 @@ def test_struct_element_field_direct_ops_match_extraction(
         extracted_result.return_dependencies
     )
     assert index_dep in direct_result.return_dependencies
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        (
+            "func F(i int64, x int64) int64 { "
+            "ss := []struct{ F []int64 }{{F: []int64{x}}}; "
+            "return ss[i].F[0] }"
+        ),
+        (
+            "func F(i int64, x int64) int64 { "
+            "ss := []struct{ F []int64 }{{F: make([]int64, 1)}}; "
+            "ss[i].F[0] = x; return ss[0].F[0] }"
+        ),
+        (
+            "func F(i int64, x int64) int64 { "
+            "ss := [2]E{{F: []int64{x}}}; return ss[i].F[0] }"
+        ),
+        (
+            "func F(i int64, x int64) int64 { "
+            "ss := [2]E{{F: make([]int64, 1)}}; "
+            "ss[i].F[0] = x; return ss[0].F[0] }"
+        ),
+        (
+            "func F(i int64, x int64) int64 { "
+            "ss := []GE[int64]{{F: []int64{x}}}; return ss[i].F[0] }"
+        ),
+        (
+            "func F(i int64, x int64) int64 { "
+            "mm := map[int64]E{0: {F: []int64{x}}}; "
+            "return mm[i].F[0] }"
+        ),
+        (
+            "func F(i int64, x int64) int64 { "
+            "mm := map[int64]E{0: {F: make([]int64, 1)}}; "
+            "mm[i].F[0] = x; return mm[0].F[0] }"
+        ),
+        (
+            "func F(i int64, x int64) int64 { "
+            "ss := [][]E{{{F: []int64{x}}}}; "
+            "return ss[i][0].F[0] }"
+        ),
+    ],
+    ids=[
+        "anon_local",
+        "anon_local_w",
+        "arr_local",
+        "arr_local_w",
+        "gen_local",
+        "map_local",
+        "map_local_w",
+        "nested_local",
+    ],
+)
+def test_struct_element_field_local_shapes_remain_available(
+    go_types_helper, body
+):
+    declarations = (
+        "type E struct { F []int64; V int64 }\n"
+        "type GE[T any] struct { F []int64 }\n"
+    )
+    result = named(*unit(go_types_helper, declarations + body + "\n"))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
 
 
 @pytest.mark.parametrize(
