@@ -85,6 +85,7 @@ class _Record:
     override: bool = False
     location: str = ""
     underlying: Any | None = None
+    parameter_count: int = 0
 
 
 @dataclass(eq=False)
@@ -169,6 +170,7 @@ class _SolBindings:
         override: bool = False,
         location: str = "",
         underlying: Any | None = None,
+        parameter_count: int = 0,
     ) -> _Record:
         name = name_override or self.text(name_node)
         scope_start, scope_end = self._scope_for_id(binding_scope)
@@ -195,6 +197,7 @@ class _SolBindings:
             override,
             location,
             underlying,
+            parameter_count,
         )
         self.records.append(record)
         self.bindings.append(binding)
@@ -386,6 +389,7 @@ class _SolBindings:
             visibility=self._visibility(node),
             virtual=bool(re.search(r"\bvirtual\b", self.text(node))),
             override=bool(re.search(r"\boverride\b", self.text(node))),
+            parameter_count=len(self._type_nodes_in_parameters(node)),
         )
 
     def _predeclare_constructor(self, node: Any, owner: _Contract) -> _Record:
@@ -608,6 +612,38 @@ class _SolBindings:
         namespace: str,
         visited: set[str] | None = None,
     ) -> tuple[_Record | None, str | None]:
+        if namespace == "value":
+            layers = self._contract_layers(
+                name, contract, namespace, visited
+            )
+            functions: list[_Record] = []
+            private_match = False
+            for index, (_layer, records) in enumerate(layers):
+                if not records:
+                    continue
+                if index > 0:
+                    private_match = private_match or any(
+                        record.binding.kind == "function"
+                        and record.visibility == "private"
+                        for record in records
+                    )
+                    records = [
+                        record
+                        for record in records
+                        if record.visibility != "private"
+                    ]
+                if not records:
+                    continue
+                if any(record.binding.kind != "function" for record in records):
+                    if functions:
+                        break
+                    return self._choose(records)
+                functions.extend(records)
+            if functions:
+                return self._choose(self._drop_overridden_functions(functions))
+            if private_match:
+                return None, "private_base_member"
+            return None, None
         visited = set() if visited is None else visited
         if contract.record.binding.id in visited:
             return None, None
@@ -642,6 +678,15 @@ class _SolBindings:
                 scope.records.get(name, []), position, namespace
             )
             if found:
+                if (
+                    namespace == "value"
+                    and self.current_contract is not None
+                    and scope is self.current_contract.scope
+                    and all(
+                        record.binding.kind == "function" for record in found
+                    )
+                ):
+                    continue
                 return self._choose(found)
         if self.current_contract is not None:
             record, reason = self._lookup_contract(
@@ -1442,6 +1487,48 @@ class _SolBindings:
             ):
                 return True
         return False
+
+    def _contract_layers(
+        self,
+        name: str,
+        contract: _Contract,
+        namespace: str,
+        visited: set[str] | None = None,
+    ) -> list[tuple[_Contract, list[_Record]]]:
+        visited = set() if visited is None else visited
+        if contract.record.binding.id in visited:
+            return []
+        visited.add(contract.record.binding.id)
+        records = self._matching_records(
+            contract.scope.records.get(name, []),
+            contract.body.start_byte,
+            namespace,
+        )
+        layers = [(contract, records)]
+        for base_name, _base_node in reversed(contract.bases):
+            base = self.contracts.get(base_name)
+            if base is not None:
+                layers.extend(
+                    self._contract_layers(name, base, namespace, visited)
+                )
+        return layers
+
+    def _drop_overridden_functions(
+        self, candidates: list[_Record]
+    ) -> list[_Record]:
+        return [
+            candidate
+            for candidate in candidates
+            if not any(
+                other is not candidate
+                and other.override
+                and other.owner is not None
+                and candidate.owner is not None
+                and other.parameter_count == candidate.parameter_count
+                and self._is_derived_from(other.owner, candidate.owner, set())
+                for other in candidates
+            )
+        ]
 
     def _call_expression(self, node: Any) -> None:
         function = node.child_by_field_name("function")

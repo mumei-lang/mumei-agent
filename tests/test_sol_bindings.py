@@ -20,6 +20,7 @@ def build_sol_bindings(source):
     assert len(reference_keys) == len(set(reference_keys)), source
     call_spans = [call.span for call in report.calls]
     assert len(call_spans) == len(set(call_spans)), source
+    assert _load(report, source).to_json() == report.to_json()
     return report
 
 
@@ -446,16 +447,52 @@ contract External is Remote { function g() public { absent(); } }
 """
     report = build_sol_bindings(source)
     chosen_call = next(call for call in report.calls if _text(source, call.span) == "chosen()")
-    b_function = next(
-        binding
-        for binding in _bindings(report, "chosen", "function")
-        if source.index("contract B") < binding.span.start < source.index("contract C")
-    )
-    assert chosen_call.target == b_function.id
+    assert chosen_call.kind == "opaque_overload"
+    assert chosen_call.target == ""
+    assert _unresolved(report, "chosen", "ambiguous_overload")
     assert _unresolved(report, "hidden", "private_base_member")
     assert _unresolved(report, "Remote", "unresolved_base")
     assert _unresolved(report, "absent", "unresolved_base")
     assert any(gap.reason == "unresolved_base" for gap in report.gaps)
+
+
+def test_inherited_overloads_collect_bases_and_remove_overridden_functions():
+    source = """
+contract Base {
+    function f(uint x) internal virtual {}
+}
+contract Derived is Base {
+    function f(uint x) internal override virtual {}
+    function selected(uint x) public { f(x); }
+}
+contract OtherBase {
+    function f(address x) internal {}
+}
+contract Ambiguous is OtherBase {
+    function f(uint x) internal {}
+    function unresolved(uint x) public { f(x); }
+}
+"""
+    report = build_sol_bindings(source)
+    derived = next(
+        binding
+        for binding in _bindings(report, "f", "function")
+        if source.index("contract Derived")
+        < binding.span.start
+        < source.index("contract OtherBase")
+    )
+    selected_call = next(
+        call for call in report.calls if call.span.start == source.index("f(x)")
+    )
+    assert selected_call.kind == "opaque_virtual"
+    assert selected_call.target == derived.id
+    ambiguous_start = source.rindex("f(x)")
+    ambiguous_call = next(
+        call for call in report.calls if call.span.start == ambiguous_start
+    )
+    assert ambiguous_call.kind == "opaque_overload"
+    assert ambiguous_call.target == ""
+    assert _unresolved(report, "f", "ambiguous_overload")
 
 
 def test_overloads_and_virtual_dispatch_are_not_direct_local_calls():
@@ -755,7 +792,7 @@ def test_cli_preserves_crlf_bytes_and_emits_loadable_report(tmp_path):
         profile=PROFILE,
         target={},
     )
-    assert restored.source_sha256 == _build_sol_bindings(source).source_sha256
+    assert restored.source_sha256 == build_sol_bindings(source).source_sha256
 
 
 @pytest.mark.parametrize(
