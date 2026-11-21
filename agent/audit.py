@@ -1581,6 +1581,9 @@ def _check_scheduled_verification(
         attempt_timeout_ms = getattr(context.policy, "timeout_ms", None)
         if attempt_timeout_ms is None:
             attempt_timeout_ms = evidence_check_schedule.DEFAULT_ATTEMPT_TIMEOUT_MS
+        attempt_timeout_ms = min(
+            attempt_timeout_ms, evidence_check_schedule.MAX_CHECK_TIMEOUT_MS
+        )
         diagnostic = evidence_check_schedule.check_schedule_bytes(
             context.core_executable,
             schedule_bytes,

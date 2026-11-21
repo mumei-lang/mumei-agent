@@ -4659,6 +4659,42 @@ def test_audit_schedule_check_error_redacts_declared_paths(
     assert "FAKE_PRIVATE" not in check["error"]
 
 
+def test_audit_schedule_check_clamps_long_policy_timeout(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import dataclasses
+
+    schedule = _schedule_check_record()
+    core = tmp_path / "core"
+    core.write_text("stub", encoding="utf-8")
+    context = _scheduled_verification_ctx(tmp_path, core=str(core))
+    context = dataclasses.replace(
+        context,
+        policy=dataclasses.replace(context.policy, timeout_ms=120_000),
+    )
+    seen: list[int] = []
+
+    def fake(core, schedule_bytes, attempt_timeout_ms, memory_bound_mb):
+        seen.append(attempt_timeout_ms)
+        diagnostic = _schedule_check_diagnostic()
+        return {
+            "normalized": {"exit_code": 0},
+            "representation": diagnostic["representation"],
+            "acceptance": diagnostic["acceptance"],
+            "schedule_outcome": diagnostic["outcome"],
+            "attempt_count": diagnostic["attempt_count"],
+            "reported_outcome_meaning": diagnostic["reported_outcome_meaning"],
+            "checks_performed": diagnostic["checks_performed"],
+            "checks_not_performed": diagnostic["checks_not_performed"],
+        }
+
+    monkeypatch.setattr(evidence_check_schedule, "check_schedule_bytes", fake)
+    check = audit_module._check_scheduled_verification(context, schedule)
+
+    assert seen == [evidence_check_schedule.MAX_CHECK_TIMEOUT_MS]
+    assert check is not None and check["status"] == "valid"
+
+
 def test_audit_schedule_check_text_report_shows_status_and_outcome() -> None:
     result = AuditResult(
         success=True,
