@@ -28,13 +28,14 @@ or historical-execution claim. `machine_code_leaf_function_tv`,
 `object_translation_correspondence` stay unperformed. This recheck report is
 never a recovery performer.
 
-Core's `machine_code_composite_register_aggregate_tv` is consumed only when
-listed in `checks_performed`; it covers one-/two-leaf struct parameters,
-results and direct-call struct values with integer and/or f64 leaves under an
-assumed SysV eightbyte classification (integer leaves in rdi–r9 / rax:rdx,
-f64 leaves in xmm0–xmm7 / xmm0:xmm1), not validated. This makes no ABI,
-runtime or full object-TV claim. Native-object-recheck itself never discharges
-this machine-TV check.
+Machine-TV recheck and object acceptance (not native-object-recheck) consume
+Core's `machine_code_composite_register_aggregate_tv` only when listed in
+`checks_performed`; it covers one-/two-leaf struct parameters, results and
+direct-call struct values with integer and/or f64 leaves under an assumed
+SysV eightbyte classification (integer leaves in rdi–r9 / rax:rdx, f64 leaves
+in xmm0–xmm7 / xmm0:xmm1), not validated. This makes no ABI, runtime or full
+object-TV claim. Native-object-recheck itself never discharges this machine-TV
+check.
 """
 
 from __future__ import annotations
