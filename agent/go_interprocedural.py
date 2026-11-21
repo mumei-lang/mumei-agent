@@ -10650,7 +10650,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         raise _Unsupported(
                             "binding_unavailable", _span(spec)
                         )
-                    if (
+                    local_chan_chan_root = (
+                        self._local_chan_chan_receive(value_nodes[0])
+                        if (
+                            binding.type.kind == "chan"
+                            and self._scalar_chan_binding(binding.id)
+                            and len(value_nodes) == 1
+                            and len(names) > 1
+                        )
+                        else None
+                    )
+                    if local_chan_chan_root is not None:
+                        self.chan_aliases.pop(binding.id, None)
+                        self.external_chan_locals.discard(binding.id)
+                        self._chan_group_join(
+                            binding.id, local_chan_chan_root
+                        )
+                    elif (
                         binding.type.kind == "chan"
                         and value_nodes
                         and len(value_nodes) == 1
