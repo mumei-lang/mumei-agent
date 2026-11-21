@@ -7640,9 +7640,82 @@ class _Builder:
             if fact is not None and fact.kind in container_kinds
             else None
         )
-        struct_element_target = self._struct_element_container_target(
-            node, params
+        struct_element_container_fact = fact
+        if (
+            inner is not None
+            and inner.type == "identifier"
+            and package_var is None
+            and member is None
+            and bound_pointer is None
+            and package_pointee is None
+            and call_operand is None
+        ):
+            inner_ref = self.references.get(self.node_key(inner))
+            root_binding = (
+                self.bindings.get(inner_ref.binding_id)
+                if inner_ref is not None and inner_ref.binding_id
+                else None
+            )
+            if (
+                inner_ref is not None
+                and inner_ref.kind != "import"
+                and root_binding is not None
+                and not self._package_level(root_binding)
+            ):
+                struct_element_container_fact = root_binding.type
+        elif (
+            inner is not None
+            and inner.type == "selector_expression"
+            and opaque_field is not None
+        ):
+            struct_element_container_fact = opaque_field[2].type
+        struct_element_candidate = (
+            len(indexes) == 1
+            and call_operand is None
+            and package_var is None
+            and member is None
+            and bound_pointer is None
+            and package_pointee is None
+            and struct_element_container_fact is not None
+            and struct_element_container_fact.kind in container_kinds
+            and struct_element_container_fact.elem is not None
+            and self._named_value_struct_supported(
+                struct_element_container_fact.elem
+            )
         )
+        struct_element_index_deps = None
+        struct_element_operand_deps = None
+        struct_element_target = None
+        if struct_element_candidate:
+            if opaque_field is not None:
+                struct_element_operand_deps = self.expression(
+                    inner,
+                    fn,
+                    params,
+                    locals_,
+                    transfers,
+                    count,
+                    depth + 1,
+                )
+            struct_element_index_deps = frozenset()
+            for idx in reversed(indexes):
+                if idx is None:
+                    raise _Unsupported(
+                        "non_parameter_reference", _span(node)
+                    )
+                if idx.type not in _INDEX_LITERALS:
+                    struct_element_index_deps |= self.expression(
+                        idx,
+                        fn,
+                        params,
+                        locals_,
+                        transfers,
+                        count,
+                        depth + 1,
+                    )
+            struct_element_target = (
+                self._struct_element_container_target(node, params)
+            )
         if struct_element_target is not None:
             fact = struct_element_target[0]
             elem = struct_element_target[1]
@@ -7652,7 +7725,7 @@ class _Builder:
                 and inner.type == "selector_expression"
             ):
                 opaque_field = self._opaque_container_field_target(
-                    inner, params
+                    inner, params, allow_struct_elements=True
                 )
         if (
             struct_element_target is not None
@@ -7840,7 +7913,10 @@ class _Builder:
                 call_operand, fn, params, locals_, transfers, count,
                 depth + 1,
             )
-        if opaque_composite is not None:
+        if (
+            opaque_composite is not None
+            and struct_element_index_deps is None
+        ):
             # `s[i]` — the element's provenance is the bound
             # container's conflated set across every sharer (a store
             # through any alias reaches this memory).
@@ -7849,35 +7925,47 @@ class _Builder:
             )
         if opaque_field is not None:
             field_key = opaque_field[0]
-            deps |= self.expression(
-                inner, fn, params, locals_, transfers, count, depth + 1
-            )
-            deps |= self._opaque_container_deps(field_key, locals_)
-        for idx in reversed(indexes):
-            if idx is None:
-                raise _Unsupported(
-                    "non_parameter_reference", _span(node)
+            if struct_element_index_deps is not None:
+                if struct_element_operand_deps is not None:
+                    deps |= struct_element_operand_deps
+            else:
+                deps |= self.expression(
+                    inner, fn, params, locals_, transfers, count,
+                    depth + 1,
                 )
-            if idx.type in {
-                "int_literal",
-                "float_literal",
-                "imaginary_literal",
-                "rune_literal",
-                "interpreted_string_literal",
-                "raw_string_literal",
-            }:
-                # A literal index carries no dependencies —
-                # `lib.VM["k"]` reads the entry at a constant key
-                # like any other modelled index shape.
-                # `true`/`false` are excluded: Go allows shadowing
-                # the predeclared constants as variable names, so
-                # the node alone cannot prove a constant — the
-                # expression path resolves the `universe` reference
-                # (still dep-free) or the shadowing binding's deps.
-                continue
-            deps |= self.expression(
-                idx, fn, params, locals_, transfers, count, depth + 1
-            )
+                deps |= self._opaque_container_deps(field_key, locals_)
+        if struct_element_index_deps is None:
+            for idx in reversed(indexes):
+                if idx is None:
+                    raise _Unsupported(
+                        "non_parameter_reference", _span(node)
+                    )
+                if idx.type in _INDEX_LITERALS:
+                    # A literal index carries no dependencies —
+                    # `lib.VM["k"]` reads the entry at a constant key
+                    # like any other modelled index shape.
+                    # `true`/`false` are excluded: Go allows shadowing
+                    # the predeclared constants as variable names, so
+                    # the node alone cannot prove a constant — the
+                    # expression path resolves the `universe` reference
+                    # (still dep-free) or the shadowing binding's deps.
+                    continue
+                deps |= self.expression(
+                    idx, fn, params, locals_, transfers, count,
+                    depth + 1,
+                )
+        else:
+            deps |= struct_element_index_deps
+            if opaque_composite is not None:
+                # Index calls may write through an alias to the
+                # container, so read the element provenance afterward.
+                deps |= self._opaque_container_deps(
+                    opaque_composite, locals_
+                )
+            if opaque_field is not None:
+                deps |= self._opaque_container_deps(
+                    opaque_field[0], locals_
+                )
         if bound_pointer is not None:
             # `(*p)[i]` — the loaded element also depends on where
             # the pointer was aimed (its own deps) and on every

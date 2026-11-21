@@ -32228,6 +32228,96 @@ def test_named_struct_element_index_calls_are_evaluated_once(
 
 
 @pytest.mark.parametrize(
+    ("types", "signature", "extracted", "control", "expected"),
+    [
+        (
+            "type E struct { V int64 }\n"
+            "func Set(s []E, x int64) int64 { "
+            "s[0].V = x; return 0 }\n",
+            "s []E, x int64",
+            "e := s[Set(s, x)]; return e.V",
+            "return s[Set(s, x)].V",
+            frozenset({0, 1}),
+        ),
+        (
+            "type E struct { V int64 }\n"
+            "func Set(s []E, x int64) int64 { "
+            "s[0].V = x; return 0 }\n",
+            "x int64",
+            "s := []E{{V: 0}}; e := s[Set(s, x)]; return e.V",
+            "s := []E{{V: 0}}; return s[Set(s, x)].V",
+            frozenset({0}),
+        ),
+        (
+            "type E struct { V int64 }\n"
+            "func Set(s []E, x int64) int64 { "
+            "s[0].V = x; return 0 }\n",
+            "s []E, x int64",
+            "var e E; e = s[Set(s, x)]; return e.V",
+            "return s[Set(s, x)].V",
+            frozenset({0, 1}),
+        ),
+        (
+            "type E struct { V int64 }\n"
+            "func Set(s []E, x int64) int64 { "
+            "s[0].V = x; return 0 }\n",
+            "s []E, x int64",
+            "var e = s[Set(s, x)]; return e.V",
+            "return s[Set(s, x)].V",
+            frozenset({0, 1}),
+        ),
+        (
+            "type E struct { V int64 }\n"
+            "func Set(s []E, x int64) int64 { "
+            "s[0].V = x; return 0 }\n",
+            "s []E, x int64",
+            "_, e := 0, s[Set(s, x)]; return e.V",
+            "return s[Set(s, x)].V",
+            frozenset({0, 1}),
+        ),
+        (
+            "type E struct { V int64 }\n"
+            "func Set(m map[int64]E, x int64) int64 { "
+            "m[0] = E{V: x}; return 0 }\n",
+            "m map[int64]E, x int64",
+            "e := m[Set(m, x)]; return e.V",
+            "return m[Set(m, x)].V",
+            frozenset({0, 1}),
+        ),
+    ],
+    ids=[
+        "short-decl-param",
+        "short-decl-local",
+        "assign",
+        "var",
+        "multi",
+        "map-key",
+    ],
+)
+def test_named_struct_extraction_applies_index_effects_before_read(
+    go_types_helper, types, signature, extracted, control, expected
+):
+    extracted_data = unit(
+        go_types_helper,
+        types + f"func F({signature}) int64 {{ {extracted} }}\n",
+    )
+    control_data = unit(
+        go_types_helper,
+        types + f"func F({signature}) int64 {{ {control} }}\n",
+    )
+    result = named(*extracted_data)
+    direct = named(*control_data)
+    assert result.available == direct.available
+    assert result.available, result.gaps
+    assert result.return_dependencies == direct.return_dependencies
+    assert result.return_dependencies == expected
+    set_id = named(*extracted_data, "Set").binding_id
+    assert sum(
+        transfer.target == set_id for transfer in result.calls
+    ) == 1
+
+
+@pytest.mark.parametrize(
     "declarations",
     [
         (
