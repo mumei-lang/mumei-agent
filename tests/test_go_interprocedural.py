@@ -15567,6 +15567,81 @@ def test_bound_closure_local_channel_container_unsupported_uses_stay_closed(
     "declarations",
     [
         pytest.param(
+            "func F(x int64) int64 { "
+            "cc := make(chan chan int64, 1); "
+            "c := make(chan int64, 1); cc <- c; "
+            "dd := make(chan chan int64, 1); "
+            "d := make(chan int64, 1); dd <- d; "
+            "g := func() { (<-cc) <- x }; "
+            "cc = dd; g(); return <-d }",
+            id="queue-write-after-reseat",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { "
+            "cc := make(chan chan int64, 1); "
+            "c := make(chan int64, 1); cc <- c; "
+            "dd := make(chan chan int64, 1); "
+            "d := make(chan int64, 1); dd <- d; "
+            "g := func() int64 { return <-(<-cc) }; "
+            "cc = dd; return g() }",
+            id="queue-read-after-reseat",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { "
+            "s := []chan chan int64{make(chan chan int64, 1)}; "
+            "t := []chan chan int64{make(chan chan int64, 1)}; "
+            "c := make(chan int64, 1); s[0] <- c; "
+            "g := func() { (<-s[0]) <- x }; "
+            "s = t; g(); return <-c }",
+            id="queue-container-after-reseat",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { "
+            "s := []chan int64{make(chan int64, 1)}; "
+            "t := []chan int64{make(chan int64, 1)}; "
+            "g := func() { s[0] <- x }; "
+            "s = t; g(); return <-t[0] }",
+            id="plain-container-after-reseat",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { "
+            "cc := make(chan chan int64, 1); "
+            "c := make(chan int64, 1); cc <- c; "
+            "p := &cc; _ = p; "
+            "g := func() { (<-cc) <- x }; "
+            "g(); return <-c }",
+            id="queue-root-address-taken",
+        ),
+    ],
+)
+def test_bound_closure_queue_roots_reject_reassignment_and_address(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available
+    assert any(gap.reason == "unsupported_expression" for gap in result.gaps)
+
+
+def test_queue_reseat_without_closure_stays_available(go_types_helper):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64) int64 { "
+            "cc := make(chan chan int64, 1); "
+            "c := make(chan int64, 1); cc <- c; "
+            "dd := make(chan chan int64, 1); "
+            "d := make(chan int64, 1); dd <- d; "
+            "cc = dd; (<-cc) <- x; return <-d }",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        pytest.param(
             "func F(x int64) int64 { c := make(chan int64, 1); "
             "g := (func() { c <- x }); g(); return <-c }",
             id="parenthesized-bound-channel",

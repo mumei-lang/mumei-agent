@@ -25053,6 +25053,92 @@ class _Builder:
             current = current.parent
         return False
 
+    def _literal_channel_root_stable(
+        self, root_id: str, literal_node: Any
+    ) -> bool:
+        function_node = literal_node
+        while function_node is not None and function_node.type not in {
+            "function_declaration",
+            "method_declaration",
+        }:
+            function_node = function_node.parent
+        if function_node is None:
+            return False
+        body = function_node.child_by_field_name("body")
+        if body is None:
+            return False
+
+        def contains_root(node: Any) -> bool:
+            pending = [node] if node is not None else []
+            while pending:
+                current = pending.pop()
+                if current.type == "identifier":
+                    binding = self.bindings_by_span.get(
+                        self.node_key(current)
+                    )
+                    ref = self.references.get(self.node_key(current))
+                    if (
+                        binding is not None
+                        and binding.id == root_id
+                    ) or (
+                        ref is not None
+                        and ref.binding_id == root_id
+                    ):
+                        return True
+                pending.extend(_children(current))
+            return False
+
+        stack = [body]
+        while stack:
+            current = stack.pop()
+            if current.type in {
+                "assignment_statement",
+                "short_var_declaration",
+            }:
+                left = current.child_by_field_name("left")
+                if contains_root(left):
+                    declares_root_here = (
+                        current.type == "short_var_declaration"
+                        and any(
+                            (binding := self.bindings_by_span.get(
+                                self.node_key(name)
+                            ))
+                            is not None
+                            and binding.id == root_id
+                            and getattr(binding.span, "start", None)
+                            == name.start_byte
+                            and getattr(binding.span, "end", None)
+                            == name.end_byte
+                            for name in _children(left)
+                            if name.type == "identifier"
+                        )
+                    )
+                    if not declares_root_here:
+                        return False
+            elif current.type in {"inc_statement", "dec_statement"}:
+                operand = next(
+                    (
+                        child
+                        for child in current.named_children
+                        if child.type != "comment"
+                    ),
+                    None,
+                )
+                if contains_root(operand):
+                    return False
+            elif current.type == "unary_expression":
+                operator = current.child_by_field_name("operator")
+                if (
+                    operator is not None
+                    and operator.type == "&"
+                    and contains_root(
+                        current.child_by_field_name("operand")
+                    )
+                ):
+                    return False
+            stack.extend(_children(current))
+        return True
+
     def _chan_container_only_operations(
         self, container_id: str, literal_node: Any
     ) -> bool:
@@ -25763,6 +25849,8 @@ class _Builder:
                 return "container", root
             return None
 
+        stable_roots: dict[str, bool] = {}
+
         def local_channel_root(root: str, kind: str) -> bool:
             root = self._chan_root(root)
             binding = self.bindings.get(root)
@@ -25774,6 +25862,12 @@ class _Builder:
                 or root in self._external_chan_group_tokens
                 or binding is None
             ):
+                return False
+            if root not in stable_roots:
+                stable_roots[root] = self._literal_channel_root_stable(
+                    root, node
+                )
+            if not stable_roots[root]:
                 return False
             if kind == "queue":
                 if (
