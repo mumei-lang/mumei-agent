@@ -17964,6 +17964,88 @@ def test_chan_chan_container_result_promotes_caller_queue_member(
     assert container_result.return_dependencies == local_result.return_dependencies
 
 
+def test_chan_chan_call_result_container_operations_evaluate_call_once(
+    go_types_helper,
+):
+    source = (
+        "var GC chan int64\n"
+        "func G(x int64) []chan chan int64 {\n"
+        "\tclose(GC)\n"
+        "\tq := make(chan chan int64, 1)\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tc <- x\n"
+        "\tq <- c\n"
+        "\ts := []chan chan int64{q}\n"
+        "\treturn s\n"
+        "}\n"
+        "func F_bound_close(x int64) {\n"
+        "\ts := G(x)\n"
+        "\tclose(s[0])\n"
+        "}\n"
+        "func F_close(x int64) { close(G(x)[0]) }\n"
+        "func F_len(x int64) int { return len(G(x)[0]) }\n"
+        "func F_cap(x int64) int { return cap(G(x)[0]) }\n"
+        "func F_range(x int64) int64 {\n"
+        "\tfor range G(x)[0] {}\n"
+        "\treturn x\n"
+        "}\n"
+        "func F_receive(x int64) int64 {\n"
+        "\tc := <-(G(x)[0])\n"
+        "\treturn <-c\n"
+        "}\n"
+        "func F_send(x int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\t(G(x)[0]) <- c\n"
+        "\tc <- x\n"
+        "\treturn <-c\n"
+        "}\n"
+    )
+    data = unit(go_types_helper, source)
+    g_id = named(*data, "G").binding_id
+    bound = named(*data, "F_bound_close")
+    assert bound.available, bound.gaps
+    expected = [
+        transfer
+        for transfer in bound.calls
+        if transfer.target == g_id
+    ]
+    assert len(expected) == 1
+    mismatches = []
+    for name in (
+        "F_close",
+        "F_len",
+        "F_cap",
+        "F_range",
+        "F_receive",
+        "F_send",
+    ):
+        result = named(*data, name)
+        assert result.available, (name, result.gaps)
+        actual = [
+            transfer
+            for transfer in result.calls
+            if transfer.target == g_id
+        ]
+        if len(actual) != len(expected):
+            mismatches.append((name, len(actual), len(expected)))
+    assert not mismatches, mismatches
+
+
+def test_chan_chan_call_result_container_rejects_unsupported_call(
+    go_types_helper,
+):
+    source = (
+        "type I interface { M() []chan chan int64 }\n"
+        "func G(i I) []chan chan int64 { return i.M() }\n"
+        "func F(i I) { close(G(i)[0]) }\n"
+    )
+    data = unit(go_types_helper, source)
+    assert not named(*data, "G").available
+    result = named(*data)
+    assert not result.available
+    assert result.gaps
+
+
 def test_chan_chan_container_escape_external_members_and_depth3(
     go_types_helper,
 ):

@@ -1010,6 +1010,9 @@ class _Builder:
         self._chan_operation_operand_cache: dict[
             tuple[int, int, int], Any
         ] = {}
+        self._chan_chan_container_call_deps: dict[
+            tuple[int, int, int], frozenset[int]
+        ] = {}
         # Bindings that died at a scope join — a branch-local `t`
         # captured by a stored literal (`fs[0] = func() { return t }`)
         # still names the value its last write gave it. `_join`
@@ -4904,20 +4907,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 )
             )
             container_operand = node.child_by_field_name("operand")
-            container_deps = (
-                self.expression(
-                    container_operand,
-                    fn,
-                    params,
-                    locals_,
-                    transfers,
-                    count,
-                    depth + 1,
-                )
-                if self._chan_chan_container_result_call(
-                    container_operand
-                )
-                else frozenset()
+            container_deps = self._evaluate_chan_chan_container_call(
+                container_operand,
+                fn,
+                params,
+                locals_,
+                transfers,
+                count,
+                depth,
             )
             self.indirect_writes |= container_deps
             index_deps = (
@@ -6554,6 +6551,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
             )
             if external_elem is not None:
                 target_id, fact, index_node = external_elem
+                container_operand = inner.child_by_field_name(
+                    "operand"
+                )
+                self._evaluate_chan_chan_container_call(
+                    container_operand,
+                    fn,
+                    params,
+                    locals_,
+                    transfers,
+                    count,
+                    depth + 1,
+                )
                 index_deps = (
                     self.expression(
                         index_node, fn, params, locals_, transfers,
@@ -7194,6 +7203,38 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 self._call_result_type(node)
             )
         )
+
+    def _evaluate_chan_chan_container_call(
+        self,
+        node: Any,
+        fn: Function,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+        transfers: list[CallTransfer],
+        count: list[int],
+        depth: int,
+    ) -> frozenset[int]:
+        inner = node
+        while (
+            inner is not None
+            and inner.type == "parenthesized_expression"
+        ):
+            inner = next(
+                (c for c in inner.named_children if c.type != "comment"),
+                None,
+            )
+        if not self._chan_chan_container_result_call(inner):
+            return frozenset()
+        key = self.node_key(inner)
+        cached = self._chan_chan_container_call_deps.get(key)
+        if cached is not None:
+            return cached
+        deps = self.expression(
+            inner, fn, params, locals_, transfers, count, depth + 1
+        )
+        self._promote_chan_call_args(inner, "", locals_, params)
+        self._chan_chan_container_call_deps[key] = deps
+        return deps
 
     def _external_chan_chan_source(
         self, node: Any, params: dict
@@ -10432,6 +10473,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
         saved_external_chan_elem_index_deps = (
             self._external_chan_elem_index_deps
         )
+        saved_chan_chan_container_call_deps = (
+            self._chan_chan_container_call_deps
+        )
         saved_defer_result_deps = self._defer_result_deps
         saved_func_args = self._func_arg_invocations
         saved_call_arg_deps = self._call_arg_deps
@@ -10460,6 +10504,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         self._chan_chan_param_origins = {}
         self.external_chan_selectors = {}
         self._external_chan_elem_index_deps = {}
+        self._chan_chan_container_call_deps = {}
         self._defer_result_deps = frozenset()
         self._func_arg_invocations = {}
         self._call_arg_deps = {}
@@ -10545,6 +10590,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
             )
             self._external_chan_elem_index_deps = (
                 saved_external_chan_elem_index_deps
+            )
+            self._chan_chan_container_call_deps = (
+                saved_chan_chan_container_call_deps
             )
             self._caller_visible_params = saved_caller_visible
             self._defer_result_deps = saved_defer_result_deps
@@ -19056,10 +19104,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         )
                         else None
                     )
-                    if self._chan_chan_container_result_call(
-                        container_operand
-                    ):
-                        value_deps |= self.expression(
+                    value_deps |= (
+                        self._evaluate_chan_chan_container_call(
                             container_operand,
                             fn,
                             params,
@@ -19068,6 +19114,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             count,
                             0,
                         )
+                    )
                     if (
                         index_node is not None
                         and index_node.type not in _INDEX_LITERALS
@@ -20888,6 +20935,42 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         target_id, fact, _index_node = (
                             external_chan_chan_elem
                         )
+                        container_node = operand
+                        while (
+                            container_node is not None
+                            and container_node.type
+                            == "parenthesized_expression"
+                        ):
+                            container_node = next(
+                                (
+                                    child
+                                    for child in container_node.named_children
+                                    if child.type != "comment"
+                                ),
+                                None,
+                            )
+                        container_operand = (
+                            container_node.child_by_field_name(
+                                "operand"
+                            )
+                            if (
+                                container_node is not None
+                                and container_node.type
+                                == "index_expression"
+                            )
+                            else None
+                        )
+                        container_deps = (
+                            self._evaluate_chan_chan_container_call(
+                                container_operand,
+                                fn,
+                                params,
+                                locals_,
+                                transfers,
+                                count,
+                                depth + 1,
+                            )
+                        )
                         self._pin_fact_identities(fact)
                         transfers.append(
                             CallTransfer(
@@ -20906,26 +20989,6 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             self._external_chan_elem_index_deps.get(
                                 self.node_key(operand), frozenset()
                             )
-                        )
-                        container_operand = (
-                            operand.child_by_field_name("operand")
-                            if operand is not None
-                            else None
-                        )
-                        container_deps = (
-                            self.expression(
-                                container_operand,
-                                fn,
-                                params,
-                                locals_,
-                                transfers,
-                                count,
-                                depth + 1,
-                            )
-                            if self._chan_chan_container_result_call(
-                                container_operand
-                            )
-                            else frozenset()
                         )
                         self.indirect_writes |= container_deps
                         origin = (
@@ -21623,6 +21686,40 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     if external_chan_chan_elem is not None:
                         target_id, fact, index_node = (
                             external_chan_chan_elem
+                        )
+                        container_node = arguments[0]
+                        while (
+                            container_node is not None
+                            and container_node.type
+                            == "parenthesized_expression"
+                        ):
+                            container_node = next(
+                                (
+                                    child
+                                    for child in container_node.named_children
+                                    if child.type != "comment"
+                                ),
+                                None,
+                            )
+                        container_operand = (
+                            container_node.child_by_field_name(
+                                "operand"
+                            )
+                            if (
+                                container_node is not None
+                                and container_node.type
+                                == "index_expression"
+                            )
+                            else None
+                        )
+                        self._evaluate_chan_chan_container_call(
+                            container_operand,
+                            fn,
+                            params,
+                            locals_,
+                            transfers,
+                            count,
+                            depth + 1,
                         )
                         index_deps = (
                             self.expression(
@@ -22403,6 +22500,40 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     if external_chan_chan_elem is not None:
                         target_id, fact, index_node = (
                             external_chan_chan_elem
+                        )
+                        container_node = arguments[0]
+                        while (
+                            container_node is not None
+                            and container_node.type
+                            == "parenthesized_expression"
+                        ):
+                            container_node = next(
+                                (
+                                    child
+                                    for child in container_node.named_children
+                                    if child.type != "comment"
+                                ),
+                                None,
+                            )
+                        container_operand = (
+                            container_node.child_by_field_name(
+                                "operand"
+                            )
+                            if (
+                                container_node is not None
+                                and container_node.type
+                                == "index_expression"
+                            )
+                            else None
+                        )
+                        self._evaluate_chan_chan_container_call(
+                            container_operand,
+                            fn,
+                            params,
+                            locals_,
+                            transfers,
+                            count,
+                            depth + 1,
                         )
                         index_deps = (
                             self.expression(
