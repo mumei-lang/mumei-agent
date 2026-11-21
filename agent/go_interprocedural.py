@@ -6373,10 +6373,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
         )
 
     def _local_chan_chan_alias(
-        self, binding_id: str, target_id: str, conditional: bool
+        self, binding_id: str, target_root: str, conditional: bool
     ) -> None:
         old_root = self._chan_root(binding_id)
-        target_root = self._chan_root(target_id)
         self._local_chan_chan_init(old_root)
         self._local_chan_chan_init(target_root)
         self.local_chan_chans.add(binding_id)
