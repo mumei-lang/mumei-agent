@@ -4276,10 +4276,11 @@ same slot, `s[i].F++`/`s[i].F` reads union the group's deps
 with the indexes' own, and a parallel assign (`s[i].F, s[j].F
 = x, y`) shares the form. A whole-element map store (`m[k] =
 St{...}`) lands like any element write — the only write Go
-allows on a map element — and a `b := s[i]` extraction stays
-closed like the `[][4]int64` form (a struct embeds no
-collection to share). A COLLECTION field on the element
-extracts like `a := st.F` on a composite: `b := s[i].F` /
+allows on a map element — and whole-value extraction or range
+binding of a supported named struct element preserves Go's
+value-copy semantics while reusing collection-field share groups.
+A COLLECTION field on the element extracts like `a := st.F` on a
+composite: `b := s[i].F` /
 `b = s[i].F` (and deeper `s[i].F.G`) binds the field's own
 share group — minted under the root container and joined to
 its group — so a store through one extraction reaches the
