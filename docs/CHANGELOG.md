@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased: Solidity lexical binding report
+
+- Added `sol-bindings`, an opt-in tree-sitter report of single-file Solidity
+  declarations, scopes, references, explicit type facts, conservative calls,
+  unresolved names, and analysis gaps. Solidity widths are recorded only for
+  explicit supported types, including `address` and `bytesN`; imported and
+  unsupported behavior remains unresolved or gapped. The report is lexical
+  metadata, not a type check, proof, or verdict. C06 remains partially
+  delivered, with TypeScript as the remaining language follow-on and no
+  default route, audit, Seal Grade, or Lean changes.
+
 ## Unreleased: Rust lexical binding report
 
 - Added `rust-bindings`, an opt-in tree-sitter report of single-file Rust
@@ -9,7 +20,8 @@
   proof, or verdict. Inert attributes and standard derives are accepted;
   conditional-compilation attributes and unknown procedural attributes or
   derives create explicit gaps. C06 remains partially delivered, with no
-  default route, audit, Seal Grade, or Lean changes.
+  default route, audit, Seal Grade, or Lean changes; Solidity is now delivered
+  and TypeScript is the remaining language follow-on.
 
 ## Unreleased: Solidity access control
 

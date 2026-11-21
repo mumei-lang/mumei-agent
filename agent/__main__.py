@@ -48,6 +48,7 @@ _SUBCOMMANDS = {
     "ts-summaries-reuse",
     "ts-summaries-attempt",
     "ts-summaries-reuse-attempt",
+    "sol-bindings",
     "sol-summaries",
     "sol-summaries-accept",
     "sol-summaries-check",
@@ -1275,6 +1276,23 @@ def main() -> None:
         rust_bindings_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(rust_bindings_main(args))
+    elif command == "sol-bindings":
+        import argparse
+        from agent.sol_bindings import (
+            build_parser as sol_bindings_build_parser,
+            main as sol_bindings_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent sol-bindings",
+            description=(
+                "Emit a conservative Solidity lexical binding report as JSON; "
+                "this is lexical metadata, not a type check, proof, or verdict."
+            ),
+        )
+        sol_bindings_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(sol_bindings_main(args))
     elif command == "rust-summaries":
         import argparse
         from agent.rust_interprocedural import (
