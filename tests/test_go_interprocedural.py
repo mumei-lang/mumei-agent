@@ -15850,6 +15850,23 @@ def test_bound_closure_reassign_updates_captures(go_types_helper):
     assert result.return_dependencies == frozenset({0})
 
 
+def test_bound_closure_parenthesized_assignment_rebind_updates_captures(
+    go_types_helper,
+):
+    data = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "\tvar y int64\n"
+        "\tvar g func()\n"
+        "\tg = (func() { y = x })\n"
+        "\tg()\n"
+        "\treturn y\n}",
+    )
+    result = named(*data)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
 def test_bound_closure_alias_call(go_types_helper):
     # `g := h` — the alias carries the same captured deps.
     data = unit(
@@ -36154,6 +36171,24 @@ def test_func_elem_index_write_literal_admitted(go_types_helper):
         "    var y int64\n"
         "    fs := []func() int64{nil}\n"
         "    fs[0] = func() int64 { return y }\n"
+        "    y = x\n"
+        "    return fs[0]()\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_func_elem_index_write_parenthesized_literal_admitted(
+    go_types_helper,
+):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "    var y int64\n"
+        "    fs := []func() int64{nil}\n"
+        "    fs[0] = (func() int64 { return y })\n"
         "    y = x\n"
         "    return fs[0]()\n"
         "}",

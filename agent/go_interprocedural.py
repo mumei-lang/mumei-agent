@@ -16255,7 +16255,8 @@ class _Builder:
                 if (
                     i in func_elem_targets
                     and len(lefts) == len(rights)
-                    and rights[i].type == "func_literal"
+                    and self._strip_parens(rights[i]).type
+                    == "func_literal"
                 ):
                     for holder_id in elem_holders:
                         self._adopt_element_records(
@@ -16797,7 +16798,8 @@ class _Builder:
                     elif (
                         (
                             len(lefts) != len(rights)
-                            or rights[i].type != "func_literal"
+                            or self._strip_parens(rights[i]).type
+                            != "func_literal"
                         )
                         and not self._is_func_elem_composite(
                             rhs_node,
