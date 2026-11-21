@@ -21205,6 +21205,114 @@ def test_chan_elem_external_imported_extract(go_types_helper):
 
 
 @pytest.mark.parametrize(
+    ("declarations", "expected"),
+    [
+        # A package chan in a literal reads sends made through the group.
+        (
+            "var GC chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\ts := []chan int64{GC}\n"
+            "\tGC <- x\n"
+            "\treturn <-s[0]\n}\n",
+            frozenset({0}),
+        ),
+        # Sends through a literal member reach the external queue.
+        (
+            "var GC chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\ts := []chan int64{GC}\n"
+            "\ts[0] <- x\n"
+            "\treturn <-GC\n}\n",
+            frozenset({0}),
+        ),
+        # External chan-element queues in literals remain connected.
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\ts := []chan int64{GS[0]}\n"
+            "\tGS[0] <- x\n"
+            "\treturn <-s[0]\n}\n",
+            frozenset({0}),
+        ),
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\ts := []chan int64{GS[0]}\n"
+            "\ts[0] <- x\n"
+            "\treturn <-GS[0]\n}\n",
+            frozenset({0}),
+        ),
+        # An extracted external name keeps group externality.
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\td := GS[0]\n"
+            "\ts := []chan int64{d}\n"
+            "\td <- x\n"
+            "\treturn <-s[0]\n}\n",
+            frozenset({0}),
+        ),
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\td := GS[0]\n"
+            "\ts := []chan int64{d}\n"
+            "\ts[0] <- x\n"
+            "\treturn <-d\n}\n",
+            frozenset({0}),
+        ),
+        # Element stores add external queues to the group.
+        (
+            "var GC chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\ts := make([]chan int64, 1)\n"
+            "\ts[0] = GC\n"
+            "\tGC <- x\n"
+            "\treturn <-s[0]\n}\n",
+            frozenset({0}),
+        ),
+        # Appended external queues join the group too.
+        (
+            "var GC chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\ts := []chan int64{make(chan int64, 1)}\n"
+            "\ts = append(s, GC)\n"
+            "\tGC <- x\n"
+            "\treturn <-s[1]\n}\n",
+            frozenset({0}),
+        ),
+        # Extracted members retain external group reads.
+        (
+            "var GC chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\ts := []chan int64{GC}\n"
+            "\td := s[0]\n"
+            "\tGC <- x\n"
+            "\treturn <-d\n}\n",
+            frozenset({0}),
+        ),
+        # Passing a group member to a sender broadcasts externally.
+        (
+            "var GC chan int64\n"
+            "func G(c chan int64, x int64) { c <- x }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := []chan int64{GC}\n"
+            "\tG(s[0], x)\n"
+            "\treturn <-GC\n}\n",
+            frozenset({0}),
+        ),
+    ],
+)
+def test_chan_elem_external_group_members(
+    go_types_helper, declarations, expected
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available
+    assert result.return_dependencies == expected
+    assert result.effects == "unknown"
+
+
+@pytest.mark.parametrize(
     "declarations",
     [
         # `[][]chan` nests stay closed — the operand of the inner
