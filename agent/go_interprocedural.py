@@ -16181,7 +16181,6 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 self.expression(
                     value, fn, params, scope, transfers, count, 0
                 )
-            switch_scope_entry = dict(scope)
             frame = {
                 "kind": "switch",
                 "exited": False,
@@ -16201,10 +16200,6 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 )
                 chan_origin_exits: list[dict[str, frozenset[int]]] = []
                 branch_origins: dict[str, frozenset[int]] | None = None
-                guard_scope = dict(switch_scope_entry)
-                has_default = any(
-                    clause.type == "default_case" for clause in clauses
-                )
                 for index, clause in enumerate(clauses):
                     body = next(
                         (
@@ -16240,10 +16235,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             # Case guards are evaluated like the tag.
                             for guard in _children(sub):
                                 self.expression(
-                                    guard, fn, params, guard_scope,
+                                    guard, fn, params, scope,
                                     transfers, count, 0,
                                 )
-                    case_scope = dict(guard_scope)
                     if branch is None:
                         # Direct match, or the head of a new chain — the
                         # same fresh alternative doubles as the chain's
@@ -16252,7 +16246,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             chan_origin_entry
                         )
                         frame["exited"] = False
-                        branch = dict(case_scope)
+                        branch = dict(scope)
                         ptr_branch = dict(self._ptr_deps)
                         self._branch_sequence(
                             statements, fn, params, branch, transfers,
@@ -16295,7 +16289,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     self._chan_chan_param_origins = dict(
                         chan_origin_entry
                     )
-                    fresh = dict(case_scope)
+                    fresh = dict(scope)
                     ptr_fresh = dict(self._ptr_deps)
                     self._branch_sequence(
                         statements, fn, params, fresh, transfers,
@@ -16323,8 +16317,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         branch_origins = None
             finally:
                 self.frames.pop()
-            if not has_default:
-                self._join(scope, guard_scope, params)
+            if not any(
+                clause.type == "default_case" for clause in clauses
+            ):
                 chan_origin_exits.append(chan_origin_entry)
             self._chan_chan_param_origins = (
                 self._merge_chan_chan_param_origin_states(
