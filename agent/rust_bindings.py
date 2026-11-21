@@ -950,21 +950,23 @@ class _RustBindings:
             )
             return []
         if pattern.type == "mut_pattern":
-            out = []
+            mutable_bindings = []
             for child in self._children(pattern):
                 if child.type != "mutable_specifier":
-                    out.extend(self._pattern_names(child, scope, True))
-            return out
+                    mutable_bindings.extend(self._pattern_names(child, scope, True))
+            return mutable_bindings
         if pattern.type == "tuple_struct_pattern":
-            out: list[tuple[Any, bool]] = []
+            tuple_struct_bindings: list[tuple[Any, bool]] = []
             constructor = pattern.child_by_field_name("type")
             if constructor is not None:
                 self._record_pattern_path(constructor, "value", {"struct", "import"})
             for child in self._children(pattern):
                 if child == constructor:
                     continue
-                out.extend(self._pattern_names(child, scope, mutable))
-            return out
+                tuple_struct_bindings.extend(
+                    self._pattern_names(child, scope, mutable)
+                )
+            return tuple_struct_bindings
         if pattern.type == "field_pattern":
             value = pattern.child_by_field_name("pattern")
             field_mutable = mutable or any(
@@ -1007,26 +1009,28 @@ class _RustBindings:
                     self._record_pattern_path(
                         type_node, "type", {"struct", "enum", "type_alias", "import"}
                     )
-            out = []
+            nested_bindings = []
             for child in self._children(pattern):
                 if pattern.type == "struct_pattern" and child == pattern.child_by_field_name("type"):
                     continue
                 if child.type == "mutable_specifier":
                     continue
                 if child.type == "field_identifier" and pattern.type == "struct_pattern":
-                    out.append((child, mutable))
+                    nested_bindings.append((child, mutable))
                     continue
                 if child.type == "type_identifier" and pattern.type == "struct_pattern":
                     continue
-                out.extend(self._pattern_names(child, scope, mutable))
-            return out
+                nested_bindings.extend(self._pattern_names(child, scope, mutable))
+            return nested_bindings
         if pattern.type in {"match_pattern", "condition"}:
-            out = []
+            condition_bindings = []
             for child in self._children(pattern):
                 if child.type in {"binary_expression", "call_expression"}:
                     continue
-                out.extend(self._pattern_names(child, scope, mutable))
-            return out
+                condition_bindings.extend(
+                    self._pattern_names(child, scope, mutable)
+                )
+            return condition_bindings
         self.gaps.append(Gap("unsupported_syntax", self.span(pattern)))
         return []
 
