@@ -17531,6 +17531,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     | value_deps,
                     conditional,
                 )
+                if self._chan_group_external_tokens(local_chan_chan):
+                    self.indirect_writes |= self._chan_group_read_deps(
+                        local_chan_chan, locals_
+                    )
                 return
             if binding is None:
                 # `GC <- x` / `lib.GC <- x` — a channel living in

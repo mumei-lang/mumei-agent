@@ -16787,6 +16787,53 @@ def test_local_chan_chan_package_store_escapes_group(
     assert caller.effects == "unknown"
 
 
+def test_package_chan_chan_store_observes_later_member_sends(
+    go_types_helper,
+):
+    source = (
+        "var GCC chan chan int64\n"
+        "func Same(x int64) int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tGCC = cc\n"
+        "\tc <- x\n"
+        "\tcc <- c\n"
+        "\treturn <-(<-GCC)\n"
+        "}\n"
+        "func Store(x int64) {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tGCC = cc\n"
+        "\tc <- x\n"
+        "\tcc <- c\n"
+        "}\n"
+        "func Read() int64 { return <-(<-GCC) }\n"
+        "func Caller(x int64) int64 {\n"
+        "\tStore(x)\n"
+        "\td := <-GCC\n"
+        "\treturn <-d\n"
+        "}\n"
+        "func JoinedBeforeSend(x int64) int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tGCC = cc\n"
+        "\tcc <- c\n"
+        "\tc <- x\n"
+        "\treturn <-(<-GCC)\n"
+        "}\n"
+    )
+    src, snapshot, summaries = unit(go_types_helper, source)
+    for name in ("Same", "Caller", "JoinedBeforeSend"):
+        result = named(src, snapshot, summaries, name)
+        assert result.available, (name, result.gaps)
+        assert result.return_dependencies == frozenset({0}), (
+            name,
+            result.return_dependencies,
+        )
+    read = named(src, snapshot, summaries, "Read")
+    assert read.available and read.effects == "unknown"
+
+
 def test_chan_chan_boundaries_stay_closed(go_types_helper):
     # Unsupported shapes cannot expose a local queue outside the
     # admitted return and package-variable paths.
