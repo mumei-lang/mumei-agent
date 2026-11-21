@@ -64,8 +64,10 @@ give the existing pinned observations something honest to discharge:
   as a unit. The raw descriptor is not a performer: an accepted
   `mumei.native-observations-accept-report/v1` performs
   `runtime_observation_semantics` from its one invocation, while accepted
-  single-channel reports recover only their matching observation and
-  fixed-diagnostic recheck reports remain non-performers.
+  single-channel reports recover only their matching observation.
+  Fixed-diagnostic rechecks and the JSON-producing
+  `native-observations-recheck` report remain non-performers; the raw
+  observation descriptor is not acceptance.
 
 Why this is honest: it claims *bounded observed behavior on one declared
 invocation*, which is exactly what the pins already verify. It upgrades
@@ -134,8 +136,9 @@ Option A, staged:
    `native-observations-accept` route runs the one-invocation Core acceptance
    and is the first performer of `runtime_observation_semantics`; accepted
    reports move the observation checks into `discharged_checks` only when
-   that same run observed them. The agent-side `recheck-observations` route
-   remains to be added.
+   that same run observed them. The agent-side
+   `native-observations-recheck` route exposes the raw descriptor but
+   remains non-performing in `recovery-eval`.
 
 What stays declared host duty forever: loader/libc/kernel/hardware
 correctness, temporal behavior beyond the declared bound, memory safety
@@ -161,13 +164,13 @@ attestation) is absorbed into Option A's invocation envelope.
 
 ## Minimal first implementation slice
 
-Status: Core stage 2 (`recheck-observations`) has landed in mumei. The agent `native-observations-accept` route and its `runtime_observation_semantics` performer have landed; the agent recheck-observations route remains.
+Status: Core stage 2 and both agent routes for the observation commands have landed. Only `native-observations-accept` performs `runtime_observation_semantics`; `native-observations-recheck` is non-performing. The remaining deep C10 endpoint is object-code translation validation, with no ABI claim.
 
 Slice 1 alone is self-contained and agent-side:
 
-- `agent/core_evidence.py`: retain the reserved
-  `mumei.runtime-observation/v1` schema name for Core's raw recheck
-  descriptor and define `RUNTIME_CHECK_VOCABULARY`
+- `agent/core_evidence.py`: retain the
+  `mumei.runtime-observation/v1` schema name emitted by Core's raw
+  recheck descriptor and define `RUNTIME_CHECK_VOCABULARY`
   (`os_exit_status_observation`,
   `os_stdout_observation`, `os_stderr_observation`,
   `runtime_observation_semantics`). The three OS-observation checks are
@@ -183,7 +186,8 @@ Slice 1 alone is self-contained and agent-side:
   observation check and no sibling's; inconclusive and drifted runs keep
   the whole runtime family not-performed; `recovery-eval` composes each
   bound native accept report into only its channel check, while
-  `runtime_observation_semantics` stays unperformed until the Core slice.
+  the raw observation descriptor and its recheck report do not perform
+  `runtime_observation_semantics`.
 
 Nothing here changes a grade, a Lean gate, an audit verdict or a default
 route — it gives the pipeline's existing, already-verified OS

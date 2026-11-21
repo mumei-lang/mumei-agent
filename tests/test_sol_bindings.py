@@ -619,7 +619,7 @@ contract Base {
     function f(uint x) internal virtual {}
 }
 contract Derived is Base {
-    function f(uint x) internal override virtual {}
+    function f(uint renamed) internal override virtual {}
     function selected(uint x) public { f(x); }
 }
 contract OtherBase {
@@ -654,10 +654,13 @@ contract Ambiguous is OtherBase {
 
 def test_derived_implementation_replaces_bodyless_interface_function():
     source = """
-interface I { function f(uint) external; }
+interface I { function f(uint[] calldata input) external; }
 contract C is I {
-    function f(uint value) public {}
-    function caller() internal { f(1); }
+    function f(uint[] memory values) public {}
+    function caller() internal {
+        uint[] memory values = new uint[](1);
+        f(values);
+    }
 }
 """
     report = build_sol_bindings(source)
@@ -667,11 +670,66 @@ contract C is I {
         if source.index("contract C") < binding.span.start
     )
     call = next(
-        call for call in report.calls if _text(source, call.span) == "f(1)"
+        call for call in report.calls if _text(source, call.span) == "f(values)"
     )
     assert call.target == implementation.id
     assert call.kind in {"direct_local", "opaque_virtual"}
     assert not _unresolved(report, "f", "ambiguous_overload")
+
+
+def test_bodyless_base_with_different_parameter_type_remains_ambiguous():
+    source = """
+abstract contract Base { function f(uint value) internal virtual; }
+contract Derived is Base {
+    function f(address value) internal {}
+    function caller() internal { f(1); }
+}
+"""
+    report = build_sol_bindings(source)
+    call = next(
+        call for call in report.calls if _text(source, call.span) == "f(1)"
+    )
+    assert call.kind == "opaque_overload"
+    assert call.target == ""
+    assert _unresolved(report, "f", "ambiguous_overload")
+
+
+def test_uint_and_uint256_parameter_texts_remain_ambiguous():
+    source = """
+abstract contract Base { function f(uint value) internal virtual; }
+contract Derived is Base {
+    function f(uint256 value) internal {}
+    function caller() internal { f(1); }
+}
+"""
+    report = build_sol_bindings(source)
+    call = next(
+        call for call in report.calls if _text(source, call.span) == "f(1)"
+    )
+    assert call.kind == "opaque_overload"
+    assert call.target == ""
+    assert _unresolved(report, "f", "ambiguous_overload")
+
+
+def test_unrecognized_parameter_type_keeps_inherited_candidate():
+    source = """
+abstract contract Base {
+    function f(function(uint) external returns (uint) callback) internal virtual;
+}
+contract Derived is Base {
+    function f(function(uint) external returns (uint) callback) internal override {}
+    function caller(function(uint) external returns (uint) callback) internal {
+        f(callback);
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    call = next(
+        call for call in report.calls if _text(source, call.span) == "f(callback)"
+    )
+    assert call.kind == "opaque_overload"
+    assert call.target == ""
+    assert _unresolved(report, "f", "ambiguous_overload")
 
 
 def test_different_arity_bodyless_base_function_remains_ambiguous():

@@ -71,6 +71,11 @@ _TYPE_BINDINGS = frozenset(
 )
 _FUNCTION_BINDINGS = frozenset({"function", "modifier", "constructor"})
 _CALL_OPTIONS = {"value", "gas", "salt"}
+_PARAMETER_TYPE_TEXT = re.compile(
+    r"[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*"
+    r"(?:\s+payable)?"
+    r"(?:\s*\[\s*(?:[A-Za-z_$][A-Za-z0-9_$.]*|\d+)?\s*\])*"
+)
 
 
 @dataclass(eq=False)
@@ -85,7 +90,7 @@ class _Record:
     override: bool = False
     location: str = ""
     underlying: Any | None = None
-    parameter_count: int = 0
+    parameter_signature: tuple[str, ...] | None = None
 
 
 @dataclass(eq=False)
@@ -170,7 +175,7 @@ class _SolBindings:
         override: bool = False,
         location: str = "",
         underlying: Any | None = None,
-        parameter_count: int = 0,
+        parameter_signature: tuple[str, ...] | None = None,
     ) -> _Record:
         name = name_override or self.text(name_node)
         scope_start, scope_end = self._scope_for_id(binding_scope)
@@ -197,7 +202,7 @@ class _SolBindings:
             override,
             location,
             underlying,
-            parameter_count,
+            parameter_signature,
         )
         self.records.append(record)
         self.bindings.append(binding)
@@ -389,7 +394,7 @@ class _SolBindings:
             visibility=self._visibility(node),
             virtual=bool(re.search(r"\bvirtual\b", self.text(node))),
             override=bool(re.search(r"\boverride\b", self.text(node))),
-            parameter_count=len(self._type_nodes_in_parameters(node)),
+            parameter_signature=self._parameter_signature(node),
         )
 
     def _predeclare_constructor(self, node: Any, owner: _Contract) -> _Record:
@@ -760,6 +765,22 @@ class _SolBindings:
 
     def _type_nodes_in_parameters(self, node: Any) -> list[Any]:
         return [child for child in self.children(node) if child.type == "parameter"]
+
+    def _parameter_signature(self, node: Any) -> tuple[str, ...] | None:
+        signature = []
+        for parameter in self._type_nodes_in_parameters(node):
+            type_node = parameter.child_by_field_name("type")
+            if (
+                type_node is None
+                or type_node.has_error
+                or type_node.is_missing
+            ):
+                return None
+            type_text = " ".join(self.text(type_node).split())
+            if not _PARAMETER_TYPE_TEXT.fullmatch(type_text):
+                return None
+            signature.append(type_text)
+        return tuple(signature)
 
     def _return_parameters(self, node: Any) -> list[Any]:
         result = node.child_by_field_name("return_type")
@@ -1517,22 +1538,24 @@ class _SolBindings:
     def _drop_overridden_functions(
         self, candidates: list[_Record]
     ) -> list[_Record]:
-        return [
-            candidate
-            for candidate in candidates
-            if not any(
+        kept = []
+        for candidate in candidates:
+            signature = candidate.parameter_signature
+            if signature is not None and any(
                 other is not candidate
                 and other.owner is not None
                 and candidate.owner is not None
-                and other.parameter_count == candidate.parameter_count
+                and other.parameter_signature == signature
                 and self._is_derived_from(other.owner, candidate.owner, set())
                 and (
                     other.override
                     or (candidate.body is None and other.body is not None)
                 )
                 for other in candidates
-            )
-        ]
+            ):
+                continue
+            kept.append(candidate)
+        return kept
 
     def _call_expression(self, node: Any) -> None:
         function = node.child_by_field_name("function")

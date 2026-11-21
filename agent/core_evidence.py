@@ -1536,7 +1536,8 @@ def evaluate_evidence_binding(record: bytes, document: dict) -> dict:
 # ``checks_not_performed`` a set of supporting documents covers.
 UNPERFORMED_CHECK_RECOVERY_SCHEMA = "mumei.unperformed-check-recovery/v1"
 
-# Reserved for the later Core slice; it is not registered as a performer yet.
+# Emitted by Core's recheck-observations command; the raw descriptor
+# remains non-performing, unlike the accepted one-invocation report.
 RUNTIME_OBSERVATION_SCHEMA = "mumei.runtime-observation/v1"
 RUNTIME_CHECK_VOCABULARY = frozenset(
     {
@@ -1583,8 +1584,10 @@ _CHECK_PERFORMERS: dict = {
          "accepted", "shared:expected_build_id"),
     ],
     # Accepted Core runs authenticate this build ID against the bundle
-    # record, so it pins sibling reports to the same record. Rechecks
-    # remain non-performers because their stdout has no bound carrier.
+    # record, so it pins sibling reports to the same record. Single-
+    # channel rechecks have fixed diagnostic stdout. The observations-
+    # recheck report and raw runtime-observation descriptor are also
+    # deliberately non-performers: they recheck, they do not accept.
     # runtime_observation_semantics is performed only by the one-
     # invocation observations acceptance; it is never a conjunction of
     # the three single-channel reports.
