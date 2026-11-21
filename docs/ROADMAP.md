@@ -2864,13 +2864,28 @@ binds each element as an external channel like `c
 := <-cc`, and the comma-ok receives `c, ok :=
 <-cc`, `var c, ok = <-cc` and `c, _ = <-cc` reseat
 or bind the value slot to the received external
-queue. Deeper nesting (`chan chan chan T`), a
-local `make(chan chan T)` or `var cc chan chan T`,
-a `chan chan` alias reseat (`cc = q`), and a
-`make(chan chan T)` rebind all stay closed — a
-channel value flowing between two local queues
-would alias queues the conflated dep set cannot
-track. Still
+queue. A local `make(chan chan T)` or `var cc chan
+chan T` is admitted as a bound channel-element
+container under the existing conflated share-group
+model: each local channel sent into or received from
+the queue joins its group, as do aliases and members
+of other local channel-element groups. Local queue
+operations (`send`, `receive`, `close`, `len`, and
+`cap`) do not record a transfer on the outer queue
+identity. External members remain externally
+observable through the group: their reads and sends
+contribute indirect writes and imported transfers.
+Local queues stay closed when they escape through
+calls, returns, stores, or func-literal captures, and
+when reseated from a call result or parameter.
+Deeper nesting (`chan chan chan T`), `[]chan chan T`,
+and direct nested channel operations stay closed:
+passing a channel received from one local queue as a
+value to another (`dst <- <-src`) is supported and
+joins their share groups, but using that receive as
+the operation target (`(<-src) <- x`) or nesting a
+receive (`<-(<-src)`) remains closed.
+Still
 closed: non-scalar elements — while `select` now
 admits: each communication case's
 receive (`v := <-ch`, `v, ok := <-ch`, `v = <-ch`,
