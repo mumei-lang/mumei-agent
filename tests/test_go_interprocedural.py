@@ -20705,6 +20705,19 @@ def test_chan_elem_array(go_types_helper, declarations, expected):
             "\treturn <-c\n}\n",
             frozenset({0}),
         ),
+        # A promoted queue still deposits into a bound share group —
+        # `s := []chan{c}` keeps `<-s[0]` observing `c <- x` sends
+        # after `GS[0] = c` marks `c` external.
+        (
+            "var GS []chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 1)\n"
+            "\ts := []chan int64{c}\n"
+            "\tGS[0] = c\n"
+            "\tc <- x\n"
+            "\treturn <-s[0]\n}\n",
+            frozenset({0}),
+        ),
     ],
 )
 def test_chan_elem_external(go_types_helper, declarations, expected):
