@@ -10548,6 +10548,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
             # lands (RHS evaluation order keeps a `GS[i], c =
             # c, make(chan T)` pre-state honest).
             external_chan_elem_targets: set[int] = set()
+            # `GS = s` reseats an external chan-element container
+            # onto a bound collection: every element queue `s`
+            # carried now lives in caller-visible state, so the
+            # store loop promotes the RHS group's members like
+            # `GS[i] = c` promotes the single stored channel.
+            external_chan_container_writes: set[int] = set()
             # `p.C = ch` reseats which queue the field names: index →
             # the leaf `chan` member, so the store can union the RHS
             # queue's tokens into the member's may-set.
@@ -10652,6 +10658,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             )
                             if self._scalar_chan_binding(binding.id):
                                 chan_write_targets.add(len(refs))
+                            elif (
+                                binding.type is not None
+                                and self._chan_elem_collection(
+                                    binding.type
+                                )
+                            ):
+                                external_chan_container_writes.add(
+                                    len(refs)
+                                )
                             # The var's contents are external state
                             # like `VA[i] = v` — the stored value's
                             # deps broadcast so a later `VA`/`VA[i]`
@@ -10666,6 +10681,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         )
                         if self._scalar_chan_fact(member.type):
                             chan_write_targets.add(len(refs))
+                        elif (
+                            member.type is not None
+                            and self._chan_elem_collection(member.type)
+                        ):
+                            external_chan_container_writes.add(
+                                len(refs)
+                            )
                         external_write_targets.add(len(refs))
                         refs.append(None)
                         continue
@@ -10771,6 +10793,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         is not None
                     ):
                         external_chan_elem_targets.add(len(refs) - 1)
+                    elif (
+                        not saw_deref
+                        and member.type is not None
+                        and self._chan_elem_collection(member.type)
+                    ):
+                        external_chan_container_writes.add(
+                            len(refs) - 1
+                        )
                     continue
                 # A package-level `var` — `G.V = v`, `G[i] = v`,
                 # `*GP = v` — mutates package state the same way: the
@@ -10799,6 +10829,14 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         is not None
                     ):
                         external_chan_elem_targets.add(len(refs) - 1)
+                    elif (
+                        not saw_deref
+                        and binding.type is not None
+                        and self._chan_elem_collection(binding.type)
+                    ):
+                        external_chan_container_writes.add(
+                            len(refs) - 1
+                        )
                     continue
                 # `(*p)[i] = v` — a store through a bound pointer
                 # whose pointee is a container writes element memory
@@ -11534,6 +11572,35 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         )
                         if sent is not None:
                             self.external_chan_locals.add(sent.id)
+                    if i in external_chan_container_writes:
+                        # `GS = s` — every element queue inside the
+                        # stored container now lives in caller-visible
+                        # state like a `GS[i] = c` store marks it:
+                        # sends through any member (`c <- x`) must
+                        # reach a `<-GS[j]` read's indirect_writes.
+                        rhs_node = (
+                            rights[i]
+                            if len(lefts) == len(rights)
+                            else rights[0]
+                        )
+                        rhs_ref = (
+                            self.references.get(self.node_key(rhs_node))
+                            if rhs_node is not None
+                            else None
+                        )
+                        if rhs_ref is not None:
+                            for holder_id in (
+                                self._opaque_container_sharers(
+                                    rhs_ref.binding_id
+                                )
+                            ):
+                                for tok in self._opaque_container_tokens.get(
+                                    holder_id, frozenset()
+                                ):
+                                    if isinstance(tok, str):
+                                        self.external_chan_locals.add(
+                                            tok
+                                        )
                     continue
                 if ref is _ALIAS_FOLD:
                     # `*lib.PV = v` writes through a member that an
