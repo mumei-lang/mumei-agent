@@ -58,6 +58,7 @@ _SUBCOMMANDS = {
     "sol-summaries-reuse-attempt",
     "evidence-check",
     "evidence-check-schedule",
+    "evidence-check-attempt-acceptance",
     "evidence-check-adapter",
     "evidence-check-accept",
     "evidence-check-list",
@@ -709,6 +710,28 @@ def main() -> None:
         evidence_check_schedule_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(evidence_check_schedule_main(args))
+    elif command == "evidence-check-attempt-acceptance":
+        import argparse
+        from agent.evidence_check_attempt_acceptance import (
+            build_check_attempt_acceptance_parser
+            as evidence_check_attempt_acceptance_build_parser,
+            main_check_attempt_acceptance
+            as evidence_check_attempt_acceptance_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent evidence-check-attempt-acceptance",
+            description=(
+                "Check only static representation and producer consistency. "
+                "The producer's accepted binding is not Core Evidence "
+                "acceptance; candidate_match is not rechecked. No Core check "
+                "rerun, claim truth, producer authenticity, freshness, or "
+                "grade promotion."
+            ),
+        )
+        evidence_check_attempt_acceptance_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(evidence_check_attempt_acceptance_main(args))
     elif command == "evidence-check-adapter":
         import argparse
         from agent.evidence_check_adapter import (

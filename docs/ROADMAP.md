@@ -6832,6 +6832,21 @@ suppresses selection.
 C11 stays partial; this route adds no Evidence acceptance or grade
 promotion.
 
+### C11 Core attempt-acceptance representation check
+
+The `evidence-check-attempt-acceptance` CLI route and
+`evidence_check_attempt_acceptance` MCP tool consume Core's
+`evidence check-attempt-acceptance --stdin --json` diagnostic. The route
+validates the static representation and local agreement on the declared
+outcome and requirement-fingerprint presence. Selection means only Core
+validated that representation and producer consistency: the producer's
+`accepted` binding is not Core Evidence acceptance, and `candidate_match`
+is not rechecked. There is no Core check rerun, claim-truth,
+producer-authenticity, freshness, or grade-promotion claim.
+
+C11 stays partial; this route adds no Evidence acceptance or grade
+promotion.
+
 ### C11 Evidence accept-list consumer route
 
 The `evidence-accept-list` CLI route and `evidence_accept_list` MCP
