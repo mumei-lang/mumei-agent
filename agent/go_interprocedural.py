@@ -11655,10 +11655,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         bound_chan is not None
                         and bound_chan.type is not None
                         and bound_chan.type.kind == "chan"
+                        and not conditional
+                        and self._may_skip == 0
                     ):
                         # The reseat replaces the name's queue slot —
                         # a `[]chan{c}` group keeps the OLD queue, so
                         # its membership detaches under a surrogate.
+                        # A maybe-skipped reseat (inside a branch, or
+                        # after an exit in the same sequence) may not
+                        # run: the group keeps the name so its old
+                        # queue is still reachable on the untaken
+                        # path — the join unions the new deps in too.
                         self._chan_queue_detach(
                             ref.binding_id, locals_, params
                         )

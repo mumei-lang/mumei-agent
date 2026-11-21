@@ -20056,6 +20056,19 @@ def test_scalar_container_literal_elem_operand(go_types_helper):
             "\treturn <-s[0]\n}\n",
             frozenset({0}),
         ),
+        # A CONDITIONAL reseat may not run: the group keeps `c`
+        # so `c <- x` still reaches `<-s[0]` on the untaken path.
+        (
+            "func F(x int64, f bool) int64 {\n"
+            "\tc := make(chan int64, 4)\n"
+            "\ts := []chan int64{c}\n"
+            "\tif f {\n"
+            "\t\tc = make(chan int64, 1)\n"
+            "\t}\n"
+            "\tc <- x\n"
+            "\treturn <-s[0]\n}\n",
+            frozenset({0}),
+        ),
         # A caller-owned queue inside the group (`c` is a param):
         # the element send deposits `x`'s dep beside the queue's
         # own contents and records an external mutation.
