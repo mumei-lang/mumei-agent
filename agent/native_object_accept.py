@@ -38,6 +38,12 @@ Direct-call f64 arguments are admitted only under Core's exact-bits obligation
 (NaN-aware match, then an exact-bit proof against the XMM argument); computed
 f64 arguments without provably identical bits and f64 tail calls fail closed.
 This is not an IEEE-754 conformance, ABI, runtime, or full object-TV claim.
+Core's `machine_code_composite_register_aggregate_tv` is consumed only when
+listed in `checks_performed`; it covers one-/two-leaf struct parameters,
+results and direct-call struct values with integer and/or f64 leaves under an
+assumed SysV eightbyte classification (integer leaves in rdi–r9 / rax:rdx,
+f64 leaves in xmm0–xmm7 / xmm0:xmm1), not validated. This makes no ABI,
+runtime or full object-TV claim.
 """
 
 from __future__ import annotations
@@ -282,7 +288,14 @@ def build_object_accept_parser(
         "match, then an exact-bit proof against the XMM argument); computed "
         "f64 arguments without provably identical bits and f64 tail calls "
         "fail closed. This makes no IEEE-754 conformance, ABI, runtime or "
-        "full object-TV claim."
+        "full object-TV claim. Core's "
+        "`machine_code_composite_register_aggregate_tv` is consumed only when "
+        "listed in `checks_performed`; it covers one-/two-leaf struct "
+        "parameters, results and direct-call struct values with integer "
+        "and/or f64 leaves under an assumed SysV eightbyte classification "
+        "(integer leaves in rdi–r9 / rax:rdx, f64 leaves in xmm0–xmm7 / "
+        "xmm0:xmm1), not validated. This makes no ABI, runtime or full "
+        "object-TV claim."
     )
     parser.add_argument(
         "--core",

@@ -67,6 +67,7 @@ BOUNDED_OBJECT_CHECKS = OBJECT_CHECK_VOCABULARY - {
     "machine_code_callee_saved_preservation_assumed_for_external_callees",
     "machine_code_entry_wrapper_tv",
     "machine_code_f64_scalar_function_tv",
+    "machine_code_composite_register_aggregate_tv",
     "machine_code_tv_mxcsr_control_state",
     "machine_code_tv_nan_payload_bits",
     "object_translation_correspondence",
@@ -200,6 +201,7 @@ def test_machine_tv_check_is_not_discharged_by_object_descriptor(
         "machine_code_callee_saved_preservation_assumed_for_external_callees",
         "machine_code_entry_wrapper_tv",
         "machine_code_f64_scalar_function_tv",
+        "machine_code_composite_register_aggregate_tv",
         "machine_code_tv_mxcsr_control_state",
         "machine_code_tv_nan_payload_bits",
     ]
@@ -227,6 +229,12 @@ def test_machine_tv_check_is_not_discharged_by_object_descriptor(
     )
     assert "machine_code_entry_wrapper_tv" not in report["discharged_checks"]
     assert "machine_code_entry_wrapper_tv" in report["checks_not_performed"]
+    assert "machine_code_composite_register_aggregate_tv" not in report[
+        "discharged_checks"
+    ]
+    assert "machine_code_composite_register_aggregate_tv" in report[
+        "checks_not_performed"
+    ]
     for check in (
         "machine_code_f64_scalar_function_tv",
         "machine_code_tv_mxcsr_control_state",
