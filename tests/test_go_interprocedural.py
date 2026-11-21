@@ -16696,6 +16696,26 @@ def test_chan_chan_param_origins_do_not_leak_between_branches(
     assert result.return_dependencies == frozenset({0})
 
 
+def test_switch_case_expression_writes_are_visible_in_case_body(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "func Set(p *int64, x int64) bool { *p = x; return true }\n"
+        "func F(x int64) int64 {\n"
+        "\tvar y int64\n"
+        "\tswitch {\n"
+        "\tcase Set(&y, x): return y\n"
+        "\tdefault: return 0\n"
+        "\t}\n"
+        "}\n",
+    }
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
 def test_chan_chan_callee_send_promotes_chan_args(go_types_helper):
     # `cc <- q` inside `Publish` hands `q`'s queue to the outer
     # queue's domain — the caller's `chan` argument roots promote

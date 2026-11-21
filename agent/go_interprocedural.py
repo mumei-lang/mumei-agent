@@ -16231,12 +16231,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     self._chan_chan_param_origins = dict(
                         chan_origin_entry
                     )
+                    case_scope = dict(switch_scope_entry)
                     for sub in clause.named_children:
                         if sub.type == "expression_list":
                             # Case guards are evaluated like the tag.
                             for guard in _children(sub):
                                 self.expression(
-                                    guard, fn, params, scope,
+                                    guard, fn, params, case_scope,
                                     transfers, count, 0,
                                 )
                     if branch is None:
@@ -16247,7 +16248,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             chan_origin_entry
                         )
                         frame["exited"] = False
-                        branch = dict(switch_scope_entry)
+                        branch = dict(case_scope)
                         ptr_branch = dict(self._ptr_deps)
                         self._branch_sequence(
                             statements, fn, params, branch, transfers,
@@ -16290,7 +16291,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     self._chan_chan_param_origins = dict(
                         chan_origin_entry
                     )
-                    fresh = dict(scope)
+                    fresh = dict(case_scope)
                     ptr_fresh = dict(self._ptr_deps)
                     self._branch_sequence(
                         statements, fn, params, fresh, transfers,
