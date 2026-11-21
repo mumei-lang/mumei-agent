@@ -16860,6 +16860,29 @@ def test_package_chan_chan_parallel_store_uses_rhs_queue_snapshot(
     assert result.return_dependencies == frozenset({0})
 
 
+@pytest.mark.parametrize(
+    ("result_type", "literal"),
+    [
+        ("[]int", "[]int{len(cc)}"),
+        ("[]int", "[]int{cap(cc)}"),
+        ("[][]int", "[][]int{{len(cc)}}"),
+        ("[]int", "[]int{0: (cap(cc))}"),
+        ("map[int]int", "map[int]int{0: len(cc)}"),
+    ],
+)
+def test_local_chan_chan_inside_literal_call_argument_is_not_escape(
+    go_types_helper, result_type, literal
+):
+    source = (
+        f"func F() {result_type} {{\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        f"\treturn {literal}\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, source))
+    assert result.available, result.gaps
+
+
 def test_chan_chan_boundaries_stay_closed(go_types_helper):
     # Unsupported shapes cannot expose a local queue outside the
     # admitted return and package-variable paths.

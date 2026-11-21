@@ -7247,17 +7247,41 @@ member, or one explicit dereference of one (`(*t).F` — the same
         deps to the caller, not the empty set the literal captured)."""
         local_chan_chan = self._local_chan_chan_id(expr)
         if expr.type == "composite_literal":
-            pending = [expr]
+            pending = [
+                expr.child_by_field_name("body")
+            ]
             while pending:
                 candidate = pending.pop()
+                if candidate is None:
+                    continue
                 if (
-                    candidate is not expr
+                    candidate.type == "identifier"
                     and self._local_chan_chan_id(candidate) is not None
                 ):
                     raise _Unsupported(
                         "unsupported_return", _span(expr)
                     )
-                pending.extend(candidate.named_children)
+                if candidate.type in {
+                    "parenthesized_expression",
+                    "literal_value",
+                    "literal_element",
+                    "composite_literal",
+                }:
+                    if candidate.type == "composite_literal":
+                        pending.append(
+                            candidate.child_by_field_name("body")
+                        )
+                    else:
+                        pending.extend(_children(candidate))
+                elif candidate.type == "keyed_element":
+                    pending.extend(
+                        child
+                        for child in (
+                            candidate.child_by_field_name("key"),
+                            candidate.child_by_field_name("value"),
+                        )
+                        if child is not None
+                    )
         deps = self.expression(
             expr, fn, params, locals_, transfers, count, 0
         )
