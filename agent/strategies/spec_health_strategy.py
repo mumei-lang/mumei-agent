@@ -22,8 +22,6 @@ import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
-
 from agent.strategies.spec_health_strategy_helpers import (
     ContradictionInfo,
     OverConstrainedInfo,
@@ -34,10 +32,13 @@ from agent.strategies.spec_health_strategy_helpers import (
     _extract_atom_from_vacuity_line,
     _string_list,
     _string_value,
+    _structured_vacuity_diagnostics,
     _suggest_health_fix,
     _suggest_overconstrained_fix,
     _vacuity_texts,
 )
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -125,9 +126,14 @@ class SpecHealthChecker:
         return None
 
     def check_vacuity(self, verify_result: dict[str, object]) -> list[VacuousInfo]:
-        """Parse stderr / stdout for vacuity-check failure messages."""
+        """Prefer structured diagnostics, then parse legacy vacuity text."""
+        report = _as_dict(verify_result.get("report"))
+        fallback_atom = _string_value(report.get("atom"), "unknown")
+        structured_vacuous = _structured_vacuity_diagnostics(report, fallback_atom)
+        if structured_vacuous:
+            return structured_vacuous
+
         vacuous: list[VacuousInfo] = []
-        fallback_atom = _string_value(_as_dict(verify_result.get("report")).get("atom"), "unknown")
         for text in _vacuity_texts(verify_result):
             for line in text.splitlines():
                 lower = line.lower()

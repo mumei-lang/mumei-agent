@@ -86,6 +86,42 @@ def _vacuity_texts(verify_result: dict[str, object]) -> list[str]:
     return texts
 
 
+def _structured_vacuity_diagnostics(
+    report: dict[str, object],
+    fallback_atom: str,
+) -> list[VacuousInfo]:
+    diagnostics = report.get("diagnostics")
+    if not isinstance(diagnostics, list):
+        return []
+
+    vacuous: list[VacuousInfo] = []
+    for diagnostic in diagnostics:
+        if not isinstance(diagnostic, dict):
+            continue
+        message = diagnostic.get("message")
+        if not isinstance(message, str):
+            continue
+        message = message.strip()
+        lower = message.lower()
+        if "vacuous" not in lower or "vacuity check passed" in lower:
+            continue
+
+        diagnostic_atom = diagnostic.get("atom")
+        atom = (
+            diagnostic_atom.strip()
+            if isinstance(diagnostic_atom, str) and diagnostic_atom.strip()
+            else fallback_atom
+        )
+        vacuous.append(
+            VacuousInfo(
+                atom=atom,
+                message=message,
+                fix_suggestion=_suggest_health_fix("vacuity", message),
+            )
+        )
+    return vacuous
+
+
 def _extract_atom_from_vacuity_line(line: str, fallback: str) -> str:
     for marker, quote in (("for '", "'"), ("for \u2018", "\u2019")):
         idx = line.find(marker)
