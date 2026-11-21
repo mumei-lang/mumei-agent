@@ -49,6 +49,7 @@ DESCRIPTOR = {
         "machine_code_forward_branch_function_tv",
         "machine_code_acyclic_branch_function_tv",
         "machine_code_conditional_call_function_tv",
+        "machine_code_bounded_loop_function_tv",
         "machine_code_tv_cyclic_control_flow_functions",
         "object_translation_correspondence",
     ],
@@ -68,6 +69,7 @@ EXPECTED_LEAF_CHECKED = EXPECTED_CHECKED - {
     "machine_code_forward_branch_function_tv",
     "machine_code_acyclic_branch_function_tv",
     "machine_code_conditional_call_function_tv",
+    "machine_code_bounded_loop_function_tv",
 }
 
 
@@ -200,6 +202,7 @@ def test_descriptor_without_equivalent_function_leaves_leaf_tv_unperformed(
             "machine_code_forward_branch_function_tv",
             "machine_code_acyclic_branch_function_tv",
             "machine_code_conditional_call_function_tv",
+            "machine_code_bounded_loop_function_tv",
         }
     )
     assert report["machine_tv_recheck"] == "checked"
@@ -225,6 +228,7 @@ def test_direct_call_site_check_is_discharged_when_listed_as_performed(
             "machine_code_forward_branch_function_tv",
             "machine_code_acyclic_branch_function_tv",
             "machine_code_conditional_call_function_tv",
+            "machine_code_bounded_loop_function_tv",
             "machine_code_tv_cyclic_control_flow_functions",
             "object_translation_correspondence",
         ],
@@ -241,6 +245,7 @@ def test_direct_call_site_check_is_discharged_when_listed_as_performed(
             "machine_code_forward_branch_function_tv",
             "machine_code_acyclic_branch_function_tv",
             "machine_code_conditional_call_function_tv",
+            "machine_code_bounded_loop_function_tv",
         }
     )
     assert "machine_code_direct_call_site_tv" in report["discharged_checks"]
@@ -259,6 +264,7 @@ def test_direct_call_and_leaf_checks_stay_unperformed_when_not_listed(
             "machine_code_forward_branch_function_tv",
             "machine_code_acyclic_branch_function_tv",
             "machine_code_conditional_call_function_tv",
+            "machine_code_bounded_loop_function_tv",
             "machine_code_tv_cyclic_control_flow_functions",
             "object_translation_correspondence",
         ],
@@ -277,6 +283,7 @@ def test_direct_call_and_leaf_checks_stay_unperformed_when_not_listed(
             "machine_code_forward_branch_function_tv",
             "machine_code_acyclic_branch_function_tv",
             "machine_code_conditional_call_function_tv",
+            "machine_code_bounded_loop_function_tv",
         }
     )
     assert "machine_code_direct_call_site_tv" not in report["discharged_checks"]
@@ -300,6 +307,7 @@ def test_forward_branch_check_is_discharged_when_listed_as_performed(
             "machine_code_direct_call_site_tv",
             "machine_code_acyclic_branch_function_tv",
             "machine_code_conditional_call_function_tv",
+            "machine_code_bounded_loop_function_tv",
             "machine_code_tv_cyclic_control_flow_functions",
             "object_translation_correspondence",
         ],
@@ -316,6 +324,7 @@ def test_forward_branch_check_is_discharged_when_listed_as_performed(
             "machine_code_direct_call_site_tv",
             "machine_code_acyclic_branch_function_tv",
             "machine_code_conditional_call_function_tv",
+            "machine_code_bounded_loop_function_tv",
         }
     )
     assert "machine_code_forward_branch_function_tv" in report["discharged_checks"]
@@ -336,6 +345,7 @@ def test_acyclic_branch_check_is_discharged_when_listed_as_performed(
             "machine_code_direct_call_site_tv",
             "machine_code_forward_branch_function_tv",
             "machine_code_conditional_call_function_tv",
+            "machine_code_bounded_loop_function_tv",
             "machine_code_tv_cyclic_control_flow_functions",
             "object_translation_correspondence",
         ],
@@ -352,6 +362,7 @@ def test_acyclic_branch_check_is_discharged_when_listed_as_performed(
             "machine_code_direct_call_site_tv",
             "machine_code_forward_branch_function_tv",
             "machine_code_conditional_call_function_tv",
+            "machine_code_bounded_loop_function_tv",
         }
     )
     assert "machine_code_acyclic_branch_function_tv" in report["discharged_checks"]
@@ -372,6 +383,7 @@ def test_conditional_call_check_is_discharged_when_listed_as_performed(
             "machine_code_direct_call_site_tv",
             "machine_code_forward_branch_function_tv",
             "machine_code_acyclic_branch_function_tv",
+            "machine_code_bounded_loop_function_tv",
             "machine_code_tv_cyclic_control_flow_functions",
             "object_translation_correspondence",
         ],
@@ -388,10 +400,49 @@ def test_conditional_call_check_is_discharged_when_listed_as_performed(
             "machine_code_direct_call_site_tv",
             "machine_code_forward_branch_function_tv",
             "machine_code_acyclic_branch_function_tv",
+            "machine_code_bounded_loop_function_tv",
         }
     )
     assert "machine_code_conditional_call_function_tv" in report["discharged_checks"]
     assert "machine_code_conditional_call_function_tv" not in report["checks_not_performed"]
+    _assert_partition(report, expected)
+
+
+def test_bounded_loop_check_is_discharged_when_listed_as_performed(
+    tmp_path, capsys
+):
+    descriptor = {
+        **DESCRIPTOR,
+        "checks_performed": [
+            *DESCRIPTOR["checks_performed"],
+            "machine_code_bounded_loop_function_tv",
+        ],
+        "checks_not_performed": [
+            "machine_code_direct_call_site_tv",
+            "machine_code_forward_branch_function_tv",
+            "machine_code_acyclic_branch_function_tv",
+            "machine_code_conditional_call_function_tv",
+            "machine_code_tv_cyclic_control_flow_functions",
+            "object_translation_correspondence",
+        ],
+    }
+    core = _write_core(tmp_path, stdout=descriptor)
+    bundle = _write_bundle(tmp_path)
+    source = _write_source(tmp_path)
+    code, out, _ = _run(capsys, _args(core, bundle, source))
+    assert code == 0
+    report = json.loads(out)
+    expected = BASE_DISCHARGED | (
+        OBJECT_MACHINE_CHECKS
+        - {
+            "machine_code_direct_call_site_tv",
+            "machine_code_forward_branch_function_tv",
+            "machine_code_acyclic_branch_function_tv",
+            "machine_code_conditional_call_function_tv",
+        }
+    )
+    assert "machine_code_bounded_loop_function_tv" in report["discharged_checks"]
+    assert "machine_code_bounded_loop_function_tv" not in report["checks_not_performed"]
     _assert_partition(report, expected)
 
 
@@ -434,6 +485,19 @@ def test_conditional_call_check_stays_unperformed_when_not_listed(
     assert "machine_code_conditional_call_function_tv" not in report["discharged_checks"]
 
 
+def test_bounded_loop_check_stays_unperformed_when_not_listed(
+    tmp_path, capsys
+):
+    core = _write_core(tmp_path)
+    bundle = _write_bundle(tmp_path)
+    source = _write_source(tmp_path)
+    code, out, _ = _run(capsys, _args(core, bundle, source))
+    assert code == 0
+    report = json.loads(out)
+    assert "machine_code_bounded_loop_function_tv" in report["checks_not_performed"]
+    assert "machine_code_bounded_loop_function_tv" not in report["discharged_checks"]
+
+
 @pytest.mark.parametrize(
     "out_of_profile_check",
     [
@@ -449,6 +513,7 @@ def test_core_out_of_profile_branch_names_remain_accepted(
         **DESCRIPTOR,
         "checks_not_performed": [
             out_of_profile_check,
+            "machine_code_bounded_loop_function_tv",
             "object_translation_correspondence",
         ],
     }
@@ -508,10 +573,21 @@ def test_non_list_checks_performed_discharge_no_object_checks(
         {
             "schema_version": OBJECT_SYMBOL_CORRESPONDENCE_SCHEMA,
             "build_id": BUILD_ID,
-            "checks_performed": ["machine_code_leaf_function_tv"],
+            "checks_performed": [
+                "machine_code_leaf_function_tv",
+                "machine_code_bounded_loop_function_tv",
+            ],
         },
-        {"schema_version": "mumei.other/v1", "build_id": BUILD_ID},
-        {"schema_version": MACHINE_TV_SCHEMA, "build_id": "b" * 64},
+        {
+            "schema_version": "mumei.other/v1",
+            "build_id": BUILD_ID,
+            "checks_performed": ["machine_code_bounded_loop_function_tv"],
+        },
+        {
+            "schema_version": MACHINE_TV_SCHEMA,
+            "build_id": "b" * 64,
+            "checks_performed": ["machine_code_bounded_loop_function_tv"],
+        },
         "not-json",
         ["not", "an", "object"],
     ],
@@ -531,6 +607,7 @@ def test_descriptor_schema_and_build_id_gate_machine_tv_fields(
     assert "input_domain" not in report
     assert "function_outcomes" not in report
     assert report["discharged_checks"] == sorted(BASE_DISCHARGED)
+    assert "machine_code_bounded_loop_function_tv" not in report["discharged_checks"]
     _assert_partition(report, BASE_DISCHARGED)
 
 
@@ -777,6 +854,7 @@ def test_real_core_rechecks_machine_tv_leaf_function(tmp_path, capsys, real_core
     assert "machine_code_forward_branch_function_tv" in descriptor["checks_not_performed"]
     assert "machine_code_acyclic_branch_function_tv" in descriptor["checks_not_performed"]
     assert "machine_code_conditional_call_function_tv" in descriptor["checks_not_performed"]
+    assert "machine_code_bounded_loop_function_tv" in descriptor["checks_not_performed"]
     assert "machine_code_tv_cyclic_control_flow_functions" in descriptor["checks_not_performed"]
     argv = _args(Path(real_core), bundle, source)
     argv[argv.index("--expected-build-id") + 1] = build_id
@@ -796,6 +874,7 @@ def test_real_core_rechecks_machine_tv_leaf_function(tmp_path, capsys, real_core
     assert "machine_code_leaf_function_tv" in report["discharged_checks"]
     assert "machine_code_direct_call_site_tv" not in report["discharged_checks"]
     assert "machine_code_conditional_call_function_tv" not in report["discharged_checks"]
+    assert "machine_code_bounded_loop_function_tv" not in report["discharged_checks"]
     assert "object_translation_correspondence" not in report["discharged_checks"]
     assert "machine_code_forward_branch_function_tv" not in report["discharged_checks"]
     assert report["discharged_checks"] == sorted(EXPECTED_LEAF_CHECKED)
@@ -822,6 +901,22 @@ CONDITIONAL_CALL_SOURCE = (
     "atom cc_result(x: i64) -> i64 requires: x >= 0 && x <= 100; "
     "ensures: true; body: { if helper(x) > 5 { 10 } else { 0 } };\n"
     "atom main() -> i64 requires: true; ensures: true; body: { cc(1) };\n"
+)
+
+BOUNDED_LOOP_SOURCE = (
+    "atom main() -> i64\n"
+    "requires: true;\n"
+    "ensures: result == 4;\n"
+    "body: {\n"
+    "    let i = 0;\n"
+    "    while i < 4\n"
+    "    invariant: i >= 0 && i <= 4\n"
+    "    decreases: 4 - i\n"
+    "    {\n"
+    "        i = i + 1;\n"
+    "    };\n"
+    "    i\n"
+    "};\n"
 )
 
 FORWARD_BRANCH_SOURCE = (
@@ -866,6 +961,7 @@ def test_real_core_rechecks_machine_tv_direct_call_sites(
         "machine_code_conditional_call_function_tv"
         in descriptor["checks_not_performed"]
     )
+    assert "machine_code_bounded_loop_function_tv" in descriptor["checks_not_performed"]
     argv = _args(Path(real_core), bundle, source)
     argv[argv.index("--expected-build-id") + 1] = build_id
     code, out, err = _run(capsys, argv)
@@ -881,6 +977,7 @@ def test_real_core_rechecks_machine_tv_direct_call_sites(
         "machine_code_conditional_call_function_tv"
         not in report["discharged_checks"]
     )
+    assert "machine_code_bounded_loop_function_tv" not in report["discharged_checks"]
     assert "machine_code_leaf_function_tv" in report["discharged_checks"]
     assert "machine_code_forward_branch_function_tv" not in report["discharged_checks"]
     assert "machine_code_acyclic_branch_function_tv" not in report["discharged_checks"]
@@ -904,6 +1001,7 @@ def test_real_core_rechecks_machine_tv_forward_branch_functions(
         "machine_code_conditional_call_function_tv"
         in descriptor["checks_not_performed"]
     )
+    assert "machine_code_bounded_loop_function_tv" in descriptor["checks_not_performed"]
     argv = _args(Path(real_core), bundle, source)
     argv[argv.index("--expected-build-id") + 1] = build_id
     code, out, err = _run(capsys, argv)
@@ -920,6 +1018,43 @@ def test_real_core_rechecks_machine_tv_forward_branch_functions(
         "machine_code_conditional_call_function_tv"
         not in report["discharged_checks"]
     )
+    assert "machine_code_bounded_loop_function_tv" not in report["discharged_checks"]
+
+
+@pytest.mark.integration
+def test_real_core_rechecks_machine_tv_bounded_loop(
+    tmp_path, capsys, real_core
+):
+    bundle, source = _build_real_bundle(
+        tmp_path, real_core, BOUNDED_LOOP_SOURCE
+    )
+    build_id = hashlib.sha256((bundle / RECORD_FILE).read_bytes()).hexdigest()
+    descriptor = _real_machine_tv_descriptor(real_core, bundle, source, build_id)
+    assert "machine_code_bounded_loop_function_tv" in descriptor["checks_performed"]
+    assert (
+        "machine_code_bounded_loop_function_tv"
+        not in descriptor["checks_not_performed"]
+    )
+    assert "_and_loops_exiting_within_bound_4" in descriptor["input_domain"]
+
+    argv = _args(Path(real_core), bundle, source)
+    argv[argv.index("--expected-build-id") + 1] = build_id
+    code, out, err = _run(capsys, argv)
+    assert code == 0, err
+    report = json.loads(out)
+    expected_discharged = BASE_DISCHARGED | (
+        set(descriptor["checks_performed"]) & OBJECT_MACHINE_CHECKS
+    )
+    assert report["machine_tv_recheck"] == "checked"
+    assert report["input_domain"] == descriptor["input_domain"]
+    assert "_and_loops_exiting_within_bound_4" in report["input_domain"]
+    assert report["function_outcomes"] == {
+        "equivalent_within_profile": 1,
+        "outside_profile": 1,
+    }
+    assert "machine_code_bounded_loop_function_tv" in report["discharged_checks"]
+    assert report["discharged_checks"] == sorted(expected_discharged)
+    assert report["checks_not_performed"] == sorted(ALL_CHECKS - expected_discharged)
     assert "object_translation_correspondence" not in report["discharged_checks"]
 
 
@@ -939,6 +1074,7 @@ def test_real_core_rechecks_machine_tv_acyclic_backward_branch_functions(
         "machine_code_conditional_call_function_tv"
         in descriptor["checks_not_performed"]
     )
+    assert "machine_code_bounded_loop_function_tv" in descriptor["checks_not_performed"]
 
     argv = _args(Path(real_core), bundle, source)
     argv[argv.index("--expected-build-id") + 1] = build_id
@@ -994,6 +1130,7 @@ def test_real_core_rechecks_machine_tv_conditional_calls(
         "machine_code_tv_cyclic_control_flow_functions"
         in descriptor["checks_not_performed"]
     )
+    assert "machine_code_bounded_loop_function_tv" in descriptor["checks_not_performed"]
 
     argv = _args(Path(real_core), bundle, source)
     argv[argv.index("--expected-build-id") + 1] = build_id
@@ -1012,6 +1149,7 @@ def test_real_core_rechecks_machine_tv_conditional_calls(
         "machine_code_conditional_call_function_tv"
         in report["discharged_checks"]
     )
+    assert "machine_code_bounded_loop_function_tv" not in report["discharged_checks"]
     assert report["discharged_checks"] == sorted(expected_discharged)
     assert report["checks_not_performed"] == sorted(ALL_CHECKS - expected_discharged)
     assert all(

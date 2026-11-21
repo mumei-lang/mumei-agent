@@ -1338,11 +1338,16 @@ def main() -> None:
             prog="python -m agent native-machine-tv-recheck",
             description=(
                 "Run Core's bounded leaf straight-line, forward-branch, "
-                "acyclic backward-branch and conditional-call machine-code "
-                "TV recheck; direct calls remain uninterpreted sites, "
+                "acyclic backward-branch, conditional-call and LOOP_BOUND=4 "
+                "bounded-loop machine-code TV recheck; direct calls remain "
+                "uninterpreted sites, "
                 "including inside branching functions with per-path guarded "
-                "call matching; cyclic control flow, loops, ABI/runtime "
-                "semantics and full object TV stay outside."
+                "call matching; bounded loops use the "
+                "`_and_loops_exiting_within_bound_4` input-domain suffix when "
+                "listed by the descriptor; executions beyond the bound, "
+                "cancellation/runtime semantics and other cyclic control "
+                "flow stay outside. The register convention is assumed, not "
+                "validated; this is not an ABI or full object-TV claim."
             ),
         )
         machine_tv_build_parser(parser)
