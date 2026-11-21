@@ -11384,7 +11384,6 @@ def test_generic_embed_walk_visits_shared_diamonds_once(
         )
     )
     files = {"a.go": "\n".join(declarations) + "\n"}
-    _, snapshot, _ = package_unit(go_types_helper, files)
     original_struct_fields = ip._Builder._struct_fields
     struct_fields_calls = 0
 
@@ -11394,7 +11393,7 @@ def test_generic_embed_walk_visits_shared_diamonds_once(
         return original_struct_fields(self, type_binding)
 
     monkeypatch.setattr(ip._Builder, "_struct_fields", count_struct_fields)
-    summaries = ip.summarize_go_package(files, snapshot)
+    files, snapshot, summaries = package_unit(go_types_helper, files)
     result = named_package(files, snapshot, summaries, "F")
     assert result.available, result.gaps
     assert result.return_dependencies == frozenset({0})
