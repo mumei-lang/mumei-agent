@@ -7889,6 +7889,37 @@ def test_struct_literal_address_argument_to_func_value(
     assert result.effects == "unknown"
 
 
+def test_struct_literal_address_argument_writeback_to_escaped_initializer(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\ty := int64(0)\n"
+        "\tlib.G(&lib.S{P: &y}, x)\n"
+        "\treturn y\n"
+        "}",
+    }
+    imports = {
+        "lib": {
+            "g.go": "package lib\n"
+            "type S struct{ P *int64 }\n"
+            "func G(p *S, v int64) { *p.P = v }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, imports),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
 def test_struct_literal_address_pointer_receiver_method(
     go_types_helper,
 ):

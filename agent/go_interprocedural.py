@@ -26676,6 +26676,25 @@ member, or one explicit dereference of one (`(*t).F` — the same
         seen.discard(summary.binding_id)
         return tuple(sorted(seen))
 
+    def _fold_pointer_call_writes(
+        self,
+        stored: frozenset[int],
+        locals_: dict[Any, Any],
+        params: dict[Any, int],
+    ) -> None:
+        self.indirect_writes |= stored
+        for escaped_id in self.escaped:
+            self._store(locals_, params, escaped_id, stored, True)
+            eb = self.bindings.get(escaped_id)
+            if eb is not None and eb.type.kind == "pointer":
+                # A callee `*q = r` store may reseat an escaped
+                # pointer — its provenance gains the stored deps like
+                # a caller-side `p = q` does.
+                self._ptr_deps[escaped_id] = (
+                    self._pointer_deps(escaped_id, params, locals_)
+                    | stored
+                )
+
     def _store_call_writes(
         self,
         arguments: list[Any],
@@ -26713,6 +26732,28 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 and arg_node.children[0].type == "&"
             ):
                 (operand,) = _children(arg_node)
+                literal_operand = operand
+                while (
+                    literal_operand is not None
+                    and literal_operand.type
+                    == "parenthesized_expression"
+                ):
+                    literal_operand = next(
+                        (
+                            child
+                            for child in literal_operand.named_children
+                            if child.type != "comment"
+                        ),
+                        None,
+                    )
+                if (
+                    literal_operand is not None
+                    and literal_operand.type == "composite_literal"
+                ):
+                    self._fold_pointer_call_writes(
+                        stored, locals_, params
+                    )
+                    continue
                 ref = (
                     self.references.get(self.node_key(operand))
                     if operand.type == "identifier"
@@ -26756,26 +26797,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     else None
                 )
                 if binding is not None and binding.type.kind == "pointer":
-                    self.indirect_writes |= stored
-                    for escaped_id in self.escaped:
-                        self._store(
-                            locals_, params, escaped_id, stored, True
-                        )
-                        eb = self.bindings.get(escaped_id)
-                        if (
-                            eb is not None
-                            and eb.type.kind == "pointer"
-                        ):
-                            # A callee `*q = r` store may reseat an
-                            # escaped pointer — its provenance gains
-                            # the stored deps like a caller-side
-                            # `p = q` does.
-                            self._ptr_deps[escaped_id] = (
-                                self._pointer_deps(
-                                    escaped_id, params, locals_
-                                )
-                                | stored
-                            )
+                    self._fold_pointer_call_writes(
+                        stored, locals_, params
+                    )
                 elif (
                     binding is not None
                     and binding.type.kind == "chan"
