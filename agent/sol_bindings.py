@@ -1522,7 +1522,6 @@ class _SolBindings:
             for candidate in candidates
             if not any(
                 other is not candidate
-                and other.override
                 and other.owner is not None
                 and candidate.owner is not None
                 and other.parameter_count == candidate.parameter_count
