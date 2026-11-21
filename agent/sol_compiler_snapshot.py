@@ -198,6 +198,7 @@ def load_sol_compiler_snapshot(
         _require(output_source["id"] == 0)
         ast_root = output_source.get("ast")
         _require(type(ast_root) is dict and ast_root.get("nodeType") == "SourceUnit")
+        _require(type(ast_root.get("nodes")) is list)
         nodes = _ast_nodes(ast_root)
         _require(all(type(node.get("nodeType")) is str for node in nodes))
         _require(

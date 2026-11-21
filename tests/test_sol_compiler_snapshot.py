@@ -230,11 +230,14 @@ def test_duplicate_lexical_references_at_a_span_must_all_agree():
     comparison = compare_with_lexical(snapshot, inconsistent_report)
 
     assert len(same_span_references) == 2
-    assert next(
-        item
-        for item in comparison["references"]
-        if item["span"] == target.span.to_dict()
-    )["status"] == "disagree"
+    assert (
+        next(
+            item
+            for item in comparison["references"]
+            if item["span"] == target.span.to_dict()
+        )["status"]
+        == "disagree"
+    )
 
 
 def test_comparison_reports_disagreement_and_missing_lexical_records():
@@ -403,6 +406,17 @@ def test_rejects_missing_or_invalid_output_source(change):
         envelope["output"]["sources"]["state_write.sol"]["id"] = 1
     else:
         _ast(envelope, "state_write.sol")["nodeType"] = "ContractDefinition"
+    _assert_rejected(envelope, _source("state_write"))
+
+
+@pytest.mark.parametrize("change", ["missing_nodes", "none_nodes"])
+def test_rejects_missing_or_invalid_ast_nodes(change):
+    envelope = _envelope("state_write")
+    ast = _ast(envelope, "state_write.sol")
+    if change == "missing_nodes":
+        del ast["nodes"]
+    else:
+        ast["nodes"] = None
     _assert_rejected(envelope, _source("state_write"))
 
 
