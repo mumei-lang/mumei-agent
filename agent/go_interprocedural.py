@@ -17354,6 +17354,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                     transfers, count, 0,
                                 )
                                 if elem[1] is not None
+                                and elem[1].type not in _INDEX_LITERALS
                                 else frozenset()
                             )
                             close_external = {
