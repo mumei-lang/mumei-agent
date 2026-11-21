@@ -29673,6 +29673,59 @@ class _Builder:
             return None
         return binding.id
 
+    def _interface_parameter_field_receiver(
+        self, node: Any, params: dict[str, int]
+    ) -> str | None:
+        selectors = []
+        current = self._strip_parens(node)
+        while current is not None and current.type == "selector_expression":
+            operand = current.child_by_field_name("operand")
+            field = current.child_by_field_name("field")
+            if operand is None or field is None:
+                return None
+            selectors.append(field)
+            current = self._strip_parens(operand)
+        if current is None or current.type != "identifier" or not selectors:
+            return None
+        root_ref = self.references.get(self.node_key(current))
+        if (
+            root_ref is None
+            or not root_ref.binding_id
+            or root_ref.binding_id not in params
+        ):
+            return None
+        root_binding = self.bindings.get(root_ref.binding_id)
+        if root_binding is None or root_binding.type is None:
+            return None
+        struct_fact = self._struct_value_fact(root_binding.type)
+        if struct_fact is None or not struct_fact.type_id:
+            return None
+        for index, field in enumerate(reversed(selectors)):
+            field_ref = self.references.get(self.node_key(field))
+            member = self._field_identity(field_ref)
+            if (
+                member is None
+                or member.type is None
+                or member.id
+                not in {
+                    candidate.id
+                    for candidate in self._struct_fields_for_fact(
+                        struct_fact
+                    )
+                }
+            ):
+                return None
+            if index == len(selectors) - 1:
+                return (
+                    root_ref.binding_id
+                    if member.type.kind == "interface"
+                    else None
+                )
+            struct_fact = self._struct_value_fact(member.type)
+            if struct_fact is None or not struct_fact.type_id:
+                return None
+        return None
+
     def _interface_dispatch_call(
         self,
         node: Any,
@@ -29698,8 +29751,10 @@ class _Builder:
         external effect records on the receiver's root binding
         (the value the dynamic implementation is reached through).
         A named interface's identity (`call.target`) pins so a
-        method-set redeclare stales the caller; a method-value
-        receiver must be a local or parameter interface binding."""
+        method-set redeclare stales the caller; a method-call receiver
+        must be a local or parameter interface binding, a
+        value-struct parameter field chain, or a direct imported call
+        result whose expression is representable."""
         receiver_node = None
         if call.method:
             function_node = node.child_by_field_name("function")
@@ -29713,30 +29768,37 @@ class _Builder:
                     call.target,
                 )
             receiver_node = function_node.child_by_field_name("operand")
-            receiver_id = receiver_node
-            while (
+            receiver_id = self._strip_parens(receiver_node)
+            admitted = False
+            if receiver_id is not None and receiver_id.type == "identifier":
+                admitted = (
+                    self._interface_value_binding(
+                        receiver_id, params, locals_
+                    )
+                    is not None
+                )
+            elif (
                 receiver_id is not None
-                and receiver_id.type == "parenthesized_expression"
+                and receiver_id.type == "selector_expression"
             ):
-                receiver_id = next(
-                    (
-                        child
-                        for child in receiver_id.named_children
-                        if child.type != "comment"
-                    ),
-                    None,
+                admitted = (
+                    self._interface_parameter_field_receiver(
+                        receiver_id, params
+                    )
+                    is not None
                 )
-            if receiver_id is None or receiver_id.type != "identifier":
-                raise _Unsupported(
-                    "unresolved_or_opaque_call",
-                    _span(node),
-                )
-            if (
-                self._interface_value_binding(
-                    receiver_id, params, locals_
-                )
-                is None
+            elif (
+                receiver_id is not None
+                and receiver_id.type == "call_expression"
             ):
+                receiver_call = self.calls.get(
+                    self.node_key(receiver_id)
+                )
+                admitted = (
+                    receiver_call is not None
+                    and receiver_call.kind == "direct_import"
+                )
+            if not admitted:
                 raise _Unsupported(
                     "unresolved_or_opaque_call",
                     _span(node),
