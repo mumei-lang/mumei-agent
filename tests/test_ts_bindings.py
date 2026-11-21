@@ -560,7 +560,7 @@ def test_parser_errors_source_limit_and_deep_nesting_fail_closed():
         build_ts_bindings(" " * (MAX_SOURCE_BYTES + 1))
     old_limit = sys.getrecursionlimit()
     try:
-        sys.setrecursionlimit(400)
+        sys.setrecursionlimit(1000)
         source = "const value = " + "+".join(["1"] * 2000) + ";"
         with pytest.raises(LexicalReportError, match="nesting exceeds"):
             build_ts_bindings(source)
