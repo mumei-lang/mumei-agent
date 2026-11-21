@@ -17172,6 +17172,91 @@ def test_deep_chan_chan_nested_receive_evaluates_operands_once(
     assert not mismatches, mismatches
 
 
+def test_deep_chan_chan_var_comma_ok_matches_short_declaration(
+    go_types_helper,
+):
+    source = (
+        "func F_external_var(p chan chan chan int64) int64 {\n"
+        "\tvar q2, ok = <-p\n"
+        "\tif !ok { return 0 }\n"
+        "\treturn <-(<-q2)\n"
+        "}\n"
+        "func F_external_short(p chan chan chan int64) int64 {\n"
+        "\tq2, ok := <-p\n"
+        "\tif !ok { return 0 }\n"
+        "\treturn <-(<-q2)\n"
+        "}\n"
+        "func F_local_var(x int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tc <- x\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tcc <- c\n"
+        "\tccc := make(chan chan chan int64, 1)\n"
+        "\tccc <- cc\n"
+        "\tvar q2, ok = <-ccc\n"
+        "\tif !ok { return 0 }\n"
+        "\treturn <-(<-q2)\n"
+        "}\n"
+        "func F_local_short(x int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tc <- x\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tcc <- c\n"
+        "\tccc := make(chan chan chan int64, 1)\n"
+        "\tccc <- cc\n"
+        "\tq2, ok := <-ccc\n"
+        "\tif !ok { return 0 }\n"
+        "\treturn <-(<-q2)\n"
+        "}\n"
+    )
+    data = unit(go_types_helper, source)
+    mismatches = []
+    for var_name, short_name, expected_deps, expected_effects in [
+        (
+            "F_external_var",
+            "F_external_short",
+            frozenset({0}),
+            "unknown",
+        ),
+        (
+            "F_local_var",
+            "F_local_short",
+            frozenset({0}),
+            "none_in_supported_fragment",
+        ),
+    ]:
+        var_result = named(*data, var_name)
+        short_result = named(*data, short_name)
+        if not var_result.available or not short_result.available:
+            mismatches.append(
+                (
+                    var_name,
+                    var_result.gaps,
+                    short_name,
+                    short_result.gaps,
+                )
+            )
+            continue
+        if (
+            var_result.return_dependencies
+            != short_result.return_dependencies
+            or var_result.return_dependencies != expected_deps
+            or var_result.effects != short_result.effects
+            or var_result.effects != expected_effects
+        ):
+            mismatches.append(
+                (
+                    var_name,
+                    var_result.return_dependencies,
+                    var_result.effects,
+                    short_name,
+                    short_result.return_dependencies,
+                    short_result.effects,
+                )
+            )
+    assert not mismatches, mismatches
+
+
 def test_deep_chan_chan_external_receive_and_send_match_named_levels(
     go_types_helper,
 ):

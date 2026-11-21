@@ -12004,23 +12004,28 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     )
                     external_chan_chan_declared = (
                         self._chan_chan_fact(binding.type)
-                        and len(value_nodes) == len(names)
                         and bool(value_nodes)
                         and (
                             (
-                                external_queue
-                                := self._external_chan_chan_source(
-                                    value_nodes[i], params
+                                len(value_nodes) == len(names)
+                                and (
+                                    (
+                                        external_queue
+                                        := self._external_chan_chan_source(
+                                            value_nodes[i], params
+                                        )
+                                    )
+                                    is not None
+                                    or self._chan_chan_receive(
+                                        value_nodes[i], params
+                                    )
+                                    or self._chan_result_call(
+                                        value_nodes[i],
+                                        self._chan_chan_fact,
+                                    )
+                                    is not None
                                 )
                             )
-                            is not None
-                            or self._chan_chan_receive(
-                                value_nodes[i], params
-                            )
-                            or self._chan_result_call(
-                                value_nodes[i], self._chan_chan_fact
-                            )
-                            is not None
                             or (
                                 len(value_nodes) == 1
                                 and len(names) > 1
