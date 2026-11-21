@@ -5659,6 +5659,22 @@ member, or one explicit dereference of one (`(*t).F` — the same
             self.bindings.setdefault(sur, replace(owner, id=sur))
         if binding_id in self.external_chan_locals:
             self.external_chan_locals.add(sur)
+        # The reseated name's own member set still lists the sharers
+        # the old queue carried (`d := s[0]` minted `d` into `c`'s
+        # set). They belong to the parked queue, not the fresh one:
+        # move them onto the surrogate so `d <- x` lands where `<-d`
+        # reads, and reset `binding_id`'s set to just itself so the
+        # new queue's reads stay clean of old-queue sends.
+        old_members = self._opaque_container_tokens.get(
+            binding_id, frozenset()
+        ) - {binding_id}
+        if old_members:
+            self._opaque_container_tokens[sur] = (
+                self._opaque_container_tokens[sur] | old_members
+            )
+        self._opaque_container_tokens[binding_id] = frozenset(
+            {binding_id}
+        )
 
     def _chan_alias_target(
         self, node: Any, locals_: dict, params: dict
