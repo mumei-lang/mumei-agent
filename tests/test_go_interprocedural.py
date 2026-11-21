@@ -30618,6 +30618,38 @@ def test_nil_struct_collection_field_literal_is_supported(
     assert result.return_dependencies == frozenset({0})
 
 
+def test_struct_field_index_call_is_recorded_once_and_index_deps_remain(
+    go_types_helper,
+):
+    data = unit(
+        go_types_helper,
+        "type S struct { A []int64 }\n"
+        "func I() int64 { return 0 }\n"
+        "func F(ss []S, x int64) int64 {\n"
+        "\tb := ss[I()].A\n"
+        "\treturn b[0] + x\n}\n",
+    )
+    result = named(*data)
+    assert result.available, result.gaps
+    index_call_id = named(*data, "I").binding_id
+    assert sum(
+        transfer.target == index_call_id
+        for transfer in result.calls
+    ) == 1
+
+    indexed = named(
+        *unit(
+            go_types_helper,
+            "type S struct { A []int64 }\n"
+            "func F(ss []S, i int64) int64 {\n"
+            "\tb := ss[i].A\n"
+            "\treturn b[0]\n}\n",
+        )
+    )
+    assert indexed.available, indexed.gaps
+    assert 1 in indexed.return_dependencies
+
+
 @pytest.mark.parametrize(
     ("declarations", "expected"),
     [

@@ -23411,8 +23411,6 @@ class _Builder:
                             if (
                                 index is not None
                                 and index.type not in _INDEX_LITERALS
-                                and self.node_key(index)
-                                not in field_index_nodes
                             ):
                                 index_nodes.append(index)
                             field_operand = (
@@ -23440,6 +23438,8 @@ class _Builder:
                             "non_parameter_reference", _span(node)
                         )
                     for index in reversed(index_nodes):
+                        if self.node_key(index) in field_index_nodes:
+                            continue
                         field_deps |= self.expression(
                             index,
                             fn,
