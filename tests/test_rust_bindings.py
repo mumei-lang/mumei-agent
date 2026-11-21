@@ -639,6 +639,27 @@ fn missing_call() { r#missing(); }
     assert report.calls[-1].kind == "unresolved"
 
 
+def test_impl_trait_arguments_are_generic_and_turbofish_stays_on_the_callee():
+    source = """
+fn impl_trait(argument: impl Copy) {}
+fn plain(argument: u8) {}
+fn target(argument: u8) {}
+fn caller() { plain(target::<u8>()); impl_trait(1); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    impl_trait = _bindings(report, "impl_trait", "function")[0]
+    plain = _bindings(report, "plain", "function")[0]
+    target = _bindings(report, "target", "function")[0]
+    functions = {function.binding_id: function for function in report.functions}
+    assert functions[impl_trait.id].generic
+    assert not functions[plain.id].generic
+    assert not functions[target.id].generic
+    calls = {call.target: call for call in report.calls}
+    assert calls[impl_trait.id].kind == "opaque_generic"
+    assert calls[target.id].kind == "opaque_generic"
+    assert calls[plain.id].kind == "direct_local"
+
+
 def test_macros_and_glob_imports_keep_hidden_names_unresolved_and_incomplete():
     macro_source = 'fn f(x:i32){ println!("{}", x); }'
     macro = build_rust_bindings(macro_source, pointer_width=64)

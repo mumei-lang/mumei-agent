@@ -303,7 +303,7 @@ class _RustBindings:
                 body = node.child_by_field_name("body")
                 if node.type == "function_item":
                     body = node.child_by_field_name("body")
-                generic = node.child_by_field_name("type_parameters") is not None
+                generic = self._is_generic_function(node)
                 signature = self.text(node)
                 is_async = _has_keyword(signature[: signature.find("fn")], "async")
                 variadic = any(c.type == "variadic_parameter" for c in self._descendants(node.child_by_field_name("parameters")))
@@ -389,6 +389,15 @@ class _RustBindings:
             current = stack.pop()
             yield current
             stack.extend(reversed(current.named_children))
+
+    def _is_generic_function(self, node: Any) -> bool:
+        if node.child_by_field_name("type_parameters") is not None:
+            return True
+        parameters = node.child_by_field_name("parameters")
+        return any(
+            candidate.type == "abstract_type"
+            for candidate in self._descendants(parameters)
+        )
 
     def _predeclare_use(self, node: Any, scope: _Scope) -> None:
         for name_node, is_glob, bound_name in self._use_names(node):
@@ -636,7 +645,7 @@ class _RustBindings:
                     parent_scope.module_depth,
                     item=True,
                     body_node=body_node,
-                    generic=node.child_by_field_name("type_parameters") is not None,
+                    generic=self._is_generic_function(node),
                     is_async=_has_keyword(
                         self.text(node)[: self.text(node).find("fn")], "async"
                     ),
@@ -1530,7 +1539,7 @@ class _RustBindings:
                 elif binding_kind == "function":
                     if record.extern or record.body_node is None:
                         kind = "opaque_bodyless"
-                    elif record.generic or "::<" in self.text(node):
+                    elif record.generic:
                         kind = "opaque_generic"
                     elif record.is_async:
                         kind = "opaque_async"
