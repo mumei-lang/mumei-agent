@@ -2367,46 +2367,615 @@ class _Builder:
             )
         ):
             return None, None
-        # `t := s` aliases the container header — `t[i].F` and
-        # `s[i].F` name the same field slot. A slot already riding
-        # this share group wins: the canonical name below shifts
-        # when the representative reseats, but the slot's tokens
-        # stay attached to the surviving aliases, so reusing the
-        # existing owner keeps extractions on one group.
-        slot_suffix = f"\x00{member.id}"
+        field_key = self._opaque_container_field_key(
+            root_ref.binding_id, member.id
+        )
+        return field_key.rsplit("\x00", 1)[0], member
+
+    def _opaque_container_field_key(
+        self, root_id: str, member_id: str
+    ) -> str:
+        """The canonical `root\\0field` slot shared by struct aliases."""
+        suffix = f"\x00{member_id}"
+        sharers = self._opaque_container_sharers(root_id)
         existing = min(
-            (
-                sid
-                for sid in self._opaque_container_sharers(
-                    root_ref.binding_id
-                )
-                if sid.endswith(slot_suffix)
-            ),
+            (sid for sid in sharers if sid.endswith(suffix)),
             default=None,
         )
         if existing is not None:
-            return existing[: -len(slot_suffix)], member
-        # First mint under a canonical root: the first-sorting
-        # same-typed name in the root's share group. Extracted
-        # names (`b`'s type is the member's, not the container's)
-        # never qualify, so the choice is stable no matter which
-        # alias minted the slot first. A composite root's only
-        # same-typed holder is itself.
-        root_binding = self.bindings.get(root_ref.binding_id)
+            return existing
+        root_binding = self.bindings.get(root_id)
         root_type = getattr(root_binding, "type", None)
         canonical = min(
             (
                 sid
-                for sid in self._opaque_container_sharers(
-                    root_ref.binding_id
-                )
+                for sid in sharers
                 if "\x00" not in sid
-                and (sb := self.bindings.get(sid)) is not None
-                and sb.type == root_type
+                and (binding := self.bindings.get(sid)) is not None
+                and binding.type == root_type
             ),
-            default=root_ref.binding_id,
+            default=root_id,
         )
-        return canonical, member
+        return f"{canonical}{suffix}"
+
+    def _set_opaque_container_field_tokens(
+        self,
+        root_id: str,
+        member_id: str,
+        tokens: frozenset | None,
+        *,
+        conditional: bool = False,
+    ) -> str:
+        """Update a field slot and its struct roots using the shared
+        field-store model."""
+        field_key = self._opaque_container_field_key(
+            root_id, member_id
+        )
+        old_tokens = self._opaque_container_tokens.get(
+            field_key, frozenset()
+        )
+        if conditional:
+            if tokens:
+                tokens = old_tokens | tokens
+            else:
+                return field_key
+        elif tokens is None:
+            self._opaque_container_tokens.pop(field_key, None)
+            return field_key
+        self._opaque_container_tokens[field_key] = tokens
+        root_binding = self.bindings.get(root_id)
+        root_type = getattr(root_binding, "type", None)
+        for holder_id in self._opaque_container_sharers(root_id):
+            if (
+                "\x00" not in holder_id
+                and getattr(
+                    self.bindings.get(holder_id), "type", None
+                )
+                == root_type
+            ):
+                self._opaque_container_tokens[holder_id] = (
+                    self._opaque_container_tokens.get(
+                        holder_id, frozenset()
+                    )
+                    | tokens
+                )
+        return field_key
+
+    def _struct_value_fact(self, fact: Any) -> Any | None:
+        if fact is None:
+            return None
+        if fact.kind == "struct":
+            return fact
+        if fact.kind == "unsupported" and fact.type_id:
+            binding = self._pointee_type(fact.type_id)
+            if (
+                binding is not None
+                and getattr(binding.type, "kind", None) == "struct"
+            ):
+                return binding.type
+        return None
+
+    def _struct_fields_for_fact(
+        self, fact: Any, anchor: Any | None = None
+    ) -> tuple[Any, ...]:
+        struct_fact = self._struct_value_fact(fact)
+        if struct_fact is None:
+            return ()
+        if struct_fact.type_id:
+            type_binding = self._pointee_type(struct_fact.type_id)
+            if (
+                type_binding is not None
+                and getattr(type_binding, "span", None) is not None
+            ):
+                return self._struct_fields(type_binding)
+        if anchor is not None:
+            span = self.anon_struct_anchor.get(anchor.id) or getattr(
+                anchor, "span", None
+            )
+            if span is not None:
+                return self._fields_declared_after(span)
+        return ()
+
+    def _struct_collection_members(
+        self,
+        fact: Any,
+        anchor: Any | None = None,
+        seen: frozenset[str] = frozenset(),
+    ) -> tuple[Any, ...]:
+        struct_fact = self._struct_value_fact(fact)
+        if struct_fact is None:
+            return ()
+        type_id = struct_fact.type_id
+        if type_id and type_id in seen:
+            return ()
+        fields = self._struct_fields_for_fact(fact, anchor)
+        if not fields:
+            return ()
+        if type_id:
+            seen = seen | {type_id}
+        members: list[Any] = []
+        for member in fields:
+            member_type = getattr(member, "type", None)
+            collection = (
+                self._scalar_elem_collection(member_type)
+                or self._scalar_elem_nested_collection(member_type)
+            )
+            if collection:
+                if (
+                    member_type.kind != "array"
+                    or self._type_embeds_collection(member_type)
+                ):
+                    members.append(member)
+                continue
+            members.extend(
+                self._struct_collection_members(
+                    member_type, member, seen
+                )
+            )
+        return tuple(members)
+
+    def _detach_struct_container_aliases(
+        self, binding_id: str
+    ) -> None:
+        binding = self.bindings.get(binding_id)
+        if binding is None:
+            return
+        sharers = self._opaque_container_sharers(binding_id)
+        survivor = min(
+            (
+                holder_id
+                for holder_id in sharers
+                if holder_id != binding_id
+                and "\x00" not in holder_id
+                and getattr(
+                    self.bindings.get(holder_id), "type", None
+                )
+                == binding.type
+            ),
+            default=None,
+        )
+        prefix = f"{binding_id}\x00"
+        for key in tuple(self._opaque_container_tokens):
+            if not key.startswith(prefix):
+                continue
+            tokens = self._opaque_container_tokens.pop(key)
+            if survivor is not None:
+                survivor_key = f"{survivor}{key[len(binding_id):]}"
+                self._opaque_container_tokens[survivor_key] = (
+                    self._opaque_container_tokens.get(
+                        survivor_key, frozenset()
+                    )
+                    | tokens
+                )
+        self._opaque_container_tokens.pop(binding_id, None)
+
+    def _bind_struct_container_snapshot(
+        self,
+        binding_id: str,
+        snapshot: tuple[frozenset, dict[str, frozenset]],
+        *,
+        conditional: bool = False,
+    ) -> None:
+        binding = self.bindings.get(binding_id)
+        if binding is None:
+            return
+        members = self._struct_collection_members(
+            binding.type, binding
+        )
+        root_tokens, field_tokens = snapshot
+        if {member.id for member in members} != set(field_tokens):
+            raise _Unsupported("unsupported_expression")
+        conditional = conditional or self._may_skip > 0
+        old_tokens = self._opaque_container_tokens.get(
+            binding_id, frozenset()
+        )
+        if not conditional:
+            self._detach_struct_container_aliases(binding_id)
+        self._opaque_container_tokens[binding_id] = (
+            root_tokens | old_tokens
+            if conditional
+            else root_tokens
+        )
+        for member in members:
+            self._set_opaque_container_field_tokens(
+                binding_id,
+                member.id,
+                field_tokens[member.id],
+                conditional=conditional,
+            )
+
+    def _struct_literal_field_values(
+        self, literal: Any, fact: Any, anchor: Any | None
+    ) -> tuple[tuple[Any, Any], ...] | None:
+        fields = self._struct_fields_for_fact(fact, anchor)
+        body = literal.child_by_field_name("body")
+        if body is None and literal.type == "literal_value":
+            body = literal
+        if not fields or body is None:
+            return None
+        result: list[tuple[Any, Any]] = []
+        positional = 0
+        for element in _children(body):
+            if element.type == "keyed_element":
+                key = element.child_by_field_name("key")
+                value = element.child_by_field_name("value")
+                while value is not None and value.type == "literal_element":
+                    value = next(iter(value.named_children), None)
+                while key is not None and key.type == "literal_element":
+                    key = next(iter(key.named_children), None)
+                key_ref = (
+                    self.references.get(self.node_key(key))
+                    if key is not None
+                    else None
+                )
+                member = self._field_identity(key_ref)
+                if (
+                    member is None
+                    or member.id not in {field.id for field in fields}
+                    or value is None
+                ):
+                    return None
+                result.append((member, value))
+            elif element.type == "literal_element":
+                if positional >= len(fields):
+                    return None
+                value = next(iter(element.named_children), None)
+                while value is not None and value.type == "literal_element":
+                    value = next(iter(value.named_children), None)
+                if value is None:
+                    return None
+                result.append((fields[positional], value))
+                positional += 1
+            else:
+                return None
+        return tuple(result)
+
+    def _initialize_struct_field_tokens(
+        self,
+        root_id: str,
+        literal: Any,
+        fact: Any,
+        params: dict | None = None,
+        *,
+        conditional: bool = False,
+        anchor: Any | None = None,
+    ) -> None:
+        """Join tracked collection donors in a local struct literal to
+        the same field slots used by extraction and field assignment."""
+        pairs = self._struct_literal_field_values(
+            literal, fact, anchor
+        )
+        if pairs is None:
+            if self._struct_collection_members(fact, anchor):
+                raise _Unsupported(
+                    "unsupported_expression", _span(literal)
+                )
+            return
+        for member, value in pairs:
+            member_type = getattr(member, "type", None)
+            is_collection = (
+                self._scalar_elem_collection(member_type)
+                or self._scalar_elem_nested_collection(member_type)
+            )
+            if is_collection and not (
+                member_type.kind == "array"
+                and not self._type_embeds_collection(member_type)
+            ):
+                source_tokens = self._opaque_container_bind(
+                    value, params
+                )
+                value_node = self._strip_parens(value)
+                if source_tokens is None and value_node is not None:
+                    fresh_call = (
+                        self.calls.get(self.node_key(value_node))
+                        if value_node.type == "call_expression"
+                        else None
+                    )
+                    function = (
+                        value_node.child_by_field_name("function")
+                        if value_node.type == "call_expression"
+                        else None
+                    )
+                    if value_node.type == "composite_literal" or (
+                        fresh_call is not None
+                        and fresh_call.kind == "builtin"
+                        and function is not None
+                        and function.type == "identifier"
+                        and function.text == b"make"
+                    ):
+                        source_tokens = frozenset(
+                            {self.node_key(value_node)}
+                        )
+                    elif value_node.type == "nil" or (
+                        value_node.type == "identifier"
+                        and value_node.text == b"nil"
+                    ):
+                        continue
+                    else:
+                        raise _Unsupported(
+                            "unsupported_expression", _span(value_node)
+                        )
+                if source_tokens:
+                    self._set_opaque_container_field_tokens(
+                        root_id,
+                        member.id,
+                        source_tokens,
+                        conditional=conditional,
+                    )
+                continue
+            nested_fact = self._struct_value_fact(member_type)
+            if nested_fact is None:
+                continue
+            nested_value = value
+            while nested_value.type == "parenthesized_expression":
+                nested_value = next(
+                    (
+                        child
+                        for child in nested_value.named_children
+                        if child.type != "comment"
+                    ),
+                    None,
+                )
+                if nested_value is None:
+                    break
+            if nested_value is None:
+                continue
+            if nested_value.type in {
+                "composite_literal",
+                "literal_value",
+            }:
+                self._initialize_struct_field_tokens(
+                    root_id,
+                    nested_value,
+                    nested_fact,
+                    params,
+                    conditional=conditional,
+                    anchor=member,
+                )
+            elif nested_value.type == "identifier":
+                nested_tokens = self._opaque_container_bind(
+                    nested_value, params
+                )
+                if nested_tokens:
+                    source_ref = self.references.get(
+                        self.node_key(nested_value)
+                    )
+                    for nested_member in self._struct_collection_members(
+                        nested_fact, member
+                    ):
+                        member_tokens = nested_tokens
+                        if (
+                            source_ref is not None
+                            and source_ref.binding_id is not None
+                        ):
+                            source_key = self._opaque_container_field_key(
+                                source_ref.binding_id, nested_member.id
+                            )
+                            member_tokens = (
+                                self._opaque_container_tokens.get(
+                                    source_key, nested_tokens
+                                )
+                            )
+                        self._set_opaque_container_field_tokens(
+                            root_id,
+                            nested_member.id,
+                            member_tokens,
+                            conditional=conditional,
+                        )
+            elif self._struct_collection_members(
+                nested_fact, member
+            ):
+                raise _Unsupported(
+                    "unsupported_expression", _span(nested_value)
+                )
+
+    def _bind_struct_container_value(
+        self,
+        binding_id: str,
+        rhs: Any,
+        params: dict | None = None,
+        *,
+        conditional: bool = False,
+        reseat: bool = False,
+    ) -> None:
+        binding = self.bindings.get(binding_id)
+        if (
+            binding is None
+            or rhs is None
+        ):
+            return
+        while rhs.type == "parenthesized_expression":
+            rhs = next(
+                (
+                    child
+                    for child in rhs.named_children
+                    if child.type != "comment"
+                ),
+                None,
+            )
+            if rhs is None:
+                return
+        members = self._struct_collection_members(
+            binding.type, binding
+        )
+        struct_call_result = (
+            self._call_result_fact(rhs)[1]
+            if rhs.type == "call_expression"
+            else None
+        )
+        struct_identifier_source = None
+        if rhs.type == "identifier":
+            source_ref = self.references.get(self.node_key(rhs))
+            source_binding = (
+                self.bindings.get(source_ref.binding_id)
+                if source_ref is not None
+                else None
+            )
+            if (
+                source_ref is not None
+                and source_ref.binding_id is not None
+                and source_binding is not None
+                and getattr(source_binding.type, "kind", None)
+                == "struct"
+                and source_ref.binding_id
+                in self._opaque_container_tokens
+            ):
+                struct_identifier_source = source_binding
+        if not members and not (
+            struct_call_result is not None
+            and struct_call_result.kind == "struct"
+        ) and struct_identifier_source is None:
+            return
+        if rhs.type == "composite_literal":
+            if reseat and not conditional:
+                self._detach_struct_container_aliases(binding_id)
+            self._initialize_struct_field_tokens(
+                binding_id,
+                rhs,
+                binding.type,
+                params,
+                conditional=conditional,
+                anchor=binding,
+            )
+            return
+        if rhs.type == "identifier":
+            source_ref = self.references.get(self.node_key(rhs))
+            source_binding = (
+                self.bindings.get(source_ref.binding_id)
+                if source_ref is not None
+                else None
+            )
+            if (
+                source_binding is None
+                or not (
+                    self._struct_collection_members(
+                        source_binding.type, source_binding
+                    )
+                    or (
+                        getattr(source_binding.type, "kind", None)
+                        == "struct"
+                        and source_ref.binding_id
+                        in self._opaque_container_tokens
+                    )
+                )
+            ):
+                return
+            tokens = self._opaque_container_bind(rhs, params)
+            if tokens is None:
+                return
+            old_tokens = self._opaque_container_tokens.get(
+                binding_id, frozenset()
+            )
+            if reseat and not conditional:
+                self._detach_struct_container_aliases(binding_id)
+            if conditional:
+                tokens |= old_tokens
+            self._opaque_container_tokens[binding_id] = tokens
+            return
+        if rhs.type == "selector_expression":
+            field = rhs.child_by_field_name("field")
+            field_ref = (
+                self.references.get(self.node_key(field))
+                if field is not None
+                else None
+            )
+            source_member = self._field_identity(field_ref)
+            nested_members = (
+                self._struct_collection_members(
+                    getattr(source_member, "type", None),
+                    source_member,
+                )
+                if source_member is not None
+                else ()
+            )
+            root = rhs.child_by_field_name("operand")
+            while root is not None and root.type in {
+                "parenthesized_expression",
+                "selector_expression",
+            }:
+                root = (
+                    next(
+                        (
+                            child
+                            for child in root.named_children
+                            if child.type != "comment"
+                        ),
+                        None,
+                    )
+                    if root.type == "parenthesized_expression"
+                    else root.child_by_field_name("operand")
+                )
+            root_ref = (
+                self.references.get(self.node_key(root))
+                if root is not None and root.type == "identifier"
+                else None
+            )
+            if (
+                not nested_members
+                or root_ref is None
+                or root_ref.binding_id is None
+            ):
+                raise _Unsupported(
+                    "unsupported_expression", _span(rhs)
+                )
+            source_id = root_ref.binding_id
+            source_tokens = self._opaque_container_bind(root, params)
+            if source_tokens is None:
+                raise _Unsupported(
+                    "unsupported_expression", _span(rhs)
+                )
+            field_tokens: dict[str, frozenset] = {}
+            for member in nested_members:
+                source_key = self._opaque_container_field_key(
+                    source_id, member.id
+                )
+                tokens = self._opaque_container_tokens.get(
+                    source_key, source_tokens
+                )
+                field_tokens[member.id] = tokens
+                self._set_opaque_container_field_tokens(
+                    source_id, member.id, tokens
+                )
+            old_tokens = self._opaque_container_tokens.get(
+                binding_id, frozenset()
+            )
+            if reseat and not conditional:
+                self._detach_struct_container_aliases(binding_id)
+            tokens = frozenset().union(*field_tokens.values())
+            if conditional:
+                tokens |= old_tokens
+            self._opaque_container_tokens[binding_id] = tokens
+            for member in nested_members:
+                self._set_opaque_container_field_tokens(
+                    binding_id,
+                    member.id,
+                    field_tokens[member.id],
+                    conditional=conditional,
+                )
+            return
+        if rhs.type == "call_expression":
+            tokens = self._opaque_container_bind(rhs, params)
+            if tokens is None:
+                raise _Unsupported(
+                    "unsupported_expression", _span(rhs)
+                )
+            old_tokens = self._opaque_container_tokens.get(
+                binding_id, frozenset()
+            )
+            if reseat and not conditional:
+                self._detach_struct_container_aliases(binding_id)
+            if conditional:
+                tokens |= old_tokens
+            self._opaque_container_tokens[binding_id] = tokens
+            for member in members:
+                self._set_opaque_container_field_tokens(
+                    binding_id,
+                    member.id,
+                    tokens,
+                    conditional=conditional,
+                )
+            return
+        raise _Unsupported("unsupported_expression", _span(rhs))
 
     def _opaque_append_bind_toks(
         self, rhs: Any, params: dict | None = None
@@ -2781,11 +3350,7 @@ class _Builder:
     def _opaque_container_bind(
         self, rhs: Any, params: dict | None = None
     ) -> frozenset[tuple[int, int, int]] | None:
-        """Backing tokens for `s := rhs` — a container-typed call
-        result mints a fresh backing (keyed on the call node), an
-        identifier naming a bound opaque container shares it for a
-        slice/map (shared memory) or mints a fresh one for an array
-        (a value copy)."""
+        """Backing tokens for a container or collection-struct binding."""
         if rhs is None:
             return None
         while rhs.type == "parenthesized_expression":
@@ -2807,6 +3372,7 @@ class _Builder:
             if call is None or call.kind not in {
                 "external_or_bodyless",
                 "direct_local",
+                "direct_import",
             }:
                 return None
             fact = (
@@ -2814,6 +3380,93 @@ class _Builder:
                 if call.kind == "direct_local"
                 else self._call_result_fact(rhs)[1]
             )
+            if fact is not None and fact.kind == "struct":
+                toks = {self.node_key(rhs)}
+                arguments_node = rhs.child_by_field_name("arguments")
+                arguments = (
+                    _children(arguments_node)
+                    if arguments_node is not None
+                    else ()
+                )
+                function_node = rhs.child_by_field_name("function")
+                while (
+                    function_node is not None
+                    and function_node.type
+                    == "parenthesized_expression"
+                ):
+                    function_node = next(
+                        (
+                            child
+                            for child in function_node.named_children
+                            if child.type != "comment"
+                        ),
+                        None,
+                    )
+                receiver = (
+                    function_node.child_by_field_name("operand")
+                    if getattr(call, "method", False)
+                    and function_node is not None
+                    and function_node.type == "selector_expression"
+                    else None
+                )
+                for arg in (
+                    *((receiver,) if receiver is not None else ()),
+                    *arguments,
+                ):
+                    arg_node = arg
+                    while (
+                        arg_node is not None
+                        and arg_node.type
+                        == "parenthesized_expression"
+                    ):
+                        arg_node = next(
+                            (
+                                child
+                                for child in arg_node.named_children
+                                if child.type != "comment"
+                            ),
+                            None,
+                        )
+                    if (
+                        arg_node is not None
+                        and arg_node.type == "identifier"
+                    ):
+                        arg_ref = self.references.get(
+                            self.node_key(arg_node)
+                        )
+                        arg_binding = (
+                            self.bindings.get(arg_ref.binding_id)
+                            if arg_ref is not None
+                            else None
+                        )
+                        if (
+                            arg_binding is not None
+                            and arg_binding.type is not None
+                            and arg_binding.type.kind == "array"
+                            and not self._array_arg_shares_memory(
+                                arg_binding.type
+                            )
+                        ):
+                            continue
+                    arg_tokens = self._opaque_container_bind(
+                        arg, params
+                    )
+                    if arg_tokens:
+                        toks |= set(arg_tokens)
+                    if arg.type == "identifier":
+                        arg_ref = self.references.get(
+                            self.node_key(arg)
+                        )
+                        if (
+                            arg_ref is not None
+                            and arg_ref.binding_id is not None
+                        ):
+                            toks |= set(
+                                self._opaque_container_tokens.get(
+                                    arg_ref.binding_id, frozenset()
+                                )
+                            )
+                return frozenset(toks)
             if fact is None or fact.kind not in {
                 "slice",
                 "array",
@@ -2914,6 +3567,27 @@ class _Builder:
                 return None
             binding = self.bindings.get(ref.binding_id)
             if (
+                binding is not None
+                and binding.type is not None
+                and binding.type.kind == "struct"
+                and (
+                    self._struct_collection_members(
+                        binding.type, binding
+                    )
+                    or ref.binding_id
+                    in self._opaque_container_tokens
+                )
+            ):
+                tokens = self._opaque_container_tokens.get(
+                    ref.binding_id
+                )
+                if not tokens:
+                    tokens = frozenset({ref.binding_id})
+                    self._opaque_container_tokens[ref.binding_id] = (
+                        tokens
+                    )
+                return tokens
+            if (
                 binding is None
                 or binding.type is None
                 or binding.type.kind not in {"slice", "array", "map"}
@@ -3001,39 +3675,17 @@ class _Builder:
                 # extracted array aliases the field's inner backing
                 # — it shares the group like a slice member.
                 return frozenset({self.node_key(rhs)})
-            field_key = f"{root_id}\x00{member.id}"
+            field_key = self._opaque_container_field_key(
+                root_id, member.id
+            )
             toks = self._opaque_container_tokens.get(field_key)
             if not toks:
-                toks = frozenset({self.node_key(rhs)})
-            self._opaque_container_tokens[field_key] = toks
-            # `s`'s conflated set covers every field — join it to
-            # the group so `a[i] = x` lands on the slot `s.F[j]`
-            # reads. Different fields mint different token sets but
-            # all reach `s`, matching the composite's own conflation.
-            # The slot rides every CONTAINER sharer's set — not only
-            # the canonical name it was minted under — so that name
-            # reseating away leaves the slot attached to the
-            # surviving aliases' group. Extracted member names are
-            # sharers too but never gain tokens: their set IS their
-            # backing's identity.
-            root_t = getattr(
-                self.bindings.get(root_id), "type", None
+                toks = self._opaque_container_tokens.get(
+                    root_id, frozenset()
+                ) or frozenset({self.node_key(rhs)})
+            self._set_opaque_container_field_tokens(
+                root_id, member.id, toks
             )
-            for holder_id in self._opaque_container_sharers(root_id):
-                if (
-                    "\x00" in holder_id
-                    or getattr(
-                        self.bindings.get(holder_id), "type", None
-                    )
-                    != root_t
-                ):
-                    continue
-                self._opaque_container_tokens[holder_id] = (
-                    self._opaque_container_tokens.get(
-                        holder_id, frozenset()
-                    )
-                    | toks
-                )
             return toks
         return None
 
@@ -3180,16 +3832,13 @@ class _Builder:
     def _opaque_call_container(
         self, node: Any, call: Any
     ) -> tuple[Any, Any] | None:
-        """`lib.G(a)` — the member + container fact of an opaque
-        imported call whose declared single result is a
-        `[]T`/`[N]T`/`map[K]T`. The result is callee-produced
-        memory: it carries the call's own dep set like an index
-        read on the same result does."""
+        """The member and fact of an opaque imported composite result."""
         _member, fact = self._call_result_fact(node)
         if fact is None or fact.kind not in {
             "slice",
             "array",
             "map",
+            "struct",
         }:
             return None
         return _member, fact
@@ -12505,6 +13154,12 @@ class _Builder:
                     if len(lefts) == len(rights)
                     else None
                 )
+                struct_call_result = (
+                    self._call_result_fact(rights[i])[1]
+                    if len(lefts) == len(rights)
+                    and rights[i].type == "call_expression"
+                    else None
+                )
                 if binding.type.kind in {
                     "slice",
                     "array",
@@ -12728,6 +13383,11 @@ class _Builder:
                     # `fs := mk()` a `[]func`/`[N]func` container
                     # whose `fs[k]()` calls opaque on it.
                     and not self._is_local_composite(binding)
+                    and not (
+                        binding.type.kind == "struct"
+                        and struct_call_result is not None
+                        and struct_call_result.kind == "struct"
+                    )
                     and not self._func_elem_collection(binding.type)
                     and not self._func_elem_nested_collection(
                         binding.type
@@ -13080,6 +13740,17 @@ class _Builder:
                         )
                     )
                 self._store(locals_, params, binding.id, value, conditional)
+                self._bind_struct_container_value(
+                    binding.id,
+                    (
+                        rights[i]
+                        if len(lefts) == len(rights)
+                        else None
+                    ),
+                    params,
+                    conditional=conditional,
+                    reseat=True,
+                )
                 # `h2 := h` — a copied closure keeps its captured
                 # bindings: propagate the capture record so `h2()`
                 # resolves them at call time like `h()` does. A
@@ -13499,6 +14170,12 @@ class _Builder:
                         if len(names) == len(value_nodes)
                         else None
                     )
+                    struct_call_result = (
+                        self._call_result_fact(value_nodes[i])[1]
+                        if len(names) == len(value_nodes)
+                        and value_nodes[i].type == "call_expression"
+                        else None
+                    )
                     if binding.type.kind in {
                         "slice",
                         "array",
@@ -13719,6 +14396,11 @@ class _Builder:
                         # `[]func`/`[N]func` container like the
                         # short-decl form.
                         and not self._is_local_composite(binding)
+                        and not (
+                            binding.type.kind == "struct"
+                            and struct_call_result is not None
+                            and struct_call_result.kind == "struct"
+                        )
                         and not self._func_elem_collection(binding.type)
                         and not self._func_elem_nested_collection(
                             binding.type
@@ -14176,6 +14858,17 @@ class _Builder:
                         )
                     self._store(
                         locals_, params, binding.id, value, conditional
+                    )
+                    self._bind_struct_container_value(
+                        binding.id,
+                        (
+                            value_nodes[i]
+                            if len(names) == len(value_nodes)
+                            else None
+                        ),
+                        params,
+                        conditional=conditional,
+                        reseat=True,
                     )
                     # `var h2 = h` — a copied closure keeps its
                     # captured bindings, like `h2 := h`.
@@ -15435,9 +16128,6 @@ class _Builder:
                 field_container_reseats.items()
             ):
                 fkey = f"{root_id}\x00{member_id}"
-                old_toks = self._opaque_container_tokens.get(
-                    fkey, frozenset()
-                )
                 src = rights[pos] if pos < len(rights) else None
                 s_src = src
                 while (
@@ -15476,77 +16166,34 @@ class _Builder:
                     )
                     new_toks = frozenset(fresh_toks)
                 reseat_plan.append(
-                    (fkey, root_id, old_toks, new_toks)
+                    (fkey, root_id, new_toks)
                 )
             reseat_roots: set[str] = set()
-            for fkey, root_id, old_toks, new_toks in reseat_plan:
+            for fkey, root_id, new_toks in reseat_plan:
                 reseat_roots.add(root_id)
-                # Only container-typed sharers gain the new
-                # backing's tokens — an extracted member name's set
-                # is its backing's identity and stays put.
-                root_t = getattr(
-                    self.bindings.get(root_id), "type", None
+                root_binding = self.bindings.get(root_id)
+                root_type = getattr(root_binding, "type", None)
+                has_struct_sharer = any(
+                    holder_id != root_id
+                    and "\x00" not in holder_id
+                    and getattr(
+                        self.bindings.get(holder_id), "type", None
+                    )
+                    == root_type
+                    for holder_id in self._opaque_container_sharers(
+                        root_id
+                    )
                 )
-                if conditional or self._may_skip > 0:
-                    # `if c { s.F = v }` — the untaken path keeps
-                    # `s.F` aimed at its old backing, so the reseat
-                    # unions the new tokens like `_store`'s
-                    # conditional join (never pops or subtracts).
-                    if new_toks:
-                        self._opaque_container_tokens[fkey] = (
-                            self._opaque_container_tokens.get(
-                                fkey, frozenset()
-                            )
-                            | new_toks
-                        )
-                        for holder_id in (
-                            self._opaque_container_sharers(root_id)
-                        ):
-                            if (
-                                "\x00" not in holder_id
-                                and getattr(
-                                    self.bindings.get(holder_id),
-                                    "type",
-                                    None,
-                                )
-                                == root_t
-                            ):
-                                self._opaque_container_tokens[
-                                    holder_id
-                                ] = (
-                                    self._opaque_container_tokens.get(
-                                        holder_id, frozenset()
-                                    )
-                                    | new_toks
-                                )
-                    continue
-                if new_toks is None:
-                    # `s.F = nil` or an untracked RHS — the field's
-                    # share group dissolves; a later `b := s.F`
-                    # mints its own backing like a fresh read.
-                    self._opaque_container_tokens.pop(fkey, None)
-                else:
-                    self._opaque_container_tokens[fkey] = new_toks
-                    for holder_id in (
-                        self._opaque_container_sharers(root_id)
-                    ):
-                        if (
-                            "\x00" not in holder_id
-                            and getattr(
-                                self.bindings.get(holder_id),
-                                "type",
-                                None,
-                            )
-                            == root_t
-                        ):
-                            self._opaque_container_tokens[
-                                holder_id
-                            ] = (
-                                self._opaque_container_tokens.get(
-                                    holder_id, frozenset()
-                                )
-                                | new_toks
-                            )
+                self._set_opaque_container_field_tokens(
+                    root_id,
+                    fkey.rsplit("\x00", 1)[-1],
+                    new_toks,
+                    conditional=(
+                        conditional
+                        or self._may_skip > 0
+                        or has_struct_sharer
+                    ),
+                )
             if not (conditional or self._may_skip > 0):
                 # The root's token set is exactly the union of its
                 # live field keys — a subtract-per-field update
@@ -15872,8 +16519,136 @@ class _Builder:
                         tok for tok in pre_set if isinstance(tok, str)
                     }
             lhs_binding_ids = {
-                getattr(ref, "binding_id", None) for ref in refs
+                getattr(ref, "binding_id")
+                for ref in refs
+                if getattr(ref, "binding_id", None) is not None
             }
+            struct_rhs_snapshots: dict[
+                int, tuple[frozenset, dict[str, frozenset]]
+            ] = {}
+            if not compound and len(lefts) == len(rights):
+                for rhs_index, rhs in enumerate(rights):
+                    snapshot_rhs = rhs
+                    while (
+                        snapshot_rhs is not None
+                        and snapshot_rhs.type
+                        == "parenthesized_expression"
+                    ):
+                        snapshot_rhs = next(
+                            (
+                                child
+                                for child in snapshot_rhs.named_children
+                                if child.type != "comment"
+                            ),
+                            None,
+                        )
+                    if (
+                        snapshot_rhs is None
+                        or snapshot_rhs.type != "identifier"
+                    ):
+                        continue
+                    source_ref = self.references.get(
+                        self.node_key(snapshot_rhs)
+                    )
+                    source_binding = (
+                        self.bindings.get(source_ref.binding_id)
+                        if source_ref is not None
+                        else None
+                    )
+                    source_members = (
+                        self._struct_collection_members(
+                            source_binding.type, source_binding
+                        )
+                        if source_binding is not None
+                        else ()
+                    )
+                    target_id = getattr(
+                        refs[rhs_index], "binding_id", None
+                    )
+                    target_binding = self.bindings.get(target_id)
+                    target_members = (
+                        self._struct_collection_members(
+                            target_binding.type, target_binding
+                        )
+                        if target_binding is not None
+                        else ()
+                    )
+                    if not source_members or not target_members:
+                        continue
+                    if tuple(
+                        member.id for member in source_members
+                    ) != tuple(member.id for member in target_members):
+                        raise _Unsupported(
+                            "unsupported_expression", _span(rhs)
+                        )
+                    source_tokens = self._opaque_container_bind(
+                        snapshot_rhs, params
+                    )
+                    if source_tokens is None:
+                        raise _Unsupported(
+                            "unsupported_expression", _span(rhs)
+                        )
+                    field_tokens = {}
+                    for member in source_members:
+                        field_key = self._opaque_container_field_key(
+                            source_ref.binding_id, member.id
+                        )
+                        field_tokens[member.id] = (
+                            self._opaque_container_tokens.get(
+                                field_key, source_tokens
+                            )
+                        )
+                    struct_rhs_snapshots[rhs_index] = (
+                        frozenset(source_tokens),
+                        field_tokens,
+                    )
+            if struct_rhs_snapshots:
+                for rhs in rights:
+                    snapshot_rhs = rhs
+                    while (
+                        snapshot_rhs is not None
+                        and snapshot_rhs.type
+                        == "parenthesized_expression"
+                    ):
+                        snapshot_rhs = next(
+                            (
+                                child
+                                for child in snapshot_rhs.named_children
+                                if child.type != "comment"
+                            ),
+                            None,
+                        )
+                    if (
+                        snapshot_rhs is None
+                        or snapshot_rhs.type == "identifier"
+                    ):
+                        continue
+                    pending = [snapshot_rhs]
+                    while pending:
+                        candidate = pending.pop()
+                        if candidate.type == "identifier":
+                            candidate_ref = self.references.get(
+                                self.node_key(candidate)
+                            )
+                            candidate_binding = (
+                                self.bindings.get(candidate_ref.binding_id)
+                                if candidate_ref is not None
+                                and candidate_ref.binding_id
+                                in lhs_binding_ids
+                                else None
+                            )
+                            if (
+                                candidate_binding is not None
+                                and self._struct_collection_members(
+                                    candidate_binding.type,
+                                    candidate_binding,
+                                )
+                            ):
+                                raise _Unsupported(
+                                    "unsupported_expression",
+                                    _span(rhs),
+                                )
+                        pending.extend(candidate.named_children)
             for i, alias_target in enumerate(chan_alias_targets):
                 source_id = (
                     alias_target.id if alias_target is not None else None
@@ -16879,6 +17654,39 @@ class _Builder:
                         conditional,
                     )
                     bound = self.bindings.get(ref.binding_id)
+                    if (
+                        lhs.type == "identifier"
+                        and bound is not None
+                        and (
+                            self._struct_collection_members(
+                                bound.type, bound
+                            )
+                            or getattr(bound.type, "kind", None)
+                            == "struct"
+                        )
+                    ):
+                        if i in struct_rhs_snapshots:
+                            self._bind_struct_container_snapshot(
+                                ref.binding_id,
+                                struct_rhs_snapshots[i],
+                                conditional=(
+                                    conditional or self._may_skip > 0
+                                ),
+                            )
+                        else:
+                            self._bind_struct_container_value(
+                                ref.binding_id,
+                                (
+                                    rights[i]
+                                    if len(lefts) == len(rights)
+                                    else None
+                                ),
+                                params,
+                                conditional=(
+                                    conditional or self._may_skip > 0
+                                ),
+                                reseat=True,
+                            )
                     if bound is not None and bound.type.kind in {
                         "slice",
                         "array",
@@ -22513,6 +23321,135 @@ class _Builder:
                             )
                         self._pin_value_promotion_chain(ref, promotion)
                     return locals_.get(ref.binding_id, frozenset())
+                field_root, _field_member = self._scalar_container_field(
+                    node
+                )
+                if field_root is not None:
+                    field_deps = locals_.get(
+                        field_root, frozenset()
+                    )
+                    field_deps |= field_index_deps
+                    field_operand = node.child_by_field_name(
+                        "operand"
+                    )
+                    index_nodes = []
+                    pointer_crossed = False
+
+                    def operand_type(value):
+                        value = self._strip_parens(value)
+                        if value is None:
+                            return None
+                        if value.type == "identifier":
+                            ref = self.references.get(
+                                self.node_key(value)
+                            )
+                            binding = (
+                                self.bindings.get(ref.binding_id)
+                                if ref is not None
+                                else None
+                            )
+                            return getattr(binding, "type", None)
+                        if value.type in {
+                            "selector_expression",
+                            "field_expression",
+                        }:
+                            field = value.child_by_field_name("field")
+                            field_ref = (
+                                self.references.get(
+                                    self.node_key(field)
+                                )
+                                if field is not None
+                                else None
+                            )
+                            return getattr(
+                                self._field_identity(field_ref),
+                                "type",
+                                None,
+                            )
+                        if value.type in {
+                            "index_expression",
+                            "dereference_expression",
+                        }:
+                            base_type = operand_type(
+                                value.child_by_field_name("operand")
+                            )
+                            return getattr(base_type, "elem", None)
+                        return None
+
+                    while field_operand is not None:
+                        while (
+                            field_operand is not None
+                            and field_operand.type
+                            == "parenthesized_expression"
+                        ):
+                            field_operand = next(
+                                (
+                                    child
+                                    for child in field_operand.named_children
+                                    if child.type != "comment"
+                                ),
+                                None,
+                            )
+                        if field_operand is None:
+                            break
+                        operand_fact = operand_type(field_operand)
+                        if (
+                            operand_fact is not None
+                            and operand_fact.kind == "pointer"
+                        ):
+                            pointer_crossed = True
+                        if field_operand.type == "selector_expression":
+                            field_operand = (
+                                field_operand.child_by_field_name(
+                                    "operand"
+                                )
+                            )
+                        elif field_operand.type == "index_expression":
+                            index = field_operand.child_by_field_name(
+                                "index"
+                            )
+                            if (
+                                index is not None
+                                and index.type not in _INDEX_LITERALS
+                            ):
+                                index_nodes.append(index)
+                            field_operand = (
+                                field_operand.child_by_field_name(
+                                    "operand"
+                                )
+                            )
+                        elif field_operand.type == "dereference_expression":
+                            pointer_crossed = True
+                            field_operand = (
+                                field_operand.child_by_field_name(
+                                    "operand"
+                                )
+                            )
+                        elif field_operand.type == "field_expression":
+                            field_operand = (
+                                field_operand.child_by_field_name(
+                                    "operand"
+                                )
+                            )
+                        else:
+                            break
+                    if pointer_crossed:
+                        raise _Unsupported(
+                            "non_parameter_reference", _span(node)
+                        )
+                    for index in reversed(index_nodes):
+                        if self.node_key(index) in field_index_nodes:
+                            continue
+                        field_deps |= self.expression(
+                            index,
+                            fn,
+                            params,
+                            locals_,
+                            transfers,
+                            count,
+                            depth + 1,
+                        )
+                    return field_deps
                 # `G.V` / `G.A.N` — a field of a package-level
                 # composite (or pointer) var: package state is
                 # external exactly like `lib.VS.F`, so the read is
@@ -29622,18 +30559,61 @@ class _Builder:
                         self.indirect_writes |= stored
                 elif (
                     binding is not None
-                    and binding.type.kind == "struct"
+                    and self._struct_collection_members(
+                        binding.type, binding
+                    )
                 ):
-                    # `G(s)` hands the callee a struct whose
-                    # pointer/chan/map/slice fields share caller
-                    # memory — `*s.P = x`, `s.C <- x`, `s.M[k] = v`
-                    # writes reach shared state the caller can
-                    # observe through `*q`/`&s.V` escapes and later
-                    # calls, so they broadcast into `indirect_writes`
-                    # like a pointer argument's do. The struct's own
-                    # field VALUES stay by-value — the callee cannot
-                    # reseat `s` or its fields — so `locals_[s]`
-                    # correctly keeps its pre-call set.
+                    # Collection fields retain their headers/backings
+                    # when the struct value is passed. A callee write
+                    # is visible through every tracked struct alias and
+                    # through later field extraction.
+                    if ref.binding_id not in params:
+                        roots = {
+                            holder_id
+                            for holder_id in self._opaque_container_sharers(
+                                ref.binding_id
+                            )
+                            if "\x00" not in holder_id
+                            and getattr(
+                                self.bindings.get(holder_id), "type", None
+                            )
+                            == binding.type
+                        } | {ref.binding_id}
+                        for root_id in roots:
+                            self._store(
+                                locals_, params, root_id, stored, True
+                            )
+                            for member in self._struct_collection_members(
+                                binding.type, binding
+                            ):
+                                field_key = (
+                                    self._opaque_container_field_key(
+                                        root_id, member.id
+                                    )
+                                )
+                                field_tokens = (
+                                    self._opaque_container_tokens.get(
+                                        field_key, frozenset()
+                                    )
+                                )
+                                for holder_id in (
+                                    self._opaque_container_holders(
+                                        field_tokens
+                                    )
+                                ):
+                                    self._store(
+                                        locals_,
+                                        params,
+                                        holder_id,
+                                        stored,
+                                        True,
+                                    )
+                    self.indirect_writes |= stored
+                elif (
+                    binding is not None
+                    and self._struct_value_fact(binding.type)
+                    is not None
+                ):
                     self.indirect_writes |= stored
                 elif (
                     ref is not None
@@ -29727,6 +30707,38 @@ class _Builder:
                         # the shared queue, broadcast like
                         # `GS[i] <- x`.
                         self.indirect_writes |= stored
+            elif arg_node.type in {
+                "selector_expression",
+                "field_expression",
+            } and self._scalar_container_field(arg_node)[0] is not None:
+                root_id, member = self._scalar_container_field(arg_node)
+                if (
+                    root_id is not None
+                    and member is not None
+                    and not (
+                        member.type.kind == "array"
+                        and not self._type_embeds_collection(
+                            member.type
+                        )
+                    )
+                ):
+                    field_tokens = self._opaque_container_bind(
+                        arg_node, params
+                    )
+                    if field_tokens:
+                        for holder_id in self._opaque_container_holders(
+                            field_tokens
+                        ):
+                            self._store(
+                                locals_,
+                                params,
+                                holder_id,
+                                stored,
+                                True,
+                            )
+                    self._store(
+                        locals_, params, root_id, stored, True
+                    )
             elif self._external_chan_operand(arg_node, params) is not None:
                 # `G(lib.GC)` — a chan operand in external state
                 # (imported member): the callee may send into the
