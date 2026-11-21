@@ -909,6 +909,9 @@ func (ix *indexer) signatureTypeIDs(sig *types.Signature) []string {
 				ids = append(ids, id)
 			}
 		}
+		if alias, ok := t.(*types.Alias); ok {
+			add(alias.Rhs())
+		}
 		// A channel's element type names a dependency too — `chan N`
 		// (or `type QC chan N`) pins N as surely as a parameter or
 		// result of type `N` does.

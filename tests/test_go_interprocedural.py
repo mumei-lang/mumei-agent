@@ -6208,6 +6208,40 @@ def test_interface_alias_parameter_pins_underlying_identity(
     assert summaries.stale_dependents(known) == frozenset({f_id})
 
 
+def test_interface_method_alias_rhs_pins_stale_dependents(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\nfunc F(i I) int64 { return i.M() }\n",
+        "i.go": "package p\ntype I interface{ M() R }\n",
+        "r.go": "package p\ntype R = int64\n",
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    alias_id = next(
+        b.id for b in snapshot.bindings if b.name == "R" and b.kind == "type"
+    )
+    assert alias_id in result.pinned
+
+    files2 = {
+        "a.go": files["a.go"],
+        "i.go": files["i.go"],
+        "r.go": "package p\n",
+        "r2.go": "package p\ntype R = int64\n",
+    }
+    snapshot2 = _snapshot_for(go_types_helper, files2)
+    known = {b.id for b in snapshot2.bindings}
+    f_id = next(
+        f.binding_id
+        for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "F"
+    )
+    assert alias_id not in known
+    assert summaries.stale_dependents(known) == frozenset({f_id})
+
+
 def test_alias_receiver_method_is_admitted(go_types_helper):
     # `type A = T` — an alias-typed parameter's method selection
     # resolves through the alias to the named receiver, exactly like a

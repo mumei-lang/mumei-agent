@@ -143,8 +143,9 @@ func TestOpaqueCalls(t *testing.T) {
 	}
 	out := checked(
 		t,
-		"package p; type N int64; type I interface{ M(N) N }; type A = I; "+
-			"func F(i I, a any, j interface{ M(N) N }, alias A) int { return 0 }",
+		"package p; type N int64; type R = N; "+
+			"type I interface{ M(R) R }; type A = I; "+
+			"func F(i I, a any, j interface{ M(R) R }, alias A) int { return 0 }",
 		"amd64",
 	)
 	if len(out.Functions) != 1 || len(out.Functions[0].Parameters) != 4 {
@@ -175,6 +176,7 @@ func TestOpaqueCalls(t *testing.T) {
 	if aliasBinding.Type.Kind != "interface" ||
 		!hasTypeID(aliasBinding.SignatureTypeIDs, typeIDs["A"]) ||
 		!hasTypeID(aliasBinding.SignatureTypeIDs, typeIDs["I"]) ||
+		!hasTypeID(aliasBinding.SignatureTypeIDs, typeIDs["R"]) ||
 		!hasTypeID(aliasBinding.SignatureTypeIDs, typeIDs["N"]) {
 		t.Fatalf("interface signature identities were not pinned: %+v", aliasBinding)
 	}
