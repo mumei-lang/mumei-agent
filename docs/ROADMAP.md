@@ -4530,7 +4530,9 @@ to the same slots used by field extraction and assignment
 copies of memory-sharing structs retain those slots. Writes
 through effectful call arguments, receivers, and collection
 field arguments flow to the slot holders and later field
-reads. Struct call results (`s := mk(a)`, `lib.Mk(...)`,
+reads. Non-identifier struct arguments and value receivers passed as
+composite literals or value selectors use the same tracked field slots
+as a bound temporary. Struct call results (`s := mk(a)`, `lib.Mk(...)`,
 methods) mint a fresh backing joined with the backings of
 memory-sharing arguments; reseating one alias re-keys its
 field slots to a surviving alias; parallel assignments
