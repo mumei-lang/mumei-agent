@@ -7568,10 +7568,13 @@ member, or one explicit dereference of one (`(*t).F` — the same
             return ()
         if (
             call is None
-            or call.kind != "direct_local"
             or call.method
             or call.method_expr
         ):
+            return None
+        if call.kind == "direct_import":
+            return roots
+        if call.kind != "direct_local":
             return None
         target = self.functions.get(call.target)
         if (
@@ -25843,6 +25846,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
         # receiver as its leading argument — a composite imported var
         # in that slot reads external state like `lib.VS.PF()` does:
         # dep-free with the member's transfer on record.
+        local_chan_chan_roots = {
+            i: root
+            for i, arg in enumerate(arguments)
+            if (root := self._local_chan_chan_id(arg)) is not None
+        }
         actual = []
         for i, arg in enumerate(arguments):
             arg_member = (
@@ -25867,14 +25875,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
             if arg_index_deps is not None:
                 actual.append(arg_index_deps)
                 continue
-            actual.append(
-                self.expression(
-                    arg, fn, params, locals_, transfers, count,
-                    depth + 1,
-                )
+            arg_deps = self.expression(
+                arg, fn, params, locals_, transfers, count,
+                depth + 1,
             )
+            root = local_chan_chan_roots.get(i)
+            if root is not None:
+                group = self._chan_group_read_deps(root, locals_)
+                arg_deps |= group
+                self._promote_local_chan_chan_group(root)
+                self.indirect_writes |= group
+            actual.append(arg_deps)
         actual = tuple(actual)
-        declared = self._declared_call_summary(call, receiver, actual)
+        declared = (
+            None
+            if local_chan_chan_roots
+            else self._declared_call_summary(call, receiver, actual)
+        )
         if declared is not None:
             # The manifest covers this callee: fold its declared
             # `return_dependencies` through the actual arguments

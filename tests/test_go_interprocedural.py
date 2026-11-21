@@ -20492,67 +20492,370 @@ def test_local_chan_chan_call_arg_boundaries_keep_unresolved_reason(
     )
 
 
-def test_local_chan_chan_imported_call_arg_stays_closed(go_types_helper):
-    files = {
-        "a.go": "package p\n"
-        "import \"lib\"\n"
-        "func F() int64 {\n"
-        "\tcc := make(chan chan int64, 1)\n"
-        "\tlib.G(cc)\n"
-        "\treturn 0\n"
-        "}\n"
-    }
-    imports = {
-        "lib": {
-            "g.go": "package lib\n"
-            "func G(cc chan chan int64) {}\n"
-        }
-    }
-    snapshot = load_go_package_snapshot(
-        package_report_imports(go_types_helper, files, imports),
-        files,
-        target_arch="amd64",
-    )
-    result = named_package(
-        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
-    )
-    assert not result.available
-    assert any(
-        gap.reason == "unresolved_or_opaque_call" for gap in result.gaps
-    )
-
-
-def test_local_chan_chan_container_imported_call_arg_stays_closed(
-    go_types_helper,
+def _imported_chan_chan_summary(
+    go_types_helper, source, library, name="F"
 ):
     files = {
-        "a.go": "package p\n"
-        "import \"lib\"\n"
-        "func F() int64 {\n"
-        "\tcc := make(chan chan int64, 1)\n"
-        "\ts := []chan chan int64{cc}\n"
-        "\tlib.G(s)\n"
-        "\treturn 0\n"
-        "}\n"
+        "a.go": 'package p\nimport "lib"\n' + source,
     }
-    imports = {
-        "lib": {
-            "g.go": "package lib\n"
-            "func G(s []chan chan int64) {}\n"
-        }
-    }
+    imports = {"lib": {"lib.go": "package lib\n" + library}}
     snapshot = load_go_package_snapshot(
         package_report_imports(go_types_helper, files, imports),
         files,
         target_arch="amd64",
     )
-    result = named_package(
-        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    summaries = ip.summarize_go_package(files, snapshot)
+    return named_package(files, snapshot, summaries, name)
+
+
+def test_local_chan_chan_imported_call_arg_is_admitted(go_types_helper):
+    result = _imported_chan_chan_summary(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "\tq := make(chan chan int64, 1)\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tq <- c\n"
+        "\tc <- x\n"
+        "\tlib.G(q)\n"
+        "\treturn <-(<-q)\n"
+        "}\n",
+        "func G(cc chan chan int64) {}\n",
     )
-    assert not result.available
-    assert any(
-        gap.reason == "unresolved_or_opaque_call" for gap in result.gaps
+    assert result.available, result.gaps
+    assert result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0})
+    imported_call = next(
+        call
+        for call in result.calls
+        if call.imported and len(call.arguments) == 1
     )
+    assert 0 in imported_call.arguments[0]
+
+
+@pytest.mark.parametrize(
+    "signature",
+    (
+        "func G(v any) {}\n",
+        "func G(cc ...chan chan int64) {}\n",
+    ),
+)
+def test_local_chan_chan_imported_any_and_variadic_args_are_admitted(
+    go_types_helper, signature
+):
+    result = _imported_chan_chan_summary(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "\tq := make(chan chan int64, 1)\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tq <- c\n"
+        "\tc <- x\n"
+        "\tlib.G(q)\n"
+        "\treturn <-(<-q)\n"
+        "}\n",
+        signature,
+    )
+    assert result.available, result.gaps
+    assert result.effects == "unknown"
+    imported_call = next(
+        call
+        for call in result.calls
+        if call.imported and len(call.arguments) == 1
+    )
+    assert 0 in imported_call.arguments[0]
+
+
+@pytest.mark.parametrize(
+    ("setup", "argument", "read", "signature"),
+    (
+        (
+            "s := []chan chan int64{q}\n",
+            "s",
+            "<-(<-s[0])",
+            "func G(s []chan chan int64) {}\n",
+        ),
+        (
+            "s := [1]chan chan int64{q}\n",
+            "s",
+            "<-(<-s[0])",
+            "func G(s [1]chan chan int64) {}\n",
+        ),
+        (
+            "s := map[int]chan chan int64{0: q}\n",
+            "s",
+            "<-(<-s[0])",
+            "func G(s map[int]chan chan int64) {}\n",
+        ),
+        (
+            "s := []chan chan int64{q}\n",
+            "s[0]",
+            "<-(<-s[0])",
+            "func G(q chan chan int64) {}\n",
+        ),
+        (
+            "q3 := make(chan chan chan int64, 1)\n"
+            "q2 := make(chan chan int64, 1)\n"
+            "c := make(chan int64, 1)\n"
+            "q3 <- q2\n"
+            "q2 <- c\n"
+            "c <- x\n"
+            "s := []chan chan chan int64{q3}\n",
+            "s",
+            "<-(<-(<-s[0]))",
+            "func G(s []chan chan chan int64) {}\n",
+        ),
+    ),
+)
+def test_local_chan_chan_container_imported_call_args_are_admitted(
+    go_types_helper, setup, argument, read, signature
+):
+    if "q3 :=" in setup:
+        prefix = setup
+    else:
+        prefix = (
+            "q := make(chan chan int64, 1)\n"
+            "c := make(chan int64, 1)\n"
+            "q <- c\n"
+            "c <- x\n"
+            + setup
+        )
+    result = _imported_chan_chan_summary(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        + prefix
+        + f"\tlib.G({argument})\n"
+        + f"\treturn {read}\n"
+        + "}\n",
+        signature,
+    )
+    assert result.available, result.gaps
+    assert result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0})
+    imported_call = next(
+        call
+        for call in result.calls
+        if call.imported and len(call.arguments) == 1
+    )
+    assert 0 in imported_call.arguments[0]
+
+
+@pytest.mark.parametrize("keyword", ("go", "defer"))
+def test_local_chan_chan_imported_go_and_defer_args_are_admitted(
+    go_types_helper, keyword
+):
+    result = _imported_chan_chan_summary(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "\tq := make(chan chan int64, 1)\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tq <- c\n"
+        "\tc <- x\n"
+        f"\t{keyword} lib.G(q)\n"
+        "\treturn 0\n"
+        "}\n",
+        "func G(cc chan chan int64) {}\n",
+    )
+    assert result.available, result.gaps
+    assert result.effects == "unknown"
+    imported_call = next(
+        call
+        for call in result.calls
+        if call.imported and len(call.arguments) == 1
+    )
+    assert 0 in imported_call.arguments[0]
+
+
+def test_local_chan_chan_imported_call_result_carries_queue_deps(
+    go_types_helper,
+):
+    result = _imported_chan_chan_summary(
+        go_types_helper,
+        "func F(x int64) int64 {\n"
+        "\tq := make(chan chan int64, 1)\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tq <- c\n"
+        "\tc <- x\n"
+        "\tr := lib.H(q)\n"
+        "\treturn <-(<-r)\n"
+        "}\n",
+        "func H(cc chan chan int64) chan chan int64 { return nil }\n",
+    )
+    assert result.available, result.gaps
+    assert result.effects == "unknown"
+    assert result.return_dependencies == frozenset({0})
+    imported_call = next(
+        call
+        for call in result.calls
+        if call.imported and len(call.arguments) == 1
+    )
+    assert 0 in imported_call.arguments[0]
+    assert 0 in imported_call.result
+
+
+def test_local_chan_chan_imported_call_late_join_matches_package_store(
+    go_types_helper,
+):
+    source = (
+        "var GCC chan chan int64\n"
+        "func F_imported(x, y int64) int64 {\n"
+        "\tq := make(chan chan int64, 1)\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tq <- c\n"
+        "\tc <- x\n"
+        "\tlib.G(q)\n"
+        "\tc2 := make(chan int64, 1)\n"
+        "\tq <- c2\n"
+        "\tc2 <- y\n"
+        "\treturn <-(<-q)\n"
+        "}\n"
+        "func F_stored(x, y int64) int64 {\n"
+        "\tq := make(chan chan int64, 1)\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tq <- c\n"
+        "\tc <- x\n"
+        "\tGCC = q\n"
+        "\tc2 := make(chan int64, 1)\n"
+        "\tq <- c2\n"
+        "\tc2 <- y\n"
+        "\treturn <-(<-q)\n"
+        "}\n"
+    )
+    files = {
+        "a.go": 'package p\nimport "lib"\n' + source,
+    }
+    imports = {"lib": {"lib.go": "package lib\nfunc G(cc chan chan int64) {}\n"}}
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, imports),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    imported = named_package(files, snapshot, summaries, "F_imported")
+    stored = named_package(files, snapshot, summaries, "F_stored")
+    assert imported.available, imported.gaps
+    assert stored.available, stored.gaps
+    assert imported.return_dependencies == stored.return_dependencies
+    assert {0, 1} <= imported.return_dependencies
+    assert imported.effects == stored.effects == "unknown"
+
+
+def test_imported_call_received_queue_arg_matches_direct_queue_arg(
+    go_types_helper,
+):
+    def function(name, argument):
+        return (
+            f"func {name}(x int64) int64 {{\n"
+            "\tq3 := make(chan chan chan int64, 1)\n"
+            "\tq2 := make(chan chan int64, 1)\n"
+            "\tq3 <- q2\n"
+            f"\tlib.G({argument})\n"
+            "\tc2 := make(chan int64, 1)\n"
+            "\tq2 <- c2\n"
+            "\tc2 <- x\n"
+            "\treturn <-(<-q2)\n"
+            "}\n"
+        )
+
+    source = function("F_received", "<-q3") + function("F_direct", "q2")
+    received = _imported_chan_chan_summary(
+        go_types_helper,
+        source,
+        "func G(cc chan chan int64) {}\n",
+        "F_received",
+    )
+    direct = _imported_chan_chan_summary(
+        go_types_helper,
+        source,
+        "func G(cc chan chan int64) {}\n",
+        "F_direct",
+    )
+    assert received.available, received.gaps
+    assert direct.available, direct.gaps
+    assert received.return_dependencies == direct.return_dependencies
+    assert received.effects == direct.effects
+    assert 0 in received.return_dependencies
+
+
+def test_local_chan_chan_non_escape_remains_local(go_types_helper):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64) int64 {\n"
+            "\tq := make(chan chan int64, 1)\n"
+            "\tc := make(chan int64, 1)\n"
+            "\tq <- c\n"
+            "\tc <- x\n"
+            "\treturn 0\n"
+            "}\n",
+        )
+    )
+    assert result.available, result.gaps
+    assert result.effects == "none_in_supported_fragment"
+
+
+@pytest.mark.parametrize(
+    ("source", "library", "expected_reason"),
+    (
+        (
+            "func F(x int64) int64 {\n"
+            "\tq := make(chan chan int64, 1)\n"
+            "\tvar t lib.T\n"
+            "\tt.M(q)\n"
+            "\treturn 0\n"
+            "}\n",
+            "type T struct{}\nfunc (T) M(q chan chan int64) {}\n",
+            "unresolved_or_opaque_call",
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\tq := make(chan chan int64, 1)\n"
+            "\tvar t lib.T\n"
+            "\tlib.T.M(t, q)\n"
+            "\treturn 0\n"
+            "}\n",
+            "type T struct{}\nfunc (T) M(q chan chan int64) {}\n",
+            "unresolved_or_opaque_call",
+        ),
+        (
+            "type QQ chan chan int64\n"
+            "func F(x int64) int64 {\n"
+            "\tq := make(chan chan int64, 1)\n"
+            "\tlib.G(QQ(q))\n"
+            "\treturn 0\n"
+            "}\n",
+            "func G(q chan chan int64) {}\n",
+            "unresolved_or_opaque_call",
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\tq := make(chan chan int64, 1)\n"
+            "\tlib.G((chan chan int64)(q))\n"
+            "\treturn 0\n"
+            "}\n",
+            "func G(q chan chan int64) {}\n",
+            "unresolved_or_opaque_call",
+        ),
+        (
+            "func F(x int64) int64 {\n"
+            "\ts := [][]chan chan int64{{make(chan chan int64, 1)}}\n"
+            "\tlib.G(s)\n"
+            "\treturn 0\n"
+            "}\n",
+            "func G(s [][]chan chan int64) {}\n",
+            None,
+        ),
+    ),
+)
+def test_imported_chan_chan_call_argument_boundaries_stay_closed(
+    go_types_helper, source, library, expected_reason
+):
+    result = _imported_chan_chan_summary(
+        go_types_helper, source, library
+    )
+    assert not result.available, result
+    if expected_reason is not None:
+        assert any(
+            gap.reason == expected_reason for gap in result.gaps
+        ), result.gaps
 
 
 def test_chan_chan_assignment_rebind_admitted(go_types_helper):
