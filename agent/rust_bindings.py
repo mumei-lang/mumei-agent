@@ -388,7 +388,15 @@ class _RustBindings:
         while stack:
             current = stack.pop()
             yield current
-            stack.extend(reversed(current.named_children))
+            stack.extend(reversed(self._children(current)))
+
+    @staticmethod
+    def _children(node: Any) -> tuple[Any, ...]:
+        return tuple(
+            child
+            for child in node.named_children
+            if child.type not in {"line_comment", "block_comment"}
+        )
 
     def _is_generic_function(self, node: Any) -> bool:
         if node.child_by_field_name("type_parameters") is not None:
@@ -427,7 +435,7 @@ class _RustBindings:
         if parameters is None:
             return
         item_scope = self.span(node)
-        for parameter in parameters.named_children:
+        for parameter in self._children(parameters):
             if parameter.type not in {
                 "type_parameter",
                 "lifetime_parameter",
@@ -477,7 +485,7 @@ class _RustBindings:
             ):
                 continue
             candidates.append(candidate)
-            stack.extend(reversed(candidate.named_children))
+            stack.extend(reversed(self._children(candidate)))
         for candidate in candidates:
             if candidate.type in {"type_identifier", "lifetime"}:
                 namespace = "type"
@@ -639,7 +647,7 @@ class _RustBindings:
         )
 
     def _scan_associated_container(self, body: Any, parent_scope: _Scope) -> None:
-        for node in body.named_children:
+        for node in self._children(body):
             if node.type in {"function_item", "function_signature_item"}:
                 name_node = self._item_name(node)
                 if name_node is None:
@@ -686,7 +694,7 @@ class _RustBindings:
                     self.gaps.append(Gap("unsupported_syntax", self.span(node)))
 
     def _scan_extern_container(self, body: Any, parent_scope: _Scope) -> None:
-        for node in body.named_children:
+        for node in self._children(body):
             if node.type in {"function_item", "function_signature_item"}:
                 record = self._find_item_record(parent_scope, node)
                 if record is not None:
@@ -759,7 +767,7 @@ class _RustBindings:
         if body is not None:
             parameter_scope = self.span(body)
             if parameters is not None:
-                for parameter in parameters.named_children:
+                for parameter in self._children(parameters):
                     parameter_ids.extend(
                         self._parameter(parameter, fn_scope, parameter_scope)
                     )
@@ -814,7 +822,7 @@ class _RustBindings:
         identifiers = []
         names = self._pattern_names(pattern, scope)
         mutable_specifier = any(
-            child.type == "mutable_specifier" for child in node.named_children
+            child.type == "mutable_specifier" for child in self._children(node)
         )
         names = self._apply_outer_mutability(names, pattern, mutable_specifier)
         for name_node, name_mutable in names:
@@ -876,7 +884,7 @@ class _RustBindings:
     def _pattern_names(
         self, pattern: Any | None, scope: _Scope, mutable: bool = False
     ) -> list[tuple[Any, bool]]:
-        if pattern is None:
+        if pattern is None or pattern.type in {"line_comment", "block_comment"}:
             return []
         if pattern.type in {"identifier", "self"}:
             name = self._normalize_identifier(self.text(pattern))
@@ -943,7 +951,7 @@ class _RustBindings:
             return []
         if pattern.type == "mut_pattern":
             out = []
-            for child in pattern.named_children:
+            for child in self._children(pattern):
                 if child.type != "mutable_specifier":
                     out.extend(self._pattern_names(child, scope, True))
             return out
@@ -952,7 +960,7 @@ class _RustBindings:
             constructor = pattern.child_by_field_name("type")
             if constructor is not None:
                 self._record_pattern_path(constructor, "value", {"struct", "import"})
-            for child in pattern.named_children:
+            for child in self._children(pattern):
                 if child == constructor:
                     continue
                 out.extend(self._pattern_names(child, scope, mutable))
@@ -960,21 +968,21 @@ class _RustBindings:
         if pattern.type == "field_pattern":
             value = pattern.child_by_field_name("pattern")
             field_mutable = mutable or any(
-                child.type == "mutable_specifier" for child in pattern.named_children
+                child.type == "mutable_specifier" for child in self._children(pattern)
             ) or _has_keyword(self.text(pattern), "mut")
             if value is not None:
                 return self._pattern_names(value, scope, field_mutable)
             field = next(
                 (
                     node
-                    for node in pattern.named_children
+                    for node in self._children(pattern)
                     if node.type in {"field_identifier", "shorthand_field_identifier"}
                 ),
                 None,
             )
             return [] if field is None else [(field, field_mutable)]
         if pattern.type == "or_pattern":
-            alternatives = pattern.named_children
+            alternatives = self._children(pattern)
             name_sets: list[list[tuple[Any, bool]]] = [
                 self._pattern_names(alternative, scope, mutable)
                 for alternative in alternatives
@@ -1000,7 +1008,7 @@ class _RustBindings:
                         type_node, "type", {"struct", "enum", "type_alias", "import"}
                     )
             out = []
-            for child in pattern.named_children:
+            for child in self._children(pattern):
                 if pattern.type == "struct_pattern" and child == pattern.child_by_field_name("type"):
                     continue
                 if child.type == "mutable_specifier":
@@ -1014,7 +1022,7 @@ class _RustBindings:
             return out
         if pattern.type in {"match_pattern", "condition"}:
             out = []
-            for child in pattern.named_children:
+            for child in self._children(pattern):
                 if child.type in {"binary_expression", "call_expression"}:
                     continue
                 out.extend(self._pattern_names(child, scope, mutable))
@@ -1034,7 +1042,7 @@ class _RustBindings:
             capture = next(
                 (
                     child
-                    for child in pattern.named_children
+                    for child in self._children(pattern)
                     if child.type in {"identifier", "self"}
                 ),
                 None,
@@ -1166,7 +1174,7 @@ class _RustBindings:
             self._expr(alternative)
         names = self._pattern_names(pattern, scope)
         mutable_specifier = any(
-            child.type == "mutable_specifier" for child in node.named_children
+            child.type == "mutable_specifier" for child in self._children(node)
         )
         names = self._apply_outer_mutability(
             names, pattern, mutable_specifier
@@ -1217,12 +1225,12 @@ class _RustBindings:
                 self._reference(name_node, "read", "type")
             fields = node.child_by_field_name("body")
             if fields is not None:
-                for initializer in fields.named_children:
+        for initializer in self._children(fields):
                     if initializer.type == "shorthand_field_initializer":
                         identifier = next(
                             (
                                 child
-                                for child in initializer.named_children
+                                for child in self._children(initializer)
                                 if child.type == "identifier"
                             ),
                             None,
@@ -1232,7 +1240,7 @@ class _RustBindings:
                     elif initializer.type == "field_initializer":
                         self._expr(initializer.child_by_field_name("value"))
                     elif initializer.type == "base_field_initializer":
-                        for child in initializer.named_children:
+                        for child in self._children(initializer):
                             self._expr(child)
                     else:
                         self.gaps.append(
@@ -1275,18 +1283,18 @@ class _RustBindings:
             self._match(node)
             return
         if kind == "parenthesized_expression":
-            for child in node.named_children:
+            for child in self._children(node):
                 self._expr(child)
             return
         if kind in _TRANSPARENT_NODES:
-            for child in node.named_children:
+            for child in self._children(node):
                 self._expr(child)
             return
         if kind in _EXPR_NODES or kind in {
             "return_expression", "break_expression", "continue_expression",
             "await_expression", "try_expression", "yield_expression",
         }:
-            for child in node.named_children:
+            for child in self._children(node):
                 self._expr(child)
             return
         if kind in {
@@ -1300,7 +1308,7 @@ class _RustBindings:
         if kind in {"type_item", "struct_item", "enum_item", "union_item", "trait_item"}:
             return
         if kind in {"expression_statement"}:
-            for child in node.named_children:
+            for child in self._children(node):
                 self._expr(child)
             return
         # Every syntax node that can conceal a read is surfaced as a gap.
@@ -1308,7 +1316,7 @@ class _RustBindings:
 
     def _place_root(self, node: Any) -> Any | None:
         if node.type == "parenthesized_expression":
-            children = node.named_children
+            children = self._children(node)
             return None if not children else self._place_root(children[0])
         if node.type in {"identifier", "self"}:
             return node
@@ -1316,13 +1324,13 @@ class _RustBindings:
             base = node.child_by_field_name("value")
             return None if base is None else self._place_root(base)
         if node.type == "index_expression":
-            children = node.named_children
+            children = self._children(node)
             return None if not children else self._place_root(children[0])
         return None
 
     def _visit_place_indices(self, node: Any) -> None:
         if node.type == "parenthesized_expression":
-            children = node.named_children
+            children = self._children(node)
             if children:
                 self._visit_place_indices(children[0])
             return
@@ -1332,14 +1340,15 @@ class _RustBindings:
                 self._visit_place_indices(base)
             return
         if node.type == "index_expression":
-            children = node.named_children
+            children = self._children(node)
             if children:
                 self._visit_place_indices(children[0])
                 for index in children[1:]:
                     self._expr(index)
             return
         if node.type == "unary_expression" and self.text(node).lstrip().startswith("*"):
-            operand = node.named_children[-1] if node.named_children else None
+            children = self._children(node)
+            operand = children[-1] if children else None
             self._expr(operand)
             return
         if node.type in {"identifier", "self"}:
@@ -1348,7 +1357,7 @@ class _RustBindings:
 
     def _assign_to_place(self, node: Any, compound: bool, assignment: Any) -> None:
         if node.type == "parenthesized_expression":
-            children = node.named_children
+            children = self._children(node)
             if children:
                 self._assign_to_place(children[0], compound, assignment)
             return
@@ -1370,7 +1379,8 @@ class _RustBindings:
                 self._assignment_reference(root, compound, assignment)
             return
         if node.type == "unary_expression" and self.text(node).lstrip().startswith("*"):
-            operand = node.named_children[-1] if node.named_children else None
+            children = self._children(node)
+            operand = children[-1] if children else None
             self._expr(operand)
             return
         if node.type in {"scoped_identifier", "scoped_type_identifier"}:
@@ -1408,7 +1418,7 @@ class _RustBindings:
             pattern = condition.child_by_field_name("pattern")
             value = condition.child_by_field_name("value")
             if value is None:
-                named = condition.named_children
+                named = self._children(condition)
                 value = named[-1] if named else None
             if value is not None:
                 self._expr(value)
@@ -1468,7 +1478,7 @@ class _RustBindings:
         body = node.child_by_field_name("body")
         if body is None:
             return
-        for arm in body.named_children:
+        for arm in self._children(body):
             if arm.type != "match_arm":
                 self.gaps.append(Gap("unsupported_syntax", self.span(arm)))
                 continue
@@ -1486,7 +1496,7 @@ class _RustBindings:
                 else next(
                     (
                         child
-                        for child in match_pattern.named_children
+                        for child in self._children(match_pattern)
                         if child != guard
                     ),
                     None,
@@ -1530,23 +1540,22 @@ class _RustBindings:
         old_owner = self.call_owner
         self.call_owner = ""
         if params is not None:
-            for parameter in params.named_children:
+            for parameter in self._children(params):
                 self._parameter(parameter, closure_scope, self.span(body))
         self._expr(body)
         self.call_owner = old_owner
         self.scopes.pop()
 
     def _callee(self, node: Any) -> Any:
-        while node.type == "parenthesized_expression" and len(node.named_children) == 1:
-            node = node.named_children[0]
+        while node.type == "parenthesized_expression" and len(self._children(node)) == 1:
+            node = self._children(node)[0]
         return node
 
     def _call(self, node: Any) -> None:
         callee = node.child_by_field_name("function")
         arguments_node = node.child_by_field_name("arguments")
-        args = () if arguments_node is None else tuple(
-            self.span(arg) for arg in arguments_node.named_children
-        )
+        arguments = () if arguments_node is None else self._children(arguments_node)
+        args = tuple(self.span(arg) for arg in arguments)
         callee = None if callee is None else self._callee(callee)
         span = self.span(node)
         kind = "opaque_expression"
@@ -1609,20 +1618,22 @@ class _RustBindings:
         elif callee is not None:
             self._expr(callee)
         if arguments_node is not None:
-            for argument in arguments_node.named_children:
+            for argument in arguments:
                 self._expr(argument)
         self.calls.append(Call(span, args, self.call_owner, target, kind))
 
     def _method_call(self, node: Any) -> None:
         receiver = node.child_by_field_name("receiver")
         if receiver is None:
-            receiver = node.named_children[0] if node.named_children else None
+            children = self._children(node)
+            receiver = children[0] if children else None
         if receiver is not None:
             self._expr(receiver)
         args_node = node.child_by_field_name("arguments")
-        args = () if args_node is None else tuple(self.span(arg) for arg in args_node.named_children)
+        arguments = () if args_node is None else self._children(args_node)
+        args = tuple(self.span(arg) for arg in arguments)
         if args_node is not None:
-            for arg in args_node.named_children:
+            for arg in arguments:
                 self._expr(arg)
         self.calls.append(Call(self.span(node), args, self.call_owner, "", "opaque_method"))
 

@@ -731,6 +731,29 @@ fn locals(pair: (i32, i32), value: S) {
         assert _bindings(report, name, kind)[0].mutable is mutable
 
 
+def test_comments_are_skipped_in_call_arguments_and_other_visitor_children():
+    source = """
+fn identity(/* parameter */ value: u8) {
+    /* block */
+    let (left, /* pattern */ right) = (value, value);
+}
+fn caller(value: u8) {
+    identity(/* argument */ value);
+    match value {
+        /* arm */ 0 => {},
+        // next arm
+        _ => {}
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    identity = _bindings(report, "identity", "function")[0]
+    call = next(call for call in report.calls if call.target == identity.id)
+    assert len(call.arguments) == 1
+    assert not any(gap.reason == "unsupported_syntax" for gap in report.gaps)
+    assert not report.unresolved
+
+
 def test_macros_and_glob_imports_keep_hidden_names_unresolved_and_incomplete():
     macro_source = 'fn f(x:i32){ println!("{}", x); }'
     macro = build_rust_bindings(macro_source, pointer_width=64)
