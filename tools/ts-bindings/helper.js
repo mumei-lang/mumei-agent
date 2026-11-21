@@ -226,11 +226,7 @@ function createEnvelope(source, extension) {
   function collectReferences(node) {
     if (ts.isIdentifier(node) && isReferenceIdentifier(node)) {
       const symbol = referenceSymbol(node);
-      const declarations =
-        symbol === undefined || symbol.declarations === undefined
-          ? null
-          : symbol.declarations;
-      if (declarations === null || declarations.length === 0) {
+      if (symbol === undefined) {
         references.push({
           span: span(node.getStart(sourceFile), node.getEnd()),
           name: node.text,
@@ -238,23 +234,34 @@ function createEnvelope(source, extension) {
           library: false,
         });
       } else {
-        const inSource = declarations.filter(
-          (declaration) => declaration.getSourceFile().fileName === inputPath,
-        );
-        const declarationSpans = inSource.map((declaration) => {
-          const name = ts.getNameOfDeclaration(declaration);
-          const nameNode = name === undefined ? declaration : name;
-          return span(nameNode.getStart(sourceFile), nameNode.getEnd());
-        });
-        declarationSpans.sort(
-          (left, right) => left.start - right.start || left.end - right.end,
-        );
-        references.push({
-          span: span(node.getStart(sourceFile), node.getEnd()),
-          name: node.text,
-          declarations: declarationSpans,
-          library: inSource.length === 0,
-        });
+        const declarations = symbol.declarations ?? [];
+        if (declarations.length === 0) {
+          references.push({
+            span: span(node.getStart(sourceFile), node.getEnd()),
+            name: node.text,
+            declarations: [],
+            library: true,
+          });
+        } else {
+          const inSource = declarations.filter(
+            (declaration) =>
+              declaration.getSourceFile().fileName === inputPath,
+          );
+          const declarationSpans = inSource.map((declaration) => {
+            const name = ts.getNameOfDeclaration(declaration);
+            const nameNode = name === undefined ? declaration : name;
+            return span(nameNode.getStart(sourceFile), nameNode.getEnd());
+          });
+          declarationSpans.sort(
+            (left, right) => left.start - right.start || left.end - right.end,
+          );
+          references.push({
+            span: span(node.getStart(sourceFile), node.getEnd()),
+            name: node.text,
+            declarations: declarationSpans,
+            library: inSource.length === 0,
+          });
+        }
       }
     }
     ts.forEachChild(node, collectReferences);

@@ -5328,6 +5328,8 @@ globals such as `console` fail closed with a diagnostic error. Imports,
 dynamic imports, `require`, external module references, and triple-slash
 references fail closed. This slice makes no trust, audit, Evidence acceptance,
 Seal Grade, runtime, or proof claim.
+Compiler intrinsics with no declaration, such as `undefined` and `globalThis`,
+are reported as builtins; a reference with no symbol still fails closed.
 
 ### C06 TypeScript lexical binding report (`ts-bindings`)
 

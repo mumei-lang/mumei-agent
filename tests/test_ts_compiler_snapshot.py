@@ -25,6 +25,7 @@ FIXTURE_NAMES = (
     "function_overloads",
     "function_param_call",
     "import_source",
+    "intrinsic_globals",
     "state_write_operators",
     "tsx_fragment",
     "type_error",
@@ -35,6 +36,7 @@ POSITIVE_FIXTURES = (
     ("function_overloads", ["agree", "agree"]),
     ("class_closure", ["agree", "agree"]),
     ("builtin_math", ["builtin"]),
+    ("intrinsic_globals", ["builtin", "builtin", "builtin"]),
     ("tsx_fragment", ["agree"]),
     ("state_write_operators", ["agree", "agree"]),
 )
@@ -119,6 +121,26 @@ def test_math_is_reported_as_a_library_builtin():
     assert reference["status"] == "builtin"
     assert reference["library"] is True
     assert reference["declarations"] == []
+
+
+def test_declaration_free_intrinsics_are_reported_as_library_builtins():
+    source = _source("intrinsic_globals")
+    snapshot = load_ts_compiler_snapshot(
+        (FIXTURES / "intrinsic_globals.envelope.json").read_bytes(),
+        source,
+    )
+    comparison = compare_with_lexical(
+        snapshot,
+        build_ts_bindings(source),
+    )
+
+    assert [item["name"] for item in comparison["references"]] == [
+        "undefined",
+        "globalThis",
+        "arguments",
+    ]
+    assert all(item["library"] is True for item in comparison["references"])
+    assert all(item["declarations"] == [] for item in comparison["references"])
 
 
 def test_overload_reference_keeps_all_in_source_declarations():
