@@ -19382,6 +19382,124 @@ def test_scalar_container_array_copy_isolates(go_types_helper):
             "\treturn b[0]\n}\n",
             frozenset({0, 1}),
         ),
+        # `s[i].F = v` on a struct-element param — the conflated
+        # element set cannot distinguish fields, so the store lands
+        # the value's and index's deps like `s[i] = v`, and the
+        # caller-visible flag records the write.
+        (
+            "type St struct { A int64; B int64 }\n"
+            "func F(s []St, i int, v int64) int64 {\n"
+            "\ts[i].A = v\n"
+            "\treturn s[0].B\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # `s[i].F` on a LOCAL struct-element slice — the field read
+        # carries the group's deps plus the stored value's.
+        (
+            "type St struct { A int64; B int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\ts := []St{{A: x}}\n"
+            "\ts[0].B = 2\n"
+            "\treturn s[0].A\n}\n",
+            frozenset({0}),
+        ),
+        # `s[i][j].F` on `[][]St` — the nested index resolves the
+        # same way through the conflated element set.
+        (
+            "type St struct { A int64 }\n"
+            "func F(s [][]St, i int, j int, v int64) int64 {\n"
+            "\ts[i][j].A = v\n"
+            "\treturn s[0][0].A\n}\n",
+            frozenset({0, 1, 2, 3}),
+        ),
+        # `m[k].F` on `map[K]St` — a map field read observes every
+        # stored element (the whole-element store `m[k] = St{...}`
+        # is the only write Go allows on a map element).
+        (
+            "type St struct { A int64 }\n"
+            "func F(m map[int]St, k int, v int64) int64 {\n"
+            "\tm[k] = St{A: v}\n"
+            "\treturn m[1].A\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # `[N]St` — the array form admits the same field store and
+        # read.
+        (
+            "type St struct { A int64 }\n"
+            "func F(x int64) int64 {\n"
+            "\tvar a [4]St\n"
+            "\ta[0].A = x\n"
+            "\treturn a[1].A\n}\n",
+            frozenset({0}),
+        ),
+        # `s[i].F++` on a param — the inc/dec lands the group's own
+        # deps back on it, so `return x` carries only x's ordinal.
+        (
+            "type St struct { A int64 }\n"
+            "func F(s []St, i int, x int64) int64 {\n"
+            "\ts[i].A++\n"
+            "\treturn x\n}\n",
+            frozenset({2}),
+        ),
+        # `s[i].F.G` — a deeper selector chain resolves to the same
+        # conflated element set.
+        (
+            "type In struct { V int64 }\n"
+            "type St struct { A In }\n"
+            "func F(s []St, i int, v int64) int64 {\n"
+            "\ts[i].A.V = v\n"
+            "\treturn s[0].A.V\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # `s[i].F` feeding a scalar read — `t := s[0].A` extracts the
+        # field's (the element's) deps.
+        (
+            "type St struct { A int64 }\n"
+            "func F(s []St, x int64) int64 {\n"
+            "\tt := s[0].A\n"
+            "\treturn t\n}\n",
+            frozenset({0}),
+        ),
+        # `s[i].F, s[j].F = x, y` — the parallel-assign form stores
+        # each side through the same element resolution.
+        (
+            "type St struct { A int64 }\n"
+            "func F(s []St, i int, j int, x int64, y int64) int64 {\n"
+            "\ts[i].A, s[j].A = x, y\n"
+            "\treturn s[0].A\n}\n",
+            frozenset({0, 1, 2, 3, 4}),
+        ),
+        # `ch <- s[i].F` — a field read feeding a channel send joins
+        # the send's deps.
+        (
+            "type St struct { A int64 }\n"
+            "func F(s []St, ch chan int64) int64 {\n"
+            "\tch <- s[0].A\n"
+            "\treturn <-ch\n}\n",
+            frozenset({0, 1}),
+        ),
+        # `return s[i].A.V` — a selector-operand chain escapes the
+        # pre-scan's index evaluation, so the read evaluates the
+        # index itself: `i`'s dep must land.
+        (
+            "type In struct { V int64 }\n"
+            "type St struct { A In }\n"
+            "func F(s []St, i int) int64 {\n"
+            "\treturn s[i].A.V\n}\n",
+            frozenset({0, 1}),
+        ),
+        # `s[0].P.V` through a pointer field — an aliased store via
+        # `q := s[0].P` lands in `indirect_writes`, so the read
+        # carries `x`'s dep too.
+        (
+            "type In struct { V int64 }\n"
+            "type St struct { P *In }\n"
+            "func F(s []St, x int64) int64 {\n"
+            "\tq := s[0].P\n"
+            "\tq.V = x\n"
+            "\treturn s[1].P.V\n}\n",
+            frozenset({0, 1}),
+        ),
     ],
 )
 def test_scalar_container_bind_read_write_admits(
@@ -19592,7 +19710,7 @@ def test_container_builtin_dep_free_param_write_marks_effects(
     [
         # `delete(m, k)` on an UNBOUND map — no share group
         # exists, so the builtin stays opaque.
-        "func F(m map[int64]struct{}, x int64) int64 {\n"
+        "func F(m map[int64]chan int64, x int64) int64 {\n"
         "\tdelete(m, 1)\n"
         "\treturn x\n}\n",
         # `a = nil` drops the backing token — `a[0]` afterwards
@@ -19637,6 +19755,22 @@ def test_container_builtin_dep_free_param_write_marks_effects(
         "\ta := <-cc\n"
         "\ta[0] = x\n"
         "\treturn a[0]\n}\n",
+        # `b := s[i]` on `[]St` — a struct element embeds no
+        # collection, so the extraction is a value copy with no
+        # shared backing and stays closed like `[][4]int64`.
+        "type St struct { A int64 }\n"
+        "func F(s []St, x int64) int64 {\n"
+        "\tb := s[0]\n"
+        "\tb.A = x\n"
+        "\treturn s[0].A\n}\n",
+        # `b = s[i]` — the reseat form stays closed for the same
+        # value-copy reason.
+        "type St struct { A int64 }\n"
+        "func F(s []St, x int64) int64 {\n"
+        "\tvar b St\n"
+        "\tb = s[0]\n"
+        "\tb.A = x\n"
+        "\treturn s[0].A\n}\n",
     ],
 )
 def test_scalar_container_unsupported_stays_closed(
@@ -19644,6 +19778,30 @@ def test_scalar_container_unsupported_stays_closed(
 ):
     result = named(*unit(go_types_helper, declarations))
     assert not result.available
+
+
+def test_scalar_container_nested_index_eval_order(go_types_helper):
+    # `s[Set(&v,x)][Get(v)].A.V` — Go evaluates the innermost index
+    # first, so `Set`'s write to `v` is visible when `Get(v)` runs.
+    # The outermost-first order dropped `x`: `Set` returns a
+    # constant, so the only way its argument lands is through
+    # `Get(v)` observing `v`'s post-`Set` set.
+    result = named(
+        *unit(
+            go_types_helper,
+            "type W struct{ V int64 }\n"
+            "type St struct{ A W }\n"
+            "func Set(v *int64, x int64) int64 { *v = x; return 0 }\n"
+            "func Get(v int64) int64 { return v }\n"
+            "func F(x int64) int64 {\n"
+            "\tvar v int64\n"
+            "\ts := [][]St{{St{A: W{V: 0}}}}\n"
+            "\treturn s[Set(&v, x)][Get(v)].A.V\n"
+            "}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
 
 
 @pytest.mark.parametrize(

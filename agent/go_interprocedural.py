@@ -1461,9 +1461,11 @@ class _Builder:
         return collection
 
     def _scalar_elem_collection(self, fact: Any) -> bool:
-        """A `[]T`/`[N]T`/`map[K]T` local whose elements are scalar
-        or pointer — `var a [4]int64`, `a := []int64{x}`,
-        `m := map[K]int{...}`. It rides the bound opaque-container
+        """A `[]T`/`[N]T`/`map[K]T` local whose elements are scalar,
+        pointer, or struct — `var a [4]int64`, `a := []int64{x}`,
+        `m := map[K]int{...}`, `s := []St{...}`. A struct element's
+        fields conflate into the element's set — `s[i].F = v` stores
+        like `s[i] = v` and `s[i].F` reads the group's deps. It rides the bound opaque-container
         model: one conflated dep set carries every element's
         provenance, `a[i] = v` lands in the backing every sharer
         reads, and `a[i]` unions the sharers' sets with the index's
@@ -1475,7 +1477,8 @@ class _Builder:
             fact is not None
             and fact.kind in {"slice", "array", "map"}
             and getattr(fact, "elem", None) is not None
-            and fact.elem.kind in {"integer", "boolean", "pointer"}
+            and fact.elem.kind
+            in {"integer", "boolean", "pointer", "struct"}
         )
         if collection:
             self._pin_fact_identities(fact)
@@ -1676,6 +1679,19 @@ class _Builder:
         inner index nodes (the elements conflate under the root `a`
         like the func-element collection-of-collection). A computed
         operand stays closed."""
+        # A selector chain (`s[i].F`, `s[i].F.G`) unwinds to its
+        # innermost operand first — the conflated element set cannot
+        # distinguish fields, so the field access rides the same
+        # index resolution.
+        while True:
+            while (
+                lhs is not None
+                and lhs.type == "parenthesized_expression"
+            ):
+                lhs = lhs.child_by_field_name("operand")
+            if lhs is None or lhs.type != "selector_expression":
+                break
+            lhs = lhs.child_by_field_name("operand")
         if lhs is None or lhs.type != "index_expression":
             return None
         operand = lhs.child_by_field_name("operand")
@@ -5191,17 +5207,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # `a[i] = <-ch` — a store into a bound container's
                 # backing lands the received deps (plus every index's
                 # own) in every sharer's set, like `a[i] = v` does.
-                index_deps = (
-                    self.expression(
-                        index_node, fn, params, locals_,
-                        transfers, count, 0,
-                    )
-                    if index_node is not None
-                    else frozenset()
-                )
-                for inner_index in inner_indexes or ():
+                # Indexes evaluate innermost-first (Go's order), so
+                # an effectful `a[Set(&v,x)][Get(v)]` reads the
+                # post-`Set` state in `Get(v)`.
+                index_deps = frozenset()
+                for inner_index in reversed(inner_indexes or ()):
                     index_deps |= self.expression(
                         inner_index, fn, params, locals_,
+                        transfers, count, 0,
+                    )
+                if index_node is not None:
+                    index_deps |= self.expression(
+                        index_node, fn, params, locals_,
                         transfers, count, 0,
                     )
                 self._record_read(index_deps)
@@ -10447,18 +10464,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     if inline:
                         opaque_elem_array_roots[ri] = oref.binding_id
                     opaque_elem_index_deps[ri] = frozenset()
-                    if (
-                        oindex is not None
-                        and oindex.type not in _INDEX_LITERALS
+                    # Innermost index first (Go's order) — an
+                    # effectful `a[Set(&v,x)][Get(v)]` reads `Set`'s
+                    # post-state inside `Get(v)`.
+                    for inner_index in reversed(
+                        inner_indexes or ()
                     ):
-                        opaque_elem_index_deps[ri] = self.expression(
-                            oindex, fn, params, locals_,
-                            transfers, count, 0,
-                        )
-                        self._record_read(
-                            opaque_elem_index_deps[ri]
-                        )
-                    for inner_index in inner_indexes or ():
                         if (
                             inner_index is not None
                             and inner_index.type
@@ -10473,6 +10484,17 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             self._record_read(
                                 opaque_elem_index_deps[ri]
                             )
+                    if (
+                        oindex is not None
+                        and oindex.type not in _INDEX_LITERALS
+                    ):
+                        opaque_elem_index_deps[ri] |= self.expression(
+                            oindex, fn, params, locals_,
+                            transfers, count, 0,
+                        )
+                        self._record_read(
+                            opaque_elem_index_deps[ri]
+                        )
                     continue
                 func_elem_lhs = self._func_elem_index_target(
                     lhs, locals_
@@ -14123,8 +14145,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 elem_value = self._opaque_container_deps(
                     ref.binding_id, locals_
                 )
-                for idx in (index_node,) + tuple(
-                    inner_indexes or ()
+                # Innermost index first (Go's order).
+                for idx in tuple(reversed(inner_indexes or ())) + (
+                    index_node,
                 ):
                     if idx is not None:
                         elem_value = elem_value | self.expression(
@@ -15805,6 +15828,99 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         transfers, count, depth + 1,
                     )
                     return deps
+            # `s[i].F[.G…]` — a field read on a bound container's
+            # struct element: the conflated element set covers the
+            # field like `s[i]` itself, so the read unions the group's
+            # deps with the indexes' own. A selector operand
+            # (`s[i].A.V`) escapes the pre-scan's index evaluation,
+            # so any index the pre-scan never evaluated runs here.
+            if member is None:
+                sel_operand = node.child_by_field_name("operand")
+                while (
+                    sel_operand is not None
+                    and sel_operand.type == "parenthesized_expression"
+                ):
+                    sel_operand = next(
+                        (
+                            c
+                            for c in sel_operand.named_children
+                            if c.type != "comment"
+                        ),
+                        None,
+                    )
+                container_idx = self._opaque_container_index_target(
+                    sel_operand
+                )
+                if container_idx is not None:
+                    cref = container_idx[0]
+                    cbound = self.bindings.get(cref.binding_id)
+                    extracted = getattr(cbound, "type", None)
+                    for _ in range(1 + len(container_idx[2] or ())):
+                        extracted = getattr(extracted, "elem", None)
+                    if extracted is not None and extracted.kind == "struct":
+                        deps = field_index_deps
+                        # Innermost index first (Go's order) —
+                        # `s[Set(&v,x)][Get(v)].A` reads `Set`'s
+                        # post-state inside `Get(v)`.
+                        for idx_node in reversed(
+                            (
+                                container_idx[1],
+                                *(container_idx[2] or ()),
+                            )
+                        ):
+                            if (
+                                idx_node is None
+                                or idx_node.type in _INDEX_LITERALS
+                                or self.node_key(idx_node)
+                                in field_index_nodes
+                            ):
+                                continue
+                            deps |= self.expression(
+                                idx_node, fn, params, locals_,
+                                transfers, count, 0,
+                            )
+                        # Walk the selector chain: each resolved
+                        # field pins its declared type identity (a
+                        # regenerated member report flags the summary
+                        # via `stale_dependents`), and a pointer
+                        # member means the leaf lives in pointee
+                        # memory the conflated set cannot cover — an
+                        # aliased store lands in `indirect_writes`,
+                        # so the read unions it.
+                        pointee = False
+                        sel = node
+                        while (
+                            sel is not None
+                            and sel.type == "selector_expression"
+                        ):
+                            fnode = sel.child_by_field_name("field")
+                            fref = (
+                                self.references.get(
+                                    self.node_key(fnode)
+                                )
+                                if fnode is not None
+                                else None
+                            )
+                            fmember = self._field_identity(fref)
+                            if fmember is not None:
+                                if fmember.type is not None:
+                                    self._pin_fact_identities(
+                                        fmember.type
+                                    )
+                                if (
+                                    getattr(
+                                        fmember.type, "kind", None
+                                    )
+                                    == "pointer"
+                                ):
+                                    pointee = True
+                            sel = sel.child_by_field_name("operand")
+                        deps |= self._opaque_container_deps(
+                            cref.binding_id, locals_
+                        )
+                        if pointee:
+                            deps |= self.indirect_writes
+                        return deps
             if (
                 member is None
                 or member.kind != "const"
