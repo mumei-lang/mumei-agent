@@ -31933,6 +31933,100 @@ def test_struct_field_root_scalar_element_writes_match_alias(
     ) == expected
 
 
+@pytest.mark.parametrize(
+    ("signature", "direct", "control"),
+    [
+        (
+            "o S2, x int64",
+            (
+                "var y int64\n"
+                "return o.A[Set(&y, x)].B[Get(&y)].V"
+            ),
+            (
+                "var y int64\n"
+                "i := Set(&y, x)\n"
+                "j := Get(&y)\n"
+                "return o.A[i].B[j].V"
+            ),
+        ),
+        (
+            "o S2, x, z int64",
+            (
+                "var y int64\n"
+                "o.A[Set(&y, x)].B[Get(&y)].V = z\n"
+                "return o.A[0].B[0].V"
+            ),
+            (
+                "var y int64\n"
+                "i := Set(&y, x)\n"
+                "j := Get(&y)\n"
+                "o.A[i].B[j].V = z\n"
+                "return o.A[0].B[0].V"
+            ),
+        ),
+        (
+            "o S2, x, z int64",
+            (
+                "var y int64\n"
+                "o.A[Set(&y, x)].B[Get(&y)].V += z\n"
+                "return o.A[0].B[0].V"
+            ),
+            (
+                "var y int64\n"
+                "i := Set(&y, x)\n"
+                "j := Get(&y)\n"
+                "o.A[i].B[j].V += z\n"
+                "return o.A[0].B[0].V"
+            ),
+        ),
+        (
+            "o S2, x int64",
+            (
+                "var y int64\n"
+                "o.A[Set(&y, x)].B[Get(&y)].V++\n"
+                "return o.A[0].B[0].V"
+            ),
+            (
+                "var y int64\n"
+                "i := Set(&y, x)\n"
+                "j := Get(&y)\n"
+                "o.A[i].B[j].V++\n"
+                "return o.A[0].B[0].V"
+            ),
+        ),
+    ],
+    ids=["read", "assign", "compound", "increment"],
+)
+def test_struct_field_root_scalar_element_nested_index_calls_follow_go_order(
+    go_types_helper, signature, direct, control
+):
+    declarations = (
+        "type B1 struct { V int64 }\n"
+        "type E struct { B []B1 }\n"
+        "type S2 struct { A []E }\n"
+        "func Set(p *int64, x int64) int64 { *p = x; return 0 }\n"
+        "func Get(p *int64) int64 { return *p }\n"
+    )
+    summaries = []
+    for body in (direct, control):
+        data = unit(
+            go_types_helper,
+            declarations + f"func F({signature}) int64 {{\n{body}\n}}\n",
+        )
+        result = named(*data)
+        assert result.available, result.gaps
+        assert 1 in result.return_dependencies
+        for callee in ("Set", "Get"):
+            target = named(*data, callee).binding_id
+            assert sum(
+                call.target == target for call in result.calls
+            ) == 1
+        summaries.append(result)
+    assert summaries[0].return_dependencies == (
+        summaries[1].return_dependencies
+    )
+
+
 def test_struct_field_array_element_copy_stays_isolated(go_types_helper):
     result = named(
         *unit(
