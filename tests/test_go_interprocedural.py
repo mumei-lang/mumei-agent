@@ -32118,6 +32118,238 @@ def test_effectful_calls_store_through_struct_collection_fields(
     assert result.return_dependencies == expected
 
 
+@pytest.mark.parametrize(
+    "signature,direct_body,bound_body,expected",
+    [
+        (
+            "a []int64, x int64",
+            "\tG(WA{A: a}, x)\n\treturn a[0]",
+            "\tw := WA{A: a}\n\tG(w, x)\n\treturn a[0]",
+            frozenset({0, 1}),
+        ),
+        (
+            "a []int64, x int64",
+            "\tG(WA{nil, a}, x)\n\treturn a[0]",
+            "\tw := WA{nil, a}\n\tG(w, x)\n\treturn a[0]",
+            frozenset({0, 1}),
+        ),
+        (
+            "x int64",
+            "\ta := make([]int64, 1)\n"
+            "\tG(WA{A: a}, x)\n"
+            "\treturn a[0]",
+            "\ta := make([]int64, 1)\n"
+            "\tw := WA{A: a}\n"
+            "\tG(w, x)\n"
+            "\treturn a[0]",
+            frozenset({0}),
+        ),
+        (
+            "x int64",
+            "\ta := make([]int64, 1)\n"
+            "\tb := a\n"
+            "\tG(WA{A: a}, x)\n"
+            "\treturn b[0]",
+            "\ta := make([]int64, 1)\n"
+            "\tb := a\n"
+            "\tw := WA{A: a}\n"
+            "\tG(w, x)\n"
+            "\treturn b[0]",
+            frozenset({0}),
+        ),
+        (
+            "x int64",
+            "\tm := map[int64]int64{}\n"
+            "\tGM(WM{M: m}, x)\n"
+            "\treturn m[0]",
+            "\tm := map[int64]int64{}\n"
+            "\tw := WM{M: m}\n"
+            "\tGM(w, x)\n"
+            "\treturn m[0]",
+            frozenset({0}),
+        ),
+        (
+            "x int64",
+            "\ta := make([]int64, 1)\n"
+            "\tGO(O{W: WA{A: a}}, x)\n"
+            "\treturn a[0]",
+            "\ta := make([]int64, 1)\n"
+            "\to := O{W: WA{A: a}}\n"
+            "\tGO(o, x)\n"
+            "\treturn a[0]",
+            frozenset({0}),
+        ),
+        (
+            "x int64",
+            "\ta := make([]int64, 1)\n"
+            "\tG((WA{A: a}), x)\n"
+            "\treturn a[0]",
+            "\ta := make([]int64, 1)\n"
+            "\tw := (WA{A: a})\n"
+            "\tG(w, x)\n"
+            "\treturn a[0]",
+            frozenset({0}),
+        ),
+        (
+            "x int64",
+            "\ta := make([]int64, 1)\n"
+            "\tWA{A: a}.Set(x)\n"
+            "\treturn a[0]",
+            "\ta := make([]int64, 1)\n"
+            "\tw := WA{A: a}\n"
+            "\tw.Set(x)\n"
+            "\treturn a[0]",
+            frozenset({0}),
+        ),
+        (
+            "x int64",
+            "\ta := make([]int64, 1)\n"
+            "\tgo G(WA{A: a}, x)\n"
+            "\treturn a[0]",
+            "\ta := make([]int64, 1)\n"
+            "\tw := WA{A: a}\n"
+            "\tgo G(w, x)\n"
+            "\treturn a[0]",
+            frozenset({0}),
+        ),
+        (
+            "o O, x int64",
+            "\tG(o.W, x)\n\treturn o.W.A[0]",
+            "\tw := o.W\n\tG(w, x)\n\treturn o.W.A[0]",
+            frozenset({0, 1}),
+        ),
+        (
+            "x int64",
+            "\ta := make([]int64, 1)\n"
+            "\to := O{W: WA{A: a}}\n"
+            "\tG(o.W, x)\n"
+            "\treturn a[0]",
+            "\ta := make([]int64, 1)\n"
+            "\to := O{W: WA{A: a}}\n"
+            "\tw := o.W\n"
+            "\tG(w, x)\n"
+            "\treturn a[0]",
+            frozenset({0}),
+        ),
+        (
+            "o O, x int64",
+            "\to.W.Set(x)\n\treturn o.W.A[0]",
+            "\tw := o.W\n\tw.Set(x)\n\treturn o.W.A[0]",
+            frozenset({0, 1}),
+        ),
+    ],
+    ids=[
+        "keyed-literal",
+        "positional-literal",
+        "local-make",
+        "local-alias",
+        "map-field",
+        "nested-literal",
+        "parenthesized-literal",
+        "literal-receiver",
+        "go-call",
+        "parameter-field",
+        "local-field",
+        "field-receiver",
+    ],
+)
+def test_struct_expression_call_writes_match_bound_temporaries(
+    go_types_helper, signature, direct_body, bound_body, expected
+):
+    declarations = (
+        "type I interface { M(int64) int64 }\n"
+        "type WA struct { i I; A []int64 }\n"
+        "type WM struct { M map[int64]int64 }\n"
+        "type O struct { W WA }\n"
+        "func G(w WA, x int64) { w.A[0] = x }\n"
+        "func GP(w *WA, x int64) { w.A[0] = x }\n"
+        "func GM(w WM, x int64) { w.M[0] = x }\n"
+        "func GO(o O, x int64) { o.W.A[0] = x }\n"
+        "func (w WA) Set(x int64) { w.A[0] = x }\n"
+    )
+
+    def analyze(body):
+        source = (
+            declarations
+            + f"func F({signature}) int64 {{\n{body}\n}}\n"
+        )
+        return named(*unit(go_types_helper, source))
+
+    direct = analyze(direct_body)
+    bound = analyze(bound_body)
+    assert direct.available, direct.gaps
+    assert bound.available, bound.gaps
+    assert direct.return_dependencies == bound.return_dependencies
+    assert direct.return_dependencies == expected
+
+
+def test_struct_expression_call_write_negative_controls(go_types_helper):
+    declarations = (
+        "type I interface { M(int64) int64 }\n"
+        "type WA struct { i I; A []int64 }\n"
+        "type P struct { V int64 }\n"
+        "func G(w WA, x int64) { w.A[0] = x }\n"
+        "func GP(w *WA, x int64) { w.A[0] = x }\n"
+        "func GP2(p P, x int64) {}\n"
+    )
+    fresh = named(
+        *unit(
+            go_types_helper,
+            declarations
+            + "func F(x int64) int64 {\n"
+            "\ta := make([]int64, 1)\n"
+            "\tG(WA{A: make([]int64, 1)}, x)\n"
+            "\treturn a[0]\n}\n",
+        )
+    )
+    assert fresh.available
+    assert fresh.return_dependencies == frozenset()
+
+    scalar = named(
+        *unit(
+            go_types_helper,
+            declarations
+            + "func F(v, x int64) int64 {\n"
+            "\tGP2(P{V: v}, x)\n"
+            "\treturn v\n}\n",
+        )
+    )
+    assert not scalar.available
+    assert {gap.reason for gap in scalar.gaps} == {
+        "callee_unsupported"
+    }
+
+    address = named(
+        *unit(
+            go_types_helper,
+            declarations
+            + "func F(x int64) int64 {\n"
+            "\ta := make([]int64, 1)\n"
+            "\tGP(&WA{A: a}, x)\n"
+            "\treturn a[0]\n}\n",
+        )
+    )
+    assert not address.available
+    assert {gap.reason for gap in address.gaps} == {
+        "unsupported_operator"
+    }
+
+    slice_expression = named(
+        *unit(
+            go_types_helper,
+            declarations
+            + "func F(x int64) int64 {\n"
+            "\ta := make([]int64, 2)\n"
+            "\tG(WA{A: a[1:]}, x)\n"
+            "\treturn a[1]\n}\n",
+        )
+    )
+    assert not slice_expression.available
+    assert {gap.reason for gap in slice_expression.gaps} == {
+        "unsupported_expression"
+    }
+
+
 def test_struct_field_argument_writes_reach_field_holders(go_types_helper):
     result = named(
         *unit(
