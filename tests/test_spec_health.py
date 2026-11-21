@@ -127,6 +127,58 @@ class TestCheckVacuity:
         checker = SpecHealthChecker()
         assert checker.check_vacuity(verify_result) == []
 
+    def test_uses_structured_diagnostic_atom_and_message(self) -> None:
+        message = (
+            "Verification Error: Specification is vacuous: surviving mutants "
+            "[constant:1->0@0]; tested 1, killed 0, unanalyzable 0."
+        )
+        report = {
+            "diagnostics": [
+                {
+                    "atom": "weak_spec",
+                    "code": "failed",
+                    "message": message,
+                    "severity": "error",
+                    "tags": ["failed", "z3_sat"],
+                }
+            ]
+        }
+        result = SpecHealthChecker().check_vacuity(
+            {"report": report, "stdout": json.dumps(report), "stderr": ""}
+        )
+
+        assert len(result) == 1
+        assert result[0].atom == "weak_spec"
+        assert result[0].message == message
+
+    def test_collects_structured_vacuity_diagnostics_for_each_atom(self) -> None:
+        report = {
+            "diagnostics": [
+                {"atom": "first_atom", "message": "Specification is vacuous."},
+                {"atom": "second_atom", "message": "Verification is VACUOUS."},
+            ]
+        }
+        result = SpecHealthChecker().check_vacuity(
+            {"report": report, "stdout": json.dumps(report), "stderr": ""}
+        )
+
+        assert [item.atom for item in result] == ["first_atom", "second_atom"]
+
+    def test_ignores_structured_non_vacuity_diagnostic(self) -> None:
+        report = {
+            "diagnostics": [
+                {
+                    "atom": "failed_atom",
+                    "message": "Verification Error: postcondition violated",
+                }
+            ]
+        }
+        result = SpecHealthChecker().check_vacuity(
+            {"report": report, "stdout": json.dumps(report), "stderr": ""}
+        )
+
+        assert result == []
+
 
 # ---------------------------------------------------------------------------
 # SpecHealthChecker — check_all
