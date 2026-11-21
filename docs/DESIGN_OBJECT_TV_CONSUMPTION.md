@@ -26,14 +26,17 @@ Core has also landed `native-bundle recheck-machine-tv` and its
 `mumei.machine-code-tv/v1` descriptor. The agent's
 `native-machine-tv-recheck` route consumes only descriptor-listed checks for
 leaf straight-line, bounded forward-branch, and acyclic backward-branch
-pure-i64 functions under an assumed register convention. Direct calls,
-including calls inside branching functions, are compared as uninterpreted
-call sites; conditional-call functions use per-path guarded call matching.
-Core #1210 adds `machine_code_conditional_call_function_tv`, consumed only
-when listed in `checks_performed`. Cyclic control flow and loops remain
-outside the profile. `object_translation_correspondence` stays unperformed;
-the route is not an ABI, runtime or full object-TV claim and is not a
-recovery performer.
+pure-i64 functions under an assumed, not validated, register convention.
+Direct calls, including calls inside branching functions, are compared as
+uninterpreted call sites; conditional-call functions use per-path guarded call
+matching. Core #1210 adds `machine_code_conditional_call_function_tv`, and
+Core #1227 adds `machine_code_bounded_loop_function_tv`; both are consumed
+only when listed in `checks_performed`. Core uses `LOOP_BOUND=4` for bounded
+loops, with `_and_loops_exiting_within_bound_4` in the input-domain string.
+Executions beyond the bound, cancellation/runtime semantics and other cyclic
+control flow remain outside the profile. `object_translation_correspondence`
+stays unperformed; the route is not an ABI, runtime or full object-TV claim
+and is not a recovery performer.
 The C `main` wrapper, CRT, loader and libc remain outside the profile, so the
 `object_translation_correspondence` performer and `accept-object` route
 remain deferred.

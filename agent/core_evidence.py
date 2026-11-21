@@ -1552,8 +1552,11 @@ RUNTIME_CHECK_VOCABULARY = frozenset(
 # cover straight-line TV under an assumed register convention; calls are
 # compared as uninterpreted sites. Forward-branch and acyclic backward-branch
 # function TV are also bounded. Conditional-call TV matches uninterpreted
-# call sites along each guarded path in branching functions. Cyclic control
-# flow (loops) remains outside the profile. These checks do not establish ABI
+# call sites along each guarded path in branching functions. Bounded-loop
+# function TV is limited to Core's LOOP_BOUND=4 profile. Executions beyond
+# that bound, cancellation/runtime semantics and other cyclic control flow
+# remain outside; the loop input domain carries
+# `_and_loops_exiting_within_bound_4`. These checks do not establish ABI
 # behavior or full object TV. object_translation_correspondence is the full
 # object-TV check; none is a recovery performer or makes a linker, loader,
 # ABI, or runtime claim.
@@ -1563,6 +1566,7 @@ OBJECT_CHECK_VOCABULARY = frozenset(
         "object_link_correspondence",
         "object_symbol_correspondence",
         "object_translation_correspondence",
+        "machine_code_bounded_loop_function_tv",
         "machine_code_leaf_function_tv",
         "machine_code_direct_call_site_tv",
         "machine_code_forward_branch_function_tv",

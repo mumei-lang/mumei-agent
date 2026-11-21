@@ -8,16 +8,19 @@ channel build ID; dispatch records one fresh attempt and publishes reconciled
 lineage compare-and-set.
 
 Core runs the object reproduction and correspondence pipeline, then compares
-leaf straight-line, forward-branch, and acyclic backward-branch functions
-with pure-i64 source models under an assumed register convention. Direct
-calls, including calls inside branching functions, are compared as
-uninterpreted call sites; conditional-call functions use per-path guarded
-call matching. The agent consumes
-`machine_code_conditional_call_function_tv` only when the matching
-`mumei.machine-code-tv/v1` descriptor lists it in `checks_performed`. Cyclic
-control flow and loops remain outside the profile. This is not an ABI, full
-object translation, runtime or historical-execution claim. The C `main`
-wrapper, CRT, loader and libc are outside the profile;
+leaf straight-line, forward-branch, acyclic backward-branch, and bounded-loop
+functions (LOOP_BOUND=4) with pure-i64 source models under an assumed
+register convention. Direct calls, including calls inside branching
+functions, are compared as uninterpreted call sites; conditional-call
+functions use per-path guarded call matching. The agent consumes machine-TV
+object checks only when the matching `mumei.machine-code-tv/v1` descriptor
+lists them in `checks_performed`. Bounded loops use Core's `LOOP_BOUND=4`,
+with `_and_loops_exiting_within_bound_4` in the input-domain string.
+Executions beyond the bound, cancellation/runtime semantics and other cyclic
+control flow remain outside the profile. The register convention is assumed,
+not validated. This is not an ABI, full object translation, runtime or
+historical-execution claim. The C `main` wrapper, CRT, loader and libc are
+outside the profile;
 `object_translation_correspondence` stays unperformed. This recheck report is
 never a recovery performer.
 """
@@ -174,10 +177,15 @@ def build_machine_tv_recheck_parser(
         parser = argparse.ArgumentParser(prog="native-machine-tv-recheck")
     parser.description = (
         "Run Core's bounded leaf straight-line, forward-branch, acyclic "
-        "backward-branch and conditional-call machine-code TV recheck; direct "
-        "calls remain uninterpreted sites, including inside branching "
-        "functions with per-path guarded call matching; cyclic control flow, "
-        "loops, ABI/runtime semantics and full object TV stay outside."
+        "backward-branch, conditional-call and LOOP_BOUND=4 bounded-loop "
+        "machine-code TV recheck; direct calls remain uninterpreted sites, "
+        "including inside branching functions with per-path guarded call "
+        "matching; bounded loops use the "
+        "`_and_loops_exiting_within_bound_4` input-domain suffix when listed "
+        "by the descriptor; executions beyond the bound, cancellation/runtime "
+        "semantics and other cyclic control flow stay outside. The register "
+        "convention is assumed, not validated; this is not an ABI or full "
+        "object-TV claim."
     )
     parser.add_argument(
         "--core",

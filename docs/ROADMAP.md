@@ -7135,12 +7135,16 @@ listed in `checks_performed`. Core #1209 adds
 `machine_code_acyclic_branch_function_tv`, also consumed only when listed in
 `checks_performed`. Core #1210 adds
 `machine_code_conditional_call_function_tv`, also consumed only when listed
-in `checks_performed`. The profile covers leaf straight-line functions,
-bounded forward and acyclic backward branches, and direct calls as
+in `checks_performed`. Core #1227 adds
+`machine_code_bounded_loop_function_tv`, consumed only when listed there.
+Core compares bounded loops with `LOOP_BOUND=4`; the input-domain string
+includes `_and_loops_exiting_within_bound_4`. Executions beyond the bound,
+cancellation/runtime semantics and other cyclic control flow remain outside
+the profile. The profile covers leaf straight-line functions, bounded
+forward and acyclic backward branches, bounded loops, and direct calls as
 uninterpreted call sites, including calls inside branching functions with
-per-path guarded call matching, under an assumed register convention. Cyclic
-control flow and loops remain outside the profile (Core lists
-`machine_code_tv_cyclic_control_flow_functions` as not performed). The C `main`
+per-path guarded call matching, under an assumed, not validated, register
+convention. The C `main`
 wrapper, CRT, loader and libc also remain outside its scope, so
 `object_translation_correspondence` stays unperformed. Other outcomes leave
 the full C02 and object-check vocabularies unperformed; mid-run input drift
