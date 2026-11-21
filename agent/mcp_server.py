@@ -4646,16 +4646,18 @@ def native_machine_tv_recheck(
     expected_build_id: str,
     attempt_timeout_ms: int = 60000,
 ) -> str:
-    """Check bounded leaf, direct-call, forward-branch, and acyclic-branch TV.
+    """Check bounded leaf, branch, and conditional-call machine-code TV.
 
     Runs `native-bundle recheck-machine-tv --json` as one declared attempt —
     the same wiring as the `native-machine-tv-recheck` CLI route. Core runs
     the object reproduction and correspondence pipeline, then checks
     leaf straight-line, forward-branch, and acyclic backward-branch functions
-    against pure-i64 source models under an assumed register convention;
-    direct calls are compared as uninterpreted sites. Cyclic control flow and
-    loops stay outside the profile. Only object checks listed in a matching
-    `mumei.machine-code-tv/v1` descriptor are discharged. The report counts
+    against pure-i64 source models under an assumed register convention.
+    Direct calls, including calls inside branching functions, are compared as
+    uninterpreted sites; conditional-call functions use per-path guarded call
+    matching. Only object checks listed in a matching
+    `mumei.machine-code-tv/v1` descriptor are discharged. Cyclic control flow
+    and loops stay outside the profile. The report counts
     function outcomes without exposing function names, and echoes convention
     and input-domain fields only when they are strings of at most 256
     characters. The C `main` wrapper, CRT, loader and libc are outside the

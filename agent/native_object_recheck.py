@@ -17,7 +17,8 @@ instruction-selection, register-allocation, linker-semantics, ABI, runtime
 or historical-execution claim. `machine_code_leaf_function_tv`,
 `machine_code_direct_call_site_tv`,
 `machine_code_forward_branch_function_tv`,
-`machine_code_acyclic_branch_function_tv` and
+`machine_code_acyclic_branch_function_tv`,
+`machine_code_conditional_call_function_tv` and
 `object_translation_correspondence` stay unperformed. This recheck report is
 never a recovery performer.
 """
@@ -51,6 +52,7 @@ OBJECT_RECHECK_CHECKS = OBJECT_CHECK_VOCABULARY - {
     "machine_code_direct_call_site_tv",
     "machine_code_forward_branch_function_tv",
     "machine_code_acyclic_branch_function_tv",
+    "machine_code_conditional_call_function_tv",
     "object_translation_correspondence",
 }
 
