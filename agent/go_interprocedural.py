@@ -2286,7 +2286,18 @@ class _Builder:
                         ),
                         None,
                     )
-                if extra is None or extra.type != "identifier":
+                if extra is None:
+                    continue
+                if extra.type == "index_expression":
+                    # `s = append(s, t[0])` — the appended queue is a
+                    # member of `t`'s chan share group; the result
+                    # carries that group's member identities like a
+                    # `[]chan{t[0]}` literal seed would.
+                    target = self._chan_elem_index_target(extra)
+                    if target is not None:
+                        toks |= set(self._chan_group_members(target[0]))
+                    continue
+                if extra.type != "identifier":
                     continue
                 extra_ref = self.references.get(self.node_key(extra))
                 extra_binding = (
@@ -2339,7 +2350,17 @@ class _Builder:
                     ),
                     None,
                 )
-            if extra is None or extra.type != "identifier":
+            if extra is None:
+                continue
+            if extra.type == "index_expression":
+                # `s = append(s, t[0])` — under the element
+                # conflation every member of `t`'s group may be the
+                # appended queue, so all of them join the result's.
+                target = self._chan_elem_index_target(extra)
+                if target is not None:
+                    out.extend(self._chan_group_members(target[0]))
+                continue
+            if extra.type != "identifier":
                 continue
             extra_ref = self.references.get(self.node_key(extra))
             extra_binding = (
@@ -2354,6 +2375,23 @@ class _Builder:
             ):
                 out.append(self._chan_root(extra_ref.binding_id))
         return out
+
+    def _chan_group_members(self, root_id: str) -> list[str]:
+        """Member queue identities of a chan-element container's share
+        group — the tokens inside the holders' sets that own a token
+        entry of their own (the entry is what makes them members; a
+        backing key or a holder's own id does not)."""
+        members: set[str] = set()
+        for holder in self._opaque_container_holders(
+            self._opaque_container_tokens.get(root_id, frozenset())
+        ) | {root_id}:
+            for tok in self._opaque_container_tokens.get(holder, ()):
+                if (
+                    isinstance(tok, str)
+                    and tok in self._opaque_container_tokens
+                ):
+                    members.add(tok)
+        return sorted(members)
 
     def _opaque_container_bind(
         self, rhs: Any

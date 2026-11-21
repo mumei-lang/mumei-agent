@@ -20939,6 +20939,32 @@ def test_chan_elem_external_unsupported_stays_closed(
             "\treturn <-s[1]\n}\n",
             frozenset({0}),
         ),
+        # `s = append(s, t[0])` — an element-expression extra joins
+        # the source container's member queues the same way.
+        (
+            "func F(x int64) int64 {\n"
+            "\tc1 := make(chan int64, 4)\n"
+            "\tc2 := make(chan int64, 4)\n"
+            "\ts := []chan int64{c1}\n"
+            "\tt := []chan int64{c2}\n"
+            "\ts = append(s, t[0])\n"
+            "\tc2 <- x\n"
+            "\treturn <-s[1]\n}\n",
+            frozenset({0}),
+        ),
+        # The send direction through an element-expression extra:
+        # `s[1] <- x` deposits into `t`'s member queues too.
+        (
+            "func F(x int64) int64 {\n"
+            "\tc1 := make(chan int64, 4)\n"
+            "\tc2 := make(chan int64, 4)\n"
+            "\ts := []chan int64{c1}\n"
+            "\tt := []chan int64{c2}\n"
+            "\ts = append(s, t[0])\n"
+            "\ts[1] <- x\n"
+            "\treturn <-c2\n}\n",
+            frozenset({0}),
+        ),
     ],
 )
 def test_chan_elem_append(go_types_helper, declarations, expected):
