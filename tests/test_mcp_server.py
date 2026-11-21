@@ -162,6 +162,7 @@ class TestGetAgentStatus:
         assert "get_spec_guidelines" in registered
         assert "native_observations_accept" in registered
         assert "native_observations_recheck" in registered
+        assert "native_object_recheck" in registered
         assert "send_latent_message" in registered
         assert "verify_code_spec_traceability" in registered
         assert "evidence_acceptance_eval" in registered

@@ -63,6 +63,13 @@ def test_recovery_statuses():
 
 
 def test_native_check_vocabularies_are_pairwise_disjoint():
+    assert OBJECT_CHECK_VOCABULARY == frozenset(
+        {
+            "object_call_edge_correspondence",
+            "object_symbol_correspondence",
+            "object_translation_correspondence",
+        }
+    )
     assert CHECK_VOCABULARY.isdisjoint(RUNTIME_CHECK_VOCABULARY)
     assert CHECK_VOCABULARY.isdisjoint(OBJECT_CHECK_VOCABULARY)
     assert RUNTIME_CHECK_VOCABULARY.isdisjoint(OBJECT_CHECK_VOCABULARY)
@@ -658,6 +665,34 @@ def test_native_observations_recheck_does_not_perform_same_build():
     assert evaluation["checks"] == {
         check: "no_evidence" for check in sorted(RUNTIME_CHECK_VOCABULARY)
     }
+
+
+def test_native_object_recheck_does_not_perform_object_checks():
+    build_id = "a" * 64
+    record = _record(*sorted(OBJECT_CHECK_VOCABULARY))
+    record["expected_build_id"] = build_id
+    evidence = _doc(
+        "mumei.native-object-recheck-report/v1",
+        object_recheck="corresponds",
+        object_correspondence_schema="mumei.object-symbol-correspondence/v1",
+        expected_build_id=build_id,
+        discharged_checks=[
+            "artifact_semantics",
+            "claim_truth",
+            "object_symbol_correspondence",
+            "object_call_edge_correspondence",
+        ],
+        checks_not_performed=["object_translation_correspondence"],
+        normalized={"stdout": {"sha256": "b" * 64}},
+    )
+    evaluation = evaluate_unperformed_check_recovery(
+        record, [evidence], record_digest="c" * 64,
+    )
+    assert evaluation["checks"] == {
+        check: "no_evidence" for check in sorted(OBJECT_CHECK_VOCABULARY)
+    }
+    assert evaluation["recovered"] == []
+    assert evaluation["unrecovered"] == sorted(OBJECT_CHECK_VOCABULARY)
 
 
 def test_native_accept_reports_recover_sibling_channels_by_shared_build_id():
