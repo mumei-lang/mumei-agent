@@ -12,6 +12,7 @@ from agent.dependency_invalidation import (
     CHECKS_NOT_PERFORMED,
     SCHEMA_VERSION,
     _declared_import_targets,
+    _scan_import_declarations,
     dependency_invalidation_map,
 )
 from agent.proliferate_healing import check_blast_radius
@@ -57,10 +58,55 @@ class TestDeclaredImportTargets:
 
     def test_malformed_lines_ignored(self):
         assert _declared_import_targets("import std/core as core;") == []
-        assert _declared_import_targets('import "std/core"') == []
+        assert _scan_import_declarations("import std/core as core;") == ([], 1)
+        assert _scan_import_declarations('import "std/core"') == (
+            ["std/core"],
+            0,
+        )
+
+    def test_import_can_span_lines(self):
+        assert _scan_import_declarations('import\n  "std/a"\n  as a;') == (
+            ["std/a"],
+            0,
+        )
+
+    def test_multiple_imports_on_one_line(self):
+        assert _scan_import_declarations('import "std/a"; import "std/b" as b;') == (
+            ["std/a", "std/b"],
+            0,
+        )
+
+    def test_import_inside_string_literal_is_ignored(self):
+        assert _scan_import_declarations(r'let x = "import \"std/hidden\"";') == ([], 0)
+
+    def test_comment_marker_inside_string_and_trailing_comment(self):
+        assert _scan_import_declarations(
+            'import "std/a//b"; // import "std/ignored";\n'
+        ) == (["std/a//b"], 0)
+
+    def test_escaped_quote_in_import_path(self):
+        assert _scan_import_declarations(r'import "std/quoted\"path";') == (
+            ['std/quoted"path'],
+            0,
+        )
+
+    def test_import_prefix_identifier_is_not_an_import(self):
+        assert _scan_import_declarations('import_x "std/a";') == ([], 0)
 
 
 class TestInvalidationMap:
+    def test_malformed_import_is_undetermined(self, tmp_path):
+        repo = _repo(
+            tmp_path,
+            {
+                "a.mm": "import std/core as core;\n",
+                "core.mm": "atom core()\n    requires: true;\n",
+            },
+        )
+        m = dependency_invalidation_map(repo / "std", "std/other.mm")
+        assert m["unresolved_imports"] == {"std/a.mm": ["<malformed import>"]}
+        assert m["undetermined"] == ["std/a.mm"]
+
     def test_linear_chain(self, tmp_path):
         repo = _repo(
             tmp_path,

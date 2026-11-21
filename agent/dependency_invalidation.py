@@ -12,8 +12,6 @@ import posixpath
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
-from agent.gap_rules import _IMPORT_RE
-
 SCHEMA_VERSION = "mumei.std-dependency-invalidation/v1"
 IMPLICIT_IMPORTS = ("std/prelude.mm",)
 
@@ -26,14 +24,69 @@ CHECKS_NOT_PERFORMED = [
 ]
 
 
-def _declared_import_targets(text: str) -> list[str]:
-    """Return raw ``import "..."`` targets in declaration order."""
+def _scan_import_declarations(text: str) -> tuple[list[str], int]:
+    """Return import string targets and malformed import declaration count."""
+    tokens: list[tuple[str, str]] = []
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char.isspace():
+            index += 1
+            continue
+        if text.startswith("//", index):
+            newline = text.find("\n", index)
+            index = len(text) if newline == -1 else newline + 1
+            continue
+        if char == '"':
+            index += 1
+            value: list[str] = []
+            while index < len(text):
+                char = text[index]
+                index += 1
+                if char == '"':
+                    break
+                if char == "\\":
+                    if index == len(text):
+                        value.append("\\")
+                        break
+                    escaped = text[index]
+                    index += 1
+                    escapes = {"n": "\n", "t": "\t", "\\": "\\", '"': '"'}
+                    value.append(escapes.get(escaped, "\\" + escaped))
+                else:
+                    value.append(char)
+            tokens.append(("string", "".join(value)))
+            continue
+        if char.isascii() and (char.isalpha() or char == "_"):
+            end = index + 1
+            while end < len(text):
+                next_char = text[end]
+                if not (
+                    next_char.isascii() and (next_char.isalnum() or next_char == "_")
+                ):
+                    break
+                end += 1
+            tokens.append(("identifier", text[index:end]))
+            index = end
+            continue
+        tokens.append(("punct", char))
+        index += 1
+
     targets: list[str] = []
-    for line in text.splitlines():
-        match = _IMPORT_RE.match(line)
-        if match:
-            targets.append(match.group(1).strip())
-    return targets
+    malformed_count = 0
+    for token_index, (kind, value) in enumerate(tokens):
+        if kind == "identifier" and value == "import":
+            next_token = tokens[token_index + 1 : token_index + 2]
+            if next_token and next_token[0][0] == "string":
+                targets.append(next_token[0][1])
+            else:
+                malformed_count += 1
+    return targets, malformed_count
+
+
+def _declared_import_targets(text: str) -> list[str]:
+    """Return import string targets in declaration order."""
+    return _scan_import_declarations(text)[0]
 
 
 def _resolve_import_target(
@@ -82,12 +135,15 @@ def _build_import_graph(
 
         dependencies: set[str] = set()
         missing: list[str] = []
-        for target in _declared_import_targets(text):
+        targets, malformed_count = _scan_import_declarations(text)
+        for target in targets:
             dependency = _resolve_import_target(target, key, file_keys)
             if dependency is None:
                 missing.append(target)
             elif dependency != key:
                 dependencies.add(dependency)
+        if malformed_count:
+            missing.append("<malformed import>")
         if missing:
             unresolved[key] = missing
         graph[key] = sorted(dependencies)
