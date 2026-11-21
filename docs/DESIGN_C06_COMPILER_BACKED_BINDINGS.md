@@ -64,8 +64,9 @@ mumei-agent の環境で実出力を採取していない。実装スライス�
 
 ### 3.2 受理条件（チェックリストとの対応）
 
-1. オーバーロード・継承・modifier・builtin で、lexical 側が `unresolved` / `opaque_overload` の参照が、
-   compiler 側では具体的な宣言に解決される positive fixture。
+1. オーバーロード・継承・modifier で、lexical 側が `unresolved` / `opaque_overload` の参照が、
+   compiler 側では具体的な宣言に解決される positive fixture。builtin の参照は宣言 span に解決せず、
+   `builtin` として記録されることを確認する fixture。
 2. import を含むソース、コンパイルエラー、ソース不一致、許可外バージョン、出力の切り詰めがすべて
    選択なし（fail-closed）になる negative fixture。
 3. inline assembly・低レベル呼び出し（`call` / `delegatecall`）・関数型の値は、compiler 側で宣言が
