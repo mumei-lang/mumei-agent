@@ -39,6 +39,16 @@ _PRELUDE_NAMES = frozenset(
         "u128", "usize", "f32", "f64", "Self",
     }
 )
+_PRELUDE_TYPE_NAMES = frozenset(
+    {
+        "Vec", "String", "Box", "Option", "Result", "Default", "Clone",
+        "Copy", "Iterator", "ToString", "ToOwned", "AsRef", "AsMut",
+        "Borrow", "Into", "From", "TryFrom", "TryInto", "Send", "Sync",
+        "Sized", "Unpin", "Fn", "FnMut", "FnOnce", "bool", "char", "str",
+        "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32",
+        "u64", "u128", "usize", "f32", "f64", "Self",
+    }
+)
 _PRELUDE_PATTERN_PATHS = frozenset({"Some", "None", "Ok", "Err"})
 _INERT_ATTRIBUTES = frozenset(
     {
@@ -119,7 +129,7 @@ class _Scope:
 @dataclass
 class _Record:
     binding: Binding
-    owner_function: str
+    owner_function: str | None
     module_depth: int
     item: bool
     alias_node: Any = None
@@ -228,7 +238,7 @@ class _RustBindings:
         name_node: Any,
         kind: str,
         scope: ByteSpan | None,
-        owner: str,
+        owner: str | None,
         module_depth: int,
         *,
         item: bool,
@@ -341,11 +351,18 @@ class _RustBindings:
                     node,
                     scope,
                     owner_function=(
-                        record.binding.id if kind == "function" else scope.function_id
+                        record.binding.id
+                        if kind == "function"
+                        else None
+                        if node.type == "trait_item"
+                        else scope.function_id
                     ),
+                    inherit_scope_function=node.type != "trait_item",
                 )
             elif node.type == "impl_item":
-                self._add_generic_parameters(node, scope)
+                self._add_generic_parameters(
+                    node, scope, inherit_scope_function=False
+                )
             elif node.type in {"extern_block", "foreign_mod_item"}:
                 body = node.child_by_field_name("body")
                 if body is None:
@@ -455,6 +472,7 @@ class _RustBindings:
         scope: _Scope,
         *,
         owner_function: str | None = None,
+        inherit_scope_function: bool = True,
     ) -> None:
         parameters = node.child_by_field_name("type_parameters")
         if parameters is None:
@@ -484,11 +502,63 @@ class _RustBindings:
                 name_node,
                 "generic_parameter",
                 item_scope,
-                scope.function_id if owner_function is None else owner_function,
+                (
+                    scope.function_id
+                    if owner_function is None and inherit_scope_function
+                    else owner_function
+                ),
                 scope.module_depth,
                 item=False,
                 generic_kind=generic_kind,
                 type_node=annotation,
+            )
+            self._add_to_scope(scope, record)
+
+    def _add_higher_ranked_lifetimes(self, node: Any) -> None:
+        if node.type == "higher_ranked_trait_bound":
+            parameters = node.child_by_field_name("type_parameters")
+            binder_scope = self.span(node)
+        elif node.type == "function_type":
+            parameters = next(
+                (
+                    child
+                    for child in self._children(node)
+                    if child.type == "for_lifetimes"
+                ),
+                None,
+            )
+            binder_scope = self.span(node)
+        else:
+            return
+        if parameters is None or not self.scopes:
+            return
+        scope = self.scopes[-1]
+        for parameter in self._children(parameters):
+            name_node = (
+                parameter.child_by_field_name("name")
+                if parameter.type == "lifetime_parameter"
+                else parameter
+                if parameter.type == "lifetime"
+                else None
+            )
+            if name_node is None:
+                continue
+            name = self._normalize_identifier(self.text(name_node))
+            if any(
+                record.binding.kind == "generic_parameter"
+                and record.binding.span == self.span(name_node)
+                and record.binding.scope == binder_scope
+                for record in scope.bindings.get(name, ())
+            ):
+                continue
+            record = self._make_record(
+                name_node,
+                "generic_parameter",
+                binder_scope,
+                self.current_function or None,
+                scope.module_depth,
+                item=False,
+                generic_kind="lifetime",
             )
             self._add_to_scope(scope, record)
 
@@ -508,6 +578,7 @@ class _RustBindings:
                 in {"function_item", "function_signature_item"}
             ):
                 continue
+            self._add_higher_ranked_lifetimes(candidate)
             if candidate.type in {"scoped_identifier", "scoped_type_identifier"}:
                 self._record_qualified_path(candidate)
                 continue
@@ -556,7 +627,7 @@ class _RustBindings:
         )
         if type_record is not None:
             record = type_record
-        else:
+        elif type_boundary is None and name not in _PRELUDE_TYPE_NAMES:
             value_record, value_boundary = self._lookup_with_boundary(
                 name, node.start_byte, "value"
             )
@@ -576,6 +647,17 @@ class _RustBindings:
                 if unresolved not in self.unresolved:
                     self.unresolved.append(unresolved)
                 return
+        else:
+            value_boundary = None
+            record = None
+        if record is None:
+            reason = type_boundary or value_boundary or (
+                "prelude_name" if name in _PRELUDE_NAMES else "unknown_name"
+            )
+            unresolved = Unresolved(self.span(node), name, reason)
+            if unresolved not in self.unresolved:
+                self.unresolved.append(unresolved)
+            return
         reference = Reference(self.span(node), record.binding.id, "read")
         if reference not in self.references:
             self.references.append(reference)
@@ -683,15 +765,21 @@ class _RustBindings:
             return
         if node.type in {"impl_item", "trait_item"}:
             body = node.child_by_field_name("body")
-            self._generic_references(node.child_by_field_name("type_parameters"))
-            self._generic_references(self._where_clause(node))
-            if node.type == "impl_item":
-                self._generic_references(node.child_by_field_name("type"))
-            if body is not None:
-                old_extern = self.in_extern
+            old_function, old_owner = self.current_function, self.call_owner
+            old_extern = self.in_extern
+            self.current_function = ""
+            self.call_owner = ""
+            try:
+                self._generic_references(node.child_by_field_name("type_parameters"))
+                self._generic_references(self._where_clause(node))
+                if node.type == "impl_item":
+                    self._generic_references(node.child_by_field_name("type"))
+                if body is not None:
+                    self._scan_associated_container(body, scope, self.span(node))
+            finally:
                 self.in_extern = old_extern
-                self._scan_associated_container(body, scope)
-                self.in_extern = old_extern
+                self.current_function = old_function
+                self.call_owner = old_owner
             return
         if node.type in {"extern_block", "foreign_mod_item"}:
             body = node.child_by_field_name("body")
@@ -726,7 +814,9 @@ class _RustBindings:
             None,
         )
 
-    def _scan_associated_container(self, body: Any, parent_scope: _Scope) -> None:
+    def _scan_associated_container(
+        self, body: Any, parent_scope: _Scope, generic_scope: ByteSpan
+    ) -> None:
         for node in self._children(body):
             if node.type in {"function_item", "function_signature_item"}:
                 name_node = self._item_name(node)
@@ -752,7 +842,10 @@ class _RustBindings:
                 self._add_generic_parameters(
                     node, parent_scope, owner_function=record.binding.id
                 )
-                self._function(node, record)
+                self._finalize_generic_type_facts(parent_scope)
+                self._function(
+                    node, record, inherited_generic_scopes=(generic_scope,)
+                )
             elif node.type == "const_item":
                 name_node = self._item_name(node)
                 if name_node is not None:
@@ -805,7 +898,13 @@ class _RustBindings:
             self.bindings[self.bindings.index(record.binding)] = replacement
             record.binding = replacement
 
-    def _function(self, node: Any, record: _Record) -> None:
+    def _function(
+        self,
+        node: Any,
+        record: _Record,
+        *,
+        inherited_generic_scopes: tuple[ByteSpan, ...] = (),
+    ) -> None:
         old_function, old_call_owner = self.current_function, self.call_owner
         self.current_function = record.binding.id
         self.call_owner = record.binding.id
@@ -826,8 +925,8 @@ class _RustBindings:
                     if (
                         generic.binding.kind != "generic_parameter"
                         or (
-                            generic.owner_function
-                            and generic.owner_function != record.binding.id
+                            generic.owner_function != record.binding.id
+                            and generic.binding.scope not in inherited_generic_scopes
                         )
                         or generic.binding.id in inherited_generics
                         or generic.binding.scope is None
@@ -1212,7 +1311,7 @@ class _RustBindings:
                     binding_scope.start <= position < binding_scope.end
                 ):
                     continue
-                if record.owner_function != self.current_function:
+                if (record.owner_function or None) != (self.current_function or None):
                     blocked = "item_boundary"
                     continue
                 generic_records.append(record)
@@ -1232,7 +1331,11 @@ class _RustBindings:
                     continue
                 if not self._in_namespace(record, namespace):
                     continue
-                if not record.item and record.owner_function != self.current_function:
+                if (
+                    not record.item
+                    and (record.owner_function or None)
+                    != (self.current_function or None)
+                ):
                     blocked = "item_boundary"
                     continue
                 return record, None
