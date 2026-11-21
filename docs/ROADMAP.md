@@ -6068,7 +6068,15 @@ and all five non-artifact checks — `file_identity`,
 `claim_truth` — ← an accepted `verify-attempt-report/v1`, whose
 attempt sequence is also the recorded execution lineage, so the
 same bound report performs `historical_execution` on the record its
-run produced. `producer_authenticity` also recovers through a
+run produced. The native accept routes' reports
+(`native-accept-report/v1`, `native-exit-status-accept-report/v1`,
+`native-stdout-accept-report/v1`, `native-stderr-accept-report/v1`)
+perform the same check through their own outcome surface — the
+string `acceptance: "accepted"` — since an accepted run's stdout is
+the acceptance descriptor itself and `normalized.stdout.sha256`
+binds the report's lineage to those bytes; a descriptor that kept
+`historical_execution` unperformed ("one run is an observation, not
+a history") recovers it through the route's published sequence. `producer_authenticity` also recovers through a
 `mumei.signature-verification/v1` doc — the only multi-outcome
 performer: a verifying signature alone binds SOME key to the digest,
 so the doc must hold `signature_valid` AND `key_pinned` (the

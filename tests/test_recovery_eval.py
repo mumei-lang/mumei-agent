@@ -301,6 +301,88 @@ def _attempt_report(
     )
 
 
+def _native_accept_report(
+    record_digest,
+    accepted=True,
+    schema="mumei.native-accept-report/v1",
+):
+    """A minimal realistic native accept-route report.
+
+    The native accept routes carry the same lineage surface as the
+    verify-attempt report — the published sequence plus
+    `normalized.stdout.sha256` naming the acceptance descriptor's
+    bytes — but surface the outcome as the string `acceptance:
+    "accepted"` rather than an `acceptance.accepted` boolean.
+    """
+    return _doc(
+        schema,
+        sequence={
+            "schema_version": "mumei.verifier-attempt-sequence/v1",
+            "request_fingerprint": "e" * 64,
+            "timeout_ms": 60000,
+            "attempts": [
+                {
+                    "request_fingerprint": "e" * 64,
+                    "attempt_number": 1,
+                    "state": "exited",
+                }
+            ],
+            "selected_result": {
+                "attempt_number": 1,
+                "output_fingerprint": "f" * 64,
+            },
+        },
+        normalized={
+            "schema_version": "mumei.verifier-run-result/v1",
+            "request_fingerprint": "e" * 64,
+            "attempt_number": 1,
+            "outcome": "exited",
+            "stdout": {"sha256": record_digest, "size_bytes": 2},
+        },
+        acceptance="accepted" if accepted else "inconclusive",
+    )
+
+
+def test_native_accept_report_recovers_historical_execution():
+    """An accepted native accept-route report is the recorded
+    execution lineage for the descriptor its run produced — it
+    performs `historical_execution` on that descriptor, which the
+    descriptor itself declares as unperformed (one run is an
+    observation, not a history)."""
+    digest = "a" * 64
+    record = _record("historical_execution")
+    for schema in (
+        "mumei.native-accept-report/v1",
+        "mumei.native-exit-status-accept-report/v1",
+        "mumei.native-stdout-accept-report/v1",
+        "mumei.native-stderr-accept-report/v1",
+    ):
+        evaluation = evaluate_unperformed_check_recovery(
+            record,
+            [_native_accept_report(digest, schema=schema)],
+            record_digest=digest,
+        )
+        assert evaluation["checks"]["historical_execution"] == "recovered", (
+            schema
+        )
+
+    # A non-accepted run produced no descriptor — the lineage binds
+    # nothing and the outcome is not the declared "accepted" string.
+    evaluation = evaluate_unperformed_check_recovery(
+        record, [_native_accept_report(digest, accepted=False)],
+        record_digest=digest,
+    )
+    assert evaluation["checks"]["historical_execution"] == "evidence_failed"
+
+    # An accepted report bound to other bytes never recovers this
+    # descriptor — `normalized.stdout.sha256` must name the record's
+    # digest.
+    evaluation = evaluate_unperformed_check_recovery(
+        record, [_native_accept_report("b" * 64)], record_digest=digest,
+    )
+    assert evaluation["checks"]["historical_execution"] == "evidence_failed"
+
+
 def test_attempt_report_recovers_five_checks():
     digest = "a" * 64
     record = _record(

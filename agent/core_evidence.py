@@ -1725,9 +1725,22 @@ _CHECK_PERFORMERS: dict = {
     # The attempt report's sequence IS the recorded execution lineage
     # for the record its candidate produced, so an accepted report
     # performs `historical_execution` on it at representation level.
+    # The native accept routes follow the same convention with a
+    # different outcome surface — `acceptance` is the string
+    # "accepted", and an accepted run's stdout is the acceptance
+    # descriptor itself, so `normalized.stdout.sha256` binds the
+    # report to the descriptor its lineage produced.
     "historical_execution": [
         ("mumei.verify-attempt-report/v1", "acceptance.accepted", True,
          "normalized.stdout.sha256"),
+        ("mumei.native-accept-report/v1", "acceptance", "accepted",
+         "normalized.stdout.sha256"),
+        ("mumei.native-exit-status-accept-report/v1", "acceptance",
+         "accepted", "normalized.stdout.sha256"),
+        ("mumei.native-stdout-accept-report/v1", "acceptance",
+         "accepted", "normalized.stdout.sha256"),
+        ("mumei.native-stderr-accept-report/v1", "acceptance",
+         "accepted", "normalized.stdout.sha256"),
         ("mumei.go-summaries-attempt-report/v1", "acceptance.accepted", True,
          "normalized.stdout.sha256"),
         ("mumei.go-summaries-reuse-attempt-report/v1",
