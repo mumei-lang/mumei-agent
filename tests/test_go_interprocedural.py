@@ -6020,6 +6020,30 @@ def test_interface_method_values_in_multi_name_var_specs(
     assert value.return_dependencies == frozenset({0, 1})
 
 
+def test_interface_method_value_accepts_imported_scalar_result_type(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "type I interface{ M(int64) lib.N }\n"
+        "func F(i I, x int64) lib.N { f := i.M; return f(x) }\n"
+        "func D(i I, x int64) lib.N { return i.M(x) }\n"
+    }
+    imports = {"lib": {"n.go": "package lib\ntype N int64\n"}}
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, imports),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    value = named_package(files, snapshot, summaries, "F")
+    direct = named_package(files, snapshot, summaries, "D")
+    assert value.available, value.gaps
+    assert direct.available, direct.gaps
+    assert value.return_dependencies == direct.return_dependencies
+    assert value.return_dependencies == frozenset({0, 1})
+
+
 def test_interface_method_expression_value_matches_direct_dispatch(
     go_types_helper,
 ):

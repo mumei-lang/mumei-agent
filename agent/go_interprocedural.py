@@ -3659,6 +3659,14 @@ class _Builder:
                 and member.type.kind
                 in {"integer", "boolean", "pointer"}
             )
+        if node.type == "qualified_type":
+            member = self._qualified_type_member(node)
+            return (
+                member is not None
+                and member.kind == "type"
+                and member.type.kind
+                in {"integer", "boolean", "pointer"}
+            )
         return False
 
     def _interface_method_result_types_admitted(
