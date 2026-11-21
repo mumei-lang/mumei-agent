@@ -2493,6 +2493,79 @@ class _Builder:
             return False
         return False
 
+    def _opaque_container_field_index_path_supported(
+        self, sel: Any, root_binding: Any
+    ) -> bool:
+        fact = getattr(root_binding, "type", None)
+        if self._type_fact_has_type_args(fact):
+            return False
+        path = []
+        current = sel.child_by_field_name("operand")
+        while current is not None:
+            while current.type == "parenthesized_expression":
+                current = next(
+                    (
+                        child
+                        for child in current.named_children
+                        if child.type != "comment"
+                    ),
+                    None,
+                )
+            if current is None:
+                break
+            if current.type in {
+                "selector_expression",
+                "field_expression",
+                "index_expression",
+            }:
+                path.append(current)
+                current = current.child_by_field_name("operand")
+                continue
+            break
+        for step in reversed(path):
+            if step.type in {
+                "selector_expression",
+                "field_expression",
+            }:
+                field = step.child_by_field_name("field")
+                field_ref = (
+                    self.references.get(self.node_key(field))
+                    if field is not None
+                    else None
+                )
+                member = self._field_identity(field_ref)
+                if member is None or member.type is None:
+                    return False
+                fact = member.type
+                struct_fact = self._struct_value_fact(fact)
+                if struct_fact is not None and (
+                    not struct_fact.type_id
+                    or self._type_fact_has_type_args(fact)
+                ):
+                    return False
+                continue
+            if (
+                fact is None
+                or fact.kind not in {"slice", "array", "map"}
+                or fact.elem is None
+            ):
+                return False
+            element = fact.elem
+            if element.kind == "pointer":
+                return False
+            struct_fact = self._struct_value_fact(element)
+            if struct_fact is not None:
+                if (
+                    not struct_fact.type_id
+                    or self._type_fact_has_type_args(element)
+                ):
+                    return False
+            elif element.kind == "struct":
+                return False
+            self._pin_fact_identities(fact)
+            fact = element
+        return True
+
     def _opaque_container_field_target(
         self, sel: Any, params: dict | None = None
     ) -> tuple[str, str, Any, frozenset, Any] | None:
@@ -2559,6 +2632,18 @@ class _Builder:
                 operand = operand.child_by_field_name("operand")
             else:
                 break
+        indexed_struct_root_clause = (
+            indexed_struct_root
+            and root_binding.type is not None
+            and root_binding.type.kind == "struct"
+        )
+        param_container_of_struct_clause = (
+            root_ref.binding_id in (params or {})
+            and root_binding.type is not None
+            and root_binding.type.kind in {"slice", "array", "map"}
+            and getattr(root_binding.type, "elem", None) is not None
+            and root_binding.type.elem.kind == "struct"
+        )
         scalar_collection = (
             fact is not None
             and fact.kind in {"slice", "array", "map"}
@@ -2579,17 +2664,13 @@ class _Builder:
                 and not root_binding.type.type_id
             )
             or (
-                indexed_struct_root
-                and root_binding.type is not None
-                and root_binding.type.kind == "struct"
-            )
-            or (
-                root_ref.binding_id in (params or {})
-                and root_binding.type is not None
-                and root_binding.type.kind
-                in {"slice", "array", "map"}
-                and getattr(root_binding.type, "elem", None) is not None
-                and root_binding.type.elem.kind == "struct"
+                (
+                    indexed_struct_root_clause
+                    or param_container_of_struct_clause
+                )
+                and not self._opaque_container_field_index_path_supported(
+                    sel, root_binding
+                )
             )
             or not (scalar_collection or nested_scalar_collection)
             or (
@@ -4192,14 +4273,18 @@ class _Builder:
         """May a container parameter's backing be caller memory a
         sibling argument also reaches? A slice or map hands over its
         header; an array copies — but its elements still share when
-        they are slices, maps or pointers (`[N][]T`, `[N]*T`), while
-        a pure `[N]int64` copies cleanly."""
+        they are slices, maps or pointers (`[N][]T`, `[N]*T`), or
+        named structs with collection fields; scalar-only arrays
+        remain value copies."""
         if t is None or t.kind is None:
             return False
         if t.kind in {"slice", "map", "pointer"}:
             return True
         if t.kind == "array":
-            return self._param_container_shares_memory(t.elem)
+            return (
+                self._param_container_shares_memory(t.elem)
+                or bool(self._struct_collection_members(t.elem))
+            )
         return False
 
     def _opaque_container_ident_toks(
@@ -4293,12 +4378,18 @@ class _Builder:
     def _type_embeds_collection(self, fact: Any) -> bool:
         """Whether a value of this type shares memory when copied —
         a slice/map header shares directly; an array shares when
-        the headers inside it are copied along (`[1][]int64`
-        shares its inner slice, `[1][1]int64` shares nothing)."""
+        its copied elements contain slice/map headers, directly or
+        through named struct fields."""
         t = fact
+        array_element = False
         while t is not None and t.kind == "array":
+            array_element = True
             t = getattr(t, "elem", None)
-        return t is not None and t.kind in {"slice", "map"}
+        if t is None:
+            return False
+        if t.kind in {"slice", "map"}:
+            return True
+        return array_element and bool(self._struct_collection_members(t))
 
     def _opaque_container_elem_toks(
         self, node: Any, params: dict | None = None

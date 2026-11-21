@@ -30291,6 +30291,156 @@ def test_external_container_reads_observe_indirect_writes(
     assert required <= result.return_dependencies
 
 
+@pytest.mark.parametrize(
+    (
+        "type_definitions",
+        "element_type",
+        "callee_write",
+        "caller_read",
+    ),
+    [
+        (
+            "type E struct { F []int64; V int64 }\n",
+            "[2]E",
+            "ss[0].F[0] = x",
+            "return a[0].F[0]",
+        ),
+        (
+            "type E struct { F []int64; V int64 }\n",
+            "[2]E",
+            "b := ss[0].F; b[0] = x",
+            "c := a[0].F; return c[0]",
+        ),
+        (
+            "type E struct { F []int64; V int64 }\n",
+            "[2]E",
+            "b := ss[0].F; b[0] = x",
+            "return a[0].F[0]",
+        ),
+        (
+            "type E struct { F []int64; V int64 }\n",
+            "[2][3]E",
+            "ss[0][1].F[0] = x",
+            "return a[0][1].F[0]",
+        ),
+        (
+            "type Inner struct { F []int64 }\n"
+            "type E struct { I Inner }\n",
+            "[2][3]E",
+            "b := ss[0][1].I.F; b[0] = x",
+            "return a[0][1].I.F[0]",
+        ),
+        (
+            "type Inner struct { F []int64 }\n"
+            "type E struct { I Inner }\n",
+            "[2][3]E",
+            "ss[0][1].I.F[0] = x",
+            "return a[0][1].I.F[0]",
+        ),
+    ],
+    ids=[
+        "arr_dir",
+        "arr_ext",
+        "arr_ext2",
+        "nested_array",
+        "nested_struct_array",
+        "nested_struct_array_ext",
+    ],
+)
+def test_array_struct_collection_field_call_writes_reach_caller(
+    go_types_helper,
+    type_definitions,
+    element_type,
+    callee_write,
+    caller_read,
+):
+    declarations = (
+        type_definitions
+        + f"func G(ss {element_type}, x int64) {{ {callee_write} }}\n"
+        + f"func F(a {element_type}, x int64) int64 {{ "
+        + f"G(a, x); {caller_read} }}\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_array_scalar_struct_field_call_write_is_not_caller_visible(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type P struct { V int64 }\n"
+            "func G(ss [2]P, x int64) { ss[0].V = x }\n"
+            "func F(a [2]P, x int64) int64 {\n"
+            "\tG(a, x)\n"
+            "\treturn a[0].V\n}\n",
+        )
+    )
+    assert result.available, result.gaps
+    assert 1 not in result.return_dependencies
+
+
+@pytest.mark.parametrize(
+    (
+        "type_definitions",
+        "initialization",
+        "write",
+        "read",
+    ),
+    [
+        (
+            "type E struct { F []int64 }\n",
+            "a := [2]E{{F: make([]int64, 1)}}",
+            "b[0].F[0] = x",
+            "return a[0].F[0]",
+        ),
+        (
+            "type E struct { F []int64 }\n",
+            "a := [2]E{{F: make([]int64, 1)}}",
+            "c := b[0].F; c[0] = x",
+            "return a[0].F[0]",
+        ),
+        (
+            "type Inner struct { F []int64 }\n"
+            "type E struct { I Inner }\n",
+            "a := [2][3]E{}; a[0][1].I.F = make([]int64, 1)",
+            "b[0][1].I.F[0] = x",
+            "return a[0][1].I.F[0]",
+        ),
+        (
+            "type Inner struct { F []int64 }\n"
+            "type E struct { I Inner }\n",
+            "a := [2][3]E{}; a[0][1].I.F = make([]int64, 1)",
+            "c := b[0][1].I.F; c[0] = x",
+            "return a[0][1].I.F[0]",
+        ),
+    ],
+    ids=["direct", "extracted", "nested_direct", "nested_extracted"],
+)
+def test_local_array_struct_field_copy_shares_collection_backing(
+    go_types_helper,
+    type_definitions,
+    initialization,
+    write,
+    read,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            type_definitions
+            + f"func F(x int64) int64 {{\n\t{initialization}\n"
+            + "\tb := a\n"
+            + f"\t{write}\n"
+            + f"\t{read}\n"
+            + "}\n",
+        )
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+
 def test_interface_field_call_writes_reach_container_field_read(
     go_types_helper,
 ):
@@ -31512,6 +31662,214 @@ def test_struct_field_element_direct_index_is_supported(go_types_helper):
 
 
 @pytest.mark.parametrize(
+    ("signature", "direct", "extracted", "index_dep"),
+    [
+        (
+            "ss []E, i int64, x int64",
+            "return ss[i].F[0]",
+            "b := ss[i].F; return b[0]",
+            1,
+        ),
+        (
+            "ss []E, i int64, x int64",
+            "ss[i].F[0] = x; c := ss[0].F; return c[0]",
+            "b := ss[i].F; b[0] = x; c := ss[0].F; return c[0]",
+            1,
+        ),
+        (
+            "ss []E, i int64, x int64",
+            "ss[i].F[0] += x; c := ss[0].F; return c[0]",
+            "b := ss[i].F; b[0] += x; c := ss[0].F; return c[0]",
+            1,
+        ),
+        (
+            "ss []E, i int64, x int64",
+            "ss[i].M[0] = x; c := ss[0].M; return c[0]",
+            "b := ss[i].M; b[0] = x; c := ss[0].M; return c[0]",
+            1,
+        ),
+        (
+            "ss []E, i int64, x int64",
+            "r := int64(0); for _, v := range ss[i].F { r = v }; "
+            "return r",
+            "r := int64(0); b := ss[i].F; "
+            "for _, v := range b { r = v }; return r",
+            1,
+        ),
+        (
+            "ss []E, i int64, x int64",
+            "return int64(len(ss[i].F))",
+            "b := ss[i].F; return int64(len(b))",
+            1,
+        ),
+        (
+            "ss []E, i int64, x int64",
+            "ss[i].F = append(ss[i].F, x); return ss[0].V",
+            "b := ss[i].F; ss[i].F = append(b, x); return ss[0].V",
+            1,
+        ),
+        (
+            "ss [2]E, i int64, x int64",
+            "return ss[i].F[0]",
+            "b := ss[i].F; return b[0]",
+            1,
+        ),
+        (
+            "ss [2]E, i int64, x int64",
+            "ss[i].F[0] = x; c := ss[0].F; return c[0]",
+            "b := ss[i].F; b[0] = x; c := ss[0].F; return c[0]",
+            1,
+        ),
+        (
+            "mm map[int64]E, i int64, x int64",
+            "return mm[i].F[0]",
+            "b := mm[i].F; return b[0]",
+            1,
+        ),
+        (
+            "mm map[int64]E, i int64, x int64",
+            "mm[i].F[0] = x; c := mm[0].F; return c[0]",
+            "b := mm[i].F; b[0] = x; c := mm[0].F; return c[0]",
+            1,
+        ),
+        (
+            "s S2, i int64, x int64",
+            "return s.A[i].F[0]",
+            "b := s.A[i].F; return b[0]",
+            1,
+        ),
+        (
+            "s S2, i int64, x int64",
+            "s.A[i].F[0] = x; c := s.A[0].F; return c[0]",
+            "b := s.A[i].F; b[0] = x; c := s.A[0].F; return c[0]",
+            1,
+        ),
+        (
+            "i int64, x int64",
+            "s := S2{A: []E{{F: []int64{x}}}}; "
+            "return s.A[i].F[0]",
+            "s := S2{A: []E{{F: []int64{x}}}}; "
+            "b := s.A[i].F; return b[0]",
+            0,
+        ),
+        (
+            "i int64, x int64",
+            "s := S2{A: []E{{F: make([]int64, 1)}}}; "
+            "s.A[i].F[0] = x; c := s.A[0].F; return c[0]",
+            "s := S2{A: []E{{F: make([]int64, 1)}}}; "
+            "b := s.A[i].F; b[0] = x; c := s.A[0].F; return c[0]",
+            0,
+        ),
+        (
+            "i int64, x int64",
+            "ss := []E{{F: make([]int64, 1)}}; "
+            "ss[i].F[0] = x; c := ss[0].F; return c[0]",
+            "ss := []E{{F: make([]int64, 1)}}; "
+            "b := ss[i].F; b[0] = x; c := ss[0].F; return c[0]",
+            0,
+        ),
+        (
+            "ss [][]E, i int64, x int64",
+            "return ss[i][0].F[0]",
+            "b := ss[i][0].F; return b[0]",
+            1,
+        ),
+    ],
+)
+def test_struct_element_field_direct_ops_match_extraction(
+    go_types_helper, signature, direct, extracted, index_dep
+):
+    declarations = (
+        "type E struct { F []int64; M map[int64]int64; V int64 }\n"
+        "type S2 struct { A []E }\n"
+    )
+    direct_result = named(
+        *unit(
+            go_types_helper,
+            declarations + f"func F({signature}) int64 {{ {direct} }}\n",
+        )
+    )
+    extracted_result = named(
+        *unit(
+            go_types_helper,
+            declarations
+            + f"func F({signature}) int64 {{ {extracted} }}\n",
+        )
+    )
+    assert direct_result.available == extracted_result.available
+    assert direct_result.available, direct_result.gaps
+    assert direct_result.return_dependencies == (
+        extracted_result.return_dependencies
+    )
+    assert index_dep in direct_result.return_dependencies
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        (
+            "func F(i int64, x int64) int64 { "
+            "ss := []struct{ F []int64 }{{F: []int64{x}}}; "
+            "return ss[i].F[0] }"
+        ),
+        (
+            "func F(i int64, x int64) int64 { "
+            "ss := []struct{ F []int64 }{{F: make([]int64, 1)}}; "
+            "ss[i].F[0] = x; return ss[0].F[0] }"
+        ),
+        (
+            "func F(i int64, x int64) int64 { "
+            "ss := [2]E{{F: []int64{x}}}; return ss[i].F[0] }"
+        ),
+        (
+            "func F(i int64, x int64) int64 { "
+            "ss := [2]E{{F: make([]int64, 1)}}; "
+            "ss[i].F[0] = x; return ss[0].F[0] }"
+        ),
+        (
+            "func F(i int64, x int64) int64 { "
+            "ss := []GE[int64]{{F: []int64{x}}}; return ss[i].F[0] }"
+        ),
+        (
+            "func F(i int64, x int64) int64 { "
+            "mm := map[int64]E{0: {F: []int64{x}}}; "
+            "return mm[i].F[0] }"
+        ),
+        (
+            "func F(i int64, x int64) int64 { "
+            "mm := map[int64]E{0: {F: make([]int64, 1)}}; "
+            "mm[i].F[0] = x; return mm[0].F[0] }"
+        ),
+        (
+            "func F(i int64, x int64) int64 { "
+            "ss := [][]E{{{F: []int64{x}}}}; "
+            "return ss[i][0].F[0] }"
+        ),
+    ],
+    ids=[
+        "anon_local",
+        "anon_local_w",
+        "arr_local",
+        "arr_local_w",
+        "gen_local",
+        "map_local",
+        "map_local_w",
+        "nested_local",
+    ],
+)
+def test_struct_element_field_local_shapes_remain_available(
+    go_types_helper, body
+):
+    declarations = (
+        "type E struct { F []int64; V int64 }\n"
+        "type GE[T any] struct { F []int64 }\n"
+    )
+    result = named(*unit(go_types_helper, declarations + body + "\n"))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+@pytest.mark.parametrize(
     ("direct", "extracted"),
     [
         (
@@ -31694,6 +32052,69 @@ def test_struct_field_range_summary_stays_fresh(go_types_helper):
     assert old_result.binding_id not in changed_missing
 
 
+def test_struct_element_field_pins_element_type(go_types_helper):
+    function = (
+        "package p\n"
+        "func F(i int64) int64 {\n"
+        "\ts := S{}\n"
+        "\treturn int64(s.A[i].F[0])\n"
+        "}\n"
+    )
+    old_files = {
+        "types.go": (
+            "package p\n"
+            "type E struct { F []int64 }\n"
+            "type S struct { A []E }\n"
+        ),
+        "function.go": function,
+    }
+    old_report = package_report(go_types_helper, old_files)
+    old_snapshot = load_go_package_snapshot(
+        old_report, old_files, target_arch="amd64"
+    )
+    old_summaries = ip.summarize_go_package(old_files, old_snapshot)
+    old_result = named_package(
+        old_files, old_snapshot, old_summaries, "F"
+    )
+    assert old_result.available, old_result.gaps
+    old_element_id = next(
+        binding.id
+        for binding in old_snapshot.bindings
+        if binding.name == "E" and binding.kind == "type"
+    )
+    assert old_element_id in old_result.pinned
+
+    changed_files = {
+        "types.go": (
+            "package p\n"
+            "type E struct { F []int32 }\n"
+            "type S struct { A []E }\n"
+        ),
+        "function.go": function,
+    }
+    changed_report = package_report(go_types_helper, changed_files)
+    changed_snapshot = load_go_package_snapshot(
+        changed_report, changed_files, target_arch="amd64"
+    )
+    changed_summaries = ip.summarize_go_package(
+        changed_files, changed_snapshot
+    )
+    changed_result = named_package(
+        changed_files, changed_snapshot, changed_summaries, "F"
+    )
+    assert changed_result.available, changed_result.gaps
+    assert changed_result.binding_id == old_result.binding_id
+    from agent import go_summaries
+
+    restored = ip.GoSummarySet.from_dict(old_summaries.to_dict())
+    reusable, stale, missing = go_summaries._reuse_partition(
+        restored, changed_summaries, changed_report
+    )
+    assert old_result.binding_id not in reusable
+    assert old_result.binding_id in stale
+    assert old_result.binding_id not in missing
+
+
 def test_struct_array_slice_field_store_keeps_backing_dependencies(
     go_types_helper,
 ):
@@ -31746,17 +32167,20 @@ def test_struct_field_comma_ok_map_read_stays_closed(go_types_helper):
 
 
 def test_struct_field_select_receive_target_stays_closed(go_types_helper):
-    result = named(
-        *unit(
-            go_types_helper,
-            "type S struct { A []int64 }\n"
-            "func F(s S, ch chan int64, i int) int64 {\n"
-            "\tselect { case s.A[i] = <-ch: }\n"
-            "\treturn s.A[i]\n}\n",
-        )
+    cases = (
+        "type S struct { A []int64 }\n"
+        "func F(s S, ch chan int64, i int) int64 {\n"
+        "\tselect { case s.A[i] = <-ch: }\n"
+        "\treturn s.A[i]\n}\n",
+        "type E struct { F []int64 }\n"
+        "func F(ss []E, ch chan int64, i int) int64 {\n"
+        "\tselect { case ss[i].F[0] = <-ch: }\n"
+        "\treturn ss[0].F[0]\n}\n",
     )
-    assert not result.available
-    assert result.gaps[0].reason == "unsupported_statement"
+    for source in cases:
+        result = named(*unit(go_types_helper, source))
+        assert not result.available
+        assert result.gaps[0].reason == "unsupported_statement"
 
 
 @pytest.mark.parametrize(
@@ -31912,10 +32336,16 @@ def test_struct_field_parallel_assignment_field_rhs_preserves_alias(
         "type S[T any] struct { A []int64 }\n"
         "func F(s S[int64]) int64 { return s.A[0] }\n",
         "type E struct { F []int64 }\n"
-        "type S struct { A []E }\n"
-        "func F(s S) int64 { return s.A[0].F[0] }\n",
-        "type E struct { F []int64 }\n"
+        "func F(ss []*E, i int) int64 { return ss[i].F[0] }\n",
+        "type P struct { F []int64 }\n"
+        "type E struct { P *P }\n"
+        "func F(ss []E, i int) int64 { return ss[i].P.F[0] }\n",
+        "type E struct { F [2]int64 }\n"
         "func F(ss []E, i int) int64 { return ss[i].F[0] }\n",
+        "func F(ss []struct { F []int64 }, i int) int64 {\n"
+        "\treturn ss[i].F[0]\n}\n",
+        "type E[T any] struct { F []int64 }\n"
+        "func F(ss []E[int64], i int) int64 { return ss[i].F[0] }\n",
         ],
 )
 def test_struct_field_direct_ops_keep_unsupported_shapes_closed(
@@ -31927,25 +32357,47 @@ def test_struct_field_direct_ops_keep_unsupported_shapes_closed(
 
 def test_struct_field_index_calls_are_evaluated_once(go_types_helper):
     cases = (
-        "type S struct { A []int64 }\n"
-        "func I() int64 { return 0 }\n"
-        "func F(s S, x int64) int64 {\n"
-        "\ts.A[I()] = x\n"
-        "\ta := s.A\n"
-        "\treturn a[0]\n}\n",
-        "type S struct { A []int64 }\n"
-        "func I() int64 { return 0 }\n"
-        "func F(s S) int64 { return s.A[I()] }\n",
+        (
+            "type S struct { A []int64 }\n"
+            "func I() int64 { return 0 }\n"
+            "func F(s S, x int64) int64 {\n"
+            "\ts.A[I()] = x\n"
+            "\ta := s.A\n"
+            "\treturn a[0]\n}\n",
+            ("I",),
+        ),
+        (
+            "type S struct { A []int64 }\n"
+            "func I() int64 { return 0 }\n"
+            "func F(s S) int64 { return s.A[I()] }\n",
+            ("I",),
+        ),
+        (
+            "type E struct { F []int64 }\n"
+            "func I() int64 { return 0 }\n"
+            "func J() int64 { return 0 }\n"
+            "func F(ss []E) int64 { return ss[I()].F[J()] }\n",
+            ("I", "J"),
+        ),
+        (
+            "type E struct { F []int64 }\n"
+            "type S2 struct { A []E }\n"
+            "func I() int64 { return 0 }\n"
+            "func J() int64 { return 0 }\n"
+            "func F(s S2) int64 { return s.A[I()].F[J()] }\n",
+            ("I", "J"),
+        ),
     )
-    for source in cases:
+    for source, calls in cases:
         data = unit(go_types_helper, source)
         result = named(*data)
         assert result.available, result.gaps
-        index_call_id = named(*data, "I").binding_id
-        assert sum(
-            transfer.target == index_call_id
-            for transfer in result.calls
-        ) == 1
+        for name in calls:
+            index_call_id = named(*data, name).binding_id
+            assert sum(
+                transfer.target == index_call_id
+                for transfer in result.calls
+            ) == 1
 
 
 def test_imported_struct_field_index_stays_closed(go_types_helper):
