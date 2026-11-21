@@ -4126,11 +4126,33 @@ side lands in the shared set: `s[i] <- x` deposits
 and `c <- x` shows up in `<-s[j]`; `<-s[i]` reads the group's
 conflated union, FIFO order unmodelled like `<-ch`. `b := s`
 shares the group like any bound container copy. The honest
-closures stay: `d := s[i]` extracts no channel name (the same
-closure `b := a[i]` keeps for scalar elements — a bare index
-sharer yields no binding), `[]chan chan T` stays closed (a
-channel value travelling the group would alias under a second
-dep set), `close(s[i])`, `for range` and `select` stay opaque.
+closures stay: `[]chan chan T` stays closed (a channel value
+travelling the group would alias under a second dep set),
+`close(s[i])`, `for range` and `select` stay opaque.
+
+Extracting a bound channel element — `d := s[i]`,
+`var d chan T = s[i]` or a plain `d = s[i]` reseat, on a
+`[]chan` or a `map[K]chan` alike — mints `d` as another member
+of the container's share group rather than copying the
+container's token set (a copied frozenset diverges the first
+later `s[j] = c2` union grows the root's set past it). `d`'s
+own slot takes the element read's deps, so `d <- x`, `<-d`,
+`for v := range d` and a member passed as a chan parameter all
+see the group's conflated queue deps — and a `s[j] <- x` send
+lands in `d`'s slot the same way it lands in every sharer's.
+Reseating behaves like any rebind: `d = t[i]` detaches `d`
+from the group it left before joining `t`'s (pre-state
+resolution on a parallel assign), a conditional `if f { d =
+t[i] }` externalises like the maybe-skipped rebind *and*
+mints the new membership, and `d = make(chan)` parks the old
+queue under a surrogate so `<-s[0]` keeps reading what `c`
+serves. The honest closures stay: `d := s[0][0]` on a
+`[][]chan` extracts nothing (the nested-element gate already
+declines it), `[]chan chan T` stays closed (a channel value
+travelling the group would alias under a second dep set), and
+`close(s[i])`, a bare `for range s[i]`, `select` and
+param/result shapes stay opaque — though `close(d)` on the
+bound member admits like any local channel operand.
 
 A chan-element collection PARAMETER or RESULT admits like the
 scalar-element form — `func F(s []chan int64)`, `func G()
