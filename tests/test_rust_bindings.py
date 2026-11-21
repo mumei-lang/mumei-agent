@@ -16,6 +16,13 @@ def build_rust_bindings(source, *, pointer_width):
     assert len(reference_keys) == len(set(reference_keys)), source
     call_spans = [call.span for call in report.calls]
     assert len(call_spans) == len(set(call_spans)), source
+    restored = load_lexical_report(
+        report.to_json(),
+        source,
+        profile=PROFILE,
+        target={"pointer_width": pointer_width},
+    )
+    assert restored.to_json() == report.to_json(), source
     return report
 
 
@@ -675,6 +682,14 @@ fn missing_call() { r#missing(); }
     )
     assert report.resolve(missing.span) is None
     assert report.calls[-1].kind == "unresolved"
+
+
+def test_raw_identifier_function_item_lookup_round_trips():
+    source = "fn r#helper() {} fn f() { helper(); r#helper(); }"
+    report = build_rust_bindings(source, pointer_width=64)
+    helper = _bindings(report, "helper", "function")[0]
+    assert [call.target for call in report.calls] == [helper.id, helper.id]
+    assert [call.kind for call in report.calls] == ["direct_local", "direct_local"]
 
 
 def test_impl_trait_arguments_are_generic_and_turbofish_stays_on_the_callee():

@@ -640,7 +640,7 @@ class _RustBindings:
         name_node = self._item_name(node)
         if name_node is None:
             return None
-        name = self.text(name_node)
+        name = self._normalize_identifier(self.text(name_node))
         return next(
             (r for r in scope.bindings.get(name, ()) if r.binding.span == self.span(name_node)),
             None,
