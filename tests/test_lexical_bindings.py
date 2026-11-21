@@ -246,6 +246,21 @@ def test_reader_validates_function_records_and_parameter_kinds(tamper):
         _load_producer_document(doc, source)
 
 
+@pytest.mark.parametrize("field", ["generic", "is_async"])
+def test_reader_rejects_generic_or_async_direct_local_targets(field):
+    source = "fn caller(){ callee(); } fn callee(){}"
+    doc = _producer_document(source)
+    call = next(call for call in doc["calls"] if call["kind"] == "direct_local")
+    target = next(
+        function
+        for function in doc["functions"]
+        if function["binding_id"] == call["target"]
+    )
+    target[field] = True
+    with pytest.raises(LexicalReportError):
+        _load_producer_document(doc, source)
+
+
 @pytest.mark.parametrize(
     ("source", "expected_kind", "callee"),
     [

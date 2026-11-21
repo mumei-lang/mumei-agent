@@ -564,7 +564,12 @@ def load_lexical_report(
             _fail(not target_id or target_id in ids)
             if kind == "direct_local":
                 target_function = functions_by_id.get(target_id)
-                _fail(target_function is not None and target_function.body is not None)
+                _fail(
+                    target_function is not None
+                    and target_function.body is not None
+                    and not target_function.is_async
+                    and not target_function.generic
+                )
             elif kind in {
                 "opaque_generic",
                 "opaque_async",
