@@ -2518,3 +2518,34 @@ class TestSignatureToolsDoNotSpawn:
                 signature_verify_fixtures._PUBLIC_KEY_HEX,
             )
         )["status"] == "ok"
+
+
+class TestNulDeclaredPaths:
+    def test_signature_and_binding_tools_reject_nul_paths(self) -> None:
+        results = (
+            (
+                mcp_server.signature_eval("envelope\x00.json"),
+                "envelope_path",
+            ),
+            (
+                mcp_server.signature_verify(
+                    "envelope\x00.json",
+                    signature_verify_fixtures._PUBLIC_KEY_HEX,
+                ),
+                "envelope_path",
+            ),
+            (
+                mcp_server.binding_eval("record\x00.json", "evidence.json"),
+                "record_path",
+            ),
+        )
+        for raw, name in results:
+            payload = _fold_assert_error(raw)
+            assert (
+                f"{name} must be a nonempty single-line path"
+                in payload["error"]
+            )
+        assert (
+            mcp_server._redact_declared_paths("unchanged", ["a\x00b"])
+            == "unchanged"
+        )

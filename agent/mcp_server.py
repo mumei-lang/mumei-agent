@@ -3076,7 +3076,7 @@ def _redact_declared_paths(text: str, declared: list[str]) -> str:
         candidates = [p]
         try:
             candidates.append(str(Path(p).resolve()))
-        except (OSError, RuntimeError):
+        except (OSError, RuntimeError, ValueError):
             pass
         for candidate in candidates:
             replacements.append((candidate, base))
@@ -3091,7 +3091,12 @@ def _redact_declared_paths(text: str, declared: list[str]) -> str:
 
 
 def _valid_declared_path(path: Any) -> bool:
-    return isinstance(path, str) and bool(path) and "\n" not in path
+    return (
+        isinstance(path, str)
+        and bool(path)
+        and "\n" not in path
+        and "\x00" not in path
+    )
 
 
 @mcp.tool()
