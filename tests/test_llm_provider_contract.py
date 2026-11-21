@@ -140,7 +140,11 @@ def test_sampling_and_openai_providers_are_interchangeable() -> None:
     for provider in (openai_provider, _sampling_provider()):
         response = complete_response(provider, MESSAGES, MODEL)
         assert response.choices[0].message.content == TEXT
+        # Neither provider style surfaces a usage object on this path, so
+        # token accounting is identically 0 — same as a usage-less client.
+        assert response_token_count(response, MODEL) == 0
         adapted = openai_client_adapter(provider).chat.completions.create(
             model=MODEL, messages=MESSAGES
         )
         assert adapted.choices[0].message.content == TEXT
+        assert response_token_count(adapted, MODEL) == 0
