@@ -12,7 +12,10 @@ import posixpath
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
+from agent.core_evidence import UNPERFORMED_CHECK_RECOVERY_SCHEMA
+
 SCHEMA_VERSION = "mumei.std-dependency-invalidation/v1"
+DEPENDENCY_CHECKS_SCHEMA = "mumei.std-dependency-checks/v1"
 IMPLICIT_IMPORTS = ("std/prelude.mm",)
 
 CHECKS_NOT_PERFORMED = [
@@ -243,4 +246,103 @@ def dependency_invalidation_map(std_dir: Path, changed: str) -> dict[str, Any]:
         "unresolved_imports": unresolved,
         "implicit_imports": [name for name in IMPLICIT_IMPORTS if name in graph],
         "checks_not_performed": list(CHECKS_NOT_PERFORMED),
+    }
+
+
+def inherit_dependency_checks(std_dir: Path, reports: dict[str, Any]) -> dict[str, Any]:
+    """Carry outstanding dependency checks into schema-open file records.
+
+    Each entry in ``files`` is accepted directly by
+    ``evaluate_unperformed_check_recovery``.
+    """
+    if type(reports) is not dict:
+        raise ValueError("reports must be an object")
+
+    outstanding_by_file: dict[str, list[str]] = {}
+    for key, report in reports.items():
+        if type(key) is not str:
+            raise ValueError("report keys must be strings")
+        if type(report) is not dict:
+            raise ValueError("reports must contain objects")
+        if report.get("schema_version") == UNPERFORMED_CHECK_RECOVERY_SCHEMA:
+            outstanding = report.get("unrecovered")
+            if type(outstanding) is not list:
+                raise ValueError("recovery reports must contain an unrecovered list")
+        else:
+            outstanding = report.get("checks_not_performed", [])
+            if type(outstanding) is not list:
+                raise ValueError("reports must contain a checks_not_performed list")
+        outstanding_by_file[key] = [
+            check for check in outstanding if type(check) is str
+        ]
+
+    graph, unresolved = _build_import_graph(std_dir)
+    _, aliases_by_key = _real_path_aliases(std_dir, set(graph))
+
+    def dependency_closure(file_key: str) -> set[str]:
+        closure: set[str] = set()
+        visited: set[str] = set()
+        self_aliases = aliases_by_key.get(file_key, {file_key})
+        frontier = list(graph[file_key])
+        while frontier:
+            node = frontier.pop()
+            if node in visited:
+                continue
+            aliases = aliases_by_key.get(node, {node})
+            for alias in aliases:
+                if alias in visited:
+                    continue
+                visited.add(alias)
+                if alias not in self_aliases:
+                    closure.add(alias)
+                frontier.extend(graph.get(alias, []))
+        return closure
+
+    files: dict[str, dict[str, Any]] = {}
+    for file_key in sorted(graph):
+        closure = dependency_closure(file_key)
+        inherited_sources: dict[str, list[str]] = {}
+        for dependency in closure:
+            for check in outstanding_by_file.get(dependency, []):
+                inherited_sources.setdefault(check, []).append(dependency)
+        inherited = {
+            check: sorted(set(dependencies))
+            for check, dependencies in sorted(inherited_sources.items())
+        }
+        dependencies_without_report = sorted(
+            dependency
+            for dependency in closure
+            if not any(
+                alias in reports
+                for alias in aliases_by_key.get(dependency, {dependency})
+            )
+        )
+        unresolved_in_closure = file_key in unresolved or any(
+            dependency in unresolved for dependency in closure
+        )
+        markers: set[str] = set()
+        if dependencies_without_report:
+            markers.add("dependency_verification")
+        if unresolved_in_closure:
+            markers.add("dependency_resolution")
+        own = outstanding_by_file.get(file_key, [])
+        checks_not_performed = sorted(set(own) | set(inherited) | markers)
+        files[file_key] = {
+            "own": own,
+            "inherited": inherited,
+            "dependencies_without_report": dependencies_without_report,
+            "unresolved_in_closure": unresolved_in_closure,
+            "checks_not_performed": checks_not_performed,
+        }
+
+    return {
+        "schema_version": DEPENDENCY_CHECKS_SCHEMA,
+        "files": files,
+        "unknown_reports": sorted(set(reports) - set(graph)),
+        "checks_not_performed": [
+            "re_verification",
+            "evidence_binding",
+            "symbol_resolution",
+            "external_std_path_resolution",
+        ],
     }
