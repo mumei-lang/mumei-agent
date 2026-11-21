@@ -20034,6 +20034,38 @@ def test_scalar_container_literal_elem_operand(go_types_helper):
             "\treturn <-s[0]\n}\n",
             frozenset({0, 1}),
         ),
+        # Consecutive sends accumulate in the queue — the second
+        # send must not evict `x`'s dep from the receive.
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 4)\n"
+            "\ts := []chan int64{c}\n"
+            "\ts[0] <- x\n"
+            "\ts[0] <- 0\n"
+            "\treturn <-s[0]\n}\n",
+            frozenset({0}),
+        ),
+        # `c = make(...)` reseats the name but `s[0]` still holds
+        # the OLD queue — its sends survive through a surrogate.
+        (
+            "func F(x int64) int64 {\n"
+            "\tc := make(chan int64, 4)\n"
+            "\ts := []chan int64{c}\n"
+            "\tc <- x\n"
+            "\tc = make(chan int64, 1)\n"
+            "\treturn <-s[0]\n}\n",
+            frozenset({0}),
+        ),
+        # A caller-owned queue inside the group (`c` is a param):
+        # the element send deposits `x`'s dep beside the queue's
+        # own contents and records an external mutation.
+        (
+            "func F(c chan int64, x int64) int64 {\n"
+            "\ts := []chan int64{c}\n"
+            "\ts[0] <- x\n"
+            "\treturn <-s[0]\n}\n",
+            frozenset({0, 1}),
+        ),
     ],
 )
 def test_chan_elem_container_send_receive(

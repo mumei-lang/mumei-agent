@@ -1025,6 +1025,7 @@ class _Builder:
         # binding_id -> slot key -> donor bindings.
         self._func_elem_inner_donors: dict[str, dict[str, set[str]]] = {}
         self._func_elem_surrogate_seq = 0
+        self._chan_queue_seq = 0
         # For an anonymous-`struct{...}` binding whose fields do not
         # follow its own name span, the span that DOES precede them:
         # `cp := st` copies st's (anonymous) type, so cp's fields are
@@ -5543,6 +5544,37 @@ member, or one explicit dereference of one (`(*t).F` — the same
         # turns that swap into a name cycle that resolves send and
         # receive to different slots.
         return self.chan_aliases.get(binding_id, binding_id)
+
+    def _chan_queue_detach(
+        self, binding_id: str, locals_: dict, params: dict
+    ) -> None:
+        """A `c = make(...)` / `c = nil` reseat replaces `c`'s slot
+        with the fresh queue — but a `[]chan{c}` share group still
+        names the OLD queue (the slice holds a copy of the channel
+        descriptor). Park the group's membership under a surrogate
+        queue token carrying the old contents: `<-s[i]` keeps the
+        pre-reseat sends while `<-c` reads only the fresh queue."""
+        shared = False
+        for hid, toks in self._opaque_container_tokens.items():
+            if hid != binding_id and binding_id in toks:
+                shared = True
+        if not shared:
+            return
+        self._chan_queue_seq += 1
+        sur = (
+            binding_id + "/chan_queue/" + str(self._chan_queue_seq)
+        )
+        self._opaque_container_tokens[sur] = frozenset({sur})
+        locals_[sur] = locals_.get(binding_id, frozenset())
+        if binding_id in params:
+            locals_[sur] = locals_[sur] | frozenset(
+                {params[binding_id]}
+            )
+        for hid, toks in list(self._opaque_container_tokens.items()):
+            if hid != binding_id and binding_id in toks:
+                self._opaque_container_tokens[hid] = (
+                    toks - {binding_id}
+                ) | {sur}
 
     def _chan_alias_target(
         self, node: Any, locals_: dict, params: dict
@@ -11618,6 +11650,18 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # An element target (`s[i]`) isn't a container rebind —
                 # the sharer union below lands the store instead.
                 if i not in opaque_elem_targets:
+                    bound_chan = self.bindings.get(ref.binding_id)
+                    if (
+                        bound_chan is not None
+                        and bound_chan.type is not None
+                        and bound_chan.type.kind == "chan"
+                    ):
+                        # The reseat replaces the name's queue slot —
+                        # a `[]chan{c}` group keeps the OLD queue, so
+                        # its membership detaches under a surrogate.
+                        self._chan_queue_detach(
+                            ref.binding_id, locals_, params
+                        )
                     self._store(
                         locals_, params, ref.binding_id, value,
                         conditional,
@@ -14769,19 +14813,54 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             count,
                             0,
                         )
-                    for holder_id in self._opaque_container_holders(
+                    holders = self._opaque_container_holders(
                         self._opaque_container_tokens.get(
                             root_id, frozenset()
                         )
-                    ):
+                    )
+                    for holder_id in holders:
+                        # A queue accumulates — later sends keep
+                        # every earlier deposit reachable, so the
+                        # element store unions like `c <- x` does.
+                        holder_old = locals_.get(
+                            holder_id, frozenset()
+                        )
+                        if holder_id in params:
+                            holder_old = holder_old | frozenset(
+                                {params[holder_id]}
+                            )
                         self._store(
                             locals_,
                             params,
                             holder_id,
-                            value_deps,
+                            holder_old | value_deps,
                             conditional,
                         )
                     self.indirect_writes |= value_deps
+                    for token in self._opaque_container_tokens.get(
+                        root_id, ()
+                    ):
+                        # The group may hold a caller-owned queue
+                        # (`s := []chan{c}` with param `c`) — a send
+                        # through the element is an external
+                        # mutation like `c <- x` itself is.
+                        if (
+                            token in params
+                            or token in self.external_chan_locals
+                        ):
+                            transfers.append(
+                                CallTransfer(
+                                    FileSpan(
+                                        self.current_file,
+                                        node.start_byte,
+                                        node.end_byte,
+                                    ),
+                                    token,
+                                    (),
+                                    frozenset(),
+                                    imported=True,
+                                )
+                            )
                     return
                 if external is not None:
                     target_id, fact = external
