@@ -31089,6 +31089,7 @@ def test_struct_array_slice_field_store_keeps_backing_dependencies(
     assert direct.return_dependencies == (
         extracted.return_dependencies
     ) == frozenset({0})
+    assert direct.effects == extracted.effects
 
 
 def test_struct_field_comma_ok_map_read_stays_closed(go_types_helper):
