@@ -1535,6 +1535,19 @@ class TestRecoveryEvalTool:
             assert tool["recovery"] == cli
             assert cli["checks"]["claim_truth"] == expected
 
+    def test_lone_surrogate_record_returns_utf8_payload(self, tmp_path) -> None:
+        record = _fold_write_json(
+            tmp_path / "record.json", _fold_record(["\ud800"])
+        )
+        evidence = _fold_write_json(
+            tmp_path / "evidence.json",
+            {"schema_version": "mumei.unknown/v1"},
+        )
+        raw = mcp_server.recovery_eval(str(record), [str(evidence)])
+        raw.encode("utf-8")
+        payload = json.loads(raw)
+        assert payload["recovery"]["checks"]["\ud800"] == "no_evidence"
+
     def test_binding_document_for_other_record_does_not_recover_binding(
         self, tmp_path
     ) -> None:
@@ -1678,3 +1691,16 @@ class TestEvidenceFoldToolsDoNotSpawn:
         assert _fold_payload(
             mcp_server.recovery_eval(str(record), [str(evidence)])
         )["status"] == "ok"
+
+
+class TestMcpPayloadSerialization:
+    def test_non_ascii_payload_remains_unescaped(self) -> None:
+        raw = mcp_server._ok({"label": "日本語"})
+        assert "日本語" in raw
+        assert r"\u65e5" not in raw
+        assert json.loads(raw)["label"] == "日本語"
+
+    def test_error_payload_escapes_lone_surrogates(self) -> None:
+        raw = mcp_server._err("\ud800")
+        raw.encode("utf-8")
+        assert json.loads(raw)["error"] == "\ud800"
