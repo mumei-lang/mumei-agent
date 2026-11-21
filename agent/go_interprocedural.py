@@ -4521,6 +4521,7 @@ class _Builder:
             fields_by_type: dict[str, tuple[Any, ...]] = {}
             found = False
             generic_found = False
+            opaque_generic = False
             for type_id, generic in level.items():
                 embedded_type = self._pointee_type(type_id)
                 if (
@@ -4531,12 +4532,14 @@ class _Builder:
                 fields = self._struct_fields(embedded_type)
                 fields_by_type[type_id] = fields
                 if generic and not fields:
-                    return True
+                    opaque_generic = True
                 if field_member.id in {field.id for field in fields}:
                     found = True
                     generic_found = generic_found or generic
             if found:
                 return generic_found
+            if opaque_generic:
+                return True
 
             next_level: dict[str, bool] = {}
             next_unenumerable_ids: set[str] = set()

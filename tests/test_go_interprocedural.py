@@ -11358,6 +11358,46 @@ def test_generic_parent_closes_unenumerable_embedded_struct_fields(
         assert members["S3"] in result.pinned
 
 
+def test_generic_opaque_embed_does_not_override_same_depth_field_hit(
+    go_types_helper,
+):
+    files = {
+        "a.go": (
+            "package p\n"
+            "type S3 struct{ B int64 }\n"
+            "type X struct{ A S3 }\n"
+            "type G[T any] struct{}\n"
+            "type W struct{ X; G[int64] }\n"
+            "func F(t *W) int64 { return t.A.B }\n"
+        )
+    }
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    members = {binding.name: binding.id for binding in snapshot.bindings}
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+    assert members["S3"] in result.pinned
+
+
+def test_generic_opaque_embed_stays_closed_when_field_is_deeper(
+    go_types_helper,
+):
+    files = {
+        "a.go": (
+            "package p\n"
+            "type S3 struct{ B int64 }\n"
+            "type H struct{ A S3 }\n"
+            "type G[T any] struct{ H }\n"
+            "type W struct{ G[int64] }\n"
+            "func F(t *W) int64 { return t.A.B }\n"
+        )
+    }
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert not result.available, result.gaps
+    assert result.gaps
+
+
 def test_generic_embed_walk_visits_shared_diamonds_once(
     go_types_helper, monkeypatch
 ):
