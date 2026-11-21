@@ -845,6 +845,7 @@ class _TypeScriptBindings:
         with_scopes: tuple[ByteSpan, ...] = (),
         *,
         tdz_function: Any | None = None,
+        check_tdz: bool = True,
     ) -> tuple[_Record | None, str | None]:
         name = self.text(node)
         if name == "arguments" and namespace == "value":
@@ -874,7 +875,8 @@ class _TypeScriptBindings:
                 None if reference_function is None else reference_function.id
             )
             if (
-                record.tdz
+                check_tdz
+                and record.tdz
                 and node.start_byte < record.binding.span.start
                 and record.declaration_function == reference_function_id
             ):
@@ -907,10 +909,10 @@ class _TypeScriptBindings:
                 while root.type in {"member_expression", "subscript_expression"}:
                     root = root.child_by_field_name("object")
                 if root is not None and root.type == "identifier":
-                    self._resolve(root, "value", "read")
+                    self._resolve(root, "value", "read", check_tdz=False)
                     return
             elif expression is not None and expression.type == "identifier":
-                self._resolve(expression, "value", "read")
+                self._resolve(expression, "value", "read", check_tdz=False)
                 return
             self.add_unresolved(node, self.text(node).strip(), "qualified_path")
             return

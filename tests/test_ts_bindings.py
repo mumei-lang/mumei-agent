@@ -869,6 +869,20 @@ type MissingType = typeof notDeclared;
     assert all(binding.type.kind == "unknown" for binding in aliases.values())
 
 
+def test_typeof_value_reference_does_not_report_runtime_tdz():
+    source = "type T = typeof value; const value = 1;"
+    report = build_ts_bindings(source)
+    value = _bindings(report, "value", "local")[0]
+    references = _refs(report, source, "value")
+    assert len(references) == 1
+    assert references[0].binding_id == value.id
+    assert references[0].kind == "read"
+    assert report.complete
+
+    runtime_read = build_ts_bindings("value; const value = 1;")
+    assert any(gap.reason == "temporal_dead_zone" for gap in runtime_read.gaps)
+
+
 def test_multibyte_spans_hash_and_output_are_deterministic():
     source = 'const greeting = "💡"; function f() { return greeting; }'
     report = build_ts_bindings(source)
