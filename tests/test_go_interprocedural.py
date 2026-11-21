@@ -16601,6 +16601,29 @@ def test_chan_chan_captured_receive_records_external_effect(go_types_helper):
     assert result.effects == "unknown"
 
 
+def test_defer_local_chan_chan_call_promotes_at_registration(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "func G(cc chan chan int64, x int64) {\n"
+        "\td := <-cc\n\td <- x\n}\n"
+        "func F(c chan int64, x int64) {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tdefer G(cc, x)\n\tcc <- c\n}\n"
+        "func Caller(x int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n\tF(c, x)\n\treturn <-c\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    f_result = named_package(files, snapshot, summaries, "F")
+    caller_result = named_package(files, snapshot, summaries, "Caller")
+    assert f_result.available and f_result.effects == "unknown"
+    assert caller_result.available
+    assert caller_result.return_dependencies == frozenset({0})
+    assert caller_result.effects == "unknown"
+
+
 def test_chan_parameter_send_recv_admitted(go_types_helper):
     # A `chan T` parameter is a queue shared with the caller: the
     # send's deps broadcast into indirect writes so the receive can

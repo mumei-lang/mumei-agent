@@ -2875,10 +2875,11 @@ operations (`send`, `receive`, `close`, `len`, and
 identity. External members remain externally
 observable through the group: their reads and sends
 contribute indirect writes and imported transfers.
-Passing a local queue to a direct local function call
-or `go` is supported only when its parameter has the
-same scalar-element `chan chan T` shape. Its whole
-share group becomes external at the call boundary;
+Passing a local queue to a direct local function call,
+`go`, or `defer` is supported only when its parameter
+has the same scalar-element `chan chan T` shape. Its
+whole share group becomes external at the call or
+defer-registration boundary;
 later members joined by sends, receives, aliases, or
 group merges inherit that externality, so indirect
 writes reach subsequent group reads. Imported,
