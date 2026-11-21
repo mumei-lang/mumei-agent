@@ -346,6 +346,28 @@ function use(value: TypeOnly, second: TypeDefault) {
     assert value_only
 
 
+@pytest.mark.parametrize("prefix", ["export default", "export ="])
+def test_expression_exports_scan_resolved_names(prefix):
+    source = f"const known = 1; {prefix} known;"
+    report = build_ts_bindings(source)
+    known = _bindings(report, "known", "local")[0]
+    reference = next(
+        reference for reference in _refs(report, source, "known")
+        if reference.span.start > source.index(prefix)
+    )
+    assert reference.binding_id == known.id
+
+
+@pytest.mark.parametrize("prefix", ["export default", "export ="])
+def test_expression_exports_scan_unresolved_calls(prefix):
+    source = f"{prefix} missing();"
+    report = build_ts_bindings(source)
+    assert any(item.name == "missing" and item.reason == "unknown_name" for item in _unresolved(report))
+    assert len(report.calls) == 1
+    assert report.calls[0].kind == "unresolved"
+    assert not report.complete
+
+
 def test_tsx_uses_tsx_grammar_and_resolves_component_expression():
     source = 'import { Widget } from "ui"; const view = <Widget value={amount}/>;'
     report = build_ts_bindings(source, tsx=True)

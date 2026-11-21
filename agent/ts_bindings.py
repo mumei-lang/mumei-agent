@@ -1364,6 +1364,19 @@ class _TypeScriptBindings:
         if re.search(r"\bfrom\b", self.text(node)):
             return
         namespace = "type" if re.match(r"\s*export\s+type\b", self.text(node)) else "value"
+        if re.match(r"\s*export\s+(?:default\b|=)", self.text(node)):
+            expression = node.child_by_field_name("value")
+            if expression is None:
+                expression = next(
+                    (
+                        child
+                        for child in self.children(node)
+                        if child.type != "export_clause"
+                    ),
+                    None,
+                )
+            self._scan(expression, owner, function_context, with_scopes)
+            return
         for child in self.walk(node):
             if child.type != "export_specifier":
                 continue
