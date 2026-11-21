@@ -271,7 +271,7 @@ def inherit_dependency_checks(std_dir: Path, reports: dict[str, Any]) -> dict[st
         else:
             outstanding = report.get("checks_not_performed", [])
             if type(outstanding) is not list:
-                outstanding = []
+                raise ValueError("reports must contain a checks_not_performed list")
         outstanding_by_file[key] = [
             check for check in outstanding if type(check) is str
         ]
@@ -282,6 +282,7 @@ def inherit_dependency_checks(std_dir: Path, reports: dict[str, Any]) -> dict[st
     def dependency_closure(file_key: str) -> set[str]:
         closure: set[str] = set()
         visited: set[str] = set()
+        self_aliases = aliases_by_key.get(file_key, {file_key})
         frontier = list(graph[file_key])
         while frontier:
             node = frontier.pop()
@@ -292,10 +293,9 @@ def inherit_dependency_checks(std_dir: Path, reports: dict[str, Any]) -> dict[st
                 if alias in visited:
                     continue
                 visited.add(alias)
-                if alias != file_key:
+                if alias not in self_aliases:
                     closure.add(alias)
                 frontier.extend(graph.get(alias, []))
-        closure.discard(file_key)
         return closure
 
     files: dict[str, dict[str, Any]] = {}
@@ -310,7 +310,12 @@ def inherit_dependency_checks(std_dir: Path, reports: dict[str, Any]) -> dict[st
             for check, dependencies in sorted(inherited_sources.items())
         }
         dependencies_without_report = sorted(
-            dependency for dependency in closure if dependency not in reports
+            dependency
+            for dependency in closure
+            if not any(
+                alias in reports
+                for alias in aliases_by_key.get(dependency, {dependency})
+            )
         )
         unresolved_in_closure = file_key in unresolved or any(
             dependency in unresolved for dependency in closure

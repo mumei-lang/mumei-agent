@@ -247,7 +247,7 @@ def test_symlink_alias_dependency_inherits_report(
         tmp_path,
         {
             "a.mm": "",
-            "b.mm": 'import "std/alias";\n',
+            "b.mm": 'import "std/alias.mm";\n',
         },
     )
     alias = std_dir / "alias.mm"
@@ -265,8 +265,31 @@ def test_symlink_alias_dependency_inherits_report(
     )
     dependent = result["files"]["std/b.mm"]
     assert dependent["inherited"] == {"alias_check": ["std/a.mm"]}
-    assert dependent["dependencies_without_report"] == ["std/alias.mm"]
-    assert "dependency_verification" in dependent["checks_not_performed"]
+    assert dependent["dependencies_without_report"] == []
+    assert "dependency_verification" not in dependent["checks_not_performed"]
+
+
+def test_self_import_through_alias_does_not_inherit_own_checks(
+    tmp_path: Path,
+) -> None:
+    std_dir = _std(
+        tmp_path,
+        {"b.mm": 'import "std/alias_b.mm";\n'},
+    )
+    alias = std_dir / "alias_b.mm"
+    try:
+        alias.symlink_to(std_dir / "b.mm")
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    result = inherit_dependency_checks(
+        std_dir,
+        {"std/b.mm": _report("own_check")},
+    )
+    record = result["files"]["std/b.mm"]
+    assert record["own"] == ["own_check"]
+    assert record["inherited"] == {}
+    assert record["dependencies_without_report"] == []
 
 
 def test_unknown_reports_are_sorted(tmp_path: Path) -> None:
@@ -285,6 +308,7 @@ def test_unknown_reports_are_sorted(tmp_path: Path) -> None:
         [],
         {1: {}},
         {"std/a.mm": []},
+        {"std/a.mm": {"checks_not_performed": "not-a-list"}},
         {
             "std/a.mm": {
                 "schema_version": UNPERFORMED_CHECK_RECOVERY_SCHEMA,
