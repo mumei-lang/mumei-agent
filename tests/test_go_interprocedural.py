@@ -15008,7 +15008,7 @@ def test_chan_chan_parameter_send_recv_chain(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available
-    assert result.return_dependencies == frozenset({1})
+    assert result.return_dependencies == frozenset({0, 1})
     assert result.effects == "unknown"
 
 
@@ -16178,7 +16178,7 @@ def test_chan_chan_range_binds_external_elements(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available
-    assert result.return_dependencies == frozenset({1})
+    assert result.return_dependencies == frozenset({0, 1})
     assert result.effects == "unknown"
 
 
@@ -16201,7 +16201,7 @@ def test_chan_chan_range_element_send_broadcasts(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available
-    assert result.return_dependencies == frozenset({1})
+    assert result.return_dependencies == frozenset({0, 1})
     assert result.effects == "unknown"
 
 
@@ -16225,7 +16225,7 @@ def test_chan_chan_tuple_receive_binds_external(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available
-    assert result.return_dependencies == frozenset({1})
+    assert result.return_dependencies == frozenset({0, 1})
     assert result.effects == "unknown"
 
 
@@ -16247,7 +16247,7 @@ def test_chan_chan_assignment_receive_reseats(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available
-    assert result.return_dependencies == frozenset({1})
+    assert result.return_dependencies == frozenset({0, 1})
     assert result.effects == "unknown"
 
 
@@ -16482,6 +16482,55 @@ def test_local_chan_chan_call_maps_received_queue_dependencies(
     callee_summary = named_package(files, snapshot, summaries, "G")
     result = named_package(files, snapshot, summaries, "F")
     assert callee_summary.available and callee_summary.effects == "unknown"
+    assert callee_summary.return_dependencies == frozenset({0})
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+@pytest.mark.parametrize(
+    "callee",
+    [
+        (
+            "func G(cc chan chan int64) int64 {\n"
+            "\td := <-cc\n\tv := <-d\n\treturn v\n}\n"
+        ),
+        (
+            "func G(cc chan chan int64) int64 {\n"
+            "\td := <-cc\n\tvar v int64\n"
+            "\tselect { case v = <-d: }\n\treturn v\n}\n"
+        ),
+        (
+            "func G(cc chan chan int64) (r int64) {\n"
+            "\td := <-cc\n\tr = <-d\n\treturn\n}\n"
+        ),
+        (
+            "func G(cc chan chan int64) int64 {\n"
+            "\td := <-cc\n\tfor v := range d { return v }\n"
+            "\treturn 0\n}\n"
+        ),
+        (
+            "func G(cc chan chan int64) int64 {\n"
+            "\td := <-cc\n\tv := <-d\n\treturn v + 1\n}\n"
+        ),
+    ],
+)
+def test_chan_chan_param_origins_flow_through_receive_values(
+    go_types_helper, callee
+):
+    files = {
+        "a.go": "package p\n"
+        + callee
+        + "func F(x int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n\tc <- x\n\tclose(c)\n"
+        "\tcc := make(chan chan int64, 1)\n\tcc <- c\n"
+        "\treturn G(cc)\n}\n",
+    }
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    callee_summary = named_package(files, snapshot, summaries, "G")
+    result = named_package(files, snapshot, summaries, "F")
+    assert callee_summary.available
+    assert callee_summary.return_dependencies == frozenset({0})
     assert result.available
     assert result.return_dependencies == frozenset({0})
     assert result.effects == "unknown"

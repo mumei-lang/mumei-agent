@@ -997,11 +997,6 @@ class _Builder:
         self.external_chan_locals: set[str] = set()
         self.local_chan_chans: set[str] = set()
         self._chan_chan_param_origins: dict[str, frozenset[int]] = {}
-        self._chan_chan_return_params_by_fn: dict[
-            str, frozenset[int]
-        ] = {}
-        self._current_chan_chan_return_params: set[int] = set()
-        self._collect_chan_chan_return_params = False
         self.external_chan_selectors: dict[str, frozenset[int]] = {}
         self._external_chan_elem_index_deps: dict[
             tuple[int, int, int], frozenset[int]
@@ -6791,14 +6786,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
         reassigned between the literal and the `return cl` reads the
         CURRENT value (`y = x` after `cl := func(){return y}` hands x's
         deps to the caller, not the empty set the literal captured)."""
-        collecting = self._collect_chan_chan_return_params
-        self._collect_chan_chan_return_params = True
-        try:
-            deps = self.expression(
-                expr, fn, params, locals_, transfers, count, 0
-            )
-        finally:
-            self._collect_chan_chan_return_params = collecting
+        deps = self.expression(
+            expr, fn, params, locals_, transfers, count, 0
+        )
         idents = [expr] if expr.type == "identifier" else []
         if not idents and expr.type == "composite_literal":
             # `return []func(){cl}` — a closure returned as a
@@ -9225,12 +9215,6 @@ member, or one explicit dereference of one (`(*t).F` — the same
         saved_chan_chan_param_origins = (
             self._chan_chan_param_origins
         )
-        saved_current_chan_chan_return_params = (
-            self._current_chan_chan_return_params
-        )
-        saved_collect_chan_chan_return_params = (
-            self._collect_chan_chan_return_params
-        )
         saved_external_chan_selectors = self.external_chan_selectors
         saved_external_chan_elem_index_deps = (
             self._external_chan_elem_index_deps
@@ -9261,8 +9245,6 @@ member, or one explicit dereference of one (`(*t).F` — the same
         self.external_chan_locals = set()
         self.local_chan_chans = set()
         self._chan_chan_param_origins = {}
-        self._current_chan_chan_return_params = set()
-        self._collect_chan_chan_return_params = False
         self.external_chan_selectors = {}
         self._external_chan_elem_index_deps = {}
         self._defer_result_deps = frozenset()
@@ -9290,14 +9272,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
             pb = self.bindings.get(p.binding_id)
             if pb is not None:
                 self.pinned.update(pb.signature_type_ids)
-        chan_chan_return_params = frozenset()
         try:
             self._sequence(
                 statements, fn, params, locals_, transfers, count, deps,
                 saw_return, False,
-            )
-            chan_chan_return_params = frozenset(
-                self._current_chan_chan_return_params
             )
             # A param's dep set grown past its seed means a store
             # landed on memory the caller still reads (`s[i] = x` on
@@ -9349,12 +9327,6 @@ member, or one explicit dereference of one (`(*t).F` — the same
             self._chan_chan_param_origins = (
                 saved_chan_chan_param_origins
             )
-            self._current_chan_chan_return_params = (
-                saved_current_chan_chan_return_params
-            )
-            self._collect_chan_chan_return_params = (
-                saved_collect_chan_chan_return_params
-            )
             self.external_chan_selectors = (
                 saved_external_chan_selectors
             )
@@ -9369,9 +9341,6 @@ member, or one explicit dereference of one (`(*t).F` — the same
             self._goto_seen = saved_goto_seen
             self._seen_labels = saved_seen_labels
             self.current_file = previous_file
-        self._chan_chan_return_params_by_fn[
-            fn.binding_id
-        ] = chan_chan_return_params
         if not saw_return[0] and fn.results:
             # A void callee may fall off the end of its body — Go
             # treats that as an implicit bare `return`, which the
@@ -15379,6 +15348,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                                 right, fn, params, scope, transfers,
                                 count, 0,
                             )
+                            rdeps |= self._chan_chan_param_origin(
+                                right, params
+                            )
                             if chan is not None:
                                 # `for v := range d` — d may sit
                                 # inside a chan-element share group
@@ -18683,22 +18655,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
                         if external is not None:
                             target_id, fact = external
                             if self._chan_chan_fact(fact):
-                                if (
-                                    self._collect_chan_chan_return_params
-                                    and target_id in params
-                                ):
-                                    self._current_chan_chan_return_params.add(
-                                        params[target_id]
-                                    )
-                                # `<-cc` pulls a channel out of the
-                                # outer queue — the received name
-                                # carries the queue's own deps
-                                # (`cc := G(x)` hands `x` to
-                                # `c := <-cc`; a bare param slot has
-                                # no entry and stays dep-free).
+                                # A channel received from an outer
+                                # queue carries the queue parameter's
+                                # provenance through subsequent reads.
                                 base_deps = locals_.get(
                                     target_id, frozenset()
                                 )
+                                if target_id in params:
+                                    base_deps |= frozenset(
+                                        {params[target_id]}
+                                    )
                             else:
                                 base_deps = frozenset()
                         else:
@@ -18739,12 +18705,6 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     if binding.id in params or (
                         binding.id in self.external_chan_locals
                     ):
-                        if self._collect_chan_chan_return_params:
-                            self._current_chan_chan_return_params.update(
-                                self._chan_chan_param_origins.get(
-                                    binding.id, frozenset()
-                                )
-                            )
                         # `<-ch` on a channel parameter or a
                         # callee-produced queue reads state shared
                         # beyond this function — external state like
@@ -18784,6 +18744,9 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             | self._chan_group_read_deps(
                                 binding.id, locals_
                             )
+                            | self._chan_chan_param_origins.get(
+                                binding.id, frozenset()
+                            )
                         )
                     group_external = (
                         self._chan_group_external_tokens(binding.id)
@@ -18805,6 +18768,8 @@ member, or one explicit dereference of one (`(*t).F` — the same
                             )
                     return self._chan_group_read_deps(
                         binding.id, locals_
+                    ) | self._chan_chan_param_origins.get(
+                        binding.id, frozenset()
                     )
                 raise _Unsupported("unsupported_operator", _span(node))
             if kind == "unary_expression" and operator.type == "&":
@@ -20282,12 +20247,23 @@ member, or one explicit dereference of one (`(*t).F` — the same
         if len(arguments) != arity:
             raise _Unsupported("callee_unavailable", _span(node), target_id)
         # Even unused arguments are evaluated and must have supported effects.
-        actual = tuple(
+        local_chan_chan_roots = (
+            self._local_chan_chan_call_arg_roots(call, arguments)
+        )
+        actual_values = [
             self.expression(
                 arg, fn, params, locals_, transfers, count, depth + 1
             )
             for arg in arguments
-        )
+        ]
+        if local_chan_chan_roots is not None:
+            for index, argument in enumerate(arguments):
+                root_id = self._local_chan_chan_id(argument)
+                if root_id is not None:
+                    actual_values[index] = self._chan_group_read_deps(
+                        root_id, locals_
+                    )
+        actual = tuple(actual_values)
         if receiver_deps is not None:
             actual = (receiver_deps, *actual)
         elif (
@@ -20314,9 +20290,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     actual[0] | self.indirect_writes,
                     *actual[1:],
                 )
-        for root_id in (
-            self._local_chan_chan_call_arg_roots(call, arguments) or ()
-        ):
+        for root_id in local_chan_chan_roots or ():
             for token in self._chan_group_members(root_id):
                 self._mark_external_chan_group_member(token)
         callee = self.summarize(target_id)
@@ -20331,27 +20305,6 @@ member, or one explicit dereference of one (`(*t).F` — the same
         result = frozenset(
             i for parameter in callee.return_dependencies for i in actual[parameter]
         )
-        for parameter in self._chan_chan_return_params_by_fn.get(
-            target_id, frozenset()
-        ):
-            if parameter >= len(arguments):
-                continue
-            argument = arguments[parameter]
-            root_id = self._local_chan_chan_id(argument)
-            if root_id is not None:
-                result |= self._chan_group_read_deps(
-                    root_id, locals_
-                )
-                continue
-            origins = self._chan_chan_param_origin(argument, params)
-            result |= origins
-            if self._collect_chan_chan_return_params:
-                self._current_chan_chan_return_params.update(origins)
-            external = self._external_chan_operand(argument, params)
-            if external is not None and self._chan_chan_fact(external[1]):
-                result |= self.indirect_writes | locals_.get(
-                    external[0], frozenset()
-                )
         # The callee's declared named-type signature identities pin
         # exactly like an imported callee's: a local type's identity
         # already churns with its declaring file, while an imported one
