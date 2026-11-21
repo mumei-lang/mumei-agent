@@ -429,7 +429,10 @@ def _range_span(
         lines, line_starts, value["end"]["line"], value["end"]["character"]
     )
     _require(end >= start, "LSIF range ends before it starts")
-    _require(end <= len(text.encode("utf-8")), "LSIF range is outside its document")
+    _require(
+        end <= line_starts[-1] + len(lines[-1].encode("utf-8")),
+        "LSIF range is outside its document",
+    )
     return ByteSpan(start, end)
 
 
@@ -446,9 +449,20 @@ def _reject_project_dependencies(manifest_bytes: bytes, lock_bytes: bytes) -> No
     _require("workspace" not in package, "Cargo workspace members are outside the project boundary")
     library = manifest.get("lib", {})
     _require(type(library) is dict)
-    if "proc-macro" in library:
-        _require(type(library["proc-macro"]) is bool)
-        _require(not library["proc-macro"], "proc-macro projects are outside the project boundary")
+    for key in ("proc-macro", "proc_macro"):
+        if key in library:
+            _require(type(library[key]) is bool)
+            _require(not library[key], "proc-macro projects are outside the project boundary")
+    for key in ("crate-type", "crate_type"):
+        if key in library:
+            crate_types = library[key]
+            _require(
+                type(crate_types) is list and all(type(kind) is str for kind in crate_types)
+            )
+            _require(
+                "proc-macro" not in crate_types,
+                "proc-macro projects are outside the project boundary",
+            )
 
     workspace = manifest.get("workspace", {})
     _require(type(workspace) is dict)
@@ -601,6 +615,14 @@ def load_rust_compiler_snapshot(
             elif edge["label"] == "textDocument/definition":
                 definitions_by_result_set.setdefault(edge["outV"], []).append(edge)
 
+        line_tables: dict[str, tuple[str, list[str], list[int]]] = {}
+
+        def document_table(path: str) -> tuple[str, list[str], list[int]]:
+            if path not in line_tables:
+                text = document_contents[path].decode("utf-8")
+                line_tables[path] = (text, *_line_table(text))
+            return line_tables[path]
+
         range_ids = {
             identifier
             for identifier, vertex in vertices.items()
@@ -614,9 +636,7 @@ def load_rust_compiler_snapshot(
             if document_location[0] == "project":
                 path = document_location[1]
                 assert path is not None
-                text = document_contents[path].decode("utf-8")
-                lines, line_starts = _line_table(text)
-                _range_span(vertices[range_id], text, lines, line_starts)
+                _range_span(vertices[range_id], *document_table(path))
 
         for edge in edges:
             if edge["label"] != "item":
@@ -628,8 +648,7 @@ def load_rust_compiler_snapshot(
                     "LSIF item range does not belong to its document",
                 )
 
-        target_text = document_contents[target_path].decode("utf-8")
-        target_lines, target_line_starts = _line_table(target_text)
+        target_text, target_lines, target_line_starts = document_table(target_path)
         raw_references: list[RustCompilerReference] = []
         seen_reference_ids: set[int] = set()
         for edge in edges:
@@ -697,8 +716,9 @@ def load_rust_compiler_snapshot(
 
                 definition_path = definition_location[1]
                 _require(definition_location[0] == "project" and definition_path is not None)
-                definition_text = document_contents[definition_path].decode("utf-8")
-                definition_lines, definition_line_starts = _line_table(definition_text)
+                definition_text, definition_lines, definition_line_starts = document_table(
+                    definition_path
+                )
                 definition_span = _range_span(
                     vertices[definition_range_id],
                     definition_text,

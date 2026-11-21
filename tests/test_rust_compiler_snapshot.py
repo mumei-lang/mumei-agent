@@ -346,6 +346,10 @@ def test_build_script_document_is_rejected():
         '[target.\'cfg(unix)\'.dependencies]\nexample = "1"',
         '[workspace]\nmembers = ["other"]',
         "[lib]\nproc-macro = true",
+        "[lib]\nproc_macro = true",
+        '[lib]\ncrate-type = ["proc-macro"]',
+        '[lib]\ncrate_type = ["rlib", "proc-macro"]',
+        '[lib]\ncrate-type = "proc-macro"',
     ],
 )
 def test_project_boundary_rejects_dependencies_workspaces_and_proc_macros(section):
@@ -355,6 +359,24 @@ def test_project_boundary_rejects_dependencies_workspaces_and_proc_macros(sectio
 
     with pytest.raises(RustCompilerSnapshotError):
         load_rust_compiler_snapshot(_payload(envelope), source)
+
+
+def test_line_table_is_built_once_per_document(monkeypatch):
+    import agent.rust_compiler_snapshot as module
+
+    calls: list[str] = []
+    original = module._line_table
+
+    def counting(text):
+        calls.append(text)
+        return original(text)
+
+    monkeypatch.setattr(module, "_line_table", counting)
+    envelope = _envelope("cross_file")
+    load_rust_compiler_snapshot(_payload(envelope), _source("cross_file"))
+
+    assert calls
+    assert len(calls) == len(set(calls))
 
 
 def test_project_boundary_rejects_package_build_key_and_lock_sources():
