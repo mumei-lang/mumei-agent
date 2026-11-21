@@ -29,6 +29,16 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+def _repo_key(path: Path, repo: Path) -> str | None:
+    try:
+        return path.relative_to(repo).as_posix()
+    except ValueError:
+        try:
+            return path.resolve().relative_to(repo.resolve()).as_posix()
+        except ValueError:
+            return None
+
+
 def check_blast_radius(
     mumei_client: MumeiClient,
     mumei_repo_dir: Path,
@@ -59,16 +69,14 @@ def check_blast_radius(
         # existing files transitively import the candidate. Computed
         # while the candidate is on disk so its node exists in the
         # scanned graph.
-        rederive: set[str] = set()
-        try:
-            rel_changed = str(
-                new_file_path.resolve().relative_to(mumei_repo_dir.resolve())
-            ).replace("\\", "/")
-            inv_map = dependency_invalidation_map(std_dir, rel_changed)
-            rederive = set(inv_map["re_derive"])
-            result["dependency_invalidation"] = inv_map
-        except (OSError, ValueError):
-            pass
+        inv_map: dict[str, Any] | None = None
+        rel_changed = _repo_key(new_file_path, mumei_repo_dir)
+        if rel_changed is not None:
+            try:
+                inv_map = dependency_invalidation_map(std_dir, rel_changed)
+                result["dependency_invalidation"] = inv_map
+            except (OSError, ValueError):
+                pass
 
         # Verify every existing .mm file (excluding the new one)
         for mm_file in sorted(std_dir.rglob("*.mm")):
@@ -76,16 +84,18 @@ def check_blast_radius(
                 continue
             verify = mumei_client.verify(str(mm_file))
             if not verify["success"]:
-                rel_broken = str(
-                    mm_file.resolve().relative_to(mumei_repo_dir.resolve())
-                ).replace("\\", "/")
+                rel_broken = _repo_key(mm_file, mumei_repo_dir)
+                dependency_relation = "undetermined"
+                if inv_map is not None and rel_broken is not None:
+                    if rel_broken in inv_map["re_derive"]:
+                        dependency_relation = "re_derive"
+                    elif rel_broken in inv_map["unaffected"]:
+                        dependency_relation = "unaffected"
                 result["broken_files"].append(
                     {
                         "file": str(mm_file),
                         "error": verify.get("stderr", ""),
-                        # True when the broken file transitively imports
-                        # the candidate; False marks independent breakage.
-                        "dependency_driven": rel_broken in rederive,
+                        "dependency_relation": dependency_relation,
                     }
                 )
         result["all_passed"] = len(result["broken_files"]) == 0

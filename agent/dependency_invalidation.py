@@ -1,45 +1,32 @@
 """Dependency-aware invalidation map over the std ``.mm`` import graph.
 
-Deeper cross-file layer on top of the existing blast-radius surface
-(:func:`agent.proliferate_healing.check_blast_radius`): the blast radius
-re-verifies every existing ``std/*.mm`` file and reports which broke.
-This module answers the next question — *which files could a change have
-invalidated at all?* — by deriving the transitive dependents of a
-changed file from the same ``import "..."`` graph used by
-``analyze_gaps``.
-
-The produced descriptor is pure metadata in the established style of the
-C07 dependent-invalidation walk: **detection, not recomputation**. The
-host decides what to rebuild or re-verify; no check is re-run here, no
-contract diff is produced, no symbol resolution is attempted, and no
+The descriptor derives transitive dependents from compiler-mirrored import
+resolution and the implicit prelude dependency. It is detection-only
+metadata: no check is re-run, no contract diff is produced, and no
 persistent cache or evidence acceptance is implied.
 """
 from __future__ import annotations
 
-from pathlib import Path
+import posixpath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
-from agent.gap_rules import _IMPORT_RE, _scan_std_imports
+from agent.gap_rules import _IMPORT_RE
 
 SCHEMA_VERSION = "mumei.std-dependency-invalidation/v1"
+IMPLICIT_IMPORTS = ("std/prelude.mm",)
 
-# Honest limits of the descriptor: it maps import-declared dependents.
 CHECKS_NOT_PERFORMED = [
     "re_verification",
     "contract_level_diff",
     "symbol_resolution",
     "cycle_analysis",
-    "transitive_prelude_import",
+    "external_std_path_resolution",
 ]
 
 
 def _declared_import_targets(text: str) -> list[str]:
-    """Raw ``import "..."`` targets declared in *text* (order preserved).
-
-    Commented usage lines (``//   import ...``) never match because the
-    anchor requires ``import`` at the start of the (whitespace-stripped)
-    line — the same convention ``_scan_std_imports`` relies on.
-    """
+    """Return raw ``import "..."`` targets in declaration order."""
     targets: list[str] = []
     for line in text.splitlines():
         match = _IMPORT_RE.match(line)
@@ -48,37 +35,90 @@ def _declared_import_targets(text: str) -> list[str]:
     return targets
 
 
+def _resolve_import_target(
+    target: str, importer: str, file_keys: set[str]
+) -> str | None:
+    path = target if target.endswith(".mm") else target + ".mm"
+    if PurePosixPath(path).is_absolute() or PureWindowsPath(path).is_absolute():
+        return None
+
+    importer_relative = posixpath.normpath(
+        posixpath.join(posixpath.dirname(importer), path)
+    )
+    if importer_relative in file_keys:
+        return importer_relative
+
+    std_target = target
+    while std_target.startswith("./"):
+        std_target = std_target[2:]
+    if std_target.startswith("std/"):
+        std_path = (
+            std_target
+            if std_target.endswith(".mm")
+            else std_target + ".mm"
+        )
+        std_fallback = posixpath.normpath(std_path)
+        if std_fallback in file_keys:
+            return std_fallback
+    return None
+
+
+def _build_import_graph(
+    std_dir: Path,
+) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    """Build resolved import edges and unresolved targets for ``std_dir``."""
+    files = {
+        mm_file.relative_to(std_dir.parent).as_posix(): mm_file
+        for mm_file in sorted(std_dir.rglob("*.mm"))
+    }
+    file_keys = set(files)
+    graph: dict[str, list[str]] = {}
+    unresolved: dict[str, list[str]] = {}
+
+    for key, mm_file in files.items():
+        try:
+            text = mm_file.read_text(encoding="utf-8")
+        except OSError:
+            graph[key] = []
+            unresolved[key] = ["<unreadable>"]
+            continue
+
+        dependencies: set[str] = set()
+        missing: list[str] = []
+        for target in _declared_import_targets(text):
+            dependency = _resolve_import_target(target, key, file_keys)
+            if dependency is None:
+                missing.append(target)
+            elif dependency != key:
+                dependencies.add(dependency)
+        if missing:
+            unresolved[key] = missing
+        graph[key] = sorted(dependencies)
+
+    prelude = IMPLICIT_IMPORTS[0]
+    if prelude in graph:
+        for key in graph:
+            if key != prelude:
+                graph[key] = sorted(set(graph[key]) | {prelude})
+
+    return graph, unresolved
+
+
 def dependency_invalidation_map(std_dir: Path, changed: str) -> dict[str, Any]:
-    """Map the files transitively invalidated by *changed*.
+    """Map files to re-derive, undetermined, or unaffected by *changed*.
 
-    Parameters
-    ----------
-    std_dir:
-        The ``std/`` directory scanned by ``_scan_std_imports``.
-    changed:
-        The changed ``.mm`` file as a repo-relative path in the
-        ``std/...`` keyspace produced by the scan (for example
-        ``"std/math/safe_mul.mm"``). A file outside the graph (for
-        example a brand-new module nothing imports yet) simply yields an
-        empty ``re_derive`` set.
+    ``re_derive`` contains files transitively depending on *changed*.
+    ``undetermined`` contains files whose own unresolved imports, or those
+    of their dependencies, prevent a sound unaffected classification.
+    ``unaffected`` contains files with neither a resolved path to *changed*
+    nor unresolved imports in their dependency closure.
 
-    Returns a ``mumei.std-dependency-invalidation/v1`` descriptor:
-
-    - ``re_derive`` — every existing file that transitively imports
-      *changed*. These are the files whose checks a host should
-      re-derive rather than assume unaffected; a cycle lands all its
-      members here whenever any of them is reachable.
-    - ``unaffected`` — files whose complete resolved import set contains
-      no path to *changed*. Correct because unresolved import names
-      cannot resolve to *changed* (if they did, they would resolve —
-      the scan sees the file on disk).
-    - ``unresolved_imports`` — per file, declared targets that resolved
-      to nothing under ``std_dir``. Informational: they can never name
-      an existing *changed* file, so they do not weaken ``unaffected``.
-    - ``checks_not_performed`` — the checks this descriptor explicitly
-      does not run.
+    The descriptor keeps unresolved declared targets in
+    ``unresolved_imports`` and identifies implicit prelude imports in
+    ``implicit_imports``. It makes no claims about external std-path
+    resolution outside the scanned directory.
     """
-    graph = _scan_std_imports(std_dir)
+    graph, unresolved = _build_import_graph(std_dir)
 
     dependents: dict[str, set[str]] = {}
     for rel, deps in graph.items():
@@ -94,31 +134,27 @@ def dependency_invalidation_map(std_dir: Path, changed: str) -> dict[str, Any]:
         re_derive.add(node)
         frontier.extend(dependents.get(node, ()))
 
-    files = set(graph)
-    files.discard(changed)
-    unaffected = sorted(files - re_derive)
+    undetermined: set[str] = set(unresolved)
+    frontier = list(undetermined)
+    while frontier:
+        node = frontier.pop()
+        for dependent in dependents.get(node, ()):
+            if dependent not in undetermined:
+                undetermined.add(dependent)
+                frontier.append(dependent)
 
-    unresolved: dict[str, list[str]] = {}
-    for mm_file in sorted(std_dir.rglob("*.mm")):
-        rel = str(mm_file.relative_to(std_dir.parent)).replace("\\", "/")
-        try:
-            text = mm_file.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        resolved = {t[: -len(".mm")] for t in graph.get(rel, [])}
-        missing = [
-            target
-            for target in _declared_import_targets(text)
-            if target not in resolved and target + ".mm" != rel
-        ]
-        if missing:
-            unresolved[rel] = missing
+    files = set(graph)
+    undetermined.difference_update(re_derive)
+    undetermined.discard(changed)
+    unaffected = files - re_derive - undetermined - {changed}
 
     return {
         "schema_version": SCHEMA_VERSION,
         "changed": changed,
         "re_derive": sorted(re_derive),
-        "unaffected": unaffected,
+        "undetermined": sorted(undetermined),
+        "unaffected": sorted(unaffected),
         "unresolved_imports": unresolved,
+        "implicit_imports": [name for name in IMPLICIT_IMPORTS if name in graph],
         "checks_not_performed": list(CHECKS_NOT_PERFORMED),
     }
