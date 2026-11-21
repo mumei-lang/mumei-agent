@@ -20340,7 +20340,11 @@ class _Builder:
                     else None
                 )
                 nested_range_index_deps = frozenset()
-                if nested_range_container is not None:
+                if (
+                    nested_range_container is not None
+                    and nested_range_container[2].type
+                    not in _INDEX_LITERALS
+                ):
                     nested_range_index_deps = self.expression(
                         nested_range_container[2],
                         fn,

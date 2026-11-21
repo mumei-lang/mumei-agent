@@ -32252,9 +32252,10 @@ def test_named_struct_element_field_ranges_match_alias_controls(
 
 
 @pytest.mark.parametrize(
-    ("actual", "control", "expected"),
+    ("signature", "actual", "control", "expected"),
     [
         (
+            "s [][]E, x int64",
             "r := int64(0); for _, e := range s[0] { r += e.V }; "
             "return r",
             "row := s[0]; r := int64(0); "
@@ -32262,20 +32263,28 @@ def test_named_struct_element_field_ranges_match_alias_controls(
             frozenset({0}),
         ),
         (
+            "s [][]E, x int64",
             "for _, e := range s[0] { e.F[0] = x }; "
             "return s[0][0].F[0]",
             "row := s[0]; for _, e := range row { e.F[0] = x }; "
             "return s[0][0].F[0]",
             frozenset({0, 1}),
         ),
+        (
+            "s map[string][]E",
+            "r := int64(0); for _, e := range s[\"row\"] { "
+            "r += e.V }; return r",
+            "row := s[\"row\"]; r := int64(0); "
+            "for _, e := range row { r += e.V }; return r",
+            frozenset({0}),
+        ),
     ],
-    ids=["nested-read", "nested-write"],
+    ids=["nested-read", "nested-write", "string-literal-map-key"],
 )
 def test_named_struct_element_nested_ranges_match_alias_controls(
-    go_types_helper, actual, control, expected
+    go_types_helper, signature, actual, control, expected
 ):
     types = "type E struct { F []int64; V int64 }\n"
-    signature = "s [][]E, x int64"
     direct = named(
         *unit(
             go_types_helper,
