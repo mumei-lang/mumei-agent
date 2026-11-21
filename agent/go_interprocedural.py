@@ -23243,11 +23243,6 @@ class _Builder:
                                 )
                             )
                         return deps
-                field_root, _field_member = self._scalar_container_field(
-                    node
-                )
-                if field_root is not None:
-                    return locals_.get(field_root, frozenset())
                 # `st.V` / `st.A.B` — a field of a tracked local
                 # composite: the binding's dep set conflates every
                 # field, so the read returns it whole. Local state —
@@ -23270,6 +23265,75 @@ class _Builder:
                             )
                         self._pin_value_promotion_chain(ref, promotion)
                     return locals_.get(ref.binding_id, frozenset())
+                field_root, _field_member = self._scalar_container_field(
+                    node
+                )
+                if field_root is not None:
+                    field_deps = locals_.get(
+                        field_root, frozenset()
+                    )
+                    field_operand = node.child_by_field_name(
+                        "operand"
+                    )
+                    index_nodes = []
+                    while field_operand is not None:
+                        while (
+                            field_operand is not None
+                            and field_operand.type
+                            == "parenthesized_expression"
+                        ):
+                            field_operand = next(
+                                (
+                                    child
+                                    for child in field_operand.named_children
+                                    if child.type != "comment"
+                                ),
+                                None,
+                            )
+                        if field_operand is None:
+                            break
+                        if field_operand.type == "selector_expression":
+                            field_operand = (
+                                field_operand.child_by_field_name(
+                                    "operand"
+                                )
+                            )
+                        elif field_operand.type == "index_expression":
+                            index = field_operand.child_by_field_name(
+                                "index"
+                            )
+                            if (
+                                index is not None
+                                and index.type not in _INDEX_LITERALS
+                            ):
+                                index_nodes.append(index)
+                            field_operand = (
+                                field_operand.child_by_field_name(
+                                    "operand"
+                                )
+                            )
+                        elif field_operand.type in {
+                            "field_expression",
+                            "dereference_expression",
+                        }:
+                            field_operand = (
+                                field_operand.child_by_field_name(
+                                    "operand"
+                                )
+                            )
+                        else:
+                            break
+                    for index in reversed(index_nodes):
+                        field_deps |= self.expression(
+                            index,
+                            fn,
+                            params,
+                            locals_,
+                            transfers,
+                            count,
+                            depth + 1,
+                        )
+                    return field_deps
                 # `G.V` / `G.A.N` — a field of a package-level
                 # composite (or pointer) var: package state is
                 # external exactly like `lib.VS.F`, so the read is
