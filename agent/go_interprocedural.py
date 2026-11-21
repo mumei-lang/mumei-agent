@@ -18547,6 +18547,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # can write through it, so the binding is marked
                 # escaped for the deref-store dependency fold.
                 operand = node.child_by_field_name("operand")
+                if self._local_chan_chan_id(operand) is not None:
+                    raise _Unsupported(
+                        "unsupported_operator", _span(node)
+                    )
                 # `&st` / `&st.V` on a tracked composite stays closed:
                 # the dep-free bound-pointer field read never sees
                 # st's conflated set, so letting a pointer alias it

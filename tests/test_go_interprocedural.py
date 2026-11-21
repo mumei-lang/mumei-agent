@@ -15573,6 +15573,14 @@ def test_chan_chan_boundaries_stay_closed(go_types_helper):
         "\tlocal := make(chan chan int64, 1)\n"
         "\tlocal <- <-cc\n"
         "\treturn 0\n}\n",
+        "var GCC chan chan int64\n"
+        "func G(p *chan chan int64) { *p = GCC }\n"
+        "func F(x int64) int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tG(&cc)\n"
+        "\td := <-cc\n"
+        "\td <- x\n"
+        "\treturn 0\n}\n",
     ):
         result = named(*unit(go_types_helper, src))
         assert not result.available, src
