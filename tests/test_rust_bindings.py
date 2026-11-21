@@ -499,6 +499,38 @@ def test_macros_and_glob_imports_keep_hidden_names_unresolved_and_incomplete():
     assert any(g.reason == "glob_import" for g in report.gaps)
 
 
+def test_inner_glob_import_blocks_outer_items_but_not_other_scopes():
+    source = (
+        "fn helper(){} "
+        "fn f(){ { use m::*; helper(); } } "
+        "fn g(){ helper(); }"
+    )
+    report = build_rust_bindings(source, pointer_width=64)
+    helper = _bindings(report, "helper", "function")[0]
+    raw = source.encode()
+    calls = sorted(
+        (
+            call
+            for call in report.calls
+            if raw[call.span.start : call.span.end] == b"helper()"
+        ),
+        key=lambda call: call.span.start,
+    )
+    assert [call.kind for call in calls] == ["unresolved", "direct_local"]
+    assert calls[0].target == ""
+    assert calls[1].target == helper.id
+    assert _unresolved(report, "helper", "glob_import")
+
+
+def test_glob_import_in_inline_module_blocks_outer_name_lookup():
+    source = "fn helper(){} mod m { use other::*; fn f(){ helper(); } }"
+    report = build_rust_bindings(source, pointer_width=64)
+    call = _call(report, source, "helper()")
+    assert call.kind == "unresolved"
+    assert call.target == ""
+    assert _unresolved(report, "helper", "glob_import")
+
+
 def test_use_imports_prelude_qualified_method_and_generic_calls():
     source = """
 use std::cmp::max;

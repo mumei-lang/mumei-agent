@@ -886,7 +886,7 @@ class _RustBindings:
             if ambiguous is not None and ambiguous[0] <= position < ambiguous[1]:
                 return None, "unknown_name"
             if scope.glob_import:
-                blocked = blocked or "glob_import"
+                return None, "glob_import"
         return None, blocked
 
     def _lookup(self, name: str, position: int, namespace: str) -> _Record | None:
