@@ -58,6 +58,7 @@ _SUBCOMMANDS = {
     "sol-summaries-reuse-attempt",
     "evidence-check",
     "evidence-check-schedule",
+    "evidence-check-adapter",
     "evidence-check-accept",
     "evidence-check-list",
     "evidence-check-consistency",
@@ -707,6 +708,24 @@ def main() -> None:
         evidence_check_schedule_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(evidence_check_schedule_main(args))
+    elif command == "evidence-check-adapter":
+        import argparse
+        from agent.evidence_check_adapter import (
+            build_check_adapter_parser as evidence_check_adapter_build_parser,
+            main_check_adapter as evidence_check_adapter_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent evidence-check-adapter",
+            description=(
+                "Check a declared adapter manifest's static representation "
+                "and consistency only; no execution, host policy, "
+                "resource enforcement or grade promotion is performed."
+            ),
+        )
+        evidence_check_adapter_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(evidence_check_adapter_main(args))
     elif command == "evidence-check-list":
         import argparse
         from agent.evidence_check_list import (
