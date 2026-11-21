@@ -71,6 +71,33 @@ def test_stale_and_future_records_fail_window():
     assert evaluation["within_window"] is False
 
 
+@pytest.mark.parametrize("max_age_seconds", [10**12, 10**18])
+def test_large_max_age_windows_do_not_overflow(max_age_seconds):
+    evaluation = evaluate_freshness(
+        {"produced_at": "2026-01-01T00:00:00Z"},
+        "2026-01-01T00:00:01Z",
+        max_age_seconds,
+    )
+    assert evaluation["freshness_claimed"] is True
+    assert evaluation["within_window"] is True
+
+
+@pytest.mark.parametrize(
+    ("produced_at", "expected"),
+    [
+        ("2026-01-01T00:00:00Z", True),
+        ("2025-12-31T23:59:59.999999Z", False),
+    ],
+)
+def test_freshness_window_boundary(produced_at, expected):
+    evaluation = evaluate_freshness(
+        {"produced_at": produced_at},
+        "2026-01-01T00:00:01Z",
+        1,
+    )
+    assert evaluation["within_window"] is expected
+
+
 def test_missing_or_malformed_claim():
     for record in (
         {},

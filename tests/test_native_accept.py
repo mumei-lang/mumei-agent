@@ -10,7 +10,10 @@ from pathlib import Path
 
 import pytest
 
+from agent.core_evidence import OBJECT_CHECK_VOCABULARY
 from agent.native_accept import (
+    CHECK_VOCABULARY,
+    DischargedChecks,
     FILE_MEMBERS,
     RECORD_FILE,
     build_accept_parser,
@@ -104,6 +107,16 @@ def _args(core: Path, bundle: Path, source: Path, extra=()):
     ]
 
 
+def _assert_check_partition(report, discharged=frozenset()):
+    assert report["checks_not_performed"] == sorted(
+        (CHECK_VOCABULARY - discharged) | OBJECT_CHECK_VOCABULARY
+    )
+    assert not (
+        set(report.get("discharged_checks", []))
+        & OBJECT_CHECK_VOCABULARY
+    )
+
+
 def test_accepted_run_selects_descriptor(tmp_path, capsys):
     core = _write_core(tmp_path)
     bundle = _write_bundle(tmp_path)
@@ -121,9 +134,11 @@ def test_accepted_run_selects_descriptor(tmp_path, capsys):
     assert report["checks_not_performed"] == [
         "file_identity",
         "freshness",
+        "object_translation_correspondence",
         "producer_authenticity",
         "semantic_correspondence",
     ]
+    _assert_check_partition(report, DischargedChecks.ACCEPTED)
     # The descriptor is anonymous — no verifier-evidence handoff.
     assert "candidate" not in report
     assert "recheck" not in report
@@ -144,6 +159,7 @@ def test_exit_one_publishes_lineage_without_claimed_outcome(
     assert report["sequence"].get("selected_result") is None
     assert "candidate" not in report
     assert report["normalized"]["exit_code"] == 1
+    _assert_check_partition(report)
 
 
 def test_inconclusive_accept_records_outcome(tmp_path, capsys):
@@ -157,6 +173,7 @@ def test_inconclusive_accept_records_outcome(tmp_path, capsys):
     assert "discharged_checks" not in report
     assert report["sequence"].get("selected_result") is None
     assert report["normalized"]["exit_code"] == 3
+    _assert_check_partition(report)
 
 
 def test_unknown_exit_code_omits_acceptance_outcome(tmp_path, capsys):
@@ -168,6 +185,7 @@ def test_unknown_exit_code_omits_acceptance_outcome(tmp_path, capsys):
     report = json.loads(out)
     assert "acceptance" not in report
     assert report["normalized"]["exit_code"] == 2
+    _assert_check_partition(report)
 
 
 def test_mid_run_input_drift_claims_no_outcome(tmp_path, capsys):
@@ -193,6 +211,7 @@ def test_mid_run_input_drift_claims_no_outcome(tmp_path, capsys):
     assert "discharged_checks" not in report
     assert "acceptance" not in report
     assert report["sequence"].get("selected_result") is None
+    _assert_check_partition(report)
 
 
 def test_multifile_members_enumerated_and_fingerprinted(tmp_path, capsys):
@@ -216,6 +235,7 @@ def test_multifile_members_enumerated_and_fingerprinted(tmp_path, capsys):
     report = json.loads(out)
     assert report["inputs_changed"] is True
     assert "acceptance" not in report
+    _assert_check_partition(report)
 
 
 def test_mid_run_record_swap_declaring_new_member_is_drift(tmp_path, capsys):
@@ -245,6 +265,7 @@ def test_mid_run_record_swap_declaring_new_member_is_drift(tmp_path, capsys):
     report = json.loads(out)
     assert report["inputs_changed"] is True
     assert "acceptance" not in report
+    _assert_check_partition(report)
 
 
 def test_record_swap_inside_validation_window_is_drift(tmp_path, capsys, monkeypatch):
@@ -278,6 +299,7 @@ def test_record_swap_inside_validation_window_is_drift(tmp_path, capsys, monkeyp
     report = json.loads(out)
     assert report["inputs_changed"] is True
     assert "acceptance" not in report
+    _assert_check_partition(report)
 
 
 def test_deeply_nested_record_rejected_without_traceback(tmp_path, capsys):
@@ -303,6 +325,7 @@ def test_multifile_bundle_accepted_clean(tmp_path, capsys):
     assert code == 0
     report = json.loads(out)
     assert report["acceptance"] == "accepted"
+    _assert_check_partition(report, DischargedChecks.ACCEPTED)
 
 
 def test_invalid_sources_member_rejected(tmp_path, capsys):
@@ -449,6 +472,7 @@ def test_cli_dispatch(tmp_path):
     assert result.returncode == 0, result.stderr
     report = json.loads(result.stdout)
     assert report["acceptance"] == "accepted"
+    _assert_check_partition(report, DischargedChecks.ACCEPTED)
 
 
 @pytest.fixture

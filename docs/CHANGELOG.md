@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased: C11 declared producer-signature folds as MCP tools
+
+- Exposed `signature-eval` and `signature-verify` as spawn-free MCP tools
+  with CLI-parity payloads, bounded declared-file reads, redacted path
+  errors, and caller-declared Ed25519 verification. `signature-sign` remains
+  CLI-only because it reads secret key material.
+
+## Unreleased: C11 declared evidence folds as MCP tools
+
+- Exposed `evidence-acceptance-eval`, `freshness-eval`, `binding-eval`, and
+  `recovery-eval` as MCP tools with CLI-parity report payloads, bounded
+  declared-file reads, path-redacted errors, and no Core subprocess or new
+  authority. MCP recovery requests accept at most 64 evidence documents.
+
 ## Unreleased: TypeScript lexical binding report
 
 - Added `ts-bindings`, an opt-in tree-sitter report of single-file TypeScript

@@ -78,24 +78,30 @@ def _read_declared(path: str) -> dict:
     return value
 
 
+def run_eval(args: argparse.Namespace) -> dict:
+    record = _read_declared(args.record)
+    output_path = getattr(args, "output", None)
+    if output_path is not None:
+        out_path = Path(output_path)
+        try:
+            if Path(args.record).samefile(out_path):
+                raise ValueError(
+                    "--output may not overwrite a declared input document"
+                )
+        except FileNotFoundError:
+            pass
+    return evaluate_freshness(
+        record,
+        args.reference_time,
+        args.max_age_seconds,
+    )
+
+
 def main_eval(args: argparse.Namespace | None = None) -> int:
     try:
-        record = _read_declared(args.record)
+        assert args is not None
+        evaluation = run_eval(args)
         output_path = getattr(args, "output", None)
-        if output_path is not None:
-            out_path = Path(output_path)
-            try:
-                if Path(args.record).samefile(out_path):
-                    raise ValueError(
-                        "--output may not overwrite a declared input document"
-                    )
-            except FileNotFoundError:
-                pass
-        evaluation = evaluate_freshness(
-            record,
-            args.reference_time,
-            args.max_age_seconds,
-        )
         text = json.dumps(evaluation, indent=2) + "\n"
         if output_path is None:
             sys.stdout.write(text)

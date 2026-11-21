@@ -746,7 +746,9 @@ level and reported in `discharged_checks` with the other four checks in
 `checks_not_performed` (producer authenticity, historical execution and
 runtime/OS semantics stay outside the profile; the link
 argument-vector is recorded-but-not-reproduced inside Core and adds no
-claim). The route is also the `native_accept` MCP tool (same
+claim). `object_translation_correspondence` stays in
+`checks_not_performed` until a Core object-stage TV accept route exists.
+The route is also the `native_accept` MCP tool (same
 `run_accept` report production, declared-path validation and basename
 redaction as the other spawn tools). C02/C10 stay partial.
 
@@ -769,6 +771,8 @@ reports `discharged_checks` — `artifact_semantics` and `claim_truth` —
 with the remaining checks in `checks_not_performed`. The command's
 stdout is a fixed diagnostic line rather than an evidence record, so
 no `candidate` is emitted and a successful run selects only lineage.
+`object_translation_correspondence` stays in `checks_not_performed`
+until a Core object-stage TV accept route exists.
 The route is also the `native_artifact_recheck` MCP tool (same
 `run_artifact_recheck` report production, declared-path validation and
 basename redaction as the other spawn tools). C02/C10 stay partial.
@@ -6907,6 +6911,27 @@ Planning only: nothing is spawned, dispatched or accepted. Declared
 inputs join the path validation and error redaction applied to the
 other declared-path tools.
 
+### C11 declared evidence folds as MCP tools
+
+The MCP tools `evidence_acceptance_eval`, `freshness_eval`,
+`binding_eval`, and `recovery_eval` mirror the four spawn-free CLI folds
+over bounded declared inputs. They preserve `checks_not_performed` and
+redact declared paths in errors; recovery requests accept at most 64
+evidence paths. They make no Core command or subprocess call and add no
+authority, Evidence acceptance, verdict, or grade promotion. C11 stays
+partial; Core meaning and acceptance, C12's demand gate and grade
+promotion are unchanged.
+
+### C11 declared producer-signature folds as MCP tools
+
+The MCP `signature_eval` and `signature_verify` tools mirror the
+spawn-free `signature-eval` and `signature-verify` CLI routes over
+bounded declared inputs. Evaluation preserves `checks_not_performed`;
+verification performs Ed25519 under caller-declared public keys. Both
+make no Core command or subprocess call and add no authority, Evidence
+acceptance, verdict, or grade promotion. `signature-sign` remains
+CLI-only because it reads secret key material. C11 stays partial; Core
+meaning and acceptance, C12's demand gate and grade promotion are unchanged.
 
 ### C10 runtime/ABI assurance — design memo
 
@@ -6925,6 +6950,17 @@ process semantics. The named channel checks remain composable through
 values match. The remaining deep endpoint is object-code translation
 validation (Option B); no ABI claim is made. No grade or audit surface
 changes.
+
+### C10 object-code translation validation — consumption memo
+
+How the agent will consume a future Core object-stage translation-validation
+observation (Option B) is designed in
+[`docs/DESIGN_OBJECT_TV_CONSUMPTION.md`](DESIGN_OBJECT_TV_CONSUMPTION.md):
+a separate `object_translation_correspondence` check (never a reuse of
+`artifact_semantics`), an accept route as the only performer, a non-performing
+recheck route, and no end-to-end source-to-executable check composed from
+stage reports. Core command and schema names are hypotheses until Core lands
+them; only vocabulary reservation is agent-side work today.
 
 ## Roadmap authority and vocabulary
 

@@ -9,16 +9,24 @@ from typing import Any
 
 from mcp.server.fastmcp import Context
 
+def _json_dumps_utf8(payload: Any, *, default: Any = None) -> str:
+    text = json.dumps(payload, ensure_ascii=False, default=default)
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        text = json.dumps(payload, ensure_ascii=True, default=default)
+    return text
+
 def _err(message: str, **extra: Any) -> str:
     """Return a JSON-encoded error payload."""
     payload: dict[str, Any] = {"status": "error", "error": message}
     payload.update(extra)
-    return json.dumps(payload, ensure_ascii=False)
+    return _json_dumps_utf8(payload)
 
 def _ok(payload: dict[str, Any]) -> str:
     """Return a JSON-encoded ``status: ok`` payload."""
     payload.setdefault("status", "ok")
-    return json.dumps(payload, ensure_ascii=False, default=str)
+    return _json_dumps_utf8(payload, default=str)
 
 def _ok_dataclass(result: Any) -> str:
     """Return a dataclass result as a JSON-encoded ``status: ok`` payload."""

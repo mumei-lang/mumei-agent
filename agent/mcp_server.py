@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
+from pydantic import StrictInt
 
 from agent import telemetry
 from agent.cross_spec_artifacts import (
@@ -2708,23 +2709,394 @@ def evidence_check_accept(sequence_json: str, check_json: str) -> str:
     return _ok({"acceptance": acceptance})
 
 
+@mcp.tool()
+def evidence_acceptance_eval(
+    descriptor_path: str,
+    expected_fingerprint: str | None = None,
+) -> str:
+    """Fold a declared Core acceptance descriptor.
+
+    Reads the descriptor through the same bounded reader as
+    `evidence-acceptance-eval` and returns its representation-level
+    evaluation. This does not run Core; `checks_not_performed` is returned
+    verbatim. It is not Evidence acceptance, a verdict, or grade promotion.
+
+    Args:
+        descriptor_path: Path to a declared Core acceptance descriptor.
+        expected_fingerprint: Optional declared record fingerprint used
+            only for the representation-level `attempt_bound` comparison.
+
+    Returns:
+        JSON with `evaluation` on success or a redacted `error` on failure.
+    """
+    if not _valid_declared_path(descriptor_path):
+        return _err("descriptor_path must be a nonempty single-line path")
+    if expected_fingerprint is not None and not isinstance(
+        expected_fingerprint, str
+    ):
+        return _err("expected_fingerprint must be a string or null")
+
+    from agent.evidence_acceptance_eval import run_eval
+
+    try:
+        evaluation = run_eval(
+            argparse.Namespace(
+                descriptor=descriptor_path,
+                expected_fingerprint=expected_fingerprint,
+                output=None,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        return _err(
+            _redact_declared_paths(str(exc), [descriptor_path])
+        )
+    return _ok({"evaluation": evaluation})
+
+
+@mcp.tool()
+def freshness_eval(
+    record_path: str,
+    reference_time: str,
+    max_age_seconds: StrictInt,
+) -> str:
+    """Fold a declared record's freshness claim against a declared clock.
+
+    Reads the record through the same bounded reader as `freshness-eval`
+    and returns its representation-level evaluation. This does not run
+    Core; `checks_not_performed` is returned verbatim. It is not Evidence
+    acceptance, a verdict, or grade promotion.
+
+    Args:
+        record_path: Path to the declared producer record.
+        reference_time: Caller-declared RFC 3339 reference time.
+        max_age_seconds: Caller-declared freshness window in seconds.
+
+    Returns:
+        JSON with `evaluation` on success or a redacted `error` on failure.
+    """
+    if not _valid_declared_path(record_path):
+        return _err("record_path must be a nonempty single-line path")
+    if not isinstance(max_age_seconds, int) or isinstance(
+        max_age_seconds, bool
+    ):
+        return _err("max_age_seconds must be an int")
+
+    from agent.freshness_eval import run_eval
+
+    try:
+        evaluation = run_eval(
+            argparse.Namespace(
+                record=record_path,
+                reference_time=reference_time,
+                max_age_seconds=max_age_seconds,
+                output=None,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        return _err(
+            _redact_declared_paths(str(exc), [record_path])
+        )
+    return _ok({"evaluation": evaluation})
+
+
+@mcp.tool()
+def binding_eval(record_path: str, evidence_path: str) -> str:
+    """Fold a declared evidence document's binding to record bytes.
+
+    Reads both paths through the same bounded readers as `binding-eval`
+    and returns its representation-level binding. This does not run Core;
+    `checks_not_performed` is returned verbatim. It is not Evidence
+    acceptance, a verdict, or grade promotion.
+
+    Args:
+        record_path: Path to the record whose raw bytes are hashed.
+        evidence_path: Path to the declared evidence JSON document.
+
+    Returns:
+        JSON with `binding` on success or a redacted `error` on failure.
+    """
+    declared_paths = [record_path, evidence_path]
+    for name, path in (
+        ("record_path", record_path),
+        ("evidence_path", evidence_path),
+    ):
+        if not _valid_declared_path(path):
+            return _err(f"{name} must be a nonempty single-line path")
+
+    from agent.binding_eval import run_eval
+
+    try:
+        binding = run_eval(
+            argparse.Namespace(
+                record=record_path,
+                evidence=evidence_path,
+                output=None,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        return _err(_redact_declared_paths(str(exc), declared_paths))
+    return _ok({"binding": binding})
+
+
+@mcp.tool()
+def recovery_eval(record_path: str, evidence_paths: list[str]) -> str:
+    """Fold declared evaluation documents over a record's open checks.
+
+    Reads all paths through the same bounded readers as `recovery-eval`;
+    this MCP request is capped at 64 evidence documents. The result is
+    representation-level only and returns `checks_not_performed` verbatim.
+    This does not run Core or verify evidence. It is not Evidence
+    acceptance, a verdict, or grade promotion.
+
+    Args:
+        record_path: Path to the declared record.
+        evidence_paths: Nonempty paths to declared evaluation documents
+            (at most 64).
+
+    Returns:
+        JSON with `recovery` on success or redacted `error` on failure.
+    """
+    if not _valid_declared_path(record_path):
+        return _err("record_path must be a nonempty single-line path")
+    if not isinstance(evidence_paths, list) or not evidence_paths:
+        return _err("evidence_paths must be a nonempty list")
+
+    from agent.recovery_eval import MAX_RECOVERY_EVIDENCE_DOCUMENTS, run_eval
+
+    if len(evidence_paths) > MAX_RECOVERY_EVIDENCE_DOCUMENTS:
+        return _err(
+            "evidence_paths exceeds the maximum of "
+            f"{MAX_RECOVERY_EVIDENCE_DOCUMENTS} documents"
+        )
+    for index, path in enumerate(evidence_paths):
+        if not _valid_declared_path(path):
+            return _err(
+                f"evidence_paths[{index}] must be a nonempty single-line path"
+            )
+    declared_paths = [record_path, *evidence_paths]
+
+    try:
+        recovery = run_eval(
+            argparse.Namespace(
+                record=record_path,
+                evidence=evidence_paths,
+                output=None,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        return _err(_redact_declared_paths(str(exc), declared_paths))
+    return _ok({"recovery": recovery})
+
+
+@mcp.tool()
+def signature_eval(
+    envelope_path: str,
+    expected_subject: str | None = None,
+    expected_producer_key: str | None = None,
+    revocation_list_path: str | None = None,
+    key_registry_path: str | None = None,
+    registry_signature_path: str | None = None,
+    revocation_signature_path: str | None = None,
+    reference_time: str | None = None,
+    max_age_seconds: StrictInt | None = None,
+) -> str:
+    """Fold a declared producer-signature envelope and caller-declared pins.
+
+    This is representation-level evaluation only: it does not verify the
+    envelope signature, run Core or spawn a subprocess. It returns the
+    route's `checks_not_performed` verbatim and adds no authority. This is not
+    Evidence acceptance, a verdict, or grade promotion.
+
+    Args:
+        envelope_path: Path to the declared producer-signature envelope.
+        expected_subject: Optional caller-declared subject digest.
+        expected_producer_key: Optional caller-declared producer key id.
+        revocation_list_path: Optional declared revocation-list path.
+        key_registry_path: Optional declared producer-key registry path.
+        registry_signature_path: Optional signature wrapper for the registry.
+        revocation_signature_path: Optional signature wrapper for the list.
+        reference_time: Optional caller-declared RFC3339 time.
+        max_age_seconds: Optional declared envelope freshness window.
+
+    Returns:
+        JSON with `evaluation` on success or a path-redacted `error`.
+    """
+    path_arguments = (
+        ("envelope_path", envelope_path, False),
+        ("revocation_list_path", revocation_list_path, True),
+        ("key_registry_path", key_registry_path, True),
+        ("registry_signature_path", registry_signature_path, True),
+        ("revocation_signature_path", revocation_signature_path, True),
+    )
+    declared_paths = []
+    for name, path, optional in path_arguments:
+        if path is None and optional:
+            continue
+        if not _valid_declared_path(path):
+            return _err(f"{name} must be a nonempty single-line path")
+        declared_paths.append(path)
+    for name, value in (
+        ("expected_subject", expected_subject),
+        ("expected_producer_key", expected_producer_key),
+        ("reference_time", reference_time),
+    ):
+        if value is not None and not isinstance(value, str):
+            return _err(f"{name} must be a string")
+    if max_age_seconds is not None and (
+        not isinstance(max_age_seconds, int)
+        or isinstance(max_age_seconds, bool)
+    ):
+        return _err("max_age_seconds must be an integer")
+
+    from agent.signature_eval import run_eval
+
+    try:
+        evaluation = run_eval(
+            argparse.Namespace(
+                envelope=envelope_path,
+                expected_subject=expected_subject,
+                expected_producer_key=expected_producer_key,
+                revocation_list=revocation_list_path,
+                key_registry=key_registry_path,
+                registry_signature=registry_signature_path,
+                revocation_signature=revocation_signature_path,
+                reference_time=reference_time,
+                max_age_seconds=max_age_seconds,
+                output=None,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        return _err(_redact_declared_paths(str(exc), declared_paths))
+    return _ok({"evaluation": evaluation})
+
+
+@mcp.tool()
+def signature_verify(
+    envelope_path: str,
+    producer_key: str,
+    expected_subject: str | None = None,
+    expected_producer_key: str | None = None,
+    revocation_list_path: str | None = None,
+    key_registry_path: str | None = None,
+    registry_signature_path: str | None = None,
+    revocation_signature_path: str | None = None,
+    reference_time: str | None = None,
+    max_age_seconds: StrictInt | None = None,
+    registry_key: str | None = None,
+    revocation_key: str | None = None,
+) -> str:
+    """Verify a declared envelope under caller-declared Ed25519 keys.
+
+    This performs Ed25519 verification under the supplied public keys
+    without running Core or spawning a subprocess. It returns the route's
+    `checks_not_performed` verbatim and adds no authority. This is not
+    Evidence acceptance, a verdict, or grade promotion.
+
+    Args:
+        envelope_path: Path to the declared producer-signature envelope.
+        producer_key: Caller-declared raw Ed25519 public key in hex.
+        expected_subject: Optional caller-declared subject digest.
+        expected_producer_key: Optional caller-declared producer key id.
+        revocation_list_path: Optional declared revocation-list path.
+        key_registry_path: Optional declared producer-key registry path.
+        registry_signature_path: Optional signature wrapper for the registry.
+        revocation_signature_path: Optional signature wrapper for the list.
+        reference_time: Optional caller-declared RFC3339 time.
+        max_age_seconds: Optional declared envelope freshness window.
+        registry_key: Optional caller-declared registry signer public key.
+        revocation_key: Optional caller-declared revocation signer public key.
+
+    Returns:
+        JSON with `verification` on success or a path-redacted `error`.
+    """
+    path_arguments = (
+        ("envelope_path", envelope_path, False),
+        ("revocation_list_path", revocation_list_path, True),
+        ("key_registry_path", key_registry_path, True),
+        ("registry_signature_path", registry_signature_path, True),
+        ("revocation_signature_path", revocation_signature_path, True),
+    )
+    declared_paths = []
+    for name, path, optional in path_arguments:
+        if path is None and optional:
+            continue
+        if not _valid_declared_path(path):
+            return _err(f"{name} must be a nonempty single-line path")
+        declared_paths.append(path)
+    if not isinstance(producer_key, str):
+        return _err("producer_key must be a string")
+    for name, value in (
+        ("expected_subject", expected_subject),
+        ("expected_producer_key", expected_producer_key),
+        ("reference_time", reference_time),
+        ("registry_key", registry_key),
+        ("revocation_key", revocation_key),
+    ):
+        if value is not None and not isinstance(value, str):
+            return _err(f"{name} must be a string")
+    if max_age_seconds is not None and (
+        not isinstance(max_age_seconds, int)
+        or isinstance(max_age_seconds, bool)
+    ):
+        return _err("max_age_seconds must be an integer")
+
+    from agent.signature_verify import run_verify
+
+    try:
+        verification = run_verify(
+            argparse.Namespace(
+                envelope=envelope_path,
+                producer_key=producer_key,
+                expected_subject=expected_subject,
+                expected_producer_key=expected_producer_key,
+                revocation_list=revocation_list_path,
+                key_registry=key_registry_path,
+                registry_signature=registry_signature_path,
+                revocation_signature=revocation_signature_path,
+                reference_time=reference_time,
+                max_age_seconds=max_age_seconds,
+                registry_key=registry_key,
+                revocation_key=revocation_key,
+                output=None,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        return _err(_redact_declared_paths(str(exc), declared_paths))
+    return _ok({"verification": verification})
+
+
 def _redact_declared_paths(text: str, declared: list[str]) -> str:
     # Failure text goes to a model: declared checkout-local paths
     # stay out of it — basenames only.
+    replacements = []
     for p in declared:
         if not p:
             continue
         base = os.path.basename(p) or "<path>"
+        candidates = [p]
         try:
-            text = text.replace(str(Path(p).resolve()), base)
-        except (OSError, RuntimeError):
+            candidates.append(str(Path(p).resolve()))
+        except (OSError, RuntimeError, ValueError):
             pass
-        text = text.replace(p, base)
+        for candidate in candidates:
+            replacements.append((candidate, base))
+            escaped = repr(candidate)[1:-1]
+            if escaped != candidate:
+                replacements.append((escaped, base))
+    for candidate, base in sorted(
+        replacements, key=lambda replacement: len(replacement[0]), reverse=True
+    ):
+        text = text.replace(candidate, base)
     return text
 
 
 def _valid_declared_path(path: Any) -> bool:
-    return isinstance(path, str) and bool(path) and "\n" not in path
+    return (
+        isinstance(path, str)
+        and bool(path)
+        and "\n" not in path
+        and "\x00" not in path
+    )
 
 
 @mcp.tool()
