@@ -6909,6 +6909,17 @@ values match. The remaining deep endpoint is object-code translation
 validation (Option B); no ABI claim is made. No grade or audit surface
 changes.
 
+### C10 object-code translation validation — consumption memo
+
+How the agent will consume a future Core object-stage translation-validation
+observation (Option B) is designed in
+[`docs/DESIGN_OBJECT_TV_CONSUMPTION.md`](DESIGN_OBJECT_TV_CONSUMPTION.md):
+a separate `object_translation_correspondence` check (never a reuse of
+`artifact_semantics`), an accept route as the only performer, a non-performing
+recheck route, and no end-to-end source-to-executable check composed from
+stage reports. Core command and schema names are hypotheses until Core lands
+them; only vocabulary reservation is agent-side work today.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
