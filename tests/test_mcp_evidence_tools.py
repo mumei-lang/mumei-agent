@@ -1420,7 +1420,7 @@ class TestFreshnessEvalTool:
                 },
             )
         )
-        payload = _fold_payload(content[0].text)
+        payload = _fold_payload(content[0][0].text)
         assert payload["status"] == "ok"
         assert payload["evaluation"]["freshness_claimed"] is False
 
