@@ -2293,8 +2293,13 @@ class _Builder:
                     i
                     for i in callee.return_dependencies or ()
                     if i < len(target_fn.parameters)
-                    and self._param_container_shares_memory(
-                        target_fn.parameters[i].type
+                    and (
+                        self._param_container_shares_memory(
+                            target_fn.parameters[i].type
+                        )
+                        or self._scalar_chan_fact(
+                            target_fn.parameters[i].type
+                        )
                     )
                 )
             toks = {self.node_key(rhs)}
@@ -2342,9 +2347,12 @@ class _Builder:
                             # slices/maps/pointers still shares
                             # the elements' memory, so it folds.
                             continue
-                        toks |= self._opaque_container_tokens.get(
-                            arg_ref.binding_id, frozenset()
-                        )
+                        # `ident_toks` reaches what the token map
+                        # alone misses: a `chan` arg's queue (seeded
+                        # on first use) and a struct arg's slot —
+                        # `s := G(c)` may return `[]chan{c}`, so the
+                        # queue joins the result's share group.
+                        toks |= self._opaque_container_ident_toks(arg)
             return frozenset(toks)
         if rhs.type == "identifier":
             ref = self.references.get(self.node_key(rhs))
@@ -14990,6 +14998,24 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # this exact value, so dropping them would
                 # under-approximate.
                 self.indirect_writes |= value_deps
+                for holder_id in self._opaque_container_holders(
+                    frozenset({binding.id})
+                ) - {binding.id}:
+                    # The queue may also sit inside a `[]chan{c}`
+                    # share group — the send reaches `<-s[j]` too,
+                    # depositing like an element send does (the
+                    # external name's own slot stays external-only).
+                    holder_old = locals_.get(
+                        holder_id, frozenset()
+                    )
+                    if holder_id in params:
+                        holder_old = holder_old | frozenset(
+                            {params[holder_id]}
+                        )
+                    self._store(
+                        locals_, params, holder_id,
+                        holder_old | value_deps, conditional,
+                    )
                 transfers.append(
                     CallTransfer(
                         FileSpan(

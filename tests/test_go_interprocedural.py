@@ -20144,19 +20144,19 @@ def test_chan_elem_container_unsupported_stays_closed(
         # A `[]chan T` parameter — the element queues are
         # caller-shared memory: `s[i] <- x` deposits into the
         # param's share group like an element store and `<-s[i]`
-        # reads it back.
+        # reads it back beside the queue's existing contents.
         (
             "func F(s []chan int64, x int64) int64 {\n"
             "\ts[0] <- x\n"
             "\treturn <-s[0]\n}\n",
-            frozenset({1}),
+            frozenset({0, 1}),
         ),
         # `map[K]chan T` parameters ride the same group.
         (
             "func F(m map[int64]chan int64, x int64) int64 {\n"
             "\tm[0] <- x\n"
             "\treturn <-m[0]\n}\n",
-            frozenset({1}),
+            frozenset({0, 1}),
         ),
         # A callee's send through a `[]chan` parameter reaches
         # caller memory — `G` records the write like `s[0] = v`,
@@ -20182,6 +20182,28 @@ def test_chan_elem_container_unsupported_stays_closed(
             "\ts[0] <- x\n"
             "\treturn <-s[0]\n}\n",
             frozenset({0}),
+        ),
+        # A param queue inside a local group: `c <- x` deposits
+        # into the group's holders so `<-s[j]` observes it (the
+        # external send only reached `indirect_writes` before).
+        (
+            "func F(c chan int64, x int64) int64 {\n"
+            "\ts := []chan int64{c}\n"
+            "\tc <- x\n"
+            "\treturn <-s[0]\n}\n",
+            frozenset({0, 1}),
+        ),
+        # `s := G(c)` — the callee's `[]chan` result aliases the
+        # `chan` argument's queue: an element send lands on `c`.
+        (
+            "func G(c chan int64) []chan int64 {\n"
+            "\treturn []chan int64{c}\n"
+            "}\n"
+            "func F(c chan int64, x int64) int64 {\n"
+            "\ts := G(c)\n"
+            "\ts[0] <- x\n"
+            "\treturn <-c\n}\n",
+            frozenset({0, 1}),
         ),
     ],
 )
