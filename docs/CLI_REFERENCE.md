@@ -78,6 +78,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `native-observations-accept` | 7 | Run a declared Core native observations acceptance as one attempt and emit the reconciled lineage plus the declared acceptance outcome. |
 | `native-observations-recheck` | 7 | Run a declared Core native observations recheck as one attempt and emit the reconciled lineage plus the declared recheck outcome. |
 | `native-object-recheck` | 7 | Run a declared Core native object correspondence recheck as one attempt and emit the reconciled lineage plus declared outcome. |
+| `native-machine-tv-recheck` | 7 | Run a declared Core native machine-code TV recheck as one attempt and emit the reconciled lineage plus declared outcome. |
 | `native-check` | 7 | Run a declared Core native bundle identity check as one attempt and emit the reconciled lineage plus the declared check outcome. |
 | `native-source-recheck` | 7 | Run a declared Core native bundle source recheck as one attempt and emit the reconciled lineage plus the declared source recheck outcome. |
 | `native-evidence-recheck` | 8 | Replay a saved native consumer Evidence envelope against a fresh pinned recheck as one declared attempt and emit the reconciled lineage plus the declared outcome. |
@@ -1222,6 +1223,23 @@ Run a declared Core native object correspondence recheck as one attempt and emit
 | Option | Value | Required | Default | Description |
 |---|---|---|---|---|
 | `--core` | `<PATH>` | yes | — | Declared Core executable (absolute path) used to run `native-bundle recheck-object`. |
+| `--bundle` | `<DIR>` | yes | — | Declared native-bundle directory (absolute path) holding native-bundle.json and its declared members. |
+| `--source` | `<PATH>` | yes | — | Declared caller-supplied .mm source (absolute path, at most 65536 bytes); the bundle's own labels/paths are never read. |
+| `--expected-build-id` | `<SHA256>` | yes | — | SHA-256 of native-bundle.json obtained through a separately trusted channel. |
+| `--attempt-timeout` | `<<MS>>` | no | 60000 | Declared attempt bound in milliseconds. |
+| `--memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling applied to the attempt child's whole address space. |
+| `--output` | `<PATH>` | no | — | Write the recheck report JSON here instead of stdout. |
+
+
+## `mumei-agent native-machine-tv-recheck`
+
+Run a declared Core native machine-code TV recheck as one attempt and emit the reconciled lineage plus declared outcome.
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--core` | `<PATH>` | yes | — | Declared Core executable (absolute path) used to run `native-bundle recheck-machine-tv`. |
 | `--bundle` | `<DIR>` | yes | — | Declared native-bundle directory (absolute path) holding native-bundle.json and its declared members. |
 | `--source` | `<PATH>` | yes | — | Declared caller-supplied .mm source (absolute path, at most 65536 bytes); the bundle's own labels/paths are never read. |
 | `--expected-build-id` | `<SHA256>` | yes | — | SHA-256 of native-bundle.json obtained through a separately trusted channel. |

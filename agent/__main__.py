@@ -88,6 +88,7 @@ _SUBCOMMANDS = {
     "native-observations-accept",
     "native-observations-recheck",
     "native-object-recheck",
+    "native-machine-tv-recheck",
     "native-check",
     "native-evidence-accept",
     "native-source-recheck",
@@ -1245,6 +1246,24 @@ def main() -> None:
         native_obj_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(native_obj_main(args))
+    elif command == "native-machine-tv-recheck":
+        import argparse
+        from agent.native_machine_tv_recheck import (
+            build_machine_tv_recheck_parser as machine_tv_build_parser,
+            main_machine_tv_recheck as machine_tv_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent native-machine-tv-recheck",
+            description=(
+                "Run a declared Core leaf machine-code TV recheck as "
+                "one attempt and emit the reconciled lineage plus the "
+                "declared outcome."
+            ),
+        )
+        machine_tv_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(machine_tv_main(args))
     elif command == "native-check":
         import argparse
         from agent.native_check import (
