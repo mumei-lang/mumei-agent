@@ -20455,6 +20455,19 @@ def test_chan_elem_detach_surrogate_never_stale(go_types_helper):
             frozenset({0}),
             1,
         ),
+        # `close(s[i])` after `ch = make` reseats the param — the
+        # parked surrogate queue is still caller-owned, so the
+        # close records the external effect like the un-reseated
+        # form does.
+        (
+            "func F(ch chan int64, x int64) int64 {\n"
+            "\ts := []chan int64{ch}\n"
+            "\tch = make(chan int64, 4)\n"
+            "\tclose(s[0])\n"
+            "\treturn 0\n}\n",
+            frozenset(),
+            1,
+        ),
     ],
 )
 def test_chan_elem_close(

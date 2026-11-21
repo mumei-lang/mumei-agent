@@ -5657,7 +5657,15 @@ member, or one explicit dereference of one (`(*t).F` — the same
         owner = self.bindings.get(binding_id)
         if owner is not None:
             self.bindings.setdefault(sur, replace(owner, id=sur))
-        if binding_id in self.external_chan_locals:
+        if (
+            binding_id in self.external_chan_locals
+            or binding_id in params
+        ):
+            # A caller-owned queue parks caller-owned: a parameter's
+            # parked surrogate inherits the external marker too, so
+            # an op through a container member (`close(s[i])` on
+            # `s := []chan{ch}` after `ch = make`, or `d <- x`)
+            # still records the caller-visible effect.
             self.external_chan_locals.add(sur)
         # The reseated name's own member set still lists the sharers
         # the old queue carried (`d := s[0]` minted `d` into `c`'s
