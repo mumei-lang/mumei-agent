@@ -60,6 +60,17 @@ _ITER_SLICE_METHODS = frozenset({"as_slice", "as_mut_slice"})
 _MAP_ELEMENT_METHODS = {"keys": 0, "values": 1}
 _MAP_CONTAINER_NAMES = frozenset({"HashMap", "BTreeMap"})
 
+# Prelude container methods that hand back `Option` — `v.get(i)`,
+# `v.first()` and `v.last()` yield `Option<&T>` while `v.pop()`
+# yields `Option<T>`. Each maps to its payload prefix and the
+# container heads the method actually exists on.
+_OPTION_HEAD_METHODS = {
+    "get": ("&", {"Vec", "HashMap", "BTreeMap"}),
+    "first": ("&", {"Vec"}),
+    "last": ("&", {"Vec"}),
+    "pop": ("", {"Vec"}),
+}
+
 _PRELUDE_NAMES = frozenset(
     {
         "Some", "None", "Ok", "Err", "Vec", "String", "Box", "Option",
@@ -2430,26 +2441,34 @@ class _RustBindings:
                     and callee.type == "field_expression"
                     else None
                 )
+                if field is not None and receiver[1] is not None:
+                    option_head = _OPTION_HEAD_METHODS.get(
+                        self.text(field).strip()
+                    )
+                else:
+                    option_head = None
                 if (
-                    field is not None
-                    and self.text(field).strip() == "get"
-                    and receiver[1] is not None
+                    option_head is not None
                     and self._container_head_name(
                         callee.child_by_field_name("value")
                     )
-                    in {"Vec", "HashMap", "BTreeMap"}
+                    in option_head[1]
                 ):
-                    # `v.get(i)` yields `Option<&T>` — only its
-                    # payload spelling is carried (`&T`); the head
-                    # stays for `_scrutinee_shape` to declare.
+                    prefix = option_head[0]
+                    # `v.get(i)`/`v.first()`/`v.pop()` yield
+                    # `Option<&T>`/`Option<T>` — only the payload
+                    # spelling is carried; the head stays for
+                    # `_scrutinee_shape` to declare.
                     elements = self._type_arg_list(receiver[1])
                     element = (
                         elements[-1].strip()
                         if len(elements) == 2
-                        else elements[0].strip() if len(elements) == 1 else None
+                        else elements[0].strip()
+                        if len(elements) == 1
+                        else None
                     )
                     if element is not None:
-                        return None, "&" + element
+                        return None, prefix + element
                 if (
                     callee is not None
                     and callee.type == "field_expression"
@@ -2457,7 +2476,6 @@ class _RustBindings:
                     return self._unwrapped(
                         callee, node.start_byte, receiver
                     )
-                return None, None
                 return None, None
             if member.binding.kind == "enum_member":
                 # A variant constructor spells its enum — `E::C(P)`
@@ -5267,17 +5285,21 @@ class _RustBindings:
                     and callee.type == "field_expression"
                     else None
                 )
+                option_head = (
+                    _OPTION_HEAD_METHODS.get(self.text(field).strip())
+                    if field is not None
+                    else None
+                )
                 if (
-                    field is not None
-                    and self.text(field).strip() == "get"
+                    option_head is not None
                     and self._container_head_name(
                         callee.child_by_field_name("value")
                     )
-                    in {"Vec", "HashMap", "BTreeMap"}
+                    in option_head[1]
                 ):
-                    # `v.get(i)` returns `Option<&T>` — the prelude
-                    # container has no member record, but Some/None
-                    # still heads the scrutinee. A declared `get`
+                    # `v.get(i)`/`v.pop()` return `Option<_>` — the
+                    # prelude container has no member record, but
+                    # Some/None still heads the scrutinee. A declared
                     # method takes the normal path above.
                     return "Option", node.start_byte, None
                 return None, None, None

@@ -5499,3 +5499,30 @@ fn f(c: C) {
     report = build_rust_bindings(source, pointer_width=64)
     get = _bindings(report, "get", "associated_function")[0]
     assert _call(report, source, "c.get()").target == get.id
+
+
+def test_option_head_methods_on_prelude_containers() -> None:
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn f(v: Vec<P>) {
+    if let Some(p) = v.first() { p.m(); }
+    if let Some(p) = v.last() { p.m(); }
+    if let Some(p) = v.pop() { p.m(); }
+}
+use std::collections::HashMap;
+fn g(m: HashMap<u32, P>) {
+    if let Some(p) = m.pop() { p.m(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = _bindings(report, "m", "associated_function")[0]
+    calls = [
+        call
+        for call in report.calls
+        if source.encode()[call.span.start : call.span.end] == b"p.m()"
+    ]
+    assert [c.target for c in calls[:3]] == [m.id] * 3
+    # HashMap has no `pop` — the Some payload stays untyped.
+    assert not calls[3].target
+
