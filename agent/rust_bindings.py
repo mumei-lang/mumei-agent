@@ -2190,6 +2190,31 @@ class _RustBindings:
                     "value",
                 )
                 tn = rec.type_node if rec is not None else None
+                if (
+                    tn is None
+                    and rec is not None
+                    and rec.value_node is not None
+                    and rec.value_node.type == "call_expression"
+                ):
+                    # `let l = make()` — the head is spelled in
+                    # `make`'s declared return annotation.
+                    vcallee = rec.value_node.child_by_field_name(
+                        "function"
+                    )
+                    if (
+                        vcallee is not None
+                        and vcallee.type == "identifier"
+                    ):
+                        fn = self._lookup(
+                            self._normalize_identifier(
+                                self.text(vcallee)
+                            ),
+                            rec.value_node.start_byte,
+                            "value",
+                        )
+                        tn = (
+                            fn.type_node if fn is not None else None
+                        )
                 while tn is not None and tn.type in {
                     "reference_type",
                     "generic_type",
@@ -2199,11 +2224,29 @@ class _RustBindings:
                     tn = tn.child_by_field_name("type")
                 if tn is not None and tn.type == "scoped_type_identifier":
                     head = self.text(tn).strip().rsplit("::", 1)[-1]
+                elif tn is not None and tn.type == "type_identifier":
+                    head = self.text(tn).strip()
             if head is not None and head.rsplit("::", 1)[-1] in _DEREF_WRAPPER_NAMES:
+                declared_head = self._lookup(
+                    head.rsplit("::", 1)[-1],
+                    value.start_byte,
+                    "type",
+                )
+            if (
+                head is not None
+                and head.rsplit("::", 1)[-1] in _DEREF_WRAPPER_NAMES
+                and (
+                    declared_head is None
+                    or declared_head.binding.kind
+                    not in {"struct", "enum"}
+                )
+            ):
                 # `b.pm()` on `b: Box<P>`/`Rc<P>`/`Arc<P>` — the
                 # wrapper derefs to `P`, so retry the member on the
                 # spelled element. Wrapper methods (`Rc::get_mut`)
-                # still resolve on the wrapper first.
+                # still resolve on the wrapper first. A declared
+                # struct/enum of the same name is a custom type —
+                # its own Deref target may differ, so stay opaque.
                 spelled_pos = (
                     self._receiver_annotation_position(value)
                     or node.start_byte
@@ -2730,15 +2773,10 @@ class _RustBindings:
             # The element is a reference or composite type — keep its
             # text so deeper indexing still reads args.
             return None, elem_args
-        elem = self._lookup(
-            self._normalize_identifier(match.group(1)),
-            position,
-            "type",
-        )
-        return (
-            None if elem is None else elem.binding.id,
-            match.group(2),
-        )
+        # `m::P`/`use m::P`-imported heads resolve through the
+        # scoped path, not a bare name lookup.
+        elem_id, _inner = self._spelled_type(match.group(1), position)
+        return (elem_id, match.group(2))
 
     def _is_map_container(
         self, container_id: str | None, node: Any | None
@@ -2926,6 +2964,17 @@ class _RustBindings:
                 return self._receiver_annotation_position(
                     callee.child_by_field_name("value")
                 )
+            if callee is not None and callee.type == "identifier":
+                # `let l = make()` — `make()`'s spelled names were
+                # written in its declared return annotation, so they
+                # resolve in the declaration's scope, not the call.
+                fn = self._lookup(
+                    self._normalize_identifier(self.text(callee)),
+                    node.start_byte,
+                    "value",
+                )
+                if fn is not None and fn.type_node is not None:
+                    return fn.type_node.start_byte
             return None
         if node.type != "identifier":
             return None
