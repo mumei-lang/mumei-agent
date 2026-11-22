@@ -56,6 +56,11 @@ _ITER_PRESERVING_METHODS = frozenset(
 )
 # Vec/slice accessors that iterate the same element as `iter()`.
 _ITER_SLICE_METHODS = frozenset({"as_slice", "as_mut_slice"})
+# Iterators over `&[T]` slices — `v.chunks(n)`/`v.windows(n)`/
+# `v.split(p)` spell `&P`, which index/iter unwrap to `P`.
+_ITER_CHUNK_METHODS = frozenset(
+    {"chunks", "windows", "rchunks", "split", "split_inclusive"}
+)
 # Map entry points and the key they read — `m.keys()` yields `K`,
 # `m.values()` yields `V` of `HashMap<K, V>`/`BTreeMap<K, V>`.
 _MAP_ELEMENT_METHODS = {"keys": 0, "values": 1}
@@ -85,6 +90,10 @@ _OPTION_HEAD_METHODS = {
     "ok": ("", {"Result"}, 0),
     "err": ("", {"Result"}, -1),
     "take": ("", {"Option"}, 0),
+    # `o.as_ref()`/`o.as_mut()` keep `Option` with a borrowed
+    # payload — spelled `&P`/`&mut P`.
+    "as_ref": ("&", {"Option"}, 0),
+    "as_mut": ("&mut ", {"Option"}, 0),
 }
 
 _PRELUDE_NAMES = frozenset(
@@ -2471,6 +2480,7 @@ class _RustBindings:
                     container_id,
                     elem_args,
                     args_position or node.start_byte,
+                    self._literal_element_args(children[0]),
                 )
             finally:
                 if push:
@@ -2681,11 +2691,30 @@ class _RustBindings:
                 return self._receiver_type(children[0])
         return None, None
 
+    def _literal_element_args(self, node: Any) -> bool:
+        """Whether `node`'s spelled args are literal element types
+        — an annotated `Vec<&[P]>` names the element `&[P]`, while a
+        bare `&[P]` binding's args are its own type (index reads
+        through the borrow)."""
+        if node is None or node.type != "identifier":
+            return False
+        record = self._lookup(
+            self._normalize_identifier(self.text(node)),
+            node.start_byte,
+            "value",
+        )
+        return (
+            record is not None
+            and record.type_node is not None
+            and "<" in self.text(record.type_node)
+        )
+
     def _element_of(
         self,
         container_id: str | None,
         elem_args: str,
         position: int,
+        literal_args: bool = False,
     ) -> tuple[str | None, str | None]:
         """(type id, generic-args key) one collection step in —
         `Vec<P>`/`[P; N]`/`&Vec<P>` yield `P`; a resolved container
@@ -2710,6 +2739,19 @@ class _RustBindings:
             # std::iter::once(1)` reaches an unresolvable extern
             # call) — the element stays opaque.
             return None, None
+        literal_args = literal_args or container_id is not None
+        if elem_args.startswith("&"):
+            # `&P`/`&mut P`/`&[P]` spell a borrowed element — the
+            # receiver of `x.m()`/`x[0]` is `P`.
+            inner = elem_args.lstrip("&").strip()
+            if inner.startswith("mut "):
+                inner = inner[4:].strip()
+            if literal_args and inner.startswith("["):
+                # A container's arg names the element type literally
+                # — `Vec<&[P]>` has `v[0]` typed `&[P]`, not `P`, so
+                # `v[0][0]` still reads the slice element.
+                return self._spelled_type(elem_args, position)
+            return self._element_of(None, inner, position)
         # A slice or array element exposes its own element type —
         # `&[[P; 2]]` reads first to `[P; 2]`, then to `P`.
         bracket = re.fullmatch(
@@ -2718,6 +2760,13 @@ class _RustBindings:
         if bracket is not None:
             # The element is an anonymous slice/array — it is indexed
             # further by its own element (`[P; 2]` → `P`), not `P`.
+            # A slice element `[P]` resolves to `P` so member calls
+            # on `a[0]` reach `P`'s members; an array `[P; N]` keeps
+            # the spelled element for deeper indexing (`a[0][1]`).
+            if ";" not in bracket.group(0):
+                return self._spelled_type(
+                    bracket.group(1).strip(), position
+                )
             return None, bracket.group(1).strip()
         match = re.fullmatch(
             r"([A-Za-z_][\w:]*)\s*(?:<(.+)>)?", elem_args
@@ -3065,8 +3114,8 @@ class _RustBindings:
                         self._receiver_annotation_position(receiver),
                     )
                 )
-            if container_id is not None:
-                container_name = next(
+            container_name = (
+                next(
                     (
                         b.name
                         for b in self.bindings
@@ -3074,6 +3123,10 @@ class _RustBindings:
                     ),
                     None,
                 )
+                if container_id is not None
+                else None
+            )
+            if container_id is not None:
                 if container_name not in _INDEX_ELEMENT_CONTAINERS:
                     # A custom `W<P>` can `Deref` to a different
                     # element — its args are not the iterated
@@ -3082,8 +3135,87 @@ class _RustBindings:
             spelled = args.strip() or None
             if spelled is None:
                 return None, None
+            if container_name == "Option":
+                # `Option<P>::iter` yields `&P` — the borrow stays
+                # part of the spelled element.
+                return (
+                    "&" + spelled,
+                    self._receiver_annotation_position(receiver),
+                )
             return spelled, self._receiver_annotation_position(
                 receiver
+            )
+        if method == "split_at":
+            container_id, args = self._receiver_type(receiver)
+            if args is None:
+                return None, None
+            container_name = (
+                next(
+                    (
+                        b.name
+                        for b in self.bindings
+                        if b.id == container_id
+                    ),
+                    None,
+                )
+                if container_id is not None
+                else None
+            )
+            if (
+                container_id is not None
+                and container_name not in _INDEX_ELEMENT_CONTAINERS
+            ):
+                # A custom `W<P>` can `Deref` to a different
+                # element — `w.split_at(i)` yields `&[Q]` there.
+                return None, None
+            spelled = args.strip() or None
+            if spelled is None:
+                return None, None
+            # `v.split_at(i)` yields `(&[P], &[P])` — a pair of
+            # borrowed slices that feeds the tuple-pattern path.
+            # Re-splitting a `&[P]` keeps the same slice — the
+            # spelling is not wrapped a second time.
+            pair = (
+                spelled
+                if spelled.startswith("&[")
+                else f"&[{spelled}]"
+            )
+            return (
+                f"({pair}, {pair})",
+                self._receiver_annotation_position(receiver),
+            )
+        if method in _ITER_CHUNK_METHODS:
+            container_id, args = self._receiver_type(receiver)
+            if args is None:
+                return None, None
+            container_name = (
+                next(
+                    (
+                        b.name
+                        for b in self.bindings
+                        if b.id == container_id
+                    ),
+                    None,
+                )
+                if container_id is not None
+                else None
+            )
+            if (
+                container_id is not None
+                and container_name not in _INDEX_ELEMENT_CONTAINERS
+            ):
+                # A custom `W<P>` can `Deref` to a different
+                # element — `w.chunks(n)` yields `&[Q]` there,
+                # not `&[P]`.
+                return None, None
+            spelled = args.strip() or None
+            if spelled is None:
+                return None, None
+            # The element is a borrowed slice — `&[P]` reads `P`
+            # at the index/iter sites that consume it.
+            return (
+                f"&[{spelled}]",
+                self._receiver_annotation_position(receiver),
             )
         if method in _ITER_PRESERVING_METHODS or method in _ITER_SLICE_METHODS:
             if receiver.type != "call_expression":
@@ -3235,6 +3367,7 @@ class _RustBindings:
                 container_id,
                 None if args is None else args.strip(),
                 call.start_byte,
+                self._literal_element_args(call),
             )
             if elem_id is None:
                 return _UNKNOWN, rest
@@ -3252,6 +3385,7 @@ class _RustBindings:
             or method in _MAP_ELEMENT_METHODS
             or method in _ITER_PRESERVING_METHODS
             or method in _ITER_SLICE_METHODS
+            or method in _ITER_CHUNK_METHODS
             or method == "enumerate"
             or method == "zip"
         ) and self._field_member(
@@ -3268,6 +3402,7 @@ class _RustBindings:
                 container_id,
                 None if args is None else args.strip(),
                 call.start_byte,
+                self._literal_element_args(call),
             )
             if elem_id is None:
                 return _UNKNOWN, rest
@@ -3275,6 +3410,34 @@ class _RustBindings:
                 (b.name for b in self.bindings if b.id == elem_id), ""
             )
             return TypeFact("named", name, 0, None, elem_id), rest
+        if method in _ITER_CHUNK_METHODS:
+            # `v.chunks(n)` yields `&[P]` slices — spell `&P`, which
+            # index/iter sites unwrap to `P`.
+            container_id, args = self._receiver_type(receiver)
+            if args is None:
+                return _UNKNOWN, None
+            container_name = (
+                next(
+                    (
+                        b.name
+                        for b in self.bindings
+                        if b.id == container_id
+                    ),
+                    None,
+                )
+                if container_id is not None
+                else None
+            )
+            if (
+                container_id is not None
+                and container_name not in _INDEX_ELEMENT_CONTAINERS
+            ):
+                # A custom `W<P>` can `Deref` to a different
+                # element — `w.chunks(n)` yields `&[Q]` there,
+                # not `&[P]`.
+                return _UNKNOWN, None
+            spelled = args.strip() or None
+            return _UNKNOWN, None if spelled is None else "&" + spelled
         if method in _ITER_PRESERVING_METHODS:
             # `v.iter().rev()` yields the inner call's element —
             # recurse into the chained receiver. A non-call receiver
@@ -3343,6 +3506,14 @@ class _RustBindings:
         container_id, args = self._receiver_type(receiver)
         if args is None:
             return _UNKNOWN, None
+        container_name = (
+            next(
+                (b.name for b in self.bindings if b.id == container_id),
+                None,
+            )
+            if container_id is not None
+            else None
+        )
         # Spelled element names refer to the types the receiver's
         # annotation wrote — resolve them there, not at the call.
         position = self._receiver_annotation_position(receiver)
@@ -3369,9 +3540,17 @@ class _RustBindings:
                     if container_name not in _INDEX_ELEMENT_CONTAINERS:
                         return _UNKNOWN, None
                 return _UNKNOWN, args.strip()
-            elem_id, rest = self._element_of(
-                container_id, args.strip(), position
-            )
+            elif container_name == "Option":
+                # `Option<P>::iter` yields `&P` — a spelled
+                # borrow keeps the element opaque.
+                elem_id, rest = None, "&" + args.strip()
+            else:
+                elem_id, rest = self._element_of(
+                    container_id,
+                    args.strip(),
+                    position,
+                    self._literal_element_args(receiver),
+                )
         elif (index := _MAP_ELEMENT_METHODS.get(method)) is not None:
             if not self._is_map_container(container_id, receiver):
                 return _UNKNOWN, None
@@ -3397,7 +3576,10 @@ class _RustBindings:
             ):
                 return _UNKNOWN, None
             elem_id, rest = self._element_of(
-                container_id, args.strip(), position
+                container_id,
+                args.strip(),
+                position,
+                self._literal_element_args(receiver),
             )
         else:
             return _UNKNOWN, None
@@ -3541,6 +3723,16 @@ class _RustBindings:
         # only the value type, so the pair's shape is unpinned here.
         if self._is_map_container(container_id, iterator):
             return _UNKNOWN, None
+        if (
+            self._receiver_type_node(iterator) is None
+            and elem_args.strip().startswith("&")
+        ):
+            # `let it = v.chunks(n)` — `it`'s spelled args ARE the
+            # element (`&[P]`), not a container's type args. A
+            # declared `Vec<&P>`/`[&P]` still names a container
+            # head — its `&` arg is the element's own reference
+            # type, unwrapped by `_element_of` below.
+            return _UNKNOWN, elem_args.strip()
         # Spelled element names on `it` (`let it = v.iter()`) were
         # written in `it`'s annotation — resolve them there.
         position = self._receiver_annotation_position(iterator)
@@ -3553,7 +3745,10 @@ class _RustBindings:
         if position is None:
             position = iterator.start_byte
         elem_id, rest = self._element_of(
-            container_id, elem_args.strip(), position
+            container_id,
+            elem_args.strip(),
+            position,
+            self._literal_element_args(iterator),
         )
         if elem_id is None:
             return _UNKNOWN, rest
@@ -4896,6 +5091,7 @@ class _RustBindings:
                             container_id,
                             container_args.strip(),
                             iterator_position,
+                            self._literal_element_args(iterator),
                         )
                         type_map = self._pattern_type_map(
                             pattern,
@@ -5783,14 +5979,33 @@ class _RustBindings:
                     position = index
                 if position < 0 or position >= len(elements):
                     continue
+                element = elements[position]
+                borrowed = element.strip().startswith("&")
+                spelled_lookup = element
+                if borrowed:
+                    spelled_lookup = (
+                        element.strip().lstrip("&").strip()
+                    )
+                    if spelled_lookup.startswith("mut "):
+                        spelled_lookup = spelled_lookup[4:].strip()
                 tid, fargs = self._spelled_type(
-                    elements[position],
+                    spelled_lookup,
                     (
                         scrut_position
                         if scrut_position is not None
                         else pattern.start_byte
                     ),
                 )
+                if borrowed and re.match(
+                    r"^&\s*(?:mut\s+)?\[", element.strip()
+                ):
+                    # `&[P]` is a spelled borrow of a slice, not the
+                    # payload itself — keep it as the bound name's
+                    # args so `a[0]`/`a.iter()` read through the
+                    # borrow. `&P`/`&mut P` keep the resolved `P`:
+                    # member calls auto-deref to it.
+                    tid = None
+                    fargs = element.strip()
                 # The container head is the element's own spelling —
                 # `_type_head_name(None, "P")` would read the first
                 # arg `P` instead of `Option`, so `(Some(p), _)` on
