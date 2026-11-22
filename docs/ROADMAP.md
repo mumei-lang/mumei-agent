@@ -184,6 +184,14 @@ code is loaded, discovered, probed or executed. Registration does not imply
 availability, trust or Evidence. MCP `verify_plan` and `verify_schedule`
 are unchanged.
 
+### C04 effective memory budget at dispatch
+
+Scheduled attempts without a host `memory_bound_mb` use the plan's effective
+`memory_mb` — the minimum of policy `memory_mb` and the adapter manifest's
+`max_memory_mb` — as the POSIX RLIMIT ceiling. Where no bound mechanism exists,
+it remains unenforced as before. This is a resource bound, not a sandbox or
+Evidence.
+
 ### C11 declared memory bounds for attempted executions
 
 `AttemptRunner.run(request, argv, cancel_event=None, memory_bound_mb=None)`
@@ -7052,16 +7060,16 @@ C11 stays partial; Core meaning and acceptance, C12's demand gate and
 any default audit/CLI/MCP route are unchanged — Evidence acceptance
 remains open.
 
-### C11 manifest-declared attempt memory bound
+### C11 plan-effective attempt memory bound
 
 When the host declares no `--memory-bound-mb`, a scheduled attempt now
-runs under the adapter's own manifest `max_memory_mb` as its POSIX
-RLIMIT_AS ceiling — the adapter's declared budget enforced as an
-ordinary observed outcome (an over-bound child surfaces as `exited` /
-`failed` / `timed_out`, never diagnosed). The host's declared bound
-always wins when present, so a host can still pin a tighter or looser
-ceiling per route. This needs no opt-in: the bound only limits the
-child, it grants nothing.
+runs under the plan's effective `memory_mb` as its POSIX RLIMIT_AS ceiling.
+That budget is the minimum of policy `memory_mb` and manifest
+`max_memory_mb`, enforced as an ordinary observed outcome (an over-bound
+child surfaces as `exited` / `failed` / `timed_out`, never diagnosed). The
+host's declared bound always wins when present, so a host can still pin a
+tighter or looser ceiling per route. This needs no opt-in: the bound only
+limits the child, it grants nothing.
 
 C11 stays partial; Core meaning and acceptance, C12's demand gate and
 any default audit/CLI/MCP route are unchanged — Evidence acceptance
@@ -7143,7 +7151,7 @@ selection requires Core's exact closed diagnostic and local
 `AdapterDescriptor.from_manifest` agreement on attempt argv, stdin and
 verdict-marker count. These fields remain
 declarations only: argv/stdin need host opt-in, markers are self-report
-vocabulary, and `max_memory_mb` is a declared ceiling. This route does
+vocabulary, and `max_memory_mb` is a declared adapter limit. This route does
 not execute adapters, assess command safety or host policy, enforce
 resources, claim producer authenticity, accept Evidence or promote
 grades. Selection means only a manifest-declared-success exit; input

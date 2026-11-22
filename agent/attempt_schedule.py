@@ -464,10 +464,11 @@ def run_attempt_schedule(
     plan = registry.plan(request, policy, current_observations)
     plans.append(plan)
     while True:
-        if plan.selected is None:
+        selected = plan.selected
+        if selected is None:
             outcome = "exhausted" if entries else "not_schedulable"
             break
-        adapter_id = plan.selected.adapter_id
+        adapter_id = selected.adapter_id
         ordinal += 1
         if cancel_event is not None and cancel_event.is_set():
             # A host stop declared before the round: it must hold for a
@@ -501,19 +502,17 @@ def run_attempt_schedule(
                 argv,
                 runner=active_runner,
                 cancel_event=cancel_event,
-                # The host's declared bound wins; otherwise the adapter's
-                # own manifest ``max_memory_mb`` is the child's ceiling —
-                # its declared budget, enforced as an observed outcome.
-                # On a platform with no POSIX bound mechanism the manifest
-                # fallback stays unenforced rather than breaking the run;
+                # The host's declared bound wins; otherwise the plan's
+                # effective budget (min of policy memory_mb and manifest
+                # max_memory_mb) is the child's ceiling. On a platform with
+                # no POSIX bound mechanism the fallback stays unenforced;
                 # an explicit host bound still fails statically there.
                 memory_bound_mb=(
                     memory_bound_mb
                     if memory_bound_mb is not None
                     else (
-                        descriptor.max_memory_mb
-                        if descriptor is not None
-                        and memory_bound_enforceable()
+                        selected.memory_mb
+                        if memory_bound_enforceable()
                         else None
                     )
                 ),
