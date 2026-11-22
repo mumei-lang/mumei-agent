@@ -179,7 +179,16 @@ def append_plan_history(path: str, plan: VerificationPlan) -> str:
 
     try:
         history_path = history_path.resolve()
+        missing_directories = []
+        directory = history_path.parent
+        while not directory.exists():
+            missing_directories.append(directory)
+            if directory.parent == directory:
+                break
+            directory = directory.parent
         history_path.parent.mkdir(parents=True, exist_ok=True)
+        for directory in missing_directories:
+            _fsync_directory(directory.parent)
         with _locked(history_path):
             entries, current_size, _ = _read_entries(history_path)
             unsigned = {

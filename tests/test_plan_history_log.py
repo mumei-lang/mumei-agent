@@ -442,3 +442,15 @@ def test_symlink_aliases_share_lock_for_concurrent_appends(tmp_path):
         *[entry["digest"] for entry in entries[:-1]],
     ]
     assert len(read_plan_history(str(alias_path))) == 41
+
+
+def test_new_parent_directories_are_fsynced(tmp_path, monkeypatch):
+    path = tmp_path / "a" / "b" / "history.jsonl"
+    calls = []
+    monkeypatch.setattr(
+        plan_history_log, "_fsync_directory", lambda directory: calls.append(directory)
+    )
+
+    append_plan_history(str(path), _plan("adapter-new-directories"))
+
+    assert set(calls) == {tmp_path, tmp_path / "a", tmp_path / "a" / "b"}
