@@ -1090,10 +1090,11 @@ class _SolBindings:
                             r"\[[^\]]*\]\s*$", "", text
                         ).strip()
                         if stripped == text:
-                            break
+                            if text == "bytes":
+                                stripped = "bytes1"
+                            else:
+                                break
                         text = stripped
-                    if args and text == "bytes":
-                        text = "bytes1"
                 # A public getter on a struct/enum-typed member returns
                 # the exploded fields, not the type — no extension
                 # target exists for the tuple.
