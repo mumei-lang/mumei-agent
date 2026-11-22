@@ -4295,8 +4295,8 @@ extraction model; pure array fields reached through an index stay
 closed. A *bare `*S` parameter root* is admitted the same way —
 `p.A[i].V`, `p.M[k].V`, `p.F[0]` slot on the parameter the way a
 slice shares its backing — while local pointer bindings (`q :=
-p`), reseats onto opaque memory (`p = &local`), `**S` roots and
-pointer-typed fields remain closed. An explicit `(*p)` deref of a
+p`), reseats onto opaque memory (`p = &local`) and pointer-element
+collections (`A []*E`) remain closed. An explicit `(*p)` deref of a
 `*S` param resolves through the same slot machinery as the
 implicit deref — Go's grammar parses `(*p)` as a parenthesized
 unary `*`, so the root walks unwrap it (a non-`*` unary operand
