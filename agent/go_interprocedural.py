@@ -23080,14 +23080,19 @@ class _Builder:
                             # A clause that ends in return/goto/
                             # continue never reaches post-state —
                             # its end state is not a switch exit.
+                            # A clause that ends in return/continue
+                            # never reaches post-state; a `break`
+                            # exits the switch itself and a `goto`
+                            # may land after it, so both keep their
+                            # end state in the exits (a label outside
+                            # just makes the merge an over-approx —
+                            # still sound).
                             if not (
                                 statements
                                 and statements[-1].type
                                 in {
                                     "return_statement",
-                                    "goto_statement",
                                     "continue_statement",
-                                    "break_statement",
                                 }
                             ):
                                 ptr_exits.append(direct_ptr)
@@ -23168,9 +23173,7 @@ class _Builder:
                             and statements[-1].type
                             in {
                                 "return_statement",
-                                "goto_statement",
                                 "continue_statement",
-                                "break_statement",
                             }
                         ):
                             ptr_exits.extend([chain_ptr, fresh_ptr])
@@ -23879,9 +23882,7 @@ class _Builder:
                         and clause_stmts[-1].type
                         in {
                             "return_statement",
-                            "goto_statement",
                             "continue_statement",
-                            "break_statement",
                         }
                     )
                     for bid, bdeps in branch.items():
