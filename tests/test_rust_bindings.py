@@ -4545,7 +4545,7 @@ fn f(w: W<P>) {
 def test_impl_const_generic_braced_param_substitutes() -> None:
     source = """
 struct R<const N: usize>;
-impl<const N: usize> R<N> { fn rn(&self) {} }
+impl R<4> { fn rn(&self) {} }
 struct W<const N: usize>;
 impl<const N: usize> W<{N}> {
     fn get(&self) -> R<N> { panic!() }
@@ -4557,4 +4557,6 @@ fn f(w: W<4>) {
     report = build_rust_bindings(source, pointer_width=64)
     rn = _bindings(report, "rn", "associated_function")[0]
     # impl<const N> W<{N}> maps N→4 — the {N} spelling still matches.
+    # `rn` lives only on `impl R<4>` so a missed substitution leaves
+    # the return as R<N> and the call opaque.
     assert _call(report, source, "w.get().rn()").target == rn.id
