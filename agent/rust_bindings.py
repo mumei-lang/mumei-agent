@@ -1389,7 +1389,8 @@ class _RustBindings:
         return (None if record is None else record.binding.id), args
 
     def _resolve_use_path(
-        self, path: str, position: int, namespace: str
+        self, path: str, position: int, namespace: str,
+        _seen: "set[str] | None" = None,
     ) -> "_Record | None":
         """Record a `use` target path names — `m::P` walks the module
         chain and returns `P`'s own binding in `namespace` (a name
@@ -1400,25 +1401,69 @@ class _RustBindings:
         module = self._lookup_module_path(
             "::".join(segments[:-1]), position
         )
+        if module is not None and module.module_scope is not None:
+            for record in reversed(
+                module.module_scope.bindings.get(segments[-1], ())
+            ):
+                if self._in_namespace(record, namespace):
+                    return record
+            return None
+        # The container is not a module — `use E::V` names a member
+        # of a type (enum variant, associated item), `use m::E::V`
+        # the same through a module chain.
+        container = self._use_path_container(
+            segments[:-1], position, _seen
+        )
+        if container is None:
+            return None
+        for record in self.records.values():
+            if (
+                record.member_of == container.binding.id
+                and record.binding.name == segments[-1]
+                and self._in_namespace(record, namespace)
+            ):
+                return record
+        return None
+
+    def _use_path_container(
+        self, segments: list, position: int,
+        seen: "set[str] | None" = None,
+    ) -> "_Record | None":
+        """Type record a `use` path's non-module container names —
+        `E` itself or `m::E` inside module `m`."""
+        if len(segments) == 1:
+            return self._through_import(
+                self._lookup(
+                    self._normalize_identifier(segments[0]),
+                    position,
+                    "type",
+                ),
+                position,
+                _seen=seen,
+            )
+        module = self._lookup_module_path(
+            "::".join(segments[:-1]), position
+        )
         if module is None or module.module_scope is None:
             return None
         for record in reversed(
             module.module_scope.bindings.get(segments[-1], ())
         ):
-            if self._in_namespace(record, namespace):
+            if self._in_namespace(record, "type"):
                 return record
         return None
 
     def _through_import(
         self, record: "_Record | None", position: int,
         namespace: str = "type",
+        _seen: "set[str] | None" = None,
     ) -> "_Record | None":
         """Follow `import` records to their use-path target —
         `use m::P` makes `P::new` read `m`'s `P`. The path resolves
         where the `use` is declared, not at the reference site, and
         an unresolvable target keeps the import record itself (the
         name is still what `impl Trait for P` matches against)."""
-        seen: set[str] = set()
+        seen: set[str] = set() if _seen is None else _seen
         while (
             record is not None
             and record.binding.kind == "import"
@@ -1430,6 +1475,7 @@ class _RustBindings:
                 record.import_path,
                 record.binding.span.start,
                 namespace,
+                seen,
             )
             if resolved is None:
                 break
@@ -3596,12 +3642,26 @@ class _RustBindings:
                 head.start_byte,
                 "type",
             )
+            if record is not None and record.binding.kind == "import":
+                resolved = self._through_import(
+                    record, head.start_byte, "type"
+                )
+                if resolved is None or resolved.binding.kind == "import":
+                    # `use E::V` names a member — a value-namespace
+                    # target, unlike `use m::P`.
+                    resolved = self._through_import(
+                        record, head.start_byte, "value"
+                    )
+                record = resolved
+            else:
+                record = self._through_import(record, head.start_byte)
         elif head.type in {"scoped_identifier", "scoped_type_identifier"}:
             member, _ = self._scoped_member(head)
-            record = (
+            record = self._through_import(
                 member
                 if member is not None
-                else self._scoped_type(head)
+                else self._scoped_type(head),
+                head.start_byte,
             )
         if record is None:
             return None
