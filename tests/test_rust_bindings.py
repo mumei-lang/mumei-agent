@@ -4159,3 +4159,187 @@ fn f(p: P) {
 """
     report = build_rust_bindings(source, pointer_width=64)
     assert _call(report, source, "p.t()").target == ""
+
+
+def test_for_loop_iter_methods_bind_container_element():
+    # `for p in v.iter()/iter_mut()/into_iter()` types `p` as the
+    # container's element, same as iterating `v` directly.
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn f(v: Vec<P>) {
+    for p in v.iter() { p.m(); }
+    for p2 in v.iter_mut() { p2.m(); }
+    for p3 in v.into_iter() { p3.m(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = next(b for b in report.bindings if b.name == "m")
+    for text in ("p.m()", "p2.m()", "p3.m()"):
+        call = next(
+            c for c in report.calls
+            if source[c.span.start:c.span.end] == text
+        )
+        assert call.target == method.id
+
+
+def test_for_loop_iter_on_array_element():
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn f(arr: [P; 4]) {
+    for p in arr.iter() { p.m(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = next(b for b in report.bindings if b.name == "m")
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "p.m()"
+    )
+    assert call.target == method.id
+
+
+def test_for_loop_map_values_bind_value_type():
+    # `m.values()` yields `V` of `HashMap<K, V>` — `m.keys()` reads
+    # `K`, and `m.iter()`'s (K, V) pair stays unpinned.
+    source = """
+struct P;
+struct K;
+impl P { fn m(&self) {} }
+impl K { fn k(&self) {} }
+fn f(m: HashMap<K, P>) {
+    for v in m.values() { v.m(); }
+    for k in m.keys() { k.k(); }
+    for pair in m.iter() { pair.m(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = next(b for b in report.bindings if b.name == "m")
+    k = next(b for b in report.bindings if b.name == "k")
+    by_text = {source[c.span.start:c.span.end]: c for c in report.calls}
+    assert by_text["v.m()"].target == m.id
+    assert by_text["k.k()"].target == k.id
+    assert by_text["pair.m()"].target == ""
+
+
+def test_for_loop_chained_iterator_stays_opaque():
+    # `v.iter().enumerate()`/`v.iter().map(f)` yield a new iterator
+    # shape — the element stays unpinned rather than guessed.
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn f(v: Vec<P>) {
+    for p in v.iter().enumerate() { p.m(); }
+    for p2 in v.iter().map(|x| x) { p2.m(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    for text in ("p.m()", "p2.m()"):
+        call = next(
+            c for c in report.calls
+            if source[c.span.start:c.span.end] == text
+        )
+        assert call.target == ""
+
+
+def test_for_loop_over_call_return_binds_element() -> None:
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn make() -> Vec<P> { Vec::new() }
+fn f() {
+    for p in make() { p.m(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = _bindings(report, "m", "associated_function")[0]
+    assert _call(report, source, "p.m()").target == method.id
+
+
+def test_for_loop_declared_iter_method_stays_opaque() -> None:
+    # A user-defined `iter()` need not yield the container's element —
+    # the std recipe does not apply once the call resolves.
+    source = """
+struct P;
+struct Q;
+impl Q { fn m(&self) {} }
+struct MyVec<T> { t: T }
+impl MyVec<P> {
+    fn iter(&self) -> Q { Q }
+}
+fn f(v: MyVec<P>) {
+    for x in v.iter() { x.m(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    assert _call(report, source, "x.m()").target == ""
+
+
+def test_for_loop_iter_element_resolves_at_annotation_scope() -> None:
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn f(v: Vec<P>) {
+    struct P;
+    impl P { fn n(&self) {} }
+    for x in v.iter() { x.m(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = _bindings(report, "m", "associated_function")[0]
+    call = _call(report, source, "x.m()")
+    # The bound `m` is the outer `P`'s — the inner `P` only has `n`.
+    assert call.target == m.id
+
+
+def test_for_loop_declared_values_return_type_binds_element() -> None:
+    source = """
+struct V;
+impl V { fn m(&self) {} }
+struct MyMap;
+impl MyMap {
+    fn values(&self) -> Vec<V> { Vec::new() }
+}
+fn f(m: MyMap) {
+    for v in m.values() { v.m(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = _bindings(report, "m", "associated_function")[0]
+    assert _call(report, source, "v.m()").target == method.id
+
+
+def test_for_loop_over_extern_call_stays_opaque() -> None:
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+struct W;
+impl W {
+    fn iter(&self) -> impl Iterator<Item = P> { std::iter::empty() }
+}
+fn f() {
+    for x in std::iter::once(1) {
+        x.m();
+    }
+    for p in P.make() {
+        p.m();
+    }
+}
+fn g(w: W) {
+    // `impl Iterator<Item = P>` hides the element inside an
+    // associated binding the model does not spell - opaque.
+    for p in w.iter() {
+        p.m();
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    assert _call(report, source, "x.m()").target == ""
+    # An unresolved extern method's element also stays opaque.
+    calls = [
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "p.m()"
+    ]
+    assert len(calls) == 2
+    assert all(c.target == "" for c in calls)

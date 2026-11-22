@@ -43,6 +43,15 @@ _INDEX_ELEMENT_CONTAINERS = frozenset(
         "BTreeMap",
     }
 )
+# Method calls that still yield a container's element —
+# `for p in v.iter()` binds like `for p in v`. Maps are excluded
+# here (they iterate (K, V) pairs) and handled by their own
+# `keys`/`values` entry points below.
+_ITER_ELEMENT_METHODS = frozenset({"iter", "iter_mut", "into_iter", "drain"})
+# Map entry points and the key they read — `m.keys()` yields `K`,
+# `m.values()` yields `V` of `HashMap<K, V>`/`BTreeMap<K, V>`.
+_MAP_ELEMENT_METHODS = {"keys": 0, "values": 1}
+_MAP_CONTAINER_NAMES = frozenset({"HashMap", "BTreeMap"})
 
 _PRELUDE_NAMES = frozenset(
     {
@@ -2249,6 +2258,11 @@ class _RustBindings:
             )
             if container_name not in _INDEX_ELEMENT_CONTAINERS:
                 return None, None
+        if elem_args is None:
+            # The iterable exposes no spelled args (`for x in
+            # std::iter::once(1)` reaches an unresolvable extern
+            # call) — the element stays opaque.
+            return None, None
         # A slice or array element exposes its own element type —
         # `&[[P; 2]]` reads first to `[P; 2]`, then to `P`.
         bracket = re.fullmatch(
@@ -2275,6 +2289,195 @@ class _RustBindings:
             match.group(2),
         )
 
+    def _is_map_container(
+        self, container_id: str | None, node: Any | None
+    ) -> bool:
+        """Whether a receiver's declared container is HashMap/BTreeMap
+        — by resolved record name, or by the spelled annotation when
+        the prelude name has no record."""
+        if container_id is not None:
+            name = next(
+                (
+                    b.name
+                    for b in self.bindings
+                    if b.id == container_id
+                ),
+                None,
+            )
+            return name in _MAP_CONTAINER_NAMES
+        if node is not None and node.type == "identifier":
+            record = self._lookup(
+                self._normalize_identifier(self.text(node)),
+                node.start_byte,
+                "value",
+            )
+            if record is not None and record.type_node is not None:
+                return (
+                    re.search(
+                        r"\b(?:HashMap|BTreeMap)\s*<",
+                        self.text(record.type_node),
+                    )
+                    is not None
+                )
+        return False
+
+    def _map_spelled_args(self, receiver: Any | None) -> str | None:
+        """Full `<K, V>` argument key of a map annotation — recovered
+        from the receiver's type node because `_annotation_type`
+        reduces map args to the value type."""
+        node = receiver
+        while node is not None and node.type == "reference_expression":
+            node = next(iter(node.named_children), None)
+        if node is None or node.type != "identifier":
+            return None
+        record = self._lookup(
+            self._normalize_identifier(self.text(node)),
+            node.start_byte,
+            "value",
+        )
+        tnode = None if record is None else record.type_node
+        while tnode is not None and tnode.type in {
+            "reference_type",
+            "generic_type",
+            "generic_type_with_turbofish",
+        }:
+            if tnode.type != "reference_type":
+                key = self._type_args_key(
+                    tnode.child_by_field_name("type_arguments")
+                )
+                if key is not None:
+                    return key
+            tnode = tnode.child_by_field_name("type")
+        return None
+
+    def _receiver_annotation_position(
+        self, receiver: Any | None
+    ) -> "int | None":
+        """Start byte of the annotation that typed this receiver —
+        spelled element names resolve against the names visible
+        there, not at the call site."""
+        node = receiver
+        while node is not None and node.type == "reference_expression":
+            node = next(iter(node.named_children), None)
+        if node is None:
+            return None
+        if node.type == "field_expression":
+            member = self._field_member(
+                node, ("struct_field", "associated_const")
+            )
+            if member is None or member.type_node is None:
+                return None
+            return member.type_node.start_byte
+        if node.type != "identifier":
+            return None
+        record = self._lookup(
+            self._normalize_identifier(self.text(node)),
+            node.start_byte,
+            "value",
+        )
+        if record is None or record.type_node is None:
+            return None
+        return record.type_node.start_byte
+
+    def _iterator_method_element(
+        self, call: Any
+    ) -> "tuple[TypeFact, str | None]":
+        """(TypeFact, element-args) for `for <pat> in c.iter()` kin —
+        `iter`/`iter_mut`/`into_iter`/`drain` yield the container's
+        element (maps iterate (K, V) pairs and stay unpinned);
+        `keys()`/`values()` on HashMap/BTreeMap yield its
+        first/second arg. Chained or unresolvable calls stay
+        `_UNKNOWN`."""
+        callee = call.child_by_field_name("function")
+        if callee is None or callee.type != "field_expression":
+            # Not a method call — `for p in make()` iterates whatever
+            # the call's own declared return type yields.
+            container_id, args = self._receiver_type(call)
+            if self._is_map_container(container_id, call):
+                return _UNKNOWN, None
+            elem_id, rest = self._element_of(
+                container_id,
+                None if args is None else args.strip(),
+                call.start_byte,
+            )
+            if elem_id is None:
+                return _UNKNOWN, rest
+            name = next(
+                (b.name for b in self.bindings if b.id == elem_id), ""
+            )
+            return TypeFact("named", name, 0, None, elem_id), rest
+        method_node = callee.child_by_field_name("field")
+        receiver = callee.child_by_field_name("value")
+        if method_node is None or receiver is None:
+            return _UNKNOWN, None
+        method = self._normalize_identifier(self.text(method_node))
+        if (
+            method in _ITER_ELEMENT_METHODS
+            or method in _MAP_ELEMENT_METHODS
+        ) and self._field_member(
+            callee, ("associated_function",)
+        ) is not None:
+            # The call resolves to a declared method — a user
+            # `iter()` need not yield the container's element, so
+            # iterate its declared return type instead of the std
+            # recipe.
+            container_id, args = self._receiver_type(call)
+            if self._is_map_container(container_id, call):
+                return _UNKNOWN, None
+            elem_id, rest = self._element_of(
+                container_id,
+                None if args is None else args.strip(),
+                call.start_byte,
+            )
+            if elem_id is None:
+                return _UNKNOWN, rest
+            name = next(
+                (b.name for b in self.bindings if b.id == elem_id), ""
+            )
+            return TypeFact("named", name, 0, None, elem_id), rest
+        container_id, args = self._receiver_type(receiver)
+        if args is None:
+            return _UNKNOWN, None
+        # Spelled element names refer to the types the receiver's
+        # annotation wrote — resolve them there, not at the call.
+        position = self._receiver_annotation_position(receiver)
+        if position is None:
+            position = call.start_byte
+        if method in _ITER_ELEMENT_METHODS:
+            if "," in args or self._is_map_container(
+                container_id, receiver
+            ):
+                return _UNKNOWN, None
+            elem_id, rest = self._element_of(
+                container_id, args.strip(), position
+            )
+        elif (index := _MAP_ELEMENT_METHODS.get(method)) is not None:
+            if not self._is_map_container(container_id, receiver):
+                return _UNKNOWN, None
+            if index == 0:
+                # `m[k]` typing reduces a map's args to the value
+                # type upstream, so `keys()` must recover the spelled
+                # argument list from the receiver's annotation.
+                spelled = self._map_spelled_args(receiver)
+                if spelled is None:
+                    return _UNKNOWN, None
+                arg = next(iter(self._type_arg_list(spelled)), None)
+            else:
+                # `values()` reads the value type — already the map's
+                # reduced args.
+                arg = args
+            if arg is None:
+                return _UNKNOWN, None
+            elem_id, rest = self._spelled_type(arg, position)
+        else:
+            return _UNKNOWN, None
+        if elem_id is None:
+            return _UNKNOWN, rest
+        name = next(
+            (b.name for b in self.bindings if b.id == elem_id), ""
+        )
+        return TypeFact("named", name, 0, None, elem_id), rest
+
     def _for_element(
         self, iterator: Any | None
     ) -> "tuple[TypeFact, str | None]":
@@ -2295,35 +2498,15 @@ class _RustBindings:
             if len(children) != 1:
                 return _UNKNOWN, None
             iterator = children[0]
+        if iterator.type == "call_expression":
+            return self._iterator_method_element(iterator)
         container_id, elem_args = self._receiver_type(iterator)
         if elem_args is None or "," in elem_args:
             return _UNKNOWN, None
         # Iterating a map yields (K, V) pairs — index typing keeps
         # only the value type, so the pair's shape is unpinned here.
-        if container_id is not None and next(
-            (
-                True
-                for b in self.bindings
-                if b.id == container_id
-                and b.name in {"HashMap", "BTreeMap"}
-            ),
-            False,
-        ):
+        if self._is_map_container(container_id, iterator):
             return _UNKNOWN, None
-        if iterator.type == "identifier":
-            irec = self._lookup(
-                self._normalize_identifier(self.text(iterator)),
-                iterator.start_byte,
-                "value",
-            )
-            if irec is not None and irec.type_node is not None and (
-                re.search(
-                    r"\b(?:HashMap|BTreeMap)\s*<",
-                    self.text(irec.type_node),
-                )
-                is not None
-            ):
-                return _UNKNOWN, None
         elem_id, rest = self._element_of(
             container_id, elem_args.strip(), iterator.start_byte
         )
