@@ -6690,6 +6690,9 @@ def test_interface_collection_chain_index_call_once(
     result = named(*unit(go_types_helper, declarations))
     assert result.available, result.gaps
     assert result.return_dependencies == frozenset({0, 2})
+    # `Set` is recorded exactly once — a second evaluation would
+    # both duplicate the record and replay its side effects.
+    assert len(result.calls) == 1
 
 
 @pytest.mark.parametrize(
