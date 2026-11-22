@@ -936,6 +936,10 @@ class _Builder:
         # memory like a `*p` read, so `h()` records an imported
         # transfer (effects unknown) and unions `indirect_writes`.
         self.pointee_closures: set[str] = set()
+        # `*pp = x` on a `**S` root replaces the `*S` the first
+        # deref names — every later `(*pp)` root reads the new
+        # pointee the slot model cannot identify, so it closes.
+        self._double_pointer_dirty: set[str] = set()
         # Bound name → the enclosing-scope binding ids its literal
         # captured. `h()` resolves each captured id's CURRENT deps
         # (params or locals at the call site) — freezing the dep set
@@ -2395,6 +2399,10 @@ class _Builder:
         # container: every element conflates into the root's group,
         # so the field's slot joins it like `s.F` on a composite.
         root = sel.child_by_field_name("operand")
+        # `(*pp)` on a `**S` root: each explicit `*` consumed here
+        # strips one pointer level off the root's declared type —
+        # `derefs_unwrapped` feeds the admission check below.
+        derefs_unwrapped = 0
         while root is not None and root.type in {
             "parenthesized_expression",
             "selector_expression",
@@ -2435,8 +2443,11 @@ class _Builder:
                     or inner.type != "identifier"
                 ):
                     break
+                derefs_unwrapped += 1
                 root = inner
             else:
+                if root.type == "dereference_expression":
+                    derefs_unwrapped += 1
                 root = root.child_by_field_name("operand")
         root_ref = (
             self.references.get(self.node_key(root))
@@ -2457,6 +2468,19 @@ class _Builder:
             root_ref = self._param_pointer_aliases[
                 root_ref.binding_id
             ]
+            if (
+                not (
+                    for_write
+                    or getattr(self, "_for_write_target", False)
+                )
+                and alias_src_id in self._double_pointer_dirty
+            ):
+                # `*pp = x` reseated the source's middle pointer —
+                # a read through `(*pp)` names a pointee the slot
+                # model cannot identify.
+                raise _Unsupported(
+                    "non_parameter_reference", _span(sel)
+                )
             if (
                 not (
                     for_write
@@ -2519,11 +2543,11 @@ class _Builder:
                         )) is not None
                     )
                     and root_binding.type is not None
-                    and root_binding.type.kind == "pointer"
-                    and getattr(
-                        root_binding.type, "elem", None
-                    ) is not None
-                    and root_binding.type.elem.kind == "struct"
+                    and self._deref_chain_struct_pointee(
+                        root_binding.type, derefs_unwrapped
+                    )
+                    and root_ref.binding_id
+                    not in self._double_pointer_dirty
                 )
             )
         ):
@@ -2594,6 +2618,11 @@ class _Builder:
                     if self._param_pointer_struct_root(inner, params):
                         current = inner
                         continue
+                    if self._param_double_pointer_struct_root(current):
+                        # `(*pp)` on a `**S` root ends the walk the
+                        # same way `(*p)` on `*S` does — the
+                        # caller-shared pointee, not a crossing.
+                        return False
                     return True
                 current = current.child_by_field_name("operand")
                 continue
@@ -2627,6 +2656,73 @@ class _Builder:
                 return False
             return False
         return False
+
+    def _deref_chain_struct_pointee(
+        self, fact: Any, derefs: int
+    ) -> bool:
+        """`fact` — a root's declared type — after `derefs` explicit
+        `*` dereferences: admit when what remains is a struct or a
+        pointer to one. `p` on `*S` (0 derefs), `(*p)` on `*S` (1)
+        and `(*pp)` on `**S` (1) each name a `*S`-level
+        caller-shared root."""
+        for _ in range(derefs):
+            if fact is None or fact.kind != "pointer":
+                return False
+            fact = fact.elem
+        if fact is None:
+            return False
+        if fact.kind == "struct":
+            return True
+        return (
+            fact.kind == "pointer"
+            and getattr(fact, "elem", None) is not None
+            and fact.elem.kind == "struct"
+        )
+
+    def _param_double_pointer_struct_root(self, node: Any) -> bool:
+        """`(*pp)` where `pp` is an unreseated `**S` binding that no
+        `*pp` store has touched — the operand dereferences to a
+        `*S`-level caller-shared root, the same shape `p` names on
+        `*S`. An alias (`pp = qq`) resolves to the target's
+        identity like the `*S` alias path does."""
+        inner = node.child_by_field_name("operand")
+        while (
+            inner is not None
+            and inner.type == "parenthesized_expression"
+        ):
+            inner = next(
+                (
+                    c
+                    for c in inner.named_children
+                    if c.type != "comment"
+                ),
+                None,
+            )
+        if inner is None or inner.type != "identifier":
+            return False
+        ref = self.references.get(self.node_key(inner))
+        if ref is None or ref.binding_id is None:
+            return False
+        binding_id = ref.binding_id
+        alias = self._param_pointer_aliases.get(binding_id)
+        if alias is not None:
+            binding_id = alias.binding_id
+        if (
+            ref.binding_id in self._double_pointer_dirty
+            or binding_id in self._double_pointer_dirty
+            or binding_id in self._pointer_param_reseats
+        ):
+            return False
+        binding = self.bindings.get(binding_id)
+        fact = getattr(binding, "type", None)
+        return (
+            fact is not None
+            and fact.kind == "pointer"
+            and getattr(fact, "elem", None) is not None
+            and fact.elem.kind == "pointer"
+            and getattr(fact.elem, "elem", None) is not None
+            and fact.elem.elem.kind == "struct"
+        )
 
     def _param_pointer_struct_root(
         self, node: Any, params: dict | None = None
@@ -7449,6 +7545,11 @@ class _Builder:
         binding = self.bindings.get(ref.binding_id)
         if binding is None or binding.type.kind != "pointer":
             return None
+        if ref.binding_id in self._double_pointer_dirty:
+            # A store through `*pp` reseated the middle pointer —
+            # `(*pp)` now names pointee memory this model cannot
+            # attribute, so the root stays closed.
+            return None
         if binding.type.type_id:
             pointee = self._pointee_type(binding.type.type_id)
             if pointee is None:
@@ -7472,6 +7573,14 @@ class _Builder:
         # the pin honest — it can never redeclare, so it flags no
         # false staleness either.
         pointee_fact = binding.type.elem
+        if (
+            pointee_fact is not None
+            and pointee_fact.kind == "pointer"
+        ):
+            # `(*pp)` on a `**S` root: the unary `*` that admitted
+            # this operand already consumed one pointer level, so
+            # the chain's pointee is the struct one hop deeper.
+            pointee_fact = pointee_fact.elem
         if pointee_fact is None or pointee_fact.kind != "struct":
             return None
         return (
@@ -9407,7 +9516,7 @@ class _Builder:
                 lhs, locals_, params
             )
             if bound_ptr is not None:
-                pointee_id, ref, extra = bound_ptr
+                pointee_id, ref, extra, dirties = bound_ptr
                 self._record_read(
                     self._deref_read_deps(
                         ref.binding_id, params, locals_
@@ -9417,6 +9526,8 @@ class _Builder:
                         ref.binding_id, params, locals_
                     )
                 )
+                if dirties:
+                    self._double_pointer_dirty.add(ref.binding_id)
                 transfers.append(
                     CallTransfer(
                         FileSpan(
@@ -13257,8 +13368,24 @@ class _Builder:
             if (
                 binding.type.kind != "pointer"
                 or elem is None
-                or elem.kind != "struct"
             ):
+                return None
+            if elem.kind == "pointer":
+                # `(*pp).V = v` on a `**S` root — the explicit `*`
+                # on the LHS consumed the outer level, so the store
+                # lands in the struct pointee-of-pointee exactly
+                # like `t.V = v` on `*S`. A `*pp` store reseats the
+                # middle pointer, so the root closes once one ran.
+                if ref.binding_id in self._double_pointer_dirty:
+                    return None
+                elem = elem.elem
+                if elem is None or elem.kind != "struct":
+                    return None
+                # The store traverses `*pp` — a pointer living in
+                # caller memory — so the destination read nested
+                # like `t.W.f = v` does.
+                return ref.binding_id + "/pointee", ref, True
+            if elem is None or elem.kind != "struct":
                 return None
             return ref.binding_id + "/pointee", ref, False
         if self._is_local_composite(binding):
@@ -13572,6 +13699,18 @@ class _Builder:
         binding = self.bindings.get(ref.binding_id)
         if binding is None or binding.type.kind != "pointer":
             return None
+        # `*pp = x` (a single `*`, so `extra == 0`) reseats the
+        # middle pointer of a `**S` root — later `(*pp)` reads name
+        # a new pointee the slot model cannot identify, so they
+        # close. A deeper store (`**pp = s`) writes the struct
+        # pointee itself and leaves the middle pointer alone. The
+        # caller decides when the mark lands: a parallel
+        # assignment's rights still read the pre-store state.
+        dirties_middle = (
+            extra == 0
+            and getattr(binding.type, "elem", None) is not None
+            and binding.type.elem.kind == "pointer"
+        )
         if not binding.type.type_id:
             # A `p := &x` alias binds an unnamed `*int64` — no member
             # identity classifies the pointee, so the pointer fact's
@@ -13623,13 +13762,14 @@ class _Builder:
                 return None
             self._pin_fact_identities(deep)
             if deep.type_id:
-                return deep.type_id, ref, extra
+                return deep.type_id, ref, extra, dirties_middle
             return (
                 f"{ref.binding_id}" + "/pointee" * (extra + 1),
                 ref,
                 extra,
+                dirties_middle,
             )
-        return pointee_id, ref, extra
+        return pointee_id, ref, extra, dirties_middle
 
     def _imported_pointer_deref(
         self,
@@ -14234,6 +14374,13 @@ class _Builder:
                     and getattr(p.type, "elem", None) is not None
                     and p.type.elem.kind == "struct"
                 )
+                or (
+                    p.type.kind == "pointer"
+                    and getattr(p.type, "elem", None) is not None
+                    and p.type.elem.kind == "pointer"
+                    and getattr(p.type.elem, "elem", None) is not None
+                    and p.type.elem.elem.kind == "struct"
+                )
             ):
                 locals_[p.binding_id] = frozenset(
                     {params[p.binding_id]}
@@ -14291,6 +14438,13 @@ class _Builder:
                     p.type.kind == "pointer"
                     and getattr(p.type, "elem", None) is not None
                     and p.type.elem.kind == "struct"
+                )
+                or (
+                    p.type.kind == "pointer"
+                    and getattr(p.type, "elem", None) is not None
+                    and p.type.elem.kind == "pointer"
+                    and getattr(p.type.elem, "elem", None) is not None
+                    and p.type.elem.elem.kind == "struct"
                 )
             )
         }
@@ -17295,6 +17449,15 @@ class _Builder:
                 # branch merge already closed (`switch { p = q }; p = r`
                 # still reseats `p` deterministically), so unlike the
                 # read root this does not reject reseated names.
+                lhs_elem = getattr(
+                    lhs_binding.type, "elem", None
+                ) if lhs_binding is not None else None
+                lhs_double = (
+                    lhs_elem is not None
+                    and lhs_elem.kind == "pointer"
+                    and getattr(lhs_elem, "elem", None) is not None
+                    and lhs_elem.elem.kind == "struct"
+                )
                 if not (
                     lhs_ref is not None
                     and params is not None
@@ -17302,9 +17465,8 @@ class _Builder:
                     and lhs_binding is not None
                     and lhs_binding.type is not None
                     and lhs_binding.type.kind == "pointer"
-                    and getattr(lhs_binding.type, "elem", None)
-                    is not None
-                    and lhs_binding.type.elem.kind == "struct"
+                    and lhs_elem is not None
+                    and (lhs_elem.kind == "struct" or lhs_double)
                 ):
                     continue
                 # `p = q` reseats the `*S` param onto `q`'s pointee.
@@ -17369,6 +17531,15 @@ class _Builder:
                     if rhs_ref is not None
                     else None
                 )
+                rhs_elem = getattr(
+                    rhs_binding.type, "elem", None
+                ) if rhs_binding is not None else None
+                rhs_double = (
+                    rhs_elem is not None
+                    and rhs_elem.kind == "pointer"
+                    and getattr(rhs_elem, "elem", None) is not None
+                    and rhs_elem.elem.kind == "struct"
+                )
                 if (
                     rhs_ref is not None
                     and params is not None
@@ -17376,10 +17547,8 @@ class _Builder:
                     and rhs_binding is not None
                     and rhs_binding.type is not None
                     and rhs_binding.type.kind == "pointer"
-                    and getattr(
-                        rhs_binding.type, "elem", None
-                    ) is not None
-                    and rhs_binding.type.elem.kind == "struct"
+                    and rhs_elem is not None
+                    and (rhs_elem.kind == "struct" or rhs_double)
                 ):
                     self._pending_param_reseats.append(
                         (lhs_ref.binding_id, rhs_ref)
@@ -17558,6 +17727,11 @@ class _Builder:
             # because the RHS values evaluate after the LHS pass.
             external_write_targets: set[int] = set()
             external_chan_chan_write_targets: set[int] = set()
+            # `*pp = x` on a `**S` root reseats the middle pointer —
+            # the mark lands with the store (after every right-hand
+            # side evaluated), so the ref index → binding collects
+            # here for the apply loop.
+            double_pointer_dirty_targets: dict[int, str] = {}
             # `GS[i] = c` — a store through an external chan-element
             # container hands `c`'s queue to caller-visible state
             # like `cc <- ch` does: the slot records here so the
@@ -18028,7 +18202,7 @@ class _Builder:
                     lhs, locals_, params
                 )
                 if bound_ptr is not None:
-                    pointee_id, ref, extra = bound_ptr
+                    pointee_id, ref, extra, dirties = bound_ptr
                     # `*p = v` computes its destination from the
                     # pointer's own provenance. `*p += v` also reads
                     # the old pointee, and `**pp = v`/`***t = v`
@@ -18043,6 +18217,15 @@ class _Builder:
                             ref.binding_id, params, locals_
                         )
                     )
+                    if dirties:
+                        # A `*pp = x` reseat lands with the store —
+                        # after every right-hand side evaluates —
+                        # so `*pp, x = r, (*pp).V` still reads the
+                        # old pointee. Defer the mark to the apply
+                        # phase.
+                        double_pointer_dirty_targets[
+                            len(refs)
+                        ] = ref.binding_id
                     transfers.append(
                         CallTransfer(
                             FileSpan(
@@ -18970,6 +19153,11 @@ class _Builder:
                         conditional or self._may_skip > 0,
                         locals_,
                     )
+            # `*pp = x` reseats land now — every right-hand side has
+            # evaluated, so a `*pp, x = r, (*pp).V` statement read
+            # the old pointee while the store marks the root dirty.
+            for dirty_id in double_pointer_dirty_targets.values():
+                self._double_pointer_dirty.add(dirty_id)
             for i, (ref, value) in enumerate(zip(refs, values)):
                 if ref is None:
                     if i in external_write_targets:
@@ -23422,7 +23610,7 @@ class _Builder:
                 operand, locals_, params
             )
             if bound_ptr is not None:
-                pointee_id, ref, _extra = bound_ptr
+                pointee_id, ref, _extra, dirties = bound_ptr
                 # `(*p)++` reads the pointer and the old pointee —
                 # the deref-read union covers `**pp`/`***t` too.
                 self._record_read(
@@ -23430,6 +23618,8 @@ class _Builder:
                         ref.binding_id, params, locals_
                     )
                 )
+                if dirties:
+                    self._double_pointer_dirty.add(ref.binding_id)
                 transfers.append(
                     CallTransfer(
                         FileSpan(
@@ -26027,11 +26217,22 @@ class _Builder:
                                     ),
                                     None,
                                 )
-                            if not self._param_pointer_struct_root(
+                            if self._param_pointer_struct_root(
                                 inner, params
                             ):
+                                field_operand = inner
+                            elif (
+                                self._param_double_pointer_struct_root(
+                                    field_operand
+                                )
+                            ):
+                                # `(*pp)` on a `**S` root is the
+                                # terminal root — `pp`'s slot
+                                # already seeded `field_deps`.
+                                break
+                            else:
                                 pointer_crossed = True
-                            field_operand = inner
+                                field_operand = inner
                         elif field_operand.type == "field_expression":
                             field_operand = (
                                 field_operand.child_by_field_name(

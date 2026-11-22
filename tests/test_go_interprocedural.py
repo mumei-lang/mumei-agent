@@ -33473,16 +33473,9 @@ def test_named_struct_element_pointer_param_root_scalar_collection_field(
             "\tq := p\n"
             "\treturn q.A[i].V\n}\n"
         ),
-        (
-            "type E struct { V int64 }\n"
-            "type S2 struct { A []E }\n"
-            "func F(pp **S2, i int64) int64 {\n"
-            "\treturn (*pp).A[i].V\n}\n"
-        ),
     ],
     ids=[
         "local-pointer-alias",
-        "double-pointer",
     ],
 )
 def test_named_struct_element_pointer_param_root_unsupported_shapes_stay_closed(
@@ -33490,6 +33483,193 @@ def test_named_struct_element_pointer_param_root_unsupported_shapes_stay_closed(
 ):
     result = named(*unit(go_types_helper, declarations))
     assert not result.available
+
+
+def test_named_struct_element_double_pointer_param_root(go_types_helper):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type E struct { V int64 }\n"
+            "type S2 struct { A []E }\n"
+            "func F(pp **S2, i int64) int64 {\n"
+            "\treturn (*pp).A[i].V\n}\n",
+        )
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_named_struct_element_double_pointer_param_root_collection(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type S struct { A []int64 }\n"
+            "func F(pp **S, i int64) int64 {\n"
+            "\treturn (*pp).A[i]\n}\n",
+        )
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_named_struct_element_double_pointer_param_root_scalar(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type S struct { V int64 }\n"
+            "func F(pp **S) int64 {\n"
+            "\treturn (*pp).V\n}\n",
+        )
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_named_struct_element_double_pointer_param_root_map(go_types_helper):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type S struct { M map[string]int64 }\n"
+            "func F(pp **S) int64 {\n"
+            '\treturn (*pp).M["k"]\n}\n',
+        )
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_named_struct_element_double_pointer_param_root_reseat(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type S struct { A []int64 }\n"
+            "func F(pp **S, qq **S, i int64) int64 {\n"
+            "\tpp = qq\n"
+            "\treturn (*pp).A[i]\n}\n",
+        )
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({1, 2})
+
+
+def test_named_struct_element_double_pointer_root_elem_write(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type S struct { A []int64 }\n"
+            "func F(pp **S) int64 {\n"
+            "\t(*pp).A[0] = 1\n"
+            "\treturn (*pp).A[0]\n}\n",
+        )
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        (
+            "type S struct { V int64 }\n"
+            "func F(pp **S, r *S) int64 {\n"
+            "\t*pp = r\n"
+            "\treturn (*pp).V\n}\n"
+        ),
+        (
+            "type S struct { V int64 }\n"
+            "func F(pp **S, r *S) int64 {\n"
+            "\t*pp = r\n"
+            "\t(*pp).V = 1\n"
+            "\treturn 0\n}\n"
+        ),
+        (
+            "type S struct { A []int64 }\n"
+            "func F(pp **S, r *S) int64 {\n"
+            "\t*pp = r\n"
+            "\treturn (*pp).A[0]\n}\n"
+        ),
+    ],
+    ids=[
+        "middle-pointer-store-read",
+        "middle-pointer-store-write",
+        "middle-pointer-store-collection",
+    ],
+)
+def test_named_struct_element_double_pointer_root_store_closes(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available
+
+
+def test_named_double_pointer_store_emits_caller_backing(
+    go_types_helper,
+):
+    # `(*pp).A[0] = x` writes caller memory — the param's dep set
+    # grows past its seed, so the summary reports the caller-backing
+    # mutation like `p.A[0] = x` on `*S` does.
+    declarations = (
+        "type S struct { A []int64 }\n"
+        "func F(pp **S, x int64) int64 { (*pp).A[0] = x; return 0 }\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    imported = [c for c in result.calls if c.imported]
+    assert any(c.target.endswith("caller-backing") for c in imported)
+
+
+def test_named_double_pointer_alias_store_observed_on_target(
+    go_types_helper,
+):
+    # `pp = qq` aliases the double-pointer entries: a store through
+    # `(*pp)` lands in `qq`'s backing, so `(*qq).A[0]` reads the
+    # written value's dep like `p = q; p.A[0] = x; q.A[0]` on `*S`.
+    declarations = (
+        "type S struct { A []int64 }\n"
+        "func F(pp **S, qq **S, x int64) int64 { "
+        "pp = qq; (*pp).A[0] = x; return (*qq).A[0] }\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({1, 2})
+
+
+def test_named_double_pointer_parallel_rhs_reads_old_pointee(
+    go_types_helper,
+):
+    # `*pp, x = r, (*pp).V` — every right-hand side evaluates before
+    # the store lands, so `(*pp).V` still reads the old pointee.
+    declarations = (
+        "type S struct { V int64 }\n"
+        "func F(pp **S, r *S, x int64) int64 { "
+        "*pp, x = r, (*pp).V; return x }\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_named_double_pointer_deep_store_keeps_root(
+    go_types_helper,
+):
+    # `**pp = s` writes the struct pointee — the middle pointer is
+    # untouched, so `(*pp).V` keeps resolving (only `*pp = r`
+    # reseats it).
+    declarations = (
+        "type S struct { V int64 }\n"
+        "func F(pp **S, s S) int64 { **pp = s; return (*pp).V }\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
 
 
 @pytest.mark.parametrize(
