@@ -2056,6 +2056,18 @@ _CHECK_PERFORMERS: dict = {
     "descriptor_freshness": [
         ("mumei.freshness-evaluation/v1", "within_window", True, None),
     ],
+    # `descriptor_authenticity` is the acceptance evaluation's own
+    # authenticity check on the descriptor it assessed. A producer
+    # signature over the descriptor's bytes, verified under a
+    # caller-pinned producer key, performs it — the same
+    # `signature_valid` + `key_pinned` shape as
+    # `producer_authenticity` (the key's own authenticity still stays
+    # unperformed), bound to the descriptor via the verification
+    # doc's `subject_digest` carrier.
+    "descriptor_authenticity": [
+        ("mumei.signature-verification/v1",
+         ("signature_valid", "key_pinned"), True, "subject_digest"),
+    ],
     # Core acceptance descriptors declare `record_freshness` — whether
     # the accepted record itself was recently produced. A freshness
     # evaluation over the record's `produced_at` performs it, like
