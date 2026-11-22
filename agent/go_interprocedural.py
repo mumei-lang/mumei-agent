@@ -27843,6 +27843,12 @@ class _Builder:
                         coll_deps |= self._pointer_deps(
                             root_id, params, locals_
                         )
+                        # The pointee is caller-shared memory — a
+                        # whole-pointee store (`*p = s`) or any
+                        # aliased write lands in `indirect_writes`
+                        # like `(*p)[i]` and the scalar-field read
+                        # observe.
+                        coll_deps |= self.indirect_writes
                     elif root_id in locals_:
                         coll_deps |= locals_[root_id]
                     elif root_id in params:
@@ -27851,7 +27857,12 @@ class _Builder:
                     # live inside the operand chain, so the
                     # synthesized read must evaluate them itself
                     # (each intermediate member's declared type
-                    # pins alongside).
+                    # pins alongside). Indexes the `lib.VSM[k].F`
+                    # pre-scan already evaluated contribute through
+                    # `field_index_deps` instead — evaluating them
+                    # again would replay their calls and side
+                    # effects.
+                    coll_deps |= field_index_deps
                     cur = node
                     chain_indexes: list[Any] = []
                     while cur is not None:
@@ -27887,6 +27898,8 @@ class _Builder:
                         if (
                             chain_index is not None
                             and chain_index.type not in _INDEX_LITERALS
+                            and self.node_key(chain_index)
+                            not in field_index_nodes
                         ):
                             coll_deps |= self.expression(
                                 chain_index,
