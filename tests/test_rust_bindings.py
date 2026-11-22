@@ -8891,3 +8891,30 @@ fn f(s: m::S) {
         for c in report.calls
     }
     assert not bound.get("x.pm()")
+
+def test_make_contiguous_and_chunks_exact_bind_elements():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(q: std::collections::VecDeque<P>, v: Vec<P>) {
+    let s = q.make_contiguous();
+    s[0].pm();
+    for a in v.chunks_exact(2) { a[0].pm(); }
+    for b in v.rchunks_exact(2) { b[0].pm(); }
+    for c in v.chunks_exact_mut(2) { c[0].pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `q.make_contiguous()` yields `&mut [P]`.
+    assert bound.get("s[0].pm()") == pm.id
+    # `chunks_exact`/`rchunks_exact`/`chunks_exact_mut` iterate
+    # `&P`/`&mut P` slices like `chunks`.
+    assert bound.get("a[0].pm()") == pm.id
+    assert bound.get("b[0].pm()") == pm.id
+    assert bound.get("c[0].pm()") == pm.id

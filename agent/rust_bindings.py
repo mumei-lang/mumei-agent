@@ -65,7 +65,8 @@ _ITER_SLICE_METHODS = frozenset({"as_slice", "as_mut_slice"})
 # `v.split(p)` spell `&P`, which index/iter unwrap to `P`.
 _ITER_CHUNK_METHODS = frozenset(
     {"chunks", "windows", "rchunks", "split", "split_inclusive",
-     "splitn", "rsplitn", "rsplit"}
+     "splitn", "rsplitn", "rsplit", "chunks_exact",
+     "rchunks_exact"}
 )
 # The `_mut` counterparts iterate `&mut [T]` slices —
 # `v.chunks_mut(n)`/`v.split_mut(p)` spell `&mut P`.
@@ -73,6 +74,7 @@ _ITER_CHUNK_MUT_METHODS = frozenset(
     {
         "chunks_mut", "rchunks_mut", "split_mut",
         "split_inclusive_mut", "splitn_mut", "rsplitn_mut",
+        "chunks_exact_mut", "rchunks_exact_mut",
     }
 )
 # Map entry points and the key they read — `m.keys()` yields `K`,
@@ -4318,12 +4320,13 @@ class _RustBindings:
                                             entry_pos,
                                         )
                     if (
-                        method_name == "leak"
+                        method_name in {"leak", "make_contiguous"}
                         and receiver[1] is not None
                         and self._container_head_name(
                             callee.child_by_field_name("value")
                         )
-                        == "Vec"
+                        == ("Vec" if method_name == "leak"
+                            else "VecDeque")
                     ):
                         # `v.leak()` yields `&'a mut [T]` — the
                         # borrowed slice spelling feeds
@@ -4336,6 +4339,11 @@ class _RustBindings:
                         )
                         if annotated is None:
                             return _UNKNOWN, None
+
+                        # `v.leak()`/`q.make_contiguous()` yield
+                        # `&'a mut [T]` — the borrowed slice
+                        # spelling feeds `s[0]`/`for` element
+                        # paths.
                         return self._spelled_type(
                             "&mut [" + receiver[1] + "]",
                             annotated,
