@@ -244,6 +244,13 @@ class _TypeScriptBindings:
         member_static: bool = False,
         member_visibility: str = "public",
     ) -> _Record:
+        if name_node.type == "string":
+            # Quoted member names (`class C { "m"() {} }`) bind under the
+            # literal's text without its quotes; escaped names keep the
+            # string node so their span stays faithful to the source.
+            fragments = self.children(name_node)
+            if len(fragments) == 1 and fragments[0].type == "string_fragment":
+                name_node = fragments[0]
         name = self.text(name_node)
         span = self.span(name_node)
         scope_start = 0 if scope is None else scope.start

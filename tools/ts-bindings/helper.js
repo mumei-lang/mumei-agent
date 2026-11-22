@@ -211,13 +211,15 @@ function createEnvelope(source, extension) {
     if (ts.isExportAssignment(parent)) {
       return parent.expression === identifier;
     }
+    if (ts.isPropertyAccessExpression(parent) && parent.name === identifier) {
+      // Member access is a use: getNameOfDeclaration also answers the name
+      // of a property access (e.g. `a.b = f`), so this precedes that check.
+      return true;
+    }
     if (ts.getNameOfDeclaration(parent) === identifier) {
       return false;
     }
-    if (
-      (ts.isPropertyAccessExpression(parent) || ts.isQualifiedName(parent)) &&
-      parent.name === identifier
-    ) {
+    if (ts.isQualifiedName(parent) && parent.name === identifier) {
       return false;
     }
     if (
@@ -245,14 +247,21 @@ function createEnvelope(source, extension) {
   const references = [];
   function collectReferences(node) {
     if (ts.isIdentifier(node) && isReferenceIdentifier(node)) {
+      const isMemberName =
+        ts.isPropertyAccessExpression(node.parent) &&
+        node.parent.name === node;
       const symbol = referenceSymbol(node);
       if (symbol === undefined) {
-        references.push({
-          span: span(node.getStart(sourceFile), node.getEnd()),
-          name: node.text,
-          declarations: null,
-          library: false,
-        });
+        if (!isMemberName) {
+          references.push({
+            span: span(node.getStart(sourceFile), node.getEnd()),
+            name: node.text,
+            declarations: null,
+            library: false,
+          });
+        }
+        // A member name with no symbol at all (`x.foo` on `any`) is
+        // unresolved, not builtin — it emits no reference.
       } else {
         const declarations = symbol.declarations ?? [];
         if (declarations.length === 0) {
@@ -261,8 +270,20 @@ function createEnvelope(source, extension) {
             node.parent.propertyName === node;
           if (
             INTRINSIC_GLOBALS.has(node.text) &&
-            !isBindingElementPropertyName
+            !isBindingElementPropertyName &&
+            !isMemberName
           ) {
+            references.push({
+              span: span(node.getStart(sourceFile), node.getEnd()),
+              name: node.text,
+              declarations: [],
+              library: true,
+            });
+          } else if (isMemberName) {
+            // Members the type system resolves without a source
+            // declaration (`prototype`, intrinsic names, mapped-type
+            // members) carry no declarations; library marks them
+            // outside-source rather than a global-name lookup.
             references.push({
               span: span(node.getStart(sourceFile), node.getEnd()),
               name: node.text,
@@ -285,6 +306,14 @@ function createEnvelope(source, extension) {
           const declarationSpans = inSource.map((declaration) => {
             const name = ts.getNameOfDeclaration(declaration);
             const nameNode = name === undefined ? declaration : name;
+            if (ts.isStringLiteral(nameNode)) {
+              // Quoted declaration names include their quotes in the
+              // span; the reader compares source text to the name.
+              return span(
+                nameNode.getStart(sourceFile) + 1,
+                nameNode.getEnd() - 1,
+              );
+            }
             return span(nameNode.getStart(sourceFile), nameNode.getEnd());
           });
           declarationSpans.sort(
