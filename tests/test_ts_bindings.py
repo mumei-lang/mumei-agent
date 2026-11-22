@@ -2802,3 +2802,84 @@ make(1).methodA();
         if source[c.span.start:c.span.end] == "make(1).methodA()"
     )
     assert call.target == method_a.id
+
+
+def test_return_type_ignores_shadowed_outer_overloads():
+    # The inner block's `make` shadows the outer one — `make("s")`
+    # must type by the inner `string -> A` signature only.
+    source = """
+class A { methodA(): void {} }
+class B { methodB(): void {} }
+function make(x: number): B { return null as any; }
+{
+    function make(x: string): A { return null as any; }
+    make("s").methodA();
+}
+"""
+    report = build_ts_bindings(source)
+    method_a = _bindings(report, "methodA", "associated_function")[0]
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == 'make("s").methodA()'
+    )
+    assert call.target == method_a.id
+
+
+def test_tagged_template_return_types_the_receiver():
+    # A tag is called `(strings, ...values)` — `tag`x`` fits the
+    # one-parameter overload, not the zero-parameter one.
+    source = """
+class A { methodA(): void {} }
+class B { methodB(): void {} }
+function tag(s: TemplateStringsArray): A;
+function tag(): B;
+function tag(...args: any[]): any { return null as any; }
+tag`x`.methodA();
+"""
+    report = build_ts_bindings(source)
+    method_a = _bindings(report, "methodA", "associated_function")[0]
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "tag`x`.methodA()"
+    )
+    assert call.target == method_a.id
+
+
+def test_parenthesized_callee_return_types_the_receiver():
+    source = """
+class A { methodA(): void {} }
+class B { methodB(): void {} }
+function make(x: number): A;
+function make(x: string): B;
+function make(x: any): any { return null as any; }
+(make)(1).methodA();
+"""
+    report = build_ts_bindings(source)
+    method_a = _bindings(report, "methodA", "associated_function")[0]
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "(make)(1).methodA()"
+    )
+    assert call.target == method_a.id
+
+
+def test_member_overload_return_types_the_receiver():
+    # The narrowed member overload's return type feeds the chained
+    # member call, same as the top-level function path.
+    source = """
+class A { methodA(): void {} }
+class B { methodB(): void {} }
+interface Factory {
+    make(x: number): A;
+    make(x: string): B;
+}
+declare const factory: Factory;
+factory.make(1).methodA();
+"""
+    report = build_ts_bindings(source)
+    method_a = _bindings(report, "methodA", "associated_function")[0]
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "factory.make(1).methodA()"
+    )
+    assert call.target == method_a.id
