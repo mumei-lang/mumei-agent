@@ -100,7 +100,7 @@ EXPECTED_METRICS: dict[str, dict[str, tuple[int, int, int]]] = {
     },
     "straight_line.go": {
         "unassigned": (0, 1, 0),  # Bare var is counted as assigned by the hint.
-        "unused": (1, 0, 0),
+        "unused": (1, 1, 0),  # The earlier read of the name hides the final store.
         "unreachable": _METRIC_ZERO,
     },
     "type_switch.go": {
@@ -122,7 +122,7 @@ EXPECTED_METRICS: dict[str, dict[str, tuple[int, int, int]]] = {
 
 EXPECTED_AGGREGATE: dict[str, tuple[int, int, int]] = {
     "unassigned": (0, 12, 2),  # Bare vars count; entry-assigned names are not seeded.
-    "unused": (5, 1, 0),  # The later read hides the dead store.
+    "unused": (5, 2, 0),  # Any read of the name hides an unread store.
     "unreachable": (4, 0, 0),
 }
 

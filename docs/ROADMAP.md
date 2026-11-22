@@ -2713,7 +2713,7 @@ frames stay unanalysed.
 ### C05 labeled flow-hint corpus
 
 The labeled Go corpus measures per-family agreement: `unassigned`
-matched 0, missed 12, unexpected 2; `unused` matched 5, missed 1,
+matched 0, missed 12, unexpected 2; `unused` matched 5, missed 2,
 unexpected 0; `unreachable` matched 4, missed 0, unexpected 0. Labels
 cover local names only: parameters, named results, and package-level
 names are assigned on entry; bare zero-value `var` declarations are not

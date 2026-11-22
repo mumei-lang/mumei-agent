@@ -3,7 +3,7 @@ package main
 func straightLineReadBeforeWrite() int {
 	var state *int
 	value := *state // want: unassigned state
-	state = new(int)
+	state = new(int) // want: unused state
 	return value
 }
 
