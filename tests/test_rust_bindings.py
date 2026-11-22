@@ -6358,3 +6358,27 @@ fn f(w: m::W<P>) {
     report = build_rust_bindings(source, pointer_width=64)
     qm = _bindings(report, "qm", "associated_function")[0]
     assert _call(report, source, "p.qm()").target == qm.id
+
+def test_flatten_does_not_peel_std_iterator_wrappers():
+    source = """
+use std::iter::Peekable;
+struct P;
+impl P { fn pm(&self) {} }
+struct I;
+impl I { fn im(&self) {} }
+fn f(v: Vec<Peekable<I>>, w: Vec<Vec<P>>) {
+    for x in v.iter().flatten() { x.im(); }
+    for y in w.iter().flatten() { y.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `Peekable<I>` iterates `I::Item`, not `I` — flatten stays opaque.
+    assert not bound.get("x.im()")
+    # Real containers still flatten to their element.
+    assert bound.get("y.pm()") == pm.id

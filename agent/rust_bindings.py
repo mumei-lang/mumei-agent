@@ -4138,6 +4138,7 @@ class _RustBindings:
                     and elem_record.import_path is not None
                     and elem_record.import_path.split("::", 1)[0]
                     in {"std", "core", "alloc"}
+                    and head in _INDEX_ELEMENT_CONTAINERS | {"Option"}
                 )
                 if head is not None and not std_reexport:
                     # `Vec<W<P>>`/`Vec<m::Vec<P>>` — a declared
