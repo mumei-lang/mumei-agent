@@ -7,8 +7,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
 from agent.native_check import (
     FILE_MEMBERS,
     RECORD_FILE,
@@ -362,14 +360,10 @@ def test_cli_dispatch():
     assert "--expected-build-id" in proc.stdout
 
 
-@pytest.mark.skipif(
-    not os.path.exists("/home/ubuntu/repos/mumei/target/debug/mumei"),
-    reason="real Core binary not built",
-)
-def test_real_core_end_to_end(tmp_path, capsys):
+def test_real_core_end_to_end(tmp_path, capsys, mumei_bin):
     """Build a real bundle with the real Core, then run the identity
     check as a declared attempt — consistent + discharged check."""
-    core = Path("/home/ubuntu/repos/mumei/target/debug/mumei")
+    core = Path(mumei_bin)
     source = tmp_path / "main.mm"
     source.write_text(SOURCE)
     bundle = tmp_path / "bundle"
@@ -398,4 +392,3 @@ def test_real_core_end_to_end(tmp_path, capsys):
     report = json.loads(out)
     assert report["bundle_check"] == "consistent"
     assert report["discharged_checks"] == ["file_identity"]
-

@@ -7,8 +7,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
 from agent.native_source_recheck import (
     FILE_MEMBERS,
     RECORD_FILE,
@@ -122,7 +120,6 @@ def test_rechecked_run_selects_output(tmp_path, capsys):
     # The stdout line is not an evidence record — no handoff.
     assert "candidate" not in report
     assert "recheck" not in report
-
 
 def test_exit_one_publishes_lineage_without_claimed_outcome(
     tmp_path, capsys
@@ -364,14 +361,10 @@ def test_cli_dispatch():
     assert "--expected-build-id" in proc.stdout
 
 
-@pytest.mark.skipif(
-    not os.path.exists("/home/ubuntu/repos/mumei/target/debug/mumei"),
-    reason="real Core binary not built",
-)
-def test_real_core_end_to_end(tmp_path, capsys):
+def test_real_core_end_to_end(tmp_path, capsys, mumei_bin):
     """Build a real bundle with the real Core, then run the source
     recheck as a declared attempt — rechecked + discharged checks."""
-    core = Path("/home/ubuntu/repos/mumei/target/debug/mumei")
+    core = Path(mumei_bin)
     source = tmp_path / "main.mm"
     source.write_text(SOURCE)
     bundle = tmp_path / "bundle"
@@ -403,4 +396,3 @@ def test_real_core_end_to_end(tmp_path, capsys):
         "claim_truth",
         "file_identity",
     ]
-
