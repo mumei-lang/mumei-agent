@@ -112,8 +112,7 @@ def build_eval_parser(parser: argparse.ArgumentParser) -> None:
         help="Declared minimum list_version the revocation list must "
         "clear. Requires --revocation-list naming a "
         "mumei.key-revocation-list/v2 document, --reference-time and "
-        "a signed list (--revocation-signature, and on this route "
-        "--revocation-key). When supplied the evaluation emits "
+        "a signed list (--revocation-signature). When supplied the evaluation emits "
         "revocation_list_current checking the list's declared window "
         "and version.",
     )
