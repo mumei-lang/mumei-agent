@@ -1312,7 +1312,7 @@ contract C is A, B {
     assert call.target == f_in_a.id
 
 
-def test_super_member_with_mixed_signatures_stays_opaque():
+def test_super_member_overload_resolves_by_argument_types():
     source = """
 contract A { function f(uint256 x) internal virtual {} }
 contract B is A { function f(bool x) internal virtual {} }
@@ -1322,8 +1322,32 @@ contract C is B {
 """
     report = build_sol_bindings(source)
     call = next(call for call in report.calls)
-    # super.f sees the overload set {B.f(bool), A.f(uint)}; without
-    # argument typing the call can't be bound to a single target.
+    # super.f sees the overload set {B.f(bool), A.f(uint256)}; the
+    # literal int argument fits only the uint256 overload.
+    f_uint = min(
+        (
+            binding
+            for binding in report.bindings
+            if binding.name == "f"
+        ),
+        key=lambda binding: binding.span.start,
+    )
+    assert call.target == f_uint.id
+    assert call.kind == "opaque_virtual"
+
+
+def test_super_member_overload_stays_opaque_on_tie():
+    source = """
+contract A { function f(uint256 x) internal virtual {} }
+contract B is A { function f(uint128 x) internal virtual {} }
+contract C is B {
+    function g() public { super.f(1); }
+}
+"""
+    report = build_sol_bindings(source)
+    call = next(call for call in report.calls)
+    # A numeric literal's smallest fitting type is unknown — both
+    # integer overloads stay viable and the set remains ambiguous.
     assert call.kind == "opaque_overload"
     assert not call.target
     assert not any(
@@ -1359,7 +1383,7 @@ contract C {
     )
 
 
-def test_overloaded_member_call_classifies_opaque_overload():
+def test_overloaded_member_call_resolves_by_argument_types():
     source = """
 contract T {
     function f(uint256 a) external {}
@@ -1371,6 +1395,36 @@ contract C {
 }
 """
     report = build_sol_bindings(source)
+    # The literal int argument fits f(uint256) but not f(bool) — solc
+    # binds the integer overload.
+    f_uint = min(
+        (
+            binding
+            for binding in report.bindings
+            if binding.name == "f"
+        ),
+        key=lambda binding: binding.span.start,
+    )
+    assert any(
+        call.kind == "direct_local" and call.target == f_uint.id
+        for call in report.calls
+    )
+
+
+def test_overloaded_member_call_stays_opaque_when_no_arg_fit():
+    source = """
+contract T {
+    function f(uint256 a) external {}
+    function f(bool b) external {}
+}
+contract C {
+    T t;
+    function g() external { t.f("x"); }
+}
+"""
+    report = build_sol_bindings(source)
+    # A string literal fits neither member overload; solc reports the
+    # member as not found after argument-dependent lookup.
     assert _unresolved(report, "f", "ambiguous_overload")
     assert any(
         call.kind == "opaque_overload" and call.target == ""
@@ -1504,7 +1558,7 @@ contract Vault {
     )
 
 
-def test_using_ambiguous_across_libraries_stays_opaque():
+def test_using_overload_across_libraries_resolves_by_args():
     source = """
 library A { function f(uint256 a, bool b) internal pure {} }
 library B { function f(uint256 a, uint256 b) internal pure {} }
@@ -1515,6 +1569,36 @@ contract Vault {
     function run() external { total.f(1); }
 }
 """
+    report = build_sol_bindings(source)
+    # The literal int second argument fits B.f's uint256 but not
+    # A.f's bool — the overload set resolves to B.f.
+    f_b = max(
+        (
+            binding
+            for binding in report.bindings
+            if binding.name == "f"
+        ),
+        key=lambda binding: binding.span.start,
+    )
+    assert any(
+        ref.binding_id == f_b.id and ref.kind == "call"
+        for ref in report.references
+    )
+
+
+def test_using_ambiguous_across_libraries_stays_opaque():
+    source = """
+library A { function f(uint256 a, uint256 b) internal pure {} }
+library B { function f(uint256 a, uint256 b) internal pure {} }
+contract Vault {
+    using A for uint256;
+    using B for uint256;
+    uint256 total;
+    function run() external { total.f(1); }
+}
+"""
+    # Both second parameters are uint256, so the literal int argument
+    # converts to either overload — the set stays ambiguous.
     report = build_sol_bindings(source)
     assert _unresolved(report, "f", "ambiguous_overload")
     assert not any(

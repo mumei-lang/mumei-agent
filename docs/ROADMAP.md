@@ -9755,20 +9755,33 @@ array elements (`values[0].add`), member chains (`coin.v.add`), call
 returns (`getTotal().add`) and chained library calls
 (`total.add(1).sub(2)`); receivers whose type cannot be named
 statically (mappings, nested arrays, function-typed returns) keep
-their opaque treatment. solc picks among
-several applicable directives by implicit argument types, which the
-lexical side does not model, so a name declared by more than one
-matching library reports `ambiguous_overload` rather than binding the
-first directive; a member that exists but is private reports
+their opaque treatment. When `x.f(...)` is a
+call, member overloads and all applicable `using` extensions form a
+single candidate set resolved by argument types — the extension's
+first (receiver) parameter is skipped, literal ints/bools/strings
+match by kind (a numeric literal converts to every integer width, so
+`t.f(1)` across `f(uint8)`/`f(uint256)` stays ambiguous), typed
+arguments use widening-only implicit conversion (`uint8`→`uint256`,
+`uintN`→`intM` needs strictly more width, `bytesN`→`bytesM`/`bytes`,
+`address payable`→`address`), and a unique survivor binds — including
+an extension that wins because no member overload can take the
+arguments (solc-verified: `inst.f("x")` with only `f(uint256)`/
+`f(address)` members binds `f(D,string)` via `using`). A candidate
+set with zero or tied survivors reports `ambiguous_overload` rather
+than binding the first match; a member that exists but is private
+reports
 `private_base_member`, and the library identifier inside the directive
-emits a `read` reference like any other type name. Declared members
-still win over directives, matching solc's lookup order. The aliased
+emits a `read` reference like any other type name. The aliased
 form `using {f as g} for T` fails parse at the grammar level, so the
 whole source stays fail-closed rather than resolving half of it.
 Nested arrays, mappings, member objects on non-contract types,
 function-typed returns (`returns (function() ...)`), function-typed
-variables, array `new` expressions and overloaded library functions
-keep their opaque treatment. Struct fields and enum members are now
+variables, array `new` expressions and non-call member positions
+(`x.f` as a value, where a lone candidate binds by name only) keep
+their opaque treatment. `this.f(...)` and `super.f(...)` never reach
+`using` — solc does not apply directives through `this` or `super`
+(verified: `this.v.ext()` under `using S for uint256` errors); only
+the member overload set is argument-resolved there. Struct fields and enum members are now
 first-class bindings (`struct_field`, `enum_member` kinds): the
 declaration's members attach to the struct/enum type record and
 member access resolves them on variables, member chains
