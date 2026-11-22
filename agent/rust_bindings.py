@@ -77,7 +77,16 @@ _DEREF_WRAPPER_NAMES = frozenset({"Box", "Rc", "Arc"})
 # `s.first()`, `s.last()` yield `Option<&T>` on `&[T]`/`[T; N]` too.
 # `pop`/`remove` stay Vec-only — slices cannot shrink.
 _SLICE_OPTION_METHODS = frozenset(
-    {"get", "first", "last", "split_first", "split_last"}
+    {
+        "get",
+        "get_mut",
+        "first",
+        "first_mut",
+        "last",
+        "last_mut",
+        "split_first",
+        "split_last",
+    }
 )
 
 # `v.split_first()`/`v.split_last()` yield
@@ -96,7 +105,11 @@ _OPTION_HEAD_METHODS = {
     "get": ("&", {"Vec", "VecDeque", "HashMap", "BTreeMap"}, -1),
     "get_mut": ("&mut ", {"Vec", "VecDeque", "HashMap", "BTreeMap"}, -1),
     "first": ("&", {"Vec"}, -1),
+    "first_mut": ("&mut ", {"Vec"}, -1),
     "last": ("&", {"Vec"}, -1),
+    "last_mut": ("&mut ", {"Vec"}, -1),
+    "front_mut": ("&mut ", {"VecDeque"}, -1),
+    "back_mut": ("&mut ", {"VecDeque"}, -1),
     "pop": ("", {"Vec"}, -1),
     "front": ("&", {"VecDeque"}, -1),
     "back": ("&", {"VecDeque"}, -1),
@@ -161,11 +174,36 @@ _UNWRAP_OK_METHODS = frozenset(
 )
 # `o.<method>(f)`/`r.<method>(f)` where a named function's return
 # annotation supplies the payload — `map`/`map_or`/`map_or_else`
-# yield `Option<U>` from `f() -> U`, `and_then`/`or_else` unwrap
-# `f() -> Option<U>`/`Result`, `map_err` rewrites `Result`'s last
-# arg. Closures stay opaque (their param types are unwritten).
+# yield `Option<U>` from `f() -> U`, `and_then`/`or_else`/`find_map`
+# unwrap `f() -> Option<U>`/`Result`, `map_err` rewrites `Result`'s
+# last arg. Closures stay opaque (their param types are unwritten).
 _FN_PAYLOAD_METHODS = frozenset(
-    {"map", "and_then", "or_else", "map_or", "map_or_else", "map_err"}
+    {
+        "map",
+        "and_then",
+        "or_else",
+        "find_map",
+        "map_or",
+        "map_or_else",
+        "map_err",
+    }
+)
+# Iterator consumers that hand back `Option<Item>` —
+# `it.find(..)`/`it.nth(i)`/`it.max()` keep the upstream element.
+_ITER_OPTION_METHODS = frozenset(
+    {
+        "find",
+        "nth",
+        "nth_back",
+        "last",
+        "min",
+        "max",
+        "min_by",
+        "max_by",
+        "min_by_key",
+        "max_by_key",
+        "reduce",
+    }
 )
 _UNWRAP_ERR_METHODS = frozenset({"unwrap_err", "expect_err"})
 _TRY_HEADS = frozenset({"Option", "Result"})
@@ -3153,6 +3191,25 @@ class _RustBindings:
                 if (
                     callee is not None
                     and callee.type == "field_expression"
+                    and self.text(
+                        callee.child_by_field_name("field")
+                    ).strip()
+                    in _ITER_OPTION_METHODS
+                ):
+                    # `it.find(..)`/`it.nth(i)`/`it.max()` yield
+                    # `Option<Item>` — the upstream chain's element.
+                    upstream = callee.child_by_field_name("value")
+                    spelled = (
+                        None
+                        if upstream is None
+                        or upstream.type != "call_expression"
+                        else self._iterator_spelling(upstream)
+                    )
+                    if spelled is not None:
+                        return None, spelled
+                if (
+                    callee is not None
+                    and callee.type == "field_expression"
                 ):
                     # Iterator chains (`v.iter()`, `it.zip(u)` …)
                     # spell their element from the receiver's args.
@@ -3695,7 +3752,7 @@ class _RustBindings:
             or record.type_node
         )
         text = self.text(ret).strip()
-        if method in {"and_then", "or_else"}:
+        if method in {"and_then", "or_else", "find_map"}:
             wrap = re.fullmatch(r"(?:Option|Result)\s*<(.+)>", text)
             if wrap is None:
                 return None
@@ -7112,7 +7169,12 @@ class _RustBindings:
         if record is None or record.type_node is None:
             return None
         head = re.match(
-            r"[A-Za-z_][\w:]*", self.text(record.type_node).strip()
+            r"[A-Za-z_][\w:]*",
+            re.sub(
+                r"^&\s*(?:'\w+\s*)?(?:mut\s+)?",
+                "",
+                self.text(record.type_node).strip(),
+            ),
         )
         if head is None:
             return None
@@ -7421,6 +7483,22 @@ class _RustBindings:
                         ) or node.start_byte,
                         None,
                     )
+                if (
+                    field is not None
+                    and self.text(field).strip()
+                    in _ITER_OPTION_METHODS
+                ):
+                    upstream = callee.child_by_field_name("value")
+                    if (
+                        upstream is not None
+                        and upstream.type == "call_expression"
+                        and self._iterator_spelling(upstream)
+                        is not None
+                    ):
+                        # `it.find(..)`/`it.nth(i)` yield
+                        # `Option<Item>` — head the scrutinee so
+                        # `Some(p)` binds the upstream element.
+                        return "Option", node.start_byte, None
                 if (
                     field is not None
                     and self.text(field).strip() in _FN_PAYLOAD_METHODS
