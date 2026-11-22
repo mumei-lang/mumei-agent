@@ -6472,6 +6472,7 @@ class _Builder:
                         count,
                         1,
                     )
+            self._record_read(deps)
             return deps
         return self.expression(
             operand,
