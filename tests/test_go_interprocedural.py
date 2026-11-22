@@ -53328,6 +53328,25 @@ def test_reslice_bind_negative_controls(go_types_helper, declarations, expected)
             "\treturn 0\n}\n",
             frozenset({0, 1, 2, 3}),
         ),
+        # The `var` and assignment forms admit the same nested
+        # lookup — value and flag carry the field slot plus every
+        # key's deps.
+        (
+            "type S struct { M map[int64]map[int64]int64 }\n"
+            "func F(p *S, k1, k2 int64) int64 {\n"
+            "\tvar v, ok = p.M[k1][k2]\n"
+            "\tif ok { return v }\n"
+            "\treturn 0\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        (
+            "type S struct { M map[int64]map[int64]int64 }\n"
+            "func F(p *S, k1, k2 int64) int64 {\n"
+            "\tv := int64(0)\n"
+            "\tv, _ = p.M[k1][k2]\n"
+            "\treturn v\n}\n",
+            frozenset({0, 1, 2}),
+        ),
     ],
 )
 def test_map_field_comma_ok_read(go_types_helper, declarations, expected):
