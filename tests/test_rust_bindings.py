@@ -2967,3 +2967,30 @@ fn f() { <P as T<u32>>::m(&P); }
     )
     call = _call(report, source, "<P as T<u32>>::m(&P)")
     assert call.target != impl_m.id
+
+
+def test_ufcs_trait_arg_binding_constrains_impl_type_args():
+    # `impl<A> T<A> for W<A>` cannot answer `<W<V<u16>> as T<u8>>::m`
+    # — `A` would have to be both `u8` (trait side) and `V<u16>`
+    # (impl side). The `impl<A> T<u8> for W<V<A>>` impl is the match.
+    source = """
+trait T<A> { fn m(&self) {} }
+struct W<A>(A);
+struct V<A>(A);
+impl<A> T<A> for W<A> { fn m(&self) {} }
+impl<A> T<u8> for W<V<A>> { fn m(&self) {} }
+fn f() { <W<V<u16>> as T<u8>>::m(&W(V(0u16))); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    right_m = next(
+        b for b in report.bindings
+        if b.name == "m" and b.span.start == source.rindex("fn m") + 3
+    )
+    wrong_m = next(
+        b for b in report.bindings
+        if b.name == "m" and b.span.start != source.rindex("fn m") + 3
+        and b.span.start != source.index("fn m") + 3
+    )
+    call = _call(report, source, "<W<V<u16>> as T<u8>>::m(&W(V(0u16)))")
+    assert call.target == right_m.id
+    assert call.target != wrong_m.id

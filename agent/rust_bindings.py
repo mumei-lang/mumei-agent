@@ -1072,17 +1072,25 @@ class _RustBindings:
         return a.replace(" ", "") == b.replace(" ", "")
 
     def _type_args_match(
-        self, a: str | None, b: str | None, params: frozenset[str]
+        self,
+        a: str | None,
+        b: str | None,
+        params: frozenset[str],
+        bindings: dict[str, str] | None = None,
     ) -> bool:
         """Positional structural equality of two type-argument keys
-        — `W<(u8,u16)>` and `W<(u8, u16)>` are the same type."""
+        — `W<(u8,u16)>` and `W<(u8, u16)>` are the same type. The
+        caller may pass a shared `bindings` map so parameter bindings
+        established on one side (trait args) constrain the other
+        (impl type args)."""
         if (a is None) != (b is None):
             return False
         if a is None:
             return True
         parts_a = self._type_arg_list(a)
         parts_b = self._type_arg_list(b)
-        bindings: dict[str, str] = {}
+        if bindings is None:
+            bindings = {}
         return len(parts_a) == len(parts_b) and all(
             self._type_arg_match(x, y, params, bindings)
             for x, y in zip(parts_a, parts_b)
@@ -1552,27 +1560,29 @@ class _RustBindings:
         if trait is None:
             return None
         # `<P as T<u32>>::m` names a specific impl — `impl T<i32> for
-        # P` must not answer for it.
+        # P` must not answer for it. One shared bindings map unifies
+        # the two sides: `A = u8` fixed by `T<A>` also constrains the
+        # impl type `W<A>` against the receiver `W<V<u16>>`.
         _, trait_args = self._annotation_type(trait_node)
+
+        def ufcs_args_match(record: _Record) -> bool:
+            bindings: dict[str, str] = {}
+            params = record.member_impl_type_params
+            if trait_args is not None and not self._type_args_match(
+                record.member_trait_args, trait_args, params, bindings
+            ):
+                return False
+            return self._type_args_match(
+                record.member_impl_args, impl_args, params, bindings
+            )
+
         pool = [
             record
             for record in self.records.values()
             if record.member_of == type_id
             and record.binding.name == name
             and record.member_trait == trait.binding.id
-            and (
-                trait_args is None
-                or self._type_args_match(
-                    record.member_trait_args,
-                    trait_args,
-                    record.member_impl_type_params,
-                )
-            )
-            and (
-                record.member_impl_args is None
-                or record.member_impl_generic
-                or record.member_impl_args == impl_args
-            )
+            and ufcs_args_match(record)
         ]
         if not pool:
             # `<P as T>::m` falls back to the trait's default
