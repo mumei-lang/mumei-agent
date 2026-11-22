@@ -6401,20 +6401,6 @@ def test_interface_dispatch_local_struct_pointer_value_stays_closed(
         pytest.param(
             "type I interface{ M(int64) int64 }\n"
             "type W struct{ i I }\n"
-            "func F(w W, x int64) int64 { "
-            "f := w.i.M; go f(x); return 0 }\n",
-            id="go-call",
-        ),
-        pytest.param(
-            "type I interface{ M(int64) int64 }\n"
-            "type W struct{ i I }\n"
-            "func F(w W, x int64) int64 { "
-            "f := w.i.M; defer f(x); return 0 }\n",
-            id="defer-call",
-        ),
-        pytest.param(
-            "type I interface{ M(int64) int64 }\n"
-            "type W struct{ i I }\n"
             "func G(f func(int64) int64, x int64) int64 { return f(x) }\n"
             "func F(w W, x int64) int64 { return G(w.i.M, x) }\n",
             id="passed-as-argument",
@@ -7067,7 +7053,8 @@ def test_interface_method_value_binding_pins_stale_dependents(
     files = {
         "a.go": (
             "package p\n"
-            "func F(i I, x int64) int64 { f := i.M; return f(x) }\n"
+            "func F(i I, x int64) (r int64) { "
+            "f := i.M; defer f(x); r = 0; return }\n"
         ),
         "i.go": "package p\ntype I interface{ M(int64) int64 }\n",
     }
@@ -7125,15 +7112,9 @@ def test_interface_method_value_binding_pins_stale_dependents(
         ),
         (
             "type I interface{ M(int64) int64 }\n"
-            "func F(i I, x int64) int64 { "
-            "f := i.M; go f(x); return x }",
-            "unsupported_expression",
-        ),
-        (
-            "type I interface{ M(int64) int64 }\n"
-            "func F(i I, x int64) int64 { "
-            "f := i.M; defer f(x); return x }",
-            "unsupported_expression",
+            "func F(i I, x int64) int64 { f := i.M; "
+            "defer func() { f(x) }(); return 0 }",
+            "cfg_unavailable",
         ),
         (
             "type I interface{ M(int64) int64 }\n"
@@ -7177,6 +7158,149 @@ def test_interface_method_value_non_call_uses_stay_closed(
     result = named(*unit(go_types_helper, declarations))
     assert not result.available
     assert any(gap.reason == reason for gap in result.gaps), result.gaps
+
+
+@pytest.mark.parametrize(
+    ("declarations", "expected_deps", "allow_transfer_widening"),
+    [
+        pytest.param(
+            "type I interface{ M(int64) int64 }\n"
+            "func F(i I, x int64) int64 { "
+            "f := i.M; defer f(x); return 0 }\n"
+            "func D(i I, x int64) int64 { "
+            "defer i.M(x); return 0 }\n",
+            frozenset(),
+            False,
+            id="defer",
+        ),
+        pytest.param(
+            "type I interface{ M(int64) int64 }\n"
+            "type P struct{ V int64 }\n"
+            "func F(i I, p *P, x int64) (r int64) { "
+            "f := i.M; defer f(x); r = p.V; return }\n"
+            "func D(i I, p *P, x int64) (r int64) { "
+            "defer i.M(x); r = p.V; return }\n",
+            frozenset({0, 1, 2}),
+            False,
+            id="named-result",
+        ),
+        pytest.param(
+            "type I interface{ M(int64) int64 }\n"
+            "type W struct{ i I }\n"
+            "func F(w W, x int64) int64 { "
+            "f := w.i.M; defer f(x); return 0 }\n"
+            "func D(w W, x int64) int64 { "
+            "defer w.i.M(x); return 0 }\n",
+            frozenset(),
+            False,
+            id="field-chain",
+        ),
+        pytest.param(
+            "type I interface{ M(int64) int64 }\n"
+            "func F(i I, x int64) int64 { "
+            "g := I.M; defer g(i, x); return 0 }\n"
+            "func D(i I, x int64) int64 { "
+            "defer I.M(i, x); return 0 }\n",
+            frozenset(),
+            False,
+            id="method-expression",
+        ),
+        pytest.param(
+            "type I interface{ M(int64) int64 }\n"
+            "func F(i I, x int64) int64 { "
+            "f := i.M; go f(x); return 0 }\n"
+            "func D(i I, x int64) int64 { "
+            "go i.M(x); return 0 }\n",
+            frozenset(),
+            False,
+            id="go",
+        ),
+        pytest.param(
+            "type I interface{ M(int64) int64 }\n"
+            "func F(i I, x, y int64) (r int64) { "
+            "f := i.M; z := y; defer f(z); z = x; r = 0; return }\n"
+            "func D(i I, x, y int64) (r int64) { "
+            "z := y; defer i.M(z); z = x; r = 0; return }\n",
+            frozenset({0, 2}),
+            False,
+            id="arguments-captured-at-defer",
+        ),
+        pytest.param(
+            "type I interface{ M(int64) int64 }\n"
+            "func F(i I, x int64) int64 { f := i.M; "
+            "for n := x; n > 0; n-- { defer f(n) }; return 0 }\n"
+            "func D(i I, x int64) int64 { "
+            "for n := x; n > 0; n-- { defer i.M(n) }; return 0 }\n",
+            frozenset(),
+            True,
+            id="defer-in-loop",
+        ),
+        pytest.param(
+            "type I interface{ M(int64) int64 }\n"
+            "func F(i, j I, x, y int64) (r int64) { "
+            "f := i.M; g := j.M; defer f(x); defer g(y); "
+            "r = 0; return }\n"
+            "func D(i, j I, x, y int64) (r int64) { "
+            "defer i.M(x); defer j.M(y); r = 0; return }\n",
+            frozenset({0, 1, 2, 3}),
+            True,
+            id="two-defers",
+        ),
+    ],
+)
+def test_interface_method_value_go_and_defer_calls_match_direct(
+    go_types_helper, declarations, expected_deps, allow_transfer_widening
+):
+    source, snapshot, summaries = unit(go_types_helper, declarations)
+    value = named(source, snapshot, summaries, "F")
+    direct = named(source, snapshot, summaries, "D")
+    assert value.available, value.gaps
+    assert direct.available, direct.gaps
+    assert value.return_dependencies == direct.return_dependencies
+    assert value.return_dependencies == expected_deps
+    assert value.effects == direct.effects
+    binding_names = {
+        binding.id: binding.name for binding in snapshot.bindings
+    }
+
+    assert len(value.calls) == len(direct.calls)
+    for value_call, direct_call in zip(value.calls, direct.calls):
+        assert binding_names.get(value_call.target, value_call.target) == (
+            binding_names.get(direct_call.target, direct_call.target)
+        )
+        assert value_call.result == direct_call.result
+        assert value_call.imported == direct_call.imported
+        assert len(value_call.arguments) == len(direct_call.arguments)
+        for value_arg, direct_arg in zip(
+            value_call.arguments, direct_call.arguments
+        ):
+            assert direct_arg <= value_arg
+            if not allow_transfer_widening:
+                assert value_arg == direct_arg
+
+
+def test_interface_method_value_defer_freezes_receiver_at_bind(
+    go_types_helper,
+):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "type I interface{ M(*int64, int64) int64 }\n"
+        "func F(i, j I, x int64) (r int64) { "
+        "f := i.M; i = j; defer f(&r, x); return }\n"
+        "func D(i, j I, x int64) (r int64) { "
+        "i = j; defer i.M(&r, x); return }\n",
+    )
+    value = named(source, snapshot, summaries, "F")
+    direct = named(source, snapshot, summaries, "D")
+    assert value.available, value.gaps
+    assert direct.available, direct.gaps
+    assert value.effects == direct.effects == "unknown"
+    assert value.return_dependencies == frozenset({0, 2})
+    assert direct.return_dependencies == frozenset({1, 2})
+    value_call = next(call for call in value.calls if call.imported)
+    direct_call = next(call for call in direct.calls if call.imported)
+    assert value_call.arguments[0] == frozenset({0})
+    assert direct_call.arguments[0] == frozenset({1})
 
 
 @pytest.mark.parametrize(

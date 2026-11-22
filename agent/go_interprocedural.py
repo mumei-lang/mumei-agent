@@ -25033,6 +25033,34 @@ class _Builder:
                     )
                     if arg_list is not None and _children(arg_list):
                         defer_arg_deps = ret
+                deferred_function = (
+                    self._strip_parens(
+                        inner[0].child_by_field_name("function")
+                    )
+                    if inner[0].type == "call_expression"
+                    else None
+                )
+                if (
+                    deferred_function is not None
+                    and deferred_function.type == "identifier"
+                ):
+                    deferred_ref = self.references.get(
+                        self.node_key(deferred_function)
+                    )
+                    deferred_binding_id = (
+                        deferred_ref.binding_id
+                        if deferred_ref is not None
+                        else None
+                    )
+                    if (
+                        deferred_binding_id
+                        in self.bound_interface_methods
+                    ):
+                        defer_arg_deps |= (
+                            self.bound_method_receiver_deps.get(
+                                deferred_binding_id, frozenset()
+                            )
+                        )
                 if deferred_shape is not None:
                     (
                         captured,
@@ -32536,19 +32564,6 @@ class _Builder:
             ref.binding_id
         )
         if bound_interface_method is not None:
-            parent = node.parent
-            while (
-                parent is not None
-                and parent.type == "parenthesized_expression"
-            ):
-                parent = parent.parent
-            if parent is not None and parent.type in {
-                "go_statement",
-                "defer_statement",
-            }:
-                raise _Unsupported(
-                    "unsupported_expression", _span(node)
-                )
             return self._bound_interface_method_call(
                 node,
                 arguments,
