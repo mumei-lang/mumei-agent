@@ -3266,7 +3266,7 @@ class _RustBindings:
             # `v.split_at(i)` yields `(&[P], &[P])` — a pair of
             # borrowed slices that feeds the tuple-pattern path.
             return (
-                f"(&{spelled}, &{spelled})",
+                f"(&[{spelled}], &[{spelled}])",
                 self._receiver_annotation_position(receiver),
             )
         if method in _ITER_CHUNK_METHODS:
@@ -6163,10 +6163,14 @@ class _RustBindings:
                         else pattern.start_byte
                     ),
                 )
-                if borrowed:
-                    # `&P` is a spelled borrow, not the payload
-                    # itself — keep it as the bound name's args so
-                    # `a[0]`/`a.iter()` read through the borrow.
+                if borrowed and re.match(
+                    r"^&\s*(?:mut\s+)?\[", element.strip()
+                ):
+                    # `&[P]` is a spelled borrow of a slice, not the
+                    # payload itself — keep it as the bound name's
+                    # args so `a[0]`/`a.iter()` read through the
+                    # borrow. `&P`/`&mut P` keep the resolved `P`:
+                    # member calls auto-deref to it.
                     tid = None
                     fargs = element.strip()
                 # The container head is the element's own spelling —
