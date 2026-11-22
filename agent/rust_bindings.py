@@ -2192,8 +2192,11 @@ class _RustBindings:
                 else None
             )
             if member is not None and member.type_node is not None:
-                ret = member.type_node.child_by_field_name(
-                    "return_type"
+                ret = (
+                    member.type_node.child_by_field_name(
+                        "return_type"
+                    )
+                    or member.type_node
                 )
                 if ret is not None:
                     spelled_pos = ret.start_byte
@@ -2243,10 +2246,23 @@ class _RustBindings:
                                 ret_generics.group(1)
                             )
                         ]
+                    arg_head = (
+                        None
+                        if index >= len(ret_args)
+                        else re.match(
+                            r"[A-Za-z_][\w:]*",
+                            re.sub(
+                                r"^(?:[\s&*()]+|(?:const|mut)\s+)+",
+                                "",
+                                ret_args[index],
+                            ),
+                        )
+                    )
                     if (
                         param_map
-                        and index < len(ret_args)
-                        and ret_args[index] in param_map
+                        and arg_head is not None
+                        and self._normalize_identifier(arg_head.group(0))
+                        in param_map
                         and any(
                             re.search(
                                 rf"\b{re.escape(param)}\b",
