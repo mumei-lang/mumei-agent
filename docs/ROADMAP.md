@@ -4074,10 +4074,14 @@ the readers and writers too.
 Package scope is detected from the binding's scope record: the
 packaged profile's file `-1` sentinel, or the whole-file span in
 the single-file profile. A function-local `var` the fragment does
-not track carries its function's scope and stays closed, as do
-package vars of composite or non-scalar type (`var G []int64`,
-`var G string`), while scalar package `const`s were always
-dep-free. Package
+not track carries its function's scope and stays closed; a bare read
+of a package var with composite or non-scalar type (`G` for
+`var G []int64`, `G` for `var G string`) stays closed too. Direct
+slice, array, and map operations on package vars and on container
+fields of package-level composite vars are external-state reads;
+field-rooted index, range, `len`, and `cap` operations transfer on
+the resolved field identity, while field chains with indexed extras
+remain closed. Scalar package `const`s were always dep-free. Package
 vars shadowing universe names (`var iota int64`, `var true bool`)
 admit the same way: the compiler resolves the use to the
 declaration, so the read is package state like any other.
