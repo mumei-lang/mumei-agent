@@ -4324,15 +4324,6 @@ class _RustBindings:
                     # misbind calls. Only a real std re-export
                     # (`use std::vec::Vec`) keeps the prelude
                     # container's own args.
-||||||| parent of 19b8e1c2 (fix: forward the whole receiver type through clone/to_owned, and keep declared containers opaque in flatten)
-                if (
-                    head is not None
-                    and head not in _INDEX_ELEMENT_CONTAINERS
-                    and head != "Option"
-                ):
-                    # `Vec<W<P>>` — a declared `W` can
-                    # `IntoIterator` to a different element;
-                    # guessing `P` would misbind calls.
                     return None, None
             return (
                 "&" + inner_args if borrow else inner_args
@@ -7127,6 +7118,45 @@ class _RustBindings:
             return None
         return head.group(0).split("::")[-1]
 
+    def _combinator_head(self, node: Any | None) -> "str | None":
+        """Container head a chain of Option/Result combinators yields —
+        `o.map(f).map(g)` still heads `Option`, `r.ok().map(f)` heads
+        `Option`. None when the chain bottoms out in another call
+        (`o.iter().map` is not a container head) or ends in a method
+        that leaves the container world (`map_or` yields `U`)."""
+        flow = {
+            "map": None,
+            "and_then": None,
+            "map_err": None,
+            "or": None,
+            "and": None,
+            "xor": None,
+            "filter": None,
+            "cloned": None,
+            "copied": None,
+            "inspect": None,
+            "ok": "Option",
+            "err": "Option",
+        }
+        head = None
+        while node is not None and node.type == "call_expression":
+            callee = node.child_by_field_name("function")
+            if callee is None or callee.type != "field_expression":
+                return None
+            field = callee.child_by_field_name("field")
+            if field is None:
+                return None
+            method = self._normalize_identifier(self.text(field))
+            if method not in flow:
+                return None
+            if flow[method] is not None:
+                head = flow[method]
+            node = callee.child_by_field_name("value")
+        base = self._container_head_name(node)
+        if base is not None and head is None:
+            head = base
+        return head
+
     def _slice_has_declared_method(self, name: str) -> bool:
         """True when an impl block declares `name` on a slice/array
         target — `impl T for [P]` means `s.first()` uses the trait's
@@ -7407,6 +7437,10 @@ class _RustBindings:
                     head = self._container_head_name(
                         callee.child_by_field_name("value")
                     )
+                    if head is None:
+                        head = self._combinator_head(
+                            callee.child_by_field_name("value")
+                        )
                     if head not in _TRY_HEADS:
                         return None, None, None
                     return head, node.start_byte, None
