@@ -6382,3 +6382,26 @@ fn f(v: Vec<Peekable<I>>, w: Vec<Vec<P>>) {
     assert not bound.get("x.im()")
     # Real containers still flatten to their element.
     assert bound.get("y.pm()") == pm.id
+
+def test_match_scrutinee_chained_combinator_heads_option():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct Q;
+impl Q { fn qm(&self) {} }
+fn to_q(p: P) -> Q { Q }
+fn identity(q: Q) -> Q { q }
+fn f(o: Option<P>, r: Result<Q, E>) {
+    match o.map(to_q).map(identity) { Some(q2) => q2.qm(), _ => () }
+    match r.ok().map(identity) { Some(q3) => q3.qm(), _ => () }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    qm = _bindings(report, "qm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    assert bound.get("q2.qm()") == qm.id
+    assert bound.get("q3.qm()") == qm.id
