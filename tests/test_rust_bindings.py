@@ -2894,3 +2894,39 @@ mod m {
     )
     assert param.type is not None
     assert param.type.type_id == count.id
+
+def test_ufcs_generic_trait_picks_matching_associated_const():
+    # `<P as T<u32>>::C` binds to the `u32` impl's const, not the
+    # `i32` impl's or the trait's.
+    source = """
+trait T<A> { const C: i32; }
+struct P;
+impl T<i32> for P { const C: i32 = 1; }
+impl T<u32> for P { const C: i32 = 2; }
+fn f() { let x = <P as T<u32>>::C; }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    u32_const = next(
+        b
+        for b in report.bindings
+        if b.name == "C" and b.span.start == source.rindex("const C") + 6
+    )
+    ref = _refs(report, source, "C")[-1]
+    assert ref.binding_id == u32_const.id
+
+
+def test_parenthesized_range_index_stays_a_slice():
+    # `v[(..)]` is still a range — `.m()` on the slice does not
+    # resolve to `P`'s method.
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn f(v: &[P]) { v[(..)].m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    member = next(
+        b for b in report.bindings
+        if b.name == "m" and b.kind == "associated_function"
+    )
+    call = _call(report, source, "v[(..)].m()")
+    assert call.target != member.id
