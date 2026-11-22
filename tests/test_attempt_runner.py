@@ -327,12 +327,16 @@ def test_run_network_isolation_marker_preserves_target_exit(
 def test_run_network_isolation_combines_with_memory_bound():
     result = AttemptRunner().run(
         request(),
-        argv("pass"),
+        argv(
+            "import resource; "
+            "print(resource.getrlimit(resource.RLIMIT_AS)[0])"
+        ),
         memory_bound_mb=256,
         isolate_network=True,
     )
     assert result.record.state == "exited"
     assert result.record.events[-1].exit_code == 0
+    assert int(result.stdout.strip()) == 256 * 1_048_576
 
 
 @pytest.mark.skipif(
