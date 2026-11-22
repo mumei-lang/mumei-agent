@@ -4295,14 +4295,21 @@ extraction model; pure array fields reached through an index stay
 closed. A *bare `*S` parameter root* is admitted the same way —
 `p.A[i].V`, `p.M[k].V`, `p.F[0]` slot on the parameter the way a
 slice shares its backing — while local pointer bindings (`q :=
-p`), reseats (`p = q`, tracked at assignment), `**S` roots and
+p`), reseats onto opaque memory (`p = &local`), `**S` roots and
 pointer-typed fields remain closed. An explicit `(*p)` deref of a
 `*S` param resolves through the same slot machinery as the
 implicit deref — Go's grammar parses `(*p)` as a parenthesized
 unary `*`, so the root walks unwrap it (a non-`*` unary operand
-like `(&x).F` stays closed). A reseat takes effect at the next
-statement — `p, x = q, p.A[i].V` still reads the entry pointee —
-and scopes per if/else arm, joining as may-reseated afterwards. A
+like `(&x).F` stays closed, and `(*p.A[i])` — an element-pointer
+deref — is not a root field chain). A reseat onto another `*S`
+parameter is an alias: `p = q` makes reads through `p` resolve on
+`q`'s entry slot (with the same may-write `caller-backing`
+over-report the shared-container params already make), while a
+reseat onto opaque memory closes the root. Reseats take effect at
+the next statement — `p, x = q, p.A[i].V` still reads the entry
+pointee — and scope per if/else arm: the arms join pointwise, so
+an alias only survives when every path agrees and a may-alias or
+may-reseat closes the root afterwards. A
 store through the parameter lands in the caller's pointee, so the
 param joins the caller-visible set and a grown dep set emits the
 `caller-backing` transfer like a shared slice. Two `*S` parameters

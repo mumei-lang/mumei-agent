@@ -2435,6 +2435,18 @@ class _Builder:
             if root is not None and root.type == "identifier"
             else None
         )
+        aliased_root = (
+            root_ref is not None
+            and root_ref.binding_id in self._param_pointer_aliases
+        )
+        if aliased_root:
+            # `p = q` copied `q`'s pointer — a read through `p`
+            # names `q`'s entry pointee, so the slot resolves on
+            # the target's identity (the target's own reseat does
+            # not reseat `p`, which kept the pointer it copied).
+            root_ref = self._param_pointer_aliases[
+                root_ref.binding_id
+            ]
         if (
             member is None
             or member.type is None
@@ -2453,8 +2465,11 @@ class _Builder:
                 or (
                     params is not None
                     and root_ref.binding_id in params
-                    and root_ref.binding_id
-                    not in self._pointer_param_reseats
+                    and (
+                        aliased_root
+                        or root_ref.binding_id
+                        not in self._pointer_param_reseats
+                    )
                     and (
                         (root_binding := self.bindings.get(
                             root_ref.binding_id
@@ -14213,11 +14228,15 @@ class _Builder:
         saved_pending_param_reseats = getattr(
             self, "_pending_param_reseats", []
         )
+        saved_pointer_param_aliases = getattr(
+            self, "_param_pointer_aliases", {}
+        )
         self._pending_labels = []
         self._goto_seen = False
         self._seen_labels = set()
         self._pointer_param_reseats = set()
         self._pending_param_reseats = []
+        self._param_pointer_aliases = {}
         self.frames = []
         self.pinned = set()
         self.escaped = set()
@@ -14349,6 +14368,7 @@ class _Builder:
             self._caller_visible_params = saved_caller_visible
             self._pointer_param_reseats = saved_pointer_param_reseats
             self._pending_param_reseats = saved_pending_param_reseats
+            self._param_pointer_aliases = saved_pointer_param_aliases
             self._defer_result_deps = saved_defer_result_deps
             self._deferred_exits = saved_deferred_exits
             self._func_arg_invocations = saved_func_args
@@ -14482,16 +14502,59 @@ class _Builder:
             # union, never replace, so the record stays idempotent.
             entry[1] |= union
 
+    def _param_pointer_state(self) -> dict:
+        # The current per-param pointer root status: ref → aliased
+        # to that `*S` param's entry pointee, None → reseated onto
+        # opaque memory, absent → still its own entry pointee.
+        state = dict(self._param_pointer_aliases)
+        for pid in self._pointer_param_reseats:
+            state[pid] = None
+        for pid, ref in self._pending_param_reseats:
+            state[pid] = ref
+        return state
+
+    def _join_param_pointer_states(self, first, second) -> None:
+        # Join two branch arms' pointer states: a param keeps its
+        # alias/reseat only when EVERY path agrees — a may-alias or
+        # may-reseat (`p = q` in one arm) leaves the pointee
+        # ambiguous, so the root closes.
+        def key(v):
+            return None if v is None else v.binding_id
+
+        for pid in set(first) | set(second):
+            a = first.get(pid, "missing")
+            b = second.get(pid, "missing")
+            if (
+                a != "missing"
+                and b != "missing"
+                and key(a) == key(b)
+            ):
+                if a is None:
+                    self._pointer_param_reseats.add(pid)
+                    self._param_pointer_aliases.pop(pid, None)
+                else:
+                    self._param_pointer_aliases[pid] = a
+                    self._pointer_param_reseats.discard(pid)
+            elif a != "missing" or b != "missing":
+                self._pointer_param_reseats.add(pid)
+                self._param_pointer_aliases.pop(pid, None)
+
     def _flush_pending_param_reseats(self) -> None:
         # A `p = q` marks the reseat only AFTER its own statement's
         # right-hand sides evaluate — `p, x = q, p.A[i].V` still
         # reads the pre-update pointee — so it takes effect at the
-        # next statement boundary or control-flow condition.
-        if self._pending_param_reseats:
-            self._pointer_param_reseats |= set(
-                self._pending_param_reseats
-            )
-            self._pending_param_reseats = []
+        # next statement boundary or control-flow condition. Each
+        # entry is (binding_id, target_ref|None): a target ref
+        # records an alias onto another `*S` parameter's entry
+        # pointee, None a reseat onto opaque memory (closes).
+        for pending_id, alias_ref in self._pending_param_reseats:
+            if alias_ref is None:
+                self._pointer_param_reseats.add(pending_id)
+                self._param_pointer_aliases.pop(pending_id, None)
+            else:
+                self._param_pointer_aliases[pending_id] = alias_ref
+                self._pointer_param_reseats.discard(pending_id)
+        self._pending_param_reseats = []
 
     def _statement(
         self,
@@ -16915,6 +16978,8 @@ class _Builder:
             )
             reseat_entry = set(self._pointer_param_reseats)
             pending_reseat_entry = list(self._pending_param_reseats)
+            alias_entry = dict(self._param_pointer_aliases)
+            entry_state = self._param_pointer_state()
             scope_entry = dict(scope)
             # Branch-local bindings never escape their scope, matching the
             # compiler — a later reference simply would not resolve.
@@ -16931,6 +16996,7 @@ class _Builder:
             )
             consequence_reseats = set(self._pointer_param_reseats)
             consequence_pending = list(self._pending_param_reseats)
+            consequence_state = self._param_pointer_state()
             self._join(scope, branch, params)
             self._join_ptr(ptr_branch, params)
             alternative = node.child_by_field_name("alternative")
@@ -16944,6 +17010,7 @@ class _Builder:
                 self._pending_param_reseats = list(
                     pending_reseat_entry
                 )
+                self._param_pointer_aliases = dict(alias_entry)
                 branch = dict(scope_entry)
                 ptr_branch = dict(self._ptr_deps)
                 if alternative.type == "if_statement":
@@ -16961,10 +17028,15 @@ class _Builder:
                 )
                 self._join(scope, branch, params)
                 self._join_ptr(ptr_branch, params)
-                self._pointer_param_reseats |= consequence_reseats
-                self._pending_param_reseats += consequence_pending
+                alternative_state = self._param_pointer_state()
             else:
                 alternative_origins = chan_origin_entry
+                alternative_state = entry_state
+            self._pointer_param_reseats |= consequence_reseats
+            self._join_param_pointer_states(
+                consequence_state, alternative_state
+            )
+            self._pending_param_reseats = []
             self._chan_chan_param_origins = (
                 self._merge_chan_chan_param_origin_states(
                     consequence_origins, alternative_origins
@@ -17001,20 +17073,71 @@ class _Builder:
                 or (len(lefts) != len(rights) and not multi)
             ):
                 raise _Unsupported("unsupported_statement", _span(node))
-            for lhs in lefts:
+            for index, lhs in enumerate(lefts):
                 lhs_ref = (
                     self.references.get(self.node_key(lhs))
                     if lhs.type == "identifier"
                     else None
                 )
-                if self._param_pointer_struct_root(lhs, params):
-                    # `p = q` reseats the `*S` param onto `q`'s
-                    # pointee — reads through it no longer name the
-                    # slot declared at entry, so the root closes
-                    # from the NEXT statement on (the rights here
-                    # still read the entry pointee).
+                if not self._param_pointer_struct_root(lhs, params):
+                    continue
+                # `p = q` reseats the `*S` param onto `q`'s pointee.
+                # When `q` is itself a `*S` parameter the copy is
+                # an alias — reads through `p` still name a param
+                # entry slot (the target's), so it is recorded and
+                # resolved rather than closed. Anything else makes
+                # the pointee opaque and the root closes from the
+                # NEXT statement on (the rights here still read the
+                # entry pointee).
+                rhs = (
+                    rights[index]
+                    if len(rights) == len(lefts)
+                    else None
+                )
+                rhs_ref = (
+                    self.references.get(self.node_key(rhs))
+                    if rhs is not None and rhs.type == "identifier"
+                    else None
+                )
+                while (
+                    rhs_ref is not None
+                    and rhs_ref.binding_id
+                    in self._param_pointer_aliases
+                ):
+                    rhs_ref = self._param_pointer_aliases[
+                        rhs_ref.binding_id
+                    ]
+                if (
+                    rhs_ref is not None
+                    and rhs_ref.binding_id == lhs_ref.binding_id
+                ):
+                    # `p = p` is not a reseat.
+                    continue
+                rhs_binding = (
+                    self.bindings.get(rhs_ref.binding_id)
+                    if rhs_ref is not None
+                    else None
+                )
+                if (
+                    rhs_ref is not None
+                    and params is not None
+                    and rhs_ref.binding_id in params
+                    and rhs_ref.binding_id
+                    not in self._pointer_param_reseats
+                    and rhs_binding is not None
+                    and rhs_binding.type is not None
+                    and rhs_binding.type.kind == "pointer"
+                    and getattr(
+                        rhs_binding.type, "elem", None
+                    ) is not None
+                    and rhs_binding.type.elem.kind == "struct"
+                ):
                     self._pending_param_reseats.append(
-                        lhs_ref.binding_id
+                        (lhs_ref.binding_id, rhs_ref)
+                    )
+                else:
+                    self._pending_param_reseats.append(
+                        (lhs_ref.binding_id, None)
                     )
             if not compound:
                 for index, rhs in enumerate(rights):

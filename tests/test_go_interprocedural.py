@@ -33118,6 +33118,100 @@ def test_named_struct_element_pointer_param_root_matches_value_control(
     assert result.return_dependencies == expected
 
 
+def test_named_struct_element_pointer_param_reseat_alias(
+    go_types_helper,
+):
+    # `p = q` reseats p onto q's entry pointee — reads through p
+    # resolve to q's slot family instead of closing.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "type E struct { V int64 }\n"
+        "type S2 struct { A []E; F []int64 }\n"
+        "func F(p *S2, q *S2, i int64) int64 {"
+        " p = q; return p.A[i].V }\n",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({1, 2})
+
+
+def test_named_struct_element_pointer_param_reseat_alias_write(
+    go_types_helper,
+):
+    # A store through an aliased param lands in the TARGET's
+    # pointee, so the caller-backing transfer keys on q.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "type S3 struct { F []int64 }\n"
+        "func F(p *S3, q *S3, x int64) int64 {"
+        " p = q; p.F[0] = x; return p.F[0] }\n",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({1, 2})
+    imported = {c.target for c in result.calls if c.imported}
+    q_id = next(
+        b.id for b in snapshot.bindings if b.name == "q"
+    )
+    p_id = next(
+        b.id for b in snapshot.bindings if b.name == "p"
+    )
+    # q carries the real store; p also emits because the reseat
+    # grew its dep set — the same may-write approximation the
+    # slice/map params already make.
+    assert imported == {
+        f"{q_id}/caller-backing",
+        f"{p_id}/caller-backing",
+    }
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        # May-alias: only the if arm reseats p — post-join the
+        # pointee is ambiguous, so the root closes.
+        (
+            "type E struct { V int64 }\n"
+            "type S2 struct { A []E }\n"
+            "func F(p *S2, q *S2, c int64, i int64) int64 {\n"
+            "\tif c > 0 {\n"
+            "\t\tp = q\n"
+            "\t}\n"
+            "\treturn p.A[i].V\n}\n"
+        ),
+        # Reseat onto opaque (non-param) memory.
+        (
+            "type E struct { V int64 }\n"
+            "type S2 struct { A []E }\n"
+            "func F(p *S2, q *S2, i int64) int64 {\n"
+            "\ts := S2{}\n"
+            "\tp = &s\n"
+            "\treturn p.A[i].V\n}\n"
+        ),
+        # A later reseat to opaque memory overrides the alias.
+        (
+            "type E struct { V int64 }\n"
+            "type S2 struct { A []E }\n"
+            "func F(p *S2, q *S2, i int64) int64 {\n"
+            "\ts := S2{}\n"
+            "\tp = q\n"
+            "\tp = &s\n"
+            "\treturn p.A[i].V\n}\n"
+        ),
+    ],
+    ids=[
+        "may-alias-join",
+        "opaque-reseat",
+        "alias-then-opaque",
+    ],
+)
+def test_named_struct_element_pointer_param_reseat_stay_closed(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available
+
+
 def test_named_struct_element_pointer_param_explicit_deref_write(
     go_types_helper,
 ):
