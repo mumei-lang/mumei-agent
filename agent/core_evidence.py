@@ -686,7 +686,9 @@ def _observation_host_match(value: object) -> bool:
 _NATIVE_ACCEPTANCE_EXTRA_FIELDS = {
     "invocation": _observation_invocation_match,
     "host": _observation_host_match,
-    "pin_envelope": lambda value: value in {"recorded", "unrecorded"},
+    "pin_envelope": lambda value: (
+        type(value) is str and value in {"recorded", "unrecorded"}
+    ),
     "build_id": lambda value: type(value) is str and value != "",
     "llvm_sha256": lambda value: _is_fingerprint(value),
     "object_sha256": lambda value: _is_fingerprint(value),
@@ -1062,8 +1064,11 @@ def evaluate_core_acceptance(
             )
             and (
                 not extras & _OBSERVATION_EXTRA_FIELDS
-                or _OBSERVATION_REQUIRED_CHECK
-                in descriptor.get("checks_performed", [])
+                or (
+                    type(descriptor.get("checks_performed")) is list
+                    and _OBSERVATION_REQUIRED_CHECK
+                    in descriptor["checks_performed"]
+                )
             )
         )
         match = (

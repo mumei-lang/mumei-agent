@@ -254,6 +254,22 @@ def test_native_object_route_extra_fields(tmp_path):
     assert evaluation["accepted"] is True
 
 
+def test_native_observation_extras_malformed_checks_never_raise(tmp_path):
+    # Observation pins beside a malformed checks_performed must fold to
+    # descriptor_match=False, never raise — the evaluation JSON is
+    # always emitted.
+    for bad in (None, 3, "runtime_observation_semantics", {"x": 1}):
+        evaluation = evaluate_core_acceptance(
+            _descriptor(
+                schema_version=_NATIVE,
+                checks_performed=bad,
+                invocation=_observation_invocation(),
+                host=_observation_host(),
+            )
+        )
+        assert evaluation["descriptor_match"] is False
+
+
 def test_native_extra_fields_validate_shapes(tmp_path):
     # An extra field with a malformed value breaks the match exactly
     # like a foreign field — the whitelist is not a free pass.
@@ -271,6 +287,8 @@ def test_native_extra_fields_validate_shapes(tmp_path):
         {"host": {**_observation_host(), "arch": 64}},
         {"pin_envelope": "tampered"},
         {"pin_envelope": 3},
+        {"pin_envelope": ["recorded"]},
+        {"pin_envelope": {"value": "recorded"}},
         {"build_id": ""},
         {"llvm_sha256": "zz" * 32},
         {"object_sha256": "A" * 64},
