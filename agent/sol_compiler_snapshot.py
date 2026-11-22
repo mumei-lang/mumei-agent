@@ -118,21 +118,28 @@ def _ast_nodes(root: dict[str, Any]) -> tuple[dict[str, Any], ...]:
     return tuple(nodes)
 
 
-def _compiler_metadata_version(output: dict[str, Any], version: str) -> None:
-    contracts = output.get("contracts", {})
+def _compiler_metadata_version(
+    output: dict[str, Any], source_name: str, version: str
+) -> None:
+    # The `contracts` section only exists once analysis ran — a
+    # `stopAfter: "parsing"` envelope omits it and would otherwise pass
+    # every member reference off as a builtin.
+    contracts = output.get("contracts")
     _require(type(contracts) is dict)
-    for source_contracts in contracts.values():
-        _require(type(source_contracts) is dict)
-        for contract in source_contracts.values():
-            _require(type(contract) is dict)
-            if "metadata" not in contract:
-                continue
-            metadata = contract["metadata"]
-            _require(type(metadata) is str)
-            decoded = _decode_json(metadata.encode("utf-8"))
-            _require(type(decoded) is dict)
-            compiler = decoded.get("compiler")
-            _require(type(compiler) is dict and compiler.get("version") == version)
+    source_contracts = contracts.get(source_name)
+    _require(type(source_contracts) is dict)
+    for contract in source_contracts.values():
+        _require(type(contract) is dict)
+        _require(
+            "metadata" in contract,
+            "contract entry lacks compiler metadata",
+        )
+        metadata = contract["metadata"]
+        _require(type(metadata) is str)
+        decoded = _decode_json(metadata.encode("utf-8"))
+        _require(type(decoded) is dict)
+        compiler = decoded.get("compiler")
+        _require(type(compiler) is dict and compiler.get("version") == version)
 
 
 def load_sol_compiler_snapshot(
@@ -189,7 +196,9 @@ def load_sol_compiler_snapshot(
                 "solc reported a compilation error",
             )
 
-        _compiler_metadata_version(output_data, compiler_version)
+        _compiler_metadata_version(
+            output_data, source_name, compiler_version
+        )
 
         output_sources = output_data.get("sources")
         _require(type(output_sources) is dict and set(output_sources) == {source_name})
