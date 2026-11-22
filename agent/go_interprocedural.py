@@ -34205,10 +34205,38 @@ class _Builder:
                         self._store(
                             locals_, params, root_id, stored, True
                         )
-                    elif self._external_chan_operand(
-                        arg_node, params
-                    ) is not None:
-                        self.indirect_writes |= stored
+                    else:
+                        elem_ptr = (
+                            self._opaque_container_struct_element_field_target(
+                                arg_node, params
+                            )
+                        )
+                        if (
+                            elem_ptr is not None
+                            and getattr(
+                                elem_ptr[6][-1].type, "kind", None
+                            )
+                            == "pointer"
+                        ):
+                            # `G(p.A[i].W, v)` — the arg hands the
+                            # callee an element's pointer member;
+                            # writes through it land in the pointee,
+                            # caller memory under a param pointer
+                            # root — broadcast like `p.A[i].W = q`.
+                            for holder_id in (
+                                self._opaque_container_holders(
+                                    elem_ptr[4]
+                                )
+                            ):
+                                self._store(
+                                    locals_, params, holder_id,
+                                    stored, True,
+                                )
+                            self.indirect_writes |= stored
+                        elif self._external_chan_operand(
+                            arg_node, params
+                        ) is not None:
+                            self.indirect_writes |= stored
             elif self._external_chan_operand(arg_node, params) is not None:
                 # `G(lib.GC)` — a chan operand in external state
                 # (imported member): the callee may send into the

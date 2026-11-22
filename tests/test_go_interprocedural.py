@@ -33776,6 +33776,45 @@ def test_named_struct_element_pointer_member_store_read_back(
 
 
 @pytest.mark.parametrize(
+    "declarations, expected",
+    [
+        # `G(p.A[i].W, x)` hands the callee the member's pointer —
+        # its `dst.V = x` writes into the pointee show up in a
+        # later `p.A[i].W.V` read.
+        (
+            "type E2 struct { V int64 }\n"
+            "type Elem struct { W *E2 }\n"
+            "type S struct { A []*Elem }\n"
+            "func G(dst *E2, x int64) {\n"
+            "\tdst.V = x\n}\n"
+            "func F(p *S, i int64, x int64) int64 {\n"
+            "\tG(p.A[i].W, x)\n"
+            "\treturn p.A[i].W.V\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # The same shape on a `B []Elem` value-element field.
+        (
+            "type E2 struct { V int64 }\n"
+            "type Elem struct { W *E2 }\n"
+            "type S struct { B []Elem }\n"
+            "func G(dst *E2, x int64) {\n"
+            "\tdst.V = x\n}\n"
+            "func F(p *S, i int64, x int64) int64 {\n"
+            "\tG(p.B[i].W, x)\n"
+            "\treturn p.B[i].W.V\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+    ],
+)
+def test_named_struct_element_pointer_member_call_arg(
+    go_types_helper, declarations, expected
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == expected
+
+
+@pytest.mark.parametrize(
     "declarations",
     [
         "type E2 struct { V int64 }\n"
