@@ -5054,6 +5054,12 @@ literals inside supported collection literals record their function fields.
 Map access, pointer-element arguments and unsupported element-copy shapes
 remain fail-closed.
 
+Elided struct elements also resolve through local named slice, array and map
+types, including bounded chains of local type declarations. Ambiguous
+closure-valued elided literals through imported, generic or otherwise
+unresolved collection shapes fail closed; elided values without function
+fields retain ordinary analysis.
+
 ### C06 imported method calls on concrete named types
 
 A method call `recv.M(args)` now classifies as `direct_import` when

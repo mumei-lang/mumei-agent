@@ -54933,3 +54933,151 @@ def test_slice_array_function_field_argument_boundaries(go_types_helper):
     param = named_package(files, snapshot, summaries, "FParam")
     assert param.available, param.gaps
     assert param.return_dependencies == frozenset({0})
+
+
+def test_named_collection_elided_struct_function_fields(go_types_helper):
+    declarations = (
+        "type S struct { F func() int64 }\n"
+        "type W struct { F func() }\n"
+        "type N struct { V int64 }\n"
+        "type SS []S\n"
+        "type SS2 SS\n"
+        "type AS [1]S\n"
+        "type WS []W\n"
+        "type AW [1]W\n"
+        "type MS map[int]S\n"
+        "type NS []N\n"
+        "type G[T any] []T\n"
+        "func useS(ss []S) int64 { return ss[0].F() }\n"
+        "func useW(ws []W) { ws[0].F() }\n"
+        "func useA(a [1]S) int64 { return a[0].F() }\n"
+        "func useAW(a [1]W) { a[0].F() }\n"
+        "func FNamedLitArg(x, y int64) int64 {\n"
+        "\tv := y; ss := SS{{F: func() int64 { return v }}}\n"
+        "\tv = x; return useS(ss)\n"
+        "}\n"
+        "func FNamedLitArgWrite(x int64) int64 {\n"
+        "\tw := int64(0); ws := WS{{F: func() { w = x }}}\n"
+        "\tuseW(ws); return w\n"
+        "}\n"
+        "func FNamedLitCall(x, y int64) int64 {\n"
+        "\tv := y; ss := SS{{F: func() int64 { return v }}}\n"
+        "\tv = x; return ss[0].F()\n"
+        "}\n"
+        "func FNamedLitExtract(x, y int64) int64 {\n"
+        "\tv := y; ss := SS{{F: func() int64 { return v }}}\n"
+        "\tf := ss[0].F; v = x; return f()\n"
+        "}\n"
+        "func FNamedArrayArg(x, y int64) int64 {\n"
+        "\tv := y; a := AS{{F: func() int64 { return v }}}\n"
+        "\tv = x; return useA(a)\n"
+        "}\n"
+        "func FNamedArrayArgWrite(x int64) int64 {\n"
+        "\tw := int64(0); a := AW{{F: func() { w = x }}}\n"
+        "\tuseAW(a); return w\n"
+        "}\n"
+        "func FNamedArrayCall(x, y int64) int64 {\n"
+        "\tv := y; a := AS{{F: func() int64 { return v }}}\n"
+        "\tv = x; return a[0].F()\n"
+        "}\n"
+        "func FNamedArrayExtract(x, y int64) int64 {\n"
+        "\tv := y; a := AS{{F: func() int64 { return v }}}\n"
+        "\tf := a[0].F; v = x; return f()\n"
+        "}\n"
+        "func FNamedAliasChain(x, y int64) int64 {\n"
+        "\tv := y; ss := SS2{{F: func() int64 { return v }}}\n"
+        "\tv = x; return ss[0].F()\n"
+        "}\n"
+        "func FNamedMapExtract(x, y int64) int64 {\n"
+        "\tv := y; m := MS{0: {F: func() int64 { return v }}}\n"
+        "\tf := m[0].F; v = x; return f()\n"
+        "}\n"
+        "func FNamedMapCall(x, y int64) int64 {\n"
+        "\tv := y; m := MS{0: {F: func() int64 { return v }}}\n"
+        "\tv = x; return m[0].F()\n"
+        "}\n"
+        "func FGenericElided(x, y int64) int64 {\n"
+        "\tv := y; ss := G[S]{{F: func() int64 { return v }}}\n"
+        "\tv = x; return ss[0].F()\n"
+        "}\n"
+        "func FNamedNoFuncField(x int64) int64 {\n"
+        "\tns := NS{{V: x}}; return ns[0].V\n"
+        "}\n"
+    )
+    files = {"a.go": "package p\n" + declarations}
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    expected = {
+        "FNamedLitArg": frozenset({0, 1}),
+        "FNamedLitArgWrite": frozenset({0}),
+        "FNamedLitCall": frozenset({0, 1}),
+        "FNamedLitExtract": frozenset({0, 1}),
+        "FNamedArrayArg": frozenset({0, 1}),
+        "FNamedArrayArgWrite": frozenset({0}),
+        "FNamedArrayCall": frozenset({0, 1}),
+        "FNamedArrayExtract": frozenset({0, 1}),
+        "FNamedAliasChain": frozenset({0, 1}),
+    }
+    for function_name, dependencies in expected.items():
+        result = named_package(
+            files, snapshot, summaries, function_name
+        )
+        assert result.available, (function_name, result.gaps)
+        assert result.return_dependencies == dependencies, function_name
+    map_extract = named_package(
+        files, snapshot, summaries, "FNamedMapExtract"
+    )
+    if map_extract.available:
+        assert map_extract.return_dependencies == frozenset({0, 1})
+    else:
+        assert map_extract.gaps
+    map_call = named_package(
+        files, snapshot, summaries, "FNamedMapCall"
+    )
+    assert not map_call.available, map_call.gaps
+    generic = named_package(
+        files, snapshot, summaries, "FGenericElided"
+    )
+    assert not generic.available, generic.gaps
+    assert "unsupported_expression" in {
+        gap.reason for gap in generic.gaps
+    }, generic.gaps
+    plain = named_package(
+        files, snapshot, summaries, "FNamedNoFuncField"
+    )
+    assert plain.available, plain.gaps
+    assert plain.return_dependencies == frozenset({0})
+
+
+def test_imported_named_collection_elided_closure_fails_closed(
+    go_types_helper,
+):
+    files = {
+        "a.go": (
+            "package p\nimport \"lib\"\n"
+            "func F(x, y int64) int64 {\n"
+            "\tv := y; ss := lib.SS{{F: func() int64 { return v }}}\n"
+            "\tv = x; return ss[0].F()\n"
+            "}\n"
+        )
+    }
+    imported = {
+        "lib": {
+            "lib.go": (
+                "package lib\n"
+                "type S struct { F func() int64 }\n"
+                "type SS []S\n"
+            )
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, imported),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    assert not result.available
+    assert "unsupported_expression" in {
+        gap.reason for gap in result.gaps
+    }, result.gaps
