@@ -33578,6 +33578,279 @@ def test_value_struct_scalar_field_range_over_int_keeps_field_dependency(
 
 
 @pytest.mark.parametrize(
+    ("signature", "promoted", "direct", "expected"),
+    [
+        (
+            "o O, i int64",
+            "return o.R[i]",
+            "return o.B.R[i]",
+            frozenset({0, 1}),
+        ),
+        (
+            "o O, x int64",
+            "o.R[0] = x; return o.R[0]",
+            "o.B.R[0] = x; return o.B.R[0]",
+            frozenset({0, 1}),
+        ),
+        (
+            "o O, x int64",
+            "o.R[0] += x; return o.R[0]",
+            "o.B.R[0] += x; return o.B.R[0]",
+            frozenset({0, 1}),
+        ),
+        (
+            "o O",
+            "o.R[0]++; return o.R[0]",
+            "o.B.R[0]++; return o.B.R[0]",
+            frozenset({0}),
+        ),
+        (
+            "o O, x int64",
+            "o.R = [2]int64{x, 0}; return o.R[0]",
+            "o.B.R = [2]int64{x, 0}; return o.B.R[0]",
+            frozenset({0, 1}),
+        ),
+        (
+            "o O",
+            "return int64(len(o.R))",
+            "return int64(len(o.B.R))",
+            None,
+        ),
+        (
+            "o O",
+            "sum := int64(0); for i := range o.R { sum += int64(i) }; "
+            "return sum",
+            "sum := int64(0); for i := range o.B.R { sum += int64(i) }; "
+            "return sum",
+            None,
+        ),
+    ],
+    ids=[
+        "read",
+        "store",
+        "compound-store",
+        "increment",
+        "whole-field-store",
+        "len",
+        "range-index",
+    ],
+)
+def test_value_struct_scalar_array_fields_allow_value_embed(
+    go_types_helper, signature, promoted, direct, expected
+):
+    promoted_declarations = (
+        "type B struct { R [2]int64 }\n"
+        "type O struct { B; V int64 }\n"
+    )
+    direct_declarations = (
+        "type B struct { R [2]int64 }\n"
+        "type O struct { B B; V int64 }\n"
+    )
+
+    def result_for(declarations, body):
+        return named(
+            *unit(
+                go_types_helper,
+                declarations + f"func F({signature}) int64 {{ {body} }}\n",
+            )
+        )
+
+    promoted_result = result_for(promoted_declarations, promoted)
+    direct_result = result_for(direct_declarations, direct)
+    assert promoted_result.available, promoted_result.gaps
+    assert direct_result.available, direct_result.gaps
+    assert promoted_result.return_dependencies == (
+        direct_result.return_dependencies
+    )
+    assert promoted_result.effects == direct_result.effects
+    if expected is not None:
+        assert promoted_result.return_dependencies == expected
+
+
+@pytest.mark.parametrize(
+    (
+        "promoted_declarations",
+        "direct_declarations",
+        "signature",
+        "promoted",
+        "direct",
+        "expected",
+    ),
+    [
+        (
+            "type B struct { R [2]int64 }\n"
+            "type M struct { B }\n"
+            "type O struct { M }\n",
+            "type B struct { R [2]int64 }\n"
+            "type M struct { B B }\n"
+            "type O struct { M M }\n",
+            "o O, i int64",
+            "return o.R[i]",
+            "return o.M.B.R[i]",
+            frozenset({0, 1}),
+        ),
+        (
+            "type B struct { R [2]int64 }\n"
+            "type S struct { B }\n"
+            "type O struct { S S }\n",
+            "type B struct { R [2]int64 }\n"
+            "type S struct { B B }\n"
+            "type O struct { S S }\n",
+            "o O, x int64",
+            "o.S.R[0] = x; return o.S.R[0]",
+            "o.S.B.R[0] = x; return o.S.B.R[0]",
+            frozenset({0, 1}),
+        ),
+        (
+            "type B struct { R [2]int64 }\n"
+            "type O struct { B; V int64 }\n",
+            "type B struct { R [2]int64 }\n"
+            "type O struct { B B; V int64 }\n",
+            "x int64",
+            "o := O{}; o.R[0] = x; return o.R[0]",
+            "o := O{}; o.B.R[0] = x; return o.B.R[0]",
+            frozenset({0}),
+        ),
+    ],
+    ids=["two-level-value-embed", "named-hop-then-embed", "local-composite"],
+)
+def test_value_struct_scalar_array_fields_allow_nested_value_embeds(
+    go_types_helper,
+    promoted_declarations,
+    direct_declarations,
+    signature,
+    promoted,
+    direct,
+    expected,
+):
+    def result_for(declarations, body):
+        return named(
+            *unit(
+                go_types_helper,
+                declarations + f"func F({signature}) int64 {{ {body} }}\n",
+            )
+        )
+
+    promoted_result = result_for(promoted_declarations, promoted)
+    direct_result = result_for(direct_declarations, direct)
+    assert promoted_result.available, promoted_result.gaps
+    assert direct_result.available, direct_result.gaps
+    assert promoted_result.return_dependencies == (
+        direct_result.return_dependencies
+    ) == expected
+    assert promoted_result.effects == direct_result.effects
+
+
+def test_value_struct_scalar_array_value_embed_copies_are_isolated(
+    go_types_helper,
+):
+    data = unit(
+        go_types_helper,
+        "type B struct { R [2]int64 }\n"
+        "type Promoted struct { B }\n"
+        "type Direct struct { B B }\n"
+        "func CopyPromoted(o Promoted, x int64) int64 {\n"
+        "\tt := o; t.R[0] = x; return o.R[0]\n"
+        "}\n"
+        "func CopyDirect(o Direct, x int64) int64 {\n"
+        "\tt := o; t.B.R[0] = x; return o.B.R[0]\n"
+        "}\n"
+        "func GPromoted(o Promoted, x int64) { o.R[0] = x }\n"
+        "func FPromoted(o Promoted, x int64) int64 {\n"
+        "\tGPromoted(o, x); return o.R[0]\n"
+        "}\n"
+        "func GDirect(o Direct, x int64) { o.B.R[0] = x }\n"
+        "func FDirect(o Direct, x int64) int64 {\n"
+        "\tGDirect(o, x); return o.B.R[0]\n"
+        "}\n",
+    )
+    copy_promoted = named(*data, "CopyPromoted")
+    copy_direct = named(*data, "CopyDirect")
+    call_promoted = named(*data, "FPromoted")
+    call_direct = named(*data, "FDirect")
+    callee_promoted = named(*data, "GPromoted")
+    callee_direct = named(*data, "GDirect")
+    for result in (
+        copy_promoted,
+        copy_direct,
+        call_promoted,
+        call_direct,
+    ):
+        assert result.available, result.gaps
+        assert result.return_dependencies == frozenset({0})
+    assert copy_promoted.return_dependencies == copy_direct.return_dependencies
+    assert copy_promoted.effects == copy_direct.effects
+    assert call_promoted.return_dependencies == call_direct.return_dependencies
+    assert call_promoted.effects == call_direct.effects
+
+    def caller_backing_transfers(summary):
+        return [
+            (call.imported, call.arguments)
+            for call in summary.calls
+            if call.target.endswith("/caller-backing")
+        ]
+
+    assert caller_backing_transfers(callee_promoted) == (
+        caller_backing_transfers(callee_direct)
+    )
+
+
+def test_value_struct_scalar_array_value_embed_pins_embedded_members(
+    go_types_helper,
+):
+    function = (
+        "package p\n"
+        "func F(o O, i int64) int64 { return int64(o.R[i]) }\n"
+    )
+    old_files = {
+        "types.go": (
+            "package p\n"
+            "type B struct { R [2]int64 }\n"
+            "type O struct { B }\n"
+        ),
+        "function.go": function,
+    }
+    old_report = package_report(go_types_helper, old_files)
+    old_snapshot = load_go_package_snapshot(
+        old_report, old_files, target_arch="amd64"
+    )
+    old_summaries = ip.summarize_go_package(old_files, old_snapshot)
+    old_result = named_package(
+        old_files, old_snapshot, old_summaries, "F"
+    )
+    assert old_result.available, old_result.gaps
+    embedded_field_id = next(
+        binding.id
+        for binding in old_snapshot.bindings
+        if binding.name == "B"
+        and binding.kind == "variable"
+        and binding.scope is None
+    )
+    embedded_type_id = next(
+        binding.id
+        for binding in old_snapshot.bindings
+        if binding.name == "B" and binding.kind == "type"
+    )
+    assert embedded_field_id in old_result.pinned
+    assert embedded_type_id in old_result.pinned
+
+    changed_files = {
+        "types.go": (
+            "package p\n"
+            "type B struct { R [2]int32 }\n"
+            "type O struct { B }\n"
+        ),
+        "function.go": function,
+    }
+    changed_report = package_report(go_types_helper, changed_files)
+    changed_snapshot = load_go_package_snapshot(
+        changed_report, changed_files, target_arch="amd64"
+    )
+    known = {binding.id for binding in changed_snapshot.bindings}
+    assert old_result.binding_id in old_summaries.stale_dependents(known)
+
+
+@pytest.mark.parametrize(
     ("binding", "term"),
     [
         ("i := range", "int64(i)"),
@@ -33776,6 +34049,91 @@ def test_value_struct_scalar_array_promoted_pointer_fields_stay_closed(
     assert whole_store.gaps[0].reason == "callee_unsupported"
     assert not element_store.available
     assert element_store.gaps[0].reason == "callee_unsupported"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        (
+            "type EmbedB struct { R [2]int64 }\n"
+            "type EmbedM struct { *EmbedB }\n"
+            "type EmbedOuter struct { EmbedM }\n"
+            "func F(o EmbedOuter, i int64) int64 { return o.R[i] }\n"
+        ),
+        (
+            "type EmbedB[T any] struct { R [2]int64 }\n"
+            "type EmbedOuter struct { EmbedB[int64] }\n"
+            "func F(o EmbedOuter, i int64) int64 { return o.R[i] }\n"
+        ),
+        (
+            "type EmbedB struct { R [2]int64 }\n"
+            "type EmbedOuter struct { EmbedB }\n"
+            "func F(o *EmbedOuter, i int64) int64 { return o.R[i] }\n"
+        ),
+    ],
+    ids=["nested-pointer-embed", "generic-embed", "pointer-root"],
+)
+def test_value_struct_scalar_array_unsupported_embeds_stay_closed(
+    go_types_helper, source
+):
+    result = named(*unit(go_types_helper, source))
+    assert not result.available
+
+
+def test_value_struct_scalar_array_imported_embed_stays_closed(
+    go_types_helper,
+):
+    files = {
+        "main.go": (
+            "package p\n"
+            "import \"lib\"\n"
+            "type EmbedOuter struct { lib.EmbedB }\n"
+            "func F(o EmbedOuter, i int64) int64 { return o.R[i] }\n"
+        )
+    }
+    imports = {
+        "lib": {
+            "lib.go": "package lib\ntype EmbedB struct { R [2]int64 }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, imports),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_value_struct_scalar_array_embed_range_preserves_non_array_deps(
+    go_types_helper,
+):
+    def result_for(declarations, field):
+        return named(
+            *unit(
+                go_types_helper,
+                declarations
+                + "func F(o O) int64 {\n"
+                + "\tsum := int64(0)\n"
+                + f"\tfor i := range {field} {{ sum += int64(i) }}\n"
+                + "\treturn sum\n"
+                + "}\n",
+            )
+        )
+
+    promoted = result_for(
+        "type B struct { N int64 }\ntype O struct { B }\n", "o.N"
+    )
+    direct = result_for(
+        "type B struct { N int64 }\ntype O struct { B B }\n", "o.B.N"
+    )
+    assert promoted.available, promoted.gaps
+    assert direct.available, direct.gaps
+    assert promoted.return_dependencies == direct.return_dependencies
+    assert promoted.return_dependencies == frozenset({0})
+    assert promoted.effects == direct.effects
 
 
 def test_caller_backing_transfer_survives_param_slice_reseat(
