@@ -2899,6 +2899,7 @@ def signature_eval(
     revocation_signature_path: str | None = None,
     reference_time: str | None = None,
     max_age_seconds: StrictInt | None = None,
+    min_revocation_version: StrictInt | None = None,
 ) -> str:
     """Fold a declared producer-signature envelope and caller-declared pins.
 
@@ -2917,6 +2918,8 @@ def signature_eval(
         revocation_signature_path: Optional signature wrapper for the list.
         reference_time: Optional caller-declared RFC3339 time.
         max_age_seconds: Optional declared envelope freshness window.
+        min_revocation_version: Optional minimum `list_version` the
+            declared `mumei.key-revocation-list/v2` must reach.
 
     Returns:
         JSON with `evaluation` on success or a path-redacted `error`.
@@ -2942,11 +2945,14 @@ def signature_eval(
     ):
         if value is not None and not isinstance(value, str):
             return _err(f"{name} must be a string")
-    if max_age_seconds is not None and (
-        not isinstance(max_age_seconds, int)
-        or isinstance(max_age_seconds, bool)
+    for name, value in (
+        ("max_age_seconds", max_age_seconds),
+        ("min_revocation_version", min_revocation_version),
     ):
-        return _err("max_age_seconds must be an integer")
+        if value is not None and (
+            not isinstance(value, int) or isinstance(value, bool)
+        ):
+            return _err(f"{name} must be an integer")
 
     from agent.signature_eval import run_eval
 
@@ -2962,6 +2968,7 @@ def signature_eval(
                 revocation_signature=revocation_signature_path,
                 reference_time=reference_time,
                 max_age_seconds=max_age_seconds,
+                min_revocation_version=min_revocation_version,
                 output=None,
             )
         )
@@ -2982,6 +2989,7 @@ def signature_verify(
     revocation_signature_path: str | None = None,
     reference_time: str | None = None,
     max_age_seconds: StrictInt | None = None,
+    min_revocation_version: StrictInt | None = None,
     registry_key: str | None = None,
     revocation_key: str | None = None,
 ) -> str:
@@ -3003,6 +3011,8 @@ def signature_verify(
         revocation_signature_path: Optional signature wrapper for the list.
         reference_time: Optional caller-declared RFC3339 time.
         max_age_seconds: Optional declared envelope freshness window.
+        min_revocation_version: Optional minimum `list_version` the
+            declared `mumei.key-revocation-list/v2` must reach.
         registry_key: Optional caller-declared registry signer public key.
         revocation_key: Optional caller-declared revocation signer public key.
 
@@ -3034,11 +3044,14 @@ def signature_verify(
     ):
         if value is not None and not isinstance(value, str):
             return _err(f"{name} must be a string")
-    if max_age_seconds is not None and (
-        not isinstance(max_age_seconds, int)
-        or isinstance(max_age_seconds, bool)
+    for name, value in (
+        ("max_age_seconds", max_age_seconds),
+        ("min_revocation_version", min_revocation_version),
     ):
-        return _err("max_age_seconds must be an integer")
+        if value is not None and (
+            not isinstance(value, int) or isinstance(value, bool)
+        ):
+            return _err(f"{name} must be an integer")
 
     from agent.signature_verify import run_verify
 
@@ -3055,6 +3068,7 @@ def signature_verify(
                 revocation_signature=revocation_signature_path,
                 reference_time=reference_time,
                 max_age_seconds=max_age_seconds,
+                min_revocation_version=min_revocation_version,
                 registry_key=registry_key,
                 revocation_key=revocation_key,
                 output=None,
