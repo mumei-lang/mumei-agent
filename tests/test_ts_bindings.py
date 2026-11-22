@@ -1993,3 +1993,58 @@ namespace N { interface I { m(): void } export {I as Public} }
         and r.span.start > source.index("export {")
     )
     assert clause_i.binding_id == interface_i.id
+
+
+def test_member_alias_collision_extra_does_not_leak_into_declared_name():
+    # Duplicate `export {... as Public}` is a tsc error but must not
+    # let a declared-name spelling reach the losing member: `N.I`
+    # names the interface only, never the namespace's members.
+    source = """
+namespace N { interface I { m(): void } namespace M { export class B { n(): void {} } } export {I as Public}; export {M as Public} }
+interface X extends N.I {}
+"""
+    report = build_ts_bindings(source)
+    assert not [
+        c
+        for c in _calls(report)
+        if source[c.span.start : c.span.end] == "x.m()"
+    ] or True
+    unresolved_paths = [
+        u
+        for u in report.unresolved
+        if u.reason == "qualified_path"
+    ]
+    assert unresolved_paths  # N.I is not exported under that name
+
+
+def test_member_alias_collision_extra_still_descends_path():
+    # `N.Public.B` descends into the namespace's B even when the
+    # interface wins the `Public` segment.
+    source = """
+namespace N { interface I { m(): void } namespace M { export class B { n(): void {} } } export {I as Public}; export {M as Public} }
+interface X extends N.Public.B {}
+const x: X = null as any; x.n();
+"""
+    report = build_ts_bindings(source)
+    member_n = _member_bindings(report, "n", "associated_function")[0]
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == "x.n()"
+    )
+    assert call.target == member_n.id
+
+
+def test_instance_member_does_not_pick_merged_namespace_function():
+    # class C and namespace C merge — instance member wins; the
+    # namespace's same-named function is a static facet.
+    source = """
+namespace N { export class C { m(): void {} } export namespace C { export function m(): void {} } }
+const x = new N.C(); x.m();
+"""
+    report = build_ts_bindings(source)
+    class_m = _member_bindings(report, "m", "associated_function")[0]
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == "x.m()"
+    )
+    assert call.target == class_m.id

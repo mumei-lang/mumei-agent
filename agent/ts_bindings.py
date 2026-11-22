@@ -156,13 +156,6 @@ class _TypeScriptBindings:
         self._member_lookup_active: set[
             tuple[str, str, bool]
         ] = set()
-        # Exported-name collisions: when several members share the
-        # looked-up name under different declared names (duplicate
-        # `export {... as Public}` — a tsc error, but still indexed),
-        # the losers stay reachable as extras so path segments can
-        # keep descending (`N.Public.B` reaches the namespace's `B`
-        # even when the interface won the `Public` segment).
-        self._member_lookup_extras: dict[str, list[_Record]] = {}
         self.function_records: dict[int, _Record] = {}
         self._function_node_ids: set[int] = set()
         self._type_alias_cache: dict[str, TypeFact] = {}
@@ -1352,6 +1345,8 @@ class _TypeScriptBindings:
         static: bool,
         via_this: bool,
         for_type: bool = False,
+        extra_seed: tuple[_Record, ...] = (),
+        collect_extras: list[_Record] | None = None,
     ) -> _Record | None:
         """BFS over the declaring type and its bases for member `name`.
 
@@ -1376,6 +1371,8 @@ class _TypeScriptBindings:
                 static=static,
                 via_this=via_this,
                 for_type=for_type,
+                extra_seed=extra_seed,
+                collect_extras=collect_extras,
             )
         finally:
             self._member_lookup_active.discard(active_key)
@@ -1389,6 +1386,8 @@ class _TypeScriptBindings:
         static: bool,
         via_this: bool,
         for_type: bool = False,
+        extra_seed: tuple[_Record, ...] = (),
+        collect_extras: list[_Record] | None = None,
     ) -> _Record | None:
         queue = [type_record]
         # Declaration merging: a namespace may merge with a class,
@@ -1400,9 +1399,7 @@ class _TypeScriptBindings:
             if not static and sibling.binding.kind == "namespace":
                 continue
             queue.append(sibling)
-        queue.extend(
-            self._member_lookup_extras.get(type_record.binding.id, ())
-        )
+        queue.extend(extra_seed)
         visited: set[str] = set()
         seed_ids = {record.binding.id for record in queue}
         matches: list[_Record] = []
@@ -1493,19 +1490,27 @@ class _TypeScriptBindings:
         # (`namespace N { export {f as g} }` publishes the merged `f`),
         # prefer the member whose own block authored the looked-up name —
         # it is the referent the clause itself points at.
+        # Exported-name collisions: when several members share the
+        # looked-up name (duplicate `export {... as Public}` — a tsc
+        # error, but still indexed), the losers are reported to the
+        # caller via `collect_extras` so a qualified path can keep
+        # descending (`N.Public.B` reaches the namespace's `B` even
+        # when the interface won the `Public` segment). Only path
+        # lookups chain them — a direct `N.I` spelling must never
+        # reach `M`'s members.
         authored = (
             "member_authored_type_names" if for_type
             else "member_authored_names"
         )
         for candidate in matches:
             if name in getattr(candidate, authored):
-                self._member_lookup_extras.setdefault(
-                    candidate.binding.id, []
-                ).extend(m for m in matches if m is not candidate)
+                if collect_extras is not None:
+                    collect_extras.extend(
+                        m for m in matches if m is not candidate
+                    )
                 return candidate
-        self._member_lookup_extras.setdefault(
-            matches[0].binding.id, []
-        ).extend(m for m in matches[1:])
+        if collect_extras is not None:
+            collect_extras.extend(matches[1:])
         return matches[0]
 
     def _member_name_sets(
@@ -1560,9 +1565,11 @@ class _TypeScriptBindings:
         record = self._lookup(segments[0], position, "type")
         if record is None:
             record = self._lookup(segments[0], position, "value")
+        extras: list[_Record] = []
         for segment in segments[1:]:
             if record is None:
                 return None
+            next_extras: list[_Record] = []
             record = self._member_lookup(
                 record,
                 segment,
@@ -1570,7 +1577,10 @@ class _TypeScriptBindings:
                 static=True,
                 via_this=False,
                 for_type=for_type,
+                extra_seed=tuple(extras),
+                collect_extras=next_extras,
             )
+            extras = next_extras
         return record
 
     def _callee_return_node(self, node: Any) -> Any | None:
