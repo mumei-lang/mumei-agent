@@ -52671,18 +52671,22 @@ def test_collection_field_reslice_bind_closed(go_types_helper, declarations):
     "declarations, expected",
     [
         # `a, c := b, a[:]` — the reslice binds `a`'s group as it
-        # was BEFORE `b` reseats `a` in the same statement, so a
-        # store through the reseated `a` never reaches `c`'s read.
+        # was BEFORE `b` reseats `a` in the same statement: a store
+        # through the reseated `a` never reaches `c`'s read, while a
+        # store through `u` (the backing `a` named before the reseat)
+        # still does — proving `c` shares the OLD group, not an
+        # independent copy.
         (
             "type E struct { V int64 }\n"
-            "func F(x int64) int64 {\n"
+            "func F(x, y int64) int64 {\n"
             "\tu := []E{{V:1}}\n"
             "\ta := u\n"
             "\tb := []E{{V:2}}\n"
             "\ta, c := b, a[:]\n"
             "\ta[0].V = x\n"
+            "\tu[0].V = y\n"
             "\treturn c[0].V\n}\n",
-            frozenset(),
+            frozenset({1}),
         ),
         # `s := a[:]` on an array VIEWS the backing — `s[j]`
         # writes land on `a`'s elements, unlike the `s = a` copy.
