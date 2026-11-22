@@ -6379,7 +6379,7 @@ class _Builder:
             # call folds is the root's element memory, named by the
             # post-alias root binding id like the dispatch path.
             element = self._interface_element_receiver(
-                operand, params
+                operand, params, locals_
             )
             if element is None:
                 return None
@@ -6453,7 +6453,7 @@ class _Builder:
             # provenance plus the field slot's, and every index
             # innermost-first (Go's order).
             element = self._interface_element_receiver(
-                operand, params
+                operand, params, locals_
             )
             if element is None:
                 return self.expression(
@@ -8731,6 +8731,18 @@ class _Builder:
                             # conflated dep set plus the index's
                             # own, like a field on `st := P{...}`.
                             opaque_composite = ref.binding_id
+                        elif (
+                            ref.binding_id in locals_
+                            and self._interface_element_receiver(
+                                node, params, locals_
+                            )
+                            is not None
+                        ):
+                            # `x[i]` on `x := p.A` — the bare `[]I`
+                            # binding names the same caller memory
+                            # its own dep set already conflates;
+                            # read it like an opaque container.
+                            opaque_composite = ref.binding_id
         # Descend one `elem` fact per extra index level — `[][]T`
         # yields `[]T` then `T`. Every container's own named identity
         # pins at its level (a named `[]T` element, a map key).
@@ -8956,7 +8968,10 @@ class _Builder:
                         )
                     )
                     or (
-                        opaque_field is not None
+                        (
+                            opaque_field is not None
+                            or opaque_composite is not None
+                        )
                         and elem.kind == "interface"
                     )
                 )
@@ -16123,7 +16138,7 @@ class _Builder:
                         # container field binds like `v := i`.
                         len(lefts) == len(rights)
                         and self._interface_element_receiver(
-                            rights[i], params
+                            rights[i], params, locals_
                         )
                         is not None
                     )
@@ -29290,6 +29305,38 @@ class _Builder:
                             append_cont = field_target[0]
                             scalar_cont = True
                     if append_cont is None:
+                        # `append(x, e)` on `x := p.A` — a bare
+                        # `[]I` binding folds the same element deps;
+                        # the reseat lands on the binding itself.
+                        arg0 = arguments[0]
+                        arg_ref = (
+                            self.references.get(self.node_key(arg0))
+                            if arg0 is not None
+                            and arg0.type == "identifier"
+                            else None
+                        )
+                        arg_binding = (
+                            self.bindings.get(arg_ref.binding_id)
+                            if arg_ref is not None
+                            and arg_ref.binding_id
+                            else None
+                        )
+                        if (
+                            arg_binding is not None
+                            and arg_binding.id in locals_
+                            and arg_binding.type is not None
+                            and arg_binding.type.kind
+                            in {"slice", "array", "map"}
+                            and getattr(
+                                arg_binding.type, "elem", None
+                            )
+                            is not None
+                            and arg_binding.type.elem.kind
+                            == "interface"
+                        ):
+                            append_cont = arg_binding.id
+                            scalar_cont = True
+                    if append_cont is None:
                         # `append(s, c)` on a bound chan-element
                         # container — the same element-dep fold as
                         # the scalar arm; the appended queue joins
@@ -33675,16 +33722,22 @@ class _Builder:
             )
 
     def _interface_element_receiver(
-        self, node: Any, params: dict[str, int]
+        self,
+        node: Any,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
     ) -> tuple[Any, str, list[Any], str] | None:
         """`p.A[i]` (or deeper index chains like `p.A[i][j]`) whose
         final element is interface-typed — the container field must
         resolve through the same roots the element-read path admits,
         then one `elem` descent per index level must end in an
-        interface fact. Returns `(member, root_id, index_nodes,
-        field_key)` — the field member, the chain root's binding id
+        interface fact. A bare binding root is admitted too: `x[i]`
+        on a local `x := p.A` or a `s []I` parameter names the same
+        caller memory the binding's own deps already track. Returns
+        `(member, root_id, index_nodes, field_key)` — the field
+        member (or the bare binding), the chain root's binding id
         (post-alias), every index node outermost-first, and the
-        field's slot key, or None."""
+        slot key, or None."""
         current = self._strip_parens(node)
         if current is None or current.type != "index_expression":
             return None
@@ -33695,7 +33748,41 @@ class _Builder:
             operand = self._strip_parens(
                 operand.child_by_field_name("operand")
             )
-        if operand is None or operand.type != "selector_expression":
+        if operand is None:
+            return None
+        if operand.type == "identifier":
+            # `x[i]` — a slice/map/array binding whose element
+            # chain ends in an interface. The binding's own dep
+            # set already names every sharer (`x := p.A` records
+            # the field's provenance when bound), so the element
+            # read folds the same way as the field-root form.
+            root_ref = self.references.get(self.node_key(operand))
+            if (
+                root_ref is None
+                or not root_ref.binding_id
+                or (
+                    root_ref.binding_id not in params
+                    and root_ref.binding_id not in locals_
+                )
+            ):
+                return None
+            binding = self.bindings.get(root_ref.binding_id)
+            if binding is None or binding.type is None:
+                return None
+            fact = binding.type
+            for _ in index_nodes:
+                if fact is None or fact.kind not in {
+                    "slice",
+                    "array",
+                    "map",
+                }:
+                    return None
+                fact = fact.elem
+            if fact is None or fact.kind != "interface":
+                return None
+            self._pin_fact_identities(binding.type)
+            return binding, binding.id, index_nodes, binding.id, []
+        if operand.type != "selector_expression":
             return None
         target = self._opaque_container_field_target(
             operand, params, allow_struct_elements=True
@@ -33835,7 +33922,7 @@ class _Builder:
                 # and the interface's identity) cover its shape, and
                 # the method's signature pins for the same reason.
                 element_receiver = self._interface_element_receiver(
-                    receiver_id, params
+                    receiver_id, params, locals_
                 )
                 if element_receiver is not None:
                     self._pin_method_binding(function_node)

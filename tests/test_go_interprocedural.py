@@ -6632,6 +6632,66 @@ def test_interface_collection_len(
     assert result.effects == "none_in_supported_fragment"
 
 
+def test_interface_collection_len_observes_pointee_store(
+    go_types_helper,
+):
+    # `*p = s; len(p.A)` — the whole-pointee store lands in
+    # `indirect_writes`; the collection read observes `s` like a
+    # scalar-field read does.
+    declarations = (
+        "type I interface{ M() int64 }\n"
+        "type S struct{ A []I }\n"
+        "func F(p *S, s S) int64 {\n"
+        "\t*p = s\n"
+        "\treturn int64(len(p.A))\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_interface_collection_bound_local(
+    go_types_helper,
+):
+    # `x := p.A` binds the field's provenance — element calls,
+    # reads and `append` on the bare `[]I` local fold the same
+    # deps the field-root forms do.
+    declarations = (
+        "type I interface{ M() int64 }\n"
+        "type S struct{ A []I }\n"
+        "func F(p *S, e I, i int64) int64 {\n"
+        "\tx := p.A\n"
+        "\tx = append(x, e)\n"
+        "\ty := x[i]\n"
+        "\treturn y.M() + x[0].M()\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1, 2})
+
+
+def test_interface_collection_chain_index_call_once(
+    go_types_helper,
+):
+    # `len(p.A[Set(v, x)].F)` — the index call evaluates through
+    # the `lib.VSM[k].F` pre-scan exactly once: no duplicated
+    # call record and no replayed side effect.
+    declarations = (
+        "type I interface{ M() int64 }\n"
+        "type E struct{ F []I }\n"
+        "type S struct{ A []E }\n"
+        "func Set(v *int64, x int64) int64 { return x }\n"
+        "func F(p *S, v *int64, x int64) int64 {\n"
+        "\treturn int64(len(p.A[Set(v, x)].F))\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 2})
+
+
 @pytest.mark.parametrize(
     "declarations",
     [
@@ -6652,13 +6712,15 @@ def test_interface_collection_len(
             "type S struct{ I I }\n"
             "func F(p *S) int64 { return p.I.M() }\n"
         ),
-        # `x := p.A` binds the read, but the bare `[]I` local's
-        # element ops stay closed like every `[]I` root's.
+        # `x[i] = e` — a store into the bare `[]I` binding's
+        # element: the share-group machinery has no token for a
+        # field-bound local, so the write stays unmodelled.
         (
             "type I interface{ M() int64 }\n"
             "type S struct{ A []I }\n"
-            "func F(p *S) int64 {\n"
+            "func F(p *S, e I, i int64) int64 {\n"
             "\tx := p.A\n"
+            "\tx[i] = e\n"
             "\treturn x[0].M()\n"
             "}\n"
         ),
