@@ -354,6 +354,39 @@ _PRELUDE_CONTAINER_PAYLOAD = {
     "Ok": ("Result", 0),
     "Err": ("Result", 1),
 }
+# `Entry::Occupied(e)`/`Entry::Vacant(e)` on a spelled
+# `Entry<K, V>` scrutinee — the payload wraps the whole args
+# (`OccupiedEntry<K, V>`), not one arg position like Some/Ok.
+_PRELUDE_ENTRY_VARIANTS = {
+    "Occupied": "OccupiedEntry",
+    "Vacant": "VacantEntry",
+}
+# Methods `if let Entry::Occupied(mut e)` / `Vacant` bindings
+# take — spelled against the entry's `K, V` args. `insert`
+# differs by variant (Occupied returns the old V, Vacant the
+# `&mut V` it just wrote).
+_OCCUPIED_ENTRY_METHODS = {
+    "key": "&{K}",
+    "into_key": "{K}",
+    "get": "&{V}",
+    "get_mut": "&mut {V}",
+    "into_mut": "&mut {V}",
+    "insert": "{V}",
+    "remove": "{V}",
+    "remove_entry": "({K}, {V})",
+    "into_entry": "Entry<{K}, {V}>",
+}
+_VACANT_ENTRY_METHODS = {
+    "key": "&{K}",
+    "into_key": "{K}",
+    "into_mut": "&mut {V}",
+    "insert": "&mut {V}",
+    "into_entry": "Entry<{K}, {V}>",
+}
+_ENTRY_BINDING_METHODS = {
+    "OccupiedEntry": _OCCUPIED_ENTRY_METHODS,
+    "VacantEntry": _VACANT_ENTRY_METHODS,
+}
 _INERT_ATTRIBUTES = frozenset(
     {
         "allow",
@@ -3956,6 +3989,67 @@ class _RustBindings:
                                             "&mut " + parts[1].strip(),
                                             entry_pos,
                                         )
+                    if (
+                        method_name == "entry"
+                        and self._container_head_name(
+                            callee.child_by_field_name("value")
+                        )
+                        in _MAP_CONTAINER_NAMES
+                    ):
+                        # `m.entry(k)` yields `Entry<K, V>` — the
+                        # verbatim spelling feeds `if let
+                        # Entry::Occupied(e)`/`match` scrutinees.
+                        # `receiver[1]` already reduced the map's
+                        # args to `V`; the declared annotation
+                        # keeps the raw `K, V` pair.
+                        entry_node = self._receiver_type_node(
+                            callee.child_by_field_name("value")
+                        )
+                        entry_args = (
+                            self._generic_head_args(
+                                entry_node, node.start_byte
+                            )[0]
+                            if entry_node is not None
+                            else None
+                        )
+                        if entry_args:
+                            return None, "Entry<" + entry_args + ">"
+                    entry_binding = re.fullmatch(
+                        r"(OccupiedEntry|VacantEntry)\s*<(.+)>",
+                        (receiver[1] or "").strip(),
+                        re.DOTALL,
+                    ) if receiver[0] is None and receiver[1] else None
+                    if entry_binding is not None:
+                        entry_methods = _ENTRY_BINDING_METHODS[
+                            self._normalize_identifier(
+                                entry_binding.group(1)
+                            )
+                        ]
+                        template = entry_methods.get(method_name)
+                        if template is not None:
+                            kv = self._type_arg_list(
+                                entry_binding.group(2)
+                            )
+                            if len(kv) == 2:
+                                spelled = template.format(
+                                    K=kv[0].strip(), V=kv[1].strip()
+                                )
+                                entry_pos = (
+                                    self._receiver_annotation_position(
+                                        callee.child_by_field_name(
+                                            "value"
+                                        )
+                                    )
+                                    or node.start_byte
+                                )
+                                if spelled.startswith("Entry<"):
+                                    # Keep the `Entry` head — the
+                                    # unresolvable spelling feeds
+                                    # `if let Entry::V` arms.
+                                    return None, spelled
+                                return self._spelled_type(
+                                    spelled, entry_pos
+                                )
                     if (
                         method_name in {"leak", "make_contiguous"}
                         and receiver[1] is not None
@@ -9516,7 +9610,7 @@ class _RustBindings:
                         self._normalize_identifier(
                             head.group(0).split("::")[-1]
                         )
-                        in _TRY_HEADS
+                        in _TRY_HEADS | {"Entry"}
                     ):
                         return (
                             self._normalize_identifier(
@@ -9603,11 +9697,66 @@ class _RustBindings:
         container is the matching prelude type — `Option<P>` lets
         `Some(p)` bind `p` to `P`. A head that resolves to a real
         record or names a different container stays unpinned."""
-        if head is None or head.type not in {"identifier", "type_identifier"}:
+        if head is None:
             return None
-        entry = _PRELUDE_CONTAINER_PAYLOAD.get(
-            self._normalize_identifier(self.text(head))
-        )
+        variant_name = None
+        scoped_container = None
+        if head.type in {"identifier", "type_identifier"}:
+            variant_name = self._normalize_identifier(self.text(head))
+        elif head.type == "scoped_identifier":
+            variant_node = head.child_by_field_name("name")
+            path_node = head.child_by_field_name("path")
+            if variant_node is not None:
+                variant_name = self._normalize_identifier(
+                    self.text(variant_node)
+                )
+            if path_node is not None:
+                scoped_container = self._normalize_identifier(
+                    self.text(path_node).split("::")[-1]
+                )
+        if variant_name is None:
+            return None
+        if scoped_container is not None and (
+            variant_name not in _PRELUDE_ENTRY_VARIANTS
+            or scoped_container != "Entry"
+            or scrut_name != "Entry"
+        ):
+            # A scoped prelude head must name its own container —
+            # `Entry::Occupied` reads `Entry`, and `m::Some` never
+            # heads `Option` the same way a bare `Some` does.
+            return None
+        if (
+            scoped_container is None
+            and variant_name not in _PRELUDE_CONTAINER_PAYLOAD
+        ):
+            # Only the scoped `Entry::V` form pins entry variants —
+            # a bare `Occupied(e)`/`Vacant(e)` head stays unpinned.
+            if variant_name not in _PRELUDE_ENTRY_VARIANTS:
+                return None
+        entry_wrapper = _PRELUDE_ENTRY_VARIANTS.get(variant_name)
+        if (
+            entry_wrapper is not None
+            and (scoped_container is not None or scrut_name == "Entry")
+            and scrut_name == "Entry"
+        ):
+            if scrut_args is not None:
+                wrapped = re.fullmatch(
+                    r"([A-Za-z_][\w:]*)\s*<(.+)>",
+                    scrut_args.strip(),
+                    re.DOTALL,
+                )
+                if (
+                    wrapped is not None
+                    and self._normalize_identifier(
+                        wrapped.group(1).split("::")[-1]
+                    )
+                    == "Entry"
+                ):
+                    scrut_args = wrapped.group(2)
+            if not scrut_args:
+                return None
+            return [(None, entry_wrapper + "<" + scrut_args + ">")]
+        entry = _PRELUDE_CONTAINER_PAYLOAD.get(variant_name)
         if entry is None or scrut_name != entry[0]:
             return None
         if scrut_args is not None:

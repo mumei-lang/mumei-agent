@@ -8206,3 +8206,50 @@ fn f(q: std::collections::VecDeque<P>, v: Vec<P>) {
     assert bound.get("a[0].pm()") == pm.id
     assert bound.get("b[0].pm()") == pm.id
     assert bound.get("c[0].pm()") == pm.id
+def test_entry_variant_bindings_bind_payloads():
+    source = """
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+struct P;
+impl P { fn pm(&self) {} }
+fn f(m: HashMap<u8, P>) {
+    if let Entry::Occupied(mut e) = m.entry(1) {
+        e.insert(P).pm();
+        e.get().pm();
+        e.get_mut().pm();
+        e.remove().pm();
+        let (k2, v2) = e.remove_entry();
+        v2.pm();
+        let e2 = e.into_entry();
+        if let Entry::Vacant(v3) = e2 { v3.insert(P).pm(); }
+    }
+    if let Entry::Vacant(vv) = m.entry(2) {
+        vv.insert(P).pm();
+        vv.into_mut().pm();
+    }
+    match m.entry(3) {
+        Entry::Occupied(o) => { o.get().pm(); }
+        Entry::Vacant(v) => { v.insert(P).pm(); }
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    for name in (
+        "e.insert(P).pm()",
+        "e.get().pm()",
+        "e.get_mut().pm()",
+        "e.remove().pm()",
+        "v2.pm()",
+        "v3.insert(P).pm()",
+        "vv.insert(P).pm()",
+        "vv.into_mut().pm()",
+        "o.get().pm()",
+        "v.insert(P).pm()",
+    ):
+        assert bound.get(name) == pm.id, name
