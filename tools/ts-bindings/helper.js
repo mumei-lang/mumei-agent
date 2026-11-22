@@ -252,16 +252,7 @@ function createEnvelope(source, extension) {
         node.parent.name === node;
       const symbol = referenceSymbol(node);
       if (symbol === undefined) {
-        if (isMemberName) {
-          // A member name the checker left unresolved is sourceless —
-          // the reader's library shape still records it for the report.
-          references.push({
-            span: span(node.getStart(sourceFile), node.getEnd()),
-            name: node.text,
-            declarations: [],
-            library: true,
-          });
-        } else {
+        if (!isMemberName) {
           references.push({
             span: span(node.getStart(sourceFile), node.getEnd()),
             name: node.text,
@@ -269,6 +260,8 @@ function createEnvelope(source, extension) {
             library: false,
           });
         }
+        // A member name with no symbol at all (`x.foo` on `any`) is
+        // unresolved, not builtin — it emits no reference.
       } else {
         const declarations = symbol.declarations ?? [];
         if (declarations.length === 0) {
