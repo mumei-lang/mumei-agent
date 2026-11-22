@@ -1283,6 +1283,28 @@ contract C is A, B {
     assert _text(source, super_ref.span) == "f"
 
 
+def test_super_member_follows_c3_order_in_a_diamond():
+    source = """
+contract O { function f() internal virtual {} }
+contract A is O { function f() internal override {} }
+contract B is O {}
+contract C is A, B {
+    function f() internal override(A, B) {}
+    function g() public { super.f(); }
+}
+"""
+    report = build_sol_bindings(source)
+    fs = [
+        binding for binding in report.bindings if binding.name == "f"
+    ]
+    # C3 order for `C is A, B` is C, B, A, O — A.f is the first
+    # definition after C even though a depth-first walk of the bases
+    # reaches O.f (through B) first.
+    f_in_a = fs[1]
+    call = next(call for call in report.calls)
+    assert call.target == f_in_a.id
+
+
 def test_qualified_declared_type_member_stays_opaque():
     source = """
 library L {

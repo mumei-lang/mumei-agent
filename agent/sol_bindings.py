@@ -702,23 +702,31 @@ class _SolBindings:
         if obj.type == "identifier" and text == "super":
             owner = self.current_contract
             if owner is not None:
-                # `super` follows the C3 linearization: the later a base
-                # is declared, the more derived it is, so walk the bases
-                # in reverse declaration order (as `_lookup_contract`
-                # does for inherited members).
-                for base_name, _base_node in reversed(owner.bases):
-                    base = self.contracts.get(base_name)
-                    if base is None:
-                        continue
-                    record, reason = self._lookup_contract(
-                        name,
-                        base,
-                        member.start_byte,
+                # `super` binds the first contract after this one in
+                # the C3 linearization that defines the member; private
+                # members are invisible to derived contracts and simply
+                # skipped. The DFS layer walk would emit a base's
+                # ancestors before a sibling base under diamonds, so
+                # the merge has to be done explicitly.
+                saw_private = False
+                for base in self._linearized_bases(owner):
+                    records = self._matching_records(
+                        base.scope.records.get(name, []),
+                        base.body.start_byte,
                         "value",
-                        allow_private_own=False,
                     )
-                    if record is not None or reason is not None:
-                        return member, record, reason
+                    visible = [
+                        record
+                        for record in records
+                        if record.visibility != "private"
+                    ]
+                    saw_private = saw_private or len(visible) < len(records)
+                    if not visible:
+                        continue
+                    record, reason = self._choose(visible)
+                    return member, record, reason
+                if saw_private:
+                    return member, None, "private_base_member"
             return member, None, None
         contract = None
         inside_owner = False
@@ -1631,6 +1639,57 @@ class _SolBindings:
                     self._contract_layers(name, base, namespace, visited)
                 )
         return layers
+
+    def _linearized_bases(self, contract: _Contract) -> list[_Contract]:
+        """C3 linearization of `contract`'s ancestors, most derived
+        first. Solidity lists direct bases most base-like first, so the
+        merge consumes them in reverse declaration order; unresolved or
+        already-visited contracts contribute nothing.
+        """
+        memo: dict[str, list[_Contract]] = {}
+
+        def linearize(owner: _Contract) -> list[_Contract]:
+            cached = memo.get(owner.record.binding.id)
+            if cached is not None:
+                return cached
+            sequences: list[list[_Contract]] = []
+            declared: list[_Contract] = []
+            for base_name, _base_node in reversed(owner.bases):
+                base = self.contracts.get(base_name)
+                if base is None:
+                    continue
+                sequences.append([base] + linearize(base))
+                declared.append(base)
+            sequences.append(declared)
+            merged: list[_Contract] = []
+            seen = {owner.record.binding.id}
+            pools = [list(sequence) for sequence in sequences]
+            while any(pools):
+                progressed = False
+                for pool in pools:
+                    if not pool:
+                        continue
+                    head = pool[0]
+                    if any(
+                        head is candidate
+                        for other in pools
+                        for candidate in other[1:]
+                    ):
+                        continue
+                    if head.record.binding.id not in seen:
+                        seen.add(head.record.binding.id)
+                        merged.append(head)
+                    for other in pools:
+                        if other and other[0] is head:
+                            other.pop(0)
+                    progressed = True
+                    break
+                if not progressed:
+                    break
+            memo[owner.record.binding.id] = merged
+            return merged
+
+        return linearize(contract)
 
     def _drop_overridden_functions(
         self, candidates: list[_Record]
