@@ -3661,9 +3661,8 @@ fn f(v: Vec<P>) {
 
 
 def test_for_loop_over_map_stays_opaque():
-    # Map iteration yields (K, V) pairs — a shape the element model
-    # cannot spell, so neither `for e in map` nor a destructured
-    # `(k, v)` picks up `P`'s methods.
+    # Map iteration yields (K, V) pairs — a single-name loop stays
+    # unpinned, while a destructured `(k, v)` binds the pair's ends.
     source = """
 use std::collections::HashMap;
 struct P;
@@ -3674,12 +3673,9 @@ fn f(map: HashMap<u32, P>) {
 }
 """
     report = build_rust_bindings(source, pointer_width=64)
-    for text in ("e.m()", "v.m()"):
-        call = next(
-            c for c in report.calls
-            if source[c.span.start:c.span.end] == text
-        )
-        assert call.target == ""
+    method = _bindings(report, "m", "associated_function")[0]
+    assert _call(report, source, "e.m()").target == ""
+    assert _call(report, source, "v.m()").target == method.id
 
 
 def test_for_loop_element_keeps_own_generic_args():
@@ -4309,7 +4305,6 @@ fn f(m: MyMap) {
     method = _bindings(report, "m", "associated_function")[0]
     assert _call(report, source, "v.m()").target == method.id
 
-
 def test_for_loop_over_extern_call_stays_opaque() -> None:
     source = """
 struct P;
@@ -4685,3 +4680,104 @@ fn f(w: W) {
     ]
     assert calls[0].target == q_same.id
     assert calls[1].target == p_same.id
+
+
+def test_for_tuple_pattern_binds_map_pair() -> None:
+    source = """
+struct K;
+struct V;
+impl K { fn k(&self) {} }
+impl V { fn v(&self) {} }
+fn f(m: HashMap<K, V>) {
+    for (k, v) in m { k.k(); v.v(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    k = _bindings(report, "k", "associated_function")[0]
+    v = _bindings(report, "v", "associated_function")[0]
+    assert _call(report, source, "k.k()").target == k.id
+    assert _call(report, source, "v.v()").target == v.id
+
+
+def test_for_tuple_pattern_binds_map_iter_pair() -> None:
+    source = """
+struct K;
+struct V;
+impl K { fn k(&self) {} }
+impl V { fn v(&self) {} }
+fn f(m: std::collections::BTreeMap<K, V>) {
+    for (k, v) in m.iter() { k.k(); v.v(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    k = _bindings(report, "k", "associated_function")[0]
+    v = _bindings(report, "v", "associated_function")[0]
+    assert _call(report, source, "k.k()").target == k.id
+    assert _call(report, source, "v.v()").target == v.id
+
+
+def test_for_tuple_pattern_wrong_arity_stays_opaque() -> None:
+    source = """
+struct K;
+struct V;
+impl V { fn v(&self) {} }
+fn f(m: HashMap<K, V>) {
+    for (k, v, x) in m { x.v(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    assert _call(report, source, "x.v()").target == ""
+
+
+def test_for_tuple_pattern_declared_iter_stays_opaque() -> None:
+    source = """
+struct K;
+struct V;
+struct Q;
+impl V { fn v(&self) {} }
+struct M;
+impl M { fn iter(&self) -> Q { Q } }
+fn f(m: M) {
+    for (k, v) in m.iter() { v.v(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    assert _call(report, source, "v.v()").target == ""
+
+
+def test_for_tuple_pattern_substitutes_generic_map_alias() -> None:
+    source = """
+struct K;
+struct V;
+impl K { fn k(&self) {} }
+impl V { fn v(&self) {} }
+type Flip<A, B> = HashMap<B, A>;
+fn f(m: Flip<K, V>) {
+    for (k, v) in m { v.k(); k.v(); k.k(); v.v(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    k = _bindings(report, "k", "associated_function")[0]
+    v = _bindings(report, "v", "associated_function")[0]
+    # Flip<K, V> iterates (V, K) pairs — the alias's args swap.
+    assert _call(report, source, "v.k()").target == k.id
+    assert _call(report, source, "k.v()").target == v.id
+    assert _call(report, source, "k.k()").target == ""
+    assert _call(report, source, "v.v()").target == ""
+
+
+def test_for_tuple_pattern_binds_mut_borrowed_map() -> None:
+    source = """
+struct K;
+struct V;
+impl K { fn k(&self) {} }
+impl V { fn v(&self) {} }
+fn f(m: HashMap<K, V>) {
+    for (k, v) in &mut m { k.k(); v.v(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    k = _bindings(report, "k", "associated_function")[0]
+    v = _bindings(report, "v", "associated_function")[0]
+    assert _call(report, source, "k.k()").target == k.id
+    assert _call(report, source, "v.v()").target == v.id
