@@ -4981,7 +4981,7 @@ class _RustBindings:
                 if decl is None:
                     owner = self.records.get(member.member_of)
                     decl = None if owner is None else owner.home_scope
-                if decl is not None and not any(
+                if decl is not None and decl not in self.scopes and not any(
                     (m := re.match(r"[A-Za-z_][\w:]*", s.strip()))
                     is not None
                     and m.group(0).rsplit("::", 1)[-1]
