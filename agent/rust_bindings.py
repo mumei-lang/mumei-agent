@@ -5178,7 +5178,14 @@ class _RustBindings:
                     record.alias_node.start_byte,
                     record.home_scope,
                 )
-            return record.binding.name, None, None
+            # Spelled args (`Option<&P>` from `v.first()`) were
+            # written in the receiver's annotation — resolve them
+            # there, not at the pattern site.
+            return (
+                record.binding.name,
+                self._receiver_annotation_position(value),
+                None,
+            )
         node = value
         while node is not None and node.type == "reference_expression":
             node = next(iter(node.named_children), None)
@@ -5300,8 +5307,17 @@ class _RustBindings:
                     # `v.get(i)`/`v.pop()` return `Option<_>` — the
                     # prelude container has no member record, but
                     # Some/None still heads the scrutinee. A declared
-                    # method takes the normal path above.
-                    return "Option", node.start_byte, None
+                    # method takes the normal path above. The spelled
+                    # payload args were written in the receiver's
+                    # annotation — resolve them there, not at the
+                    # call site.
+                    return (
+                        "Option",
+                        self._receiver_annotation_position(
+                            callee.child_by_field_name("value")
+                        ) or node.start_byte,
+                        None,
+                    )
                 return None, None, None
             if member.type_node is None:
                 return None, None, None
