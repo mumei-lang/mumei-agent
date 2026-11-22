@@ -9590,8 +9590,17 @@ def test_field_write_through_pointer_is_admitted(go_types_helper):
     )
     assert result.available and result.return_dependencies == frozenset()
     assert result.effects == "unknown"
-    (write,) = [c for c in result.calls if c.imported]
-    assert write.target == members["S"]["id"] and write.arguments == ()
+    imported = {c.target for c in result.calls if c.imported}
+    # The field write records the declaring member, and — the
+    # pointee is caller memory — the param's caller-visible backing
+    # the store landed in.
+    s_id = next(
+        b.id for b in snapshot.bindings if b.name == "s"
+    )
+    assert imported == {
+        members["S"]["id"],
+        f"{s_id}/caller-backing",
+    }
 
 
 def test_field_write_dependencies_survive_into_later_reads(go_types_helper):
@@ -9631,8 +9640,17 @@ def test_deref_base_field_write_is_admitted(go_types_helper):
     )
     assert result.available and result.return_dependencies == frozenset()
     assert result.effects == "unknown"
-    (write,) = [c for c in result.calls if c.imported]
-    assert write.target == members["S"]["id"] and write.arguments == ()
+    imported = {c.target for c in result.calls if c.imported}
+    # The field write records the declaring member, and — the
+    # pointee is caller memory — the param's caller-visible backing
+    # the store landed in.
+    s_id = next(
+        b.id for b in snapshot.bindings if b.name == "s"
+    )
+    assert imported == {
+        members["S"]["id"],
+        f"{s_id}/caller-backing",
+    }
 
 
 def test_deref_base_field_write_comment_parens_is_admitted(go_types_helper):
@@ -12833,8 +12851,17 @@ def test_nested_field_write_is_admitted(go_types_helper):
     )
     assert result.available and result.return_dependencies == frozenset()
     assert result.effects == "unknown"
-    (write,) = [c for c in result.calls if c.imported]
-    assert write.target == members["W2"]["id"] and write.arguments == ()
+    imported = {c.target for c in result.calls if c.imported}
+    # The field write records the declaring member, and — the
+    # pointee is caller memory — the param's caller-visible backing
+    # the store landed in.
+    t_id = next(
+        b.id for b in snapshot.bindings if b.name == "t"
+    )
+    assert imported == {
+        members["W2"]["id"],
+        f"{t_id}/caller-backing",
+    }
 
 
 def test_nested_field_write_folds_deps_into_root(go_types_helper):
@@ -12893,8 +12920,17 @@ def test_nested_field_write_deref_base_is_admitted(go_types_helper):
     )
     assert result.available and result.return_dependencies == frozenset()
     assert result.effects == "unknown"
-    (write,) = [c for c in result.calls if c.imported]
-    assert write.target == members["W2"]["id"] and write.arguments == ()
+    imported = {c.target for c in result.calls if c.imported}
+    # The field write records the declaring member, and — the
+    # pointee is caller memory — the param's caller-visible backing
+    # the store landed in.
+    t_id = next(
+        b.id for b in snapshot.bindings if b.name == "t"
+    )
+    assert imported == {
+        members["W2"]["id"],
+        f"{t_id}/caller-backing",
+    }
 
 
 def test_nested_field_write_receiver_observes_folded_deps(go_types_helper):
@@ -26333,9 +26369,19 @@ def test_bound_pointer_value_struct_channel_leaf_matches_pointer(
         assert value.return_dependencies == expected
         assert pointer.return_dependencies == expected
         assert value.effects == pointer.effects == "unknown"
-    assert [call.target for call in value.calls] == [
-        call.target for call in pointer.calls
+    # The caller-backing transfer is keyed on each function's own
+    # `t` binding — normalize it before comparing the two lists.
+    normalize = [
+        "caller-backing" if c.target.endswith("/caller-backing")
+        else c.target
+        for c in value.calls
     ]
+    normalize_pointer = [
+        "caller-backing" if c.target.endswith("/caller-backing")
+        else c.target
+        for c in pointer.calls
+    ]
+    assert normalize == normalize_pointer
 
 
 def test_bound_field_channel_range_rejoins_sends(go_types_helper):

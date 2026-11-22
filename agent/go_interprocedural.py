@@ -14129,9 +14129,13 @@ class _Builder:
         saved_caller_visible = getattr(
             self, "_caller_visible_params", None
         )
+        saved_pointer_param_reseats = getattr(
+            self, "_pointer_param_reseats", frozenset()
+        )
         self._pending_labels = []
         self._goto_seen = False
         self._seen_labels = set()
+        self._pointer_param_reseats = set()
         self.frames = []
         self.pinned = set()
         self.escaped = set()
@@ -14261,6 +14265,7 @@ class _Builder:
                 saved_chan_chan_container_call_deps
             )
             self._caller_visible_params = saved_caller_visible
+            self._pointer_param_reseats = saved_pointer_param_reseats
             self._defer_result_deps = saved_defer_result_deps
             self._deferred_exits = saved_deferred_exits
             self._func_arg_invocations = saved_func_args
