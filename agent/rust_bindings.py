@@ -188,6 +188,9 @@ _OPTION_HEAD_METHODS = {
     # `o.and(o2)`/`o.or(o2)`/`o.xor(o2)` still yield `Option<P>` —
     # the payload index keeps the receiver's own first arg.
     "filter": ("", {"Option"}, 0),
+    # `o.take_if(f)` keeps the `Option<P>` receiver spelling —
+    # `f` only decides whether it becomes `None`.
+    "take_if": ("", {"Option"}, 0),
     "and": ("", {"Option"}, 0),
     "or": ("", {"Option"}, 0),
     "xor": ("", {"Option"}, 0),
@@ -4439,6 +4442,30 @@ class _RustBindings:
                         if inner is None:
                             return None, None
                         return None, inner.strip()
+                    if (
+                        method_name == "concat"
+                        and receiver[1] is not None
+                        and self._container_head_name(
+                            callee.child_by_field_name("value")
+                        )
+                        == "Vec"
+                    ):
+                        # `Vec<Vec<P>>::concat()` yields `Vec<P>` —
+                        # flatten one `Vec` level of the element.
+                        inner = re.fullmatch(
+                            r"Vec\s*<(.+)>", receiver[1].strip()
+                        )
+                        if inner is not None:
+                            return self._spelled_type(
+                                "Vec<" + inner.group(1).strip() + ">",
+                                self._receiver_annotation_position(
+                                    callee.child_by_field_name(
+                                        "value"
+                                    )
+                                )
+                                or node.start_byte,
+                            )
+                        return None, None
                     if (
                         method_name in {"cloned", "copied"}
                         and receiver[1] is not None
