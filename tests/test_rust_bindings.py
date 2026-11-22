@@ -6267,33 +6267,319 @@ fn g() {
 
 def test_option_and_keeps_the_option_head_when_scopes_differ():
     source = """
-mod m { pub struct Q; impl Q { pub fn qm(&self) {} } }
-use m::Q;
-fn g() -> Option<Q> { None }
-fn f(o: Option<Q>) {
-    struct Q;
-    impl Q { fn is_some(&self) -> bool { true } }
-    let u = g();
-    o.and(u).is_some();
-    match o.and(u) { Some(q) => q.qm(), _ => () }
+struct P;
+impl P { fn pm(&self) {} }
+struct W<T> { _m: T }
+impl<T> W<T> { fn wm(&self) {} }
+fn f(b: Box<P>, r: std::rc::Rc<P>, w: W<P>, m: std::sync::Mutex<P>) {
+    b.pm();
+    r.pm();
+    w.pm();
+    m.pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    resolved = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    assert resolved["b.pm()"] == pm.id
+    assert resolved["r.pm()"] == pm.id
+    # A custom `W<P>` and a guard `Mutex<P>` stay opaque — they do
+    # not Deref straight to `P`.
+    assert not resolved["w.pm()"]
+    assert not resolved["m.pm()"]
+
+
+def test_slice_and_array_option_heads():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(s: &[P], a: [P; 4]) {
+    if let Some(p) = s.first() { p.pm(); }
+    if let Some(p) = a.last() { p.pm(); }
+    if let Some(p) = s.get(0) { p.pm(); }
+    match s.first() { Some(p) => p.pm(), None => {} }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    calls = [
+        call for call in report.calls
+        if raw[call.span.start:call.span.end].decode() == "p.pm()"
+    ]
+    assert len(calls) == 4
+    for call in calls:
+        assert call.target == pm.id
+
+
+def test_get_mut_and_option_filter_heads():
+    source = """
+use std::collections::HashMap;
+struct P;
+impl P { fn pm(&self) {} }
+fn f(v: Vec<P>, m: HashMap<i32, P>, o: Option<P>) {
+    if let Some(p) = v.get_mut(0) { p.pm(); }
+    if let Some(p) = m.get_mut(&1) { p.pm(); }
+    if let Some(p) = o.filter(|x| true) { p.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    calls = [
+        call for call in report.calls
+        if raw[call.span.start:call.span.end].decode() == "p.pm()"
+    ]
+    assert len(calls) == 3
+    for call in calls:
+        assert call.target == pm.id
+
+
+def test_split_first_and_last_pair_payloads():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(v: Vec<P>, s: &[P]) {
+    if let Some((h, rest)) = v.split_first() { h.pm(); rest[0].pm(); }
+    if let Some((l, rest)) = s.split_last() { l.pm(); rest[0].pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    calls = [
+        call for call in report.calls
+        if raw[call.span.start:call.span.end].decode()
+        in {"h.pm()", "l.pm()", "rest[0].pm()"}
+    ]
+    assert len(calls) == 4
+    for call in calls:
+        assert call.target == pm.id
+
+def test_scoped_callee_return_spelled_in_decl_scope():
+    # `n::make() -> Box<P>` spells `P` in `n`'s scope — a same-named
+    # root `P` must not win the payload resolution.
+    source = """
+mod n {
+    pub struct P;
+    impl P { fn pm(&self) {} }
+    pub fn make() -> Box<P> { Box::new(P) }
+}
+struct P;
+fn g() { let b = n::make(); b.pm(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    calls = [
+        call for call in report.calls
+        if raw[call.span.start:call.span.end].decode() == "b.pm()"
+    ]
+    assert len(calls) == 1
+    assert calls[0].target == pm.id
+
+
+def test_struct_pattern_field_keeps_declared_head():
+    # `let m::W { opt } = w` binds `opt` to the field's declared
+    # `Option<T>` — a later `if let Some(q) = opt` still reads the
+    # `Option` head and resolves `m::Q` in the module's scope.
+    source = """
+mod m {
+    pub struct W<T> { pub opt: Option<T> }
+    pub struct Q;
+    impl Q { fn qm(&self) {} }
+}
+struct Q;
+fn f() {
+    let w: m::W<m::Q> = todo!();
+    let m::W { opt } = w;
+    if let Some(q) = opt { q.qm(); }
 }
 """
     report = build_rust_bindings(source, pointer_width=64)
     qm = _bindings(report, "qm", "associated_function")[0]
-    local_is_some = next(
-        b
-        for b in _bindings(report, "is_some", "associated_function")
-        if b.span.start > source.index("struct Q;\n    impl Q { fn is_some")
-    )
     raw = source.encode()
-    calls = {
-        raw[call.span.start:call.span.end].decode(): call.target
+    calls = [
+        call for call in report.calls
+        if raw[call.span.start:call.span.end].decode() == "q.qm()"
+    ]
+    assert len(calls) == 1
+    assert calls[0].target == qm.id
+
+
+def test_flatten_unwraps_the_iterated_element():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct W<T>(T);
+impl W<Vec<P>> { fn flatten(&self) -> W<P> { W(self.0) } }
+fn f(v: Vec<Vec<P>>, o: Option<Vec<P>>, w: W<Vec<P>>, s: Vec<P>, n: Vec<Vec<Vec<P>>>) {
+    for p in v.iter().flatten() { p.pm(); }
+    for p in v.into_iter().flatten() { p.pm(); }
+    let it = v.iter().flatten();
+    for p in it { p.pm(); }
+    for p in o.iter().flatten() { p.pm(); }
+    for p in n.iter().flatten().flatten() { p.pm(); }
+    for p in s.iter().flatten() { p.pm(); }
+    for p in w.flatten() { p.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    resolved = sum(
+        1
         for call in report.calls
-    }
-    # Option::is_some is prelude — the local Q::is_some must not win.
-    assert calls["o.and(u).is_some()"] != local_is_some.id
-    # The payload still resolves in `u`'s scope — `q` is `m::Q`.
-    assert calls["q.qm()"] == qm.id
+        if raw[call.span.start:call.span.end].decode() == "p.pm()"
+        and call.target == pm.id
+    )
+    assert resolved == 5
+
+
+def test_flatten_array_elem_const_block_and_alias_scopes() -> None:
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+mod m {
+    pub struct Q<T>(pub T);
+    impl<T> Q<T> { pub fn wrong(&self) {} }
+    pub type Row<T> = Vec<Q<T>>;
+}
+fn f(v: Vec<&[P<{1; 2}>; 4]>, w: Vec<m::Row<P>>) {
+    for p in v.into_iter().flatten() { p.pm(); }
+    for q in w.into_iter().flatten() { q.wrong(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    # `P<{1; 2}>` keeps its whole head — the `;` inside the const
+    # block must not cut the slice's element spelling.
+    assert (
+        _call(report, source, "p.pm()").target == pm.id
+    )
+    # `Row`'s `Q` was spelled in `mod m` — resolving it at the use
+    # site would bind a different type, so the element stays opaque.
+    assert _call(report, source, "q.wrong()").target == ""
+
+
+def test_flatten_alias_std_import_and_shadowed_params() -> None:
+    source = """
+use std::vec::Vec;
+struct P;
+impl P { fn pm(&self) {} }
+mod m {
+    pub struct P;
+    impl P { pub fn wrong(&self) {} }
+    pub type Row<T> = Vec<T>;
+}
+type Line<T> = Vec<T>;
+fn f(v: Vec<Line<P>>, w: Vec<m::Row<P>>) {
+    for p in v.into_iter().flatten() { p.pm(); }
+    for p in w.into_iter().flatten() { p.pm(); p.wrong(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    resolved = sum(
+        1
+        for call in report.calls
+        if raw[call.span.start:call.span.end].decode() == "p.pm()"
+        and call.target == pm.id
+    )
+    # `use std::vec::Vec` is still the std container, and `Row<P>`'s
+    # substituted `P` resolves at the use site despite `m::P`.
+    assert resolved == 2
+    assert _call(report, source, "p.wrong()").target == ""
+
+
+def test_flatten_alias_to_custom_container_stays_opaque() -> None:
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct Vec<T>(T);
+impl<T> Vec<T> { fn into_iter(self) -> Option<T> { None } }
+type Row<T> = Vec<T>;
+fn f(v: Vec<Row<P>>) {
+    for p in v.into_iter().flatten() { p.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    # The alias target `Vec` resolves to the declared custom type —
+    # flattening it as a std container would misbind `p.pm()`.
+    assert _call(report, source, "p.pm()").target == ""
+
+
+def test_flatten_unwraps_array_refs_and_container_aliases():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+type Row<T> = Vec<T>;
+fn f(v: Vec<&[P; 2]>, w: Vec<Row<P>>) {
+    for p in v.into_iter().flatten() { p.pm(); }
+    for p in w.into_iter().flatten() { p.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    resolved = sum(
+        1
+        for call in report.calls
+        if raw[call.span.start:call.span.end].decode() == "p.pm()"
+        and call.target == pm.id
+    )
+    assert resolved == 2
+
+
+def test_flatten_through_cloned_and_owned_containers():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(v: Vec<Vec<P>>, s: &[Vec<P>], o: Option<Vec<P>>) {
+    for p in v.clone().iter().flatten() { p.pm(); }
+    for q in s.to_owned().iter().flatten() { q.pm(); }
+    for r in s.as_ref().iter().flatten() { r.pm(); }
+    for x in o.iter().flatten() { x.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    resolved = sum(
+        1
+        for call in report.calls
+        if raw[call.span.start:call.span.end].decode().endswith("pm()")
+        and call.target == pm.id
+    )
+    assert resolved == 4
+
+
+def test_let_bound_next_result_heads_some_patterns():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(v: Vec<P>, w: Vec<Vec<P>>) {
+    let r = v.iter().next();
+    match r { Some(p) => p.pm(), None => () }
+    let s = w.iter().flatten().next();
+    if let Some(q) = s { q.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    resolved = sum(
+        1
+        for call in report.calls
+        if raw[call.span.start:call.span.end].decode().endswith("pm()")
+        and call.target == pm.id
+    )
+    assert resolved == 2
 
 
 
@@ -6532,3 +6818,29 @@ fn f(w: W<*mut P>) {
     assert _call(report, source, "w.mm()").target == mm.id
     assert _call(report, source, "w.cm()").target != cm.id
     assert _call(report, source, "w.pm()").target != pm.id
+
+
+def test_declared_conversion_args_resolve_in_the_member_scope():
+    # `m::W::to_owned -> Vec<Vec<Q>>` — the `Q` spelled in the
+    # member's declaration scope is `m::Q`, not the call site's
+    # same-named `Q`.
+    source = """
+mod m {
+    pub struct Q;
+    impl Q { pub fn qm(&self) {} }
+    pub struct W<T>;
+    impl<T> W<T> {
+        pub fn to_owned(&self) -> Vec<Vec<Q>> { vec![] }
+    }
+}
+struct Q;
+struct P;
+fn f(w: m::W<P>) {
+    for p in w.to_owned().iter().flatten() {
+        p.qm();
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    qm = _bindings(report, "qm", "associated_function")[0]
+    assert _call(report, source, "p.qm()").target == qm.id

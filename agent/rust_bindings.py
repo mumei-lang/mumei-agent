@@ -3565,7 +3565,52 @@ class _RustBindings:
             return None, None
         method = self._normalize_identifier(self.text(method_node))
         if method in _ITER_ELEMENT_METHODS:
-            container_id, args = self._receiver_type(receiver)
+            container_receiver = receiver
+            while container_receiver.type == "call_expression":
+                # `v.clone().iter()`/`s.to_owned().iter()` — the
+                # transparent conversion keeps the container's
+                # element args, so iterate the inner receiver.
+                inner_fn = container_receiver.child_by_field_name(
+                    "function"
+                )
+                if inner_fn is None or inner_fn.type != "field_expression":
+                    break
+                inner_method_node = inner_fn.child_by_field_name(
+                    "field"
+                )
+                inner_value = inner_fn.child_by_field_name("value")
+                if inner_method_node is None or inner_value is None:
+                    break
+                inner_method = self._normalize_identifier(
+                    self.text(inner_method_node)
+                )
+                if inner_method not in {
+                    "clone",
+                    "to_owned",
+                    "as_ref",
+                    "as_mut",
+                }:
+                    break
+                if (
+                    self._field_member(
+                        inner_fn, ("associated_function",)
+                    )
+                    is not None
+                ):
+                    # A declared `W::to_owned()`/`clone()`/`as_ref()`
+                    # has its own return type — the element comes
+                    # from the member, not the receiver's args.
+                    break
+                if (
+                    inner_method in {"as_ref", "as_mut"}
+                    and self._container_head_name(inner_value) == "Option"
+                ):
+                    # `Option::as_ref` re-spells the payload as
+                    # `&P` — iterating it is `Option<&P>::iter`,
+                    # which this spelling cannot represent.
+                    break
+                container_receiver = inner_value
+            container_id, args = self._receiver_type(container_receiver)
             if args is None:
                 return None, None
             if self._is_map_container(container_id, receiver):
@@ -3683,6 +3728,346 @@ class _RustBindings:
                 f"&[{spelled}]",
                 self._receiver_annotation_position(receiver),
             )
+        if method == "flatten":
+            # `v.iter().flatten()` unwraps the element's own args —
+            # `Vec<Vec<P>>` iterates `Vec<P>`, flatten yields `P`
+            # (`&Vec<P>` yields `&P`). An element without a generic
+            # head (`P`, `(P, Q)`) flattens nothing — opaque.
+            if receiver.type != "call_expression":
+                return None, None
+            inner, pos = self._iterator_spelling_with_pos(
+                receiver, _depth + 1
+            )
+            if inner is None:
+                return None, None
+            inner_pos = pos if pos is not None else call.start_byte
+            stripped = inner.strip()
+            borrow = stripped.startswith("&")
+            if borrow:
+                body = stripped.lstrip("&").strip()
+                if body.startswith("mut "):
+                    body = body[4:].strip()
+                if body.startswith("&"):
+                    # `&&[P]` — iter of a `&[P]` element: flatten
+                    # iterates the slice and yields `&P`.
+                    inner2 = body.lstrip("&").strip()
+                    if inner2.startswith("mut "):
+                        inner2 = inner2[4:].strip()
+                    if inner2.startswith("[") and inner2.endswith("]"):
+                        # `&&[P]`/`&&[P; N]` — the slice's `&P`.
+                        return (
+                            "&" + self._array_elem(inner2[1:-1]),
+                            pos,
+                        )
+                    return None, None
+                if body.startswith("[") and body.endswith("]"):
+                    # `&[P]`/`&[P; N]` — flattening a slice or an
+                    # array reference yields `&P`.
+                    return (
+                        "&" + self._array_elem(body[1:-1]),
+                        pos,
+                    )
+                inner_callee = receiver.child_by_field_name(
+                    "function"
+                )
+                inner_method = (
+                    self.text(
+                        inner_callee.child_by_field_name("field")
+                    ).strip()
+                    if inner_callee is not None
+                    and inner_callee.type == "field_expression"
+                    else None
+                )
+                if inner_method in _ITER_CHUNK_METHODS:
+                    # `v.chunks(n)`/`windows(n)` spell their `&[P]`
+                    # item as `&P` — flatten yields the slice's
+                    # `&P` elements.
+                    return "&" + body, pos
+                # `&Vec<P>`/`&Option<P>` — fall through to the
+                # generic head path on the un-borrowed spelling.
+                stripped = body
+            _elem_id, inner_args = self._spelled_type(
+                stripped, inner_pos
+            )
+            inner_args = (inner_args or "").strip()
+            if not inner_args or inner_args == stripped:
+                return None, None
+            if _elem_id is not None:
+                elem_record = self.records.get(_elem_id)
+                if (
+                    elem_record is not None
+                    and elem_record.binding.kind == "type_alias"
+                    and elem_record.alias_node is not None
+                ):
+                    # `type Row<T> = Vec<T>` — flatten the alias's
+                    # target shape, not the alias name. The target
+                    # args substitute the alias's declared params.
+                    target = re.fullmatch(
+                        r"([A-Za-z_][\w:]*)\s*(?:<(.+)>)?",
+                        self.text(elem_record.alias_node).strip(),
+                    )
+                    params_node = elem_record.alias_node.parent
+                    param_names = (
+                        []
+                        if params_node is None
+                        else self._type_param_names(
+                            params_node.child_by_field_name(
+                                "type_parameters"
+                            )
+                        )
+                    )
+                    target_head = (
+                        None if target is None else target.group(1)
+                    )
+                    target_args = (
+                        "" if target is None or target.group(2) is None
+                        else target.group(2).strip()
+                    )
+                    if (
+                        target_head in _INDEX_ELEMENT_CONTAINERS
+                        or target_head == "Option"
+                    ):
+                        # The target names were spelled where the
+                        # alias was declared — a `Vec`/`Option`
+                        # resolving there is a custom container
+                        # whose Item may differ, and an element
+                        # head binding differently than at the
+                        # use site would misbind member calls.
+                        alias_scope = elem_record.home_scope
+                        pushed = (
+                            alias_scope is not None
+                            and alias_scope not in self.scopes
+                        )
+                        if pushed:
+                            self.scopes.append(alias_scope)
+                        try:
+                            target_record = self._through_import(
+                                self._scoped_spelled_type(
+                                    target_head,
+                                    elem_record.alias_node.start_byte,
+                                )
+                                if "::" in target_head
+                                else self._lookup(
+                                    self._normalize_identifier(
+                                        target_head
+                                    ),
+                                    elem_record.alias_node.start_byte,
+                                    "type",
+                                ),
+                                elem_record.alias_node.start_byte,
+                            )
+                            if (
+                                target_record is not None
+                                and target_record.binding.kind
+                                == "import"
+                                and target_record.import_path
+                                is not None
+                            ):
+                                use_segs = (
+                                    target_record.import_path.split(
+                                        "::"
+                                    )
+                                )
+                                if use_segs[0] in {
+                                    "std",
+                                    "core",
+                                    "alloc",
+                                }:
+                                    # `use std::vec::Vec` — an
+                                    # unresolvable std import is
+                                    # still the std container.
+                                    target_record = None
+                                elif use_segs[0] in {
+                                    "crate",
+                                    "self",
+                                    "super",
+                                }:
+                                    # `use crate::m::Vec` may
+                                    # re-export the std container —
+                                    # resolve the module's own `Vec`
+                                    # binding to tell.
+                                    if use_segs[0] == "crate":
+                                        # `crate::m` names the root
+                                        # scope's `m` — an inner
+                                        # `mod m` must not shadow it.
+                                        module = next(
+                                            (
+                                                r
+                                                for r in reversed(
+                                                    self.scopes[
+                                                        0
+                                                    ].bindings.get(
+                                                        use_segs[1], ()
+                                                    )
+                                                )
+                                                if r.binding.kind
+                                                == "module"
+                                            ),
+                                            None,
+                                        )
+                                        for seg in use_segs[2:-1]:
+                                            if (
+                                                module is None
+                                                or module.module_scope
+                                                is None
+                                            ):
+                                                module = None
+                                                break
+                                            module = next(
+                                                (
+                                                    r
+                                                    for r in reversed(
+                                                        module.module_scope.bindings.get(
+                                                            seg, ()
+                                                        )
+                                                    )
+                                                    if r.binding.kind
+                                                    == "module"
+                                                ),
+                                                None,
+                                            )
+                                    else:
+                                        module = (
+                                            self._lookup_module_path(
+                                                "::".join(
+                                                    use_segs[1:-1]
+                                                ),
+                                                target_record.binding.span.start,
+                                            )
+                                        )
+                                    inner = (
+                                        next(
+                                            (
+                                                r
+                                                for r in reversed(
+                                                    module.module_scope.bindings.get(
+                                                        use_segs[-1], ()
+                                                    )
+                                                )
+                                            ),
+                                            None,
+                                        )
+                                        if module is not None
+                                        and module.module_scope
+                                        is not None
+                                        else None
+                                    )
+                                    inner = self._through_import(
+                                        inner,
+                                        target_record.binding.span.start,
+                                    )
+                                    if (
+                                        inner is not None
+                                        and inner.binding.kind
+                                        == "import"
+                                        and inner.import_path
+                                        is not None
+                                        and inner.import_path.split(
+                                            "::", 1
+                                        )[0]
+                                        in {"std", "core", "alloc"}
+                                    ):
+                                        # `pub use std::vec::Vec`
+                                        # inside `m`.
+                                        target_record = None
+                                    elif (
+                                        inner is not None
+                                        and inner.binding.kind
+                                        != "import"
+                                    ):
+                                        # `m::Vec` is a real type.
+                                        target_record = inner
+                            pre_head = re.match(
+                                r"[A-Za-z_][\w:]*", target_args
+                            )
+                            if param_names:
+                                mapping = dict(
+                                    zip(
+                                        param_names,
+                                        self._type_arg_list(inner_args),
+                                    )
+                                )
+                                target_args = re.sub(
+                                    r"\b("
+                                    + "|".join(
+                                        re.escape(name)
+                                        for name in mapping
+                                    )
+                                    + r")\b",
+                                    lambda match: mapping[
+                                        match.group(1)
+                                    ],
+                                    target_args,
+                                )
+                            emitted = re.match(
+                                r"[A-Za-z_][\w:]*", target_args
+                            )
+                            mismatch = False
+                            if (
+                                emitted is not None
+                                and pre_head is not None
+                                and pre_head.group(0)
+                                not in param_names
+                            ):
+                                head_text = emitted.group(0)
+                                alias_side = (
+                                    self._scoped_spelled_type(
+                                        head_text,
+                                        elem_record.alias_node.start_byte,
+                                    )
+                                    if "::" in head_text
+                                    else self._lookup(
+                                        self._normalize_identifier(
+                                            head_text
+                                        ),
+                                        elem_record.alias_node.start_byte,
+                                        "type",
+                                    )
+                                )
+                                use_side = (
+                                    self._scoped_spelled_type(
+                                        head_text, pos
+                                    )
+                                    if "::" in head_text
+                                    else self._lookup(
+                                        self._normalize_identifier(
+                                            head_text
+                                        ),
+                                        pos,
+                                        "type",
+                                    )
+                                )
+                                mismatch = (
+                                    alias_side is not None
+                                    and alias_side is not use_side
+                                )
+                        finally:
+                            if pushed:
+                                self.scopes.pop()
+                        if target_record is None and not mismatch:
+                            inner_args = target_args
+                            _elem_id = None
+            if _elem_id is not None:
+                head = next(
+                    (
+                        b.name
+                        for b in self.bindings
+                        if b.id == _elem_id
+                    ),
+                    None,
+                )
+                if (
+                    head is not None
+                    and head not in _INDEX_ELEMENT_CONTAINERS
+                    and head != "Option"
+                ):
+                    # `Vec<W<P>>` — a declared `W` can
+                    # `IntoIterator` to a different element;
+                    # guessing `P` would misbind calls.
+                    return None, None
+            return (
+                "&" + inner_args if borrow else inner_args
+            ), pos
         if method in _ITER_PRESERVING_METHODS or method in _ITER_SLICE_METHODS:
             if receiver.type != "call_expression":
                 return None, None
@@ -3854,6 +4239,7 @@ class _RustBindings:
             or method in _ITER_CHUNK_METHODS
             or method == "enumerate"
             or method == "zip"
+            or method == "flatten"
         ) and self._field_member(
             callee, ("associated_function",)
         ) is not None:
@@ -3904,6 +4290,34 @@ class _RustBindings:
                 return _UNKNOWN, None
             spelled = args.strip() or None
             return _UNKNOWN, None if spelled is None else "&" + spelled
+        if method == "flatten":
+            # `v.iter().flatten()` unwraps the element's own args —
+            # `Vec<Vec<P>>` iterates `Vec<P>`, flatten yields `P`
+            # (`&Vec<P>` yields `&P`). The spelled path carries the
+            # full element (`Vec<P>`); `_element_of` resolves the
+            # flattened head at the annotation scope.
+            if receiver.type != "call_expression":
+                return _UNKNOWN, None
+            spelled, spelled_pos = self._iterator_spelling_with_pos(
+                call
+            )
+            if spelled is None:
+                return _UNKNOWN, None
+            position = (
+                spelled_pos if spelled_pos is not None
+                else call.start_byte
+            )
+            elem_id, rest = self._element_of(
+                None, spelled.strip(), position
+            )
+            if elem_id is None:
+                return _UNKNOWN, (
+                    spelled.strip() if rest is None else rest
+                )
+            name = next(
+                (b.name for b in self.bindings if b.id == elem_id), ""
+            )
+            return TypeFact("named", name, 0, None, elem_id), rest
         if method in _ITER_PRESERVING_METHODS:
             # `v.iter().rev()` yields the inner call's element —
             # recurse into the chained receiver. A non-call receiver
@@ -4197,8 +4611,33 @@ class _RustBindings:
             # element (`&[P]`), not a container's type args. A
             # declared `Vec<&P>`/`[&P]` still names a container
             # head — its `&` arg is the element's own reference
-            # type, unwrapped by `_element_of` below.
-            return _UNKNOWN, elem_args.strip()
+            # type, unwrapped by `_element_of` below. A `flatten`
+            # producer instead spells the flattened `&P` element —
+            # a real reference `_element_of` unwraps.
+            record = (
+                self._lookup(
+                    self._normalize_identifier(self.text(iterator)),
+                    iterator.start_byte,
+                    "value",
+                )
+                if iterator.type == "identifier"
+                else None
+            )
+            value = None if record is None else record.value_node
+            vcall = (
+                value.child_by_field_name("function")
+                if value is not None
+                and value.type == "call_expression"
+                else None
+            )
+            vmethod = (
+                self.text(vcall.child_by_field_name("field")).strip()
+                if vcall is not None
+                and vcall.type == "field_expression"
+                else None
+            )
+            if vmethod != "flatten":
+                return _UNKNOWN, elem_args.strip()
         # Spelled element names on `it` (`let it = v.iter()`) were
         # written in `it`'s annotation — resolve them there.
         position = self._receiver_annotation_position(iterator)
@@ -5731,21 +6170,42 @@ class _RustBindings:
                 param: self._qualified_spelling(spelled, pos)
                 for param, spelled in param_map.items()
             }
-        if (
-            not param_map
-            and member.type_node is not None
-            and value_node is None
+        ann = member.type_node if annotation is None else annotation
+        fixed_annotation = ann is not None and not any(
+            re.search(rf"\b{re.escape(param)}\b", self.text(ann))
+            for param in param_map
+        )
+        if ann is not None and (
+            (not param_map and value_node is None) or fixed_annotation
         ):
-            # Nothing substitutes — `n::make() -> Box<P>` spells the
-            # `P` written in the member's own declaration scope, not
-            # a same-named type at the call site.
-            pos = member.type_node.start_byte
+            # `n::make() -> Box<P>` / `W<T>::to_owned() -> Vec<Vec<Q>>`
+            # — an annotation spelling no substituted param resolves
+            # in the member's own declaration scope, not at the
+            # receiver's annotation where a same-named local type
+            # would shadow it.
+            pos = ann.start_byte
         type_id, args = self._field_annotation(
             member.type_node if annotation is None else annotation,
             param_map,
             pos,
             container,
         )
+        if args is not None and param_map and fixed_annotation:
+            # The receiver substitutes nothing in this annotation —
+            # its names live in the member's declaration scope, which
+            # the spelled text does not carry; anchor each resolvable
+            # name to its `crate::` path now or a same-named type at
+            # the use site shadows it.
+            home = member.home_scope
+            if home is None:
+                owner = self.records.get(member.member_of)
+                home = None if owner is None else owner.home_scope
+            pushed = home is not None and home not in self.scopes
+            if pushed:
+                self.scopes.append(home)
+            args = self._qualified_spelling(args, pos)
+            if pushed:
+                self.scopes.pop()
         if type_id is None and args is None:
             return None
         if type_id is None and args is not None:
@@ -6032,6 +6492,32 @@ class _RustBindings:
         )
 
     @staticmethod
+    def _array_elem(inner: str) -> str:
+        """Element text of `T; N` — a `;` inside a `<{1; 2}>` const
+        block or nested brackets stays inside the element. `<`/`>`
+        inside `{...}` are operators, not generic brackets."""
+        depth = 0
+        braces = 0
+        for index, ch in enumerate(inner):
+            if ch in "([{":
+                depth += 1
+                if ch == "{":
+                    braces += 1
+            elif ch in ")]}":
+                depth -= 1
+                if ch == "}":
+                    braces -= 1
+            elif ch == "<":
+                if braces == 0:
+                    depth += 1
+            elif ch == ">":
+                if braces == 0 and inner[index - 1] != "-":
+                    depth -= 1
+            elif ch == ";" and depth == 0:
+                return inner[:index].strip()
+        return inner.strip()
+
+    @staticmethod
     def _paren_wraps(spelled: str) -> bool:
         """Whether `(...)` wraps the whole spelling — `(P, Q), (R, S)`
         only starts and ends with parens; the first one closes early."""
@@ -6050,7 +6536,7 @@ class _RustBindings:
     ) -> "_Record | None":
         """Type record for a `m::P` spelling — the module path walks
         `_lookup_module_path`, the last segment reads that module's
-        scope. A `crate::` head anchors the walk at the root scope."""
+        scope."""
         segments = name.split("::")
         if segments[0] == "crate":
             scope = self.scopes[0] if self.scopes else None
@@ -6648,6 +7134,12 @@ class _RustBindings:
             if record.pattern_decl_node is not None
             else record.type_node
         )
+        if decl_node is None and record.value_node is not None:
+            # `let r = it.next()` — no annotation, but the
+            # initializer's call arm still heads the scrutinee
+            # (`Option` from `next`), which an args-only record
+            # cannot spell.
+            return self._scrutinee_shape(record.value_node, None)
         position = (
             None
             if decl_node is None
