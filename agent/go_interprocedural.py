@@ -3123,6 +3123,7 @@ class _Builder:
     ] | None:
         fields = []
         current = node
+        share_extract = None
         while current is not None:
             while current.type == "parenthesized_expression":
                 current = next(
@@ -3162,6 +3163,24 @@ class _Builder:
                 break
             indexes.append(current.child_by_field_name("index"))
             current = current.child_by_field_name("operand")
+        if (
+            fields
+            and not indexes
+            and current is not None
+            and current.type == "identifier"
+        ):
+            # `x.F[i]` where `x := p.B[i]` bound an element
+            # extraction — the share lets the member path name
+            # the extracted element's own index into `p.B`.
+            share_ref = self.references.get(self.node_key(current))
+            share_extract = self._element_share.get(
+                share_ref.binding_id if share_ref is not None else ""
+            )
+            if share_extract is not None:
+                indexes.append(
+                    share_extract.child_by_field_name("index")
+                )
+                current = share_extract.child_by_field_name("operand")
         if (
             not fields
             or len(indexes) != 1
@@ -3288,6 +3307,13 @@ class _Builder:
                 is not None
             ):
                 return None
+        if share_extract is not None and not any(
+            getattr(member.type, "kind", None) == "pointer"
+            for member in path_members
+        ):
+            # `x.V` reads the copy's own slot — only a member path
+            # crossing a pointer still names the element's memory.
+            return None
         self._pin_fact_identities(container_fact)
         if (
             container_fact.kind == "array"
@@ -8616,6 +8642,19 @@ class _Builder:
                                 elem
                             )
                             or self._chan_elem_collection(fact)
+                        )
+                    )
+                    or (
+                        opaque_field is not None
+                        and elem.kind == "struct"
+                        and (
+                            self._named_value_struct_supported(elem)
+                            or (
+                                (_elem_value := self._struct_value_fact(
+                                    elem
+                                )) is not None
+                                and _elem_value.type_id != ""
+                            )
                         )
                     )
                 )
@@ -14695,12 +14734,14 @@ class _Builder:
         saved_pointer_param_aliases = getattr(
             self, "_param_pointer_aliases", {}
         )
+        saved_element_share = getattr(self, "_element_share", {})
         self._pending_labels = []
         self._goto_seen = False
         self._seen_labels = set()
         self._pointer_param_reseats = set()
         self._pending_param_reseats = []
         self._param_pointer_aliases = {}
+        self._element_share = {}
         self.frames = []
         self.pinned = set()
         self.escaped = set()
@@ -14833,6 +14874,7 @@ class _Builder:
             self._pointer_param_reseats = saved_pointer_param_reseats
             self._pending_param_reseats = saved_pending_param_reseats
             self._param_pointer_aliases = saved_pointer_param_aliases
+            self._element_share = saved_element_share
             self._defer_result_deps = saved_defer_result_deps
             self._deferred_exits = saved_deferred_exits
             self._func_arg_invocations = saved_func_args
@@ -16065,6 +16107,26 @@ class _Builder:
                     self._param_pointer_aliases.pop(
                         binding.id, None
                     )
+                extract_rhs = (
+                    rights[i] if len(lefts) == len(rights) else None
+                )
+                if (
+                    extract_rhs is not None
+                    and extract_rhs.type == "index_expression"
+                    and self._opaque_container_field_target(
+                        extract_rhs.child_by_field_name("operand"),
+                        params,
+                        allow_struct_elements=True,
+                        allow_struct_element_arrays=True,
+                        for_write=True,
+                    )
+                    is not None
+                ):
+                    # `x := p.B[i]` — the copy still shares each
+                    # pointer member's pointee with the element.
+                    self._element_share[binding.id] = extract_rhs
+                else:
+                    self._element_share.pop(binding.id, None)
                 self._bind_struct_container_value(
                     binding.id,
                     (
@@ -17736,12 +17798,19 @@ class _Builder:
                     # A bare `q = …` on a LOCAL previously handed a
                     # param's pointee (`q := p`) reseats it away —
                     # the alias no longer names the caller's slot.
-                    if (
-                        lhs_ref is not None
-                        and lhs_ref.binding_id
-                        in self._param_pointer_aliases
-                    ):
-                        self._param_pointer_aliases.pop(
+                    if lhs_ref is not None:
+                        if (
+                            lhs_ref.binding_id
+                            in self._param_pointer_aliases
+                        ):
+                            self._param_pointer_aliases.pop(
+                                lhs_ref.binding_id, None
+                            )
+                        # `x = e` reseats a name an earlier
+                        # `x := p.B[i]` marked — the element
+                        # share no longer describes what x
+                        # holds.
+                        self._element_share.pop(
                             lhs_ref.binding_id, None
                         )
                     continue

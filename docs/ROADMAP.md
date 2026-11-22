@@ -4330,7 +4330,15 @@ stores through the pointer member (`p.B[k].W.V = x`) — only
 a direct field store on the map element (`p.B[k].W = q`)
 stays closed because Go itself rejects it. Handing the member to a call —
 `G(p.A[i].W, x)` — folds the callee's writes through the
-pointer into the pointee like `p.A[i].W = q`. A pointer member read with no deeper field —
+pointer into the pointee like `p.A[i].W = q`. Extracting the
+element into a name — `x := p.B[i]` (likewise `p.A[i]` and
+`p.M[k]`) — binds the copy to the group's deps, and a member
+path on the copy that crosses a pointer (`x.W.V`, and the
+store `x.W.V = v`) names the extracted element's memory like
+the indexed form does; a plain `x.V` read still sees the
+copy's own deps. Reassigning `x` clears the share, and a
+non-parameter root's extraction (`x := o.B[i]`) keeps the
+pointer-member path closed. A pointer member read with no deeper field —
 `p.A[i].W`, `p.B[i].W`, `p.A[i].W == nil` — reads the
 member's slot value, which names the same group deps as a
 scalar leaf. Whole-element stores admit the same way on every

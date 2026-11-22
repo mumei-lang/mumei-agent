@@ -33939,6 +33939,102 @@ def test_named_struct_value_element_pointer_member_read(
 
 
 @pytest.mark.parametrize(
+    "declarations, expected",
+    [
+        # `x := p.B[i]` copies the element, but the copy's pointer
+        # member still names the element's own pointee — `x.W.V`
+        # resolves like `p.B[i].W.V`.
+        (
+            "type E2 struct { V int64 }\n"
+            "type Elem struct { W *E2 }\n"
+            "type S struct { B []Elem }\n"
+            "func F(p *S, i int64) int64 {\n"
+            "\tx := p.B[i]\n"
+            "\treturn x.W.V\n}\n",
+            frozenset({0, 1}),
+        ),
+        # Same share through a `[]*Elem` element.
+        (
+            "type E2 struct { V int64 }\n"
+            "type Elem struct { W *E2 }\n"
+            "type S struct { B []*Elem }\n"
+            "func F(p *S, i int64) int64 {\n"
+            "\tx := p.B[i]\n"
+            "\treturn x.W.V\n}\n",
+            frozenset({0, 1}),
+        ),
+        # ... and through a map element.
+        (
+            "type E2 struct { V int64 }\n"
+            "type Elem struct { W *E2 }\n"
+            "type S struct { B map[int64]Elem }\n"
+            "func F(p *S, k int64) int64 {\n"
+            "\tx := p.B[k]\n"
+            "\treturn x.W.V\n}\n",
+            frozenset({0, 1}),
+        ),
+        # A store through the copy's pointer member reaches the
+        # element's memory like `p.B[i].W.V = v` does.
+        (
+            "type E2 struct { V int64 }\n"
+            "type Elem struct { W *E2 }\n"
+            "type S struct { B []Elem }\n"
+            "func F(p *S, i int64, v int64) int64 {\n"
+            "\tx := p.B[i]\n"
+            "\tx.W.V = v\n"
+            "\treturn p.B[0].W.V\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # The bare extraction binds the copy to the group's deps.
+        (
+            "type E2 struct { V int64 }\n"
+            "type Elem struct { V int64; W *E2 }\n"
+            "type S struct { B []Elem }\n"
+            "func F(p *S, i int64) int64 {\n"
+            "\tx := p.B[i]\n"
+            "\treturn x.V\n}\n",
+            frozenset({0, 1}),
+        ),
+    ],
+)
+def test_named_struct_value_element_extract_share(
+    go_types_helper, declarations, expected
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == expected
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        # `x = e` reseats the name — the copy's pointer member no
+        # longer names the element's memory.
+        "type E2 struct { V int64 }\n"
+        "type Elem struct { W *E2 }\n"
+        "type S struct { B []Elem }\n"
+        "func F(p *S, i int64, e Elem) int64 {\n"
+        "\tx := p.B[i]\n"
+        "\tx = e\n"
+        "\treturn x.W.V\n}\n",
+        # A local (non-parameter) root's extraction keeps the
+        # member path closed.
+        "type E2 struct { V int64 }\n"
+        "type Elem struct { W *E2 }\n"
+        "type S struct { B []Elem }\n"
+        "func F(o S, i int64) int64 {\n"
+        "\tx := o.B[i]\n"
+        "\treturn x.W.V\n}\n",
+    ],
+)
+def test_named_struct_value_element_extract_share_closed(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.gaps
+
+
+@pytest.mark.parametrize(
     "declarations",
     [
         # `R [N]Elem` — an array member's value-copy semantics keep
