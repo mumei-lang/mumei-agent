@@ -742,14 +742,13 @@ class _SolBindings:
                 if functions:
                     # Same signature in several unrelated bases resolves
                     # to the most derived, the first in linearization
-                    # order; differing signatures form an overload set
+                    # order; differing signatures — or any signature the
+                    # scanner could not pin down — form an overload set
                     # the call resolves against, which stays opaque.
-                    if len(
-                        {
-                            record.parameter_signature
-                            for record in functions
-                        }
-                    ) == 1:
+                    signatures = {
+                        record.parameter_signature for record in functions
+                    }
+                    if len(signatures) == 1 and None not in signatures:
                         return member, functions[0], None
                     return member, None, "ambiguous_overload"
                 if saw_private:
