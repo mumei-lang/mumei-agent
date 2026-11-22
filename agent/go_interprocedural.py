@@ -2367,7 +2367,7 @@ class _Builder:
         }
 
     def _scalar_container_field(
-        self, sel: Any
+        self, sel: Any, params: dict | None = None
     ) -> tuple[str | None, Any]:
         """`s.F` (or a nested `s.W.F`) naming a scalar-element
         collection field — or its one-level nested form — on a
@@ -2425,6 +2425,21 @@ class _Builder:
                 )
                 or root_ref.binding_id
                 in self._opaque_container_tokens
+                or (
+                    params is not None
+                    and root_ref.binding_id in params
+                    and (
+                        (root_binding := self.bindings.get(
+                            root_ref.binding_id
+                        )) is not None
+                    )
+                    and root_binding.type is not None
+                    and root_binding.type.kind == "pointer"
+                    and getattr(
+                        root_binding.type, "elem", None
+                    ) is not None
+                    and root_binding.type.elem.kind == "struct"
+                )
             )
         ):
             return None, None
@@ -2589,7 +2604,9 @@ class _Builder:
         *,
         allow_struct_elements: bool = False,
     ) -> tuple[str, str, Any, frozenset, Any] | None:
-        root_id, member = self._scalar_container_field(sel)
+        root_id, member = self._scalar_container_field(
+                sel, params
+            )
         if root_id is None or member is None:
             return None
         if self._scalar_container_field_pointer_crossing(sel, params):
@@ -4623,6 +4640,37 @@ class _Builder:
                     )
                 return tokens
             if (
+                binding is not None
+                and binding.type is not None
+                and binding.type.kind == "pointer"
+                and ref.binding_id in (params or {})
+            ):
+                # `p *S` parameter — the pointer shares its pointee
+                # with the caller the way a slice shares its
+                # backing, so a struct pointee with collection
+                # members mints a container token keyed on `p`.
+                # Local pointer bindings (`q := &o`), reseats and
+                # `**S` roots stay closed: their aliasing cannot be
+                # resolved in this slot model.
+                pointee = getattr(binding.type, "elem", None)
+                if (
+                    pointee is not None
+                    and pointee.kind == "struct"
+                    and self._struct_collection_members(
+                        pointee, binding
+                    )
+                ):
+                    tokens = self._opaque_container_tokens.get(
+                        ref.binding_id
+                    )
+                    if not tokens:
+                        tokens = frozenset({ref.binding_id})
+                        self._opaque_container_tokens[
+                            ref.binding_id
+                        ] = tokens
+                    return tokens
+                return None
+            if (
                 binding is None
                 or binding.type is None
                 or binding.type.kind not in {"slice", "array", "map"}
@@ -4698,7 +4746,9 @@ class _Builder:
             imported = self._opaque_container_imported_var_bind(rhs)
             if imported is not None:
                 return imported
-            root_id, member = self._scalar_container_field(rhs)
+            root_id, member = self._scalar_container_field(
+                rhs, params
+            )
             if root_id is None:
                 return None
             if member.type.kind == "array" and not (
@@ -17048,7 +17098,7 @@ class _Builder:
                     # reads that field's contents too.
                     refs.append((ref, True, bool(type_id), nested))
                     field_root, field_member = (
-                        self._scalar_container_field(lhs)
+                        self._scalar_container_field(lhs, params)
                     )
                     if field_root is not None:
                         # `s.F = v` — the field's share group
@@ -24953,7 +25003,7 @@ class _Builder:
                         self._pin_value_promotion_chain(ref, promotion)
                     return locals_.get(ref.binding_id, frozenset())
                 field_root, _field_member = self._scalar_container_field(
-                    node
+                    node, params
                 )
                 if field_root is not None:
                     field_deps = locals_.get(
@@ -32518,7 +32568,7 @@ class _Builder:
                     self.indirect_writes |= stored
                 else:
                     root_id, member = self._scalar_container_field(
-                        arg_node
+                        arg_node, params
                     )
                     if (
                         root_id is not None
