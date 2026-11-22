@@ -966,13 +966,13 @@ class _RustBindings:
             bound = bindings.get(a)
             # Lifetimes are erased for consistency — `&'a u8` and
             # `&'b u8` bind the same parameter.
-            normalized = re.sub(r"'\w+", "", b).replace(" ", "")
+            normalized = re.sub(r"'\w+(?!')", "", b).replace(" ", "")
             if bound is None:
                 bindings[a] = normalized
                 return True
             return bound == normalized
-        ref_a = re.fullmatch(r"&\s*(?:'\w+\s+)?(mut\s+)?(.+)", a)
-        ref_b = re.fullmatch(r"&\s*(?:'\w+\s+)?(mut\s+)?(.+)", b)
+        ref_a = re.fullmatch(r"&\s*(?:'\w+\s*)?(mut\s*)?(.+)", a)
+        ref_b = re.fullmatch(r"&\s*(?:'\w+\s*)?(mut\s*)?(.+)", b)
         if (ref_a is None) != (ref_b is None):
             return False
         if ref_a is not None:
@@ -1006,6 +1006,23 @@ class _RustBindings:
                 for x, y in zip(sub_a, sub_b)
             )
         return a.replace(" ", "") == b.replace(" ", "")
+
+    def _type_args_match(
+        self, a: str | None, b: str | None, params: frozenset[str]
+    ) -> bool:
+        """Positional structural equality of two type-argument keys
+        — `W<(u8,u16)>` and `W<(u8, u16)>` are the same type."""
+        if (a is None) != (b is None):
+            return False
+        if a is None:
+            return True
+        parts_a = self._type_arg_list(a)
+        parts_b = self._type_arg_list(b)
+        bindings: dict[str, str] = {}
+        return len(parts_a) == len(parts_b) and all(
+            self._type_arg_match(x, y, params, bindings)
+            for x, y in zip(parts_a, parts_b)
+        )
 
     def _type_args_key(self, args_node: Any | None) -> str | None:
         """Normalized `Wrap<i32>`-style type-argument text."""
@@ -1103,7 +1120,9 @@ class _RustBindings:
             if (
                 record.member_impl_args is not None
                 and not record.member_impl_generic
-                and record.member_impl_args != impl_args
+                and not self._type_args_match(
+                    record.member_impl_args, impl_args, frozenset()
+                )
             ):
                 return False
             return True
@@ -1140,7 +1159,9 @@ class _RustBindings:
             ) in impl_traits:
                 if edge_args is not None:
                     if not edge_generic:
-                        if edge_args != impl_args:
+                        if not self._type_args_match(
+                            edge_args, impl_args, frozenset()
+                        ):
                             continue
                     elif impl_args is not None:
                         # Generic impl (`impl<A> T for W<A, i32>`):

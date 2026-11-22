@@ -2232,3 +2232,54 @@ fn g(u: {miss}) {{ u.m(); }}
         member_m = _bindings(report, "m", "associated_function")[0]
         assert _call(report, source, "w.m()").target == member_m.id
         assert _call(report, source, "u.m()").target == ""
+
+
+def test_member_generic_impl_whitespace_independent_concrete_args():
+    # `W<(u8,u16)>` and `W<(u8, u16)>` spell the same type — concrete
+    # impl-arg keys compare structurally, not by raw text.
+    source = """
+struct W<A, B> { a: A, b: B }
+trait T { fn m(&self) {} }
+impl T for W<(u8,u16), u8> {}
+fn f(w: W<(u8, u16), u8>) { w.m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    member_m = _bindings(report, "m", "associated_function")[0]
+    assert _call(report, source, "w.m()").target == member_m.id
+
+
+def test_member_generic_impl_repeated_const_param_must_bind_same_value():
+    # `impl<const A: usize> T for W<A, A>` covers `W<3, 3>` but not
+    # `W<3, 4>` — repeated parameters bind consistently.
+    source = """
+struct W<A, B> { a: A, b: B }
+trait T { fn m(&self) {} }
+impl<const A: usize> T for W<A, A> {}
+fn f(w: W<3, 4>) { w.m(); }
+fn g(w: W<3, 3>) { w.m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    member_m = _bindings(report, "m", "associated_function")[0]
+    calls = [
+        c
+        for c in report.calls
+        if source[c.span.start : c.span.end] == "w.m()"
+    ]
+    assert calls[0].target == ""
+    assert calls[1].target == member_m.id
+
+
+def test_member_generic_impl_spaceless_reference_syntax():
+    # `&mut&u8` and `&'b[u8]` are valid Rust — optional whitespace
+    # after `mut` and lifetimes must not break the reference match.
+    source = """
+struct W<A, B> { a: A, b: B }
+trait T { fn m(&self) {} }
+impl<A> T for W<&mut A, u8> {}
+impl<'b> T for W<&'b [u8], i8> {}
+fn f(w: W<&mut&u8, u8>, g: W<&'b[u8], i8>) { w.m(); g.m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    member_m = _bindings(report, "m", "associated_function")[0]
+    assert _call(report, source, "w.m()").target == member_m.id
+    assert _call(report, source, "g.m()").target == member_m.id
