@@ -5507,6 +5507,28 @@ fn g(w: W<i32>) {
     assert _call(report, source, "w.items[0].wrong()").target == ""
 
 
+def test_index_field_element_across_newline_args() -> None:
+    source = """
+mod m {
+    pub struct P;
+    impl P { pub fn wrong(&self) {} }
+    pub struct W<T> { pub items: Vec<
+T
+> }
+}
+struct P;
+impl P { fn pm(&self) {} }
+fn f(w: m::W<P>) {
+    w.items[0].pm();
+    w.items[0].wrong();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    assert _call(report, source, "w.items[0].pm()").target == pm.id
+    assert _call(report, source, "w.items[0].wrong()").target == ""
+
+
 def test_index_element_resolves_at_annotation_scope():
     source = """
 mod m { pub struct P; impl P { pub fn p(&self) {} } }

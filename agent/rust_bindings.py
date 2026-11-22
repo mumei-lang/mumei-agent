@@ -2939,7 +2939,7 @@ class _RustBindings:
         )
         if param_map:
             member_text = self.text(member.type_node)
-            inner = re.search(r"<(.*)>", member_text)
+            inner = re.search(r"<([\s\S]*)>", member_text)
             elem_text = (
                 inner.group(1) if inner else member_text
             ).strip()
