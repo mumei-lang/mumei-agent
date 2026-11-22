@@ -1,11 +1,17 @@
 import hashlib
 import json
+import socket
 import sys
 import threading
+from dataclasses import replace
 
 import pytest
 
-from agent.attempt_runner import memory_bound_enforceable
+import agent.attempt_schedule as attempt_schedule
+from agent.attempt_runner import (
+    memory_bound_enforceable,
+    network_isolation_enforceable,
+)
 from agent.attempt_schedule import (
     MAX_SCHEDULE_ATTEMPTS,
     SCHEDULE_SCHEMA_VERSION,
@@ -40,6 +46,20 @@ def environment_probe(present):
     return argv(
         "0 if ('MUMEI_TEST_FAKE_SENTINEL' in __import__('os').environ) "
         f"is {present} else 1"
+    )
+
+
+def network_probe(port):
+    return (
+        PY,
+        "-c",
+        "import socket,sys\n"
+        "try:\n"
+        f" s=socket.create_connection(('127.0.0.1',{port}), timeout=3)\n"
+        "except OSError:\n"
+        " sys.exit(1)\n"
+        "else:\n"
+        " s.close(); sys.exit(0)\n",
     )
 
 
@@ -170,6 +190,155 @@ def test_schedule_helper_scrubs_environment_when_permissions_are_undeclared(
     assert environment is not None
     assert "MUMEI_TEST_FAKE_SENTINEL" not in environment
     assert set(environment) <= {"PATH", "SYSTEMROOT"}
+
+
+@pytest.mark.parametrize(
+    (
+        "required_permissions",
+        "allowed_permissions",
+        "enforceable",
+        "expected_isolation",
+    ),
+    [
+        (
+            frozenset({"network.connect"}),
+            frozenset({"network.connect"}),
+            True,
+            False,
+        ),
+        (frozenset(), frozenset({"network.connect"}), True, True),
+        (frozenset(), frozenset(), True, True),
+        (frozenset(), frozenset(), False, False),
+    ],
+    ids=[
+        "declared-and-allowed",
+        "allowed-not-declared",
+        "no-permissions",
+        "boundary-unavailable",
+    ],
+)
+def test_schedule_computes_network_isolation_from_permissions(
+    monkeypatch,
+    required_permissions,
+    allowed_permissions,
+    enforceable,
+    expected_isolation,
+):
+    registry = AdapterRegistry()
+    registry.register(
+        descriptor("alpha", required_permissions=required_permissions)
+    )
+    requested_isolation = []
+    real_dispatch = attempt_schedule.dispatch_attempt
+
+    def record_dispatch(sequence, child_argv, **kwargs):
+        requested_isolation.append(kwargs["isolate_network"])
+        kwargs["isolate_network"] = False
+        return real_dispatch(sequence, child_argv, **kwargs)
+
+    monkeypatch.setattr(attempt_schedule, "dispatch_attempt", record_dispatch)
+    monkeypatch.setattr(
+        attempt_schedule,
+        "network_isolation_enforceable",
+        lambda: enforceable,
+    )
+    result = schedule(
+        registry,
+        ("alpha",),
+        {"alpha": argv(0)},
+        policy=policy(allowed_permissions=allowed_permissions),
+    )
+
+    assert result.outcome == "selected"
+    assert requested_isolation == [expected_isolation]
+
+
+def test_network_isolation_predicate_treats_unspecified_policy_as_denied():
+    registry = AdapterRegistry()
+    registry.register(
+        descriptor(
+            "alpha",
+            required_permissions=frozenset({"network.connect"}),
+        )
+    )
+    plan = registry.plan(
+        request(),
+        policy(allowed_permissions=None),
+        observations("alpha"),
+    )
+
+    assert plan.selected is not None
+    assert plan.selected.required_permissions is None
+    assert attempt_schedule._network_isolated(plan) is True
+
+
+def test_network_isolation_predicate_rejects_disallowed_permission():
+    # Explicit permission mismatches are rejected before an attempt is
+    # prepared, so exercise the dispatch predicate with a plan snapshot.
+    registry = AdapterRegistry()
+    registry.register(descriptor("alpha", required_permissions=frozenset()))
+    plan = registry.plan(
+        request(),
+        policy(allowed_permissions=frozenset()),
+        observations("alpha"),
+    )
+    assert plan.selected is not None
+    plan = replace(
+        plan,
+        selected=replace(
+            plan.selected,
+            required_permissions=frozenset({"network.connect"}),
+        ),
+    )
+
+    assert attempt_schedule._network_isolated(plan) is True
+
+
+@pytest.mark.skipif(
+    not network_isolation_enforceable(),
+    reason="network isolation requires an unprivileged network namespace",
+)
+def test_schedule_network_permission_controls_loopback_connection():
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        port = listener.getsockname()[1]
+        probe = network_probe(port)
+
+        undeclared_registry = AdapterRegistry()
+        undeclared_registry.register(
+            descriptor("alpha", required_permissions=frozenset())
+        )
+        undeclared = schedule(
+            undeclared_registry,
+            ("alpha",),
+            {"alpha": probe},
+            policy=policy(allowed_permissions=frozenset()),
+        )
+
+        declared_registry = AdapterRegistry()
+        declared_registry.register(
+            descriptor(
+                "alpha",
+                required_permissions=frozenset({"network.connect"}),
+            )
+        )
+        declared = schedule(
+            declared_registry,
+            ("alpha",),
+            {"alpha": probe},
+            policy=policy(
+                allowed_permissions=frozenset({"network.connect"})
+            ),
+        )
+
+    assert undeclared.outcome == "exhausted"
+    assert undeclared.selected_adapter_id is None
+    assert undeclared.entries[0].terminal_state == "exited"
+    assert undeclared.entries[0].exit_code != 0
+    assert declared.outcome == "selected"
+    assert declared.selected_adapter_id == "alpha"
+    assert declared.entries[0].exit_code == 0
 
 
 def test_failed_exit_falls_back_to_next_adapter():

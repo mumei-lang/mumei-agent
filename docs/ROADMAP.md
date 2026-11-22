@@ -170,9 +170,9 @@ document. MCP `verify_plan` and `verify-schedule` do not write this log.
 Scheduled adapter attempts run with only `PATH` (and `SYSTEMROOT` on
 Windows) unless the selected adapter declares `environment.read` and the
 explicit policy permits it. Undeclared permissions fail closed. This
-enforces only the environment category; `filesystem.*`, `network.connect`, and
-`process.spawn` remain declared-only. Environment scrubbing is not a
-sandbox and is not Evidence.
+enforces the environment category and, where available, `network.connect`;
+`filesystem.*` and `process.spawn` remain declared-only. Environment scrubbing
+is not a sandbox and is not Evidence.
 
 ### C04 declarative adapter overlay
 
@@ -191,6 +191,14 @@ Scheduled attempts without a host `memory_bound_mb` use the plan's effective
 `max_memory_mb` — as the POSIX RLIMIT ceiling. Where no bound mechanism exists,
 it remains unenforced as before. This is a resource bound, not a sandbox or
 Evidence.
+
+### C04 network.connect enforcement at dispatch
+
+Scheduled attempts whose adapter does not declare `network.connect` or whose
+policy does not permit it run in a fresh network namespace via
+`unshare --net --map-current-user` where the host supports unprivileged user
+namespaces; otherwise it remains unenforced as before. This is not a sandbox
+or Evidence; `filesystem.*` and `process.spawn` remain declared-only.
 
 ### C04 self-reported failure is not a scheduling success
 

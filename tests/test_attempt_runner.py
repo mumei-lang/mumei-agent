@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -145,6 +146,100 @@ def test_run_rejects_invalid_environment(environment):
         ValueError, match="^invalid attempt run environment$"
     ):
         AttemptRunner().run(request(), argv("pass"), environment=environment)
+
+
+@pytest.mark.skipif(
+    not attempt_runner.network_isolation_enforceable(),
+    reason="network isolation requires an unprivileged network namespace",
+)
+def test_run_network_isolation_blocks_loopback_connection():
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        port = listener.getsockname()[1]
+        code = (
+            "import socket,sys\n"
+            "try:\n"
+            f" s=socket.create_connection(('127.0.0.1',{port}), timeout=3)\n"
+            "except OSError:\n"
+            " sys.exit(1)\n"
+            "else:\n"
+            " s.close(); sys.exit(0)\n"
+        )
+        direct = AttemptRunner().run(request(), argv(code))
+        isolated = AttemptRunner().run(
+            request(), argv(code), isolate_network=True
+        )
+
+    assert direct.record.state == "exited"
+    assert direct.record.events[-1].exit_code == 0
+    assert isolated.record.state == "exited"
+    assert isolated.record.events[-1].exit_code != 0
+
+
+def test_run_network_isolation_requires_boundary_before_spawn(monkeypatch):
+    spawned = False
+
+    def fail_if_spawned(*args, **kwargs):
+        nonlocal spawned
+        spawned = True
+        pytest.fail("isolation validation must precede spawn")
+
+    monkeypatch.setattr(attempt_runner, "_UNSHARE", None)
+    monkeypatch.setattr(attempt_runner.subprocess, "Popen", fail_if_spawned)
+    with pytest.raises(
+        ValueError,
+        match="^attempt run network isolation requires a network namespace boundary$",
+    ):
+        AttemptRunner().run(
+            request(), argv("pass"), isolate_network=True
+        )
+    assert spawned is False
+
+
+@pytest.mark.parametrize("isolate_network", [1, "true"])
+def test_run_rejects_non_boolean_network_isolation(isolate_network):
+    with pytest.raises(
+        ValueError, match="^invalid attempt run network isolation$"
+    ):
+        AttemptRunner().run(
+            request(), argv("pass"), isolate_network=isolate_network
+        )
+
+
+@pytest.mark.skipif(
+    not attempt_runner.network_isolation_enforceable(),
+    reason="network isolation requires an unprivileged network namespace",
+)
+def test_run_network_isolation_missing_target_reports_spawn_failure():
+    target = ("/nonexistent-mumei-network-isolation-target",)
+    direct = AttemptRunner().run(request(), target)
+    isolated = AttemptRunner().run(
+        request(), target, isolate_network=True
+    )
+
+    assert direct.record.state == "failed"
+    assert isolated.record.state == direct.record.state
+    assert [event.kind for event in isolated.record.events] == [
+        event.kind for event in direct.record.events
+    ]
+    assert isolated.record.events[-1].exit_code is None
+
+
+@pytest.mark.skipif(
+    not attempt_runner.network_isolation_enforceable()
+    or not attempt_runner.memory_bound_enforceable(),
+    reason="requires network namespace and memory-bound enforcement",
+)
+def test_run_network_isolation_combines_with_memory_bound():
+    result = AttemptRunner().run(
+        request(),
+        argv("pass"),
+        memory_bound_mb=256,
+        isolate_network=True,
+    )
+    assert result.record.state == "exited"
+    assert result.record.events[-1].exit_code == 0
 
 
 @pytest.mark.skipif(
@@ -1310,6 +1405,63 @@ def test_detect_ulimit_sh_rejects_non_posix_hosts(monkeypatch):
         lambda argv, **kwargs: pytest.fail("probe must not run"),
     )
     assert attempt_runner._detect_ulimit_sh() is None
+
+
+def test_detect_unshare_requires_linux(monkeypatch):
+    monkeypatch.setattr(attempt_runner.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        attempt_runner.shutil,
+        "which",
+        lambda name: pytest.fail("unshare lookup must not run"),
+    )
+    assert attempt_runner._detect_unshare() is None
+
+
+def test_detect_unshare_returns_none_without_binary(monkeypatch):
+    monkeypatch.setattr(attempt_runner.sys, "platform", "linux")
+    monkeypatch.setattr(attempt_runner.shutil, "which", lambda name: None)
+    monkeypatch.setattr(
+        attempt_runner.subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("probe must not run"),
+    )
+    assert attempt_runner._detect_unshare() is None
+
+
+def test_detect_unshare_probes_the_required_namespace_options(monkeypatch):
+    monkeypatch.setattr(attempt_runner.sys, "platform", "linux")
+    monkeypatch.setattr(
+        attempt_runner.shutil, "which", lambda name: "/usr/bin/unshare"
+    )
+
+    def fake_run(argv, **kwargs):
+        assert argv == [
+            "/usr/bin/unshare",
+            "--net",
+            "--map-current-user",
+            "--",
+            "true",
+        ]
+        assert kwargs["stdout"] is subprocess.DEVNULL
+        assert kwargs["stderr"] is subprocess.DEVNULL
+        assert kwargs["timeout"] == 10
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(attempt_runner.subprocess, "run", fake_run)
+    assert attempt_runner._detect_unshare() == "/usr/bin/unshare"
+
+
+def test_detect_unshare_treats_probe_errors_as_absent(monkeypatch):
+    monkeypatch.setattr(attempt_runner.sys, "platform", "linux")
+    monkeypatch.setattr(
+        attempt_runner.shutil, "which", lambda name: "/usr/bin/unshare"
+    )
+
+    def fake_run(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, 10)
+
+    monkeypatch.setattr(attempt_runner.subprocess, "run", fake_run)
+    assert attempt_runner._detect_unshare() is None
 
 
 def test_run_memory_bound_non_posix_sh_still_rejected(monkeypatch):
