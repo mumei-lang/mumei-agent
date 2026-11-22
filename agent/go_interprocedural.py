@@ -16984,32 +16984,24 @@ class _Builder:
                     and binding.type is not None
                     and binding.type.kind == "function"
                 ):
-                    candidate_factory_source = (
-                        self._closure_factory_source(
-                            rights[i],
-                            params,
-                            locals_pre,
-                            captures_before=factory_captures_pre,
-                            writes_before=factory_writes_pre,
-                            star_before=factory_star_pre,
-                            calls_before=factory_calls_pre,
-                            pointee_before=factory_pointee_pre,
-                            opaque_before=factory_opaque_pre,
-                            aliases_before=factory_aliases_pre,
-                            mv_before=factory_mv_pre,
-                            imv_before=factory_imv_pre,
-                            factory_literals_before=factory_literals_pre,
-                        )
+                    factory_source = self._closure_factory_bind_source(
+                        rights[i],
+                        binding,
+                        params,
+                        locals_pre,
+                        conditional=conditional or self._may_skip > 0,
+                        statement=node,
+                        captures_before=factory_captures_pre,
+                        writes_before=factory_writes_pre,
+                        star_before=factory_star_pre,
+                        calls_before=factory_calls_pre,
+                        pointee_before=factory_pointee_pre,
+                        opaque_before=factory_opaque_pre,
+                        aliases_before=factory_aliases_pre,
+                        mv_before=factory_mv_pre,
+                        imv_before=factory_imv_pre,
+                        factory_literals_before=factory_literals_pre,
                     )
-                    if (
-                        (conditional or self._may_skip > 0)
-                        and candidate_factory_source is not None
-                    ):
-                        raise _Unsupported(
-                            "unsupported_statement", _span(node)
-                        )
-                    if not (conditional or self._may_skip > 0):
-                        factory_source = candidate_factory_source
                 # `s := lib.G(a)` — a container-typed call result
                 # binds a local whose single dep set conflates every
                 # element; the fresh backing keys on the call node.
@@ -18225,11 +18217,16 @@ class _Builder:
                         and binding.type is not None
                         and binding.type.kind == "function"
                     ):
-                        candidate_factory_source = (
-                            self._closure_factory_source(
+                        factory_source = (
+                            self._closure_factory_bind_source(
                                 value_nodes[i],
+                                binding,
                                 params,
                                 locals_pre,
+                                conditional=(
+                                    conditional or self._may_skip > 0
+                                ),
+                                statement=node,
                                 captures_before=factory_captures_pre,
                                 writes_before=factory_writes_pre,
                                 star_before=factory_star_pre,
@@ -18244,15 +18241,6 @@ class _Builder:
                                 ),
                             )
                         )
-                        if (
-                            (conditional or self._may_skip > 0)
-                            and candidate_factory_source is not None
-                        ):
-                            raise _Unsupported(
-                                "unsupported_statement", _span(spec)
-                            )
-                        if not (conditional or self._may_skip > 0):
-                            factory_source = candidate_factory_source
                     if binding.type.kind == "interface" and value_nodes:
                         rhs = (
                             value_nodes[i]
@@ -21461,10 +21449,13 @@ class _Builder:
                     ):
                         continue
                     factory_sources[i] = (
-                        self._closure_factory_source(
+                        self._closure_factory_bind_source(
                             rights[i],
+                            binding,
                             params,
                             locals_pre,
+                            conditional=False,
+                            statement=node,
                             captures_before=captures_before,
                             writes_before=writes_before,
                             star_before=star_before,
@@ -21888,77 +21879,34 @@ class _Builder:
             for dirty_id in double_pointer_dirty_targets.values():
                 self._double_pointer_dirty.add(dirty_id)
             for i, (ref, value) in enumerate(zip(refs, values)):
-                rhs = (
-                    self._strip_parens(rights[i])
-                    if len(lefts) == len(rights)
-                    else None
-                )
                 if (
-                    ref is not None
+                    (conditional or self._may_skip > 0)
                     and len(lefts) == len(rights)
-                    and rhs is not None
-                    and rhs.type == "call_expression"
                 ):
                     target_id = getattr(ref, "binding_id", None)
-                    target_binding = (
+                    binding = (
                         self.bindings.get(target_id)
                         if target_id is not None
                         else None
                     )
-                    callee = self._strip_parens(
-                        rhs.child_by_field_name("function")
+                    self._closure_factory_bind_source(
+                        rights[i],
+                        binding,
+                        params,
+                        locals_pre,
+                        conditional=True,
+                        statement=node,
+                        captures_before=captures_before,
+                        writes_before=writes_before,
+                        star_before=star_before,
+                        calls_before=calls_before,
+                        pointee_before=pointee_before,
+                        opaque_before=opaque_before,
+                        aliases_before=aliases_before,
+                        mv_before=mv_before,
+                        imv_before=imv_before,
+                        factory_literals_before=factory_literals_before,
                     )
-                    callee_ref = (
-                        self.references.get(self.node_key(callee))
-                        if callee is not None
-                        and callee.type == "identifier"
-                        else None
-                    )
-                    callee_id = (
-                        callee_ref.binding_id
-                        if callee_ref is not None
-                        else None
-                    )
-                    conditional_function_bind = (
-                        (conditional or self._may_skip > 0)
-                        and target_binding is not None
-                        and target_binding.type is not None
-                        and target_binding.type.kind == "function"
-                    )
-                    factory_source = None
-                    if conditional_function_bind:
-                        factory_source = self._closure_factory_source(
-                            rhs,
-                            params,
-                            locals_pre,
-                            captures_before=captures_before,
-                            writes_before=writes_before,
-                            star_before=star_before,
-                            calls_before=calls_before,
-                            pointee_before=pointee_before,
-                            opaque_before=opaque_before,
-                            aliases_before=aliases_before,
-                            mv_before=mv_before,
-                            imv_before=imv_before,
-                            factory_literals_before=(
-                                factory_literals_before
-                            ),
-                        )
-                    if (
-                        conditional_function_bind
-                        and (
-                            factory_source is not None
-                            or (
-                                callee_id is not None
-                                and callee_id
-                                not in self.closure_factory_literals
-                                and callee_id in self.opaque_callees
-                            )
-                        )
-                    ):
-                        raise _Unsupported(
-                            "unsupported_statement", _span(node)
-                        )
                 if ref is None:
                     if i in external_write_targets:
                         # The member/package-var store landed in
@@ -34298,6 +34246,48 @@ class _Builder:
                 targets |= _chase(ref.binding_id)
         return targets
 
+    def _closure_factory_returned_literals(
+        self, literal: Any
+    ) -> tuple[list[Any], bool]:
+        body = literal.child_by_field_name("body")
+        if body is None:
+            return [], False
+        returned_literals: list[Any] = []
+        saw_return = False
+        all_returns_are_literals = True
+        stack = list(_children(body))
+        while stack:
+            current = stack.pop()
+            if current.type == "func_literal":
+                continue
+            if current.type == "return_statement":
+                saw_return = True
+                expressions = [
+                    child
+                    for child in current.named_children
+                    if child.type != "comment"
+                ]
+                if (
+                    len(expressions) == 1
+                    and expressions[0].type == "expression_list"
+                ):
+                    expressions = [
+                        child
+                        for child in expressions[0].named_children
+                        if child.type != "comment"
+                    ]
+                if len(expressions) != 1:
+                    all_returns_are_literals = False
+                    continue
+                returned = self._strip_parens(expressions[0])
+                if returned is None or returned.type != "func_literal":
+                    all_returns_are_literals = False
+                    continue
+                returned_literals.append(returned)
+                continue
+            stack.extend(_children(current))
+        return returned_literals, saw_return and all_returns_are_literals
+
     def _closure_factory_source(
         self,
         rhs: Any,
@@ -34332,44 +34322,6 @@ class _Builder:
         )
         if callee is None:
             return None
-
-        def returned_literals(literal: Any) -> list[Any] | None:
-            body = literal.child_by_field_name("body")
-            if body is None:
-                return None
-            returned_literals: list[Any] = []
-            stack = list(_children(body))
-            while stack:
-                current = stack.pop()
-                if current.type == "func_literal":
-                    continue
-                if current.type == "return_statement":
-                    expressions = [
-                        child
-                        for child in current.named_children
-                        if child.type != "comment"
-                    ]
-                    if (
-                        len(expressions) == 1
-                        and expressions[0].type == "expression_list"
-                    ):
-                        expressions = [
-                            child
-                            for child in expressions[0].named_children
-                            if child.type != "comment"
-                        ]
-                    if len(expressions) != 1:
-                        return None
-                    returned = self._strip_parens(expressions[0])
-                    if (
-                        returned is None
-                        or returned.type != "func_literal"
-                    ):
-                        return None
-                    returned_literals.append(returned)
-                    continue
-                stack.extend(_children(current))
-            return returned_literals or None
 
         def captures_factory_reference(
             literal: Any, returned: list[Any]
@@ -34428,10 +34380,10 @@ class _Builder:
                 if source_id is not None
                 else None
             )
-            returned = (
-                returned_literals(factory[0])
+            returned, all_returns_are_literals = (
+                self._closure_factory_returned_literals(factory[0])
                 if factory is not None
-                else None
+                else ([], False)
             )
             if (
                 source_id is None
@@ -34446,7 +34398,7 @@ class _Builder:
                 or source_id in imv_before
                 or factory is None
                 or captures_before[source_id] is not factory[1]
-                or returned is None
+                or not all_returns_are_literals
                 or captures_factory_reference(factory[0], returned)
             ):
                 return None
@@ -34461,8 +34413,13 @@ class _Builder:
 
         if callee.type != "func_literal":
             return None
-        returned = returned_literals(callee)
-        if returned is None or captures_factory_reference(callee, returned):
+        returned, all_returns_are_literals = (
+            self._closure_factory_returned_literals(callee)
+        )
+        if (
+            not all_returns_are_literals
+            or captures_factory_reference(callee, returned)
+        ):
             return None
         try:
             (
@@ -34485,6 +34442,123 @@ class _Builder:
             captures_pointer,
             False,
         )
+
+    def _closure_factory_bind_source(
+        self,
+        rhs: Any,
+        binding: Any,
+        params: dict[str, int],
+        locals_pre: dict[str, frozenset[int]],
+        *,
+        conditional: bool,
+        statement: Any,
+        captures_before: dict[str, frozenset[str]],
+        writes_before: dict[str, frozenset[str]],
+        star_before: set[str],
+        calls_before: set[str],
+        pointee_before: set[str],
+        opaque_before: set[str],
+        aliases_before: dict[str, Any],
+        mv_before: dict[str, Any],
+        imv_before: dict[str, Any],
+        factory_literals_before: dict[
+            str, tuple[Any, frozenset[str]]
+        ],
+    ) -> tuple[
+        frozenset[str],
+        frozenset[str],
+        bool,
+        bool,
+        bool,
+        bool,
+    ] | None:
+        if (
+            binding is None
+            or binding.type is None
+            or binding.type.kind != "function"
+        ):
+            return None
+        rhs = self._strip_parens(rhs)
+        if rhs is None or rhs.type != "call_expression":
+            return None
+        source = self._closure_factory_source(
+            rhs,
+            params,
+            locals_pre,
+            captures_before=captures_before,
+            writes_before=writes_before,
+            star_before=star_before,
+            calls_before=calls_before,
+            pointee_before=pointee_before,
+            opaque_before=opaque_before,
+            aliases_before=aliases_before,
+            mv_before=mv_before,
+            imv_before=imv_before,
+            factory_literals_before=factory_literals_before,
+        )
+        if source is not None:
+            if conditional:
+                raise _Unsupported(
+                    "unsupported_statement", _span(statement)
+                )
+            return source
+        callee = self._strip_parens(
+            rhs.child_by_field_name("function")
+        )
+        if callee is None:
+            return None
+        if callee.type == "func_literal":
+            returned, _ = self._closure_factory_returned_literals(callee)
+            if returned:
+                raise _Unsupported(
+                    "unsupported_statement", _span(statement)
+                )
+            return None
+        if callee.type != "identifier":
+            return None
+        ref = self.references.get(self.node_key(callee))
+        source_id = ref.binding_id if ref is not None else None
+        source_binding = (
+            self.bindings.get(source_id)
+            if source_id is not None
+            else None
+        )
+        factory = (
+            factory_literals_before.get(source_id)
+            if source_id is not None
+            else None
+        )
+        if factory is not None:
+            returned, _ = self._closure_factory_returned_literals(
+                factory[0]
+            )
+            if returned and captures_before.get(source_id):
+                raise _Unsupported(
+                    "unsupported_statement", _span(statement)
+                )
+            return None
+        if (
+            conditional
+            and source_id is not None
+            and source_id not in factory_literals_before
+            and source_id in opaque_before
+        ):
+            raise _Unsupported(
+                "unsupported_statement", _span(statement)
+            )
+        if (
+            source_id is not None
+            and source_id not in params
+            and source_binding is not None
+            and source_binding.kind == "variable"
+            and source_binding.type is not None
+            and source_binding.type.kind == "function"
+            and captures_before.get(source_id)
+        ):
+            raise _Unsupported(
+                "unsupported_statement", _span(statement)
+            )
+        return None
 
     def _bind_closure_factory_result(
         self,

@@ -20373,11 +20373,17 @@ def test_closure_factory_results_resolve_captures_at_call(
             id="factory-returns-callback",
         ),
         pytest.param(
+            "func F(x, y int64, cb func() int64) int64 { "
+            "h := func() func() int64 { return cb }(); return h() }",
+            frozenset({2}),
+            id="immediate-factory-returns-callback",
+        ),
+        pytest.param(
             "func F(b bool, x, y int64, cb func() int64) int64 { "
             "v := y; g := func() func() int64 { "
             "if b { return func() int64 { return v } }; "
             "return cb }; h := g(); v = x; return h() }",
-            frozenset({0, 2, 3}),
+            None,
             id="factory-mixed-returns",
         ),
         pytest.param(
@@ -20477,7 +20483,7 @@ def test_conditional_literal_rebind_keeps_factory_result_snapshot(
 
 
 @pytest.mark.parametrize(
-    ("source", "dependencies"),
+    "source",
     [
         pytest.param(
             "func F(x int64, c bool, cb func() int64) int64 { "
@@ -20486,7 +20492,6 @@ def test_conditional_literal_rebind_keeps_factory_result_snapshot(
             "if c { g = func() func() int64 { "
             "return func() int64 { return v } } }; "
             "h := g(); return h() }",
-            frozenset({0, 2}),
             id="callback-return",
         ),
         pytest.param(
@@ -20496,18 +20501,18 @@ def test_conditional_literal_rebind_keeps_factory_result_snapshot(
             "if c { g = func() func() { "
             "return func() { w = v } } }; "
             "h := g(); h(); return w }",
-            frozenset({0, 2}),
             id="callback-write",
         ),
     ],
 )
-def test_conditional_factory_rebind_keeps_callback_effects_opaque(
-    go_types_helper, source, dependencies
+def test_conditional_factory_rebind_with_captured_callbacks_closes(
+    go_types_helper, source
 ):
     result = named(*unit(go_types_helper, source))
-    assert result.available, result.gaps
-    assert result.return_dependencies == dependencies
-    assert result.effects == "unknown"
+    assert not result.available, result.gaps
+    assert any(
+        gap.reason == "unsupported_statement" for gap in result.gaps
+    )
 
 
 def test_conditional_factory_assignment_retains_current_capture_dependency(
@@ -20630,6 +20635,56 @@ def test_factory_results_reject_non_scalar_factory_local_captures(
     assert result.available, result.gaps
     assert result.return_dependencies == dependencies
     assert result.effects == effects
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(
+            "func F(x, y int64) int64 { "
+            "v := y; u := y; "
+            "g := func(p *int64) func() int64 { "
+            "return func() int64 { return *p + v } }; "
+            "h := g(&u); v = x; return h() }",
+            id="pointer-param-and-outer-capture",
+        ),
+        pytest.param(
+            "func F(x, y int64, c bool) int64 { "
+            "v := y; "
+            "g := func() func() int64 { "
+            "return func() int64 { return v } }; "
+            "if c { g = func() func() int64 { "
+            "return func() int64 { return v + 1 } } }; "
+            "h := g(); v = x; return h() }",
+            id="conditionally-reassigned-factory",
+        ),
+        pytest.param(
+            "func F(x, y int64) int64 { "
+            "v := y; a := []int64{y}; "
+            "g := func(s []int64) func() int64 { "
+            "return func() int64 { return s[0] + v } }; "
+            "h := g(a); v = x; return h() }",
+            id="slice-param-and-outer-capture",
+        ),
+        pytest.param(
+            "func F(x, y int64, cb func() int64) int64 { "
+            "v := y; "
+            "g := func() func() int64 { "
+            "if x > 0 { return cb }; "
+            "return func() int64 { return v } }; "
+            "h := g(); v = x; return h() }",
+            id="mixed-returns-and-outer-capture",
+        ),
+    ],
+)
+def test_rejected_closure_factories_with_outer_captures_close(
+    go_types_helper, source
+):
+    result = named(*unit(go_types_helper, source))
+    assert not result.available, result.gaps
+    assert any(
+        gap.reason == "unsupported_statement" for gap in result.gaps
+    )
 
 
 @pytest.mark.parametrize(
