@@ -1833,3 +1833,38 @@ a.m();
     }
     assert calls["new N.A()"].target
     assert calls["a.m()"].target == m_rec.id
+
+
+def test_member_alias_clause_does_not_shadow_declared_class():
+    # `export {B as A}` publishes the merged B only under "A" — a
+    # class member in the clause's block must not answer `new N.B()`.
+    source = """
+declare namespace N {
+  interface B { i: number }
+  class B { n() {} }
+  export { B as A }
+}
+declare namespace N {
+  export class B { m() {} }
+}
+const x = new N.B();
+x.m();
+const y = new N.A();
+y.n();
+"""
+    report = build_ts_bindings(source)
+    b_public = next(
+        b for b in report.bindings
+        if b.name == "B" and "export class B" in source
+        and source[b.span.start - 20 : b.span.start].find("export") >= 0
+    )
+    n_rec = _member_bindings(report, "n", "associated_function")[0]
+    m_rec = _member_bindings(report, "m", "associated_function")[0]
+    calls = {
+        source[c.span.start : c.span.end]: c for c in report.calls
+    }
+    # `N.B` names the inline-exported class; `N.A` the clause block's.
+    assert calls["new N.B()"].target == b_public.id
+    assert calls["x.m()"].target == m_rec.id
+    assert calls["new N.A()"].target != calls["new N.B()"].target
+    assert calls["y.n()"].target == n_rec.id

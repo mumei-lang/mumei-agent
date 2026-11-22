@@ -1543,7 +1543,9 @@ class _TypeScriptBindings:
                     init_position,
                 )
                 return (
-                    self._merged_constructible(resolved)
+                    self._merged_constructible(
+                        resolved, self.text(property_node)
+                    )
                     if resolved is not None
                     else None
                 )
@@ -1715,8 +1717,21 @@ class _TypeScriptBindings:
                 return True
         return False
 
-    def _merged_constructible(self, record: _Record) -> _Record:
-        """Prefer the class (or ambient class) of a merged declaration."""
+    def _merged_constructible(
+        self, record: _Record, name: str | None = None
+    ) -> _Record:
+        """Prefer the class (or ambient class) of a merged declaration.
+
+        `name` is the property the caller spelled (`new N.A()` → "A"):
+        sibling blocks can contribute same-named members reachable under
+        different export names, so prefer a class that actually answers
+        to the spelled name."""
+        def _named(sibling: _Record) -> bool:
+            if name is None:
+                return True
+            value_names, _ = self._member_name_sets(sibling)
+            return name in value_names
+
         merge_kind = self._merge_kind(record)
         if merge_kind in {"class", "ambient_class"}:
             return record
@@ -1731,9 +1746,16 @@ class _TypeScriptBindings:
             return record
         siblings = self._merge_siblings(record)
         for preferred in ("class", "ambient_class"):
-            for sibling in siblings:
-                if self._merge_kind(sibling) == preferred:
+            classes = [
+                sibling
+                for sibling in siblings
+                if self._merge_kind(sibling) == preferred
+            ]
+            for sibling in classes:
+                if _named(sibling):
                     return sibling
+            if classes:
+                return classes[0]
         if merge_kind in {"interface", "namespace", "type_alias"}:
             # Type-only names can't be `new`'d: a same-scope value-side
             # declaration (e.g. `declare const C` carrying a construct
@@ -1870,7 +1892,9 @@ class _TypeScriptBindings:
                     )
                     if record is not None:
                         return (
-                            self._merged_constructible(record),
+                            self._merged_constructible(
+                                record, self.text(property_node)
+                            ),
                             False,
                             False,
                         )
@@ -2406,7 +2430,9 @@ class _TypeScriptBindings:
                     node.start_byte,
                 )
                 if new and member is not None:
-                    member = self._merged_constructible(member)
+                    member = self._merged_constructible(
+                        member, self.text(property_node)
+                    )
                 if member is not None:
                     self.add_reference(property_node, member, "call")
             kind = "opaque_method"
