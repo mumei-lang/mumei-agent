@@ -1015,6 +1015,9 @@ class _TypeScriptBindings:
                         and node.type in self._MEMBER_DECLARATIONS
                     ):
                         other.member_of = decl.id
+                        # Namespace members sit on the namespace object —
+                        # treat them as static for call-kind selection.
+                        other.member_static = True
 
     def _type_record_by_id(self, binding_id_value: str) -> _Record | None:
         for record in self.records:
@@ -1822,15 +1825,20 @@ class _TypeScriptBindings:
                     kind = "opaque_generator"
                 elif info.generic:
                     kind = "opaque_generic"
-                else:
+                elif member.member_static:
                     kind = "direct_local"
+                else:
+                    # Instance methods can dispatch to an override on a
+                    # subclass — not a statically direct call.
+                    kind = "opaque_virtual"
             target = (
                 member.binding.id
                 if member is not None
                 and kind
                 in {
                     "direct_local", "opaque_generic", "opaque_async",
-                    "opaque_bodyless",
+                    "opaque_bodyless", "opaque_virtual",
+                    "opaque_generator",
                 }
                 else ""
             )

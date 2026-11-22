@@ -135,7 +135,7 @@ CALL_KINDS_WITH_TARGET = frozenset(
     }
 )
 CALL_TARGET_BINDING_KINDS = {
-    "opaque_virtual": frozenset({"function"}),
+    "opaque_virtual": frozenset({"function", "associated_function"}),
     "constructor": frozenset({"struct"}),
     "opaque_import": frozenset({"import"}),
     "opaque_new": frozenset({"contract", "class"}),
@@ -738,7 +738,10 @@ def load_lexical_report(
                 elif kind == "opaque_bodyless":
                     _fail(target_function.body is None)
                 else:
-                    _fail(binding_kinds[target_id] == "function")
+                    _fail(
+                        binding_kinds[target_id]
+                        in {"function", "associated_function"}
+                    )
             target_kinds = CALL_TARGET_BINDING_KINDS.get(kind)
             if target_kinds is not None:
                 _fail(binding_kinds[target_id] in target_kinds)
