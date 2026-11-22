@@ -34,6 +34,18 @@ at develop on 2026-11-21, plus PRs merged on 2026-11-20/21 in mumei, mumei-agent
 | 8 | C06 acceptance checklist on #651 (unresolved/alias/dynamic not trusted-safe; per-language fixtures; regressions) | `go-ip` for Go; `agent` for TS/Rust/Solidity binding reports | none | 3 項目とも未チェック。TS/Rust/Sol は lexical binding report 段階で、compiler-backed 解決は未着手。言語ごとの次スライスは別途設計が必要。 |
 | 9 | Core `docs/MCP_TOOL_CONTRACT.md` omits many agent MCP tools (`native_*`, `evidence_*`, `go_summaries*`) | mumei docs outside `sync` | none | 本担当の範囲（CROSS_PROJECT_ROADMAP のみ）外のため記録のみ。 |
 
+## Landed since the audit (2026-11-23)
+
+- Item 1 — landed: `native_machine_tv_branch_call_recheck` asserts all four
+  branch/call checks in `checks_performed`
+  ([mumei-demo#171](https://github.com/mumei-lang/mumei-demo/pull/171)).
+- Item 2 — landed: all four routes have scenarios
+  ([mumei-demo#172](https://github.com/mumei-lang/mumei-demo/pull/172)).
+- Item 3 — covered by 追補（31）in
+  [mumei#1340](https://github.com/mumei-lang/mumei/pull/1340) (draft): agent
+  #1026/#1037/#1041/#1048/#1061/#1065/#1067, demo #163/#164, Core #1167/#1169/
+  #1170/#1184–#1191/#1208/#1211 are cross-referenced by number.
+
 ## Deferred or demand-gated (excluded)
 
 - C12 authority correspondence: demand-gated (concrete use case required).

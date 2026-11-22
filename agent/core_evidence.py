@@ -1078,6 +1078,64 @@ _VERDICT_ACCEPTANCE_MATCHERS = {
     REQUIREMENT_LIST_ACCEPTANCE_SCHEMA: _requirement_list_acceptance_match,
 }
 
+SIDECAR_ACCEPTANCE_SCHEMA = (
+    "mumei.semantic-contract-sidecar-acceptance/v1"
+)
+
+_SIDECAR_ACCEPTANCE_REQUIRED_FIELDS = frozenset(
+    {
+        "schema_version",
+        "sidecar_schema_version",
+        "sidecar_fingerprint",
+        "artifact_sha256",
+        "atoms",
+        "acceptance",
+        "accepted",
+        "scope",
+        "checks_performed",
+        "checks_not_performed",
+    }
+)
+
+
+def _sidecar_acceptance_match(descriptor: dict) -> bool:
+    """Membership for `mumei.semantic-contract-sidecar-acceptance/v1` —
+    `evidence accept-sidecar` over a semantic-contract sidecar
+    (mumei#1344). `accepted` stays a Boolean like the flat family;
+    `atoms` is the contract-name list the sidecar carries. Only
+    `producer_signature` is admitted as an extra — the route never
+    emits `produced_at_signed` (the sidecar itself declares no
+    `produced_at`)."""
+    fields = frozenset(descriptor)
+    return (
+        _SIDECAR_ACCEPTANCE_REQUIRED_FIELDS <= fields
+        and fields
+        <= _SIDECAR_ACCEPTANCE_REQUIRED_FIELDS
+        | frozenset({"producer_signature"})
+        and _producer_signature_admitted(
+            descriptor, frozenset({"producer_signature"})
+        )
+        and descriptor["schema_version"] == SIDECAR_ACCEPTANCE_SCHEMA
+        and descriptor["sidecar_schema_version"]
+        == "mumei.semantic-contract-sidecar/v1"
+        and _is_fingerprint(descriptor["sidecar_fingerprint"])
+        and _is_fingerprint(descriptor["artifact_sha256"])
+        and _string_list(descriptor["atoms"])
+        and descriptor["acceptance"] == "evaluated"
+        and type(descriptor["accepted"]) is bool
+        and type(descriptor["scope"]) is str
+        and descriptor["scope"] != ""
+        and _string_list(descriptor["checks_performed"])
+        and _string_list(descriptor["checks_not_performed"])
+    )
+
+
+# Sidecar acceptance: the same Boolean-`accepted` convention as the
+# flat family, on its own closed shape.
+_SIDECAR_ACCEPTANCE_MATCHERS = {
+    SIDECAR_ACCEPTANCE_SCHEMA: _sidecar_acceptance_match,
+}
+
 
 def evaluate_core_acceptance(
     descriptor: dict,
@@ -1144,7 +1202,19 @@ def evaluate_core_acceptance(
     exactly one of the two). `attempt_bound` still compares
     `expected_fingerprint` to `evidence_fingerprint`, so a list-pinned
     descriptor honestly reports `attempt_bound: false` — it pins
-    record-list bytes, not one record."""
+    record-list bytes, not one record.
+
+    A third accepted-shaped schema is
+    `mumei.semantic-contract-sidecar-acceptance/v1`
+    (`evidence accept-sidecar` over a semantic-contract sidecar,
+    mumei#1344): `sidecar_schema_version` must name
+    `mumei.semantic-contract-sidecar/v1`, both pins
+    (`sidecar_fingerprint`, `artifact_sha256`) must be fingerprints and
+    `atoms` is a string list. `producer_signature` is admitted on the
+    binding check like the other routes; `produced_at_signed` is not —
+    a sidecar declares no `produced_at`. `attempt_bound` compares
+    `expected_fingerprint` to `sidecar_fingerprint` there — the
+    sidecar is the evaluated subject."""
     if type(descriptor) is not dict:
         raise ValueError("unsupported core acceptance evaluation request")
     if expected_fingerprint is not None and not _is_fingerprint(
@@ -1157,8 +1227,15 @@ def evaluate_core_acceptance(
         if type(schema) is str
         else None
     )
+    sidecar_matcher = (
+        _SIDECAR_ACCEPTANCE_MATCHERS.get(schema)
+        if type(schema) is str
+        else None
+    )
     if verdict_matcher is not None:
         match = verdict_matcher(descriptor)
+    elif sidecar_matcher is not None:
+        match = sidecar_matcher(descriptor)
     else:
         fields = frozenset(descriptor)
         schema = descriptor.get("schema_version")
@@ -1230,6 +1307,10 @@ def evaluate_core_acceptance(
         if verdict_matcher is not None
         else descriptor.get("accepted") is True
     )
+    pins = (
+        descriptor.get("evidence_fingerprint"),
+        descriptor.get("sidecar_fingerprint"),
+    )
     evaluation = {
         "schema_version": "mumei.core-acceptance-evaluation/v1",
         "descriptor_match": match,
@@ -1247,8 +1328,7 @@ def evaluate_core_acceptance(
         ).hexdigest()
     if expected_fingerprint is not None:
         evaluation["attempt_bound"] = (
-            match
-            and descriptor.get("evidence_fingerprint") == expected_fingerprint
+            match and expected_fingerprint in pins
         )
         evaluation["checks_not_performed"] = [
             check
