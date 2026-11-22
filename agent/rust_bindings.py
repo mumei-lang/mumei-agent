@@ -2736,10 +2736,11 @@ class _RustBindings:
         else:
             # `for (k, .., v) in m` — `..` swallows middle elements,
             # so the slots before it map to the pair's head and the
-            # slots after it to its tail.
+            # slots after it to its tail. `for (k, ..) in m` keeps
+            # just the key and `for (.., v) in m` just the value.
             front = slots[:rest_at]
             back = slots[rest_at + 1 :]
-            if len(front) + len(back) != 2:
+            if len(front) + len(back) > len(parts):
                 return {}
             pairs = list(zip(front, parts[: len(front)])) + list(
                 zip(back, parts[len(parts) - len(back) :])

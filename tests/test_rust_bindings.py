@@ -5009,3 +5009,23 @@ fn f(m: HashMap<P, Q>) {
     q = _bindings(report, "q", "associated_function")[0]
     assert _call(report, source, "k.m()").target == m.id
     assert _call(report, source, "v.q()").target == q.id
+
+
+def test_for_tuple_pattern_binds_partial_map_pair() -> None:
+    source = """
+struct P;
+struct Q;
+impl P { fn m(&self) {} }
+impl Q { fn q(&self) {} }
+use std::collections::HashMap;
+use std::collections::BTreeMap;
+fn f(m: HashMap<P, Q>, t: BTreeMap<P, Q>) {
+    for (k, ..) in m { k.m(); }
+    for (.., v) in t { v.q(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = _bindings(report, "m", "associated_function")[0]
+    q = _bindings(report, "q", "associated_function")[0]
+    assert _call(report, source, "k.m()").target == m.id
+    assert _call(report, source, "v.q()").target == q.id
