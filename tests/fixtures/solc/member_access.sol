@@ -2,7 +2,12 @@ contract Token {
     function transfer(address to, uint256 amount) external {}
     uint256 public supply;
 }
-contract Vault {
+contract Base {
+    uint256 public seed;
+    function baseFn() internal virtual {}
+    function hidden() private {}
+}
+contract Vault is Base {
     Token token;
     uint256[] values;
     function run() external {
@@ -10,5 +15,9 @@ contract Vault {
         uint256 s = token.supply();
         values.push(s);
         s = s + values.length;
+        this.vaultFn();
+        super.baseFn();
+        s = this.seed();
     }
+    function vaultFn() public {}
 }

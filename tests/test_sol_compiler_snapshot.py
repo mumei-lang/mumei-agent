@@ -100,10 +100,15 @@ def _assert_rejected(envelope, source, *, raw=None):
         ),
         (
             "member_access",
-            ["agree"] * 6
+            ["agree"] * 7
             + ["builtin"]
             + ["agree"] * 4
-            + ["builtin"],
+            + ["builtin"] * 2
+            + ["agree"]
+            + ["builtin"]
+            + ["agree"] * 2
+            + ["builtin"]
+            + ["agree"],
         ),
     ],
 )
@@ -595,9 +600,13 @@ def test_member_access_declarations_match_lexical_member_bindings():
     member_items = [
         item
         for item in comparison["references"]
-        if item["name"] in {"transfer", "supply"}
+        if item["name"]
+        in {"transfer", "supply", "vaultFn", "baseFn", "seed"}
     ]
     assert [item["status"] for item in member_items] == [
+        "agree",
+        "agree",
+        "agree",
         "agree",
         "agree",
     ]
@@ -615,10 +624,28 @@ def test_member_access_declarations_match_lexical_member_bindings():
         call for call in report.calls if call.target == transfer.id
     )
     assert call.kind == "direct_local"
+    vault_fn = next(
+        binding
+        for binding in report.bindings
+        if binding.name == "vaultFn"
+    )
+    this_call = next(
+        call for call in report.calls if call.target == vault_fn.id
+    )
+    assert this_call.kind == "direct_local"
+    base_fn = next(
+        binding
+        for binding in report.bindings
+        if binding.name == "baseFn"
+    )
+    super_call = next(
+        call for call in report.calls if call.target == base_fn.id
+    )
+    assert super_call.kind == "opaque_virtual"
     builtins = [
         item
         for item in comparison["references"]
-        if item["name"] in {"push", "length"}
+        if item["name"] in {"push", "length", "this", "super"}
     ]
     assert all(item["status"] == "builtin" for item in builtins)
 
