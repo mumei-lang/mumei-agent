@@ -16211,10 +16211,7 @@ class _Builder:
                     )
                     if (
                         share_index is None
-                        or share_index.type in {
-                            "identifier",
-                            *_INDEX_LITERALS,
-                        }
+                        or self._pure_index_expr(share_index)
                     ):
                         # The extraction's index deps freeze at
                         # mark time — `i = 0` afterwards cannot

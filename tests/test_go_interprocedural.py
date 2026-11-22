@@ -34032,6 +34032,38 @@ def test_named_struct_value_element_pointer_member_read(
             "\treturn r\n}\n",
             frozenset({0, 1}),
         ),
+        (
+            # The freeze is scoped to the share's injected index —
+            # a later plain `p.B[i]` read sees the updated index.
+            "type E2 struct { V int64 }\n"
+            "type Elem struct { V int64; W *E2 }\n"
+            "type S struct { B []Elem }\n"
+            "func F(p *S, i int64, j int64) int64 {\n"
+            "\tx := p.B[i]\n"
+            "\ti = j\n"
+            "\treturn p.B[i].W.V + x.V\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        (
+            # A pure index expression shares like an identifier.
+            "type E2 struct { V int64 }\n"
+            "type Elem struct { V int64; W *E2 }\n"
+            "type S struct { B []Elem }\n"
+            "func F(p *S, i int64) int64 {\n"
+            "\tx := p.B[i+1]\n"
+            "\treturn x.W.V\n}\n",
+            frozenset({0, 1}),
+        ),
+        (
+            # `p.B[(i)]` — a parenthesized index is pure too.
+            "type E2 struct { V int64 }\n"
+            "type Elem struct { V int64; W *E2 }\n"
+            "type S struct { B []Elem }\n"
+            "func F(p *S, i int64) int64 {\n"
+            "\tx := p.B[(i)]\n"
+            "\treturn x.W.V\n}\n",
+            frozenset({0, 1}),
+        ),
     ],
 )
 def test_named_struct_value_element_extract_share(
