@@ -33791,42 +33791,70 @@ def test_named_pointer_element_param_observes_late_pointee_store(
 
 
 @pytest.mark.parametrize(
-    "declarations",
+    ("declarations", "expected"),
     [
         # `q := p` hands q the caller-shared pointee — a scalar
         # field read through it slots on `p`.
-        "type S struct { V int64 }\n"
-        "func F(p *S) int64 { q := p; return q.V }\n",
+        (
+            "type S struct { V int64 }\n"
+            "func F(p *S) int64 { q := p; return q.V }\n",
+            frozenset({0}),
+        ),
         # The alias resolves through another local — `r := q`
         # lands on the same entry pointee.
-        "type S struct { V int64 }\n"
-        "func F(p *S) int64 { q := p; r := q; return r.V }\n",
+        (
+            "type S struct { V int64 }\n"
+            "func F(p *S) int64 { q := p; r := q; return r.V }\n",
+            frozenset({0}),
+        ),
         # `q = r` reseats the local away — the read now names r's
         # pointee, not p's entry.
-        "type S struct { V int64 }\n"
-        "func F(p *S, r *S) int64 { q := p; q = r; return q.V }\n",
-        # Container fields through the local alias stay closed —
-        # `q.A[i]` needs a deeper root resolution the slot model
-        # does not have.
-        "type S struct { A []int64 }\n"
-        "func F(p *S, i int64) int64 { q := p; return q.A[i] }\n",
+        (
+            "type S struct { V int64 }\n"
+            "func F(p *S, r *S) int64 { q := p; q = r; return q.V }\n",
+            frozenset({1}),
+        ),
+        # A store through p lands in the entry pointee `*q` names —
+        # `s := *q` sees the write like `s := *p` does.
+        (
+            "type S struct { V int64 }\n"
+            "func F(p *S, x int64) int64 { "
+            "q := p; p.V = x; s := *q; return s.V }\n",
+            frozenset({0, 1}),
+        ),
+        # `q, r := s, q` reads the pre-state: r keeps the pointee q
+        # held (p's entry) even as q itself reseats onto s.
+        (
+            "type S struct { V int64 }\n"
+            "func F(p *S, s *S) int64 { "
+            "q := p; q, r := s, q; return (*r).V }\n",
+            frozenset({0}),
+        ),
     ],
 )
 def test_named_local_pointer_alias_reads(
-    go_types_helper, declarations
+    go_types_helper, declarations, expected
 ):
     result = named(*unit(go_types_helper, declarations))
-    if "q.A[i]" in declarations:
-        assert result.gaps
-        assert any(
-            g.reason == "non_parameter_reference" for g in result.gaps
-        )
-    else:
-        assert result.available, result.gaps
-        assert result.return_dependencies in (
-            frozenset({0}),
-            frozenset({1}),
-        )
+    assert result.available, result.gaps
+    assert result.return_dependencies == expected
+
+
+def test_named_local_pointer_alias_container_field_stays_closed(
+    go_types_helper,
+):
+    # Container fields through the local alias stay closed —
+    # `q.A[i]` needs a deeper root resolution the slot model
+    # does not have.
+    declarations = (
+        "type S struct { A []int64 }\n"
+        "func F(p *S, i int64) int64 { q := p; return q.A[i] }\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.gaps
+    assert any(
+        g.reason == "non_parameter_reference" for g in result.gaps
+    )
 
 
 def test_named_pointer_element_field_write_emit_caller_backing(
