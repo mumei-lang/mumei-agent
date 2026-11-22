@@ -2661,24 +2661,31 @@ class _RustBindings:
                                 if arg_args is None
                                 else arg_args.strip()
                             )
-                            arg_pos = (
-                                self._receiver_annotation_position(
-                                    first_arg
+                            if element is not None:
+                                arg_pos = (
+                                    self._receiver_annotation_position(
+                                        first_arg
+                                    )
                                 )
-                            )
-                            if (
-                                element is not None
-                                and arg_pos is not None
-                                and not self._spelling_scope_stable(
-                                    element, arg_pos, node.start_byte
-                                )
-                            ):
-                                # The argument's names were spelled
-                                # where different bindings are
-                                # visible — spelling the payload
-                                # would bind the wrong same-named
-                                # type.
-                                element = None
+                                if (
+                                    arg_pos is not None
+                                    and not self._spelling_scope_stable(
+                                        element,
+                                        arg_pos,
+                                        node.start_byte,
+                                    )
+                                ):
+                                    # `u`'s `Q` resolves in the
+                                    # argument's own scope — at the
+                                    # receiver's annotation a
+                                    # same-named type is another
+                                    # record.
+                                    tid = self._spelled_type(
+                                        element, arg_pos
+                                    )[0]
+                                    if tid is not None:
+                                        return tid, None
+                                    element = None
                     if element:
                         return None, prefix + element
                 if (
