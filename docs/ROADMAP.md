@@ -5065,6 +5065,11 @@ arrays preserve their function-field closure records. Pointer, slice, map,
 channel and interface fields, map elements and nested-index copies remain
 fail-closed.
 
+Bound method values on a single indexed alias-free struct element of a local
+or parameter slice/array freeze the container and index dependencies and
+preserve the element's function-field records. Unsupported indexed receivers
+fail closed when they carry closure records or the method can write.
+
 ### C06 imported method calls on concrete named types
 
 A method call `recv.M(args)` now classifies as `direct_import` when
