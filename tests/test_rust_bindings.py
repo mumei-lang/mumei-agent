@@ -7645,3 +7645,40 @@ fn f(vd: VecDeque<P>, o: Option<Option<P>>, w: W<P>) {
     assert not bound.get("v.pm()")
     # A custom `W` can name any `as_slices` — stays opaque.
     assert not bound.get("s.pm()")
+def test_result_iter_and_option_unzip_bind_payloads():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct W<T> { x: T }
+fn f(r: Result<P, E>, o: Option<(P, P)>, w: W<P>) {
+    for p in r.iter() { p.pm(); }
+    for q in r.iter_mut() { q.pm(); }
+    let i1 = r.iter();
+    for u in i1 { u.pm(); }
+    let (x, y) = o.unzip();
+    if let Some(a) = x { a.pm(); }
+    if let Some(b) = y { b.pm(); }
+    let z = o.unzip();
+    if let Some(c) = z { c.pm(); }
+    for s in w.iter() { s.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `Result::iter`/`iter_mut` iterate the `Ok` payload `&P`.
+    assert bound.get("p.pm()") == pm.id
+    assert bound.get("q.pm()") == pm.id
+    assert bound.get("u.pm()") == pm.id
+    # `Option<(P, P)>::unzip` gives `(Option<P>, Option<P>)` —
+    # each name keeps its spelled `Option` head for `Some`.
+    assert bound.get("a.pm()") == pm.id
+    assert bound.get("b.pm()") == pm.id
+    # `z` is the pair itself — `Some` on a tuple is a type error.
+    assert not bound.get("c.pm()")
+    # A custom `W` can name any `iter` — stays opaque.
+    assert not bound.get("s.pm()")
