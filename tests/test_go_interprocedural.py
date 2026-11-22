@@ -36865,6 +36865,13 @@ def test_named_struct_element_pointer_member_store_local_root_closed(
         "func F(p *S, i int64, q *E2) {\n"
         "\tr := p\n"
         "\tr.B[i].W = q\n}\n",
+        # A scalar-pointee member (`*int64`) reseats the same
+        # element slot — the store only writes the pointer the
+        # slot holds, so no struct pointee is needed.
+        "type Elem struct { W *int64; V int64 }\n"
+        "type S struct { B []Elem }\n"
+        "func F(p *S, i int64, q *int64) {\n"
+        "\tp.B[i].W = q\n}\n",
     ],
 )
 def test_named_struct_value_element_pointer_member_store(
