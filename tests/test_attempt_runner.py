@@ -44,6 +44,13 @@ def argv(code):
     return (PY, "-c", code)
 
 
+def _fake_unshare(tmp_path, script):
+    executable = tmp_path / "unshare"
+    executable.write_text(f"#!/bin/sh\n{script}\n")
+    executable.chmod(0o755)
+    return str(executable)
+
+
 @pytest.mark.parametrize(
     "bad_request",
     [None, "x", 1, AttemptRecord(FINGERPRINT, 1, 10)],
@@ -224,6 +231,92 @@ def test_run_network_isolation_missing_target_reports_spawn_failure():
         event.kind for event in direct.record.events
     ]
     assert isolated.record.events[-1].exit_code is None
+
+
+@pytest.mark.skipif(os.name != "posix", reason="fake unshare requires POSIX")
+def test_run_network_isolation_missing_target_never_spawns(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        attempt_runner,
+        "_UNSHARE",
+        _fake_unshare(tmp_path, "exit 0"),
+    )
+
+    def fail_if_spawned(*args, **kwargs):
+        raise AssertionError("an unresolved isolated target must not spawn")
+
+    monkeypatch.setattr(attempt_runner.subprocess, "Popen", fail_if_spawned)
+    result = AttemptRunner().run(
+        request(),
+        (str(tmp_path / "missing-target"),),
+        isolate_network=True,
+    )
+
+    assert result.record.state == "failed"
+    assert [event.kind for event in result.record.events] == [
+        "started",
+        "failed",
+    ]
+    assert [event.elapsed_ms for event in result.record.events] == [0, 0]
+    assert result.record.events[-1].exit_code is None
+    assert result.stdout == b""
+    assert result.stderr == b""
+
+
+@pytest.mark.parametrize("unshare_status", [0, 1])
+@pytest.mark.skipif(os.name != "posix", reason="fake unshare requires POSIX")
+def test_run_network_isolation_rejects_unshare_failure(
+    tmp_path, monkeypatch, unshare_status
+):
+    monkeypatch.setattr(
+        attempt_runner,
+        "_UNSHARE",
+        _fake_unshare(tmp_path, f"exit {unshare_status}"),
+    )
+    result = AttemptRunner().run(
+        request(),
+        argv("import sys; sys.exit(0)"),
+        isolate_network=True,
+    )
+
+    assert result.record.state == "failed"
+    assert [event.kind for event in result.record.events] == [
+        "started",
+        "failed",
+    ]
+    assert result.record.events[-1].exit_code is None
+
+
+@pytest.mark.parametrize("exit_code", [0, 3])
+@pytest.mark.skipif(os.name != "posix", reason="fake unshare requires POSIX")
+def test_run_network_isolation_marker_preserves_target_exit(
+    tmp_path, monkeypatch, exit_code
+):
+    script = (
+        "while [ \"$#\" -gt 0 ]; do\n"
+        "  if [ \"$1\" = \"--\" ]; then shift; break; fi\n"
+        "  shift\n"
+        "done\n"
+        "exec \"$@\""
+    )
+    monkeypatch.setattr(
+        attempt_runner,
+        "_UNSHARE",
+        _fake_unshare(tmp_path, script),
+    )
+    result = AttemptRunner().run(
+        request(),
+        argv(f"import sys; sys.exit({exit_code})"),
+        isolate_network=True,
+    )
+
+    assert result.record.state == "exited"
+    assert [event.kind for event in result.record.events] == [
+        "started",
+        "exited",
+    ]
+    assert result.record.events[-1].exit_code == exit_code
 
 
 @pytest.mark.skipif(

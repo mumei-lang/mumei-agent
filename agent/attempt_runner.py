@@ -220,6 +220,16 @@ def _detect_unshare() -> "str | None":
 
 
 _UNSHARE = _detect_unshare()
+_NETNS_MARKER_SCRIPT = """import os, sys
+fd = int(sys.argv[1])
+os.write(fd, b"x")
+os.set_inheritable(fd, False)
+try:
+    os.execvp(sys.argv[2], sys.argv[2:])
+except OSError:
+    os.write(fd, b"e")
+    os._exit(127)
+"""
 
 
 def memory_bound_enforceable() -> bool:
@@ -364,6 +374,38 @@ class AttemptRunResult:
         )
 
 
+def _spawn_failure_result(record: AttemptRecord) -> AttemptRunResult:
+    return AttemptRunResult(
+        record.record(AttemptEvent("started", 0)).record(
+            AttemptEvent("failed", 0)
+        ),
+        b"",
+        True,
+        b"",
+        True,
+    )
+
+
+def _read_network_marker(fd: int) -> bytes | None:
+    marker = bytearray()
+    eof = False
+    try:
+        while len(marker) < 8:
+            chunk = os.read(fd, 8 - len(marker))
+            if not chunk:
+                eof = True
+                break
+            marker.extend(chunk)
+    except OSError:
+        return None
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    return bytes(marker) if eof else None
+
+
 class AttemptRunner:
     """Executes one declared request per call with real process control.
 
@@ -462,6 +504,17 @@ class AttemptRunner:
             request.attempt_number,
             request.timeout_ms,
         )
+        if isolate_network and not _spawn_target_resolvable(
+            argv[0], child_environment
+        ):
+            return _spawn_failure_result(record)
+        marker_read_fd = None
+        marker_write_fd = None
+        if isolate_network:
+            try:
+                marker_read_fd, marker_write_fd = os.pipe()
+            except OSError:
+                return _spawn_failure_result(record)
         spawn_argv: list[str] = list(argv)
         preexec = None
         if memory_bound_mb is not None:
@@ -495,20 +548,22 @@ class AttemptRunner:
                     ]
             else:
                 preexec = _memory_bound_preexec(memory_bound_mb)
-        if (
-            isolate_network
-            and _UNSHARE is not None
-            and _spawn_target_resolvable(argv[0], child_environment)
-        ):
-            # Keep unresolved targets as direct spawns so wrapper exit 127
-            # cannot masquerade as the target's own exit.
+        if isolate_network:
+            # The close-on-exec marker distinguishes target exits from setup failures.
             spawn_argv = [
                 _UNSHARE,
                 "--net",
                 "--map-current-user",
                 "--",
+                sys.executable,
+                "-c",
+                _NETNS_MARKER_SCRIPT,
+                str(marker_write_fd),
                 *spawn_argv,
             ]
+        popen_options = (
+            {} if marker_write_fd is None else {"pass_fds": (marker_write_fd,)}
+        )
         try:
             popen_environment = (
                 {} if child_environment is None else {"env": child_environment}
@@ -521,17 +576,15 @@ class AttemptRunner:
                 preexec_fn=preexec,
                 start_new_session=_PROCESS_GROUP,
                 **popen_environment,
+                **popen_options,
             )
         except (OSError, subprocess.SubprocessError):
-            return AttemptRunResult(
-                record.record(AttemptEvent("started", 0)).record(
-                    AttemptEvent("failed", 0)
-                ),
-                b"",
-                True,
-                b"",
-                True,
-            )
+            for fd in (marker_read_fd, marker_write_fd):
+                if fd is not None:
+                    os.close(fd)
+            return _spawn_failure_result(record)
+        if marker_write_fd is not None:
+            os.close(marker_write_fd)
         feed_stop = threading.Event()
         feeder = None
         if feed_bytes is not None:
@@ -594,6 +647,17 @@ class AttemptRunner:
         if feeder is not None:
             feed_stop.set()
             feeder.join(COLLECTOR_JOIN_SECONDS)
+        marker = (
+            None
+            if marker_read_fd is None
+            else _read_network_marker(marker_read_fd)
+        )
+        if (
+            isolate_network
+            and marker != b"x"
+            and events[-1].kind == "exited"
+        ):
+            events[-1] = AttemptEvent("failed", events[-1].elapsed_ms)
         for event in events:
             record = record.record(event)
         return AttemptRunResult(
