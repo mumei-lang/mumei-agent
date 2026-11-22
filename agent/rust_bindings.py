@@ -79,7 +79,10 @@ _OPTION_HEAD_METHODS = {
     "pop_back": ("", {"VecDeque"}, -1),
     "remove": ("", {"HashMap", "BTreeMap", "VecDeque"}, -1),
     "next": ("&", None, -1),
-    "ok": ("", {"Option", "Result"}, 0),
+    # `Option` exposes no `ok()` — only `Result::ok()` narrows to
+    # `Option<T>`; an unresolved extension method on `Option` stays
+    # opaque rather than pinning a payload.
+    "ok": ("", {"Result"}, 0),
     "err": ("", {"Result"}, -1),
     "take": ("", {"Option"}, 0),
 }

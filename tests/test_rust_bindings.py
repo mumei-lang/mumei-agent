@@ -5683,3 +5683,19 @@ fn f(o: Option<P>, mut o2: Option<P>, r: Result<P, E>, v: Vec<P>, d: P) {
     assert len(calls) == 4
     assert [call.target for call in calls] == [pm.id] * 4
     assert _call(report, source, "e.em()").target == em.id
+
+
+def test_option_ok_stays_opaque():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(o: Option<P>) {
+    if let Some(p) = o.ok() { p.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    calls = [call for call in report.calls if call.target == pm.id]
+    # `Option` has no `ok()` — the unresolved extension call pins
+    # no payload.
+    assert calls == []
