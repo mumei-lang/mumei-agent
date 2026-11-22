@@ -89,7 +89,12 @@ def test_manifest_probe_plan_dispatch_publish_composes():
     assert descriptor is not None
 
     # Manifest-declared probe → observed outcome → plan selects.
-    probe = probe_request_for(descriptor, stamp=1, tool_version="0.1.0")
+    probe = probe_request_for(
+        descriptor,
+        stamp=1,
+        tool_version="0.1.0",
+        policy=_policy(),
+    )
     observations = observe_probes((probe,))
     assert len(observations) == 1
     assert observations[0].availability == "available"
@@ -141,7 +146,12 @@ def test_manifest_probe_plan_dispatch_publish_composes():
 def test_probe_history_composes_with_retry_scheduling():
     registry = _registry()
     descriptor = registry.descriptor(ADAPTER_ID)
-    probe = probe_request_for(descriptor, stamp=1, tool_version="0.1.0")
+    probe = probe_request_for(
+        descriptor,
+        stamp=1,
+        tool_version="0.1.0",
+        policy=_policy(),
+    )
     outcome = run_probe(probe)
 
     history = AdapterProbeHistory.start(probe)
@@ -161,7 +171,12 @@ def test_probe_history_composes_with_retry_scheduling():
         probe_argv=[sys.executable, "-c", "import sys; sys.exit(3)"]
     )
     missing = missing_registry.descriptor(ADAPTER_ID)
-    miss_probe = probe_request_for(missing, stamp=1, tool_version="0.1.0")
+    miss_probe = probe_request_for(
+        missing,
+        stamp=1,
+        tool_version="0.1.0",
+        policy=_policy(),
+    )
     miss_outcome = run_probe(miss_probe)
     miss_history = AdapterProbeHistory.start(miss_probe).record(
         miss_probe, miss_outcome

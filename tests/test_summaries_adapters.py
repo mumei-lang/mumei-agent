@@ -6,6 +6,7 @@ import json
 import pytest
 
 from agent.adapter_probe import AdapterProbeHistory
+from agent.attempt_runner import filesystem_write_isolation_enforceable
 from agent.ts_interprocedural import PROFILE as TS_SUMMARY_PROFILE
 from agent.sol_interprocedural import PROFILE as SOL_SUMMARY_PROFILE
 from agent.summaries_adapters import (
@@ -251,6 +252,38 @@ def test_summaries_plan_route_emits_report(capsys, tmp_path):
     history = report["histories"][0]
     assert history["adapter_id"] == "agent.go-summaries"
     assert history["outcomes"]
+
+
+@pytest.mark.parametrize(
+    "descriptor",
+    summary_descriptors(),
+    ids=lambda descriptor: descriptor.adapter_id,
+)
+@pytest.mark.skipif(
+    not filesystem_write_isolation_enforceable(),
+    reason="read-only mount isolation requires unprivileged mount namespaces",
+)
+def test_builtin_summary_probes_are_available_with_readonly_filesystem(
+    descriptor,
+):
+    assert descriptor.required_permissions is not None
+    assert "filesystem.write" not in descriptor.required_permissions
+    plan = plan_summary_route(
+        sorted(descriptor.profiles)[0],
+        PlannerPolicy(
+            allowed_permissions=descriptor.required_permissions
+        ),
+        stamp=37,
+    )
+
+    assert plan.plan.selected is not None
+    assert plan.plan.selected.adapter_id == descriptor.adapter_id
+    observation = next(
+        item
+        for item in plan.observations
+        if item.adapter_id == descriptor.adapter_id
+    )
+    assert observation.availability == "available"
 
 
 def test_summaries_plan_route_resumes_declared_histories(capsys, tmp_path):
