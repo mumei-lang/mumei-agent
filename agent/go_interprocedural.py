@@ -6358,6 +6358,24 @@ class _Builder:
                 interface_id = (
                     interface_member.type.type_id or interface_member.id
                 )
+        elif operand.type == "index_expression":
+            # `p.A[i].M` — a method value bound from an
+            # interface-typed collection element: the receiver the
+            # call folds is the root's element memory, named by the
+            # post-alias root binding id like the dispatch path.
+            element = self._interface_element_receiver(
+                operand, params
+            )
+            if element is None:
+                return None
+            elem_member, root_id, index_nodes, _fk, _inner = element
+            fact = elem_member.type
+            for _ in index_nodes:
+                fact = getattr(fact, "elem", None)
+            if fact is None or fact.kind != "interface":
+                return None
+            receiver_id = root_id
+            interface_id = fact.type_id or None
         else:
             return None
 
@@ -6407,10 +6425,56 @@ class _Builder:
         receiver_id = method[0]
         if receiver_id is None:
             return frozenset()
+        operand = self._strip_parens(
+            node
+        ).child_by_field_name("operand")
+        if (
+            operand is not None
+            and operand.type == "index_expression"
+        ):
+            # `p.A[i].M` — the bare element read stays closed for
+            # `[]I`, so the bound value's receiver deps are
+            # synthesized like the dispatch path's: the root's
+            # provenance plus the field slot's, and every index
+            # innermost-first (Go's order).
+            element = self._interface_element_receiver(
+                operand, params
+            )
+            if element is None:
+                return self.expression(
+                    operand,
+                    fn,
+                    params,
+                    locals_,
+                    transfers,
+                    count,
+                    1,
+                )
+            _m, root_id, index_nodes, field_key, inner_indexes = (
+                element
+            )
+            deps = self._pointer_deps(
+                root_id, params, locals_
+            ) | self._opaque_container_deps(field_key, locals_)
+            for index_node in (
+                inner_indexes[::-1] + index_nodes[::-1]
+            ):
+                if (
+                    index_node is not None
+                    and index_node.type not in _INDEX_LITERALS
+                ):
+                    deps |= self.expression(
+                        index_node,
+                        fn,
+                        params,
+                        locals_,
+                        transfers,
+                        count,
+                        1,
+                    )
+            return deps
         return self.expression(
-            self._strip_parens(
-                node
-            ).child_by_field_name("operand"),
+            operand,
             fn,
             params,
             locals_,
