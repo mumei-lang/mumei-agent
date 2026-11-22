@@ -6118,3 +6118,147 @@ fn f() {
         calls = {self._call_name(c) for c in report.calls}
         self.assertIn("qm", calls)
         self.assertNotIn("stray", calls)
+
+def test_scoped_module_call_picks_its_own_function():
+    source = """
+mod a {
+    pub struct P;
+    impl P { pub fn pm(&self) {} }
+    pub fn make() -> Box<P> { Box::new(P) }
+}
+mod b {
+    pub struct Q;
+    impl Q { pub fn qm(&self) {} }
+    pub fn make() -> Box<Q> { Box::new(Q) }
+}
+fn g() {
+    let x = b::make();
+    x.qm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    qm = _bindings(report, "qm", "associated_function")[0]
+    bound = [
+        call
+        for call in report.calls
+        if raw[call.span.start:call.span.end].decode() == "x.qm()"
+    ]
+    assert len(bound) == 1
+    assert bound[0].target == qm.id
+    assert not any(
+        raw[call.span.start:call.span.end].decode() == "x.pm()"
+        for call in report.calls
+        if call.target
+    )
+
+
+def test_member_borrowing_a_container_keeps_the_container():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct W { v: Vec<P> }
+impl W {
+    fn vref(&self) -> &Vec<P> { &self.v }
+    fn oref(&self) -> &Option<P> { &None }
+    fn sref(&self) -> &mut [P] { &mut [] }
+}
+fn f(w: &W) {
+    w.vref()[0].pm();
+    match w.oref() { Some(q) => q.pm(), _ => () }
+    match w.sref().first() { Some(r) => r.pm(), _ => () }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    assert sum(1 for c in report.calls if c.target == pm.id) == 3
+
+
+def test_pattern_field_args_resolve_in_the_declaring_module():
+    source = """
+struct Q;
+impl Q { fn stray(&self) {} }
+mod m {
+    pub struct Q;
+    impl Q { pub fn qm(&self) {} }
+    pub struct W { pub opt: Option<Q> }
+}
+fn f(w: m::W) {
+    let m::W { opt } = w;
+    match opt { Some(q) => q.qm(), _ => () }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    qm = _bindings(report, "qm", "associated_function")[0]
+    stray = _bindings(report, "stray", "associated_function")[0]
+    targets = [c.target for c in report.calls]
+    assert qm.id in targets
+    assert stray.id not in targets
+
+
+def test_substituted_pattern_args_resolve_at_the_use_site():
+    source = """
+mod m {
+    pub struct Q;
+    impl Q { pub fn stray(&self) {} }
+    pub struct W<T> { pub opt: Option<T> }
+}
+struct Q;
+impl Q { fn qm(&self) {} }
+fn f(w: m::W<Q>) {
+    let m::W { opt } = w;
+    match opt { Some(q) => q.qm(), _ => () }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    qm = _bindings(report, "qm", "associated_function")[0]
+    stray = _bindings(report, "stray", "associated_function")[0]
+    targets = [c.target for c in report.calls]
+    assert qm.id in targets
+    assert stray.id not in targets
+
+
+def test_borrowed_smart_pointer_return_resolves_in_member_scope():
+    source = """
+struct P;
+impl P { fn stray(&self) {} }
+mod n {
+    pub struct P;
+    impl P { pub fn pm(&self) {} }
+    pub fn get() -> &'static Box<P> { &Box::new(P) }
+}
+fn g() {
+    n::get().pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    stray = _bindings(report, "stray", "associated_function")[0]
+    targets = [c.target for c in report.calls]
+    assert pm.id in targets
+    assert stray.id not in targets
+
+
+def test_module_reexport_and_same_named_alias():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+mod a {
+    pub struct P2;
+    impl P2 { pub fn p2m(&self) {} }
+    pub fn make() -> Box<P2> { Box::new(P2) }
+}
+mod m {
+    pub use a::make;
+    pub fn direct() -> Box<P> { Box::new(P) }
+    pub type alias = P;
+}
+fn g() {
+    let x = m::make();
+    x.p2m();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    p2m = _bindings(report, "p2m", "associated_function")[0]
+    targets = [c.target for c in report.calls]
+    assert p2m.id in targets

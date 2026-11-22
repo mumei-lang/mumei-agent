@@ -1790,10 +1790,23 @@ class _RustBindings:
                                 (),
                             )
                         )
+                        # A module may declare a `fn make` and a
+                        # `type make` side by side — the call wants
+                        # the value-namespace one.
+                        if self._in_namespace(r, "value")
                     ),
                     None,
                 ) if head_record.module_scope is not None else None
                 if member is not None:
+                    # `mod m { pub use a::make; }` — the scope holds
+                    # the import record; the call wants the target's
+                    # function record.
+                    member = (
+                        self._through_import(
+                            member, name.start_byte, "value"
+                        )
+                        or member
+                    )
                     return member, name
         if path.type == "generic_type":
             type_id, args = self._annotation_type(path)
@@ -2816,13 +2829,26 @@ class _RustBindings:
                     # `Option<&T>`/`Option<T>` — only the payload
                     # spelling is carried; the head stays for
                     # `_scrutinee_shape` to declare.
-                    elements = self._type_arg_list(receiver[1])
-                    index = option_head[2]
-                    element = (
-                        elements[index].strip()
-                        if -len(elements) <= index < len(elements)
-                        else None
+                    slice_args = re.fullmatch(
+                        r"&\s*(?:'\w+\s+)?(?:mut\s+)?\[(.+)\]"
+                        r"|\[(.+)\]",
+                        receiver[1].strip(),
                     )
+                    if slice_args is not None:
+                        # The receiver itself spelled a slice
+                        # (`s.as_ref()` → `&[P]`) — the element is
+                        # inside the brackets, not the whole arg.
+                        element = (
+                            slice_args.group(1) or slice_args.group(2)
+                        ).strip()
+                    else:
+                        elements = self._type_arg_list(receiver[1])
+                        index = option_head[2]
+                        element = (
+                            elements[index].strip()
+                            if -len(elements) <= index < len(elements)
+                            else None
+                        )
                     if self.text(field).strip() == "get" and element:
                         arg_list = node.child_by_field_name(
                             "arguments"
@@ -5595,14 +5621,38 @@ class _RustBindings:
             if borrow is None:
                 wrap = re.match(r"\s*([A-Za-z_]\w*)\s*<", ret_text)
             spelled = None
-            if borrow is not None and re.fullmatch(
-                r"[A-Za-z_][\w:]*", borrow.group(1).strip()
-            ):
-                # `&P`/`&'a mut m::P` — a borrowed payload spelled
-                # in the member's scope. `&Vec<P>`/`&mut [P]`
-                # borrow a container instead, so the receiver is
-                # the container itself and nothing is re-resolved.
-                spelled = borrow.group(1).strip()
+            if borrow is not None:
+                borrowed = borrow.group(1).strip()
+                if borrowed.startswith("[") and borrowed.endswith("]"):
+                    # `&mut [P]` — the receiver stays a borrowed
+                    # slice so `first`/`get` still apply.
+                    return None, "&" + borrowed
+                if re.fullmatch(r"[A-Za-z_][\w:]*", borrowed):
+                    # `&P`/`&'a mut m::P` — a borrowed payload
+                    # spelled in the member's scope. `&Vec<P>`/
+                    # `&mut [P]` borrow a container instead, so
+                    # the receiver is the container itself and
+                    # nothing is re-resolved.
+                    spelled = borrowed
+                else:
+                    borrow_wrap = re.fullmatch(
+                        r"([A-Za-z_]\w*)\s*<(.+)>", borrowed
+                    )
+                    if borrow_wrap is not None and borrow_wrap.group(
+                        1
+                    ) in {"Box", "Rc", "Arc", "Pin"}:
+                        # `&'static Box<P>` — a borrow of a
+                        # deref-transparent wrapper: the payload
+                        # is still the receiver type, spelled in
+                        # the member's scope.
+                        spelled = next(
+                            iter(
+                                self._type_arg_list(
+                                    borrow_wrap.group(2)
+                                )
+                            ),
+                            borrow_wrap.group(2),
+                        ).strip()
             elif wrap is not None and wrap.group(1) in {
                 "Box",
                 "Rc",
@@ -5980,6 +6030,14 @@ class _RustBindings:
             type_node = decl.child_by_field_name("type")
             if name_node is None or type_node is None:
                 continue
+            field_text = self.text(type_node)
+            substituted = any(
+                re.search(
+                    r"(?<![\w:])" + re.escape(param) + r"(?![\w:])",
+                    field_text,
+                )
+                for param in param_map
+            )
             fields[
                 self._normalize_identifier(self.text(name_node))
             ] = (
@@ -5987,7 +6045,13 @@ class _RustBindings:
                     type_node, param_map, head.start_byte, container
                 ),
                 type_node,
-                None if container is None else container.home_scope,
+                # Substituted args were spelled at the call site
+                # (`m::W<Q>`'s `Q` resolves there); only a field
+                # spelling the module's own names (`opt: Option<Q>`)
+                # resolves them in the declaring scope.
+                None
+                if container is None or substituted
+                else container.home_scope,
             )
         return fields
 
@@ -6169,8 +6233,13 @@ class _RustBindings:
         inner = node
         while inner is not None and inner.type == "reference_expression":
             inner = next(iter(inner.named_children), None)
-        if inner is None or inner.type != "identifier":
+        if inner is None:
             return False
+        if inner.type != "identifier":
+            # `s.as_ref()`/`w.sref()` — the call result itself can
+            # be a slice; its spelled args keep the `[` shape.
+            _call_id, call_args = self._receiver_type(inner)
+            return call_args is not None and "[" in call_args
         record = self._lookup(
             self._normalize_identifier(self.text(inner)),
             inner.start_byte,
