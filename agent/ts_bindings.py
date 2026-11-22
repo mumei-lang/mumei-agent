@@ -857,9 +857,41 @@ class _TypeScriptBindings:
             return _PRIMITIVE_FACTS[text]
         if node.type == "type_identifier" and text in _PRIMITIVE_FACTS:
             return _PRIMITIVE_FACTS[text]
-        if node.type in {
-            "type_query", "member_expression", "nested_type_identifier",
-        }:
+        if node.type == "nested_type_identifier":
+            member = self._qualified_type_member(node)
+            if member is None:
+                return _UNKNOWN
+            if member.binding.kind == "type_alias":
+                if member.binding.id in visited:
+                    return TypeFact(
+                        "unknown", text, 0, None, member.binding.id
+                    )
+                cached = self._type_alias_cache.get(member.binding.id)
+                if cached is not None:
+                    return cached
+                alias_visited = set(visited)
+                alias_visited.add(member.binding.id)
+                fact = self._type_fact(member.alias_node, alias_visited)
+                if fact.kind == "unknown":
+                    fact = TypeFact(
+                        "unknown", text, 0, None, member.binding.id
+                    )
+                else:
+                    fact = replace(fact, type_id=member.binding.id)
+                self._type_alias_cache[member.binding.id] = fact
+                return fact
+            if member.class_like or member.binding.kind in {
+                "class", "interface", "enum", "namespace",
+            }:
+                return TypeFact(
+                    "named",
+                    member.binding.name,
+                    0,
+                    None,
+                    member.binding.id,
+                )
+            return _UNKNOWN
+        if node.type in {"type_query", "member_expression"}:
             return _UNKNOWN
         if node.type == "type_identifier":
             record = self._lookup(text, node.start_byte, "type")
@@ -1303,10 +1335,24 @@ class _TypeScriptBindings:
 
     def _type_record_by_id(self, binding_id_value: str) -> _Record | None:
         for record in self.records:
-            if record.binding.id == binding_id_value and (
-                record.class_like or record.binding.kind == "namespace"
-            ):
+            if record.binding.id != binding_id_value:
+                continue
+            if record.class_like or record.binding.kind == "namespace":
                 return record
+            # Aliases are transparent for member resolution — `x: T`
+            # with `type T = C` types `x` as `C`. Cyclic aliases leave
+            # the fact `unknown`, which stays unresolvable.
+            if (
+                record.binding.kind == "type_alias"
+                and record.alias_node is not None
+            ):
+                fact = self._type_fact(record.alias_node)
+                if (
+                    fact.kind == "named"
+                    and fact.type_id != binding_id_value
+                ):
+                    return self._type_record_by_id(fact.type_id)
+            return None
         return None
 
     def _type_record_for_node(self, decl_node: Any | None) -> _Record | None:
@@ -1335,6 +1381,46 @@ class _TypeScriptBindings:
                 return self._type_record_for_node(ancestor)
             ancestor = ancestor.parent
         return None
+
+    def _qualified_type_member(self, node: Any) -> _Record | None:
+        """Resolve `A.B.C` nested type identifiers to a member record.
+
+        Each segment resolves on the type side: `N.Public` where the
+        clause `export {Inner as Public}` authored the spelling is
+        reachable, the private `N.Inner` is not."""
+        segments: list[str] = []
+        current = node
+        while current is not None and current.type in {
+            "nested_type_identifier",
+            "nested_identifier",
+        }:
+            name_node = current.child_by_field_name(
+                "name"
+            ) or current.child_by_field_name("property")
+            if name_node is not None:
+                segments.append(self.text(name_node))
+            current = current.child_by_field_name(
+                "module"
+            ) or current.child_by_field_name("object")
+        if current is None or current.type != "identifier":
+            return None
+        segments.append(self.text(current))
+        segments.reverse()
+        record = self._lookup(segments[0], node.start_byte, "type")
+        if record is None:
+            record = self._lookup(segments[0], node.start_byte, "value")
+        for segment in segments[1:]:
+            if record is None:
+                return None
+            record = self._member_lookup(
+                record,
+                segment,
+                node.start_byte,
+                static=True,
+                via_this=False,
+                for_type=True,
+            )
+        return record
 
     def _member_lookup(
         self,
@@ -2218,7 +2304,15 @@ class _TypeScriptBindings:
                 return
             self.add_unresolved(node, self.text(node).strip(), "qualified_path")
             return
-        if node.type in {"member_expression", "nested_type_identifier"}:
+        if node.type == "nested_type_identifier":
+            # Qualified paths in type position stay conservative:
+            # `_type_fact` resolves them for receiver typing, but the
+            # reference report keeps the `qualified_path` marker.
+            self.add_unresolved(
+                node, self.text(node).strip(), "qualified_path"
+            )
+            return
+        if node.type == "member_expression":
             self.add_unresolved(node, self.text(node).strip(), "qualified_path")
             return
         if node.type == "type_identifier":
