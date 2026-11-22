@@ -33435,6 +33435,24 @@ def test_value_struct_multidimensional_scalar_array_partial_rows_stay_closed(
     assert not range_value.available
 
 
+def test_value_struct_scalar_field_range_over_int_keeps_field_dependency(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type O struct { N int64 }\n"
+            "func F(o O, x int64) int64 {\n"
+            "\ts := int64(0)\n"
+            "\tfor i := range o.N { s = i }\n"
+            "\treturn s\n"
+            "}\n",
+        )
+    )
+    if result.available:
+        assert 0 in result.return_dependencies
+
+
 @pytest.mark.parametrize(
     ("binding", "term"),
     [

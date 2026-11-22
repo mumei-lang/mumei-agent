@@ -3230,6 +3230,8 @@ class _Builder:
                 ):
                     return None
         member = members[-1]
+        if member.type.kind != "array":
+            return None
         element = member.type
         while element is not None and element.kind == "array":
             element = getattr(element, "elem", None)
