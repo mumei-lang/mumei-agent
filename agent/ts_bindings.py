@@ -932,9 +932,9 @@ class _TypeScriptBindings:
             return _UNKNOWN
         return _UNKNOWN
 
-    def _lookup(
+    def _lookup_candidates(
         self, name: str, position: int, namespace: str
-    ) -> _Record | None:
+    ) -> list[_Record]:
         candidates: list[tuple[int, _Record]] = []
         for record in self.records:
             if namespace not in record.namespaces or record.binding.name != name:
@@ -947,8 +947,6 @@ class _TypeScriptBindings:
                 self_scope = record.self_scope
                 assert self_scope is not None
                 candidates.append((self_scope.end - self_scope.start, record))
-        if not candidates:
-            return None
         candidates.sort(
             key=lambda item: (
                 item[0],
@@ -956,7 +954,13 @@ class _TypeScriptBindings:
                 -item[1].binding.span.start,
             )
         )
-        return candidates[0][1]
+        return [record for _, record in candidates]
+
+    def _lookup(
+        self, name: str, position: int, namespace: str
+    ) -> _Record | None:
+        candidates = self._lookup_candidates(name, position, namespace)
+        return candidates[0] if candidates else None
 
     _MEMBER_DECLARATIONS = {
         "function_declaration", "generator_function_declaration",
@@ -1599,7 +1603,32 @@ class _TypeScriptBindings:
                 else 1
             )
         if args_node is not None:
-            matches = self._narrow_overloads(matches, args_node)
+            narrowed = self._narrow_overloads(matches, args_node)
+            # A clause-authored name (`export {f as g}` in one sibling
+            # block) pins the referent to that block's declaration —
+            # keep it ahead of overload narrowing, which would drop it
+            # when its signature does not fit the arguments.
+            authored_pre = (
+                "member_authored_type_names" if for_type
+                else "member_authored_names"
+            )
+            narrowed_authored = [
+                candidate
+                for candidate in narrowed
+                if name in getattr(candidate, authored_pre)
+            ]
+            if narrowed_authored:
+                matches = narrowed_authored
+            else:
+                original_authored = [
+                    candidate
+                    for candidate in matches
+                    if name in getattr(candidate, authored_pre)
+                ]
+                if original_authored:
+                    matches = original_authored
+                else:
+                    matches = narrowed
         # When sibling `namespace` blocks re-export each other's members
         # (`namespace N { export {f as g} }` publishes the merged `f`),
         # prefer the member whose own block authored the looked-up name —
@@ -2419,6 +2448,7 @@ class _TypeScriptBindings:
         tdz_function: Any | None = None,
         check_tdz: bool = True,
         constructible: bool = False,
+        args_node: Any | None = None,
     ) -> tuple[_Record | None, str | None]:
         name = self.text(node)
         if name == "arguments" and namespace == "value":
@@ -2428,6 +2458,22 @@ class _TypeScriptBindings:
             self.add_unresolved(node, name, "with_scope")
             return None, "with_scope"
         record = self._lookup(name, node.start_byte, namespace)
+        if (
+            record is not None
+            and args_node is not None
+            and namespace == "value"
+            and record.function_node is not None
+        ):
+            signatures = [
+                candidate
+                for candidate in self._lookup_candidates(
+                    name, node.start_byte, namespace
+                )
+                if candidate.function_node is not None
+            ]
+            narrowed = self._narrow_overloads(signatures, args_node)
+            if narrowed:
+                record = narrowed[0]
         if record is not None and constructible:
             # `new N()` on a merged declaration must name the class, so
             # the reference lands on the class before it is emitted.
@@ -3006,7 +3052,12 @@ class _TypeScriptBindings:
             self._append_call(Call(self.span(node), args, owner, "", "builtin"))
             return
         record, reason = self._resolve(
-            callee, "value", "call", with_scopes, constructible=new
+            callee,
+            "value",
+            "call",
+            with_scopes,
+            constructible=new,
+            args_node=node.child_by_field_name("arguments"),
         )
         if name == "eval" and not new:
             self.add_gap("dynamic_eval", node)
