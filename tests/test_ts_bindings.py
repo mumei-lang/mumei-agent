@@ -2052,3 +2052,33 @@ const x = new N.C(); x.m();
         if source[c.span.start : c.span.end] == "x.m()"
     )
     assert call.target == class_m.id
+
+
+def test_member_alias_collision_value_side_prefers_winner_member():
+    # Class and namespace share the export alias `Public`. When both
+    # provide `f`, the winning class's static member applies; the
+    # namespace member only fills in when the class lacks the name.
+    # Parenthesized receivers take the same path.
+    source = """
+namespace N { export class C { static f(): void {} } namespace M { export function f(): void {} } export {C as Public}; export {M as Public} }
+N.Public.f();
+(N.Public).f();
+"""
+    report = build_ts_bindings(source)
+    static_f = _member_bindings(report, "f", "associated_function")[0]
+    calls = _calls(report)
+    assert len(calls) == 2
+    assert all(c.target == static_f.id for c in calls)
+
+
+def test_member_alias_collision_value_side_falls_back_to_loser():
+    source = """
+namespace N { export class C { } namespace M { export function f(): void {} } export {C as Public}; export {M as Public} }
+N.Public.f();
+(N.Public).f();
+"""
+    report = build_ts_bindings(source)
+    ns_f = _member_bindings(report, "f", "function")[0]
+    calls = _calls(report)
+    assert len(calls) == 2
+    assert all(c.target == ns_f.id for c in calls)

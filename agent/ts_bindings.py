@@ -1570,16 +1570,27 @@ class _TypeScriptBindings:
             if record is None:
                 return None
             next_extras: list[_Record] = []
-            record = self._member_lookup(
+            resolved = self._member_lookup(
                 record,
                 segment,
                 position,
                 static=True,
                 via_this=False,
                 for_type=for_type,
-                extra_seed=tuple(extras),
                 collect_extras=next_extras,
             )
+            if resolved is None and extras:
+                resolved = self._member_lookup(
+                    record,
+                    segment,
+                    position,
+                    static=True,
+                    via_this=False,
+                    for_type=for_type,
+                    extra_seed=tuple(extras),
+                    collect_extras=next_extras,
+                )
+            record = resolved
             extras = next_extras
         return record
 
@@ -2072,7 +2083,9 @@ class _TypeScriptBindings:
             "as_expression", "satisfies_expression", "await_expression",
         }:
             return self._object_type(
-                next(iter(self.children(node)), None), position
+                next(iter(self.children(node)), None),
+                position,
+                extras_out=extras_out,
             )
         return None, False, False
 
@@ -2094,15 +2107,28 @@ class _TypeScriptBindings:
         )
         if type_record is None:
             return None
-        return self._member_lookup(
+        member = self._member_lookup(
             type_record,
             name,
             position,
             static=static,
             via_this=via_this,
-            extra_seed=tuple(inner_extras),
             collect_extras=collect_extras,
         )
+        # The collision losers only apply when the winning member
+        # record does not provide the name — the winner's own members
+        # always rank first.
+        if member is None and inner_extras:
+            member = self._member_lookup(
+                type_record,
+                name,
+                position,
+                static=static,
+                via_this=via_this,
+                extra_seed=tuple(inner_extras),
+                collect_extras=collect_extras,
+            )
+        return member
 
     def _resolve(
         self,
