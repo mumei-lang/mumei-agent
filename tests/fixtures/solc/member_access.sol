@@ -1,5 +1,7 @@
 contract Token {
     function transfer(address to, uint256 amount) external {}
+    function send(uint256 a) external {}
+    function send(bool b) external {}
     uint256 public supply;
 }
 contract Base {
@@ -50,6 +52,7 @@ contract Vault is Base {
         getToken().transfer(address(0), 1);
         new Token().transfer(address(0), 1);
         this.token().transfer(address(0), 1);
+        token.send(1);
         status = Status.Ready;
         coin.v = s;
         s = coins[0].v;

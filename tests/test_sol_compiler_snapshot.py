@@ -110,7 +110,7 @@ def _assert_rejected(envelope, source, *, raw=None):
             + ["builtin"]
             + ["agree"] * 12
             + ["builtin"]
-            + ["agree"] * 18
+            + ["agree"] * 20
             + ["lexical_missing"]
             + ["agree"] * 18
             + ["builtin"] * 2
@@ -616,11 +616,12 @@ def test_member_access_declarations_match_lexical_member_bindings():
             "seed",
             "add",
             "stamp",
+            "send",
             "Ready",
             "v",
         }
     ]
-    assert [item["status"] for item in member_items] == ["agree"] * 23 + [
+    assert [item["status"] for item in member_items] == ["agree"] * 24 + [
         "lexical_missing"
     ]
     for item in member_items:

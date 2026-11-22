@@ -704,7 +704,7 @@ class _SolBindings:
         self, name: str, position: int, owner: _Contract | None
     ) -> _Record | None:
         if owner is not None:
-            inherited, _reason = self._lookup_contract(
+            inherited, _reason, _c = self._lookup_contract(
                 name, owner, position, "type"
             )
             if inherited is not None:
@@ -723,7 +723,10 @@ class _SolBindings:
         visited: set[str] | None = None,
         allow_private_own: bool = True,
         exclude_type_members: bool = False,
-    ) -> tuple[_Record | None, str | None]:
+    ) -> tuple[_Record | None, str | None, list[_Record]]:
+        # The third element is the surviving overload set — populated
+        # only when the lookup ends in ``ambiguous_overload`` — so a
+        # call site can resolve the winner by argument types.
         if namespace == "value":
             layers = self._contract_layers(
                 name, contract, namespace, visited
@@ -755,16 +758,23 @@ class _SolBindings:
                 if any(record.binding.kind != "function" for record in records):
                     if functions:
                         break
-                    return self._choose(records)
+                    record, reason = self._choose(records)
+                    return record, reason, []
                 functions.extend(records)
             if functions:
-                return self._choose(self._drop_overridden_functions(functions))
+                candidates = self._drop_overridden_functions(functions)
+                record, reason = self._choose(candidates)
+                return (
+                    record,
+                    reason,
+                    candidates if reason == "ambiguous_overload" else [],
+                )
             if private_match:
-                return None, "private_base_member"
-            return None, None
+                return None, "private_base_member", []
+            return None, None, []
         visited = set() if visited is None else visited
         if contract.record.binding.id in visited:
-            return None, None
+            return None, None, []
         visited.add(contract.record.binding.id)
         own = self._matching_records(
             contract.scope.records.get(name, []),
@@ -772,21 +782,26 @@ class _SolBindings:
             namespace,
         )
         if own:
-            return self._choose(own)
+            record, reason = self._choose(own)
+            return (
+                record,
+                reason,
+                own if reason == "ambiguous_overload" else [],
+            )
         for base_name, _base_node in reversed(contract.bases):
             base = self.contracts.get(base_name)
             if base is None:
                 continue
-            record, reason = self._lookup_contract(
+            record, reason, candidates = self._lookup_contract(
                 name, base, position, namespace, visited
             )
             if reason is not None:
-                return None, reason
+                return None, reason, candidates
             if record is not None:
                 if record.visibility == "private":
-                    return None, "private_base_member"
-                return record, None
-        return None, None
+                    return None, "private_base_member", []
+                return record, None, []
+        return None, None, []
 
     def _resolve_member(
         self, node: Any
@@ -876,6 +891,15 @@ class _SolBindings:
                     }
                     if len(signatures) == 1 and None not in signatures:
                         return member, functions[0], None
+                    # `super.f` is explicit dispatch — `using`
+                    # extensions never enter the candidate set — but
+                    # the overload set itself is still resolved by the
+                    # call's argument types.
+                    winner, _outcome = self._resolve_overload(
+                        [(item, 0) for item in functions], node
+                    )
+                    if winner is not None:
+                        return member, winner, None
                     return member, None, "ambiguous_overload"
                 if saw_private:
                     return member, None, "private_base_member"
@@ -973,7 +997,7 @@ class _SolBindings:
             # contract name only; on an instance (`inst.S(...)`) the
             # member position skips them, so an inherited same-named
             # function or a `using` extension owns the call instead.
-            record, reason = self._lookup_contract(
+            record, reason, candidates = self._lookup_contract(
                 name,
                 contract,
                 member.start_byte,
@@ -981,14 +1005,40 @@ class _SolBindings:
                 allow_private_own=inside_owner,
                 exclude_type_members=not via_type_name,
             )
+            if (
+                record is not None
+                and record.binding.kind != "function"
+            ):
+                return member, record, reason
+            member_pool = (
+                [record] if record is not None else candidates
+            )
+            if member_pool:
+                # solc resolves `x.f(...)` by argument-dependent
+                # lookup over ONE set: member overloads plus every
+                # `using` extension applicable to the receiver's type.
+                # A member that cannot take the call's arguments loses
+                # to an applicable extension (verified: `inst.f("x")`
+                # with only f(uint256)/f(address) members binds the
+                # f(D,string) extension; a single member that cannot
+                # convert the argument is a compile error, not a bind).
+                pool = [(item, 0) for item in member_pool]
+                if self._call_argument_exprs(node) is not None:
+                    seen = {item.binding.id for item in member_pool}
+                    pool += [
+                        (item, 1)
+                        for item in self._using_candidates(
+                            name, obj, member.start_byte
+                        )[0]
+                        if item.binding.id not in seen
+                    ]
+                winner, _outcome = self._resolve_overload(pool, node)
+                if winner is not None:
+                    return member, winner, None
+                return member, None, "ambiguous_overload"
             # A lookup that ended on an invisible private member does
             # not close the position: solc treats the member as absent,
-            # so a `using` extension still owns the call. An overload
-            # set that failed resolution does close it — the member
-            # exists, and solc reports the ambiguity rather than
-            # reaching for an extension.
-            if record is not None or reason == "ambiguous_overload":
-                return member, record, reason
+            # so a `using` extension still owns the call.
         if type_record is not None:
             # Enum constants only resolve through the type name
             # (`Status.Ready`): on an enum-typed value they would shadow
@@ -998,20 +1048,29 @@ class _SolBindings:
                 if found is not None:
                     return member, found, None
         using_record, using_reason = self._lookup_using(
-            name, obj, member.start_byte
+            name, obj, member.start_byte, node
         )
         if using_record is not None or using_reason is not None:
             return member, using_record, using_reason
         return member, None, reason
 
     def _object_declared_type_text(self, obj: Any) -> str | None:
-        """Declared-type text of a member-call receiver, or None when the
-        object's type cannot be named statically. Identifier objects keep
-        the original variable lookup; member chains (`coin.v.f()`), array
+        declared = self._object_declared_type(obj)
+        return declared[0] if declared is not None else None
+
+    def _object_declared_type(
+        self, obj: Any
+    ) -> "tuple[str, _Contract | None] | None":
+        """Declared-type text of a member-call receiver together with
+        the scope that spelling resolves in, or None when the object's
+        type cannot be named statically. Identifier objects keep the
+        original variable lookup; member chains (`coin.v.f()`), array
         elements (`totals[0].f()`), calls returning a named type
         (`getTotal().f()`, `total.add(1).sub(2)`) and type conversions
         (`Token(addr).f()`) reuse the same type-node machinery as the
-        contract path.
+        contract path. The owner matters for user-defined types:
+        `A.get()` returning `S` spells `S` inside `A`, not in the
+        call site's contract.
         """
         obj = self._unwrap(obj)
         if obj is None:
@@ -1029,12 +1088,12 @@ class _SolBindings:
                 in {"contract", "interface", "library"}
             ):
                 return None
-            return self.text(record.type_node)
+            return self.text(record.type_node), record.owner
         if obj.type == "member_expression":
             _member, inner, _reason = self._resolve_member(obj)
             if inner is None or inner.type_node is None:
                 return None
-            return self.text(inner.type_node)
+            return self.text(inner.type_node), inner.owner
         if obj.type == "array_access":
             base = self._unwrap(obj.child_by_field_name("base"))
             base_record = self._object_record(base)
@@ -1048,7 +1107,7 @@ class _SolBindings:
             element = re.sub(r"\[[^\]]*\]\s*$", "", text).strip()
             if element == text.strip() or "[" in element:
                 return None
-            return element
+            return element, base_record.owner
         if obj.type == "call_expression":
             callee = self._unwrap(obj.child_by_field_name("function"))
             record = self._object_record(callee)
@@ -1064,10 +1123,12 @@ class _SolBindings:
                 # `Token(addr)` / `Coin(...)` — the value is typed by
                 # the declared type itself. A qualified callee keeps
                 # its dotted name (`Container.Coin(1)`): using targets
-                # spell the type the same way.
+                # spell the type the same way. The name resolved at
+                # the call site, so it re-resolves in the call site's
+                # scope.
                 if callee.type == "member_expression":
-                    return self.text(callee)
-                return record.binding.name
+                    return self.text(callee), self.current_contract
+                return record.binding.name, self.current_contract
             if record.binding.kind != "function":
                 if record.type_node is None or re.match(
                     r"\s*function\b", self.text(record.type_node)
@@ -1110,7 +1171,7 @@ class _SolBindings:
                     "enum",
                 }:
                     return None
-                return text
+                return text, record.owner
             function_node = record.node.parent
             if function_node is None:
                 return None
@@ -1122,22 +1183,25 @@ class _SolBindings:
                 r"\s*function\b", self.text(type_node)
             ):
                 return None
-            return self.text(type_node)
+            # The returns clause is spelled inside the callee's
+            # declaring contract (`A.get(): returns (S)` means `A.S`),
+            # not the caller's.
+            return self.text(type_node), record.owner
         return None
 
-    def _lookup_using(
+    def _using_candidates(
         self, name: str, obj: Any, position: int
-    ) -> tuple[_Record | None, str | None]:
-        """Resolve `x.f` through `using Lib for T` directives when the
-        contract-type path found no member: the object's declared type
-        text must equal the directive's `for` target, or the directive
-        must be `for *`. Objects whose type cannot be named statically
-        (mappings, nested arrays, function-typed returns) keep their
-        opaque treatment.
+    ) -> tuple[list[_Record], str | None]:
+        """`using Lib for T` candidates for `obj.name`: the object's
+        declared type text must equal the directive's `for` target, or
+        the directive must be `for *`. Objects whose type cannot be
+        named statically (mappings, nested arrays, function-typed
+        returns) keep their opaque treatment.
         """
-        raw_text = self._object_declared_type_text(obj)
-        if raw_text is None:
-            return None, None
+        declared = self._object_declared_type(obj)
+        if declared is None:
+            return [], None
+        raw_text, type_owner = declared
         type_text = self._canonical_type_text(raw_text)
         directives = list(self.file_usings)
         if self.current_contract is not None:
@@ -1145,37 +1209,355 @@ class _SolBindings:
         candidates: list[_Record] = []
         first_reason: str | None = None
         for directive in directives:
-            if directive.target and self._canonical_type_text(
-                directive.target
-            ) != type_text:
-                continue
+            if directive.target:
+                target_text = self._canonical_type_text(directive.target)
+                if target_text != type_text:
+                    target_record = self._user_type_record(
+                        target_text, self.current_contract, position
+                    )
+                    receiver_record = self._user_type_record(
+                        type_text, type_owner, position
+                    )
+                    if (
+                        target_record is None
+                        or receiver_record is None
+                        or target_record.binding.id
+                        != receiver_record.binding.id
+                    ):
+                        continue
             library = self.contracts.get(directive.library)
             if library is None or library.kind != "library":
                 continue
-            member_record, member_reason = self._lookup_contract(
-                name,
-                library,
-                position,
-                "value",
-                allow_private_own=False,
+            member_record, member_reason, member_candidates = (
+                self._lookup_contract(
+                    name,
+                    library,
+                    position,
+                    "value",
+                    allow_private_own=False,
+                )
             )
-            if member_record is not None:
+            pool = (
+                [member_record]
+                if member_record is not None
+                else member_candidates
+            )
+            for item in pool:
+                signature = item.parameter_signature
+                if (
+                    signature
+                    and self._param_accepts(
+                        signature[0],
+                        "typed",
+                        type_text,
+                        param_owner=item.owner,
+                        arg_owner=type_owner,
+                        position=position,
+                    )
+                    == "nomatch"
+                ):
+                    # A `for *` directive admits every name, but a
+                    # function still only applies when the receiver
+                    # implicitly converts to its first parameter.
+                    continue
                 if all(
-                    candidate.binding.id != member_record.binding.id
+                    candidate.binding.id != item.binding.id
                     for candidate in candidates
                 ):
-                    candidates.append(member_record)
-            elif member_reason is not None and first_reason is None:
+                    candidates.append(item)
+            if (
+                member_reason is not None
+                and member_reason != "ambiguous_overload"
+                and first_reason is None
+            ):
                 first_reason = member_reason
-        # solc picks the binding by implicit argument types; without
-        # argument typing a name declared by more than one applicable
-        # directive is an overload set the call resolves against, which
-        # stays opaque rather than binding to the first directive.
+        return candidates, first_reason
+
+    def _lookup_using(
+        self,
+        name: str,
+        obj: Any,
+        position: int,
+        member_node: Any | None = None,
+    ) -> tuple[_Record | None, str | None]:
+        """Resolve `x.f` through `using Lib for T` directives when the
+        contract-type path found no member. The extension's first
+        parameter is the receiver, so argument matching skips it. On a
+        non-call member position (`x.f` as a value) a single candidate
+        binds and several stay an overload set, as before.
+        """
+        candidates, first_reason = self._using_candidates(
+            name, obj, position
+        )
+        if not candidates:
+            return None, first_reason
+        if member_node is not None:
+            winner, _outcome = self._resolve_overload(
+                [(item, 1) for item in candidates], member_node
+            )
+            if winner is not None:
+                return winner, None
+            return None, "ambiguous_overload"
         if len(candidates) > 1:
             return None, "ambiguous_overload"
-        if candidates:
-            return candidates[0], None
-        return None, first_reason
+        return candidates[0], None
+
+    def _call_argument_exprs(self, member_node: Any) -> list[Any] | None:
+        """Argument expressions when `member_node` (`x.f`) is the callee
+        of a `call_expression`, else None — non-call member positions
+        cannot be disambiguated by argument types.
+        """
+        parent = member_node.parent
+        if parent is not None and parent.type == "expression":
+            parent = parent.parent
+        if parent is None or parent.type != "call_expression":
+            return None
+        callee = self._unwrap(parent.child_by_field_name("function"))
+        if (
+            callee is None
+            or (callee.start_byte, callee.end_byte)
+            != (member_node.start_byte, member_node.end_byte)
+        ):
+            return None
+        # Named arguments (`f({y: true, x: 1})`) reorder by parameter
+        # name — the scanner has no parameter names to reorder by, so
+        # the position falls back to name-only resolution.
+        for child in self.children(parent):
+            if child.type != "call_argument":
+                continue
+            if any(
+                inner.type == "call_struct_argument"
+                for inner in self.children(child)
+            ):
+                return None
+        _spans, expressions = self._call_arguments(parent)
+        return [self._unwrap(expr) for expr in expressions]
+
+    def _argument_kind(
+        self, arg: Any
+    ) -> "tuple[str, str | None, _Contract | None]":
+        """Best-effort type of a call argument: a literal marker for
+        literals, the canonical declared-type text for expressions the
+        receiver-type machinery can name plus the scope that spelling
+        resolves in, or ``("unknown", None, None)``.
+        """
+        arg = self._unwrap(arg)
+        if arg is None:
+            return "unknown", None, None
+        if arg.type == "number_literal":
+            return "literal_int", self.text(arg), None
+        if arg.type == "string_literal":
+            return "literal_string", None, None
+        if arg.type == "boolean_literal":
+            return "literal_bool", None, None
+        declared = self._object_declared_type(arg)
+        if declared is not None:
+            text, owner = declared
+            return "typed", self._canonical_type_text(text), owner
+        return "unknown", None, None
+
+    @staticmethod
+    def _int_width(text: str) -> tuple[bool, int] | None:
+        match = re.fullmatch(r"(u?)int(\d*)", text)
+        if match is None:
+            return None
+        width = int(match.group(2)) if match.group(2) else 256
+        return (match.group(1) == "u"), width
+
+    @staticmethod
+    def _bytes_width(text: str) -> int | None:
+        match = re.fullmatch(r"bytes(\d{1,2})", text)
+        if match is None:
+            return None
+        return int(match.group(1))
+
+    def _implicitly_converts(self, arg: str, param: str) -> bool:
+        """Whether a value of canonical type `arg` implicitly converts
+        to a parameter of canonical type `param` (widening only —
+        narrowing and signed→unsigned are not implicit).
+        """
+        if arg == param:
+            return True
+        arg_int = self._int_width(arg)
+        param_int = self._int_width(param)
+        if arg_int is not None and param_int is not None:
+            arg_unsigned, arg_width = arg_int
+            param_unsigned, param_width = param_int
+            if arg_unsigned and param_unsigned:
+                return param_width >= arg_width
+            if not arg_unsigned and not param_unsigned:
+                return param_width >= arg_width
+            if arg_unsigned:
+                # uintN -> intM needs strictly more width.
+                return param_width > arg_width
+            return False
+        arg_bytes = self._bytes_width(arg)
+        if arg_bytes is not None:
+            if param == "bytes":
+                return True
+            param_bytes = self._bytes_width(param)
+            return param_bytes is not None and param_bytes >= arg_bytes
+        if arg == "address payable" and param == "address":
+            return True
+        return False
+
+    def _user_type_record(
+        self, text: str | None, owner: "_Contract | None", position: int
+    ) -> "_Record | None":
+        """Resolve a canonical user-type spelling to its declaration
+        record, so a qualified spelling (`L.S`) and the scope-local
+        spelling the declaring scope uses (`S` inside `L`) compare by
+        identity rather than by text.
+        """
+        if not text:
+            return None
+        parts = text.split(".")
+        if len(parts) == 1:
+            return self._lookup_type_record(parts[0], position, owner)
+        if len(parts) != 2:
+            return None
+        container = self.contracts.get(parts[0])
+        if container is None:
+            return None
+        record, _reason, _candidates = self._lookup_contract(
+            parts[1], container, position, "type"
+        )
+        return record
+
+    def _param_accepts(
+        self,
+        param_text: str,
+        arg_kind: str,
+        arg_text: str | None,
+        *,
+        param_owner: "_Contract | None" = None,
+        arg_owner: "_Contract | None" = None,
+        position: int = 0,
+    ) -> str:
+        """`match` / `convert` / `nomatch` for one parameter against one
+        call argument. Literals carry only a kind (a numeric literal's
+        value — and so its smallest fitting type — is unknown, matching
+        solc's ambiguity for `f(1)` across integer overloads).
+        """
+        param = self._canonical_type_text(
+            re.sub(
+                r"\b(memory|calldata|storage)\b", "", param_text
+            ).strip()
+        )
+        if arg_kind == "unknown":
+            return "convert"
+        if arg_kind == "literal_int":
+            if re.fullmatch(
+                r"0x[0-9a-fA-F]{40}", arg_text or ""
+            ):
+                # A 40-hex-digit literal is an address literal.
+                return (
+                    "match"
+                    if param in {"address", "address payable"}
+                    else "nomatch"
+                )
+            return (
+                "convert"
+                if self._int_width(param) is not None
+                else "nomatch"
+            )
+        if arg_kind == "literal_string":
+            if (
+                param == "string"
+                or param == "bytes"
+                or self._bytes_width(param) is not None
+            ):
+                return "convert"
+            return "nomatch"
+        if arg_kind == "literal_bool":
+            return "convert" if param == "bool" else "nomatch"
+        if arg_text == param:
+            return "match"
+        if arg_text is not None and self._implicitly_converts(
+            arg_text, param
+        ):
+            return "convert"
+        param_record = self._user_type_record(
+            param, param_owner, position
+        )
+        arg_record = self._user_type_record(
+            arg_text, arg_owner, position
+        )
+        if (
+            param_record is not None
+            and arg_record is not None
+            and param_record.binding.id == arg_record.binding.id
+        ):
+            return "match"
+        return "nomatch"
+
+    def _resolve_overload(
+        self, pool: list[tuple[_Record, int]], member_node: Any
+    ) -> tuple[_Record | None, str]:
+        """Argument-driven overload resolution over `pool` of
+        `(record, leading_params_to_skip)` pairs — extensions skip
+        their receiver parameter. Returns the winning record and a
+        status: ``ok``, ``none`` (no candidate can take the args) or
+        ``ambiguous``. A non-call member position keeps name-only
+        semantics: a lone candidate binds, a set stays ambiguous.
+        """
+        args = self._call_argument_exprs(member_node)
+        if args is None:
+            if len(pool) == 1:
+                return pool[0][0], "ok"
+            return None, "ambiguous"
+        survivors: list[tuple[_Record, int]] = []
+        for record, skip in pool:
+            signature = record.parameter_signature
+            if signature is None:
+                # Parameters the scanner could not pin down stay in
+                # the set but can never outrank a known candidate.
+                survivors.append((record, -1))
+                continue
+            params = signature[skip:]
+            if len(params) != len(args):
+                continue
+            rank = 0
+            viable = True
+            for param, arg in zip(params, args):
+                kind, arg_text, arg_owner = self._argument_kind(arg)
+                verdict = self._param_accepts(
+                    param,
+                    kind,
+                    arg_text,
+                    param_owner=record.owner,
+                    arg_owner=arg_owner,
+                    position=member_node.start_byte,
+                )
+                if verdict == "nomatch":
+                    viable = False
+                    break
+                if verdict == "match":
+                    rank += 1
+            if viable:
+                survivors.append((record, rank))
+        if len(survivors) == 1:
+            return survivors[0][0], "ok"
+        if not survivors:
+            return None, "none"
+        if any(
+            self._argument_kind(arg)[0] == "unknown"
+            for arg in args
+        ):
+            # An argument whose type cannot be named could be an exact
+            # match for any survivor — solc would still disambiguate,
+            # but ranking here could pick a wrong winner, so the set
+            # stays ambiguous rather than binding the best-ranked.
+            return None, "ambiguous"
+        best = max(rank for _record, rank in survivors)
+        winners = [
+            record
+            for record, rank in survivors
+            if rank == best and record.parameter_signature is not None
+        ]
+        if len(winners) == 1 and best >= 0:
+            return winners[0], "ok"
+        return None, "ambiguous"
 
     def _type_record_for_type_node(
         self, type_node: Any | None, owner: _Contract | None
@@ -1341,7 +1723,7 @@ class _SolBindings:
                     continue
                 return self._choose(found)
         if self.current_contract is not None:
-            record, reason = self._lookup_contract(
+            record, reason, _candidates = self._lookup_contract(
                 name, self.current_contract, position, namespace
             )
             if record is not None or reason is not None:
