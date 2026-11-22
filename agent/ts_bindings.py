@@ -1135,15 +1135,15 @@ class _TypeScriptBindings:
         if node.type == "super":
             current = self._enclosing_type_record(node)
             if current is None:
-                return None, True, True
+                return None, False, True
             decl = current.node.parent
             for base in self._type_bases.get(
                 None if decl is None else decl.id, ()
             )[:1]:
                 base_record = self._lookup(base, position, "type")
                 if base_record is not None:
-                    return base_record, True, True
-            return None, True, True
+                    return base_record, False, True
+            return None, False, True
         if node.type == "identifier":
             record = self._lookup(self.text(node), position, "value")
             if record is None:
