@@ -2933,7 +2933,7 @@ contract C {
     assert call.target == uint_take.id
 
 
-def test_elementary_conversion_argument_types_overload_resolution():
+def test_elementary_conversion_argument_binds_call_reference():
     # `this.take(uint(1))` infers the argument's type from the cast,
     # so the uint256 overload wins over address.
     source = """
