@@ -56,6 +56,11 @@ _ITER_PRESERVING_METHODS = frozenset(
 )
 # Vec/slice accessors that iterate the same element as `iter()`.
 _ITER_SLICE_METHODS = frozenset({"as_slice", "as_mut_slice"})
+# Iterators over `&[T]` slices — `v.chunks(n)`/`v.windows(n)`/
+# `v.split(p)` spell `&P`, which index/iter unwrap to `P`.
+_ITER_CHUNK_METHODS = frozenset(
+    {"chunks", "windows", "rchunks", "split", "split_inclusive"}
+)
 # Map entry points and the key they read — `m.keys()` yields `K`,
 # `m.values()` yields `V` of `HashMap<K, V>`/`BTreeMap<K, V>`.
 _MAP_ELEMENT_METHODS = {"keys": 0, "values": 1}
@@ -2710,6 +2715,13 @@ class _RustBindings:
             # std::iter::once(1)` reaches an unresolvable extern
             # call) — the element stays opaque.
             return None, None
+        if elem_args.startswith("&"):
+            # `&P`/`&mut P`/`&[P]` spell a borrowed element — the
+            # receiver of `x.m()`/`x[0]` is `P`.
+            inner = elem_args.lstrip("&").strip()
+            if inner.startswith("mut "):
+                inner = inner[4:].strip()
+            return self._element_of(None, inner, position)
         # A slice or array element exposes its own element type —
         # `&[[P; 2]]` reads first to `[P; 2]`, then to `P`.
         bracket = re.fullmatch(
@@ -3081,6 +3093,19 @@ class _RustBindings:
             return spelled, self._receiver_annotation_position(
                 receiver
             )
+        if method in _ITER_CHUNK_METHODS:
+            container_id, args = self._receiver_type(receiver)
+            if args is None:
+                return None, None
+            spelled = args.strip() or None
+            if spelled is None:
+                return None, None
+            # The element is a borrowed slice — `&P` unwraps to `P`
+            # at the index/iter sites that consume it.
+            return (
+                "&" + spelled,
+                self._receiver_annotation_position(receiver),
+            )
         if method in _ITER_PRESERVING_METHODS or method in _ITER_SLICE_METHODS:
             if receiver.type != "call_expression":
                 return None, None
@@ -3271,6 +3296,14 @@ class _RustBindings:
                 (b.name for b in self.bindings if b.id == elem_id), ""
             )
             return TypeFact("named", name, 0, None, elem_id), rest
+        if method in _ITER_CHUNK_METHODS:
+            # `v.chunks(n)` yields `&[P]` slices — spell `&P`, which
+            # index/iter sites unwrap to `P`.
+            container_id, args = self._receiver_type(receiver)
+            if args is None:
+                return _UNKNOWN, None
+            spelled = args.strip() or None
+            return _UNKNOWN, None if spelled is None else "&" + spelled
         if method in _ITER_PRESERVING_METHODS:
             # `v.iter().rev()` yields the inner call's element —
             # recurse into the chained receiver. A non-call receiver
