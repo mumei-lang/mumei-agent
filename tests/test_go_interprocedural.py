@@ -54487,3 +54487,28 @@ def test_deferred_method_named_result_observes_exit_writes(go_types_helper):
     result = named(*unit(go_types_helper, declarations))
     assert result.available, result.gaps
     assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_receiver_field_records_reach_callback_invocations(go_types_helper):
+    # `s.Run` hands `s.F` to `g`, which invokes it and stores the
+    # result — the field's captured deps must ride the call-arg deps
+    # so `g`'s write to `out` observes `v`'s post-capture update.
+    files = {
+        "a.go": (
+            "package p\n"
+            "func g(f func() int64, store *int64) { *store = f() }\n"
+            "type S struct { F func() int64 }\n"
+            "func (s S) Run(out *int64) { g(s.F, out) }\n"
+            "func F(v int64, x int64) int64 {\n"
+            "\tvar out int64\n"
+            "\ts := S{F: func() int64 { return v }}\n"
+            "\tv = x\n"
+            "\ts.Run(&out)\n"
+            "\treturn out\n}\n"
+        ),
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
