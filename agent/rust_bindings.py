@@ -2951,6 +2951,26 @@ class _RustBindings:
             container_id, args = self._receiver_type(receiver)
             if args is None:
                 return None, None
+            container_name = (
+                next(
+                    (
+                        b.name
+                        for b in self.bindings
+                        if b.id == container_id
+                    ),
+                    None,
+                )
+                if container_id is not None
+                else None
+            )
+            if (
+                container_id is not None
+                and container_name not in _INDEX_ELEMENT_CONTAINERS
+            ):
+                # A custom `W<P>` can `Deref` to a different
+                # element — `w.chunks(n)` yields `&[Q]` there,
+                # not `&[P]`.
+                return None, None
             spelled = args.strip() or None
             if spelled is None:
                 return None, None
@@ -3063,6 +3083,7 @@ class _RustBindings:
             or method in _MAP_ELEMENT_METHODS
             or method in _ITER_PRESERVING_METHODS
             or method in _ITER_SLICE_METHODS
+            or method in _ITER_CHUNK_METHODS
             or method == "enumerate"
             or method == "zip"
         ) and self._field_member(
@@ -3091,6 +3112,26 @@ class _RustBindings:
             # index/iter sites unwrap to `P`.
             container_id, args = self._receiver_type(receiver)
             if args is None:
+                return _UNKNOWN, None
+            container_name = (
+                next(
+                    (
+                        b.name
+                        for b in self.bindings
+                        if b.id == container_id
+                    ),
+                    None,
+                )
+                if container_id is not None
+                else None
+            )
+            if (
+                container_id is not None
+                and container_name not in _INDEX_ELEMENT_CONTAINERS
+            ):
+                # A custom `W<P>` can `Deref` to a different
+                # element — `w.chunks(n)` yields `&[Q]` there,
+                # not `&[P]`.
                 return _UNKNOWN, None
             spelled = args.strip() or None
             return _UNKNOWN, None if spelled is None else "&" + spelled
@@ -3360,6 +3401,10 @@ class _RustBindings:
         # only the value type, so the pair's shape is unpinned here.
         if self._is_map_container(container_id, iterator):
             return _UNKNOWN, None
+        if elem_args.strip().startswith("&"):
+            # `let it = v.chunks(n)` — `it`'s spelled args ARE the
+            # element (`&[P]`), not a container's type args.
+            return _UNKNOWN, elem_args.strip()
         # Spelled element names on `it` (`let it = v.iter()`) were
         # written in `it`'s annotation — resolve them there.
         position = self._receiver_annotation_position(iterator)
