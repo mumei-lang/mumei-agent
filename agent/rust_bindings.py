@@ -200,6 +200,9 @@ class _Record:
     # The item carries a `pub` visibility modifier — only `pub` items
     # come through a `use m::*` glob.
     public: bool = False
+    # An `import` record's full use path (`use m::P as Q` → "m::P")
+    # — the name it binds resolves through this target.
+    import_path: str | None = None
 
 
 class _RustBindings:
@@ -543,7 +546,9 @@ class _RustBindings:
             child.type == "visibility_modifier"
             for child in node.named_children
         )
-        for name_node, is_glob, bound_name in self._use_names(node):
+        for name_node, is_glob, bound_name, target_path in self._use_names(
+            node
+        ):
             if is_glob:
                 scope.glob_import = True
                 if bound_name:
@@ -562,6 +567,7 @@ class _RustBindings:
                 name_override=bound_name,
             )
             record.public = is_pub
+            record.import_path = target_path
             self._add_to_scope(scope, record)
 
     def _add_generic_parameters(
@@ -775,8 +781,15 @@ class _RustBindings:
             if gap not in self.gaps:
                 self.gaps.append(gap)
 
-    def _use_names(self, node: Any) -> list[tuple[Any, bool, str | None]]:
-        out: list[tuple[Any, bool, str | None]] = []
+    def _use_names(
+        self, node: Any
+    ) -> list[tuple[Any, bool, str | None, str | None]]:
+        out: list[tuple[Any, bool, str | None, str | None]] = []
+
+        def joined(prefix: tuple[str, ...], text: str) -> str:
+            return "::".join(
+                prefix + tuple(part for part in text.split("::") if part)
+            )
 
         def add_leaf(tree: Any, prefix: tuple[str, ...] = ()) -> None:
             if tree.type == "use_list":
@@ -793,14 +806,43 @@ class _RustBindings:
             elif tree.type == "use_as_clause":
                 alias = tree.child_by_field_name("alias")
                 if alias is not None:
-                    out.append((alias, False, self.text(alias)))
+                    path_node = next(
+                        (
+                            child
+                            for child in self._children(tree)
+                            if child.id != alias.id
+                        ),
+                        None,
+                    )
+                    out.append(
+                        (
+                            alias,
+                            False,
+                            self.text(alias),
+                            None
+                            if path_node is None
+                            else joined(prefix, self.text(path_node)),
+                        )
+                    )
             elif tree.type in {"use_wildcard", "wildcard_pattern"} or self.text(tree).endswith("*"):
                 path = self.text(tree).removesuffix("*").removesuffix("::")
                 out.append(
-                    (tree, True, "::".join(prefix + (path,)) if prefix else path)
+                    (
+                        tree,
+                        True,
+                        "::".join(prefix + (path,)) if prefix else path,
+                        None,
+                    )
                 )
             elif tree.type == "self":
-                out.append((tree, False, prefix[-1] if prefix else "self"))
+                out.append(
+                    (
+                        tree,
+                        False,
+                        prefix[-1] if prefix else "self",
+                        "::".join(prefix) if prefix else None,
+                    )
+                )
             else:
                 candidates = [
                     child for child in self._descendants(tree)
@@ -811,7 +853,9 @@ class _RustBindings:
                     final = self.text(picked)
                     if final == "self":
                         final = prefix[-1] if prefix else "self"
-                    out.append((picked, False, final))
+                    out.append(
+                        (picked, False, final, joined(prefix, self.text(tree)))
+                    )
 
         for child in node.named_children:
             add_leaf(child)
@@ -821,7 +865,17 @@ class _RustBindings:
                 None,
             )
             if candidate is not None:
-                out.append((candidate, False, self.text(candidate)))
+                out.append(
+                    (
+                        candidate,
+                        False,
+                        self.text(candidate),
+                        self.text(node)
+                        .removeprefix("use")
+                        .removesuffix(";")
+                        .strip(),
+                    )
+                )
         return out
 
     def _scan_container(self, container: Any, scope: _Scope) -> None:
@@ -1274,10 +1328,13 @@ class _RustBindings:
             return (None if record is None else record.binding.id), args
         if node is None or node.type != "type_identifier":
             return None, None
-        record = self._lookup(
-            self._normalize_identifier(self.text(node)),
+        record = self._through_import(
+            self._lookup(
+                self._normalize_identifier(self.text(node)),
+                node.start_byte,
+                "type",
+            ),
             node.start_byte,
-            "type",
         )
         name = self._normalize_identifier(self.text(node))
         if (
@@ -1322,6 +1379,54 @@ class _RustBindings:
             parts = self._type_arg_list(args)
             args = parts[-1] if parts else None
         return (None if record is None else record.binding.id), args
+
+    def _resolve_use_path(
+        self, path: str, position: int, namespace: str
+    ) -> "_Record | None":
+        """Record a `use` target path names — `m::P` walks the module
+        chain and returns `P`'s own binding in `namespace` (a name
+        that only exists in the other namespace does not resolve)."""
+        segments = path.split("::")
+        if len(segments) < 2:
+            return None
+        module = self._lookup_module_path(
+            "::".join(segments[:-1]), position
+        )
+        if module is None or module.module_scope is None:
+            return None
+        for record in reversed(
+            module.module_scope.bindings.get(segments[-1], ())
+        ):
+            if self._in_namespace(record, namespace):
+                return record
+        return None
+
+    def _through_import(
+        self, record: "_Record | None", position: int,
+        namespace: str = "type",
+    ) -> "_Record | None":
+        """Follow `import` records to their use-path target —
+        `use m::P` makes `P::new` read `m`'s `P`. The path resolves
+        where the `use` is declared, not at the reference site, and
+        an unresolvable target keeps the import record itself (the
+        name is still what `impl Trait for P` matches against)."""
+        seen: set[str] = set()
+        while (
+            record is not None
+            and record.binding.kind == "import"
+            and record.import_path is not None
+            and record.binding.id not in seen
+        ):
+            seen.add(record.binding.id)
+            resolved = self._resolve_use_path(
+                record.import_path,
+                record.binding.span.start,
+                namespace,
+            )
+            if resolved is None:
+                break
+            record = resolved
+        return record
 
     def _lookup_module_path(
         self, path: str, position: int
@@ -1474,10 +1579,13 @@ class _RustBindings:
         if path.type == "generic_type":
             type_id, args = self._annotation_type(path)
         elif path.type in {"identifier", "type_identifier"}:
-            record = self._lookup(
-                self._normalize_identifier(self.text(path)),
+            record = self._through_import(
+                self._lookup(
+                    self._normalize_identifier(self.text(path)),
+                    path.start_byte,
+                    "type",
+                ),
                 path.start_byte,
-                "type",
             )
             type_id, args = (
                 None
@@ -1579,10 +1687,7 @@ class _RustBindings:
             trait = self.records.get(record.member_trait)
             if trait is None:
                 return False
-            resolved = self._lookup(
-                trait.binding.name, position, "type"
-            )
-            return resolved is trait
+            return self._trait_visible(trait, position)
 
         pool = [
             record
@@ -1631,10 +1736,7 @@ class _RustBindings:
                 trait = self.records.get(trait_id)
                 if trait is None:
                     continue
-                resolved = self._lookup(
-                    trait.binding.name, position, "type"
-                )
-                if resolved is not trait:
+                if not self._trait_visible(trait, position):
                     continue
                 pool.extend(
                     record
@@ -1756,6 +1858,53 @@ class _RustBindings:
             type_id = resolved
         return type_id
 
+    def _trait_visible(
+        self, trait: "_Record", position: int
+    ) -> bool:
+        """Whether `trait` is in scope at `position` — directly, or
+        through an import whose use path lands on it (`use m::Tr`,
+        `use m::Tr as Q`). An import record stands for an externally
+        declared trait: only its own binding satisfies membership."""
+        resolved = self._through_import(
+            self._lookup(trait.binding.name, position, "type"),
+            position,
+        )
+        if resolved is trait:
+            return True
+        if trait.binding.kind == "import":
+            return False
+        # A `use` is name-visible only inside its own module — neither
+        # `use` nor `pub use` in a parent module brings the name into a
+        # nested `mod` (that needs `use super::Tr`). The span check keeps
+        # block-local `use` scoped to its block; the depth check drops a
+        # parent module's `use`, whose span encloses nested mods.
+        depth = (
+            self.scopes[-1].module_depth
+            if self.scopes
+            else self.module_depth
+        )
+        for scope in self.scopes:
+            for records in scope.bindings.values():
+                for candidate in records:
+                    if (
+                        candidate.binding.kind == "import"
+                        and candidate.module_depth == depth
+                        and (
+                            candidate.binding.scope is None
+                            or candidate.binding.scope
+                            == ByteSpan(0, 0)
+                            or (
+                                candidate.binding.scope.start
+                                <= position
+                                < candidate.binding.scope.end
+                            )
+                        )
+                        and self._through_import(candidate, position)
+                        is trait
+                    ):
+                        return True
+        return False
+
     def _resolve_trait_node(self, trait_node: Any) -> "_Record | None":
         """Trait record for a UFCS `as` qualifier — plain, scoped
         (`m::T`) or generic (`T<A>`) spellings all resolve."""
@@ -1770,10 +1919,13 @@ class _RustBindings:
             return None
         if node.type in {"scoped_identifier", "scoped_type_identifier"}:
             return self._scoped_type(node)
-        return self._lookup(
-            self._normalize_identifier(self.text(node)),
+        return self._through_import(
+            self._lookup(
+                self._normalize_identifier(self.text(node)),
+                node.start_byte,
+                "type",
+            ),
             node.start_byte,
-            "type",
         )
 
     def _ufcs_member(
