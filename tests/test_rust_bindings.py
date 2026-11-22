@@ -5802,3 +5802,29 @@ fn f(v: Vec<P>) {
     assert _call(report, source, "c[0].pm()").target == pm.id
     assert _call(report, source, "x.pm()").target == pm.id
     assert _call(report, source, "w[0].pm()").target == pm.id
+
+
+def test_chunk_spelling_honors_declared_and_bound_methods():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct Q;
+impl Q { fn qm(&self) {} }
+struct W<T> { _m: T }
+impl<T> W<T> { fn chunks(&self, n: usize) -> Vec<Vec<Q>> { vec![] } }
+fn f(v: Vec<P>, w: W<P>) {
+    let it = v.chunks(2);
+    for c in it { c[0].pm(); }
+    for c in w.chunks(2) { c[0].qm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    qm = _bindings(report, "qm", "associated_function")[0]
+    chunks = _bindings(report, "chunks", "associated_function")[0]
+    # `let it = v.chunks(2)` keeps the slice element — `c[0]` is P.
+    assert _call(report, source, "c[0].pm()").target == pm.id
+    # A declared `W<T>::chunks` wins over the std recipe — its
+    # `Vec<Vec<Q>>` return types the element as `Q`.
+    assert _call(report, source, "w.chunks(2)").target == chunks.id
+    assert _call(report, source, "c[0].qm()").target == qm.id
