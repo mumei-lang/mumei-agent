@@ -4612,3 +4612,41 @@ fn f(m: MyMap) {
 """
     report = build_rust_bindings(source, pointer_width=64)
     assert _call(report, source, "p.m()").target == ""
+
+
+def test_method_call_scrutinee_payload_resolves_in_declaring_module() -> None:
+    source = """
+mod m {
+    pub struct P;
+    impl P { pub fn same(&self) {} }
+    pub struct W;
+    impl W { pub fn get(&self) -> Option<P> { Option::None } }
+}
+struct P;
+impl P { fn same(&self) {} }
+use m::W;
+fn f(w: W) {
+    match w.get() { Some(p) => p.same(), _ => {} }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    module_same = min(
+        (b for b in report.bindings if b.name == "same"),
+        key=lambda b: int(b.id.split(":")[-3]),
+    )
+    assert _call(report, source, "p.same()").target == module_same.id
+
+
+def test_method_call_scrutinee_unwraps_turbofish() -> None:
+    source = """
+struct P;
+impl P { fn same(&self) {} }
+struct W;
+impl W { fn get(&self) -> Option<P> { Option::None } }
+fn f(w: W) {
+    match w.get::<u8>() { Some(p) => p.same(), _ => {} }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    same = _bindings(report, "same", "associated_function")[0]
+    assert _call(report, source, "p.same()").target == same.id
