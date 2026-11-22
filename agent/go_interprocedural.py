@@ -2380,13 +2380,16 @@ class _Builder:
         params: dict | None = None,
         *,
         for_write: bool = False,
+        allow_struct_elements: bool = False,
     ) -> tuple[str | None, Any]:
         """`s.F` (or a nested `s.W.F`) naming a scalar-element
         collection field — or its one-level nested form — on a
         local-composite root — returns (root binding id, member),
         else (None, None). An array member is included: callers
         decide whether its copy semantics admit a shared backing
-        token."""
+        token. With `allow_struct_elements`, a slice/map member
+        whose elements are a named value struct admits too — the
+        caller walks the element's members itself."""
         field = sel.child_by_field_name("field")
         f_ref = (
             self.references.get(self.node_key(field))
@@ -2524,6 +2527,27 @@ class _Builder:
             or not (
                 self._scalar_elem_collection(member.type)
                 or self._scalar_elem_nested_collection(member.type)
+                or (
+                    allow_struct_elements
+                    and member.type.kind in {"slice", "map"}
+                    and getattr(member.type, "elem", None)
+                    is not None
+                    and (
+                        self._named_value_struct_supported(
+                            member.type.elem
+                        )
+                        or (
+                            (
+                                _elem_struct := (
+                                    self._struct_value_fact(
+                                        member.type.elem
+                                    )
+                                )
+                            ) is not None
+                            and bool(_elem_struct.type_id)
+                        )
+                    )
+                )
             )
             or root_ref is None
             or root_ref.binding_id is None
@@ -2871,7 +2895,8 @@ class _Builder:
         for_write: bool = False,
     ) -> tuple[str, str, Any, frozenset, Any] | None:
         root_id, member = self._scalar_container_field(
-                sel, params, for_write=for_write
+                sel, params, for_write=for_write,
+                allow_struct_elements=allow_struct_elements,
             )
         if root_id is None or member is None:
             return None
@@ -2993,7 +3018,17 @@ class _Builder:
             and fact is not None
             and fact.kind in {"slice", "array", "map"}
             and getattr(fact, "elem", None) is not None
-            and self._named_value_struct_supported(fact.elem)
+            and (
+                self._named_value_struct_supported(fact.elem)
+                or (
+                    (
+                        _elem_struct := self._struct_value_fact(
+                            fact.elem
+                        )
+                    ) is not None
+                    and bool(_elem_struct.type_id)
+                )
+            )
         )
         if (
             root_ref.kind == "import"
@@ -3208,7 +3243,8 @@ class _Builder:
             # element: the pointer conflates into the collection's
             # group, so the field's slot is the group's.
             field_fact = field_fact.elem
-        for field_node in reversed(fields):
+        fields_seq = list(reversed(fields))
+        for field_index, field_node in enumerate(fields_seq):
             if not _elem_struct_ok(field_fact):
                 return None
             field_ref = self.references.get(
@@ -3222,31 +3258,34 @@ class _Builder:
             self._pin_fact_identities(field_member.type)
             field_fact = field_member.type
             if (
-                mid_pointer_root
+                field_index < len(fields_seq) - 1
+                and mid_pointer_root
                 and getattr(field_fact, "kind", None) == "pointer"
                 and self._named_value_struct_supported(
                     getattr(field_fact, "elem", None)
                 )
             ):
-                # `p.A[i].W` yields `*E` — the next field resolves
+                # `p.A[i].W` yields `*E` — a mid-chain field resolves
                 # on the member's pointee like the element pointer.
                 field_fact = field_fact.elem
         if not self._scalar_value_fact(field_fact):
-            # A store into a pointer leaf (`p.A[i].W = q`) resolves
-            # the chain to the member's pointee — caller memory for
-            # a param pointer root. The LHS consumer folds the write
-            # opaquely like `p.P = q`, so admit the target shape;
-            # a pointer leaf read stays closed.
+            # A pointer leaf (`p.A[i].W`) reads the member's slot
+            # value — caller memory under a param pointer root —
+            # and a store into it (`p.A[i].W = q`) resolves the
+            # chain to the member's pointee the LHS consumer folds
+            # opaquely like `p.P = q`. A local composite's pointer
+            # member escapes the slot model either way.
             if not (
-                for_pointer_leaf
-                and mid_pointer_root
+                mid_pointer_root
                 and path_members
                 and getattr(
                     path_members[-1].type, "kind", None
                 )
                 == "pointer"
-                and getattr(field_fact, "kind", None) == "struct"
-                and self._struct_value_fact(field_fact) is not None
+                and self._struct_value_fact(
+                    getattr(path_members[-1].type, "elem", None)
+                )
+                is not None
             ):
                 return None
         self._pin_fact_identities(container_fact)
@@ -5328,7 +5367,8 @@ class _Builder:
             if imported is not None:
                 return imported
             root_id, member = self._scalar_container_field(
-                rhs, params, for_write=True
+                rhs, params, for_write=True,
+                allow_struct_elements=True,
             )
             if root_id is None:
                 return None
@@ -18582,9 +18622,16 @@ class _Builder:
                     )
                     refs.append((oref, True, True, True))
                     continue
-                if (
-                    scalar_field_elem_lhs is not None
-                    and scalar_field_elem_lhs[3].type.kind != "map"
+                if scalar_field_elem_lhs is not None and (
+                    scalar_field_elem_lhs[3].type.kind != "map"
+                    # `p.B[k].W.V = x` — the member path crosses a
+                    # pointer, so the store lands inside the pointee,
+                    # caller memory — legal even though Go rejects a
+                    # direct member store on the map element.
+                    or any(
+                        getattr(member.type, "kind", None) == "pointer"
+                        for member in scalar_field_elem_lhs[6]
+                    )
                 ):
                     (
                         oref, indexes, field_key, _container_member,
@@ -34165,10 +34212,38 @@ class _Builder:
                         self._store(
                             locals_, params, root_id, stored, True
                         )
-                    elif self._external_chan_operand(
-                        arg_node, params
-                    ) is not None:
-                        self.indirect_writes |= stored
+                    else:
+                        elem_ptr = (
+                            self._opaque_container_struct_element_field_target(
+                                arg_node, params
+                            )
+                        )
+                        if (
+                            elem_ptr is not None
+                            and getattr(
+                                elem_ptr[6][-1].type, "kind", None
+                            )
+                            == "pointer"
+                        ):
+                            # `G(p.A[i].W, v)` — the arg hands the
+                            # callee an element's pointer member;
+                            # writes through it land in the pointee,
+                            # caller memory under a param pointer
+                            # root — broadcast like `p.A[i].W = q`.
+                            for holder_id in (
+                                self._opaque_container_holders(
+                                    elem_ptr[4]
+                                )
+                            ):
+                                self._store(
+                                    locals_, params, holder_id,
+                                    stored, True,
+                                )
+                            self.indirect_writes |= stored
+                        elif self._external_chan_operand(
+                            arg_node, params
+                        ) is not None:
+                            self.indirect_writes |= stored
             elif self._external_chan_operand(arg_node, params) is not None:
                 # `G(lib.GC)` — a chan operand in external state
                 # (imported member): the callee may send into the
