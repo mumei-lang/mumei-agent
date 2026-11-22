@@ -16,3 +16,5 @@ visualizer/.report_history.lock
 examples/challenges/results/*/
 tools/go-types/go-types
 /tools/ts-bindings/node_modules/
+tests/fixtures/.mumei/
+tests/fixtures/.mumei_cache
