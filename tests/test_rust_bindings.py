@@ -2215,17 +2215,20 @@ fn f(w: W<(u8, u16)>) { w.m(); }
 
 
 def test_member_generic_impl_reference_mutability_matters():
-    # `impl<A> T for W<&A>` does not cover `W<&mut u8>` — shared and
-    # mutable references are distinct types.
-    source = """
-trait T { fn m(&self) {} }
+    # Shared and mutable references are distinct types: each impl
+    # covers only its own mutability side.
+    for impl_args, hit, miss in (
+        ("&A", "W<&u8>", "W<&mut u8>"),
+        ("&mut A", "W<&mut u8>", "W<&u8>"),
+    ):
+        source = f"""
+trait T {{ fn m(&self) {{}} }}
 struct W<X>(X);
-impl<A> T for W<&A> { }
-impl<A> T for W<&mut A> { }
-fn f(w: W<&mut u8>) { w.m(); }
-fn g(u: W<&u8>) { u.m(); }
+impl<A> T for W<{impl_args}> {{ }}
+fn f(w: {hit}) {{ w.m(); }}
+fn g(u: {miss}) {{ u.m(); }}
 """
-    report = build_rust_bindings(source, pointer_width=64)
-    member_m = _bindings(report, "m", "associated_function")[0]
-    assert _call(report, source, "w.m()").target == member_m.id
-    assert _call(report, source, "u.m()").target == member_m.id
+        report = build_rust_bindings(source, pointer_width=64)
+        member_m = _bindings(report, "m", "associated_function")[0]
+        assert _call(report, source, "w.m()").target == member_m.id
+        assert _call(report, source, "u.m()").target == ""

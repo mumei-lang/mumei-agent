@@ -964,17 +964,15 @@ class _RustBindings:
         b = concrete.strip().strip("{}").strip()
         if a in params:
             bound = bindings.get(a)
-            normalized = b.replace(" ", "")
+            # Lifetimes are erased for consistency — `&'a u8` and
+            # `&'b u8` bind the same parameter.
+            normalized = re.sub(r"'\w+", "", b).replace(" ", "")
             if bound is None:
                 bindings[a] = normalized
                 return True
             return bound == normalized
-        # Normalized keys have no whitespace, so `&mut u8` arrives as
-        # `&mutu8` — `mut` counts as the keyword whenever it leads the
-        # inner type (a type literally named `mut…` cannot be told
-        # apart after stripping and is pathological).
-        ref_a = re.fullmatch(r"&\s*(?:'\w+\s*)?(mut)?(.+)", a)
-        ref_b = re.fullmatch(r"&\s*(?:'\w+\s*)?(mut)?(.+)", b)
+        ref_a = re.fullmatch(r"&\s*(?:'\w+\s+)?(mut\s+)?(.+)", a)
+        ref_b = re.fullmatch(r"&\s*(?:'\w+\s+)?(mut\s+)?(.+)", b)
         if (ref_a is None) != (ref_b is None):
             return False
         if ref_a is not None:
@@ -1014,7 +1012,7 @@ class _RustBindings:
         if args_node is None:
             return None
         return ",".join(
-            self.text(child).replace(" ", "")
+            re.sub(r"\s+", " ", self.text(child)).strip()
             for child in self._children(args_node)
         )
 
