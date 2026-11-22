@@ -4953,3 +4953,59 @@ fn h() {
         if source[c.span.start : c.span.end].endswith(("m()", "q()"))
     ]
     assert [c.target for c in calls] == [m.id, m.id, m.id, m.id, q.id]
+
+
+def test_tuple_pattern_prelude_variant_in_tuple() -> None:
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn f(t: (Option<P>, P)) {
+    match t {
+        (Some(p), _) => p.m(),
+        _ => (),
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = _bindings(report, "m", "associated_function")[0]
+    assert _call(report, source, "p.m()").target == m.id
+
+
+def test_let_pattern_inferred_annotation_slots() -> None:
+    source = """
+struct P;
+struct Q;
+impl P { fn m(&self) {} }
+impl Q { fn q(&self) {} }
+fn f(t: (P, Q)) {
+    let (a, b): (_, _) = t;
+    a.m(); b.q();
+    let (c, d): (P, _) = t;
+    c.m(); d.q();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = _bindings(report, "m", "associated_function")[0]
+    q = _bindings(report, "q", "associated_function")[0]
+    assert _call(report, source, "a.m()").target == m.id
+    assert _call(report, source, "b.q()").target == q.id
+    assert _call(report, source, "c.m()").target == m.id
+    assert _call(report, source, "d.q()").target == q.id
+
+
+def test_for_tuple_pattern_binds_map_pair_around_rest() -> None:
+    source = """
+struct P;
+struct Q;
+impl P { fn m(&self) {} }
+impl Q { fn q(&self) {} }
+use std::collections::HashMap;
+fn f(m: HashMap<P, Q>) {
+    for (k, .., v) in m { k.m(); v.q(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = _bindings(report, "m", "associated_function")[0]
+    q = _bindings(report, "q", "associated_function")[0]
+    assert _call(report, source, "k.m()").target == m.id
+    assert _call(report, source, "v.q()").target == q.id

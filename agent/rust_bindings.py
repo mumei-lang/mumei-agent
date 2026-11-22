@@ -2721,10 +2721,31 @@ class _RustBindings:
             if self.text(child).strip() not in {"(", ")", ","}
             and child.type not in {"line_comment", "block_comment"}
         ]
-        if len(slots) != 2:
-            return {}
+        rest_at = next(
+            (
+                index
+                for index, child in enumerate(slots)
+                if child.type == "remaining_field_pattern"
+            ),
+            None,
+        )
+        if rest_at is None:
+            if len(slots) != 2:
+                return {}
+            pairs = list(zip(slots, parts))
+        else:
+            # `for (k, .., v) in m` — `..` swallows middle elements,
+            # so the slots before it map to the pair's head and the
+            # slots after it to its tail.
+            front = slots[:rest_at]
+            back = slots[rest_at + 1 :]
+            if len(front) + len(back) != 2:
+                return {}
+            pairs = list(zip(front, parts[: len(front)])) + list(
+                zip(back, parts[len(parts) - len(back) :])
+            )
         mapping = {}
-        for child, arg in zip(slots, parts):
+        for child, arg in pairs:
             tid, rest = self._spelled_type(arg, position)
             # A nested pattern (`for (k, (a, b)) in m` over
             # `HashMap<K, (P, Q)>`) destructures its arg's own
@@ -3621,6 +3642,33 @@ class _RustBindings:
                 else self._receiver_type(value)
             )
         )
+        if (
+            annotation is not None
+            and annotation.type == "tuple_type"
+            and scrut_args is not None
+            and any(
+                arg.strip() == "_"
+                for arg in self._type_arg_list(scrut_args)
+            )
+        ):
+            # `let (a, b): (_, _) = t` — an inferred `_` element
+            # does not erase the value's declared type; substitute
+            # it positionally when the initialiser's args line up.
+            value_id, value_args = (
+                (None, None)
+                if value is None
+                else self._receiver_type(value)
+            )
+            if value_args is not None:
+                annotated = self._type_arg_list(scrut_args)
+                declared = self._type_arg_list(value_args)
+                if len(annotated) == len(declared):
+                    scrut_args = ", ".join(
+                        dv if av.strip() == "_" else av
+                        for av, dv in zip(annotated, declared)
+                    )
+                    if scrut_id is None:
+                        scrut_id = value_id
         scrut_name, scrut_position, scrut_scope = (
             (
                 self._alias_head_name(
@@ -4844,11 +4892,28 @@ class _RustBindings:
                         else pattern.start_byte
                     ),
                 )
+                # The container head is the element's own spelling —
+                # `_type_head_name(None, "P")` would read the first
+                # arg `P` instead of `Option`, so `(Some(p), _)` on
+                # `(Option<P>, P)` still gates the prelude payload.
+                spelled_head = re.match(
+                    r"[A-Za-z_][\w:]*",
+                    elements[position].strip(),
+                )
+                head_name = (
+                    self._type_head_name(tid, fargs)
+                    if tid is not None
+                    else (
+                        self._normalize_identifier(
+                            spelled_head.group(0).split("::")[-1]
+                        )
+                        if spelled_head is not None
+                        else None
+                    )
+                )
                 mapping.update(
                     self._pattern_type_map(
-                        child, tid, fargs,
-                        self._type_head_name(tid, fargs),
-                        scrut_position,
+                        child, tid, fargs, head_name, scrut_position
                     )
                 )
             return mapping
