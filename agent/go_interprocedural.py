@@ -12567,6 +12567,45 @@ class _Builder:
                 return _children(current)
             return []
 
+        def stable_func_alias(binding_id: str) -> bool:
+            binding = self.bindings.get(binding_id)
+            if binding is None:
+                return False
+            for current in nodes:
+                if current.type in {
+                    "assignment_statement",
+                    "short_var_declaration",
+                    "inc_statement",
+                    "dec_statement",
+                }:
+                    defines_binding = (
+                        current.start_byte <= binding.span.start
+                        and binding.span.end <= current.end_byte
+                    )
+                    for lhs in lhs_items(current):
+                        root = root_identifier(lhs)
+                        if (
+                            root is not None
+                            and identifier_binding_id(root) == binding_id
+                            and not defines_binding
+                        ):
+                            return False
+                if current.type != "unary_expression":
+                    continue
+                operator = current.child_by_field_name("operator")
+                operand = self._strip_parens(
+                    current.child_by_field_name("operand")
+                )
+                if (
+                    operator is not None
+                    and operator.text == b"&"
+                    and operand is not None
+                    and operand.type == "identifier"
+                    and identifier_binding_id(operand) == binding_id
+                ):
+                    return False
+            return True
+
         written: set[str] = set()
         nonplain = False
         for current in region.values():
@@ -12628,6 +12667,9 @@ class _Builder:
                             self.closure_inner_calls,
                             self.pointee_closures,
                         )
+                    ) or (
+                        callee_id in self.func_aliases
+                        and stable_func_alias(callee_id)
                     )
                     if not resolved_literal:
                         if (

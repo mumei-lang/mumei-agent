@@ -18788,6 +18788,80 @@ def test_opaque_func_call_closes_for_shared_reference_touched_by_go(
 
 
 @pytest.mark.parametrize(
+    "source",
+    [
+        (
+            "func G(a int64) int64 { return a }\n"
+            "func F(b []int64, x int64) int64 { "
+            "w := int64(0); h := G; "
+            "g := func() { w = b[0] }; go g(); "
+            "y := h(x); return w + y }"
+        ),
+        (
+            "func rd(ch chan int64, b []int64) { ch <- b[0] }\n"
+            "func G(a int64) int64 { return a }\n"
+            "func F(b []int64, x int64) int64 { "
+            "ch := make(chan int64, 1); h := G; go rd(ch, b); "
+            "y := h(x); return <-ch + y }"
+        ),
+        (
+            "func rd(ch chan int64, m map[string]int64) { "
+            "ch <- m[\"k\"] }\n"
+            "func G(a int64) int64 { return a }\n"
+            "func F(m map[string]int64, x int64) int64 { "
+            "ch := make(chan int64, 1); h := G; go rd(ch, m); "
+            "y := h(x); return <-ch + y }"
+        ),
+    ],
+    ids=[
+        "slice-literal-before-go",
+        "slice-named-before-go",
+        "map-named-before-go",
+    ],
+)
+def test_stable_named_func_alias_does_not_close_shared_go_race(
+    go_types_helper, source
+):
+    result = named(*unit(go_types_helper, source))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_rebound_named_func_alias_still_closes_shared_go_race(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func rd(ch chan int64, b []int64) { ch <- b[0] }\n"
+            "func G(a int64) int64 { return a }\n"
+            "func F(b []int64, x int64) int64 { "
+            "ch := make(chan int64, 1); h := G; go rd(ch, b); "
+            "h = func(a int64) int64 { b[0] = a; return a }; "
+            "y := h(x); return <-ch + y }",
+        )
+    )
+    assert not result.available
+
+
+def test_stable_named_func_alias_writer_still_closes_shared_go_race(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func rd(ch chan int64, b []int64) { ch <- b[0] }\n"
+            "func W(b []int64, a int64) int64 { "
+            "b[0] = a; return a }\n"
+            "func F(b []int64, x int64) int64 { "
+            "ch := make(chan int64, 1); h := W; go rd(ch, b); "
+            "y := h(b, x); return <-ch + y }",
+        )
+    )
+    assert not result.available
+
+
+@pytest.mark.parametrize(
     "body",
     [
         "g := func() { ch <- x }; g(); return <-ch",
