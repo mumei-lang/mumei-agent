@@ -3117,9 +3117,11 @@ class _RustBindings:
                         )
                     if method_name in {"clone", "to_owned"}:
                         # `o.clone()`/`s.to_owned()` keep the
-                        # spelled payload — the clone's own type
-                        # head stays for `_scrutinee_shape`.
-                        return None, receiver[1]
+                        # receiver's whole type — forwarding it
+                        # preserves the container id so
+                        # `w.clone()[0]` reads `W`'s declared
+                        # `Index::Output`, not the arg `P`.
+                        return receiver
                     if (
                         method_name in {"as_ref", "as_mut"}
                         and receiver[1] is not None
@@ -4028,6 +4030,7 @@ class _RustBindings:
                             pre_head = re.match(
                                 r"[A-Za-z_][\w:]*", target_args
                             )
+                            pre_target_args = target_args
                             if param_names:
                                 mapping = dict(
                                     zip(
@@ -4048,16 +4051,33 @@ class _RustBindings:
                                     target_args,
                                 )
                             emitted = re.match(
-                                r"[A-Za-z_][\w:]*", target_args
+                                r"[A-Za-z_][\w:]*", pre_target_args
+                            )
+                            check_heads = [emitted.group(0)] if (
+                                emitted is not None
+                            ) else (
+                                [
+                                    h.group(0)
+                                    for part in self._type_arg_list(
+                                        pre_target_args[1:-1]
+                                    )
+                                    if (
+                                        h := re.match(
+                                            r"[A-Za-z_][\w:]*",
+                                            part.strip().lstrip("&")
+                                            .strip().lstrip("mut ")
+                                            .strip(),
+                                        )
+                                    )
+                                ]
+                                if pre_target_args.startswith("(")
+                                and pre_target_args.endswith(")")
+                                else []
                             )
                             mismatch = False
-                            if (
-                                emitted is not None
-                                and pre_head is not None
-                                and pre_head.group(0)
-                                not in param_names
-                            ):
-                                head_text = emitted.group(0)
+                            for head_text in check_heads:
+                                if head_text in param_names:
+                                    continue
                                 alias_side = (
                                     self._scoped_spelled_type(
                                         head_text,
@@ -4089,6 +4109,8 @@ class _RustBindings:
                                     alias_side is not None
                                     and alias_side is not use_side
                                 )
+                                if mismatch:
+                                    break
                         finally:
                             if pushed:
                                 self.scopes.pop()
@@ -4104,14 +4126,26 @@ class _RustBindings:
                     ),
                     None,
                 )
-                if (
-                    head is not None
-                    and head not in _INDEX_ELEMENT_CONTAINERS
-                    and head != "Option"
-                ):
-                    # `Vec<W<P>>` — a declared `W` can
-                    # `IntoIterator` to a different element;
-                    # guessing `P` would misbind calls.
+                elem_record = self.records.get(_elem_id)
+                if elem_record is not None:
+                    elem_record = (
+                        self._through_import(elem_record, pos)
+                        or elem_record
+                    )
+                std_reexport = (
+                    elem_record is not None
+                    and elem_record.binding.kind == "import"
+                    and elem_record.import_path is not None
+                    and elem_record.import_path.split("::", 1)[0]
+                    in {"std", "core", "alloc"}
+                )
+                if head is not None and not std_reexport:
+                    # `Vec<W<P>>`/`Vec<m::Vec<P>>` — a declared
+                    # type (even named `Vec`) can `IntoIterator`
+                    # to a different element; guessing `P` would
+                    # misbind calls. Only a real std re-export
+                    # (`use std::vec::Vec`) keeps the prelude
+                    # container's own args.
                     return None, None
             return (
                 "&" + inner_args if borrow else inner_args
