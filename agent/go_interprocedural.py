@@ -33294,9 +33294,10 @@ class _Builder:
                         root_id, locals_
                     )
         if receiver_node is not None:
-            for field_binding_id in self._struct_argument_field_record_ids(
+            record_ids = self._struct_argument_field_record_ids(
                 receiver_node
-            ):
+            )
+            for field_binding_id in record_ids:
                 # `s.Run()` runs the callee's `s.F()` — the receiver's
                 # func-typed fields carry their closure records like a
                 # struct passed as an argument (#1212). Resolving the
@@ -33311,6 +33312,15 @@ class _Builder:
                 )
                 self._queue_struct_field_invocation(
                     node, receiver_node, field_binding_id
+                )
+            if record_ids:
+                # The receiver's captured deps joined `_call_arg_deps`
+                # before the arguments evaluated — re-union so a
+                # `g(s.F())` callee's invocation reads them too.
+                key = self.node_key(node)
+                self._call_arg_deps[key] = (
+                    self._call_arg_deps.get(key, frozenset())
+                    | receiver_deps
                 )
         actual = tuple(actual_values)
         if receiver_deps is not None:
