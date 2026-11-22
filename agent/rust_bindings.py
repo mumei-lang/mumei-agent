@@ -3321,6 +3321,13 @@ class _RustBindings:
         # Spelled element names on `it` (`let it = v.iter()`) were
         # written in `it`'s annotation — resolve them there.
         position = self._receiver_annotation_position(iterator)
+        if iterator.type == "field_expression":
+            # `for q in w.xs` — `xs: Vec<T>` substitutes the receiver
+            # `w`'s args, so the element name is spelled at `w`'s
+            # annotation, not the field's declaring scope.
+            position = self._receiver_annotation_position(
+                iterator.child_by_field_name("value")
+            ) or position
         if position is None:
             position = iterator.start_byte
         elem_id, rest = self._element_of(
