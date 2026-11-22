@@ -2132,3 +2132,60 @@ fn f(w: W<u8, u16>) { w.m(); }
     call = _call(report, source, "w.m()")
     assert call.kind == "opaque_method"
     assert call.target == ""
+
+
+def test_member_generic_impl_covers_composite_args():
+    # A generic impl covers receivers whose args contain commas or
+    # generics of their own — parameter positions stay wildcards at
+    # any nesting depth.
+    source = """
+trait T { fn m(&self) {} }
+struct W<X>(X);
+impl<A> T for W<A> { }
+fn f(w: W<(u8, u16)>) { w.m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    member_m = _bindings(report, "m", "associated_function")[0]
+    call = _call(report, source, "w.m()")
+    assert call.target == member_m.id
+
+
+def test_member_generic_impl_nested_generic_arg():
+    source = """
+trait T { fn m(&self) {} }
+struct W<X>(X);
+impl<A> T for W<Vec<A>> { }
+fn f(w: W<Vec<u8>>) { w.m(); }
+fn g(w: W<Box<u8>>) { g_unchecked(w); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    member_m = _bindings(report, "m", "associated_function")[0]
+    call = _call(report, source, "w.m()")
+    assert call.target == member_m.id
+    # `Box<u8>` does not match `Vec<A>` — m() stays opaque there.
+    assert _call(report, source, "w.m()").target == member_m.id
+    source2 = """
+trait T { fn m(&self) {} }
+struct W<X>(X);
+impl<A> T for W<Vec<A>> { }
+fn g(w: W<Box<u8>>) { w.m(); }
+"""
+    report2 = build_rust_bindings(source2, pointer_width=64)
+    assert _call(report2, source2, "w.m()").target == ""
+
+
+def test_member_generic_impl_const_and_lifetime_params():
+    source = """
+trait T { fn m(&self) {} fn n(&self) {} }
+struct W<const N: usize>([u8; N]);
+impl<const N: usize> T for W<N> { }
+struct R<'a>(&'a u8);
+trait U { fn p(&self) {} }
+impl<'a> U for R<'a> { }
+fn f(w: W<4>, r: R<'static>) { w.m(); r.p(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    member_m = _bindings(report, "m", "associated_function")[0]
+    member_p = _bindings(report, "p", "associated_function")[0]
+    assert _call(report, source, "w.m()").target == member_m.id
+    assert _call(report, source, "r.p()").target == member_p.id

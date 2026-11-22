@@ -849,17 +849,27 @@ class _RustBindings:
                                     member_generic,
                                     frozenset(
                                         self._normalize_identifier(
-                                            self.text(child.children[0])
+                                            self.text(
+                                                child.child_by_field_name(
+                                                    "name"
+                                                )
+                                            )
                                         )
                                         for child in (
                                             ()
                                             if type_params is None
                                             else type_params.named_children
                                         )
-                                        if child.type == "type_parameter"
-                                        and child.children
-                                        and child.children[0].type
-                                        == "type_identifier"
+                                        if child.type
+                                        in {
+                                            "type_parameter",
+                                            "const_parameter",
+                                            "lifetime_parameter",
+                                        }
+                                        and child.child_by_field_name(
+                                            "name"
+                                        )
+                                        is not None
                                     ),
                                 )
                             )
@@ -913,6 +923,73 @@ class _RustBindings:
             (child for child in self._children(node) if child.type == "where_clause"),
             None,
         )
+
+    @staticmethod
+    def _type_arg_list(args: str) -> list[str]:
+        """Top-level comma split of a type-argument key — commas
+        inside `(...)`, `[...]` or `<...>` stay inside their arg."""
+        parts: list[str] = []
+        depth = 0
+        current: list[str] = []
+        for ch in args:
+            if ch in "([{":
+                depth += 1
+            elif ch in ")]}":
+                depth -= 1
+            if ch == "," and depth <= 0:
+                parts.append("".join(current))
+                current = []
+            else:
+                current.append(ch)
+        parts.append("".join(current))
+        return [part.strip() for part in parts]
+
+    def _type_arg_match(
+        self, pattern: str, concrete: str, params: frozenset[str]
+    ) -> bool:
+        """Does impl-side arg `pattern` cover receiver arg `concrete`?
+
+        Positions spelled with an impl parameter are wildcards; other
+        positions must match structurally — `Vec<A>` covers `Vec<u8>`
+        and `(A,B)` covers `(u8,u16)`. Lifetimes inside references are
+        ignored: they never change which methods a type provides."""
+        a = pattern.strip().strip("{}").strip()
+        b = concrete.strip().strip("{}").strip()
+        if a in params:
+            return True
+        ref_a = re.fullmatch(r"&\s*(?:'\w+\s+)?(?:mut\s+)?(.+)", a)
+        ref_b = re.fullmatch(r"&\s*(?:'\w+\s+)?(?:mut\s+)?(.+)", b)
+        if (ref_a is None) != (ref_b is None):
+            return False
+        if ref_a is not None:
+            return self._type_arg_match(
+                ref_a.group(1), ref_b.group(1), params
+            )
+        if a.startswith("(") and a.endswith(")"):
+            if not (b.startswith("(") and b.endswith(")")):
+                return False
+            sub_a = self._type_arg_list(a[1:-1])
+            sub_b = self._type_arg_list(b[1:-1])
+            return len(sub_a) == len(sub_b) and all(
+                self._type_arg_match(x, y, params)
+                for x, y in zip(sub_a, sub_b)
+            )
+        match_a = re.fullmatch(r"(.+?)\s*<(.+)>", a)
+        match_b = re.fullmatch(r"(.+?)\s*<(.+)>", b)
+        if (match_a is None) != (match_b is None):
+            return False
+        if match_a is not None:
+            if match_a.group(1).replace(" ", "") != match_b.group(
+                1
+            ).replace(" ", ""):
+                return False
+            sub_a = self._type_arg_list(match_a.group(2))
+            sub_b = self._type_arg_list(match_b.group(2))
+            return len(sub_a) == len(sub_b) and all(
+                self._type_arg_match(x, y, params)
+                for x, y in zip(sub_a, sub_b)
+            )
+        return a.replace(" ", "") == b.replace(" ", "")
 
     def _type_args_key(self, args_node: Any | None) -> str | None:
         """Normalized `Wrap<i32>`-style type-argument text."""
@@ -1052,11 +1129,16 @@ class _RustBindings:
                     elif impl_args is not None:
                         # Generic impl (`impl<A> T for W<A, i32>`):
                         # parameter positions are wildcards, concrete
-                        # positions must equal the receiver's args.
-                        edge_parts = edge_args.split(",")
-                        impl_parts = impl_args.split(",")
+                        # positions must structurally equal the
+                        # receiver's args — `W<(u8,u16)>` still matches
+                        # `impl<A> T for W<A>` since the comma is
+                        # nested inside the tuple.
+                        edge_parts = self._type_arg_list(edge_args)
+                        impl_parts = self._type_arg_list(impl_args)
                         if len(edge_parts) != len(impl_parts) or any(
-                            edge not in edge_params and edge != concrete
+                            not self._type_arg_match(
+                                edge, concrete, edge_params
+                            )
                             for edge, concrete in zip(
                                 edge_parts, impl_parts
                             )
