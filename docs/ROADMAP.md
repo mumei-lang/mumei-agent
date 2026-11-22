@@ -3124,6 +3124,16 @@ or send `y` on a channel argument — and the callee's
 declared type identity pins alongside the var's/parameter's
 binding identity so a named `type MyFn func(...)`
 regenerating in another file flags the caller stale. A
+call that receives `&p` also folds writes through p's pointee;
+address-of index/selector chains update their identified root,
+reusing shared slice/map handling and weak-storing array or
+value-struct roots, while pointer crossings and unknown roots
+broadcast through indirect writes. Imported pointer-receiver
+methods apply the same model to their implicit receiver address;
+go/types marks known imported receiver kinds, while older or
+incomplete snapshots conservatively treat an unknown receiver as
+written. Bounded calls and known value-receiver methods do not add
+receiver writes. A
 func-typed binding's signature (`f func(N) int64`, `var f
 MyFn`, `type MyFn func(N) int64`) declares its inner
 named/alias type identities on the binding's
