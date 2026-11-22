@@ -20477,6 +20477,61 @@ def test_conditional_literal_rebind_keeps_factory_result_snapshot(
 
 
 @pytest.mark.parametrize(
+    ("source", "dependencies"),
+    [
+        pytest.param(
+            "func F(x int64, c bool, cb func() int64) int64 { "
+            "v := x; "
+            "g := func() func() int64 { return cb }; "
+            "if c { g = func() func() int64 { "
+            "return func() int64 { return v } } }; "
+            "h := g(); return h() }",
+            frozenset({0, 2}),
+            id="callback-return",
+        ),
+        pytest.param(
+            "func F(x int64, c bool, cb func()) int64 { "
+            "v := x; w := int64(0); "
+            "g := func() func() { return cb }; "
+            "if c { g = func() func() { "
+            "return func() { w = v } } }; "
+            "h := g(); h(); return w }",
+            frozenset({0}),
+            id="callback-write",
+        ),
+    ],
+)
+def test_conditional_factory_rebind_keeps_callback_effects_opaque(
+    go_types_helper, source, dependencies
+):
+    result = named(*unit(go_types_helper, source))
+    assert result.available, result.gaps
+    assert result.return_dependencies == dependencies
+    assert result.effects == "unknown"
+
+
+def test_conditional_factory_assignment_retains_current_capture_dependency(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x, y int64, c bool) int64 { "
+            "v := y; u := y; "
+            "g := func() func() int64 { "
+            "return func() int64 { return v } }; "
+            "h := func() int64 { return u }; "
+            "if c { h = g() }; v = x; return h() }",
+        )
+    )
+    if result.available:
+        assert 0 in result.return_dependencies
+        assert result.effects == "unknown"
+    else:
+        assert result.gaps
+
+
+@pytest.mark.parametrize(
     ("source", "dependencies", "effects"),
     [
         pytest.param(

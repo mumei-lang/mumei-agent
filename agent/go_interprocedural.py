@@ -34815,7 +34815,8 @@ class _Builder:
                 self.closure_factory_results.discard(bound_id)
             binding = self.bindings.get(bound_id)
             if (
-                not in_composite
+                not may_skip
+                and not in_composite
                 and binding is not None
                 and binding.type is not None
                 and binding.type.kind == "function"
