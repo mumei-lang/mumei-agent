@@ -445,9 +445,10 @@ class AssignmentFacts:
 
     `all_paths` names identifiers textually assigned on every path from the
     entry to this node; `some_path` names identifiers textually assigned on
-    at least one such path. Unreachable nodes vacuously report the whole
-    name universe for `all_paths` and only their own targets for
-    `some_path`.
+    at least one such path. Bare `var` declarations kill an earlier tracked
+    assignment without generating one. Entry names seed both sets.
+    Unreachable nodes vacuously report the remaining name universe for
+    `all_paths` and only their own assignment targets for `some_path`.
     """
 
     all_paths: frozenset[str]
@@ -468,6 +469,10 @@ def _walk(
 
 
 def _assigned_names(statement: tree_sitter_extract.Statement) -> frozenset[str]:
+    if statement.kind == "var" and all(
+        value == "" for value in statement.values
+    ):
+        return frozenset()
     # "case" joins for `v := <-ch` / `v, ok := <-ch` select
     # communication cases: the extractor puts the bound names in
     # `targets`. Expression cases never carry targets, so widening
@@ -481,8 +486,25 @@ def _assigned_names(statement: tree_sitter_extract.Statement) -> frozenset[str]:
     )
 
 
+def _declared_names(
+    statement: tree_sitter_extract.Statement,
+) -> frozenset[str]:
+    if statement.kind != "var" or not all(
+        value == "" for value in statement.values
+    ):
+        return frozenset()
+    return frozenset(
+        target
+        for target in statement.targets
+        if target != "_" and _IDENTIFIER.fullmatch(target)
+    )
+
+
 def assignment_facts(
-    body: str, graph: ControlFlowGraph
+    body: str,
+    graph: ControlFlowGraph,
+    *,
+    entry_assigned: frozenset[str] = frozenset(),
 ) -> dict[int, AssignmentFacts]:
     """Bounded fixed-point assignment facts over an explicit normal-flow CFG.
 
@@ -490,41 +512,65 @@ def assignment_facts(
     the name universe (intersection over predecessors) and `some_path`
     ascends from empty (union), each through at most
     `nodes x names` updates, checked against a defensive iteration bound.
-    Facts are per program point: they do not decide termination, reach
-    calls, fields, elements or shadowed scopes.
+    `entry_assigned` seeds both facts before the body. Bare `var`
+    declarations kill previous facts for their names without generating
+    assignments. Facts are per program point: they do not decide
+    termination, reach calls, fields, elements or shadowed scopes.
     """
+    if not isinstance(entry_assigned, frozenset) or any(
+        not isinstance(name, str) for name in entry_assigned
+    ):
+        raise ValueError("entry_assigned must be a frozenset of strings")
     if hashlib.sha256(body.encode("utf-8")).hexdigest() != graph.source_sha256:
         raise ValueError("body does not match the graph source digest")
     tree = tree_sitter_extract.extract_statements(body, "go")
     if tree is None:
         raise ValueError("assignment facts require a parsed Go body")
-    by_span = {
+    walked = _walk(tree.statements)
+    assigned_by_span = {
         (stmt.start, stmt.start + len(stmt.text)): _assigned_names(stmt)
-        for stmt in _walk(tree.statements)
+        for stmt in walked
     }
-    assigned = {
-        node.node_id: (
-            by_span.get((node.span.start, node.span.end), frozenset())
+    declared_by_span = {
+        (stmt.start, stmt.start + len(stmt.text)): _declared_names(stmt)
+        for stmt in walked
+    }
+    assigned: dict[int, frozenset[str]] = {}
+    declared: dict[int, frozenset[str]] = {}
+    for node in graph.nodes:
+        span = (
+            (node.span.start, node.span.end)
             if node.span is not None
+            else None
+        )
+        assigned[node.node_id] = (
+            assigned_by_span.get(span, frozenset())
+            if span is not None
             else frozenset()
         )
-        for node in graph.nodes
-    }
-    universe = frozenset().union(*assigned.values()) if assigned else frozenset()
+        declared[node.node_id] = (
+            declared_by_span.get(span, frozenset())
+            if span is not None
+            else frozenset()
+        )
+    universe = entry_assigned | frozenset().union(
+        *assigned.values(), *declared.values()
+    )
     predecessors: dict[int, list[int]] = defaultdict(list)
     for edge in graph.edges:
         predecessors[edge.target].append(edge.source)
     all_paths = {node.node_id: universe for node in graph.nodes}
-    all_paths[graph.entry] = frozenset()
+    all_paths[graph.entry] = entry_assigned
     some_path = {node.node_id: frozenset() for node in graph.nodes}
+    some_path[graph.entry] = entry_assigned
     iteration_bound = 4 * (len(graph.nodes) + 1) * (len(universe) + 1) + 1
     for _ in range(iteration_bound):
         changed = False
         for node in graph.nodes:
             incoming = predecessors.get(node.node_id, ())
             if node.node_id == graph.entry:
-                meet_all: frozenset[str] = frozenset()
-                join_some: frozenset[str] = frozenset()
+                meet_all = entry_assigned
+                join_some = entry_assigned
             else:
                 meet_all = (
                     frozenset.intersection(*(all_paths[p] for p in incoming))
@@ -532,8 +578,12 @@ def assignment_facts(
                     else universe
                 )
                 join_some = frozenset().union(*(some_path[p] for p in incoming))
-            new_all = meet_all | assigned[node.node_id]
-            new_some = join_some | assigned[node.node_id]
+            new_all = (
+                meet_all - declared[node.node_id]
+            ) | assigned[node.node_id]
+            new_some = (
+                join_some - declared[node.node_id]
+            ) | assigned[node.node_id]
             if (
                 new_all != all_paths[node.node_id]
                 or new_some != some_path[node.node_id]
@@ -556,11 +606,11 @@ class UnassignedUse:
     """A name used at a node that is not assigned on every path reaching it.
 
     A heuristic hint over `assignment_facts`, not a defect verdict: the
-    name is flagged only when it is a simple identifier assigned somewhere
-    in the body but missing from the node's `all_paths` pre-state.
-    `definite` is true when the name is also missing from the node's
-    `some_path` pre-state — assigned somewhere in the body, yet no path
-    can deliver it to this use.
+    name is flagged only when it is a simple identifier assigned or
+    declared somewhere in the body but missing from the node's `all_paths`
+    pre-state. `definite` is true when the name is also missing from the
+    node's `some_path` pre-state, so no modelled path can deliver it to
+    this use.
     """
 
     node_id: int
@@ -592,33 +642,86 @@ def _use_text(statement: tree_sitter_extract.Statement) -> str:
     return ""
 
 
+def _value_read_names(
+    statement: tree_sitter_extract.Statement,
+) -> frozenset[str]:
+    use_text = _use_text(statement)
+    fallback = frozenset(_IDENTIFIER.findall(use_text))
+    wrapped = (
+        "package p\nfunc _() {\n"
+        f"_ = []any{{{use_text}}}\n"
+        "}\n"
+    )
+    try:
+        tree, source_bytes = tree_sitter_extract.parse(wrapped, "go")
+    except Exception:
+        return fallback
+    if tree is None or source_bytes is None or tree.root_node.has_error:
+        return fallback
+
+    names: set[str] = set()
+
+    def collect(node) -> None:
+        if node.type == "func_literal":
+            return
+        if node.type == "identifier":
+            parent = node.parent
+            if parent is not None and parent.type == "unary_expression":
+                operator = parent.child_by_field_name("operator")
+                operand = parent.child_by_field_name("operand")
+                if (
+                    operator is not None
+                    and operator.text == b"&"
+                    and operand is not None
+                    and operand.start_byte == node.start_byte
+                    and operand.end_byte == node.end_byte
+                ):
+                    return
+            name = source_bytes[node.start_byte : node.end_byte].decode("utf-8")
+            if name != "_":
+                names.add(name)
+        for child in node.named_children:
+            collect(child)
+
+    collect(tree.root_node)
+    return frozenset(names)
+
+
 def unassigned_uses(
-    body: str, graph: ControlFlowGraph
+    body: str,
+    graph: ControlFlowGraph,
+    *,
+    entry_assigned: frozenset[str] = frozenset(),
 ) -> tuple[UnassignedUse, ...]:
     """Names used at a node without a definite assignment reaching it.
 
-    Reports `name` at `node` when `name` is textually assigned somewhere in
-    the body yet absent from the node's `all_paths` pre-state — a possibly-
-    unassigned read, conservatively limited to recognized identifiers. The
-    `definite` flag marks the stronger class: the name is assigned
-    somewhere but absent from the `some_path` pre-state too, so no
+    Reports `name` at `node` when it is textually assigned or declared
+    somewhere in the body yet absent from the node's `all_paths`
+    pre-state — a possibly-unassigned read, conservatively limited to
+    recognized identifiers. Bare `var` declarations are tracked as
+    declarations that kill earlier facts; `entry_assigned` seeds values
+    available before the body. The `definite` flag marks the stronger
+    class: the name is absent from the `some_path` pre-state too, so no
     modelled path can deliver it. It does not model fields, elements,
     calls, shadowing or closures; names the extractor marks unreliable
     (assigned inside a closure or address-taken) can still be flagged
-    but are never promoted to `definite`, because a closure call or an
-    aliased write sits outside the modelled paths. A finding is a hint
-    for the host's own dataflow, not a defect verdict.
+    but are never promoted to `definite`. A finding is a hint for the
+    host's own dataflow, not a defect verdict.
     """
-    facts = assignment_facts(body, graph)
+    facts = assignment_facts(body, graph, entry_assigned=entry_assigned)
     tree = tree_sitter_extract.extract_statements(body, "go")
     assert tree is not None  # assignment_facts already re-parsed the body
     unreliable = tree.closure_assigned | tree.address_taken
+    walked = _walk(tree.statements)
     by_span = {
         (stmt.start, stmt.start + len(stmt.text)): stmt
-        for stmt in _walk(tree.statements)
+        for stmt in walked
     }
     universe = frozenset().union(
-        *(fact.some_path for fact in facts.values())
+        *(
+            _assigned_names(statement) | _declared_names(statement)
+            for statement in walked
+        )
     )
     predecessors: dict[int, list[int]] = defaultdict(list)
     for edge in graph.edges:
@@ -640,8 +743,11 @@ def unassigned_uses(
             for pred in predecessors.get(node.node_id, ())
             if pred in reachable
         ]
-        if node.node_id == graph.entry or not incoming:
-            pre = frozenset() if node.node_id == graph.entry else universe
+        if node.node_id == graph.entry:
+            pre = entry_assigned
+            pre_some = entry_assigned
+        elif not incoming:
+            pre = universe
             pre_some = frozenset()
         else:
             pre = frozenset.intersection(
@@ -650,7 +756,7 @@ def unassigned_uses(
             pre_some = frozenset().union(
                 *(facts[p].some_path for p in incoming)
             )
-        for name in sorted(_IDENTIFIER.findall(_use_text(statement))):
+        for name in sorted(_value_read_names(statement)):
             if name in universe and name not in pre:
                 findings.append(
                     UnassignedUse(
@@ -668,9 +774,9 @@ def unassigned_uses(
 class UnusedAssignment:
     """A name textually assigned at a node but never read anywhere.
 
-    A heuristic hint, not a defect verdict: "read" is the same
-    conservative identifier scan `unassigned_uses` performs, so a name
-    mentioned only inside its own initializer still counts as read.
+    A heuristic hint, not a defect verdict: "read" uses a conservative
+    identifier scan, so a name mentioned inside a function literal or
+    only through address-taking still counts as used here.
     """
 
     node_id: int
@@ -768,7 +874,12 @@ class FlowHints:
     unreliable: frozenset[str] = frozenset()
 
 
-def flow_hints(body: str, graph: ControlFlowGraph) -> FlowHints:
+def flow_hints(
+    body: str,
+    graph: ControlFlowGraph,
+    *,
+    entry_assigned: frozenset[str] = frozenset(),
+) -> FlowHints:
     """Single entry point returning every bounded flow hint together.
 
     Aggregates `unassigned_uses`, `unused_assignments` and
@@ -776,12 +887,13 @@ def flow_hints(body: str, graph: ControlFlowGraph) -> FlowHints:
     digest-checked body and graph. It adds no analysis of its own: the
     same profiles, gaps and modelling limits apply, and the report is a
     hint surface for the host, not a defect list or a proof.
+    `entry_assigned` seeds names known to be available before the body.
     """
     tree = tree_sitter_extract.extract_statements(body, "go")
     if tree is None:
         raise ValueError("flow hints require a parsed Go body")
     return FlowHints(
-        unassigned_uses(body, graph),
+        unassigned_uses(body, graph, entry_assigned=entry_assigned),
         unused_assignments(body, graph),
         unreachable_statements(graph),
         tree.closure_assigned | tree.address_taken,
@@ -990,3 +1102,91 @@ def function_body(
     ):
         raise ValueError("function body does not match the declared digest")
     return body
+
+
+def go_entry_assigned_names(
+    source: str, units: GoFileUnits, function: FileFunction
+) -> frozenset[str]:
+    """Return entry-assigned names visible in this one Go source file.
+
+    Includes receiver, parameter and named-result identifiers from the
+    function plus top-level `var` and `const` names in this file. Other
+    package files are not available here, so their declarations are not
+    included. The source digest and function membership must match `units`.
+    """
+    if (
+        hashlib.sha256(source.encode("utf-8")).hexdigest()
+        != units.source_sha256
+    ):
+        raise ValueError("source does not match the file units digest")
+    if function not in units.functions:
+        raise ValueError("function is not declared in these file units")
+
+    declaration_start = function.declaration.start
+    declaration_end = function.declaration.end
+    if (
+        declaration_start < 0
+        or declaration_end < declaration_start
+        or declaration_end > len(source)
+    ):
+        raise ValueError("function declaration span is invalid")
+    byte_offsets = [0]
+    for character in source:
+        byte_offsets.append(
+            byte_offsets[-1] + len(character.encode("utf-8"))
+        )
+    declaration_start_byte = byte_offsets[declaration_start]
+    declaration_end_byte = byte_offsets[declaration_end]
+
+    tree, source_bytes = tree_sitter_extract.parse(source, "go")
+    if tree is None or source_bytes is None or tree.root_node.has_error:
+        raise ValueError("source cannot be parsed as Go")
+    declaration = next(
+        (
+            node
+            for node in tree.root_node.named_children
+            if node.type in {"function_declaration", "method_declaration"}
+            and node.start_byte == declaration_start_byte
+            and node.end_byte == declaration_end_byte
+        ),
+        None,
+    )
+    if declaration is None:
+        raise ValueError("function declaration span does not match source")
+
+    names: set[str] = set()
+
+    def add_name_fields(node) -> None:
+        for index, child in enumerate(node.children):
+            if (
+                node.field_name_for_child(index) == "name"
+                and child.type == "identifier"
+            ):
+                name = source_bytes[child.start_byte : child.end_byte].decode(
+                    "utf-8"
+                )
+                if name != "_":
+                    names.add(name)
+
+    def add_parameter_names(parameter_list) -> None:
+        if parameter_list is None or parameter_list.type != "parameter_list":
+            return
+        for parameter in parameter_list.named_children:
+            if parameter.type == "parameter_declaration":
+                add_name_fields(parameter)
+
+    add_parameter_names(declaration.child_by_field_name("receiver"))
+    add_parameter_names(declaration.child_by_field_name("parameters"))
+    add_parameter_names(declaration.child_by_field_name("result"))
+
+    for top_level in tree.root_node.named_children:
+        if top_level.type not in {"var_declaration", "const_declaration"}:
+            continue
+        for child in top_level.named_children:
+            if child.type in {"var_spec", "const_spec"}:
+                add_name_fields(child)
+            elif child.type in {"var_spec_list", "const_spec_list"}:
+                for spec in child.named_children:
+                    if spec.type in {"var_spec", "const_spec"}:
+                        add_name_fields(spec)
+    return frozenset(names)

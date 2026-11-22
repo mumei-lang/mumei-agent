@@ -2,9 +2,10 @@
 
 `unassigned` labels reads of function-local names without an explicit
 assignment (`:=`, `=`, initialized `var`, or range/select binding) reaching on
-every path from function entry. A bare zero-value `var x T` is not an explicit
-assignment; parameters, named results, and package-level names count as
-assigned on entry and are never labeled unassigned.
+every path from function entry. A bare zero-value `var x T` is a declaration,
+not an explicit assignment. Parameters, named results, and package-level
+names from this source file seed the entry facts; other package files are not
+indexed.
 
 `unused` labels explicit stores to function-local names that no later read can
 observe. Package-level stores, parameter pointees, fields, and elements are
@@ -44,7 +45,7 @@ EXPECTED_UNRELIABLE: dict[str, dict[str, frozenset[str]]] = {
 
 EXPECTED_METRICS: dict[str, dict[str, tuple[int, int, int]]] = {
     "backward_goto.go": {
-        "unassigned": (0, 1, 0),  # Bare var is counted as assigned by the hint.
+        "unassigned": (1, 0, 1),
         "unused": _METRIC_ZERO,
         "unreachable": _METRIC_ZERO,
     },
@@ -59,27 +60,27 @@ EXPECTED_METRICS: dict[str, dict[str, tuple[int, int, int]]] = {
         "unreachable": _METRIC_ZERO,
     },
     "defer.go": {
-        "unassigned": (0, 1, 0),  # Bare var is counted as assigned by the hint.
+        "unassigned": (1, 0, 0),
         "unused": _METRIC_ZERO,
         "unreachable": _METRIC_ZERO,
     },
     "entry_assigned_names.go": {
-        "unassigned": (0, 0, 2),  # Parameter and package entry values are not seeded.
+        "unassigned": _METRIC_ZERO,
         "unused": _METRIC_ZERO,
         "unreachable": _METRIC_ZERO,
     },
     "expression_switch.go": {
-        "unassigned": (0, 1, 0),  # Bare var is counted as assigned by the hint.
+        "unassigned": (1, 0, 0),
         "unused": _METRIC_ZERO,
         "unreachable": _METRIC_ZERO,
     },
     "forward_goto.go": {
-        "unassigned": (0, 1, 0),  # Bare var is counted as assigned by the hint.
+        "unassigned": (1, 0, 0),
         "unused": _METRIC_ZERO,
         "unreachable": _METRIC_ZERO,
     },
     "loop_carried.go": {
-        "unassigned": (0, 2, 0),  # Bare var is counted as assigned by the hint.
+        "unassigned": (2, 0, 0),
         "unused": _METRIC_ZERO,
         "unreachable": _METRIC_ZERO,
     },
@@ -89,22 +90,22 @@ EXPECTED_METRICS: dict[str, dict[str, tuple[int, int, int]]] = {
         "unreachable": (2, 0, 0),
     },
     "partial_branch.go": {
-        "unassigned": (0, 1, 0),  # Bare var is counted as assigned by the hint.
+        "unassigned": (1, 0, 0),
         "unused": _METRIC_ZERO,
         "unreachable": _METRIC_ZERO,
     },
     "select.go": {
-        "unassigned": (0, 1, 0),  # Bare var is counted as assigned by the hint.
+        "unassigned": (1, 0, 0),
         "unused": _METRIC_ZERO,
         "unreachable": _METRIC_ZERO,
     },
     "straight_line.go": {
-        "unassigned": (0, 1, 0),  # Bare var is counted as assigned by the hint.
+        "unassigned": (1, 0, 0),
         "unused": (1, 1, 0),  # The earlier read of the name hides the final store.
         "unreachable": _METRIC_ZERO,
     },
     "type_switch.go": {
-        "unassigned": (0, 1, 0),  # Bare var is counted as assigned by the hint.
+        "unassigned": (1, 0, 0),
         "unused": _METRIC_ZERO,
         "unreachable": _METRIC_ZERO,
     },
@@ -114,14 +115,15 @@ EXPECTED_METRICS: dict[str, dict[str, tuple[int, int, int]]] = {
         "unreachable": (2, 0, 0),
     },
     "unreliable_names.go": {
-        "unassigned": (0, 2, 0),  # Bare var is counted despite unreliable writes.
+        "unassigned": (2, 0, 0),
         "unused": _METRIC_ZERO,
         "unreachable": _METRIC_ZERO,
     },
 }
 
 EXPECTED_AGGREGATE: dict[str, tuple[int, int, int]] = {
-    "unassigned": (0, 12, 2),  # Bare vars count; entry-assigned names are not seeded.
+    # Path-insensitive: the nil check on the backward-goto loop guards this read.
+    "unassigned": (12, 0, 1),
     "unused": (5, 2, 0),  # Any read of the name hides an unread store.
     "unreachable": (4, 0, 0),
 }
@@ -247,7 +249,10 @@ def _metrics_for_file(path: Path) -> dict[str, tuple[int, int, int]]:
                     expectations[label.kind].append(node.node_id)
         consumed_label_lines.update(function_labels)
 
-        hints = control_flow.flow_hints(body, graph)
+        entry = control_flow.go_entry_assigned_names(source, units, function)
+        hints = control_flow.flow_hints(
+            body, graph, entry_assigned=entry
+        )
         unreliable_names = expected_unreliable.get(
             function.name, frozenset()
         )

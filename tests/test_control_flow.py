@@ -277,9 +277,7 @@ def test_assignment_facts_unbounded_loop_body_still_assigns():
         "x &^= 1",
         "x++",
         "x--",
-        "var x int",
         "var x = 1",
-        "var x, y int",
         "const x = 1",
         "x, y := f()",
         "x, y = swap()",
@@ -288,6 +286,86 @@ def test_assignment_facts_unbounded_loop_body_still_assigns():
 def test_assignment_facts_recognize_assignment_forms(statement):
     cfg, result = facts(f"{statement}\nreturn")
     assert "x" in result[cfg.exit].some_path
+
+
+def test_bare_var_is_a_declaration_not_an_assignment():
+    body = "var x int\nreturn x"
+    cfg, result = facts(body)
+    declaration = nodes(cfg, "var")[0]
+    assert result[declaration.node_id].some_path == frozenset()
+    assert result[cfg.exit].some_path == frozenset()
+
+    (use,) = control_flow.unassigned_uses(body, cfg)
+    assert use.name == "x"
+    assert use.definite is True
+
+
+def test_bare_var_list_tracks_every_declaration_target():
+    body = "var x, y int\nuse(x); use(y)"
+    cfg, result = facts(body)
+    assert result[cfg.exit].some_path == frozenset()
+    uses = control_flow.unassigned_uses(body, cfg)
+    assert {use.name for use in uses} == {"x", "y"}
+    assert all(use.definite for use in uses)
+
+
+def test_conditional_assignment_after_bare_var_is_maybe_assigned():
+    body = "var x int\nif c { x = 1 }\nreturn x"
+    cfg = graph(body)
+    (use,) = control_flow.unassigned_uses(body, cfg)
+    assert use.name == "x"
+    assert use.definite is False
+
+
+def test_bare_var_in_loop_body_kills_a_prior_assignment():
+    body = "x := 1\nfor c { x = 2; var x int; use(x) }"
+    cfg = graph(body)
+    facts_by_node = control_flow.assignment_facts(body, cfg)
+    declaration = nodes(cfg, "var")[0]
+    use_node = nodes(cfg, "expr")[0]
+    assert "x" in facts_by_node[nodes(cfg, "assign")[0].node_id].some_path
+    assert "x" not in facts_by_node[declaration.node_id].some_path
+    (use,) = control_flow.unassigned_uses(body, cfg)
+    assert use.node_id == use_node.node_id
+    assert use.name == "x"
+    assert use.definite is True
+
+
+def test_entry_assigned_seeds_parameter_reads_and_defaults_to_empty():
+    body = "use(p); p = 1; use(p)"
+    cfg = graph(body)
+    seeded = control_flow.assignment_facts(
+        body, cfg, entry_assigned=frozenset({"p"})
+    )
+    assert seeded[cfg.entry] == control_flow.AssignmentFacts(
+        frozenset({"p"}), frozenset({"p"})
+    )
+    assert control_flow.flow_hints(
+        body, cfg, entry_assigned=frozenset({"p"})
+    ).unassigned == ()
+
+    default = control_flow.assignment_facts(body, cfg)
+    assert default[cfg.entry] == control_flow.AssignmentFacts(
+        frozenset(), frozenset()
+    )
+    (use,) = control_flow.flow_hints(body, cfg).unassigned
+    assert use.name == "p"
+    assert use.definite is True
+
+
+@pytest.mark.parametrize(
+    "entry_assigned",
+    [{"x"}, ["x"], frozenset({"x", 1})],
+)
+def test_assignment_facts_reject_invalid_entry_names(entry_assigned):
+    body = "use(x)"
+    cfg = graph(body)
+    with pytest.raises(
+        ValueError, match="entry_assigned must be a frozenset of strings"
+    ):
+        control_flow.assignment_facts(
+            body, cfg, entry_assigned=entry_assigned
+        )
 
 
 @pytest.mark.parametrize(
@@ -478,6 +556,11 @@ def test_unused_assignments_flag_never_read_name():
 
 def test_unused_assignments_clear_when_read():
     cfg, result = unuses("x := 1\nreturn x")
+    assert result == ()
+
+
+def test_unused_assignments_ignore_bare_var_declarations():
+    cfg, result = unuses("var x int")
     assert result == ()
 
 
@@ -780,6 +863,76 @@ def test_function_body_returns_the_exact_inner_text():
     ).hexdigest()
 
 
+def test_go_entry_assigned_names_include_signature_and_file_names():
+    source = """// 雪 before the declaration
+package demo
+
+var (
+\tpackageVar int
+\t_, packageVar2 = 1, 2
+)
+const (
+\tpackageConst = 3
+\t_ = 4
+)
+type T struct{}
+
+func (receiver *T) Method(param, _ int) (result int, ok bool) {
+\tvar local int
+\t_ = local
+\treturn
+}
+"""
+    file_units = control_flow.go_file_units(source)
+    assert file_units.gaps == ()
+    (function,) = file_units.functions
+    assert control_flow.go_entry_assigned_names(
+        source, file_units, function
+    ) == frozenset(
+        {
+            "packageVar",
+            "packageVar2",
+            "packageConst",
+            "receiver",
+            "param",
+            "result",
+            "ok",
+        }
+    )
+
+
+def test_go_entry_assigned_names_handle_function_declarations():
+    source = """package demo
+var global int
+const limit = 8
+
+func calculate(input int) (result int) {
+\treturn
+}
+"""
+    file_units = control_flow.go_file_units(source)
+    (function,) = file_units.functions
+    assert control_flow.go_entry_assigned_names(
+        source, file_units, function
+    ) == frozenset({"global", "limit", "input", "result"})
+
+
+def test_go_entry_assigned_names_reject_mismatched_provenance():
+    source = "package p\nfunc f(param int) (result int) { return }\n"
+    file_units = control_flow.go_file_units(source)
+    function = file_units.functions[0]
+    with pytest.raises(ValueError, match="source does not match"):
+        control_flow.go_entry_assigned_names(
+            source + "// changed\n", file_units, function
+        )
+
+    other_units = control_flow.go_file_units("package p\nfunc other() {}\n")
+    with pytest.raises(ValueError, match="not declared"):
+        control_flow.go_entry_assigned_names(
+            source, file_units, other_units.functions[0]
+        )
+
+
 def test_function_body_rejects_a_foreign_source():
     result = units()
     with pytest.raises(ValueError, match="does not match"):
@@ -997,6 +1150,67 @@ def test_unreliable_names_stay_hintable_not_definite():
     hints = control_flow.flow_hints(body, cfg)
     uses = [use for use in hints.unassigned if use.name == "x"]
     assert uses and not uses[0].definite
+
+
+def test_unassigned_scan_skips_closure_body_at_definition():
+    body = (
+        "var state *int\n"
+        "writer := func() { state = new(int) }\n"
+        "if condition { writer() }\n"
+        "return *state"
+    )
+    cfg = graph(body)
+    hints = control_flow.flow_hints(body, cfg)
+    definition = nodes(cfg, "define")[0]
+    read = nodes(cfg, "return")[0]
+    assert not any(
+        use.node_id == definition.node_id and use.name == "state"
+        for use in hints.unassigned
+    )
+    (return_use,) = [
+        use
+        for use in hints.unassigned
+        if use.node_id == read.node_id and use.name == "state"
+    ]
+    assert return_use.definite is False
+
+
+def test_unassigned_scan_does_not_treat_direct_address_as_a_value_read():
+    body = "p := &x\nx := 1"
+    cfg = graph(body)
+    assert control_flow.unassigned_uses(body, cfg) == ()
+
+
+def test_unassigned_scan_still_reads_root_of_addressed_selector():
+    body = "p := &x.f\nx := 1"
+    cfg = graph(body)
+    (use,) = control_flow.unassigned_uses(body, cfg)
+    assert use.name == "x"
+    assert use.node_id == nodes(cfg, "define")[0].node_id
+
+
+def test_unassigned_value_read_scan_falls_back_to_regex_on_parse_failure(
+    monkeypatch,
+):
+    body = "use(x)"
+    tree = control_flow.tree_sitter_extract.extract_statements(body, "go")
+    assert tree is not None
+    statement = tree.statements[0]
+    expected = frozenset(
+        control_flow._IDENTIFIER.findall(control_flow._use_text(statement))
+    )
+    monkeypatch.setattr(
+        control_flow.tree_sitter_extract,
+        "parse",
+        lambda source, language: (None, None),
+    )
+    assert control_flow._value_read_names(statement) == expected
+
+
+def test_unused_assignments_count_closure_body_reads():
+    body = "x := 1\nreader := func() { use(x) }"
+    cfg, result = unuses(body)
+    assert "x" not in {assignment.name for assignment in result}
 
 
 def test_flow_hints_declares_empty_unreliable_for_plain_bodies():
