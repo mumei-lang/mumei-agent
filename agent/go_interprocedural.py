@@ -14178,10 +14178,14 @@ class _Builder:
         saved_pointer_param_reseats = getattr(
             self, "_pointer_param_reseats", frozenset()
         )
+        saved_pending_param_reseats = getattr(
+            self, "_pending_param_reseats", []
+        )
         self._pending_labels = []
         self._goto_seen = False
         self._seen_labels = set()
         self._pointer_param_reseats = set()
+        self._pending_param_reseats = []
         self.frames = []
         self.pinned = set()
         self.escaped = set()
@@ -14312,6 +14316,7 @@ class _Builder:
             )
             self._caller_visible_params = saved_caller_visible
             self._pointer_param_reseats = saved_pointer_param_reseats
+            self._pending_param_reseats = saved_pending_param_reseats
             self._defer_result_deps = saved_defer_result_deps
             self._deferred_exits = saved_deferred_exits
             self._func_arg_invocations = saved_func_args
@@ -14461,6 +14466,14 @@ class _Builder:
         if count[0] > MAX_EXPRESSION_NODES:
             raise _Unsupported("analysis_limit", _span(node))
         self._conditional = conditional
+        if self._pending_param_reseats:
+            # A `p = q` marks the reseat only AFTER its own
+            # statement's right-hand sides evaluate — `p, x = q,
+            # p.A[i].V` still reads the pre-update pointee.
+            self._pointer_param_reseats |= set(
+                self._pending_param_reseats
+            )
+            self._pending_param_reseats = []
         kind = node.type
         if kind in {"block", "statement_list"}:
             self._sequence(
@@ -16863,6 +16876,8 @@ class _Builder:
             chan_origin_entry = dict(
                 self._chan_chan_param_origins
             )
+            reseat_entry = set(self._pointer_param_reseats)
+            pending_reseat_entry = list(self._pending_param_reseats)
             scope_entry = dict(scope)
             # Branch-local bindings never escape their scope, matching the
             # compiler — a later reference simply would not resolve.
@@ -16877,11 +16892,21 @@ class _Builder:
             consequence_origins = dict(
                 self._chan_chan_param_origins
             )
+            consequence_reseats = set(self._pointer_param_reseats)
+            consequence_pending = list(self._pending_param_reseats)
             self._join(scope, branch, params)
             self._join_ptr(ptr_branch, params)
             alternative = node.child_by_field_name("alternative")
             if alternative is not None:
                 self._chan_chan_param_origins = dict(chan_origin_entry)
+                # The `if` arm's reseats do not reach the `else`
+                # arm — it still reads the entry pointee — so each
+                # arm runs from the same entry set and joins them
+                # after, like `chan_chan_param_origins` above.
+                self._pointer_param_reseats = set(reseat_entry)
+                self._pending_param_reseats = list(
+                    pending_reseat_entry
+                )
                 branch = dict(scope_entry)
                 ptr_branch = dict(self._ptr_deps)
                 if alternative.type == "if_statement":
@@ -16899,6 +16924,8 @@ class _Builder:
                 )
                 self._join(scope, branch, params)
                 self._join_ptr(ptr_branch, params)
+                self._pointer_param_reseats |= consequence_reseats
+                self._pending_param_reseats += consequence_pending
             else:
                 alternative_origins = chan_origin_entry
             self._chan_chan_param_origins = (
@@ -16946,8 +16973,10 @@ class _Builder:
                 if self._param_pointer_struct_root(lhs, params):
                     # `p = q` reseats the `*S` param onto `q`'s
                     # pointee — reads through it no longer name the
-                    # slot declared at entry, so the root closes.
-                    self._pointer_param_reseats.add(
+                    # slot declared at entry, so the root closes
+                    # from the NEXT statement on (the rights here
+                    # still read the entry pointee).
+                    self._pending_param_reseats.append(
                         lhs_ref.binding_id
                     )
             if not compound:
