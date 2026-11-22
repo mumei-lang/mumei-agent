@@ -1351,8 +1351,10 @@ class _TypeScriptBindings:
             return True
         if "enum" in kinds:
             return kinds == {"enum"}
-        if "ambient_var" in kinds:
-            return False
+        if "ambient_var" in kinds or "local" in kinds:
+            # A variable only merges with an `interface` (type side) —
+            # `const`/`declare const` + `namespace` is a redeclaration.
+            return kinds - {"ambient_var", "local"} == {"interface"}
         if kinds <= {"class", "ambient_class"}:
             return False
         if "ambient_class" in kinds:
@@ -1383,18 +1385,7 @@ class _TypeScriptBindings:
                 self._merge_kind(record), self._merge_kind(sibling)
             ):
                 continue
-            if (
-                sibling.member_of is not None
-                and sibling.member_of == record.member_of
-            ) or (
-                sibling.member_container is not None
-                and sibling.member_container == record.member_container
-                and record.member_container is not None
-            ) or (
-                sibling.member_of is None
-                and record.member_of is None
-                and sibling.binding.scope == record.binding.scope
-            ):
+            if self._same_declaration_family(record, sibling):
                 siblings.append(sibling)
         return siblings
 
@@ -1416,7 +1407,40 @@ class _TypeScriptBindings:
             for sibling in self._merge_siblings(record):
                 if self._merge_kind(sibling) == preferred:
                     return sibling
+        if merge_kind in {"interface", "namespace", "type_alias"}:
+            # Type-only names can't be `new`'d: a same-scope value-side
+            # declaration (e.g. `declare const C` carrying a construct
+            # signature) is the honest referent for the constructor.
+            for sibling in self.records:
+                if (
+                    sibling is not record
+                    and sibling.binding.name == record.binding.name
+                    and self._same_declaration_family(record, sibling)
+                    and self._merge_kind(sibling)
+                    in {"local", "ambient_var", "function"}
+                ):
+                    return sibling
         return record
+
+    def _same_declaration_family(
+        self, record: _Record, sibling: _Record
+    ) -> bool:
+        return (
+            (
+                sibling.member_of is not None
+                and sibling.member_of == record.member_of
+            )
+            or (
+                sibling.member_container is not None
+                and sibling.member_container == record.member_container
+                and record.member_container is not None
+            )
+            or (
+                sibling.member_of is None
+                and record.member_of is None
+                and sibling.binding.scope == record.binding.scope
+            )
+        )
 
     def _object_type(
         self, node: Any | None, position: int

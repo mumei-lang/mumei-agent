@@ -1363,10 +1363,56 @@ d.n();
     }
     assert c_cls.id in bodyless
     assert d_cls.id in bodyless
-    # `new D()` names the ambient class, not the bodied function.
+    # `new C()`/`new D()` name the ambient classes specifically —
+    # `opaque_ambient` alone could not tell class from function here.
     call_refs = [r for r in report.references if r.kind == "call"]
+    c_ambient = [b for b in classes if b.name == "C"][0]
     d_ambient = [b for b in classes if b.name == "D"][0]
+    c_fn = [
+        b for b in report.bindings
+        if b.name == "C" and b.id != c_ambient.id
+    ][0]
+    assert any(r.binding_id == c_ambient.id for r in call_refs)
     assert any(r.binding_id == d_ambient.id for r in call_refs)
+    assert not any(r.binding_id == c_fn.id for r in call_refs)
+
+
+def test_member_ambient_var_interface_merge():
+    # `interface I` (type side) + `declare const I` (value side, with a
+    # construct signature) merge across spaces: `new I()` calls the
+    # ambient const and `i.m()` resolves through the interface.
+    source = """
+interface I { m(): void }
+declare const I: { new(): I }
+const i = new I();
+i.m();
+"""
+    report = build_ts_bindings(source)
+    ambient = _member_bindings(report, "I", "ambient")[0]
+    method = _member_bindings(report, "m", "associated_function")[0]
+    call_refs = [r for r in report.references if r.kind == "call"]
+    assert any(r.binding_id == ambient.id for r in call_refs)
+    assert {
+        c.target for c in report.calls if c.kind == "opaque_bodyless"
+    } == {method.id}
+
+
+def test_member_new_on_type_only_name_falls_back_to_value():
+    # `declare const K` + `namespace K` can't legally merge (a
+    # redeclaration per tsc), but for `new K()` the value-side const —
+    # the only callable declaration — is the honest referent even when
+    # the type-only namespace shadows the name.
+    source = """
+declare const K: { new(): K }
+namespace K { export const q = 1 }
+const k = new K();
+"""
+    report = build_ts_bindings(source)
+    ambient = _member_bindings(report, "K", "ambient")[0]
+    call_refs = [r for r in report.references if r.kind == "call"]
+    assert call_refs and all(
+        r.binding_id == ambient.id for r in call_refs
+    )
 
 
 def test_member_ambient_declarations_have_no_tdz():
