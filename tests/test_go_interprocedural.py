@@ -33673,6 +33673,108 @@ def test_named_double_pointer_deep_store_keeps_root(
 
 
 @pytest.mark.parametrize(
+    "declarations",
+    [
+        # `p.A[i].V` — `[]*E` field on a `*S` parameter: the element
+        # pointer conflates into the field's group like `o.A[i].V`.
+        "type E struct { V int64 }\n"
+        "type S struct { A []*E }\n"
+        "func F(p *S, i int64) int64 { return p.A[i].V }\n",
+        # Same field on a value parameter.
+        "type E struct { V int64 }\n"
+        "type S struct { A []*E }\n"
+        "func F(o S, i int64) int64 { return o.A[i].V }\n",
+        # `(*pp)` on `**S` — the `*S` root's element field.
+        "type E struct { V int64 }\n"
+        "type S struct { A []*E }\n"
+        "func F(pp **S, i int64) int64 { return (*pp).A[i].V }\n",
+        # A pointer-slice parameter root directly: `ss[i].F[0]`.
+        "type E struct { F []int64 }\n"
+        "func F(ss []*E, i int) int64 { return ss[i].F[0] }\n",
+    ],
+)
+def test_named_pointer_element_field_reads(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_named_pointer_element_field_local_read(go_types_helper):
+    # The same `[]*E` field on a local composite — `i` is param 0.
+    declarations = (
+        "type E struct { V int64 }\n"
+        "type S struct { A []*E }\n"
+        "func F(i int64) int64 { s := S{}; return s.A[i].V }\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_named_pointer_element_read_observes_late_pointee_store(
+    go_types_helper,
+):
+    # `o.A = []*E{e}` hands the element pointer `e` to the group —
+    # a later `e.V = x` store through the bound pointer must reach
+    # the `o.A[0].V` read like a bare `*p` deref observes it.
+    declarations = (
+        "type E struct { V int64 }\n"
+        "type S struct { A []*E }\n"
+        "func F(x int64) int64 { "
+        "var o S; e := &E{}; o.A = []*E{e}; e.V = x; "
+        "return o.A[0].V }\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_named_pointer_element_field_write_emit_caller_backing(
+    go_types_helper,
+):
+    # `p.A[i].V = x` writes through the element pointer — the
+    # shared-backing store lands on `p`'s caller-backing.
+    declarations = (
+        "type E struct { V int64 }\n"
+        "type S struct { A []*E }\n"
+        "func F(p *S, i int64, x int64) int64 { "
+        "p.A[i].V = x; return 0 }\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    imported = [c for c in result.calls if c.imported]
+    assert any(c.target.endswith("caller-backing") for c in imported)
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        # A pointer member inside the element keeps the chain
+        # closed — `p.A[i].W.V` is a deeper pointer hop.
+        "type E struct { V int64; W *E }\n"
+        "type S struct { A []*E }\n"
+        "func F(p *S, i int64) int64 { return p.A[i].W.V }\n",
+        # Map-of-pointer-element fields stay closed.
+        "type E struct { V int64 }\n"
+        "type S struct { M map[string]*E }\n"
+        "func F(p *S, k string) int64 { return p.M[k].V }\n",
+        # An array of pointer elements stays closed — the `[N]*E`
+        # copy detaches the names like an `[N]chan` does.
+        "type E struct { V int64 }\n"
+        "type S struct { A [1]*E }\n"
+        "func F(p *S) int64 { return p.A[0].V }\n",
+    ],
+)
+def test_named_pointer_element_field_unsupported_stays_closed(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available
+
+
+@pytest.mark.parametrize(
     ("direct", "extracted"),
     [
         (
@@ -34234,8 +34336,6 @@ def test_struct_field_parallel_assignment_field_rhs_preserves_alias(
         "func F(s struct { A []int64 }) int64 { return s.A[0] }\n",
         "type S[T any] struct { A []int64 }\n"
         "func F(s S[int64]) int64 { return s.A[0] }\n",
-        "type E struct { F []int64 }\n"
-        "func F(ss []*E, i int) int64 { return ss[i].F[0] }\n",
         "type P struct { F []int64 }\n"
         "type E struct { P *P }\n"
         "func F(ss []E, i int) int64 { return ss[i].P.F[0] }\n",

@@ -3110,11 +3110,30 @@ class _Builder:
         if (
             container_fact is None
             or container_fact.kind not in {"slice", "array", "map"}
-            or not self._named_value_struct_supported(element_fact)
+            or not (
+                self._named_value_struct_supported(element_fact)
+                or (
+                    getattr(element_fact, "kind", None) == "pointer"
+                    and self._named_value_struct_supported(
+                        getattr(element_fact, "elem", None)
+                    )
+                )
+            )
         ):
             return None
         path_members = []
         field_fact = element_fact
+        if (
+            getattr(field_fact, "kind", None) == "pointer"
+            and self._named_value_struct_supported(
+                getattr(field_fact, "elem", None)
+            )
+        ):
+            # `a[i]` yields `*E` — `.V` reads through the element
+            # pointer the way `a[i].F` reads through a struct
+            # element: the pointer conflates into the collection's
+            # group, so the field's slot is the group's.
+            field_fact = field_fact.elem
         for field_node in reversed(fields):
             if (
                 not self._named_value_struct_supported(field_fact)
@@ -26175,6 +26194,7 @@ class _Builder:
                         if (
                             operand_fact is not None
                             and operand_fact.kind == "pointer"
+                            and field_operand.type != "index_expression"
                             and not self._param_pointer_struct_root(
                                 field_operand, params
                             )
@@ -26390,6 +26410,26 @@ class _Builder:
                     deps |= self._opaque_container_deps(
                         field_key, locals_
                     )
+                    if (
+                        getattr(
+                            _container_member.type, "elem", None
+                        )
+                        is not None
+                        and _container_member.type.elem.kind
+                        == "pointer"
+                    ):
+                        # `a[i]` is a `*E` element pointer that may
+                        # aim at any escaped or bound memory — like a
+                        # bare `*p` deref the read unions every
+                        # indirect store and the escaped bindings'
+                        # live slots, so `a[0] = &e; e.V = x` still
+                        # reports the later update.
+                        deps |= self.indirect_writes
+                        for escaped_id in self.escaped:
+                            if escaped_id in locals_:
+                                deps |= locals_[escaped_id]
+                            elif escaped_id in params:
+                                deps |= {params[escaped_id]}
                     return deps
                 sel_operand = node.child_by_field_name("operand")
                 while (
