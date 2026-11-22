@@ -65,10 +65,16 @@ _MAP_CONTAINER_NAMES = frozenset({"HashMap", "BTreeMap"})
 # yields `Option<T>`. Each maps to its payload prefix and the
 # container heads the method actually exists on.
 _OPTION_HEAD_METHODS = {
-    "get": ("&", {"Vec", "HashMap", "BTreeMap"}),
+    "get": ("&", {"Vec", "VecDeque", "HashMap", "BTreeMap"}),
     "first": ("&", {"Vec"}),
     "last": ("&", {"Vec"}),
     "pop": ("", {"Vec"}),
+    "front": ("&", {"VecDeque"}),
+    "back": ("&", {"VecDeque"}),
+    "pop_front": ("", {"VecDeque"}),
+    "pop_back": ("", {"VecDeque"}),
+    "remove": ("", {"HashMap", "BTreeMap", "VecDeque"}),
+    "next": ("&", None),
 }
 
 _PRELUDE_NAMES = frozenset(

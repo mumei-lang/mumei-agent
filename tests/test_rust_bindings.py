@@ -5593,3 +5593,51 @@ fn f() {
     m = _bindings(report, "m", "associated_function")[0]
     assert _call(report, source, "w.0.m()").target == m.id
     assert _call(report, source, "w.1.m()").target == m.id
+
+
+def test_iterator_chain_and_next_head_option() -> None:
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn f(v: Vec<P>) {
+    for p in v.iter().chain(v.iter()) { p.m(); }
+    let mut it = v.iter();
+    while let Some(p) = it.next() { p.m(); }
+    for p in it { p.m(); }
+    if let Some(p) = v.iter().next() { p.m(); }
+    if let Some(p) = v.next() { p.m(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = _bindings(report, "m", "associated_function")[0]
+    calls = [
+        call
+        for call in report.calls
+        if source.encode()[call.span.start : call.span.end] == b"p.m()"
+    ]
+    assert len(calls) == 5
+    assert [call.target for call in calls] == [m.id] * 5
+
+
+def test_option_head_methods_on_vecdeque_and_map_remove() -> None:
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+use std::collections::{VecDeque, HashMap};
+fn f(d: VecDeque<P>, m: HashMap<u32, P>) {
+    if let Some(p) = d.front() { p.m(); }
+    if let Some(p) = d.back() { p.m(); }
+    if let Some(p) = d.pop_front() { p.m(); }
+    if let Some(p) = d.get(0) { p.m(); }
+    if let Some(p) = m.remove(&0) { p.m(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = _bindings(report, "m", "associated_function")[0]
+    calls = [
+        call
+        for call in report.calls
+        if source.encode()[call.span.start : call.span.end] == b"p.m()"
+    ]
+    assert len(calls) == 5
+    assert [call.target for call in calls] == [m.id] * 5
