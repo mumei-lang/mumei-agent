@@ -18719,6 +18719,177 @@ def test_bound_closure_parenthesized_and_var_literals_keep_records(
     assert result.return_dependencies == frozenset({0})
 
 
+@pytest.mark.parametrize(
+    ("declarations", "expected"),
+    [
+        pytest.param(
+            "type S struct{ F func() int64 }\n"
+            "func Composite(x, y int64) int64 { v := y; "
+            "s := S{F: func() int64 { return v }}; v = x; return s.F() }\n"
+            "func Assigned(x, y int64) int64 { v := y; var s S; "
+            "s.F = func() int64 { return v }; v = x; return s.F() }",
+            frozenset({0, 1}),
+            id="s1-keyed",
+        ),
+        pytest.param(
+            "type S struct{ F func() int64 }\n"
+            "func Composite(x, y int64) int64 { v := y; "
+            "s := S{F: func() int64 { return v }}; return s.F() + x }\n"
+            "func Assigned(x, y int64) int64 { v := y; var s S; "
+            "s.F = func() int64 { return v }; return s.F() + x }",
+            frozenset({0, 1}),
+            id="s4-result-plus-input",
+        ),
+        pytest.param(
+            "type W struct{ F func() }\n"
+            "func Composite(x, y int64) int64 { w := int64(0); v := y; "
+            "s := W{F: func() { w = v }}; v = x; s.F(); return w }\n"
+            "func Assigned(x, y int64) int64 { w := int64(0); v := y; "
+            "var s W; s.F = func() { w = v }; v = x; s.F(); return w }",
+            frozenset({0, 1}),
+            id="s5-write",
+        ),
+        pytest.param(
+            "type S struct{ F func() int64 }\n"
+            "func Composite(x, y int64) int64 { v := y; "
+            "s := S{F: func() int64 { return v }}; t := s; v = x; "
+            "return t.F() }\n"
+            "func Assigned(x, y int64) int64 { v := y; var s S; "
+            "s.F = func() int64 { return v }; t := s; v = x; "
+            "return t.F() }",
+            frozenset({0, 1}),
+            id="s7-field-copy",
+        ),
+        pytest.param(
+            "type W struct{ F func() }\n"
+            "func Composite(x, y int64) int64 { w := int64(0); "
+            "s := W{F: func() { w = x }}; s.F(); return w }\n"
+            "func Assigned(x, y int64) int64 { w := int64(0); var s W; "
+            "s.F = func() { w = x }; s.F(); return w }",
+            frozenset({0}),
+            id="t5-write-without-later-store",
+        ),
+        pytest.param(
+            "type S struct{ F func() int64 }\n"
+            "func Composite(x, y int64) int64 { v := y; "
+            "s := S{func() int64 { return v }}; v = x; return s.F() }\n"
+            "func Assigned(x, y int64) int64 { v := y; var s S; "
+            "s.F = func() int64 { return v }; v = x; return s.F() }",
+            frozenset({0, 1}),
+            id="t6-positional",
+        ),
+        pytest.param(
+            "type S struct{ F func() int64 }\n"
+            "func Composite(x, y int64) int64 { v := y; "
+            "var s = S{F: func() int64 { return v }}; v = x; "
+            "return s.F() }\n"
+            "func Assigned(x, y int64) int64 { v := y; var s S; "
+            "s.F = func() int64 { return v }; v = x; return s.F() }",
+            frozenset({0, 1}),
+            id="t7-var-composite",
+        ),
+        pytest.param(
+            "type S struct{ F func() int64 }\n"
+            "func Composite(x, y int64) int64 { v := y; var s S; "
+            "s = S{F: func() int64 { return v }}; v = x; return s.F() }\n"
+            "func Assigned(x, y int64) int64 { v := y; var s S; "
+            "s.F = func() int64 { return v }; v = x; return s.F() }",
+            frozenset({0, 1}),
+            id="t8-assignment-composite",
+        ),
+        pytest.param(
+            "type S struct{ F func() int64 }\n"
+            "type O struct{ S S }\n"
+            "func Composite(x, y int64) int64 { v := y; "
+            "o := O{S: S{F: func() int64 { return v }}}; v = x; "
+            "return o.S.F() }\n"
+            "func Assigned(x, y int64) int64 { v := y; var o O; "
+            "o.S.F = func() int64 { return v }; v = x; return o.S.F() }",
+            frozenset({0, 1}),
+            id="a7-nested-composite",
+        ),
+    ],
+)
+def test_struct_composite_func_literals_match_field_assignments(
+    go_types_helper, declarations, expected
+):
+    source, snapshot, summaries = unit(go_types_helper, declarations)
+    composite = named(source, snapshot, summaries, "Composite")
+    assigned = named(source, snapshot, summaries, "Assigned")
+    assert composite.available, composite.gaps
+    assert assigned.available, assigned.gaps
+    assert composite.return_dependencies == assigned.return_dependencies
+    assert composite.return_dependencies == expected
+    assert composite.effects == assigned.effects == "unknown"
+
+
+def test_struct_composite_func_literal_controls_match_develop(
+    go_types_helper,
+):
+    declarations = (
+        "type S struct{ F func() int64 }\n"
+        "type W struct{ F func() }\n"
+        "func T1(x, y int64) int64 { var s, t S; v := y; u := x; "
+        "s.F = func() int64 { return v }; "
+        "t.F = func() int64 { return 0 }; _ = u; return s.F() }\n"
+        "func T2(x, y int64) int64 { var s, t S; "
+        "s.F = func() int64 { return x }; "
+        "t.F = func() int64 { return y }; return s.F() }\n"
+        "func S10(x, y int64) int64 { "
+        "s := S{F: func() int64 { return y }}; return s.F() }\n"
+        "func S11(x, y int64, s S) int64 { return s.F() + x }\n"
+        "func J1(x, y int64) int64 { v := y; "
+        "fs := []func() int64{func() int64 { return v }}; "
+        "v = x; return fs[0]() }\n"
+        "func J2(x, y int64) int64 { w := int64(0); v := y; "
+        "fs := []func(){func() { w = v }}; v = x; fs[0](); return w }"
+    )
+    source, snapshot, summaries = unit(go_types_helper, declarations)
+    expected = {
+        "T1": frozenset({1}),
+        "T2": frozenset({0, 1}),
+        "S10": frozenset({1}),
+        "S11": frozenset({0, 2}),
+        "J1": frozenset({0, 1}),
+        "J2": frozenset({0, 1}),
+    }
+    for name, dependencies in expected.items():
+        result = named(source, snapshot, summaries, name)
+        assert result.available, (name, result.gaps)
+        assert result.return_dependencies == dependencies
+        assert result.effects == "unknown"
+
+
+def test_struct_composite_unresolved_positional_func_field_fails_closed(
+    go_types_helper,
+):
+    files = {
+        "main.go": 'package p\nimport "lib"\n'
+        "func F(x int64) int64 { "
+        "s := lib.S{func() int64 { return x }}; return s.F() }\n"
+    }
+    imports = {
+        "lib": {
+            "lib.go": "package lib\ntype S struct{ F func() int64 }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, imports),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files,
+        snapshot,
+        ip.summarize_go_package(files, snapshot),
+        "F",
+    )
+    assert not result.available
+    assert any(
+        gap.reason == "unsupported_expression" for gap in result.gaps
+    )
+
+
 def test_bound_closure_local_channel_send_imported_callback(
     go_types_helper,
 ):
