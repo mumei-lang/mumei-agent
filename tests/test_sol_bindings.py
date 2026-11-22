@@ -1540,6 +1540,165 @@ contract Vault {
     )
 
 
+def test_compound_write_through_struct_field_emits_read_and_write():
+    source = """
+struct Coin { uint256 v; }
+contract Vault {
+    Coin coin;
+    function run() external { coin.v += 1; }
+}
+"""
+    report = build_sol_bindings(source)
+    v = next(
+        binding for binding in report.bindings if binding.name == "v"
+    )
+    kinds = sorted(
+        ref.kind
+        for ref in report.references
+        if ref.binding_id == v.id
+    )
+    assert kinds == ["read", "write"]
+
+
+def test_write_to_enum_member_records_gap_not_write():
+    source = """
+enum Status { Ready, Done }
+contract Vault {
+    Status status;
+    function run() external { Status.Ready = status; }
+}
+"""
+    # Assigning to the enum constant itself stays a gap + read,
+    # matching the non-assignable identifier rule — the report keeps
+    # every reference kind the readers accept.
+    report = build_sol_bindings(source)
+    ready = next(
+        binding for binding in report.bindings if binding.name == "Ready"
+    )
+    assert not any(
+        ref.binding_id == ready.id and ref.kind == "write"
+        for ref in report.references
+    )
+    assert any(
+        ref.binding_id == ready.id and ref.kind == "read"
+        for ref in report.references
+    )
+    assert any(
+        gap.reason == "unsupported_syntax" for gap in report.gaps
+    )
+
+
+def test_enum_typed_value_uses_using_member_not_constant():
+    source = """
+enum Status { Ready, Done }
+library L {
+    function Ready(Status s) internal pure returns (bool) {}
+}
+contract Vault {
+    using L for Status;
+    Status status;
+    function run() external {
+        status.Ready();
+        Status.Ready;
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    lib_fn = next(
+        binding
+        for binding in report.bindings
+        if binding.name == "Ready" and binding.kind == "function"
+    )
+    member = next(
+        binding
+        for binding in report.bindings
+        if binding.name == "Ready" and binding.kind == "enum_member"
+    )
+    assert any(
+        ref.binding_id == lib_fn.id and ref.kind == "call"
+        for ref in report.references
+    )
+    assert any(
+        ref.binding_id == member.id and ref.kind == "read"
+        for ref in report.references
+    )
+    assert not any(
+        ref.binding_id == member.id and ref.kind == "call"
+        for ref in report.references
+    )
+
+
+def test_struct_getter_call_return_stays_opaque():
+    source = """
+contract Token { function transfer(address to, uint256 a) external {} }
+struct Coin { Token t; uint256 v; }
+contract Vault {
+    Coin public coin;
+    function run() external { this.coin().transfer(address(0), 1); }
+}
+"""
+    # A public struct getter returns the exploded fields, not the
+    # struct — the member call keeps its opaque treatment.
+    report = build_sol_bindings(source)
+    assert report.calls[-1].kind == "opaque_member"
+
+
+def test_function_pointer_selector_does_not_bind_struct_field():
+    source = """
+struct Coin { uint256 selector; }
+contract Vault {
+    function run() external {
+        function() external returns (Coin memory) cb;
+        cb.selector;
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    field = next(
+        binding for binding in report.bindings if binding.name == "selector"
+    )
+    assert not any(
+        ref.binding_id == field.id for ref in report.references
+    )
+
+
+def test_qualified_enum_member_resolves():
+    source = """
+contract Container { enum State { On, Off } }
+contract Vault {
+    Container.State state;
+    function run() external { state = Container.State.On; }
+}
+"""
+    report = build_sol_bindings(source)
+    on = next(
+        binding for binding in report.bindings if binding.name == "On"
+    )
+    assert any(
+        ref.binding_id == on.id and ref.kind == "read"
+        for ref in report.references
+    )
+
+
+def test_struct_constructor_member_resolves():
+    source = """
+struct Coin { uint256 v; }
+contract Vault {
+    function run() external returns (uint256) {
+        return Coin(1).v;
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    v = next(
+        binding for binding in report.bindings if binding.name == "v"
+    )
+    assert any(
+        ref.binding_id == v.id and ref.kind == "read"
+        for ref in report.references
+    )
+
+
 def test_member_call_on_array_element_resolves():
     source = """
 contract Token {

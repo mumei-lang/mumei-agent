@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from agent.lexical_bindings import (
+    NON_ASSIGNABLE_WRITE_KINDS,
     Binding,
     ByteSpan,
     Call,
@@ -853,6 +854,7 @@ class _SolBindings:
             return member, None, None
         contract = None
         type_record = None
+        enum_via_type_name = False
         inside_owner = False
         if obj.type == "identifier" and text == "this":
             contract = self.current_contract
@@ -866,6 +868,14 @@ class _SolBindings:
                     contract = self.contracts.get(record.binding.name)
                 elif record.binding.kind == "enum":
                     type_record = record
+                    enum_via_type_name = True
+                elif record.type_node is not None and re.match(
+                    r"\s*function\b", self.text(record.type_node)
+                ):
+                    # Function-typed variables carry builtin members
+                    # (`cb.selector`); the signature's return struct
+                    # must not leak fields into this position.
+                    pass
                 else:
                     fact = self._type_fact(
                         record.type_node, record.owner, set()
@@ -891,12 +901,24 @@ class _SolBindings:
                             )
         elif obj.type == "member_expression":
             # Member chains (`vault.coin.v`): resolve the inner member
-            # first, then use its declared type.
+            # first, then use its declared type. A nested type name
+            # (`Container.State.Ready`) supplies the type record itself
+            # — its declaration has no type annotation to look through.
             _inner_member, inner, _inner_reason = self._resolve_member(obj)
             if inner is not None:
-                type_record = self._type_record_for_type_node(
-                    inner.type_node, inner.owner
-                )
+                if inner.binding.kind in {
+                    "contract",
+                    "interface",
+                    "library",
+                    "struct",
+                    "enum",
+                }:
+                    type_record = inner
+                    enum_via_type_name = inner.binding.kind == "enum"
+                else:
+                    type_record = self._type_record_for_type_node(
+                        inner.type_node, inner.owner
+                    )
         elif obj.type == "array_access":
             # `tokens[0].transfer()`: the element type of a contract
             # array is contract-typed.
@@ -924,9 +946,13 @@ class _SolBindings:
             if record is not None or reason is not None:
                 return member, record, reason
         if type_record is not None:
-            found = type_record.members.get(name)
-            if found is not None:
-                return member, found, None
+            # Enum constants only resolve through the type name
+            # (`Status.Ready`): on an enum-typed value they would shadow
+            # a same-named `using` extension, which solc prefers.
+            if type_record.binding.kind != "enum" or enum_via_type_name:
+                found = type_record.members.get(name)
+                if found is not None:
+                    return member, found, None
         record, reason = self._lookup_using(name, obj, member.start_byte)
         return member, record, reason
 
@@ -1067,9 +1093,15 @@ class _SolBindings:
         record = self._object_record(callee)
         if record is None:
             return None
-        if record.binding.kind in {"contract", "interface", "library"}:
-            # `new Token()` / `Token(addr)` — the value is typed by the
-            # contract itself.
+        if record.binding.kind in {
+            "contract",
+            "interface",
+            "library",
+            "struct",
+            "enum",
+        }:
+            # `new Token()` / `Token(addr)` / `Coin(1)` / `Status(0)` —
+            # the value is typed by the declaration itself.
             return record
         if record.binding.kind != "function":
             if record.type_node is not None and not re.match(
@@ -1078,10 +1110,19 @@ class _SolBindings:
                 # Getter-style call on a declared variable, e.g.
                 # `this.token().f()` — the value has the variable's
                 # declared type. Function-typed variables (`cb(t)`)
-                # would root at the signature's first identifier.
-                return self._type_record_for_type_node(
+                # would root at the signature's first identifier. A
+                # struct-typed public getter returns the exploded
+                # fields, not the struct, and an enum-typed value is
+                # not callable, so neither carries a member surface.
+                resolved = self._type_record_for_type_node(
                     record.type_node, record.owner
                 )
+                if resolved is not None and resolved.binding.kind in {
+                    "struct",
+                    "enum",
+                }:
+                    return None
+                return resolved
             return None
         function_node = record.node.parent
         if function_node is None:
@@ -1910,18 +1951,37 @@ class _SolBindings:
             else:
                 self._expr(root)
             # Member names in the chain keep their own references:
-            # inner members are reads, the outermost takes `mode`.
+            # inner members are reads, the outermost mirrors the
+            # identifier write rules — read+write for compound updates,
+            # gap+read for non-assignable members (enum constants,
+            # functions) so readers accepting the report's invariants
+            # never see a write they forbid.
             current = node
             while current.type == "member_expression":
                 member, member_record, member_reason = self._resolve_member(
                     current
                 )
                 if member is not None and member_record is not None:
-                    self._add_ref(
-                        member,
-                        member_record,
-                        mode if current is node and mode != "read_write" else "read",
-                    )
+                    effective = mode if current is node else "read"
+                    if effective in {"read", "read_write"}:
+                        self._add_ref(member, member_record, "read")
+                    if effective in {"write", "read_write"}:
+                        if (
+                            member_record.binding.kind
+                            in NON_ASSIGNABLE_WRITE_KINDS
+                            or (
+                                member_record.binding.kind
+                                == "state_variable"
+                                and not member_record.binding.mutable
+                            )
+                        ):
+                            self._add_gap(
+                                "unsupported_syntax", assignment_node or node
+                            )
+                            if effective == "write":
+                                self._add_ref(member, member_record, "read")
+                        else:
+                            self._add_ref(member, member_record, "write")
                 elif member is not None and member_reason is not None:
                     self._add_unresolved(
                         member, self.text(member), member_reason
