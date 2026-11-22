@@ -5482,3 +5482,16 @@ fn f(items: Vec<P>, v: Vec<m::P>, nested: Vec<Vec<P>>) {
     assert _call(report, source, "items[0].p()").target == p.id
     assert _call(report, source, "v[0].p()").target == p.id
     assert _call(report, source, "nested[0][1].p()").target == p.id
+
+
+def test_index_element_resolves_at_annotation_scope():
+    source = """
+mod m { pub struct P; impl P { pub fn p(&self) {} } }
+fn f(items: Vec<m::P>) {
+    mod m { pub struct P; impl P { pub fn other(&self) {} } }
+    items[0].p();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    p = _bindings(report, "p", "associated_function")[0]
+    assert _call(report, source, "items[0].p()").target == p.id

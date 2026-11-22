@@ -2315,7 +2315,10 @@ class _RustBindings:
                 # `v[f(0..10)]` keeps its integer index.
                 return None, elem_args
             return self._element_of(
-                container_id, elem_args, node.start_byte
+                container_id,
+                elem_args,
+                self._receiver_annotation_position(children[0])
+                or node.start_byte,
             )
         if node.type == "field_expression":
             member, receiver_id, receiver_args = self._field_member_typed(
