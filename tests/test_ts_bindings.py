@@ -1066,3 +1066,20 @@ getCar().drive();
         c.kind == "direct_local" and c.target == drive.id
         for c in report.calls
     )
+
+
+def test_member_access_on_array_elements_binds():
+    source = """
+class Car { start(): void {} }
+function go(cars: Car[], row: Car[][]) {
+    cars[0].start();
+    row[0][1].start();
+}
+"""
+    report = build_ts_bindings(source)
+    start = _member_bindings(report, "start", "associated_function")[0]
+    calls = [
+        c for c in report.calls
+        if c.kind == "direct_local" and c.target == start.id
+    ]
+    assert len(calls) == 2

@@ -1090,8 +1090,8 @@ class _TypeScriptBindings:
             first = False
         return None
 
-    def _return_type_record(self, node: Any) -> _Record | None:
-        """Type record named by a call's return annotation, if resolvable."""
+    def _callee_return_node(self, node: Any) -> Any | None:
+        """Return-type annotation node of a call's resolved callee."""
         callee = node.child_by_field_name("function")
         record: _Record | None = None
         if callee is not None and callee.type == "identifier":
@@ -1116,12 +1116,64 @@ class _TypeScriptBindings:
             for child in self.children(record.function_node):
                 if child.type in {"type_annotation", "return_type"}:
                     return_node = child
+        return return_node
+
+    def _return_type_record(self, node: Any) -> _Record | None:
+        """Type record named by a call's return annotation, if resolvable."""
+        return_node = self._callee_return_node(node)
         if return_node is None:
             return None
         fact = self._type_fact(next(iter(self.children(return_node)), None))
         if fact.kind != "named":
             return None
         return self._type_record_by_id(fact.type_id)
+
+    def _declared_type_node(self, node: Any | None, position: int) -> Any | None:
+        """The declaring type's syntax node for a member/subscript object."""
+        if node is None:
+            return None
+        if node.type == "identifier":
+            record = self._lookup(self.text(node), position, "value")
+            if record is None:
+                return None
+            return self._unwrap_type(record.type_node)
+        if node.type == "member_expression":
+            property_node = node.child_by_field_name("property")
+            if (
+                property_node is None
+                or property_node.type != "property_identifier"
+            ):
+                return None
+            member = self._resolve_member(
+                node.child_by_field_name("object"),
+                self.text(property_node),
+                position,
+            )
+            if member is None:
+                return None
+            return self._unwrap_type(member.type_node)
+        if node.type == "call_expression":
+            return_node = self._callee_return_node(node)
+            if return_node is None:
+                return None
+            return self._unwrap_type(
+                next(iter(self.children(return_node)), None)
+            )
+        if node.type == "subscript_expression":
+            inner = self._declared_type_node(
+                node.child_by_field_name("object"), position
+            )
+            if inner is not None and inner.type == "array_type":
+                return next(iter(self.children(inner)), None)
+            return None
+        if node.type in {
+            "parenthesized_expression", "non_null_expression",
+            "as_expression", "satisfies_expression",
+        }:
+            return self._declared_type_node(
+                next(iter(self.children(node)), None), position
+            )
+        return None
 
     def _object_type(
         self, node: Any | None, position: int
@@ -1179,6 +1231,12 @@ class _TypeScriptBindings:
             return self._type_record_by_id(fact.type_id), False, False
         if node.type == "call_expression":
             return self._return_type_record(node), False, False
+        if node.type == "subscript_expression":
+            type_node = self._declared_type_node(node, position)
+            fact = self._type_fact(type_node)
+            if fact.kind != "named":
+                return None, False, False
+            return self._type_record_by_id(fact.type_id), False, False
         if node.type == "new_expression":
             constructor = node.child_by_field_name("constructor")
             if constructor is not None and constructor.type in {
