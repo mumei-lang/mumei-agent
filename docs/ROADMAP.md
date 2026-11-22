@@ -138,6 +138,29 @@ duties and open work. No default CLI/MCP/audit route, external verifier
 or dependency is added. C11 stays partial; C12's demand gate and existing
 assurance/Lean/native/LLVM/deferred-WASM policies are unchanged.
 
+### C04 durable plan history log
+
+The opt-in `agent.plan_history_log` library module exposes
+`append_plan_history(path: str, plan: VerificationPlan) -> str` and
+`read_plan_history(path: str, *, expected_head: str | None = None) ->
+tuple[dict, ...]` for a canonical JSONL log of existing
+`VerificationPlan.to_dict()` projections. Each entry is SHA-256 chained
+to the previous entry. The chain detects in-file edits, reordering and
+mid-file deletion; tail truncation or rollback is detected only when the
+host supplies a pinned `expected_head`. This is tamper evidence, not
+authentication: a writer can rewrite the complete chain. The projection
+contains only the existing non-secret plan fields, and the log is not
+Evidence or a dispatch or acceptance record.
+
+Cross-process writer exclusion requires POSIX `fcntl`; where it is
+unavailable, locking is process-local and hosts must use a single writer
+process. A write or fsync failure triggers best-effort rollback to the
+validated prefix. Entries use standard JSON and reject NaN and Infinity.
+
+C04/C11 remain partial: Evidence acceptance and default routes are open
+work. The log does not wire persistence into planning, dispatch or runtime
+fallback.
+
 ### C11 declared memory bounds for attempted executions
 
 `AttemptRunner.run(request, argv, cancel_event=None, memory_bound_mb=None)`
