@@ -1734,7 +1734,9 @@ class _TypeScriptBindings:
             filtered = [
                 candidate
                 for candidate in remaining
-                if self._param_accepts(candidate, index, kind)
+                if self._param_accepts(
+                    candidate, index, kind, arg.start_byte
+                )
             ]
             if filtered:
                 remaining = filtered
@@ -1822,7 +1824,7 @@ class _TypeScriptBindings:
         return None
 
     def _param_accepts(
-        self, candidate: _Record, index: int, kind: str
+        self, candidate: _Record, index: int, kind: str, position: int
     ) -> bool:
         params = (
             candidate.function_node.child_by_field_name("parameters")
@@ -1853,6 +1855,7 @@ class _TypeScriptBindings:
                     next(iter(self.children(annotation)), None)
                 ),
                 kind,
+                position,
             )
         item = items[index]
         pattern = item.child_by_field_name("pattern")
@@ -1866,7 +1869,7 @@ class _TypeScriptBindings:
         inner = next(iter(self.children(annotation)), None)
         if variadic:
             inner = self._rest_element_node(inner)
-        return self._annotation_accepts(inner, kind)
+        return self._annotation_accepts(inner, kind, position)
 
     def _rest_element_node(self, node: Any | None) -> Any | None:
         """Element annotation of a rest parameter — `...x: T[]` and
@@ -1882,7 +1885,9 @@ class _TypeScriptBindings:
         return node
 
 
-    def _annotation_accepts(self, node: Any | None, kind: str) -> bool:
+    def _annotation_accepts(
+        self, node: Any | None, kind: str, position: int
+    ) -> bool:
         """Whether the parameter annotation can hold `kind`.
 
         `kind` is a primitive name or a named type's spelling. Missing
@@ -1892,7 +1897,7 @@ class _TypeScriptBindings:
             return True
         if node.type == "union_type":
             return any(
-                self._annotation_accepts(child, kind)
+                self._annotation_accepts(child, kind, position)
                 for child in self.children(node)
                 if child.type != "|"
             )
@@ -1925,7 +1930,7 @@ class _TypeScriptBindings:
                     if record.alias_node is not None
                     else None
                 )
-                return self._annotation_accepts(inner, kind)
+                return self._annotation_accepts(inner, kind, position)
             if (
                 record is not None
                 and record.binding.kind == "generic_parameter"
@@ -1949,36 +1954,40 @@ class _TypeScriptBindings:
                     ),
                     None,
                 )
-                return self._annotation_accepts(inner, kind)
+                return self._annotation_accepts(inner, kind, position)
             return text == kind or self._type_derives_from(
-                kind, text, node.start_byte
+                kind, text, position, node.start_byte
             )
         if node.type == "generic_type":
             return text == kind or self._type_derives_from(
-                kind, text, node.start_byte
+                kind, text, position, node.start_byte
             )
         return True
 
     def _type_derives_from(
-        self, name: str, ancestor: str, position: int
+        self, name: str, ancestor: str, arg_position: int, decl_position: int
     ) -> bool:
         """True when type `name` transitively extends/implements
         `ancestor` — `new Derived()` fits a `Base` parameter when
-        `class Derived extends Base`."""
-        first = self._lookup(name, position, "type")
-        if first is None:
+        `class Derived extends Base`. The argument's type resolves where
+        the argument is spelled; the annotation's name resolves at its
+        own site so `D extends N.Base` is not confused with a global
+        `Base`."""
+        first = self._lookup(name, arg_position, "type")
+        ancestor_record = self._base_type_record(ancestor, decl_position)
+        if first is None or ancestor_record is None:
             return False
         seen: set[int] = set()
         queue = [first]
         while queue:
             record = queue.pop()
+            if record.binding.id == ancestor_record.binding.id:
+                return True
             decl = record.node.parent if record.node is not None else None
             if decl is None or decl.id in seen:
                 continue
             seen.add(decl.id)
             for base, base_value in self._type_bases.get(decl.id, ()):
-                if base == ancestor or base.split(".")[-1] == ancestor:
-                    return True
                 base_record = self._base_type_record(
                     base,
                     decl.start_byte,

@@ -2536,3 +2536,48 @@ f(new Derived());
         if source[c.span.start : c.span.end] == "f(new Derived())"
     )
     assert call.target == fs[0].id
+
+def test_overload_namespaced_base_is_not_global_base():
+    # `D extends N.Base` is unrelated to the global `Base` — the
+    # `x: Base` overload must not accept `new D()`.
+    source = """
+class Base {}
+namespace N { export class Base {} }
+class D extends N.Base {}
+function f(x: Base): void {}
+function f(x: unknown): void {}
+f(new D());
+"""
+    report = build_ts_bindings(source)
+    fs = sorted(
+        _bindings(report, "f", "function"), key=lambda b: b.span.start
+    )
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == "f(new D())"
+    )
+    assert call.target == fs[1].id
+
+
+def test_overload_shadowed_arg_type_uses_call_site_scope():
+    # Inside `g` a local `D` shadows the outer `D extends Base` —
+    # `new D()` there does not fit `T extends Base`.
+    source = """
+class Base {}
+class D extends Base {}
+function f<T extends Base>(x: T): void {}
+function f(x: unknown): void {}
+function g() {
+  class D {}
+  f(new D());
+}
+"""
+    report = build_ts_bindings(source)
+    fs = sorted(
+        _bindings(report, "f", "function"), key=lambda b: b.span.start
+    )
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == "f(new D())"
+    )
+    assert call.target == fs[1].id
