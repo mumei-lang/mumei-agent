@@ -2314,12 +2314,21 @@ class _RustBindings:
                 # the next index can still unwrap. A call like
                 # `v[f(0..10)]` keeps its integer index.
                 return None, elem_args
-            return self._element_of(
-                container_id,
-                elem_args,
-                self._field_args_position(children[0])
-                or node.start_byte,
+            args_position, home_scope = self._field_args_scope(
+                children[0]
             )
+            push = home_scope is not None and home_scope not in self.scopes
+            if push:
+                self.scopes.append(home_scope)
+            try:
+                return self._element_of(
+                    container_id,
+                    elem_args,
+                    args_position or node.start_byte,
+                )
+            finally:
+                if push:
+                    self.scopes.pop()
         if node.type == "field_expression":
             member, receiver_id, receiver_args = self._field_member_typed(
                 node, ("struct_field", "associated_const")
@@ -2898,21 +2907,23 @@ class _RustBindings:
             return f"({left}, {right})", position
         return None, None
 
-    def _field_args_position(
+    def _field_args_scope(
         self, field_expr: Any | None
-    ) -> "int | None":
-        """Scope position resolving a field access's spelled args —
-        the receiver's annotation when the field type spells the
-        container's own params (substituted args were written at the
-        use site), else the field's declaration (a fixed `Vec<Q>`
-        keeps `Q` in the field's scope, not a same-named local)."""
+    ) -> "tuple[int | None, _Scope | None]":
+        """(position, scope) resolving a field access's spelled
+        args — the receiver's annotation when the field type spells
+        the container's own params (substituted args were written at
+        the use site), else the field's declaration position plus
+        its home scope pushed (a fixed `Vec<Q>` keeps `Q` in the
+        field's scope — module members are not reachable from the
+        use-site stack)."""
         if field_expr is None or field_expr.type != "field_expression":
-            return self._receiver_annotation_position(field_expr)
+            return self._receiver_annotation_position(field_expr), None
         member = self._field_member(
             field_expr, ("struct_field", "associated_const")
         )
         if member is None or member.type_node is None:
-            return None
+            return None, None
         value = field_expr.child_by_field_name("value")
         type_id, impl_args = (
             (None, None) if value is None
@@ -2928,6 +2939,25 @@ class _RustBindings:
         )
         if param_map:
             member_text = self.text(member.type_node)
+            inner = re.search(r"<(.*)>", member_text)
+            elem_text = (
+                inner.group(1) if inner else member_text
+            ).strip()
+            elem_head = re.match(r"[A-Za-z_][\w:]*", elem_text)
+            if elem_head is not None and (
+                self._normalize_identifier(elem_head.group(0)).rsplit(
+                    "::", 1
+                )[-1]
+                not in param_map
+            ):
+                # `Vec<Fixed<T>>` — the element head `Fixed` was
+                # spelled in the field's scope; only the substituted
+                # args came from the receiver's annotation site, and
+                # they stay spelled for downstream consumers.
+                return (
+                    member.type_node.start_byte,
+                    None if container is None else container.home_scope,
+                )
             if any(
                 re.search(rf"\b{re.escape(param)}\b", member_text)
                 for param in param_map
@@ -2935,8 +2965,11 @@ class _RustBindings:
                 return (
                     self._receiver_annotation_position(value)
                     or field_expr.start_byte
+                ), None
+        return (
+                    member.type_node.start_byte,
+                    None if container is None else container.home_scope,
                 )
-        return member.type_node.start_byte
 
     def _iterator_method_element(
         self, call: Any

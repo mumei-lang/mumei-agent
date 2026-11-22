@@ -5484,6 +5484,29 @@ fn f(items: Vec<P>, v: Vec<m::P>, nested: Vec<Vec<P>>) {
     assert _call(report, source, "nested[0][1].p()").target == p.id
 
 
+def test_index_field_element_resolves_in_the_fields_module() -> None:
+    source = """
+mod m {
+    pub struct Fixed<T> { pub x: T }
+    impl<T> Fixed<T> { pub fn pm(&self) {} }
+    pub struct W<T> { pub items: Vec<Fixed<T>> }
+}
+struct Fixed;
+impl Fixed { fn wrong(&self) {} }
+use m::W;
+fn g(w: W<i32>) {
+    w.items[0].pm();
+    w.items[0].wrong();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    # `Fixed` was spelled in `mod m`'s scope — the use-site local
+    # `struct Fixed` must not shadow it.
+    assert _call(report, source, "w.items[0].pm()").target == pm.id
+    assert _call(report, source, "w.items[0].wrong()").target == ""
+
+
 def test_index_element_resolves_at_annotation_scope():
     source = """
 mod m { pub struct P; impl P { pub fn p(&self) {} } }
