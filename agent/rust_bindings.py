@@ -51,7 +51,8 @@ _ITER_ELEMENT_METHODS = frozenset({"iter", "iter_mut", "into_iter", "drain"})
 # Iterator adaptors that keep the same element type — `map`/`flat_map`
 # change it through a closure and stay opaque.
 _ITER_PRESERVING_METHODS = frozenset(
-    {"rev", "skip", "take", "filter", "step_by"}
+    {"rev", "skip", "take", "filter", "step_by", "chain",
+     "cloned", "copied"}
 )
 # Vec/slice accessors that iterate the same element as `iter()`.
 _ITER_SLICE_METHODS = frozenset({"as_slice", "as_mut_slice"})
@@ -64,11 +65,26 @@ _MAP_CONTAINER_NAMES = frozenset({"HashMap", "BTreeMap"})
 # `v.first()` and `v.last()` yield `Option<&T>` while `v.pop()`
 # yields `Option<T>`. Each maps to its payload prefix and the
 # container heads the method actually exists on.
+# (payload prefix, container heads, arg index) — index picks the
+# type arg that becomes Option's payload (`ok` reads P of
+# `Result<P, E>`, `err` reads E); -1 is the last arg.
 _OPTION_HEAD_METHODS = {
-    "get": ("&", {"Vec", "HashMap", "BTreeMap"}),
-    "first": ("&", {"Vec"}),
-    "last": ("&", {"Vec"}),
-    "pop": ("", {"Vec"}),
+    "get": ("&", {"Vec", "VecDeque", "HashMap", "BTreeMap"}, -1),
+    "first": ("&", {"Vec"}, -1),
+    "last": ("&", {"Vec"}, -1),
+    "pop": ("", {"Vec"}, -1),
+    "front": ("&", {"VecDeque"}, -1),
+    "back": ("&", {"VecDeque"}, -1),
+    "pop_front": ("", {"VecDeque"}, -1),
+    "pop_back": ("", {"VecDeque"}, -1),
+    "remove": ("", {"HashMap", "BTreeMap", "VecDeque"}, -1),
+    "next": ("&", None, -1),
+    # `Option` exposes no `ok()` — only `Result::ok()` narrows to
+    # `Option<T>`; an unresolved extension method on `Option` stays
+    # opaque rather than pinning a payload.
+    "ok": ("", {"Result"}, 0),
+    "err": ("", {"Result"}, -1),
+    "take": ("", {"Option"}, 0),
 }
 
 _PRELUDE_NAMES = frozenset(
@@ -269,6 +285,7 @@ class _RustBindings:
         self.in_extern = False
         self._function_records: dict[str, _Record] = {}
         self._receiver_memo: dict[tuple, tuple] = {}
+        self._spelling_memo: dict[tuple, tuple] = {}
         # Receiver-resolution epoch — bumped only by declarations that
         # can change a `_receiver_type` result (type/function/impl
         # items, or a record overwrite), so long `let` chains do not
@@ -2490,19 +2507,19 @@ class _RustBindings:
                     )
                     if head is None and spelled_args is not None:
                         spelled_args = spelled_args.strip()
-                        if self._paren_wraps(spelled_args):
-                            spelled = self._type_arg_list(
-                                spelled_args[1:-1]
-                            )
-                            index = int(index_text)
-                            if index < len(spelled):
-                                return self._spelled_type(
-                                    spelled[index],
-                                    self._receiver_annotation_position(
-                                        value_node
-                                    )
-                                    or node.start_byte,
+                        wrapped = self._paren_wraps(spelled_args)
+                        spelled = self._type_arg_list(
+                            spelled_args[1:-1] if wrapped else spelled_args
+                        )
+                        index = int(index_text)
+                        if (wrapped or len(spelled) > 1) and index < len(spelled):
+                            return self._spelled_type(
+                                spelled[index],
+                                self._receiver_annotation_position(
+                                    value_node
                                 )
+                                or node.start_byte,
+                            )
             return None, None
         if node.type == "call_expression":
             callee_node = node.child_by_field_name("function")
@@ -2579,10 +2596,12 @@ class _RustBindings:
                     option_head = None
                 if (
                     option_head is not None
-                    and self._container_head_name(
-                        callee.child_by_field_name("value")
+                    and (
+                        option_head[1] is None
+                        or self._container_head_name(
+                            callee.child_by_field_name("value")
+                        ) in option_head[1]
                     )
-                    in option_head[1]
                 ):
                     prefix = option_head[0]
                     # `v.get(i)`/`v.first()`/`v.pop()` yield
@@ -2590,19 +2609,23 @@ class _RustBindings:
                     # spelling is carried; the head stays for
                     # `_scrutinee_shape` to declare.
                     elements = self._type_arg_list(receiver[1])
+                    index = option_head[2]
                     element = (
-                        elements[-1].strip()
-                        if len(elements) == 2
-                        else elements[0].strip()
-                        if len(elements) == 1
+                        elements[index].strip()
+                        if -len(elements) <= index < len(elements)
                         else None
                     )
-                    if element is not None:
+                    if element:
                         return None, prefix + element
                 if (
                     callee is not None
                     and callee.type == "field_expression"
                 ):
+                    # Iterator chains (`v.iter()`, `it.zip(u)` …)
+                    # spell their element from the receiver's args.
+                    spelled = self._iterator_spelling(node)
+                    if spelled is not None:
+                        return None, spelled
                     return self._unwrapped(
                         callee, node.start_byte, receiver
                     )
@@ -2883,7 +2906,11 @@ class _RustBindings:
                 node, ("struct_field", "associated_const")
             )
             if member is None or member.type_node is None:
-                return None
+                element = self._tuple_element_node(
+                    node.child_by_field_name("value"),
+                    node.child_by_field_name("field"),
+                )
+                return None if element is None else element.start_byte
             return member.type_node.start_byte
         if node.type == "call_expression":
             # `v.iter()`/`v.first()` spelled names were written in
@@ -2914,6 +2941,46 @@ class _RustBindings:
                 record.value_node
             )
         return None
+
+    def _field_args_position(
+        self, field_expr: Any | None
+    ) -> "int | None":
+        """Scope position resolving a field access's spelled args —
+        the receiver's annotation when the field type spells the
+        container's own params (substituted args were written at the
+        use site), else the field's declaration (a fixed `Vec<Q>`
+        keeps `Q` in the field's scope, not a same-named local)."""
+        if field_expr is None or field_expr.type != "field_expression":
+            return self._receiver_annotation_position(field_expr)
+        member = self._field_member(
+            field_expr, ("struct_field", "associated_const")
+        )
+        if member is None or member.type_node is None:
+            return None
+        value = field_expr.child_by_field_name("value")
+        type_id, impl_args = (
+            (None, None) if value is None
+            else self._receiver_type(value)
+        )
+        container = (
+            None if type_id is None else self.records.get(type_id)
+        )
+        param_map = (
+            {}
+            if container is None
+            else self._pattern_param_map(container, impl_args)
+        )
+        if param_map:
+            member_text = self.text(member.type_node)
+            if any(
+                re.search(rf"\b{re.escape(param)}\b", member_text)
+                for param in param_map
+            ):
+                return (
+                    self._receiver_annotation_position(value)
+                    or field_expr.start_byte
+                )
+        return member.type_node.start_byte
 
     def _spelling_scope_stable(
         self, spelled: str, pos_a: int | None, pos_b: int | None
@@ -2955,6 +3022,20 @@ class _RustBindings:
         unpinned when the names would resolve differently."""
         if _depth > 8:
             return None, None
+        key = (
+            call.start_byte,
+            call.end_byte,
+            self._resolution_epoch,
+        )
+        if key in self._spelling_memo:
+            return self._spelling_memo[key]
+        result = self._iterator_spelling_uncached(call, _depth)
+        self._spelling_memo[key] = result
+        return result
+
+    def _iterator_spelling_uncached(
+        self, call: Any, _depth: int
+    ) -> "tuple[str | None, int | None]":
         callee = call.child_by_field_name("function")
         if callee is None or callee.type != "field_expression":
             return None, None
@@ -2962,7 +3043,7 @@ class _RustBindings:
             self._field_member(callee, ("associated_function",))
             is not None
         ):
-            return None
+            return None, None
         method_node = callee.child_by_field_name("field")
         receiver = callee.child_by_field_name("value")
         if method_node is None or receiver is None:
@@ -3460,8 +3541,19 @@ class _RustBindings:
         # only the value type, so the pair's shape is unpinned here.
         if self._is_map_container(container_id, iterator):
             return _UNKNOWN, None
+        # Spelled element names on `it` (`let it = v.iter()`) were
+        # written in `it`'s annotation — resolve them there.
+        position = self._receiver_annotation_position(iterator)
+        if iterator.type == "field_expression":
+            # `for q in w.xs` — `xs: Vec<T>` substitutes the receiver
+            # `w`'s args, so the element name is spelled at `w`'s
+            # annotation, not the field's declaring scope; a fixed
+            # `xs: Vec<Q>` keeps `Q` in the field's own scope.
+            position = self._field_args_position(iterator) or position
+        if position is None:
+            position = iterator.start_byte
         elem_id, rest = self._element_of(
-            container_id, elem_args.strip(), iterator.start_byte
+            container_id, elem_args.strip(), position
         )
         if elem_id is None:
             return _UNKNOWN, rest
@@ -4019,8 +4111,8 @@ class _RustBindings:
             return list(first.values())
         if pattern.type in {
             "tuple_pattern", "slice_pattern", "struct_pattern", "ref_pattern",
-            "mut_pattern", "captured_pattern", "remaining_field_pattern",
-            "field_pattern", "tuple_struct_pattern",
+            "reference_pattern", "mut_pattern", "captured_pattern",
+            "remaining_field_pattern", "field_pattern", "tuple_struct_pattern",
         }:
             if pattern.type == "struct_pattern":
                 type_node = pattern.child_by_field_name("type")
@@ -4790,13 +4882,27 @@ class _RustBindings:
                         iterator
                     )
                     if container_args is not None:
+                        # `for p in it` — `it`'s args may be spelled
+                        # names written in `it`'s own annotation
+                        # (`let it = v.iter()`), not at the loop.
+                        iterator_position = (
+                            self._receiver_annotation_position(
+                                iterator
+                            )
+                        )
+                        if iterator_position is None:
+                            iterator_position = iterator.start_byte
                         elem_id, elem_args = self._element_of(
                             container_id,
                             container_args.strip(),
-                            iterator.start_byte,
+                            iterator_position,
                         )
                         type_map = self._pattern_type_map(
-                            pattern, elem_id, elem_args
+                            pattern,
+                            elem_id,
+                            elem_args,
+                            None,
+                            iterator_position,
                         )
             self._bind_pattern_names(
                 names,
@@ -5503,10 +5609,12 @@ class _RustBindings:
                 )
                 if (
                     option_head is not None
-                    and self._container_head_name(
-                        callee.child_by_field_name("value")
+                    and (
+                        option_head[1] is None
+                        or self._container_head_name(
+                            callee.child_by_field_name("value")
+                        ) in option_head[1]
                     )
-                    in option_head[1]
                 ):
                     # `v.get(i)`/`v.pop()` return `Option<_>` — the
                     # prelude container has no member record, but
@@ -5719,7 +5827,7 @@ class _RustBindings:
                 else _UNKNOWN
             )
             return {pattern.start_byte: (fact, scrut_args)}
-        if kind in {"ref_pattern", "mut_pattern"}:
+        if kind in {"ref_pattern", "reference_pattern", "mut_pattern"}:
             inner = next(
                 (
                     child

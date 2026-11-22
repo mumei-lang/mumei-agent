@@ -5604,8 +5604,6 @@ fn g(m: HashMap<u32, P>) {
     # HashMap has no `pop` — the Some payload stays untyped.
     assert not calls[3].target
 
-
-
 def test_unwrap_receiver_resolves_at_return_annotation():
     source = """
 use std::option::Option;
@@ -5622,3 +5620,160 @@ fn f(w: W) {
     report = build_rust_bindings(source, pointer_width=64)
     qm = _bindings(report, "qm", "associated_function")[0]
     assert _call(report, source, "w.get().unwrap().qm()").target == qm.id
+
+
+def test_reference_pattern_tuple_bindings() -> None:
+    source = """
+struct P;
+struct Q;
+impl P { fn m(&self) {} }
+impl Q { fn q(&self) {} }
+fn f() {
+    let t: (P, Q) = (P, Q);
+    let &(x, y) = &t;
+    x.m(); y.q();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = _bindings(report, "m", "associated_function")[0]
+    q = _bindings(report, "q", "associated_function")[0]
+    assert _call(report, source, "x.m()").target == m.id
+    assert _call(report, source, "y.q()").target == q.id
+
+
+def test_reference_pattern_on_option_match() -> None:
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn f(o: Option<P>) {
+    match &o {
+        Some(p) => p.m(),
+        None => (),
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = _bindings(report, "m", "associated_function")[0]
+    assert _call(report, source, "p.m()").target == m.id
+
+
+def test_reference_pattern_whole_binding_tuple_index() -> None:
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn f() {
+    let t: (P, P) = (P, P);
+    let &w = &t;
+    w.0.m(); w.1.m();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = _bindings(report, "m", "associated_function")[0]
+    assert _call(report, source, "w.0.m()").target == m.id
+    assert _call(report, source, "w.1.m()").target == m.id
+
+
+def test_iterator_chain_and_next_head_option() -> None:
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn f(v: Vec<P>) {
+    for p in v.iter().chain(v.iter()) { p.m(); }
+    let mut it = v.iter();
+    while let Some(p) = it.next() { p.m(); }
+    for p in it { p.m(); }
+    if let Some(p) = v.iter().next() { p.m(); }
+    if let Some(p) = v.next() { p.m(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = _bindings(report, "m", "associated_function")[0]
+    calls = [
+        call
+        for call in report.calls
+        if source.encode()[call.span.start : call.span.end] == b"p.m()"
+    ]
+    assert len(calls) == 5
+    assert [call.target for call in calls] == [m.id] * 5
+
+
+def test_option_head_methods_on_vecdeque_and_map_remove() -> None:
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+use std::collections::{VecDeque, HashMap};
+fn f(d: VecDeque<P>, m: HashMap<u32, P>) {
+    if let Some(p) = d.front() { p.m(); }
+    if let Some(p) = d.back() { p.m(); }
+    if let Some(p) = d.pop_front() { p.m(); }
+    if let Some(p) = d.get(0) { p.m(); }
+    if let Some(p) = m.remove(&0) { p.m(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = _bindings(report, "m", "associated_function")[0]
+    calls = [
+        call
+        for call in report.calls
+        if source.encode()[call.span.start : call.span.end] == b"p.m()"
+    ]
+    assert len(calls) == 5
+    assert [call.target for call in calls] == [m.id] * 5
+
+
+def test_for_element_resolves_at_receiver_annotation():
+    source = """
+struct Q;
+impl Q { fn qm(&self) {} }
+struct W<T> { xs: Vec<T> }
+fn f(w: W<Q>) {
+    for q in w.xs { q.qm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    qm = _bindings(report, "qm", "associated_function")[0]
+    assert _call(report, source, "q.qm()").target == qm.id
+
+
+def test_option_transforms_and_cloned():
+    source = """
+struct P;
+struct E;
+impl P { fn pm(&self) {} }
+impl E { fn em(&self) {} }
+fn f(o: Option<P>, mut o2: Option<P>, r: Result<P, E>, v: Vec<P>, d: P) {
+    if let Some(p) = r.ok() { p.pm(); }
+    if let Some(e) = r.err() { e.em(); }
+    if let Some(p) = o2.take() { p.pm(); }
+    let p = o.unwrap_or(d);
+    p.pm();
+    for p in v.iter().cloned() { p.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    em = _bindings(report, "em", "associated_function")[0]
+    calls = [
+        call
+        for call in report.calls
+        if source.encode()[call.span.start : call.span.end] == b"p.pm()"
+    ]
+    assert len(calls) == 4
+    assert [call.target for call in calls] == [pm.id] * 4
+    assert _call(report, source, "e.em()").target == em.id
+
+
+def test_option_ok_stays_opaque():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(o: Option<P>) {
+    if let Some(p) = o.ok() { p.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    calls = [call for call in report.calls if call.target == pm.id]
+    # `Option` has no `ok()` — the unresolved extension call pins
+    # no payload.
+    assert calls == []
