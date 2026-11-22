@@ -1614,7 +1614,7 @@ fn f(p: &mut P, w: i32) { p.v = w; }
     assert len(writes) == 1
 
 
-def test_member_call_on_trait_impl_stays_opaque():
+def test_member_call_on_trait_impl_resolves_when_trait_in_scope():
     source = """
 struct P {}
 trait T { fn t(&self) -> i32; }
@@ -1622,8 +1622,14 @@ impl T for P { fn t(&self) -> i32 { 1 } }
 fn f(p: P) { p.t(); }
 """
     report = build_rust_bindings(source, pointer_width=64)
-    assert _call(report, source, "p.t()").kind == "opaque_method"
-    assert _call(report, source, "p.t()").target == ""
+    impl_member = next(
+        b
+        for b in _bindings(report, "t", "associated_function")
+        if b.span.start > source.index("impl T")
+    )
+    call = _call(report, source, "p.t()")
+    assert call.kind == "direct_local"
+    assert call.target == impl_member.id
 
 
 def test_member_tuple_positional_field_stays_unresolved():
@@ -1913,3 +1919,68 @@ fn f<'a>(t: &'a mut (i32, P), u: &'static (i32, P)) { t.1.get(); u.1.get(); }
     calls = {source[c.span.start : c.span.end]: c for c in report.calls}
     assert calls["t.1.get()"].target == get.id
     assert calls["u.1.get()"].target == get.id
+
+
+
+def test_member_trait_impl_resolves_when_trait_in_scope():
+    source = """
+trait Greet { fn hi(&self); }
+struct P;
+impl Greet for P { fn hi(&self) {} }
+fn f(p: &P) { p.hi(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    hi = next(
+        b
+        for b in _bindings(report, "hi", "associated_function")
+        if b.span.start > source.index("impl Greet")
+    )
+    call = _call(report, source, "p.hi()")
+    assert call.target == hi.id
+    assert call.kind == "direct_local"
+
+
+def test_member_trait_impl_via_imported_trait_resolves():
+    source = """
+mod inner { pub trait Greet { fn hi(&self); } }
+use inner::Greet;
+struct P;
+impl Greet for P { fn hi(&self) {} }
+fn f(p: &P) { p.hi(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    call = _call(report, source, "p.hi()")
+    assert call.kind == "direct_local"
+    assert call.target
+
+
+def test_member_scoped_trait_impl_stays_opaque():
+    # `impl inner::Greet` — the scoped trait is not resolvable here,
+    # so its members must not resolve as methods.
+    source = """
+mod inner { pub trait Greet { fn hi(&self); } }
+struct P;
+impl inner::Greet for P { fn hi(&self) {} }
+fn f(p: &P) { p.hi(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    call = _call(report, source, "p.hi()")
+    assert call.kind == "opaque_method"
+
+
+def test_member_inherent_impl_shadows_trait_impl():
+    source = """
+trait Greet { fn hi(&self); }
+struct P;
+impl P { fn hi(&self) {} }
+impl Greet for P { fn hi(&self) {} }
+fn f(p: &P) { p.hi(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    inherent = next(
+        b
+        for b in _bindings(report, "hi", "associated_function")
+        if source.index("impl P") < b.span.start < source.index("impl Greet")
+    )
+    call = _call(report, source, "p.hi()")
+    assert call.target == inherent.id

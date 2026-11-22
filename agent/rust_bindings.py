@@ -150,6 +150,9 @@ class _Record:
     # The impl block itself is generic (`impl<T> Wrap<T>`) — its
     # members apply to every instantiation.
     member_impl_generic: bool = False
+    # Binding id of the trait an `impl Tr for T` member belongs to;
+    # None for inherent impl members.
+    member_trait: str | None = None
     # The impl block's own `type` node — the declared type `self`
     # parameters inside it refer to (keeps generic args).
     self_type_node: Any = None
@@ -794,18 +797,26 @@ class _RustBindings:
                 member_of = None
                 member_args = None
                 member_generic = False
+                member_trait = None
                 member_type_node = None
                 if node.type == "impl_item":
                     self._generic_references(node.child_by_field_name("type"))
-                    if node.child_by_field_name("trait") is None:
-                        member_type_node = node.child_by_field_name("type")
-                        member_of, member_args = self._annotation_type(
-                            member_type_node
-                        )
-                        member_generic = (
-                            node.child_by_field_name("type_parameters")
-                            is not None
-                        )
+                    trait_node = node.child_by_field_name("trait")
+                    member_type_node = node.child_by_field_name("type")
+                    member_of, member_args = self._annotation_type(
+                        member_type_node
+                    )
+                    member_generic = (
+                        node.child_by_field_name("type_parameters")
+                        is not None
+                    )
+                    if trait_node is not None:
+                        member_trait, _ = self._annotation_type(trait_node)
+                        if member_trait is None:
+                            # `impl path::Tr for T` — the scoped trait is
+                            # not resolvable here; its members attach to
+                            # the type but never resolve as methods.
+                            member_trait = "<unresolved>"
                 if body is not None:
                     self._scan_associated_container(
                         body,
@@ -814,9 +825,8 @@ class _RustBindings:
                         member_of,
                         member_args,
                         member_generic,
-                        member_type_node
-                        if node.type == "impl_item"
-                        else None,
+                        member_trait,
+                        member_type_node,
                     )
             finally:
                 self.in_extern = old_extern
@@ -930,24 +940,27 @@ class _RustBindings:
                 type_node=annotation,
             )
             member.member_of = record.binding.id
-
     def _member_record(
         self,
         type_id: str | None,
         name: str,
         kinds: tuple[str, ...] = (),
         impl_args: str | None = None,
+        position: int | None = None,
     ) -> _Record | None:
         """Member `name` of the type `type_id`.
 
         `kinds` prefers e.g. `struct_field` for field access or
         `associated_function` for calls when both spellings exist.
         Members of a concrete specialization impl (`impl Wrap<i32>`)
-        only apply to receivers annotated with the same arguments."""
+        only apply to receivers annotated with the same arguments.
+        Inherent impl members win; trait-impl members apply only when
+        the trait itself resolves at the access site — an out-of-scope
+        trait's methods do not."""
         if type_id is None:
             return None
 
-        def matches(record: _Record) -> bool:
+        def args_match(record: _Record) -> bool:
             if (
                 record.member_impl_args is not None
                 and not record.member_impl_generic
@@ -956,23 +969,32 @@ class _RustBindings:
                 return False
             return True
 
-        pool = (
+        def trait_in_scope(record: _Record) -> bool:
+            if record.member_trait is None or position is None:
+                return record.member_trait is None
+            trait = self.records.get(record.member_trait)
+            if trait is None:
+                return False
+            resolved = self._lookup(
+                trait.binding.name, position, "type"
+            )
+            return resolved is trait
+
+        pool = [
             record
             for record in self.records.values()
-            if record.member_of == type_id and record.binding.name == name
-        )
+            if record.member_of == type_id
+            and record.binding.name == name
+            and args_match(record)
+            and trait_in_scope(record)
+        ]
+        # Inherent members shadow trait-impl members of the same name.
+        pool.sort(key=lambda record: record.member_trait is not None)
         if kinds:
             for record in pool:
-                if record.binding.kind in kinds and matches(record):
+                if record.binding.kind in kinds:
                     return record
-        for record in self.records.values():
-            if (
-                record.member_of == type_id
-                and record.binding.name == name
-                and matches(record)
-            ):
-                return record
-        return None
+        return pool[0] if pool else None
 
     def _field_member(
         self, node: Any, kinds: tuple[str, ...] = ()
@@ -987,7 +1009,9 @@ class _RustBindings:
             # Tuple fields are positional; honest opaque.
             return None
         type_id, impl_args = self._receiver_type(value)
-        return self._member_record(type_id, name, kinds, impl_args)
+        return self._member_record(
+            type_id, name, kinds, impl_args, node.start_byte
+        )
 
     def _record_type(
         self, record: _Record, position: int
@@ -1119,6 +1143,7 @@ class _RustBindings:
         member_of: str | None = None,
         member_impl_args: str | None = None,
         member_impl_generic: bool = False,
+        member_trait: str | None = None,
         member_type_node: Any = None,
     ) -> None:
         children = self._children(body)
@@ -1149,6 +1174,7 @@ class _RustBindings:
                 record.member_of = member_of
                 record.member_impl_args = member_impl_args
                 record.member_impl_generic = member_impl_generic
+                record.member_trait = member_trait
                 record.self_type_node = member_type_node
                 self._function_records[record.binding.id] = record
                 predeclared[node.id] = record
@@ -1169,6 +1195,7 @@ class _RustBindings:
                 const_record.member_of = member_of
                 const_record.member_impl_args = member_impl_args
                 const_record.member_impl_generic = member_impl_generic
+                const_record.member_trait = member_trait
         for node in children:
             if node.type in {"function_item", "function_signature_item"}:
                 record = predeclared.get(node.id)
@@ -2325,6 +2352,7 @@ class _RustBindings:
                 self._normalize_identifier(self.text(name_node)),
                 ("associated_function", "associated_const"),
                 recv_args,
+                node.start_byte,
             )
         )
         args_node = node.child_by_field_name("arguments")
