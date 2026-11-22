@@ -642,6 +642,66 @@ _CORE_ACCEPTANCE_REQUIRED_FIELDS = frozenset(
 # Optional descriptor fields Core may emit on top of the required shape.
 _CORE_ACCEPTANCE_OPTIONAL_FIELDS = frozenset({"evidence_fingerprint"})
 
+
+def _observation_invocation_match(value: object) -> bool:
+    """Closed shape of the `invocation` pin the observation route emits."""
+    return (
+        type(value) is dict
+        and frozenset(value)
+        == frozenset(
+            {
+                "argv",
+                "stdin",
+                "timeout_ms",
+                "channel_cap_bytes",
+                "environment",
+                "working_directory",
+            }
+        )
+        and _string_list(value["argv"])
+        and type(value["stdin"]) is str
+        and _nonnegative_int(value["timeout_ms"])
+        and _nonnegative_int(value["channel_cap_bytes"])
+        and type(value["environment"]) is str
+        and type(value["working_directory"]) is str
+    )
+
+
+def _observation_host_match(value: object) -> bool:
+    """Closed shape of the `host` record the observation route emits."""
+    return (
+        type(value) is dict
+        and frozenset(value) == frozenset({"os", "arch", "family"})
+        and all(
+            type(value[key]) is str for key in ("os", "arch", "family")
+        )
+    )
+
+
+# `mumei.native-evidence-acceptance/v1`-only extras. The observation
+# route emits `invocation`/`host`/`pin_envelope` only when it performed
+# `runtime_observation_semantics` — enforced by
+# _OBSERVATION_REQUIRED_CHECK below. The object route pins the compared
+# artifacts and the machine-TV outcome.
+_NATIVE_ACCEPTANCE_EXTRA_FIELDS = {
+    "invocation": _observation_invocation_match,
+    "host": _observation_host_match,
+    "pin_envelope": lambda value: (
+        type(value) is str and value in {"recorded", "unrecorded"}
+    ),
+    "build_id": lambda value: type(value) is str and value != "",
+    "llvm_sha256": lambda value: _is_fingerprint(value),
+    "object_sha256": lambda value: _is_fingerprint(value),
+    "register_convention_assumed": lambda value: type(value) is str,
+    "input_domain": lambda value: type(value) is str,
+    "functions": lambda value: type(value) is dict,
+}
+
+_OBSERVATION_EXTRA_FIELDS = frozenset(
+    {"invocation", "host", "pin_envelope"}
+)
+_OBSERVATION_REQUIRED_CHECK = "runtime_observation_semantics"
+
 # The conjunctive promotable descriptor Core `evidence accept
 # --requirement-list` emits: same `acceptance: "evaluated"` convention,
 # but the accepted claim is `verdict` and the evidence pin is exactly
@@ -988,9 +1048,33 @@ def evaluate_core_acceptance(
         match = verdict_matcher(descriptor)
     else:
         fields = frozenset(descriptor)
+        allowed = _CORE_ACCEPTANCE_REQUIRED_FIELDS | _CORE_ACCEPTANCE_OPTIONAL_FIELDS
+        if descriptor.get("schema_version") == (
+            "mumei.native-evidence-acceptance/v1"
+        ):
+            allowed |= frozenset(_NATIVE_ACCEPTANCE_EXTRA_FIELDS)
+        extras = fields - _CORE_ACCEPTANCE_REQUIRED_FIELDS - _CORE_ACCEPTANCE_OPTIONAL_FIELDS
+        extra_valid = not extras or (
+            descriptor.get("schema_version")
+            == "mumei.native-evidence-acceptance/v1"
+            and all(
+                name in _NATIVE_ACCEPTANCE_EXTRA_FIELDS
+                and _NATIVE_ACCEPTANCE_EXTRA_FIELDS[name](descriptor[name])
+                for name in extras
+            )
+            and (
+                not extras & _OBSERVATION_EXTRA_FIELDS
+                or (
+                    type(descriptor.get("checks_performed")) is list
+                    and _OBSERVATION_REQUIRED_CHECK
+                    in descriptor["checks_performed"]
+                )
+            )
+        )
         match = (
             _CORE_ACCEPTANCE_REQUIRED_FIELDS <= fields
-            and fields <= _CORE_ACCEPTANCE_REQUIRED_FIELDS | _CORE_ACCEPTANCE_OPTIONAL_FIELDS
+            and fields <= allowed
+            and extra_valid
             and type(descriptor["schema_version"]) is str
             and descriptor["schema_version"] in CORE_ACCEPTANCE_SCHEMAS
             and type(descriptor["acceptance"]) is str

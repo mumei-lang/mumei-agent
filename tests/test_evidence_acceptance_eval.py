@@ -162,6 +162,152 @@ def test_optional_evidence_fingerprint_field(tmp_path):
     assert foreign["descriptor_match"] is False
 
 
+_NATIVE = "mumei.native-evidence-acceptance/v1"
+_OBSERVATION_PERFORMED = ["runtime_observation_semantics", "os_exit_status_observation"]
+
+
+def _observation_invocation() -> dict:
+    # Shape `observation_invocation_envelope()` emits on the
+    # accept-observations route.
+    return {
+        "argv": [],
+        "stdin": "closed",
+        "timeout_ms": 30000,
+        "channel_cap_bytes": 65536,
+        "environment": "empty",
+        "working_directory": "executable_directory",
+    }
+
+
+def _observation_host() -> dict:
+    return {"os": "linux", "arch": "x86_64", "family": "unix"}
+
+
+def test_native_observation_route_extra_fields(tmp_path):
+    # The accept-observations descriptor pins invocation/host and may
+    # carry pin_envelope — only when runtime_observation_semantics was
+    # performed. Both extras fold to a match.
+    descriptor = _descriptor(
+        schema_version=_NATIVE,
+        checks_performed=_OBSERVATION_PERFORMED,
+        invocation=_observation_invocation(),
+        host=_observation_host(),
+        pin_envelope="recorded",
+    )
+    evaluation = evaluate_core_acceptance(descriptor)
+    assert evaluation["descriptor_match"] is True
+    assert evaluation["accepted"] is True
+
+    # pin_envelope stays optional; invocation and host still fold.
+    evaluation = evaluate_core_acceptance(
+        _descriptor(
+            schema_version=_NATIVE,
+            checks_performed=_OBSERVATION_PERFORMED,
+            invocation=_observation_invocation(),
+            host=_observation_host(),
+        )
+    )
+    assert evaluation["descriptor_match"] is True
+
+
+def test_native_observation_extras_require_performed_check(tmp_path):
+    # Core only emits the observation pins when it performed
+    # runtime_observation_semantics — pins without that check do not
+    # fold, and they never fold on the source-schema route.
+    for key, value in (
+        ("invocation", _observation_invocation()),
+        ("host", _observation_host()),
+        ("pin_envelope", "unrecorded"),
+    ):
+        evaluation = evaluate_core_acceptance(
+            _descriptor(
+                schema_version=_NATIVE,
+                checks_performed=["fresh_source_recheck"],
+                **{key: value},
+            )
+        )
+        assert evaluation["descriptor_match"] is False
+        evaluation = evaluate_core_acceptance(
+            _descriptor(
+                checks_performed=_OBSERVATION_PERFORMED,
+                **{key: value},
+            )
+        )
+        assert evaluation["descriptor_match"] is False
+
+
+def test_native_object_route_extra_fields(tmp_path):
+    # The object-machine-TV acceptance descriptor pins the compared
+    # artifacts and the per-function outcome.
+    evaluation = evaluate_core_acceptance(
+        _descriptor(
+            schema_version=_NATIVE,
+            build_id="e" * 64,
+            llvm_sha256="f" * 64,
+            object_sha256="1" * 64,
+            register_convention_assumed="sysv_amd64",
+            input_domain="loops_unrolled_refined_signatures",
+            functions={"main": {"outcome": "equivalent"}},
+        )
+    )
+    assert evaluation["descriptor_match"] is True
+    assert evaluation["accepted"] is True
+
+
+def test_native_observation_extras_malformed_checks_never_raise(tmp_path):
+    # Observation pins beside a malformed checks_performed must fold to
+    # descriptor_match=False, never raise — the evaluation JSON is
+    # always emitted.
+    for bad in (None, 3, "runtime_observation_semantics", {"x": 1}):
+        evaluation = evaluate_core_acceptance(
+            _descriptor(
+                schema_version=_NATIVE,
+                checks_performed=bad,
+                invocation=_observation_invocation(),
+                host=_observation_host(),
+            )
+        )
+        assert evaluation["descriptor_match"] is False
+
+
+def test_native_extra_fields_validate_shapes(tmp_path):
+    # An extra field with a malformed value breaks the match exactly
+    # like a foreign field — the whitelist is not a free pass.
+    bad_cases = [
+        {"invocation": "closed"},
+        {"invocation": {**_observation_invocation(), "argv": [1]}},
+        {"invocation": {**_observation_invocation(), "timeout_ms": -1}},
+        {
+            "invocation": {
+                **_observation_invocation(),
+                "surprise": True,
+            }
+        },
+        {"host": {"os": "linux"}},
+        {"host": {**_observation_host(), "arch": 64}},
+        {"pin_envelope": "tampered"},
+        {"pin_envelope": 3},
+        {"pin_envelope": ["recorded"]},
+        {"pin_envelope": {"value": "recorded"}},
+        {"build_id": ""},
+        {"llvm_sha256": "zz" * 32},
+        {"object_sha256": "A" * 64},
+        {"register_convention_assumed": ["sysv_amd64"]},
+        {"input_domain": 7},
+        {"functions": ["main"]},
+        {"foreign_field": {}},
+    ]
+    for extra in bad_cases:
+        evaluation = evaluate_core_acceptance(
+            _descriptor(
+                schema_version=_NATIVE,
+                checks_performed=_OBSERVATION_PERFORMED,
+                **extra,
+            )
+        )
+        assert evaluation["descriptor_match"] is False, extra
+
+
 def test_expected_fingerprint_binds_descriptor_to_attempt(tmp_path, capsys):
     fingerprint = "c" * 64
     descriptor = _descriptor(evidence_fingerprint=fingerprint)
