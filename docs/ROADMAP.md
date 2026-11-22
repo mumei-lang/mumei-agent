@@ -4314,7 +4314,11 @@ switch and select clause (case guards evaluate once at the
 statement's entry), and a for body's may-not-run path all join
 pointwise on the entry state, so an alias only survives when every
 path agrees and a may-alias or may-reseat closes the root
-afterwards. The alias target's name is only its entry pointee
+afterwards. A clause whose tail statement unconditionally leaves
+the function (return/goto/continue/break) contributes no exit
+state — `switch { case 1: p = q; return 0 }` keeps `p` on its
+entry pointee after the switch. The alias target's name is only
+its entry pointee
 while it is clean — if the target is itself reseated or re-seated
 (`p = q; q = r`, `p, q = q, p`), its slot tracks the new pointee,
 and a read through `p` closes rather than mis-attribute the
