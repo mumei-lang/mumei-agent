@@ -5733,3 +5733,47 @@ fn f(w: W<Q>) {
     report = build_rust_bindings(source, pointer_width=64)
     qm = _bindings(report, "qm", "associated_function")[0]
     assert _call(report, source, "q.qm()").target == qm.id
+
+
+def test_option_transforms_and_cloned():
+    source = """
+struct P;
+struct E;
+impl P { fn pm(&self) {} }
+impl E { fn em(&self) {} }
+fn f(o: Option<P>, mut o2: Option<P>, r: Result<P, E>, v: Vec<P>, d: P) {
+    if let Some(p) = r.ok() { p.pm(); }
+    if let Some(e) = r.err() { e.em(); }
+    if let Some(p) = o2.take() { p.pm(); }
+    let p = o.unwrap_or(d);
+    p.pm();
+    for p in v.iter().cloned() { p.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    em = _bindings(report, "em", "associated_function")[0]
+    calls = [
+        call
+        for call in report.calls
+        if source.encode()[call.span.start : call.span.end] == b"p.pm()"
+    ]
+    assert len(calls) == 4
+    assert [call.target for call in calls] == [pm.id] * 4
+    assert _call(report, source, "e.em()").target == em.id
+
+
+def test_option_ok_stays_opaque():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(o: Option<P>) {
+    if let Some(p) = o.ok() { p.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    calls = [call for call in report.calls if call.target == pm.id]
+    # `Option` has no `ok()` — the unresolved extension call pins
+    # no payload.
+    assert calls == []
