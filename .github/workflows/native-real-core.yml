@@ -34,6 +34,8 @@ on:
       - tests/test_core_evidence.py
       - tests/test_evidence_accept_list.py
       - tests/test_native_*.py
+      - tests/test_forge_e2e.py
+      - tests/test_erosion_binary_integration.py
       - tests/test_body_port.py
       - tests/test_binary_integration.py
       - tests/test_audit.py
@@ -144,6 +146,7 @@ jobs:
               tests/test_verify_attempt.py \
               tests/test_binary_integration.py \
               tests/test_audit.py \
+              tests/test_forge_e2e.py \
               -m integration --run-integration \
               -v --tb=short --junitxml=real-core-junit.xml
 
@@ -151,6 +154,7 @@ jobs:
         working-directory: mumei-agent
         run: |
           MUMEI_BIN="$GITHUB_WORKSPACE/mumei/target/release/mumei" \
+          MUMEI_EROSION_BIN="$GITHUB_WORKSPACE/mumei/target/release/mumei" \
             uv run pytest \
               tests/test_evidence_check_consistency.py::TestRealCore::test_real_check_consistency_reports_consistent \
               tests/test_evidence_check_consistency.py::TestRealCore::test_real_check_consistency_rejected_envelope_claims_nothing \
@@ -169,6 +173,7 @@ jobs:
               tests/test_proliferate_sibling_lemmas.py::test_real_mumei_claims_exposes_g4_grade \
               tests/test_verify_schedule.py::test_exported_triple_passes_the_real_claim_gate \
               tests/test_body_port.py::test_porter_verifies_with_mumei \
+              tests/test_erosion_binary_integration.py::test_real_mumei_erosion_binary_detects_weakened_contract_and_body_only_change \
               -m "not integration" \
               -v --tb=short --junitxml=real-core-unmarked-junit.xml
 
@@ -182,8 +187,8 @@ jobs:
           from pathlib import Path
 
           reports = [
-              ("Real-Core native integration", "real-core-junit.xml", 99),
-              ("Real-Core binary-gated unit tests", "real-core-unmarked-junit.xml", 20),
+              ("Real-Core native integration", "real-core-junit.xml", 100),
+              ("Real-Core binary-gated unit tests", "real-core-unmarked-junit.xml", 21),
           ]
           lines = [
               "### Real-Core test results",
