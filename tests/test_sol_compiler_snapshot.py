@@ -621,3 +621,18 @@ def test_member_access_declarations_match_lexical_member_bindings():
         if item["name"] in {"push", "length"}
     ]
     assert all(item["status"] == "builtin" for item in builtins)
+
+
+def test_member_access_without_analysis_output_is_rejected():
+    # A `stopAfter: "parsing"` envelope leaves MemberAccess nodes with
+    # empty `typeDescriptions`; without the check every member would be
+    # miscounted as a builtin reference.
+    source = _source("member_access")
+    envelope = _envelope("member_access")
+    ast = _ast(envelope, "member_access.sol")
+    for node in _nodes(ast):
+        if node.get("nodeType") == "MemberAccess":
+            node.pop("referencedDeclaration", None)
+            node["typeDescriptions"] = {}
+    with pytest.raises(SolCompilerSnapshotError):
+        load_sol_compiler_snapshot(_payload(envelope), source)
