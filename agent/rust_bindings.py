@@ -2715,20 +2715,25 @@ class _RustBindings:
         annotated = self._receiver_annotation_position(receiver)
         if annotated is not None:
             position = annotated
-        mapping = {}
-        names = [
+        slots = [
             child
-            for child in self._children(pattern)
-            if child.type == "identifier"
+            for child in pattern.children
+            if self.text(child).strip() not in {"(", ")", ","}
+            and child.type not in {"line_comment", "block_comment"}
         ]
-        if len(names) != 2:
+        if len(slots) != 2:
             return {}
-        for name_node, arg in zip(names, parts):
+        mapping = {}
+        for child, arg in zip(slots, parts):
             tid, rest = self._spelled_type(arg, position)
-            name = self._normalize_identifier(self.text(name_node))
-            mapping[name_node.start_byte] = (
-                TypeFact("named", name, 0, None, tid or ""),
-                rest,
+            # A nested pattern (`for (k, (a, b)) in m` over
+            # `HashMap<K, (P, Q)>`) destructures its arg's own
+            # slots instead of binding the pair as a name.
+            mapping.update(
+                self._pattern_type_map(
+                    child, tid, rest,
+                    self._type_head_name(tid, rest), position,
+                )
             )
         return mapping
 
@@ -4336,22 +4341,83 @@ class _RustBindings:
         self, spelled: str, position: int
     ) -> tuple[str | None, str | None]:
         """(type id, args) for a type argument's spelling — `P`
-        resolves to its record, `Vec<P>` keeps its args, an
-        unresolvable shape stays args-only."""
+        resolves to its record, `Vec<P>` keeps its args, `&P`/`m::P`
+        strip to the named head, an unresolvable shape stays
+        args-only."""
+        spelled = spelled.strip()
+        while True:
+            ref = re.match(
+                r"^(?:&\s*(?:'\w+\s+)?(?:mut\s+)?|\*\s*(?:const|mut)\s+)(.+)$",
+                spelled,
+            )
+            if ref is not None:
+                spelled = ref.group(1).strip()
+                continue
+            if (
+                spelled.startswith("(")
+                and spelled.endswith(")")
+                and self._paren_wraps(spelled)
+            ):
+                spelled = spelled[1:-1].strip()
+                continue
+            break
         match = re.fullmatch(
-            r"([A-Za-z_][\w:]*)\s*(?:<(.+)>)?", spelled.strip()
+            r"([A-Za-z_][\w:]*)\s*(?:<(.+)>)?", spelled
         )
         if match is None:
             return None, spelled
-        record = self._lookup(
-            self._normalize_identifier(match.group(1)),
-            position,
-            "type",
+        name = match.group(1)
+        record = (
+            self._scoped_spelled_type(name, position)
+            if "::" in name
+            else self._lookup(
+                self._normalize_identifier(name), position, "type"
+            )
         )
+        record = self._through_import(record, position)
         return (
             None if record is None else record.binding.id,
             match.group(2),
         )
+
+    @staticmethod
+    def _paren_wraps(spelled: str) -> bool:
+        """Whether `(...)` wraps the whole spelling — `(P, Q), (R, S)`
+        only starts and ends with parens; the first one closes early."""
+        depth = 0
+        for index, char in enumerate(spelled):
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    return index == len(spelled) - 1
+        return False
+
+    def _scoped_spelled_type(
+        self, name: str, position: int
+    ) -> "_Record | None":
+        """Type record for a `m::P` spelling — the module path walks
+        `_lookup_module_path`, the last segment reads that module's
+        scope."""
+        segments = name.split("::")
+        module = self._lookup_module_path(
+            "::".join(segments[:-1]), position
+        )
+        if module is None or module.module_scope is None:
+            return None
+        head = self._normalize_identifier(segments[-1])
+        record = next(
+            (
+                candidate
+                for candidate in reversed(
+                    module.module_scope.bindings.get(head, ())
+                )
+                if self._in_namespace(candidate, "type")
+            ),
+            None,
+        )
+        return record
 
     def _pattern_head_fields(
         self, head: Any | None, scrut_id: str, scrut_args: str | None
@@ -4725,9 +4791,12 @@ class _RustBindings:
             if (
                 spelled_args.startswith("(")
                 and spelled_args.endswith(")")
+                and self._paren_wraps(spelled_args)
             ):
                 # A nested tuple spells its elements in parens —
-                # `(A, B)` inside the parent's args key unwraps here.
+                # `(A, B)` inside the parent's args key unwraps here;
+                # `(A, B), (C, D)` is not wrapped — its parens close
+                # mid-string.
                 spelled_args = spelled_args[1:-1]
             elements = (
                 []
@@ -4768,10 +4837,19 @@ class _RustBindings:
                 if position < 0 or position >= len(elements):
                     continue
                 tid, fargs = self._spelled_type(
-                    elements[position], pattern.start_byte
+                    elements[position],
+                    (
+                        scrut_position
+                        if scrut_position is not None
+                        else pattern.start_byte
+                    ),
                 )
                 mapping.update(
-                    self._pattern_type_map(child, tid, fargs)
+                    self._pattern_type_map(
+                        child, tid, fargs,
+                        self._type_head_name(tid, fargs),
+                        scrut_position,
+                    )
                 )
             return mapping
         if kind in {"identifier", "self"}:
