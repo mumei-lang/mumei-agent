@@ -1128,6 +1128,24 @@ class _SolBindings:
             if element is None:
                 return None
             return element, owner
+        if obj.type == "type_cast_expression":
+            # `uint(1)`-style elementary conversions — the value is
+            # typed by the cast's primitive type so `using` directives
+            # still apply.
+            type_node = next(
+                (
+                    child
+                    for child in self.children(obj)
+                    if child.type in {"primitive_type", "type_name"}
+                ),
+                None,
+            )
+            if type_node is None:
+                return None
+            return (
+                re.sub(r"\s+", " ", self.text(type_node)).strip(),
+                self.current_contract,
+            )
         if obj.type == "call_expression":
             callee = self._unwrap(obj.child_by_field_name("function"))
             record = self._object_record(callee)

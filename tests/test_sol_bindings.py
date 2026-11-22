@@ -2869,3 +2869,39 @@ contract C {
         ref.binding_id == take.id and ref.kind == "call"
         for ref in report.references
     )
+
+
+def test_using_extension_binds_on_elementary_conversion_receiver():
+    # `uint(1).f()` types the value by the cast's primitive type, so a
+    # `using L for uint` extension still owns the call; `bytes("x")`
+    # works the same; without the directive the member stays opaque.
+    source = """
+library L { function f(uint x) public {} function h(bytes memory x) public {} }
+contract C {
+    using L for uint;
+    using L for bytes;
+    function g() public {
+        uint(1).f();
+        bytes("x").h();
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    f = next(b for b in report.bindings if b.name == "f" and b.kind == "function")
+    h = next(b for b in report.bindings if b.name == "h" and b.kind == "function")
+    calls = {source[c.span.start : c.span.end]: c for c in report.calls}
+    assert calls["uint(1).f()"].target == f.id
+    assert calls['bytes("x").h()'].target == h.id
+
+    source = """
+library L { function f(uint x) public {} }
+contract C { function g() public { uint(1).f(); } }
+"""
+    report = build_sol_bindings(source)
+    (call,) = [
+        c
+        for c in _calls(report, source)
+        if source[c.span.start : c.span.end] == "uint(1).f()"
+    ]
+    assert call.kind == "opaque_member"
+    assert call.target == ""
