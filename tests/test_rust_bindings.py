@@ -1660,3 +1660,118 @@ fn f(w: Wrap<i32>) { w.get(); }
     get = _bindings(report, "get", "associated_function")[0]
     assert call.target == get.id
     assert call.kind == "direct_local"
+
+
+def test_member_write_prefers_field_over_same_named_method():
+    source = """
+struct P { m: i32 }
+impl P { fn m(&self) {} }
+fn f(p: &P) { p.m = 1; p.m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    field = _bindings(report, "m", "struct_field")[0]
+    method = _bindings(report, "m", "associated_function")[0]
+    write = next(
+        r for r in report.references
+        if r.kind == "write" and source[r.span.start : r.span.end] == "m"
+    )
+    call = _call(report, source, "p.m()")
+    assert write.binding_id == field.id
+    assert call.target == method.id
+
+
+def test_member_call_respects_concrete_impl_specialization():
+    source = """
+struct Wrap<T>(T);
+impl Wrap<i32> { fn get(&self) -> i32 { 0 } }
+impl Wrap<bool> { fn get(&self) -> bool { true } }
+fn f(w: Wrap<bool>) { w.get(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    bool_get = _bindings(report, "get", "associated_function")[1]
+    call = _call(report, source, "w.get()")
+    assert call.target == bool_get.id
+
+
+def test_member_resolves_annotation_at_its_own_position():
+    source = """
+struct P { x: i32 }
+fn g(p: &P) { p.x; }
+struct Q { x: i32 }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    field = _bindings(report, "x", "struct_field")[0]
+    read = next(
+        r for r in report.references
+        if r.kind == "read" and source[r.span.start : r.span.end] == "x"
+        and r.span.start > source.index("p.x")
+    )
+    assert read.binding_id == field.id
+
+
+def test_member_destructured_parameter_does_not_resolve_as_whole_type():
+    source = """
+struct P { inner: i32 }
+impl P { fn n(&self) {} }
+fn f(P { inner }: P) { inner.n(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method_call = _call(report, source, "inner.n()")
+    assert method_call.kind == "opaque_method"
+
+
+def test_member_async_method_return_does_not_chain_members():
+    source = """
+struct A {}
+struct B {}
+impl A { async fn mk(&self) -> B { B {} } }
+impl B { fn hit(&self) {} }
+fn h(a: A) { a.mk().hit(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    hit_call = _call(report, source, "a.mk().hit()")
+    assert hit_call.kind == "opaque_method"
+    assert not hit_call.target
+
+
+def test_member_forward_reference_inside_impl_resolves():
+    source = """
+struct S {}
+impl S {
+    fn outer(&self) { self.inner(); }
+    fn inner(&self) {}
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    inner = _bindings(report, "inner", "associated_function")[0]
+    call = _call(report, source, "self.inner()")
+    assert call.target == inner.id
+    assert call.kind == "direct_local"
+
+
+def test_member_call_chains_through_reference_return_type():
+    source = """
+struct A {}
+struct B {}
+impl A { fn mk(&self) -> &B { &B {} } }
+impl B { fn hit(&self) {} }
+fn h(a: A) { a.mk().hit(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    hit = _bindings(report, "hit", "associated_function")[0]
+    call = _call(report, source, "a.mk().hit()")
+    assert call.target == hit.id
+
+
+def test_member_reference_annotated_local_resolves():
+    source = """
+struct P { x: i32 }
+fn f() { let q: &P = &P { x: 0 }; q.x; }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    field = _bindings(report, "x", "struct_field")[0]
+    read = next(
+        r for r in report.references
+        if r.kind == "read" and source[r.span.start : r.span.end] == "x"
+    )
+    assert read.binding_id == field.id
