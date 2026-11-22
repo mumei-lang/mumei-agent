@@ -55114,6 +55114,180 @@ def test_alias_free_slice_array_struct_element_copies(go_types_helper):
         assert not result.available, (function_name, result.gaps)
 
 
+def test_multi_index_slice_array_struct_element_func_fields(
+    go_types_helper,
+):
+    declarations = (
+        "type S struct { F func() int64; V int64 }\n"
+        "type W struct { F func() }\n"
+        "type E struct { V int64 }\n"
+        "type H struct { B [][]S }\n"
+        "var GSS [][]S\n"
+        "func ap(cb func() int64) int64 { return cb() }\n"
+        "func g() int { return 0 }\n"
+        "func (s S) Run() int64 { return s.F() }\n"
+        "func (e E) Get() int64 { return e.V }\n"
+        "func (e *E) Set(v int64) { e.V = v }\n"
+        "func useSS(ss [][]S) int64 { return ss[0][0].F() }\n"
+        "func useWW(ws [][]W) { ws[0][0].F() }\n"
+        "func mkSS(ss [][]S) [][]S { return ss }\n"
+        "func sc_get(x int64) int64 {\n"
+        "\tes := [][]E{{{V: x}}}; return es[0][0].Get()\n"
+        "}\n"
+        "func sc_set(x int64) int64 {\n"
+        "\tes := [][]E{{{}}}; es[0][0].Set(x); return es[0][0].V\n"
+        "}\n"
+        "func sc_param(es [][]E, x int64) int64 {\n"
+        "\tes[0][1].V = x; return es[0][1].V\n"
+        "}\n"
+        "func FStore(x, y int64) int64 {\n"
+        "\tv := y; ss := make([][]S, 1); ss[0] = make([]S, 1)\n"
+        "\tss[0][0].F = func() int64 { return v }; v = x\n"
+        "\treturn ss[0][0].F()\n"
+        "}\n"
+        "func FIndex(x, y int64, i int) int64 {\n"
+        "\tv := y; ss := make([][]S, 1); ss[0] = make([]S, 2)\n"
+        "\tss[0][i].F = func() int64 { return v }; v = x\n"
+        "\treturn ss[0][i].F()\n"
+        "}\n"
+        "func FLiteral(x, y int64) int64 {\n"
+        "\tv := y; ss := [][]S{{{F: func() int64 { return v }}}}\n"
+        "\tv = x; return ss[0][0].F()\n"
+        "}\n"
+        "func FArray(x, y int64) int64 {\n"
+        "\tv := y; var a [2][2]S\n"
+        "\ta[0][1].F = func() int64 { return v }; v = x\n"
+        "\treturn a[0][1].F()\n"
+        "}\n"
+        "func FWrite(x int64) int64 {\n"
+        "\tw := int64(0); ws := make([][]W, 1); ws[0] = make([]W, 1)\n"
+        "\tws[0][0].F = func() { w = x }; ws[0][0].F(); return w\n"
+        "}\n"
+        "func FDefer(x int64) (r int64) {\n"
+        "\tws := make([][]W, 1); ws[0] = make([]W, 1)\n"
+        "\tws[0][0].F = func() { r = x }; defer ws[0][0].F()\n"
+        "\treturn 0\n"
+        "}\n"
+        "func FNamedStore(x, y int64) int64 {\n"
+        "\tv := y; g := func() int64 { return v }\n"
+        "\tss := make([][]S, 1); ss[0] = make([]S, 1)\n"
+        "\tss[0][0].F = g; v = x; return ss[0][0].F()\n"
+        "}\n"
+        "func FReseat(x, y int64) int64 {\n"
+        "\tv := y; ss := make([][]S, 1); ss[0] = make([]S, 1)\n"
+        "\tss[0][0].F = func() int64 { return v }\n"
+        "\tss[0][0].F = func() int64 { return x }\n"
+        "\treturn ss[0][0].F()\n"
+        "}\n"
+        "func FUseSS(x, y int64) int64 {\n"
+        "\tv := y; ss := make([][]S, 1); ss[0] = make([]S, 1)\n"
+        "\tss[0][0].F = func() int64 { return v }; v = x\n"
+        "\treturn useSS(ss)\n"
+        "}\n"
+        "func FUseWW(x int64) int64 {\n"
+        "\tw := int64(0); ws := make([][]W, 1); ws[0] = make([]W, 1)\n"
+        "\tws[0][0].F = func() { w = x }; useWW(ws); return w\n"
+        "}\n"
+        "func FFieldRoot(x, y int64, i int) int64 {\n"
+        "\tv := y; o := H{B: make([][]S, 1)}; o.B[0] = make([]S, 2)\n"
+        "\to.B[0][i].F = func() int64 { return v }; v = x\n"
+        "\treturn o.B[0][i].F()\n"
+        "}\n"
+        "func FExtract(x, y int64) int64 {\n"
+        "\tv := y; ss := [][]S{{{F: func() int64 { return v }}}}\n"
+        "\tv = x; f := ss[0][0].F; return f()\n"
+        "}\n"
+        "func FCallback(x, y int64) int64 {\n"
+        "\tv := y; ss := [][]S{{{F: func() int64 { return v }}}}\n"
+        "\tv = x; return ap(ss[0][0].F)\n"
+        "}\n"
+        "func FReturnSS(x, y int64) int64 {\n"
+        "\tv := y; ss := make([][]S, 1); ss[0] = make([]S, 1)\n"
+        "\tss[0][0].F = func() int64 { return v }; v = x\n"
+        "\treturned := mkSS(ss); return returned[0][0].F()\n"
+        "}\n"
+        "func FThreeLevel(x, y int64) int64 {\n"
+        "\tv := y; s3 := make([][][]S, 1); s3[0] = make([][]S, 1)\n"
+        "\ts3[0][0] = make([]S, 1)\n"
+        "\ts3[0][0][0].F = func() int64 { return v }; v = x\n"
+        "\treturn s3[0][0][0].F()\n"
+        "}\n"
+        "func FMap(x, y int64) int64 {\n"
+        "\tv := y; m := map[int][]S{0: {{F: func() int64 { return v }}}}\n"
+        "\tv = x; return m[0][0].F()\n"
+        "}\n"
+        "func FPointerLevel(x, y int64) int64 {\n"
+        "\tv := y; ss := [][]*S{{{}}}\n"
+        "\tss[0][0].F = func() int64 { return v }\n"
+        "\tv = x; return ss[0][0].F()\n"
+        "}\n"
+        "func FPointerContainer() int64 {\n"
+        "\tinner := []S{{F: func() int64 { return 1 }}}\n"
+        "\tps := []*[]S{&inner}; return (*ps[0])[0].F()\n"
+        "}\n"
+        "func FPointerRoot() int64 {\n"
+        "\tss := [][]S{{{F: func() int64 { return 1 }}}}\n"
+        "\tp := &ss; return (*p)[0][0].F()\n"
+        "}\n"
+        "func FPackageRoot() int64 { return GSS[0][0].F() }\n"
+        "func FComputedIndex(x int64) int64 {\n"
+        "\tss := make([][]S, 1); ss[0] = make([]S, 1)\n"
+        "\tss[0][0].F = func() int64 { return x }; return ss[g()][0].F()\n"
+        "}\n"
+        "func FCopy(ss [][]S) int64 { e := ss[0][0]; return e.F() }\n"
+        "func FMethod(ss [][]S) int64 { return ss[0][0].Run() }\n"
+        "func FMethodValue(ss [][]S) int64 {\n"
+        "\tf := ss[0][0].Run; return f()\n"
+        "}\n"
+    )
+    files = {"a.go": "package p\n" + declarations}
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    expected = {
+        "FStore": frozenset({0, 1}),
+        "FIndex": frozenset({0, 1, 2}),
+        "FLiteral": frozenset({0, 1}),
+        "FArray": frozenset({0, 1}),
+        "FWrite": frozenset({0}),
+        "FDefer": frozenset({0}),
+        "FNamedStore": frozenset({0, 1}),
+        "FReseat": frozenset({0, 1}),
+        "FUseSS": frozenset({0, 1}),
+        "FUseWW": frozenset({0}),
+        "FFieldRoot": frozenset({0, 1, 2}),
+        "FExtract": frozenset({0, 1}),
+        "FCallback": frozenset({0, 1}),
+        "FReturnSS": frozenset({0, 1}),
+        "FThreeLevel": frozenset({0, 1}),
+        "FPointerLevel": frozenset({0, 1}),
+        "sc_get": frozenset({0}),
+        "sc_set": frozenset({0}),
+        "sc_param": frozenset({0, 1}),
+    }
+    for function_name, dependencies in expected.items():
+        result = named_package(files, snapshot, summaries, function_name)
+        assert result.available, (function_name, result.gaps)
+        assert result.return_dependencies == dependencies, function_name
+    use_ss = named_package(files, snapshot, summaries, "useSS")
+    assert use_ss.available, use_ss.gaps
+    assert use_ss.return_dependencies == frozenset({0})
+    mk_ss = named_package(files, snapshot, summaries, "mkSS")
+    assert mk_ss.available, mk_ss.gaps
+    assert mk_ss.return_dependencies == frozenset({0})
+    for function_name in (
+        "FMap",
+        "FPointerContainer",
+        "FPointerRoot",
+        "FPackageRoot",
+        "FComputedIndex",
+        "FCopy",
+        "FMethod",
+        "FMethodValue",
+    ):
+        result = named_package(files, snapshot, summaries, function_name)
+        assert not result.available, (function_name, result.gaps)
+
+
 def test_slice_array_element_method_values(go_types_helper):
     declarations = (
         "type S struct { F func() int64; V int64 }\n"

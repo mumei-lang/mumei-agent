@@ -5054,6 +5054,12 @@ literals inside supported collection literals record their function fields.
 Map access, pointer-element arguments and unsupported element-copy shapes
 remain fail-closed.
 
+Function-field calls and stores also support multi-index chains through
+non-pointer slice/array levels rooted at a local or parameter container or
+value-struct field. Nested collection arguments and returns preserve the same
+field and root closure records; map, computed-index, copy and method-value
+shapes remain fail-closed. Existing pointer-element behavior is unchanged.
+
 Elided struct elements also resolve through local named slice, array and map
 types, including bounded chains of local type declarations. Ambiguous
 closure-valued elided literals through imported, generic or otherwise

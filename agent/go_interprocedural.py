@@ -3643,6 +3643,97 @@ class _Builder:
             allow_struct_element_arrays=True,
             for_write=True,
         )
+        if multi_index and for_pointer_leaf and share_extract is None:
+            root_node = self._strip_parens(current)
+            while (
+                root_node is not None
+                and root_node.type == "selector_expression"
+            ):
+                root_node = self._strip_parens(
+                    root_node.child_by_field_name("operand")
+                )
+            root_ref = (
+                self.references.get(self.node_key(root_node))
+                if root_node is not None
+                and root_node.type == "identifier"
+                else None
+            )
+            root_binding = (
+                self.bindings.get(root_ref.binding_id)
+                if root_ref is not None
+                else None
+            )
+            container_member = self._field_member(current)
+            container_fact = (
+                container_member.type
+                if container_member is not None
+                else None
+            )
+            supported_root = (
+                root_ref is not None
+                and root_ref.kind != "import"
+                and root_binding is not None
+                and not self._package_level(root_binding)
+                and getattr(root_binding.type, "kind", None)
+                == "struct"
+                and (
+                    root_ref.binding_id in (params or {})
+                    or self._is_local_composite(root_binding)
+                )
+                and not self._scalar_container_field_pointer_crossing(
+                    current, params
+                )
+            )
+            element_fact = container_fact
+            if supported_root and container_fact is not None:
+                for _ in indexes:
+                    if (
+                        element_fact is None
+                        or element_fact.kind not in {"slice", "array"}
+                        or getattr(element_fact, "elem", None) is None
+                        or element_fact.elem.kind == "pointer"
+                    ):
+                        element_fact = None
+                        break
+                    self._pin_fact_identities(element_fact)
+                    element_fact = element_fact.elem
+            struct_fact = self._struct_value_fact(element_fact)
+            field_node = fields[0] if len(fields) == 1 else None
+            field_ref = (
+                self.references.get(self.node_key(field_node))
+                if field_node is not None
+                else None
+            )
+            field_member = self._field_identity(field_ref)
+            if (
+                supported_root
+                and container_member is not None
+                and struct_fact is not None
+                and struct_fact.type_id
+                and not self._type_fact_has_type_args(element_fact)
+                and self._alias_free_value_struct_supported(element_fact)
+                and field_member is not None
+                and field_member.type is not None
+                and field_member.type.kind == "function"
+            ):
+                field_key = self._opaque_container_field_key(
+                    root_ref.binding_id, container_member.id
+                )
+                tokens = self._opaque_container_tokens.get(field_key)
+                if not tokens:
+                    tokens = frozenset({field_key})
+                    self._opaque_container_tokens[field_key] = tokens
+                self._pin_fact_identities(container_fact)
+                self._pin_fact_identities(field_member.type)
+                return (
+                    root_ref,
+                    indexes,
+                    field_key,
+                    container_member,
+                    tokens,
+                    current,
+                    (field_member,),
+                )
         if target is None:
             return None
         field_key, _root_id, container_member, tokens, root_ref = target
@@ -4238,6 +4329,7 @@ class _Builder:
         container_fact = None
         nested_target = None
         nested_depth = 0
+        nested_local_root = False
         if range_index_container:
             nested_target = self._opaque_container_index_target(
                 current
@@ -4252,10 +4344,102 @@ class _Builder:
             inner_indexes = (
                 nested_target[2] if nested_target is not None else None
             )
-            if nested_target is None or len(inner_indexes or ()) != 1:
-                return None
-            nested_depth = len(inner_indexes or ())
-        if nested_target is not None:
+            if nested_target is not None and len(inner_indexes or ()) == 1:
+                nested_depth = 1
+            else:
+                root_node = current
+                index_count = 0
+                while root_node is not None:
+                    while (
+                        root_node.type
+                        == "parenthesized_expression"
+                    ):
+                        root_node = next(
+                            (
+                                child
+                                for child in root_node.named_children
+                                if child.type != "comment"
+                            ),
+                            None,
+                        )
+                    if (
+                        root_node is None
+                        or root_node.type != "index_expression"
+                    ):
+                        break
+                    index_count += 1
+                    root_node = root_node.child_by_field_name(
+                        "operand"
+                    )
+                while (
+                    root_node is not None
+                    and root_node.type == "parenthesized_expression"
+                ):
+                    root_node = next(
+                        (
+                            child
+                            for child in root_node.named_children
+                            if child.type != "comment"
+                        ),
+                        None,
+                    )
+                root_ref = (
+                    self._receiver_root_ref(root_node)
+                    if root_node is not None
+                    and root_node.type
+                    in {"identifier", "selector_expression"}
+                    else None
+                )
+                root_binding = (
+                    self.bindings.get(root_ref.binding_id)
+                    if root_ref is not None
+                    else None
+                )
+                if (
+                    index_count < 2
+                    or root_ref is None
+                    or root_ref.kind == "import"
+                    or root_binding is None
+                    or root_binding.type is None
+                    or self._package_level(root_binding)
+                    or (
+                        root_node.type == "identifier"
+                        and root_binding.type.kind == "pointer"
+                    )
+                    or (
+                        root_node.type == "selector_expression"
+                        and (
+                            self._struct_value_fact(
+                                root_binding.type
+                            )
+                            is None
+                            or self._scalar_container_field_pointer_crossing(
+                                root_node, params
+                            )
+                        )
+                    )
+                ):
+                    return None
+                container_fact = (
+                    root_binding.type
+                    if root_node.type == "identifier"
+                    else self._deferred_expression_type(root_node)
+                )
+                if container_fact is None:
+                    return None
+                for _ in range(index_count - 1):
+                    if (
+                        container_fact.kind not in {"slice", "array"}
+                        or getattr(container_fact, "elem", None) is None
+                        or container_fact.elem.kind == "pointer"
+                    ):
+                        return None
+                    self._pin_fact_identities(container_fact)
+                    container_fact = container_fact.elem
+                root_id = root_ref.binding_id
+                nested_depth = index_count - 1
+                nested_local_root = True
+        if nested_target is not None and not nested_local_root:
             root_ref = nested_target[0]
             root_id = root_ref.binding_id
             root_binding = self.bindings.get(root_id)
@@ -4298,8 +4482,10 @@ class _Builder:
                     or container_fact.elem is None
                 ):
                     return None
-                self._pin_fact_identities(container_fact)
+                    self._pin_fact_identities(container_fact)
                 container_fact = container_fact.elem
+        elif nested_local_root:
+            pass
         elif container.type == "identifier":
             ref = self.references.get(self.node_key(container))
             root_id = ref.binding_id if ref is not None else None
@@ -10154,20 +10340,52 @@ class _Builder:
             if struct_element_root_ref is not None
             else None
         )
+        struct_element_parts = self._slice_array_struct_element_parts(
+            node, params, locals_
+        )
+        if struct_element_parts is not None:
+            struct_element_root, struct_element_indexes = (
+                struct_element_parts
+            )
+            struct_element_fact = self._deferred_expression_type(
+                struct_element_root
+            )
+            for _ in range(len(struct_element_indexes) - 1):
+                if (
+                    struct_element_fact is None
+                    or struct_element_fact.kind not in {"slice", "array"}
+                    or getattr(struct_element_fact, "elem", None) is None
+                ):
+                    struct_element_fact = None
+                    break
+                struct_element_fact = struct_element_fact.elem
+            if struct_element_fact is not None:
+                fact = struct_element_fact
+                elem = getattr(fact, "elem", None)
+                struct_element_container_fact = fact
         alias_free_value_copy = (
-            len(indexes) == 1
-            and inner is not None
-            and inner.type == "identifier"
-            and struct_element_root_ref is not None
-            and struct_element_root_ref.kind != "import"
-            and struct_element_root_binding is not None
-            and not self._package_level(struct_element_root_binding)
-            and struct_element_root_binding.type is not None
-            and struct_element_root_binding.type.kind
-            in {"slice", "array"}
-            and struct_element_root_binding.type.elem is not None
-            and self._alias_free_value_struct_supported(
-                struct_element_root_binding.type.elem
+            (
+                len(indexes) == 1
+                and inner is not None
+                and inner.type == "identifier"
+                and struct_element_root_ref is not None
+                and struct_element_root_ref.kind != "import"
+                and struct_element_root_binding is not None
+                and not self._package_level(
+                    struct_element_root_binding
+                )
+                and struct_element_root_binding.type is not None
+                and struct_element_root_binding.type.kind
+                in {"slice", "array"}
+                and struct_element_root_binding.type.elem is not None
+                and self._alias_free_value_struct_supported(
+                    struct_element_root_binding.type.elem
+                )
+            )
+            or (
+                struct_element_parts is not None
+                and elem is not None
+                and self._alias_free_value_struct_supported(elem)
             )
         )
         struct_element_candidate = (
@@ -10177,6 +10395,17 @@ class _Builder:
                     len(indexes) == 2
                     and nested_struct_index_target is not None
                     and len(nested_struct_index_target[2] or ()) == 1
+                )
+                or struct_element_parts is not None
+            )
+            and (
+                len(indexes) <= 1
+                or self._multi_index_func_field_selector(node)
+                or (
+                    len(indexes) == 2
+                    and not self._multi_index_struct_element_has_field_records(
+                        node
+                    )
                 )
             )
             and call_operand is None
@@ -10202,6 +10431,20 @@ class _Builder:
             if opaque_field is not None:
                 struct_element_operand_deps = self.expression(
                     inner,
+                    fn,
+                    params,
+                    locals_,
+                    transfers,
+                    count,
+                    depth + 1,
+                )
+            elif (
+                struct_element_parts is not None
+                and struct_element_parts[0].type
+                == "selector_expression"
+            ):
+                struct_element_operand_deps = self.expression(
+                    struct_element_parts[0],
                     fn,
                     params,
                     locals_,
@@ -13766,21 +14009,43 @@ class _Builder:
     def _struct_collection_element_field_record_ids(
         self, fact: Any, anchor: Any | None = None
     ) -> tuple[str, ...]:
-        if (
-            fact is None
-            or fact.kind not in {"slice", "array", "map", "chan"}
-            or getattr(fact, "elem", None) is None
-        ):
-            return ()
-        element_fact = fact.elem
-        if element_fact.kind == "pointer":
-            element_fact = getattr(element_fact, "elem", None)
-        struct_fact = self._struct_value_fact(element_fact)
-        if struct_fact is None:
-            return ()
-        return self._struct_field_closure_record_ids(
-            struct_fact, anchor
-        )
+        seen: set[int] = set()
+
+        def collect(current: Any) -> tuple[str, ...]:
+            if current is None or id(current) in seen:
+                return ()
+            seen.add(id(current))
+            if current.kind in {
+                "slice",
+                "array",
+                "map",
+                "chan",
+                "pointer",
+            }:
+                return collect(getattr(current, "elem", None))
+            struct_fact = self._struct_value_fact(current)
+            if struct_fact is None:
+                return ()
+            return self._struct_field_closure_record_ids(
+                struct_fact, anchor
+            )
+
+        return collect(fact)
+
+    def _struct_collection_element_value_fact(
+        self, fact: Any
+    ) -> tuple[Any | None, bool]:
+        if fact is None or fact.kind not in {"slice", "array"}:
+            return None, False
+        current = fact
+        while current.kind in {"slice", "array"}:
+            element = getattr(current, "elem", None)
+            if element is None or element.kind == "pointer":
+                return element, False
+            current = element
+        if current.kind in {"map", "chan", "pointer"}:
+            return current, False
+        return current, True
 
     def _local_struct_value_record_source_id(
         self, node: Any
@@ -13837,43 +14102,172 @@ class _Builder:
         node: Any,
         params: dict[str, int],
         locals_: dict[str, frozenset[int]],
-    ) -> tuple[Any, Any] | None:
+    ) -> tuple[Any, tuple[Any, ...]] | None:
         value = self._strip_parens(node)
         if value is None or value.type != "index_expression":
             return None
-        container = self._strip_parens(
-            value.child_by_field_name("operand")
-        )
+        indexes: list[Any] = []
+        container = value
+        while container is not None and container.type == "index_expression":
+            index = container.child_by_field_name("index")
+            if index is None:
+                return None
+            indexes.append(index)
+            container = self._strip_parens(
+                container.child_by_field_name("operand")
+            )
         if container is None or container.type not in {
             "identifier",
             "selector_expression",
         }:
             return None
         root_ref = self._receiver_root_ref(container)
+        root_binding = (
+            self.bindings.get(root_ref.binding_id)
+            if root_ref is not None
+            else None
+        )
         if (
             root_ref is None
             or root_ref.kind == "import"
             or root_ref.binding_id not in params
             and root_ref.binding_id not in locals_
+            or root_binding is None
+            or self._package_level(root_binding)
+            or (
+                container.type == "selector_expression"
+                and (
+                    root_binding.type is None
+                    or self._struct_value_fact(root_binding.type)
+                    is None
+                    or self._scalar_container_field_pointer_crossing(
+                        container, params
+                    )
+                )
+            )
         ):
             return None
         container_fact = self._deferred_expression_type(container)
-        if (
-            container_fact is None
-            or container_fact.kind not in {"slice", "array"}
-            or getattr(container_fact, "elem", None) is None
-            or container_fact.elem.kind == "pointer"
-        ):
+        if container_fact is None:
             return None
-        element_struct = self._struct_value_fact(container_fact.elem)
+        for _ in reversed(indexes):
+            if (
+                container_fact.kind not in {"slice", "array"}
+                or getattr(container_fact, "elem", None) is None
+                or container_fact.elem.kind == "pointer"
+            ):
+                return None
+            container_fact = container_fact.elem
+        element_struct = self._struct_value_fact(container_fact)
         if (
             element_struct is None
             or not element_struct.type_id
-            or self._type_fact_has_type_args(container_fact.elem)
+            or self._type_fact_has_type_args(container_fact)
         ):
             return None
-        index = value.child_by_field_name("index")
-        return (container, index) if index is not None else None
+        return container, tuple(reversed(indexes))
+
+    def _multi_index_computed_index_has_field_records(
+        self, node: Any
+    ) -> bool:
+        current = self._strip_parens(node)
+        indexes = 0
+        computed_index = False
+        while current is not None and current.type == "index_expression":
+            indexes += 1
+            index = current.child_by_field_name("index")
+            if (
+                index is None
+                or (
+                    index.type not in _INDEX_LITERALS
+                    and index.type != "identifier"
+                )
+            ):
+                computed_index = True
+            current = self._strip_parens(
+                current.child_by_field_name("operand")
+            )
+        return (
+            indexes > 1
+            and computed_index
+            and bool(self._struct_argument_field_record_ids(node))
+        )
+
+    def _multi_index_func_field_selector(self, node: Any) -> bool:
+        current = self._strip_parens(node)
+        indexes = []
+        while current is not None and current.type == "index_expression":
+            indexes.append(current.child_by_field_name("index"))
+            current = self._strip_parens(
+                current.child_by_field_name("operand")
+            )
+        current = self._strip_parens(node)
+        selector = None
+        while current is not None:
+            parent = current.parent
+            while (
+                parent is not None
+                and parent.type == "parenthesized_expression"
+            ):
+                current = parent
+                parent = current.parent
+            if (
+                parent is not None
+                and parent.type == "index_expression"
+                and parent.child_by_field_name("operand") == current
+            ):
+                indexes.append(parent.child_by_field_name("index"))
+                current = parent
+                continue
+            if (
+                parent is not None
+                and parent.type == "selector_expression"
+                and parent.child_by_field_name("operand") == current
+            ):
+                selector = parent
+            break
+        if selector is None or len(indexes) < 2 or any(
+            index is None
+            or (
+                index.type not in _INDEX_LITERALS
+                and index.type != "identifier"
+            )
+            for index in indexes
+        ):
+            return False
+        member = self._field_member(selector)
+        return (
+            member is not None
+            and member.kind in {"var", "variable"}
+            and member.type is not None
+            and member.type.kind == "function"
+        )
+
+    def _multi_index_struct_element_has_field_records(
+        self, node: Any
+    ) -> bool:
+        current = self._strip_parens(node)
+        while current is not None and current.type == "index_expression":
+            current = self._strip_parens(
+                current.child_by_field_name("operand")
+            )
+        if current is None:
+            return False
+        fact = self._deferred_expression_type(current)
+        if fact is None:
+            return False
+        anchor = None
+        if current.type == "identifier":
+            ref = self.references.get(self.node_key(current))
+            if ref is not None:
+                anchor = self.bindings.get(ref.binding_id)
+        elif current.type == "selector_expression":
+            anchor = self._field_member(current)
+        return bool(
+            self._struct_collection_element_field_record_ids(
+                fact, anchor
+            )
+        )
 
     def _struct_argument_field_record_ids(
         self, node: Any
@@ -13945,12 +14339,10 @@ class _Builder:
                     fact, anchor
                 )
             )
-            element_fact = getattr(fact, "elem", None)
-            if (
-                fact.kind not in {"slice", "array"}
-                or element_fact is None
-                or element_fact.kind == "pointer"
-            ):
+            element_fact, supported_collection_path = (
+                self._struct_collection_element_value_fact(fact)
+            )
+            if not supported_collection_path:
                 if collection_records:
                     raise _Unsupported(
                         "unsupported_expression", _span(node)
@@ -13988,6 +14380,25 @@ class _Builder:
         record_source_id = (
             self._local_struct_value_record_source_id(value)
         )
+        if record_source_id is None and collection_element:
+            root_ref = self._receiver_root_ref(value)
+            root_binding = (
+                self.bindings.get(root_ref.binding_id)
+                if root_ref is not None
+                else None
+            )
+            if (
+                root_ref is not None
+                and root_ref.kind != "import"
+                and root_binding is not None
+                and not self._package_level(root_binding)
+            ):
+                if value.type == "identifier":
+                    record_source_id = root_ref.binding_id
+                elif value.type == "selector_expression":
+                    root_member = self._field_member(value)
+                    if root_member is not None:
+                        record_source_id = root_member.id
         if (
             record_source_id is not None
             and self._has_closure_records(record_source_id)
@@ -15365,16 +15776,16 @@ class _Builder:
             records = self._struct_collection_element_field_record_ids(
                 fact, binding
             )
-            element_fact = getattr(fact, "elem", None)
-            if records and (
-                fact.kind not in {"slice", "array"}
-                or element_fact is None
-                or element_fact.kind == "pointer"
-            ):
+            element_fact, supported_collection_path = (
+                self._struct_collection_element_value_fact(fact)
+            )
+            if records and not supported_collection_path:
                 raise _Unsupported(
                     "unsupported_expression", _span(node)
                 )
             if fact.kind not in {"slice", "array"}:
+                return ()
+            if not supported_collection_path:
                 return ()
             struct_fact = self._struct_value_fact(element_fact)
             if (
@@ -38016,6 +38427,17 @@ class _Builder:
             member = self._field_member(callee_node)
             if (
                 member is not None
+                and member.type is not None
+                and member.type.kind == "function"
+                and self._multi_index_computed_index_has_field_records(
+                    operand
+                )
+            ):
+                raise _Unsupported(
+                    "unsupported_expression", _span(node)
+                )
+            if (
+                member is not None
                 and member.kind in {"var", "variable"}
                 and member.type is not None
                 and member.type.kind == "function"
@@ -38053,7 +38475,7 @@ class _Builder:
                     else None
                 )
                 if indexed_struct_parts is not None:
-                    container, element_index = indexed_struct_parts
+                    container, element_indexes = indexed_struct_parts
                     container_member = self._field_member(container)
                     container_ref = (
                         self._receiver_root_ref(container)
@@ -38071,16 +38493,12 @@ class _Builder:
                         container, fn, params, locals_, transfers,
                         count, depth + 1,
                     )
-                    if element_index.type not in {
-                        "int_literal",
-                        "rune_literal",
-                        "interpreted_string_literal",
-                        "raw_string_literal",
-                    }:
-                        callee_deps |= self.expression(
-                            element_index, fn, params, locals_,
-                            transfers, count, depth + 1,
-                        )
+                    for element_index in element_indexes:
+                        if element_index.type not in _INDEX_LITERALS:
+                            callee_deps |= self.expression(
+                                element_index, fn, params, locals_,
+                                transfers, count, depth + 1,
+                            )
                 else:
                     # `s.f` reads `s` — the operand's deps are the
                     # callee's own read set (a `func` field itself has
