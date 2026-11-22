@@ -5850,3 +5850,89 @@ fn f(o: Option<P>, v: Vec<P>) {
     assert _call(report, source, "p.pm()").target == pm.id
     assert _call(report, source, "a[0].pm()").target == pm.id
     assert _call(report, source, "b[0].pm()").target == pm.id
+
+
+def test_preserving_adaptors_keep_the_element_type():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(v: Vec<P>) {
+    for p in v.iter().peekable() { p.pm(); }
+    for p in v.iter().inspect(|x| ()) { p.pm(); }
+    for p in v.iter().fuse().by_ref() { p.pm(); }
+    for p in v.iter().skip_while(|x| true).take_while(|x| true) { p.pm(); }
+    for p in v.iter().cycle().take(3) { p.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    calls = [
+        call for call in report.calls
+        if raw[call.span.start:call.span.end].decode() == "p.pm()"
+    ]
+    assert len(calls) == 5
+    for call in calls:
+        assert call.target == pm.id
+
+
+def test_option_combinators_keep_the_payload():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct Q;
+impl Q { fn qm(&self) {} }
+fn f(o: Option<P>, u: Option<P>, v: Option<Q>) {
+    if let Some(p) = o.and(u) { p.pm(); }
+    if let Some(p) = o.and(v) { p.qm(); p.pm(); }
+    if let Some(p) = o.or(u) { p.pm(); }
+    if let Some(p) = o.xor(u) { p.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    qm = _bindings(report, "qm", "associated_function")[0]
+    raw = source.encode()
+    calls = [
+        (raw[call.span.start:call.span.end].decode(), call.target)
+        for call in report.calls
+    ]
+    # `and` yields the argument's payload — `o.and(v)` is Option<Q>.
+    assert next(t for k, t in calls if k == "p.qm()") == qm.id
+    targets = [t for k, t in calls if k == "p.pm()"]
+    # three `p.pm()` sites resolve to P::pm; the one under `and(v)`
+    # stays unbound (it would need P on a Q payload).
+    assert len(targets) == 4
+    assert targets.count(pm.id) == 3
+    assert sum(1 for t in targets if not t) == 1
+    assert len(calls) == 3
+    for call in calls:
+        assert call.target == pm.id
+
+
+def test_smart_pointer_receivers_deref_to_the_payload():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct W<T> { _m: T }
+impl<T> W<T> { fn wm(&self) {} }
+fn f(b: Box<P>, r: std::rc::Rc<P>, w: W<P>, m: std::sync::Mutex<P>) {
+    b.pm();
+    r.pm();
+    w.pm();
+    m.pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    resolved = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    assert resolved["b.pm()"] == pm.id
+    assert resolved["r.pm()"] == pm.id
+    # A custom `W<P>` and a guard `Mutex<P>` stay opaque — they do
+    # not Deref straight to `P`.
+    assert not resolved["w.pm()"]
+    assert not resolved["m.pm()"]
