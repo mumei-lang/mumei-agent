@@ -10075,6 +10075,55 @@ class _Builder:
             and binding.type.elem.kind != "struct"
         )
 
+    def _comma_ok_container_field_map(
+        self, node: Any, width: int, params: dict | None = None
+    ) -> bool:
+        """`v, ok := p.M[k]` — the comma-ok pair on a param-root
+        struct's map field element.
+
+        Same two-name shape as the bound-map comma-ok: the element
+        read already flows through the single-name `e := p.M[k]`
+        index path, so the value carries the field slot's deps plus
+        the key's, and the flag conservatively takes them too.
+        `_scalar_container_field` does the member typing and the
+        param-root admission (pointer roots, aliases, reseat
+        accounting) — a member that is not a map, or a field the
+        slot model cannot name (reseated/dirty roots), stays closed."""
+        if width != 2 or node is None or node.type != "index_expression":
+            return False
+        operand = node.child_by_field_name("operand")
+        while (
+            operand is not None
+            and operand.type == "parenthesized_expression"
+        ):
+            operand = next(
+                (
+                    c
+                    for c in operand.named_children
+                    if c.type != "comment"
+                ),
+                None,
+            )
+        if operand is None or operand.type not in (
+            "selector_expression",
+            "field_expression",
+        ):
+            return False
+        _root_id, member = self._scalar_container_field(
+            operand, params, allow_struct_elements=True
+        )
+        return (
+            member is not None
+            and member.type is not None
+            and member.type.kind == "map"
+            and getattr(member.type, "elem", None) is not None
+            # An interface element binds the comma-ok value without
+            # the dispatch provenance the single-name `e := p.M[k]`
+            # read keeps, so `e.M()` would gap anyway — keep it
+            # closed rather than admit a half-supported read.
+            and member.type.elem.kind != "interface"
+        )
+
     def _call_result_fact(self, node: Any) -> tuple[Any | None, Any | None]:
         """(member, single-result fact) for a call operand.
 
@@ -16898,6 +16947,9 @@ class _Builder:
                     and not self._comma_ok_opaque_map(
                         rights[0], len(lefts)
                     )
+                    and not self._comma_ok_container_field_map(
+                        rights[0], len(lefts), params
+                    )
                     and not self._is_chan_recv(rights[0], len(lefts))
                 ):
                     raise _Unsupported("unsupported_statement", _span(node))
@@ -17032,6 +17084,20 @@ class _Builder:
                 )
                 for i in range(len(lefts))
             ]
+            # A comma-ok pair `e, ok := p.M[k]` binds the element
+            # value to the FIRST name — it takes the same
+            # element-extraction share and container-field binding
+            # the single-name `e := p.M[k]` does; the flag name
+            # carries only the read's deps.
+            comma_ok_rhs = (
+                rights[0]
+                if len(lefts) != len(rights)
+                and len(rights) == 1
+                and self._comma_ok_container_field_map(
+                    rights[0], len(lefts), params
+                )
+                else None
+            )
             for i, (lhs, value) in enumerate(zip(lefts, values)):
                 # `_` discards its value — the RHS was still evaluated.
                 if lhs.text == b"_":
@@ -17084,9 +17150,15 @@ class _Builder:
                 )
                 element_snapshot = (
                     self._struct_element_container_snapshot(
-                        rights[i], params
+                        (
+                            rights[i]
+                            if len(lefts) == len(rights)
+                            else comma_ok_rhs
+                        ),
+                        params,
                     )
                     if len(lefts) == len(rights)
+                    or (i == 0 and comma_ok_rhs is not None)
                     else None
                 )
                 target_struct = self._struct_value_fact(binding.type)
@@ -17782,7 +17854,9 @@ class _Builder:
                         binding.id, None
                     )
                 extract_rhs = (
-                    rights[i] if len(lefts) == len(rights) else None
+                    rights[i]
+                    if len(lefts) == len(rights)
+                    else (comma_ok_rhs if i == 0 else None)
                 )
                 if (
                     extract_rhs is not None
@@ -17842,7 +17916,7 @@ class _Builder:
                     (
                         rights[i]
                         if len(lefts) == len(rights)
-                        else None
+                        else (comma_ok_rhs if i == 0 else None)
                     ),
                     params,
                     conditional=conditional,
@@ -18178,6 +18252,9 @@ class _Builder:
                         or self._comma_ok_opaque_map(
                             value_nodes[0], len(names)
                         )
+                        or self._comma_ok_container_field_map(
+                            value_nodes[0], len(names), params
+                        )
                         or self._is_chan_recv(
                             value_nodes[0], len(names)
                         )
@@ -18229,6 +18306,19 @@ class _Builder:
                     ]
                 else:
                     values = [frozenset() for _ in names]
+                # See the short-declaration store loop: a comma-ok
+                # `var e, ok = p.M[k]` binds the element value to
+                # the FIRST name — it takes the container-field
+                # binding the single-name form does.
+                comma_ok_rhs = (
+                    value_nodes[0]
+                    if len(names) != len(value_nodes)
+                    and len(value_nodes) == 1
+                    and self._comma_ok_container_field_map(
+                        value_nodes[0], len(names), params
+                    )
+                    else None
+                )
                 # See the short-declaration store loop: tuple values
                 # evaluate against the pre-state, so copies read the
                 # capture maps as they were before any store.
@@ -19067,7 +19157,7 @@ class _Builder:
                         (
                             value_nodes[i]
                             if len(names) == len(value_nodes)
-                            else None
+                            else (comma_ok_rhs if i == 0 else None)
                         ),
                         params,
                         conditional=conditional,
@@ -19554,6 +19644,9 @@ class _Builder:
                     or self._comma_ok_map_index(rights[0], len(lefts))
                     is not None
                     or self._comma_ok_opaque_map(rights[0], len(lefts))
+                    or self._comma_ok_container_field_map(
+                        rights[0], len(lefts), params
+                    )
                     or self._is_chan_recv(rights[0], len(lefts))
                 )
             )
@@ -21735,7 +21828,20 @@ class _Builder:
                 int, tuple[frozenset, dict[str, frozenset]]
             ] = {}
             struct_rhs_element_snapshots: set[int] = set()
-            if not compound and len(lefts) == len(rights):
+            # `e, ok = p.M[k]` binds the element value to the FIRST
+            # LHS name — its struct snapshot comes from the single
+            # RHS the same way `e = p.M[k]` does.
+            comma_ok_multi = (
+                not compound
+                and len(lefts) != len(rights)
+                and len(rights) == 1
+                and self._comma_ok_container_field_map(
+                    rights[0], len(lefts), params
+                )
+            )
+            if not compound and (
+                len(lefts) == len(rights) or comma_ok_multi
+            ):
                 for rhs_index, rhs in enumerate(rights):
                     snapshot_rhs = rhs
                     while (
@@ -22960,7 +23066,11 @@ class _Builder:
                                 (
                                     rights[i]
                                     if len(lefts) == len(rights)
-                                    else None
+                                    else (
+                                        rights[0]
+                                        if i == 0 and comma_ok_multi
+                                        else None
+                                    )
                                 ),
                                 params,
                                 conditional=(

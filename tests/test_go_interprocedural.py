@@ -40541,7 +40541,10 @@ def test_struct_array_slice_field_store_keeps_backing_dependencies(
     assert direct.effects == extracted.effects
 
 
-def test_struct_field_comma_ok_map_read_stays_closed(go_types_helper):
+def test_struct_field_comma_ok_map_read_is_admitted(go_types_helper):
+    # A value-struct root's comma-ok map read joins the root's
+    # self-contained group like its single-name `v := s.M[k]` read —
+    # the presence flag conservatively takes the same deps.
     result = named(
         *unit(
             go_types_helper,
@@ -40552,8 +40555,8 @@ def test_struct_field_comma_ok_map_read_stays_closed(go_types_helper):
             "\treturn 0\n}\n",
         )
     )
-    assert not result.available
-    assert result.gaps[0].reason == "unsupported_statement"
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
 
 
 def test_struct_field_select_receive_target_stays_closed(go_types_helper):
@@ -53147,3 +53150,176 @@ def test_reslice_bind_negative_controls(go_types_helper, declarations, expected)
     result = named(*unit(go_types_helper, declarations))
     assert result.available, result.gaps
     assert result.return_dependencies == expected
+
+
+@pytest.mark.parametrize(
+    "declarations, expected",
+    [
+        # `v, ok := p.M[k]` — the comma-ok pair on a param-root
+        # struct's map field element; the flag takes the read's
+        # deps too.
+        (
+            "type S struct { M map[int64]int64 }\n"
+            "func F(p *S, k int64) int64 {\n"
+            "\tv, ok := p.M[k]\n"
+            "\tif ok { return v }\n"
+            "\treturn 0\n}\n",
+            frozenset({0, 1}),
+        ),
+        # The `v, ok = p.M[k]` assignment form binds the same pair.
+        (
+            "type S struct { M map[int64]int64 }\n"
+            "func F(p *S, k int64) int64 {\n"
+            "\tvar v int64\n"
+            "\tvar ok bool\n"
+            "\tv, ok = p.M[k]\n"
+            "\tif ok { return v }\n"
+            "\treturn 0\n}\n",
+            frozenset({0, 1}),
+        ),
+        # `var v, ok = p.M[k]` — the var-declaration path.
+        (
+            "type S struct { M map[int64]int64 }\n"
+            "func F(p *S, k int64) int64 {\n"
+            "\tvar v, ok = p.M[k]\n"
+            "\tif ok { return v }\n"
+            "\treturn 0\n}\n",
+            frozenset({0, 1}),
+        ),
+        # A struct element read through comma-ok.
+        (
+            "type E struct { V int64 }\n"
+            "type S struct { M map[int64]E }\n"
+            "func F(p *S, k int64) int64 {\n"
+            "\te, ok := p.M[k]\n"
+            "\tif ok { return e.V }\n"
+            "\treturn 0\n}\n",
+            frozenset({0, 1}),
+        ),
+        # A nested field path — `p.W.M[k]`.
+        (
+            "type W struct { M map[int64]int64 }\n"
+            "type S struct { W W }\n"
+            "func F(p *S, k int64) int64 {\n"
+            "\tv, ok := p.W.M[k]\n"
+            "\tif ok { return v }\n"
+            "\treturn 0\n}\n",
+            frozenset({0, 1}),
+        ),
+        # `q := p` / `(*pp)` roots resolve the same field slot.
+        (
+            "type S struct { M map[int64]int64 }\n"
+            "func F(p *S, k int64) int64 {\n"
+            "\tq := p\n"
+            "\tv, ok := q.M[k]\n"
+            "\tif ok { return v }\n"
+            "\treturn 0\n}\n",
+            frozenset({0, 1}),
+        ),
+        (
+            "type S struct { M map[int64]int64 }\n"
+            "func F(pp **S, k int64) int64 {\n"
+            "\tv, ok := (*pp).M[k]\n"
+            "\tif ok { return v }\n"
+            "\treturn 0\n}\n",
+            frozenset({0, 1}),
+        ),
+        # A value-struct root's comma-ok read stays inside the
+        # self-contained group like its single-name read.
+        (
+            "type S struct { M map[int64]int64 }\n"
+            "func F(o S, k int64) int64 {\n"
+            "\tv, ok := o.M[k]\n"
+            "\tif ok { return v }\n"
+            "\treturn 0\n}\n",
+            frozenset({0, 1}),
+        ),
+        # A store into the same slot is observed by the comma-ok
+        # read — `x` joins the deps.
+        (
+            "type S struct { M map[int64]int64 }\n"
+            "func F(p *S, k int64, x int64) int64 {\n"
+            "\tp.M[k] = x\n"
+            "\tv, ok := p.M[k]\n"
+            "\tif ok { return v }\n"
+            "\treturn 0\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # A struct element bound by the comma-ok pair keeps the
+        # element share: a write into the map element's collection
+        # after the read is observed through the bound name —
+        # like the single-name `e := p.M[k]` bind.
+        (
+            "type E struct { V int64; A []int64 }\n"
+            "type S struct { M map[int64]E }\n"
+            "func F(p *S, k int64, x int64) int64 {\n"
+            "\te, _ := p.M[k]\n"
+            "\tp.M[k].A[0] = x\n"
+            "\treturn e.A[0]\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # Same share through the `var` and assignment forms.
+        (
+            "type E struct { V int64; A []int64 }\n"
+            "type S struct { M map[int64]E }\n"
+            "func F(p *S, k int64, x int64) int64 {\n"
+            "\tvar e, _ = p.M[k]\n"
+            "\tp.M[k].A[0] = x\n"
+            "\treturn e.A[0]\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        (
+            "type E struct { V int64; A []int64 }\n"
+            "type S struct { M map[int64]E }\n"
+            "func F(p *S, k int64, x int64) int64 {\n"
+            "\te := E{}\n"
+            "\te, _ = p.M[k]\n"
+            "\tp.M[k].A[0] = x\n"
+            "\treturn e.A[0]\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # The reverse direction — a write through the bound name
+        # is observed reading the map element afterwards.
+        (
+            "type E struct { V int64; A []int64 }\n"
+            "type S struct { M map[int64]E }\n"
+            "func F(p *S, k int64, x int64) int64 {\n"
+            "\te, _ := p.M[k]\n"
+            "\te.A[0] = x\n"
+            "\treturn p.M[k].A[0]\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+    ],
+)
+def test_map_field_comma_ok_read(go_types_helper, declarations, expected):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == expected
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        # An interface element binds the comma-ok value without the
+        # dispatch provenance the single-name read keeps — the
+        # statement stays closed rather than half-supported.
+        "type I interface { M() int64 }\n"
+        "type S struct { M map[int64]I }\n"
+        "func F(p *S, k int64) int64 {\n"
+        "\te, ok := p.M[k]\n"
+        "\tif ok { return e.M() }\n"
+        "\treturn 0\n}\n",
+        # A comma-ok type assertion stays closed — only the map
+        # index form carries the pair.
+        "type I interface { M() int64 }\n"
+        "func F(x int64) int64 {\n"
+        "\tvar i I\n"
+        "\t_ = i\n"
+        "\te, ok := i.(I)\n"
+        "\tif ok { return e.M() }\n"
+        "\treturn 0\n}\n",
+    ],
+)
+def test_map_field_comma_ok_read_closed(go_types_helper, declarations):
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available
