@@ -96,6 +96,54 @@ def test_round_trip_three_appends_and_expected_head(tmp_path):
     )
 
 
+def test_append_with_matching_expected_head(tmp_path):
+    path = tmp_path / "history.jsonl"
+    plans = _plans()
+    first_digest = append_plan_history(str(path), plans[0])
+
+    second_digest = append_plan_history(
+        str(path), plans[1], expected_head=first_digest
+    )
+
+    assert read_plan_history(str(path), expected_head=second_digest) == tuple(
+        _json_plan(plan) for plan in plans[:2]
+    )
+
+
+def test_append_with_stale_expected_head_refuses_without_changing_bytes(tmp_path):
+    path = tmp_path / "history.jsonl"
+    plans = _plans()
+    stale_head = append_plan_history(str(path), plans[0])
+    append_plan_history(str(path), plans[1])
+    original = path.read_bytes()
+
+    with pytest.raises(ValueError, match="head mismatch"):
+        append_plan_history(str(path), plans[2], expected_head=stale_head)
+
+    assert path.read_bytes() == original
+
+
+def test_append_expected_head_requires_an_existing_nonempty_log(tmp_path):
+    missing = tmp_path / "missing.jsonl"
+    empty = tmp_path / "empty.jsonl"
+    empty.write_bytes(b"")
+
+    with pytest.raises(ValueError, match="head mismatch"):
+        append_plan_history(str(missing), _plan("adapter-missing-head"), expected_head="0" * 64)
+    with pytest.raises(ValueError, match="head mismatch"):
+        append_plan_history(str(empty), _plan("adapter-empty-head"), expected_head="0" * 64)
+
+    assert not missing.exists()
+    assert empty.read_bytes() == b""
+
+
+def test_append_expected_head_shape_is_validated(tmp_path):
+    path = tmp_path / "history.jsonl"
+
+    with pytest.raises(ValueError, match="invalid expected"):
+        append_plan_history(str(path), _plan("adapter-invalid-head"), expected_head="ABC")
+
+
 def test_missing_file_is_empty_but_cannot_match_an_expected_head(tmp_path):
     path = tmp_path / "missing.jsonl"
 

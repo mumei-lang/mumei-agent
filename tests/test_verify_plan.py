@@ -1,11 +1,13 @@
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-from agent.verify_schedule import build_plan_parser, main_plan, run_plan
+from agent.plan_history_log import read_plan_history
+from agent.verify_schedule import build_plan_parser, run_plan
 
 PY = sys.executable
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -109,7 +111,7 @@ def cli(inputs, *extra, env_secret=False):
             "--observations", inputs["observations"],
             *extra,
         ],
-        capture_output=True, text=True, cwd=REPO_ROOT, env=env,
+        check=False, capture_output=True, text=True, cwd=REPO_ROOT, env=env,
     )
 
 
@@ -215,7 +217,7 @@ def test_closed_shape_rejects_unknown_policy_keys(inputs, tmp_path):
             "--adapters", inputs["adapters"],
             "--policy", str(policy),
         ],
-        capture_output=True, text=True, cwd=REPO_ROOT,
+        check=False, capture_output=True, text=True, cwd=REPO_ROOT,
         env={"PYTHONPATH": str(REPO_ROOT), "PATH": "/usr/bin:/bin"},
     )
     assert out.returncode == 1
@@ -233,6 +235,20 @@ def test_output_file_written_and_input_overwrite_refused(inputs, tmp_path):
     refused = cli(inputs, "--output", inputs["policy"])
     assert refused.returncode == 1
     assert refused.stderr.startswith("verify-plan:")
+
+
+def test_output_hard_link_to_request_is_refused(inputs, tmp_path):
+    request = Path(inputs["request"])
+    original = request.read_bytes()
+    output = tmp_path / "request-link.json"
+    os.link(request, output)
+
+    refused = cli(inputs, "--output", str(output))
+
+    assert refused.returncode == 1
+    assert "--output must not overwrite a declared input" in refused.stderr
+    assert request.read_bytes() == original
+    assert output.read_bytes() == original
 
 
 def test_no_secret_in_document_or_stderr(inputs, tmp_path):
@@ -259,7 +275,7 @@ def test_duplicate_observation_is_a_static_error(inputs, tmp_path):
             "--policy", inputs["policy"],
             "--observations", str(obs),
         ],
-        capture_output=True, text=True, cwd=REPO_ROOT,
+        check=False, capture_output=True, text=True, cwd=REPO_ROOT,
         env={"PYTHONPATH": str(REPO_ROOT), "PATH": "/usr/bin:/bin"},
     )
     assert out.returncode == 1
@@ -272,3 +288,118 @@ def test_cli_doc_matches_library_doc(inputs):
     assert json.loads(out.stdout) == json.loads(
         json.dumps(run_plan(args_for(inputs)))
     )
+
+
+def test_history_log_appends_emitted_plans_and_accepts_previous_head(inputs, tmp_path):
+    history = tmp_path / "plan-history.jsonl"
+    plain = cli(inputs)
+    first = cli(inputs, "--history-log", str(history))
+
+    assert plain.returncode == first.returncode == 0
+    assert first.stdout == plain.stdout
+    first_document = json.loads(first.stdout)
+    first_entry = json.loads(history.read_text(encoding="utf-8").splitlines()[-1])
+    first_head = first_entry["digest"]
+    assert first.stderr == f"verify-plan: history head {first_head}\n"
+    assert read_plan_history(str(history), expected_head=first_head) == (
+        first_document,
+    )
+
+    second = cli(
+        inputs,
+        "--history-log",
+        str(history),
+        "--expected-history-head",
+        first_head,
+    )
+
+    assert second.returncode == 0, second.stderr
+    assert second.stdout == plain.stdout
+    second_document = json.loads(second.stdout)
+    second_entry = json.loads(history.read_text(encoding="utf-8").splitlines()[-1])
+    second_head = second_entry["digest"]
+    assert second.stderr == f"verify-plan: history head {second_head}\n"
+    assert read_plan_history(str(history), expected_head=second_head) == (
+        first_document,
+        second_document,
+    )
+
+
+def test_stale_history_head_fails_before_writing_output(inputs, tmp_path):
+    history = tmp_path / "plan-history.jsonl"
+    first = cli(inputs, "--history-log", str(history))
+    stale_head = json.loads(history.read_text(encoding="utf-8").splitlines()[-1])[
+        "digest"
+    ]
+    cli(inputs, "--history-log", str(history))
+    original = history.read_bytes()
+    output = tmp_path / "must-not-exist.json"
+
+    refused = cli(
+        inputs,
+        "--history-log",
+        str(history),
+        "--expected-history-head",
+        stale_head,
+        "--output",
+        str(output),
+    )
+
+    assert first.returncode == 0
+    assert refused.returncode == 1
+    assert refused.stdout == ""
+    assert history.read_bytes() == original
+    assert not output.exists()
+    assert str(tmp_path) not in refused.stderr
+
+
+def test_expected_history_head_requires_history_log(inputs, tmp_path):
+    refused = cli(inputs, "--expected-history-head", "0" * 64)
+
+    assert refused.returncode == 1
+    assert refused.stdout == ""
+    assert str(tmp_path) not in refused.stderr
+
+
+def test_history_log_cannot_overwrite_request_or_output(inputs, tmp_path):
+    request = Path(inputs["request"])
+    original_request = request.read_bytes()
+    request_collision = cli(inputs, "--history-log", str(request))
+
+    output = tmp_path / "plan.json"
+    output_collision = cli(
+        inputs, "--history-log", str(output), "--output", str(output)
+    )
+
+    assert request_collision.returncode == 1
+    assert request.read_bytes() == original_request
+    assert output_collision.returncode == 1
+    assert request.read_bytes() == original_request
+    assert not output.exists()
+    assert str(tmp_path) not in request_collision.stderr
+    assert str(tmp_path) not in output_collision.stderr
+
+
+def test_history_log_hard_link_as_output_is_refused(inputs, tmp_path):
+    history = tmp_path / "history.jsonl"
+    first = cli(inputs, "--history-log", str(history))
+    assert first.returncode == 0, first.stderr
+    original = history.read_bytes()
+    output = tmp_path / "out.json"
+    os.link(history, output)
+
+    refused = cli(
+        inputs,
+        "--history-log",
+        str(history),
+        "--output",
+        str(output),
+    )
+
+    assert refused.returncode == 1
+    assert (
+        "--history-log must not overwrite a declared input or output"
+        in refused.stderr
+    )
+    assert history.read_bytes() == original
+    assert output.read_bytes() == original
