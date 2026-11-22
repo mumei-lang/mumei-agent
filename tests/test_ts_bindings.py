@@ -2743,3 +2743,22 @@ f(`\\${n}`);
         if source[c.span.start:c.span.end] == "f(`\\${n}`)"
     )
     assert call.target == literal_fn.id
+
+def test_overload_double_backslash_template_still_interpolates():
+    # `` `\\${n}` `` — the escaped backslash leaves `${` unescaped,
+    # so it interpolates and does not fit the `"${n}"` literal.
+    source = """
+function f(a: "${n}"): void {}
+function f(a: string): void {}
+declare const n: string;
+f(`\\\\${n}`);
+"""
+    report = build_ts_bindings(source)
+    string_fn = sorted(
+        _bindings(report, "f", "function"), key=lambda b: b.span.start
+    )[1]
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start:c.span.end] == "f(`\\\\${n}`)"
+    )
+    assert call.target == string_fn.id

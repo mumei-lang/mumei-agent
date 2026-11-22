@@ -1846,12 +1846,23 @@ class _TypeScriptBindings:
         def value(spelling: str) -> object:
             if quoted(spelling):
                 inner = spelling[1:-1]
-                # An unescaped `${` starts interpolation; `\${` is
-                # literal text (`` `\${x}` `` is the string `${x}`).
-                if spelling[0] == "`" and re.search(
-                    r"(?<!\\)\$\{", inner
-                ):
-                    return nonconstant
+                # `${` starts interpolation unless an odd run of
+                # backslashes precedes it — `\${` is literal text but
+                # `\\${` (escaped backslash) still interpolates.
+                if spelling[0] == "`":
+                    pos = 0
+                    while True:
+                        idx = inner.find("${", pos)
+                        if idx == -1:
+                            break
+                        backslashes = 0
+                        j = idx - 1
+                        while j >= 0 and inner[j] == "\\":
+                            backslashes += 1
+                            j -= 1
+                        if backslashes % 2 == 0:
+                            return nonconstant
+                        pos = idx + 2
                 return inner.replace("\\$", "$")
             try:
                 return int(spelling.replace("_", ""), 0)
