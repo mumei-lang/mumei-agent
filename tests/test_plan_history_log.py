@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
@@ -278,6 +279,30 @@ def test_corrupted_log_refuses_append_without_changing_file_bytes(tmp_path):
         append_plan_history(str(path), _plan("adapter-new"))
 
     assert path.read_bytes() == original
+
+
+def test_failed_partial_append_rolls_back_to_validated_prefix(tmp_path, monkeypatch):
+    path = tmp_path / "history.jsonl"
+    append_plan_history(str(path), _plan("adapter-before-failure"))
+    original = path.read_bytes()
+    write = plan_history_log.os.write
+    calls = 0
+
+    def partial_then_fail(file_fd, data):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return write(file_fd, data[:7])
+        raise OSError(errno.ENOSPC, "no space")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(plan_history_log.os, "write", partial_then_fail)
+        with pytest.raises(ValueError):
+            append_plan_history(str(path), _plan("adapter-failing-append"))
+
+    assert path.read_bytes() == original
+    append_plan_history(str(path), _plan("adapter-after-failure"))
+    assert len(read_plan_history(str(path))) == 2
 
 
 def test_non_verification_plan_is_rejected(tmp_path):

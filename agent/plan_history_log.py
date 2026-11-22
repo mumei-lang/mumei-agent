@@ -212,6 +212,16 @@ def append_plan_history(path: str, plan: VerificationPlan) -> str:
                         raise OSError
                     remaining = remaining[written:]
                 os.fsync(file_fd)
+            except BaseException:
+                try:
+                    os.ftruncate(file_fd, current_size)
+                except OSError:
+                    pass
+                try:
+                    os.fsync(file_fd)
+                except OSError:
+                    pass
+                raise
             finally:
                 os.close(file_fd)
             if created:
