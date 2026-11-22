@@ -38156,6 +38156,16 @@ def test_named_struct_element_pointer_member_pointee_ops(
             "\treturn (*p.A[i].W).Next.V\n}\n",
             frozenset({0, 1, 2}),
         ),
+        # …and the same read without a store: the index deps come
+        # from evaluating the dereferenced chain, not a broadcast.
+        (
+            "type E2 struct { V int64; Next *E2 }\n"
+            "type Elem struct { W *E2 }\n"
+            "type S struct { A []*Elem }\n"
+            "func F(p *S, i int64, x int64) int64 {\n"
+            "\treturn (*p.A[i].W).Next.V\n}\n",
+            frozenset({0, 1}),
+        ),
     ],
 )
 def test_named_struct_element_pointer_member_pointee_operand_eval(
