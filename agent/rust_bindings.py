@@ -400,12 +400,17 @@ class _RustBindings:
                 if node.type == "mod_item" and body is not None:
                     # Module contents are items too — predeclare them so
                     # `m::P` resolves before `mod m` is scanned, like a
-                    # top-level item does.
+                    # top-level item does. The child scope must be
+                    # active while its own items predeclare, or names
+                    # like a const-generic's type annotation stay
+                    # unresolved.
                     child_scope = _Scope(
                         body, scope.module_depth + 1, scope.function_id
                     )
                     record.module_scope = child_scope
+                    self.scopes.append(child_scope)
                     self._predeclare(body, child_scope)
+                    self.scopes.pop()
                 self._add_generic_parameters(
                     node,
                     scope,
