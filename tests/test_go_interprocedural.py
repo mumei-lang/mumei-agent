@@ -6455,6 +6455,20 @@ def test_interface_element_store_map_field(
     assert result.available, result.gaps
     assert result.return_dependencies == frozenset({0, 1, 2})
     assert result.effects == "unknown"
+    # The write alone records the effect — no dispatch is needed
+    # to observe it.
+    write_only = named(
+        *unit(
+            go_types_helper,
+            "type I interface{ M() int64 }\n"
+            "type S struct{ M map[int64]I }\n"
+            "func F(p *S, k int64, e I) {\n"
+            "\tp.M[k] = e\n"
+            "}\n",
+        )
+    )
+    assert write_only.available, write_only.gaps
+    assert write_only.effects == "unknown"
 
 
 @pytest.mark.parametrize(
