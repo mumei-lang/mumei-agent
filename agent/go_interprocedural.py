@@ -7074,6 +7074,104 @@ class _Builder:
             return None
         return self._local_field(field_ref)
 
+    def _indexed_pointer_method_root_may_change(
+        self, node: Any, root_binding_id: str
+    ) -> bool:
+        current = node
+        enclosing = None
+        while current is not None:
+            if current.type in {
+                "function_declaration",
+                "method_declaration",
+            }:
+                enclosing = current
+                break
+            current = current.parent
+        body = (
+            enclosing.child_by_field_name("body")
+            if enclosing is not None
+            else None
+        )
+        if body is None:
+            return True
+        file_id = self.node_key(node)[0]
+
+        def binding_id(identifier: Any) -> str | None:
+            identifier = self._strip_parens(identifier)
+            if identifier is None or identifier.type != "identifier":
+                return None
+            key = (
+                file_id,
+                identifier.start_byte,
+                identifier.end_byte,
+            )
+            ref = self.references.get(key)
+            if ref is not None:
+                return ref.binding_id
+            binding = self.bindings_by_span.get(key)
+            return binding.id if binding is not None else None
+
+        def is_root_identifier(target: Any) -> bool:
+            target = self._strip_parens(target)
+            return (
+                target is not None
+                and target.type == "identifier"
+                and binding_id(target) == root_binding_id
+            )
+
+        stack = [body]
+        while stack:
+            current = stack.pop()
+            stack.extend(_children(current))
+            if current.type in {
+                "assignment_statement",
+                "short_var_declaration",
+            }:
+                left = current.child_by_field_name("left")
+                targets = (
+                    _children(left)
+                    if left is not None
+                    and left.type == "expression_list"
+                    else [left]
+                )
+                for target in targets:
+                    if not is_root_identifier(target):
+                        continue
+                    declaration = self.bindings_by_span.get(
+                        (
+                            file_id,
+                            target.start_byte,
+                            target.end_byte,
+                        )
+                    )
+                    if (
+                        current.type == "short_var_declaration"
+                        and declaration is not None
+                        and declaration.id == root_binding_id
+                    ):
+                        continue
+                    return True
+            elif current.type == "range_clause":
+                left = current.child_by_field_name("left")
+                targets = (
+                    _children(left)
+                    if left is not None
+                    and left.type == "expression_list"
+                    else [left]
+                )
+                if any(is_root_identifier(target) for target in targets):
+                    return True
+            elif current.type == "unary_expression":
+                operator = current.child_by_field_name("operator")
+                operand = current.child_by_field_name("operand")
+                if (
+                    operator is not None
+                    and operator.text == b"&"
+                    and is_root_identifier(operand)
+                ):
+                    return True
+        return False
+
     def _method_value_parts(
         self, node: Any
     ) -> tuple[str, str | None, str | None] | None:
@@ -7127,6 +7225,13 @@ class _Builder:
                 source_id is None
                 or index is None
                 or index.type not in {"identifier", "int_literal"}
+            ):
+                return None
+            if (
+                method_fn.receiver.type.kind == "pointer"
+                and self._indexed_pointer_method_root_may_change(
+                    node, source_id
+                )
             ):
                 return None
             return method_fn.binding_id, source_id, None
@@ -13475,6 +13580,17 @@ class _Builder:
             or receiver.type != "index_expression"
         ):
             return False
+        source_id = self._local_struct_value_record_source_id(
+            receiver
+        )
+        if (
+            source_id is not None
+            and method.receiver.type.kind == "pointer"
+            and self._indexed_pointer_method_root_may_change(
+                value, source_id
+            )
+        ):
+            return True
         try:
             if self._struct_argument_field_record_ids(receiver):
                 return True

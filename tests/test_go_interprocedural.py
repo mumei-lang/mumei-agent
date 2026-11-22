@@ -55163,6 +55163,33 @@ def test_slice_array_element_method_values(go_types_helper):
         "func FPointerIdentifierReseat(x, y int64) int64 {\n"
         "\ts := S{V: y}; f := s.PGet; s = S{V: x}; return f()\n"
         "}\n"
+        "func FPointerReseatSet(x, y int64) int64 {\n"
+        "\tss := []S{{V: y}}; old := ss; f := ss[0].Set\n"
+        "\tss = []S{{V: 0}}; f(x); return old[0].V\n"
+        "}\n"
+        "func FPointerReseatRead(x, y int64) int64 {\n"
+        "\tss := []S{{V: y}}; f := ss[0].PGet; old := ss\n"
+        "\tss = nil; old[0].V = x; return f()\n"
+        "}\n"
+        "func FPointerReseatAppend(y int64) int64 {\n"
+        "\tss := []S{{V: y}}; f := ss[0].PGet\n"
+        "\tss = append(ss, S{}); return f()\n"
+        "}\n"
+        "func FPointerAddressTaken(y int64) int64 {\n"
+        "\tss := []S{{V: y}}; f := ss[0].PGet; p := &ss\n"
+        "\t_ = p; return f()\n"
+        "}\n"
+        "func FPointerNestedReseat(y int64) int64 {\n"
+        "\tss := []S{{V: y}}; f := ss[0].PGet\n"
+        "\tfunc() { ss = nil }(); return f()\n"
+        "}\n"
+        "func FPointerShortReseat(x, y int64) int64 {\n"
+        "\tss := []S{{V: y}}; f := ss[0].PGet\n"
+        "\tss, other := []S{{V: x}}, 0; _ = other; return f()\n"
+        "}\n"
+        "func FValueReseat(x, y int64) int64 {\n"
+        "\tss := []S{{V: y}}; f := ss[0].Get; ss = nil; return f()\n"
+        "}\n"
         "func FPointerCallback(x, y int64) int64 {\n"
         "\ts := S{V: y}; f := s.PGet; s.V = x; return ap(f)\n"
         "}\n"
@@ -55247,6 +55274,7 @@ def test_slice_array_element_method_values(go_types_helper):
         "FArray": frozenset({0, 1}),
         "FNamed": frozenset({0, 1}),
         "FParameter": frozenset({0}),
+        "FValueReseat": frozenset({1}),
     }
     for function_name, dependencies in expected.items():
         result = named_package(files, snapshot, summaries, function_name)
@@ -55282,6 +55310,12 @@ def test_slice_array_element_method_values(go_types_helper):
         "FComputedIndex",
         "FAliasClosure",
         "FAliasWrite",
+        "FPointerReseatSet",
+        "FPointerReseatRead",
+        "FPointerReseatAppend",
+        "FPointerAddressTaken",
+        "FPointerNestedReseat",
+        "FPointerShortReseat",
     ):
         result = named_package(files, snapshot, summaries, function_name)
         assert not result.available, (function_name, result.gaps)
