@@ -6489,3 +6489,468 @@ fn f(o: Option<W<fn(P)>>, o2: Option<Q>) {
     }
     assert bound.get("w.wm()") == wm.id
     assert bound.get("q.qm()") == qm.id
+
+
+def test_unwrap_or_default_yields_the_option_payload():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(o: Option<P>) { o.unwrap_or_default().pm(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    assert _call(report, source, "o.unwrap_or_default().pm()").target == pm.id
+
+
+def test_as_deref_yields_the_borrowed_payload():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(o: Option<Box<P>>) {
+    match o.as_deref() {
+        Some(p) => p.pm(),
+        _ => {}
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    assert _call(report, source, "p.pm()").target == pm.id
+
+
+def test_map_and_and_then_take_the_function_return_payload():
+    source = """
+struct P;
+struct Q;
+impl Q { fn qm(&self) {} }
+fn to_q(p: &P) -> Q { Q }
+fn maybe_q(p: &P) -> Option<Q> { Some(Q) }
+fn f(o: Option<P>) {
+    match o.map(to_q) {
+        Some(q) => q.qm(),
+        _ => {}
+    }
+}
+fn g(o: Option<P>) {
+    match o.and_then(maybe_q) {
+        Some(q) => q.qm(),
+        _ => {}
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    qm = _bindings(report, "qm", "associated_function")[0]
+    assert _call(report, source, "q.qm()").target == qm.id
+
+
+def test_map_err_rewrites_the_result_error_arg():
+    source = """
+struct P;
+struct F;
+impl F { fn fm(&self) {} }
+fn to_f(e: &E) -> F { F }
+struct E;
+fn f(r: Result<P, E>) {
+    match r.map_err(to_f) {
+        Err(e) => e.fm(),
+        _ => {}
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    fm = _bindings(report, "fm", "associated_function")[0]
+    assert _call(report, source, "e.fm()").target == fm.id
+
+
+def test_find_and_nth_yield_the_upstream_element():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(v: Vec<P>) {
+    match v.iter().find(|x| true) {
+        Some(p) => p.pm(),
+        _ => {}
+    }
+    match v.iter().max() {
+        Some(p) => p.pm(),
+        _ => {}
+    }
+    v.iter().nth(1).unwrap().pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    assert _call(report, source, "p.pm()").target == pm.id
+    assert _call(report, source, "v.iter().nth(1).unwrap().pm()").target == pm.id
+
+
+def test_find_map_unwraps_the_function_return_option():
+    source = """
+struct P;
+struct Q;
+impl Q { fn qm(&self) {} }
+fn maybe_q(p: &P) -> Option<Q> { Some(Q) }
+fn f(v: Vec<P>) {
+    match v.iter().find_map(maybe_q) {
+        Some(q) => q.qm(),
+        _ => {}
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    qm = _bindings(report, "qm", "associated_function")[0]
+    assert _call(report, source, "q.qm()").target == qm.id
+
+
+def test_map_with_a_closure_stays_opaque():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(o: Option<P>) {
+    match o.map(|x| x) {
+        Some(p) => p.pm(),
+        _ => {}
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    # The closure's return type is unwritten — the payload stays
+    # opaque rather than guessing.
+    assert _call(report, source, "p.pm()").target == ""
+
+
+def test_first_mut_yields_a_mut_borrowed_element():
+    source = """
+struct P;
+impl P { fn pm(&mut self) {} }
+fn f(v: &mut Vec<P>) {
+    match v.first_mut() {
+        Some(p) => p.pm(),
+        _ => {}
+    }
+}
+fn g(s: &mut [P]) {
+    match s.get_mut(0) {
+        Some(p) => p.pm(),
+        _ => {}
+    }
+}
+fn h(d: &mut VecDeque<P>) {
+    match d.front_mut() {
+        Some(p) => p.pm(),
+        _ => {}
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    calls = [
+        c
+        for c in report.calls
+        if source[c.span.start : c.span.end] == "p.pm()"
+    ]
+    assert len(calls) == 3
+    assert all(c.target == pm.id for c in calls)
+
+
+def test_iter_map_filter_map_flat_map_named_fn_elements():
+    source = """
+struct P;
+struct Q;
+impl Q { fn qm(&self) {} }
+fn to_q(p: &P) -> Q { Q }
+fn ok(p: &P) -> Option<Q> { None }
+fn vs(p: &P) -> Vec<Q> { Vec::new() }
+fn os(p: &P) -> Option<Q> { None }
+fn ss(p: &P) -> &[Q] { &[] }
+fn bad(p: &P) -> i32 { 0 }
+fn f(v: Vec<P>) {
+    for q in v.iter().map(to_q) { q.qm(); }
+    for q in v.iter().filter_map(ok) { q.qm(); }
+    for q in v.iter().flat_map(vs) { q.qm(); }
+    for q in v.iter().flat_map(os) { q.qm(); }
+    for q in v.iter().flat_map(ss) { q.qm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    qm = _bindings(report, "qm", "associated_function")[0]
+    raw = source.encode()
+    resolved = sum(
+        1
+        for call in report.calls
+        if raw[call.span.start:call.span.end].decode() == "q.qm()"
+        and call.target == qm.id
+    )
+    assert resolved == 5
+
+
+def test_iter_fn_element_stays_opaque_for_closures_and_scalars():
+    source = """
+struct P;
+struct Q;
+impl Q { fn qm(&self) {} }
+fn bad(p: &P) -> i32 { 0 }
+fn f(v: Vec<P>) {
+    for q in v.iter().map(|x| x) { q.qm(); }
+    for q in v.iter().filter_map(|x| None) { q.qm(); }
+    for q in v.iter().flat_map(bad) { q.qm(); }
+    for q in v.iter().map(bad) { q.qm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    assert not any(
+        raw[call.span.start:call.span.end].decode() == "q.qm()"
+        and call.target
+        for call in report.calls
+    )
+
+
+def test_iter_fn_element_qualified_return_stays_in_fn_scope():
+    source = """
+mod m {
+    pub struct Q;
+    impl Q { pub fn qm(&self) {} }
+    pub fn to_q(p: &super::P) -> Q { Q }
+}
+struct P;
+struct Q;
+fn f(v: Vec<P>) {
+    for q in v.iter().map(m::to_q) { q.qm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    qm = _bindings(report, "qm", "associated_function")[0]
+    raw = source.encode()
+    assert any(
+        raw[call.span.start:call.span.end].decode() == "q.qm()"
+        and call.target == qm.id
+        for call in report.calls
+    )
+
+
+def test_option_cloned_and_copied_peel_the_borrowed_payload():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(o: Option<&P>, m: Option<&mut P>, n: Option<P>) {
+    match o.cloned() { Some(p) => p.pm(), _ => () }
+    match o.copied() { Some(p2) => p2.pm(), _ => () }
+    match m.cloned() { Some(p3) => p3.pm(), _ => () }
+    match n.cloned() { Some(p4) => p4.pm(), _ => () }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    calls = [
+        call for call in report.calls
+        if raw[call.span.start:call.span.end].decode().endswith("pm()")
+    ]
+    bound = {
+        raw[call.span.start:call.span.end].decode()
+        for call in calls
+        if call.target == pm.id
+    }
+    assert bound == {"p.pm()", "p2.pm()", "p3.pm()"}
+    # `Option<P>` has no borrow to peel — `n.cloned()` stays opaque.
+    assert not any(
+        raw[call.span.start:call.span.end].decode() == "p4.pm()"
+        and call.target
+        for call in calls
+    )
+
+
+def test_option_zip_spells_the_paired_payload():
+    source = """
+struct P;
+struct Q;
+impl P { fn pm(&self) {} }
+impl Q { fn qm(&self) {} }
+fn f(a: Option<P>, b: Option<Q>, v: Vec<Q>) {
+    match a.zip(b) { Some((p, q)) => { p.pm(); q.qm(); }, _ => () }
+    // A non-Option argument keeps the payload opaque.
+    match a.zip(v.first().copied().into_iter().next()) {
+        Some((p2, q2)) => { p2.pm(); q2.qm(); },
+        _ => (),
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    qm = _bindings(report, "qm", "associated_function")[0]
+    raw = source.encode()
+    resolved = {
+        raw[call.span.start:call.span.end].decode(): call.target
+        for call in report.calls
+        if raw[call.span.start:call.span.end].decode().endswith(
+            ("pm()", "qm()")
+        )
+    }
+    assert resolved.get("p.pm()") == pm.id, resolved
+    assert resolved.get("q.qm()") == qm.id, resolved
+    # `a.zip(<unresolvable>)` stays opaque — no false bindings.
+    assert not resolved.get("p2.pm()"), resolved
+    assert not resolved.get("q2.qm()"), resolved
+
+
+def test_option_insert_methods_bind_the_mut_payload():
+    source = """
+struct P;
+struct V;
+struct K;
+impl P { fn pm(&self) {} }
+impl V { fn vm(&self) {} }
+fn f(o: Option<P>, m: HashMap<K, V>, d: P, k: K, v: V) {
+    let a = o.get_or_insert(d);
+    a.pm();
+    let b = o.or_insert(d);
+    b.pm();
+    let c = o.get_or_insert_with(prod);
+    c.pm();
+    let e = o.insert(d);
+    e.pm();
+    let g = o.or_insert_with(prod);
+    g.pm();
+    match m.insert(k, v) { Some(old) => old.vm(), _ => () }
+}
+fn prod() -> P { P }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    vm = _bindings(report, "vm", "associated_function")[0]
+    raw = source.encode()
+    resolved = {
+        raw[call.span.start:call.span.end].decode(): call.target
+        for call in report.calls
+    }
+    for text in ("a.pm()", "b.pm()", "c.pm()", "e.pm()", "g.pm()"):
+        assert resolved.get(text) == pm.id, (text, resolved)
+    assert resolved.get("old.vm()") == vm.id, resolved
+
+
+def test_vec_insert_does_not_bind_the_inserted_payload():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(v: Vec<P>, p: P) {
+    let r = v.insert(0, p);
+    r.pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    # Vec::insert returns (), not a payload — `r` stays untyped.
+    assert _call(report, source, "r.pm()").target == ""
+
+
+def test_map_pair_methods_spell_the_key_value_pair():
+    source = """
+struct K;
+impl K { fn km(&self) {} }
+struct V;
+impl V { fn vm(&self) {} }
+fn f(m: BTreeMap<K, V>) {
+    match m.pop_first() { Some((k, v)) => { k.km(); v.vm(); }, _ => () }
+    match m.pop_last() { Some((k2, v2)) => { k2.km(); v2.vm(); }, _ => () }
+}
+fn g(m: HashMap<K, V>, k0: K) {
+    match m.remove_entry(k0) { Some((k3, v3)) => { k3.km(); v3.vm(); }, _ => () }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    km = _bindings(report, "km", "associated_function")[0]
+    vm = _bindings(report, "vm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    assert bound["k.km()"] == km.id
+    assert bound["v.vm()"] == vm.id
+    assert bound["k2.km()"] == km.id
+    assert bound["v2.vm()"] == vm.id
+    assert bound["k3.km()"] == km.id
+    assert bound["v3.vm()"] == vm.id
+
+
+def test_option_replace_and_deque_swap_remove():
+    source = """
+use std::collections::VecDeque;
+struct P;
+impl P { fn pm(&self) {} }
+fn f(o: Option<P>, q: VecDeque<P>) {
+    match o.replace(p) { Some(old) => old.pm(), _ => () }
+    match q.swap_remove_front(0) { Some(p1) => p1.pm(), _ => () }
+    match q.swap_remove_back(0) { Some(p2) => p2.pm(), _ => () }
+    let t = q.swap_remove(0);
+    t.pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    assert bound["old.pm()"] == pm.id
+    assert bound["p1.pm()"] == pm.id
+    assert bound["p2.pm()"] == pm.id
+    assert bound["t.pm()"] == pm.id
+
+
+def test_set_heap_list_option_heads_bind_payloads():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(s: HashSet<P>, t: BTreeSet<P>, h: BinaryHeap<P>, l: LinkedList<P>, k: P) {
+    match s.get(&k) { Some(p) => p.pm(), _ => () }
+    match s.take(&k) { Some(p) => p.pm(), _ => () }
+    match t.first() { Some(p) => p.pm(), _ => () }
+    match t.last() { Some(p) => p.pm(), _ => () }
+    match t.take(&k) { Some(p) => p.pm(), _ => () }
+    match h.pop() { Some(p) => p.pm(), _ => () }
+    match h.peek() { Some(p) => p.pm(), _ => () }
+    match l.front() { Some(p) => p.pm(), _ => () }
+    match l.back() { Some(p) => p.pm(), _ => () }
+    match l.pop_front() { Some(p) => p.pm(), _ => () }
+    match l.pop_back() { Some(p) => p.pm(), _ => () }
+}
+fn g(t: BTreeSet<P>) {
+    match t.pop_first() { Some(p) => p.pm(), _ => () }
+    match t.pop_last() { Some(p) => p.pm(), _ => () }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    hits = [
+        c for c in report.calls
+        if raw[c.span.start:c.span.end].decode() == "p.pm()"
+        and c.target == pm.id
+    ]
+    assert len(hits) == 13
+
+
+def test_map_pair_methods_still_spell_pairs_not_set_elements():
+    source = """
+struct K;
+impl K { fn km(&self) {} }
+struct V;
+impl V { fn vm(&self) {} }
+fn f(m: BTreeMap<K, V>, t: BTreeSet<K>) {
+    match m.pop_first() { Some((k, v)) => { k.km(); v.vm(); }, _ => () }
+    match t.pop_first() { Some(p) => p.km(), _ => () }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    km = _bindings(report, "km", "associated_function")[0]
+    vm = _bindings(report, "vm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    assert bound["k.km()"] == km.id
+    assert bound["v.vm()"] == vm.id
+    assert bound["p.km()"] == km.id
