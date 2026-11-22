@@ -357,6 +357,34 @@ class _AnonymousChannelBinding:
     type: Any
 
 
+class _FrozenIndex:
+    """The index a `x := p.B[i]` extraction picked, carrying the
+    dependencies `i` had AT the extraction — a later `i = 0`
+    cannot re-seat the share onto another element. It walks like
+    a node (`.type`/`.text`/span fields) so the existing index
+    plumbing accepts it, but `_expression` returns the frozen
+    deps instead of re-reading the live index binding — which is
+    what limits the freeze to the share's own injected uses."""
+
+    __slots__ = (
+        "deps", "text", "children", "named_children", "parent",
+        "start_byte", "end_byte", "start_point", "end_point",
+    )
+
+    type = "frozen_index"
+
+    def __init__(self, node: Any, deps: frozenset) -> None:
+        self.deps = deps
+        self.text = node.text
+        self.children = ()
+        self.named_children = ()
+        self.parent = node.parent
+        self.start_byte = node.start_byte
+        self.end_byte = node.end_byte
+        self.start_point = node.start_point
+        self.end_point = node.end_point
+
+
 def _span_dict(span: ByteSpan | FileSpan | None) -> dict | None:
     if span is None:
         return None
@@ -3123,6 +3151,7 @@ class _Builder:
     ] | None:
         fields = []
         current = node
+        share_extract = None
         while current is not None:
             while current.type == "parenthesized_expression":
                 current = next(
@@ -3162,6 +3191,27 @@ class _Builder:
                 break
             indexes.append(current.child_by_field_name("index"))
             current = current.child_by_field_name("operand")
+        if (
+            fields
+            and not indexes
+            and current is not None
+            and current.type == "identifier"
+        ):
+            # `x.F[i]` where `x := p.B[i]` bound an element
+            # extraction — the share lets the member path name
+            # the extracted element's own index into `p.B`.
+            share_ref = self.references.get(self.node_key(current))
+            share_extract = self._element_share.get(
+                share_ref.binding_id if share_ref is not None else ""
+            )
+            if share_extract is not None:
+                indexes.append(
+                    _FrozenIndex(
+                        share_extract[0].child_by_field_name("index"),
+                        share_extract[1],
+                    )
+                )
+                current = share_extract[0].child_by_field_name("operand")
         if (
             not fields
             or len(indexes) != 1
@@ -3288,6 +3338,13 @@ class _Builder:
                 is not None
             ):
                 return None
+        if share_extract is not None and not any(
+            getattr(member.type, "kind", None) == "pointer"
+            for member in path_members
+        ):
+            # `x.V` reads the copy's own slot — only a member path
+            # crossing a pointer still names the element's memory.
+            return None
         self._pin_fact_identities(container_fact)
         if (
             container_fact.kind == "array"
@@ -8625,6 +8682,19 @@ class _Builder:
                                 elem
                             )
                             or self._chan_elem_collection(fact)
+                        )
+                    )
+                    or (
+                        opaque_field is not None
+                        and elem.kind == "struct"
+                        and (
+                            self._named_value_struct_supported(elem)
+                            or (
+                                (_elem_value := self._struct_value_fact(
+                                    elem
+                                )) is not None
+                                and _elem_value.type_id != ""
+                            )
                         )
                     )
                 )
@@ -14704,12 +14774,25 @@ class _Builder:
         saved_pointer_param_aliases = getattr(
             self, "_param_pointer_aliases", {}
         )
+        saved_element_share = getattr(self, "_element_share", {})
+        saved_pending_lhs_pops = getattr(
+            self, "_pending_lhs_pops", []
+        )
+        # A mid-expression callee's own statements overwrite these
+        # per-statement fields (`_, x := f(0), p.B[j]` — `g`'s body
+        # resets `_pre_locals`, dropping the caller statement's
+        # snapshot of the local index).
+        saved_pre_locals = getattr(self, "_pre_locals", {})
+        saved_conditional = getattr(self, "_conditional", False)
         self._pending_labels = []
         self._goto_seen = False
         self._seen_labels = set()
         self._pointer_param_reseats = set()
         self._pending_param_reseats = []
         self._param_pointer_aliases = {}
+        self._element_share = {}
+        self._pending_lhs_pops = []
+        self._pre_locals = {}
         self.frames = []
         self.pinned = set()
         self.escaped = set()
@@ -14842,6 +14925,10 @@ class _Builder:
             self._pointer_param_reseats = saved_pointer_param_reseats
             self._pending_param_reseats = saved_pending_param_reseats
             self._param_pointer_aliases = saved_pointer_param_aliases
+            self._element_share = saved_element_share
+            self._pending_lhs_pops = saved_pending_lhs_pops
+            self._pre_locals = saved_pre_locals
+            self._conditional = saved_conditional
             self._defer_result_deps = saved_defer_result_deps
             self._deferred_exits = saved_deferred_exits
             self._func_arg_invocations = saved_func_args
@@ -15120,6 +15207,47 @@ class _Builder:
                 self._param_pointer_aliases[pending_id] = alias_ref
                 self._pointer_param_reseats.discard(pending_id)
         self._pending_param_reseats = []
+        # `x = e`/`x.W = q` on a name an earlier `x := p.B[i]`
+        # marked, or a bare local `q = e` clearing its `q := p`
+        # alias — the marks land AFTER this statement's right-hand
+        # sides read the pre-state (`x, r = e, x.W.V` still names
+        # the element). A mark from a possibly-skipped statement
+        # applies unconditionally: a maybe-reseat is the
+        # conservative direction.
+        for pending_id in self._pending_lhs_pops:
+            self._param_pointer_aliases.pop(pending_id, None)
+            self._drop_element_share(pending_id)
+        self._pending_lhs_pops = []
+
+    def _drop_element_share(self, binding_id: str) -> None:
+        self._element_share.pop(binding_id, None)
+
+    def _pure_index_expr(self, node: Any) -> bool:
+        # `p.B[i+1]`'s index is pure — identifiers, literals,
+        # parentheses, arithmetic — so an `x := p.B[i+1]`
+        # extraction may share like `x := p.B[i]` does. A call
+        # or other effectful index stays out: injecting its
+        # node would re-run the call per use.
+        if node is None:
+            return False
+        if node.type in _INDEX_LITERALS or node.type == "identifier":
+            return True
+        if node.type == "parenthesized_expression":
+            inner = _children(node)
+            return len(inner) == 1 and self._pure_index_expr(
+                inner[0]
+            )
+        if node.type == "binary_expression":
+            return self._pure_index_expr(
+                node.child_by_field_name("left")
+            ) and self._pure_index_expr(
+                node.child_by_field_name("right")
+            )
+        if node.type == "unary_expression":
+            return self._pure_index_expr(
+                node.child_by_field_name("operand")
+            )
+        return False
 
     def _statement(
         self,
@@ -15137,6 +15265,10 @@ class _Builder:
         if count[0] > MAX_EXPRESSION_NODES:
             raise _Unsupported("analysis_limit", _span(node))
         self._conditional = conditional
+        # `i, x := int64(0), p.B[i+1]` — the extraction's index
+        # reads the PRE-state `i`, before this statement's own
+        # declarations reseat it.
+        self._pre_locals = dict(locals_)
         self._flush_pending_param_reseats()
         kind = node.type
         if kind in {"block", "statement_list"}:
@@ -16074,6 +16206,62 @@ class _Builder:
                     self._param_pointer_aliases.pop(
                         binding.id, None
                     )
+                extract_rhs = (
+                    rights[i] if len(lefts) == len(rights) else None
+                )
+                if (
+                    extract_rhs is not None
+                    and extract_rhs.type == "index_expression"
+                    and self._opaque_container_field_target(
+                        extract_rhs.child_by_field_name("operand"),
+                        params,
+                        allow_struct_elements=True,
+                        allow_struct_element_arrays=True,
+                        for_write=True,
+                    )
+                    is not None
+                ):
+                    # `x := p.B[i]` — the copy still shares each
+                    # pointer member's pointee with the element.
+                    # An effectful index (`p.B[f()]`) stays out —
+                    # injecting its node would re-run the call per
+                    # use — and an identifier index freezes the
+                    # deps the extraction saw so `i = 0` later
+                    # cannot re-seat the share.
+                    share_index = extract_rhs.child_by_field_name(
+                        "index"
+                    )
+                    if (
+                        share_index is None
+                        or self._pure_index_expr(share_index)
+                    ):
+                        # The extraction's index deps freeze at
+                        # mark time — `i = 0` afterwards cannot
+                        # re-seat the share onto another slot.
+                        # `_pre_locals` keeps the index's
+                        # pre-state deps for the multi-declare
+                        # case; a literal key (`p.M["k"]`)
+                        # carries none.
+                        share_deps = (
+                            self.expression(
+                                share_index, fn, params,
+                                self._pre_locals,
+                                transfers, count, 0,
+                            )
+                            if share_index is not None
+                            and share_index.type
+                            not in _INDEX_LITERALS
+                            else frozenset()
+                        )
+                        self._drop_element_share(binding.id)
+                        self._element_share[binding.id] = (
+                            extract_rhs,
+                            share_deps,
+                        )
+                    else:
+                        self._drop_element_share(binding.id)
+                else:
+                    self._drop_element_share(binding.id)
                 self._bind_struct_container_value(
                     binding.id,
                     (
@@ -17745,13 +17933,16 @@ class _Builder:
                     # A bare `q = …` on a LOCAL previously handed a
                     # param's pointee (`q := p`) reseats it away —
                     # the alias no longer names the caller's slot.
-                    if (
-                        lhs_ref is not None
-                        and lhs_ref.binding_id
-                        in self._param_pointer_aliases
-                    ):
-                        self._param_pointer_aliases.pop(
-                            lhs_ref.binding_id, None
+                    # The same holds for a name an earlier
+                    # `x := p.B[i]` marked — the element share no
+                    # longer describes what x holds. Both land
+                    # AFTER this statement's right-hand sides read
+                    # the pre-state (`x, r = e, x.W.V` still names
+                    # the element), so they queue like the
+                    # parameter reseats above.
+                    if lhs_ref is not None:
+                        self._pending_lhs_pops.append(
+                            lhs_ref.binding_id
                         )
                     continue
                 # `p = q` reseats the `*S` param onto `q`'s pointee.
@@ -18216,6 +18407,49 @@ class _Builder:
                 )
                 if write_target is not None:
                     type_id, ref, nested = write_target
+                    # `x.W = q` on a copy `x := p.B[i]` marked
+                    # replaces the SLOT of the copy's pointer
+                    # member — x's W no longer names the
+                    # element's member, so the share ends. A
+                    # scalar-field store (`x.V = 1`) leaves the
+                    # pointer members sharing the element's
+                    # memory, and a nested store (`x.W.V = v`)
+                    # writes through the shared pointee — only
+                    # a bare pointer-member slot write clears.
+                    if (
+                        ref is not None
+                        and ref.binding_id in self._element_share
+                    ):
+                        _lhs_fields = []
+                        _lhs_probe = lhs
+                        while _lhs_probe is not None and (
+                            _lhs_probe.type
+                            in {"selector_expression", "field_expression"}
+                        ):
+                            _lhs_field = (
+                                _lhs_probe.child_by_field_name("field")
+                            )
+                            if _lhs_field is None:
+                                break
+                            _lhs_fields.append(_lhs_field)
+                            _lhs_probe = (
+                                _lhs_probe.child_by_field_name("operand")
+                            )
+                        if len(_lhs_fields) == 1:
+                            _lhs_member = self._field_identity(
+                                self.references.get(
+                                    self.node_key(_lhs_fields[0])
+                                )
+                            )
+                            if _lhs_member is not None and (
+                                getattr(
+                                    _lhs_member.type, "kind", None
+                                )
+                                == "pointer"
+                            ):
+                                self._pending_lhs_pops.append(
+                                    ref.binding_id
+                                )
                     # A local composite's field store reports no
                     # external mutation — the empty identity skips
                     # the transfer; only the dep fold applies.
@@ -25865,6 +26099,8 @@ class _Builder:
         count: list[int],
         depth: int,
     ) -> frozenset[int]:
+        if node is not None and node.type == "frozen_index":
+            return node.deps
         count[0] += 1
         if depth + len(self.active) >= MAX_DEPTH or count[0] > MAX_EXPRESSION_NODES:
             raise _Unsupported("analysis_limit", _span(node))
