@@ -51,7 +51,7 @@ POSITIVE_FIXTURES = (
         + ["agree"] * 2
         + ["builtin"]
         + ["agree"] * 3
-        + ["builtin", "agree", "builtin", "agree", "builtin"],
+        + ["builtin", "agree", "builtin", "agree", "builtin", "agree"],
     ),
 )
 _STATUSES = (

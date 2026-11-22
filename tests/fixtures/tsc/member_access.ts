@@ -31,3 +31,5 @@ const quoted = new Quoted(); quoted.m();
 declare const record: Record<"undefined", number>;
 record.undefined;
 Car.prototype;
+declare const dyn: any;
+dyn.foo;

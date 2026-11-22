@@ -562,9 +562,23 @@
         "end": 806,
         "start": 797
       }
+    },
+    {
+      "declarations": [
+        {
+          "end": 825,
+          "start": 822
+        }
+      ],
+      "library": false,
+      "name": "dyn",
+      "span": {
+        "end": 835,
+        "start": 832
+      }
     }
   ],
-  "source": "interface Shape { area(): number }\nclass Engine { start(): void {} }\nclass Car implements Shape {\n    engine: Engine = new Engine();\n    base(): void {}\n    area(): number { return 0 }\n    run(other: Car): void {\n        this.engine.start();\n        other.engine.start();\n        this.base();\n        other.area();\n    }\n}\nnamespace N {\n    export function help(): void {}\n    export class Inner { ping(): void {} }\n}\nenum Direction { Up, Down }\nconst heading = Direction.Up;\nN.help();\nconst inner = new N.Inner();\ninner.ping();\nconst s: Shape = new Car();\ns.area();\nconst cars: Car[] = [new Car()];\ncars[0].base();\ncars.push(new Car());\ncars.length;\nclass Quoted { \"m\"(): void {} }\nconst quoted = new Quoted(); quoted.m();\ndeclare const record: Record<\"undefined\", number>;\nrecord.undefined;\nCar.prototype;\n",
+  "source": "interface Shape { area(): number }\nclass Engine { start(): void {} }\nclass Car implements Shape {\n    engine: Engine = new Engine();\n    base(): void {}\n    area(): number { return 0 }\n    run(other: Car): void {\n        this.engine.start();\n        other.engine.start();\n        this.base();\n        other.area();\n    }\n}\nnamespace N {\n    export function help(): void {}\n    export class Inner { ping(): void {} }\n}\nenum Direction { Up, Down }\nconst heading = Direction.Up;\nN.help();\nconst inner = new N.Inner();\ninner.ping();\nconst s: Shape = new Car();\ns.area();\nconst cars: Car[] = [new Car()];\ncars[0].base();\ncars.push(new Car());\ncars.length;\nclass Quoted { \"m\"(): void {} }\nconst quoted = new Quoted(); quoted.m();\ndeclare const record: Record<\"undefined\", number>;\nrecord.undefined;\nCar.prototype;\ndeclare const dyn: any;\ndyn.foo;\n",
   "typescript_version": "5.9.3",
   "unsupported": []
 }

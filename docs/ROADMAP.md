@@ -5596,6 +5596,9 @@ references fail closed. This slice makes no trust, audit, Evidence acceptance,
 Seal Grade, runtime, or proof claim.
 Compiler intrinsics with no declaration, such as `undefined` and `globalThis`,
 are reported as builtins; a reference with no symbol still fails closed.
+Member-access names on unresolvable receivers (`any`, unresolved types) are
+omitted rather than failing the envelope — the receiver expression is itself
+captured, so the member name adds no verifiable information.
 
 ### C06 first compiler-backed Rust binding slice
 
