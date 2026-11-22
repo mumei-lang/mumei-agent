@@ -91,6 +91,9 @@ _MAP_RANGE_METHODS = frozenset({"range", "range_mut"})
 _SET_ALGEBRA_METHODS = frozenset(
     {"union", "intersection", "difference", "symmetric_difference"}
 )
+# `s.extract_if(f)` drains matching elements — sets yield `P`;
+# the maps yield `(K, V)` pairs spelled at the pair-pattern site.
+_EXTRACT_IF_METHODS = frozenset({"extract_if"})
 _SET_CONTAINER_NAMES = frozenset({"HashSet", "BTreeSet"})
 
 # Smart pointers that `Deref` straight to their payload — `b.pm()`
@@ -207,8 +210,9 @@ _OPTION_HEAD_METHODS = {
     "zip": ("", {"Option"}, 0),
     # `m.insert(k, v)` yields `Option<V>` — the pair's value arg.
     "insert": ("", {"HashMap", "BTreeMap"}, -1),
-    # `o.replace(v)` yields `Option<P>` — the old payload.
-    "replace": ("", {"Option"}, 0),
+    # `o.replace(v)`/`s.replace(v)` yield `Option<P>` — the old
+    # payload/element.
+    "replace": ("", {"Option", "HashSet", "BTreeSet"}, 0),
     # `m.remove_entry(k)`/`m.pop_first()`/`m.pop_last()` yield
     # `Option<(K, V)>` — `_MAP_PAIR_METHODS` spells the pair.
     "remove_entry": ("", {"HashMap", "BTreeMap"}, 0),
@@ -5023,6 +5027,23 @@ class _RustBindings:
             return spelled, self._receiver_annotation_position(
                 receiver
             )
+        if method in _EXTRACT_IF_METHODS:
+            # `s.extract_if(f)` yields the set's `P` elements; the
+            # map variant yields `(K, V)` pairs handled at the
+            # pair-pattern site.
+            container_id, args = self._receiver_type(receiver)
+            if args is None:
+                return None, None
+            if self._container_head_name(receiver) not in (
+                _SET_CONTAINER_NAMES
+            ):
+                return None, None
+            spelled = args.strip() or None
+            if spelled is None:
+                return None, None
+            return spelled, self._receiver_annotation_position(
+                receiver
+            )
         if method in {"split_at", "split_at_mut"}:
             container_id, args = self._receiver_type(receiver)
             if args is None:
@@ -5854,6 +5875,7 @@ class _RustBindings:
             or method in _ITER_CHUNK_METHODS
             or method in _ITER_CHUNK_MUT_METHODS
             or method in _SET_ALGEBRA_METHODS
+            or method in _EXTRACT_IF_METHODS
             or method == "enumerate"
             or method == "zip"
             or method == "flatten"
@@ -5936,6 +5958,27 @@ class _RustBindings:
             elem_id, rest = self._element_of(
                 container_id,
                 arg0,
+                call.start_byte,
+                self._literal_element_args(call),
+            )
+            if elem_id is None:
+                return _UNKNOWN, rest
+            name = next(
+                (b.name for b in self.bindings if b.id == elem_id), ""
+            )
+            return TypeFact("named", name, 0, None, elem_id), rest
+        if method in _EXTRACT_IF_METHODS:
+            # `s.extract_if(f)` yields the set's `P` elements.
+            container_id, args = self._receiver_type(receiver)
+            if args is None:
+                return _UNKNOWN, None
+            if self._container_head_name(receiver) not in (
+                _SET_CONTAINER_NAMES
+            ):
+                return _UNKNOWN, None
+            elem_id, rest = self._element_of(
+                container_id,
+                args.strip(),
                 call.start_byte,
                 self._literal_element_args(call),
             )
@@ -6276,7 +6319,9 @@ class _RustBindings:
             )
             if (
                 method
-                not in _ITER_ELEMENT_METHODS | _MAP_RANGE_METHODS
+                not in _ITER_ELEMENT_METHODS
+                | _MAP_RANGE_METHODS
+                | _EXTRACT_IF_METHODS
             ):
                 return {}
             if (
@@ -6295,6 +6340,14 @@ class _RustBindings:
         ):
             # `range`/`range_mut` are `BTreeMap`-only — a `HashMap`
             # receiver names no such std method.
+            return {}
+        if (
+            method in _EXTRACT_IF_METHODS
+            and self._container_head_name(receiver)
+            not in _MAP_CONTAINER_NAMES
+        ):
+            # `extract_if` is a map/set method — the pair path
+            # only admits the maps.
             return {}
         spelled = self._map_spelled_args(receiver)
         if spelled is None:
