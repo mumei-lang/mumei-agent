@@ -1813,3 +1813,23 @@ d.m();
         if source[c.span.start : c.span.end] == "d.m()"
     )
     assert call.target == m_rec.id
+
+
+def test_member_inline_export_survives_type_clause():
+    # `export class A` keeps `N.A` reachable on the value side even
+    # when a sibling clause exports the type under another name.
+    source = """
+declare namespace N {
+  export class A { m() {} }
+  export type { A as Public }
+}
+const a = new N.A();
+a.m();
+"""
+    report = build_ts_bindings(source)
+    m_rec = _member_bindings(report, "m", "associated_function")[0]
+    calls = {
+        source[c.span.start : c.span.end]: c for c in report.calls
+    }
+    assert calls["new N.A()"].target
+    assert calls["a.m()"].target == m_rec.id

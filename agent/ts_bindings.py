@@ -1317,17 +1317,7 @@ class _TypeScriptBindings:
             for candidate in self.records:
                 if decl_id is None or candidate.member_of != decl_id:
                     continue
-                # Explicit export lists publish a member only under the
-                # listed names — `export type {A as B}` removes `N.A`
-                # entirely. With no explicit list the declared name is
-                # reachable (and the private filter decides).
-                if candidate.member_public_names or candidate.member_type_public_names:
-                    value_names = candidate.member_public_names
-                    type_names = value_names | candidate.member_type_public_names
-                else:
-                    value_names = type_names = frozenset(
-                        {candidate.binding.name}
-                    )
+                value_names, type_names = self._member_name_sets(candidate)
                 if name not in (type_names if for_type else value_names):
                     continue
                 if (
@@ -1369,6 +1359,41 @@ class _TypeScriptBindings:
                     if base_record is not None:
                         queue.append(base_record)
         return None
+
+    def _member_name_sets(
+        self, candidate: _Record
+    ) -> tuple[frozenset[str], frozenset[str]]:
+        """(value names, type names) a namespace member answers to.
+
+        Explicit export lists publish a member only under the listed
+        names — `export type {A as B}` removes `N.A` entirely. An inline
+        `export` (or implicit ambient export) keeps the declared name
+        alongside any clause aliases — `export class A` +
+        `export type {A as B}` still answers `N.A`."""
+        if candidate.member_public_names or candidate.member_type_public_names:
+            declared = candidate.binding.name
+            value_names = set(candidate.member_public_names)
+            if candidate.member_visibility == "public" and (
+                not value_names or declared in value_names
+            ):
+                value_names.add(declared)
+            type_names = set(candidate.member_type_public_names)
+            if candidate.class_like:
+                type_names |= value_names
+            if (
+                candidate.member_type_exported
+                and (
+                    not candidate.member_type_public_names
+                    or declared in candidate.member_type_public_names
+                )
+            ) or (
+                candidate.member_visibility == "public"
+                and not candidate.member_public_names
+            ):
+                type_names.add(declared)
+            return frozenset(value_names), frozenset(type_names)
+        declared_names = frozenset({candidate.binding.name})
+        return declared_names, declared_names
 
     def _base_type_record(
         self, base: str, position: int, *, for_type: bool = True
