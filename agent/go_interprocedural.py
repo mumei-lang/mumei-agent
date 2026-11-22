@@ -12750,6 +12750,7 @@ class _Builder:
         if value is None:
             return ()
         anchor = None
+        literal_fact = None
         if value.type == "composite_literal":
             literal_fact = self._local_struct_literal_fact(value)
             if literal_fact is not None:
@@ -12809,6 +12810,8 @@ class _Builder:
         if not record_ids:
             return ()
         is_reference = value.type == "identifier"
+        if value.type == "composite_literal":
+            is_reference = literal_fact is not None
         if value.type == "selector_expression":
             base = value
             while base is not None and base.type == "selector_expression":

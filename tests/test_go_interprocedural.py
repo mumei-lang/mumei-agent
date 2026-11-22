@@ -32486,23 +32486,97 @@ def test_go_struct_argument_keeps_racy_field_closure_closed(
     assert not result.available
 
 
-def test_struct_composite_argument_with_recorded_field_fails_closed(
+def test_struct_literal_argument_with_recorded_field_propagates(
     go_types_helper,
 ):
     result = named(
         *unit(
             go_types_helper,
-            "type S struct { F func() int64 }\n"
-            "func use(s S) int64 { return s.F() }\n"
+            "type W struct { F func() }\n"
+            "func use(s W) { s.F() }\n"
             "func F(x int64) int64 {\n"
-            "\treturn use(S{F: func() int64 { return x }})\n"
+            "\tw := int64(0)\n"
+            "\tuse(W{F: func() { w = x }})\n"
+            "\treturn w\n"
             "}\n",
         )
     )
-    assert not result.available
-    assert {gap.reason for gap in result.gaps} == {
-        "unsupported_expression"
-    }
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_named_closure_struct_composite_argument_propagates(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type W struct { F func() }\n"
+            "func use(s W) { s.F() }\n"
+            "func F(x int64) int64 {\n"
+            "\tw := int64(0)\n"
+            "\tg := func() { w = x }\n"
+            "\tuse(W{F: g})\n"
+            "\treturn w\n"
+            "}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_nested_named_closure_struct_composite_argument_matches_local(
+    go_types_helper,
+):
+    data = unit(
+        go_types_helper,
+        "type S struct { F func() }\n"
+        "type O struct { S S }\n"
+        "func use(o O) { o.S.F() }\n"
+        "func Composite(x int64) int64 {\n"
+        "\tw := int64(0)\n"
+        "\tg := func() { w = x }\n"
+        "\tuse(O{S: S{F: g}})\n"
+        "\treturn w\n"
+        "}\n"
+        "func Local(x int64) int64 {\n"
+        "\tw := int64(0)\n"
+        "\tg := func() { w = x }\n"
+        "\ts := O{S: S{F: g}}\n"
+        "\tuse(s)\n"
+        "\treturn w\n"
+        "}\n",
+    )
+    composite = named(*data, name="Composite")
+    local = named(*data, name="Local")
+    assert composite.available and local.available
+    assert composite.return_dependencies == frozenset({0})
+    assert composite.return_dependencies == local.return_dependencies
+    assert composite.effects == local.effects
+
+
+def test_nonreference_struct_arguments_with_records_stay_closed(
+    go_types_helper,
+):
+    data = unit(
+        go_types_helper,
+        "type W struct { F func() }\n"
+        "func use(s W) { s.F() }\n"
+        "func makeW(x int64) W { return W{F: func() { _ = x }} }\n"
+        "func FromCall(x int64) int64 {\n"
+        "\tuse(makeW(x))\n"
+        "\treturn x\n"
+        "}\n"
+        "func FromIndex(x int64) int64 {\n"
+        "\ta := [1]W{{F: func() { _ = x }}}\n"
+        "\tuse(a[0])\n"
+        "\treturn x\n"
+        "}\n",
+    )
+    for name in ("FromCall", "FromIndex"):
+        result = named(*data, name=name)
+        assert not result.available
+        assert result.gaps
 
 
 def test_struct_arguments_without_recorded_func_fields_keep_behavior(
