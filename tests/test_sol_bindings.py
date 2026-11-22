@@ -2763,3 +2763,23 @@ contract Vault {
         ref.binding_id == f.id and ref.kind == "call"
         for ref in report.references
     )
+
+
+def test_mapping_derived_contract_value_converts_to_base_parameter():
+    source = """
+contract Base {}
+contract Derived is Base {}
+contract C {
+    mapping(uint256 => Derived) byId;
+    function take(Base b) external {}
+    function run() external { take(byId[0]); }
+}
+"""
+    report = build_sol_bindings(source)
+    # `byId[0]` is `Derived`-typed; it implicitly converts to `Base`
+    # for the call — a member overload set must not lose it.
+    take = next(b for b in report.bindings if b.name == "take")
+    assert any(
+        ref.binding_id == take.id and ref.kind == "call"
+        for ref in report.references
+    )

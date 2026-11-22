@@ -1494,13 +1494,40 @@ class _SolBindings:
         arg_record = self._user_type_record(
             arg_text, arg_owner, position
         )
-        if (
-            param_record is not None
-            and arg_record is not None
-            and param_record.binding.id == arg_record.binding.id
-        ):
-            return "match"
+        if param_record is not None and arg_record is not None:
+            if param_record.binding.id == arg_record.binding.id:
+                return "match"
+            if (
+                arg_record.binding.kind in {"contract", "interface"}
+                and param_record.binding.kind
+                in {"contract", "interface"}
+                and self._contract_subtype(arg_record, param_record)
+            ):
+                # A derived contract value implicitly converts to any
+                # contract it inherits from (`m[i]` yields `Derived`;
+                # `f(Base)` still takes it).
+                return "convert"
         return "nomatch"
+
+    def _contract_subtype(self, arg: _Record, param: _Record) -> bool:
+        """Whether the argument contract's declared base chain reaches
+        the parameter contract."""
+        start = self.contracts.get(arg.binding.name)
+        seen: set[str] = set()
+        stack = [start] if start is not None else []
+        while stack:
+            contract = stack.pop()
+            if contract.record.binding.id in seen:
+                continue
+            seen.add(contract.record.binding.id)
+            for base_name, _node in contract.bases:
+                base = self.contracts.get(base_name)
+                if base is None:
+                    continue
+                if base.record.binding.id == param.binding.id:
+                    return True
+                stack.append(base)
+        return False
 
     def _resolve_overload(
         self, pool: list[tuple[_Record, int]], member_node: Any
