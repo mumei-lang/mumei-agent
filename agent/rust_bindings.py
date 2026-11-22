@@ -2966,6 +2966,25 @@ class _RustBindings:
             container_id, args = self._receiver_type(receiver)
             if args is None:
                 return None, None
+            container_name = (
+                next(
+                    (
+                        b.name
+                        for b in self.bindings
+                        if b.id == container_id
+                    ),
+                    None,
+                )
+                if container_id is not None
+                else None
+            )
+            if (
+                container_id is not None
+                and container_name not in _INDEX_ELEMENT_CONTAINERS
+            ):
+                # A custom `W<P>` can `Deref` to a different
+                # element — `w.split_at(i)` yields `&[Q]` there.
+                return None, None
             spelled = args.strip() or None
             if spelled is None:
                 return None, None
@@ -3266,8 +3285,9 @@ class _RustBindings:
                         return _UNKNOWN, None
                 return _UNKNOWN, args.strip()
             elif container_name == "Option":
-                # `Option<P>::iter` yields `&P`.
-                rest = "&" + args.strip()
+                # `Option<P>::iter` yields `&P` — a spelled
+                # borrow keeps the element opaque.
+                elem_id, rest = None, "&" + args.strip()
             else:
                 elem_id, rest = self._element_of(
                     container_id, args.strip(), position
