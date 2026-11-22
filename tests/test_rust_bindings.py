@@ -4142,3 +4142,20 @@ def test_imported_tuple_struct_still_binds_pattern_payload() -> None:
     report = build_rust_bindings(source, pointer_width=64)
     method = _bindings(report, "m", "associated_function")[0]
     assert _call(report, source, "p.m()").target == method.id
+
+
+def test_self_named_use_path_does_not_recurse() -> None:
+    # `use log::log` — an import whose path starts with its own name —
+    # must not recurse when a container lookup re-resolves it.
+    source = """
+use log::log;
+trait Tr { fn t(&self) {} }
+use Tr as Q;
+struct P;
+impl Q for P {}
+fn f(p: P) {
+    p.t();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    assert _call(report, source, "p.t()").target == ""

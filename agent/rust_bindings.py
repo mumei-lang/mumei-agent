@@ -1389,7 +1389,8 @@ class _RustBindings:
         return (None if record is None else record.binding.id), args
 
     def _resolve_use_path(
-        self, path: str, position: int, namespace: str
+        self, path: str, position: int, namespace: str,
+        _seen: "set[str] | None" = None,
     ) -> "_Record | None":
         """Record a `use` target path names — `m::P` walks the module
         chain and returns `P`'s own binding in `namespace` (a name
@@ -1410,7 +1411,9 @@ class _RustBindings:
         # The container is not a module — `use E::V` names a member
         # of a type (enum variant, associated item), `use m::E::V`
         # the same through a module chain.
-        container = self._use_path_container(segments[:-1], position)
+        container = self._use_path_container(
+            segments[:-1], position, _seen
+        )
         if container is None:
             return None
         for record in self.records.values():
@@ -1423,7 +1426,8 @@ class _RustBindings:
         return None
 
     def _use_path_container(
-        self, segments: list, position: int
+        self, segments: list, position: int,
+        seen: "set[str] | None" = None,
     ) -> "_Record | None":
         """Type record a `use` path's non-module container names —
         `E` itself or `m::E` inside module `m`."""
@@ -1435,6 +1439,7 @@ class _RustBindings:
                     "type",
                 ),
                 position,
+                _seen=seen,
             )
         module = self._lookup_module_path(
             "::".join(segments[:-1]), position
@@ -1451,13 +1456,14 @@ class _RustBindings:
     def _through_import(
         self, record: "_Record | None", position: int,
         namespace: str = "type",
+        _seen: "set[str] | None" = None,
     ) -> "_Record | None":
         """Follow `import` records to their use-path target —
         `use m::P` makes `P::new` read `m`'s `P`. The path resolves
         where the `use` is declared, not at the reference site, and
         an unresolvable target keeps the import record itself (the
         name is still what `impl Trait for P` matches against)."""
-        seen: set[str] = set()
+        seen: set[str] = set() if _seen is None else _seen
         while (
             record is not None
             and record.binding.kind == "import"
@@ -1469,6 +1475,7 @@ class _RustBindings:
                 record.import_path,
                 record.binding.span.start,
                 namespace,
+                seen,
             )
             if resolved is None:
                 break
