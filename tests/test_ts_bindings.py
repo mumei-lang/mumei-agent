@@ -469,7 +469,11 @@ function use() { external(ambientValue); N.localFunction(); }
     assert _bindings(report, "N", "namespace")
     local_value = _bindings(report, "localValue", "local")[0]
     assert any(reference.binding_id == local_value.id for reference in _refs(report, source, "localValue"))
-    assert any(call.kind == "opaque_method" for call in report.calls)
+    local_function = _bindings(report, "localFunction", "function")[0]
+    assert any(
+        call.kind == "direct_local" and call.target == local_function.id
+        for call in report.calls
+    )
 
 
 def test_import_forms_and_type_only_import_namespaces():
@@ -974,3 +978,91 @@ def test_cli_fails_with_fixed_errors_without_json(tmp_path, contents, expected):
     assert result.stdout == ""
     assert expected in result.stderr
     assert result.stderr.startswith("ts-bindings: ")
+
+
+def _member_bindings(report, name, kind):
+    return [b for b in report.bindings if b.name == name and b.kind == kind]
+
+
+def test_member_access_binds_class_members():
+    source = """
+class Base { base(): number { return 1 } }
+class C extends Base {
+    static count = 0;
+    field: number;
+    method(): number { return this.base() + this.field }
+    run(other: C) { other.method(); }
+}
+const c = new C();
+c.method(); C.count;
+"""
+    report = build_ts_bindings(source)
+    base = _member_bindings(report, "base", "associated_function")[0]
+    assert any(r.binding_id == base.id for r in _refs(report, source, "base"))
+    method = _member_bindings(report, "method", "associated_function")[0]
+    assert any(
+        c.kind == "direct_local" and c.target == method.id
+        for c in report.calls
+    )
+    field = _member_bindings(report, "field", "struct_field")[0]
+    assert any(r.binding_id == field.id for r in _refs(report, source, "field"))
+    count = _member_bindings(report, "count", "struct_field")[0]
+    assert any(r.binding_id == count.id for r in _refs(report, source, "count"))
+
+
+def test_member_access_binds_interface_and_enum_members():
+    source = """
+interface Shape { area(): number; name: string }
+function areaOf(s: Shape): number { return s.area() + s.name.length }
+enum Color { Red, Blue }
+const pick = Color.Blue;
+"""
+    report = build_ts_bindings(source)
+    area = _member_bindings(report, "area", "associated_function")[0]
+    assert any(
+        c.kind == "opaque_bodyless" and c.target == area.id
+        for c in report.calls
+    )
+    name = _member_bindings(report, "name", "struct_field")[0]
+    assert any(r.binding_id == name.id for r in _refs(report, source, "name"))
+    blue = _member_bindings(report, "Blue", "enum_member")[0]
+    assert any(r.binding_id == blue.id for r in _refs(report, source, "Blue"))
+
+
+def test_member_access_private_and_unknown_stay_unbound():
+    source = """
+class C {
+    private secret = 0;
+    show(): number { return this.secret }
+}
+const c = new C();
+const leak = c.secret;
+const nothing = c.ghost;
+"""
+    report = build_ts_bindings(source)
+    secret = _member_bindings(report, "secret", "struct_field")[0]
+    reads = [r for r in _refs(report, source, "secret") if r.binding_id == secret.id]
+    assert len(reads) == 1  # only `this.secret`, not `c.secret`
+    assert not any(r.kind == "read" for r in _refs(report, source, "ghost"))
+
+
+def test_member_access_chains_through_field_types():
+    source = """
+class Engine { start(): void {} }
+class Car { engine: Engine; drive(): void { this.engine.start(); } }
+function getCar(): Car { return new Car() }
+getCar().drive();
+"""
+    report = build_ts_bindings(source)
+    engine = _member_bindings(report, "engine", "struct_field")[0]
+    assert any(r.binding_id == engine.id for r in _refs(report, source, "engine"))
+    start = _member_bindings(report, "start", "associated_function")[0]
+    assert any(
+        c.kind == "direct_local" and c.target == start.id
+        for c in report.calls
+    )
+    drive = _member_bindings(report, "drive", "associated_function")[0]
+    assert any(
+        c.kind == "direct_local" and c.target == drive.id
+        for c in report.calls
+    )

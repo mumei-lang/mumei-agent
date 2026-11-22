@@ -83,6 +83,9 @@ class _Record:
     declaration_function: int | None = None
     self_scope: ByteSpan | None = None
     direct_function: bool = False
+    member_of: int | None = None
+    member_static: bool = False
+    member_visibility: str = "public"
 
 
 @dataclass
@@ -118,6 +121,7 @@ class _TypeScriptBindings:
         self._type_alias_cache: dict[str, TypeFact] = {}
         self._loop_binding_ids: dict[int, frozenset[str]] = {}
         self._tdz_binding_ids: frozenset[str] = frozenset()
+        self._type_bases: dict[int, list[str]] = {}
 
     def span(self, node: Any) -> ByteSpan:
         return ByteSpan(node.start_byte, node.end_byte)
@@ -188,6 +192,9 @@ class _TypeScriptBindings:
         declaration_function: int | None = None,
         self_scope: ByteSpan | None = None,
         direct_function: bool = False,
+        member_of: int | None = None,
+        member_static: bool = False,
+        member_visibility: str = "public",
     ) -> _Record:
         name = self.text(name_node)
         span = self.span(name_node)
@@ -215,6 +222,9 @@ class _TypeScriptBindings:
             declaration_function,
             self_scope,
             direct_function,
+            member_of,
+            member_static,
+            member_visibility,
         )
         self.bindings.append(binding)
         self.records.append(record)
@@ -227,7 +237,8 @@ class _TypeScriptBindings:
             if node.type == "decorator":
                 self.add_gap("decorator", node)
             self._predeclare_node(node)
-        for record in self.records:
+        self._link_members()
+        for record in list(self.records):
             if record.function_node is not None:
                 self._function_info(
                     record.function_node,
@@ -844,6 +855,366 @@ class _TypeScriptBindings:
         )
         return candidates[0][1]
 
+    _MEMBER_DECLARATIONS = {
+        "function_declaration", "generator_function_declaration",
+        "class_declaration", "abstract_class_declaration",
+        "interface_declaration", "enum_declaration",
+        "type_alias_declaration", "internal_module",
+        "lexical_declaration", "variable_declaration",
+        "export_statement", "ambient_declaration",
+    }
+
+    def _member_visibility(self, member: Any, name_node: Any) -> str:
+        if name_node.type == "private_property_identifier":
+            return "private"
+        for child in member.children:
+            if child.type == "accessibility_modifier":
+                text = self.text(child).strip()
+                if text in {"private", "protected", "public"}:
+                    return text
+        return "public"
+
+    def _link_members(self) -> None:
+        """Attach member bindings to their declaring type or namespace.
+
+        `method_definition` records exist by the time this runs; fields,
+        signatures and enum members are declared here so every member is
+        reachable through its declaring type record.
+        """
+        for record in list(self.records):
+            decl = record.node.parent
+            if decl is None:
+                continue
+            body = decl.child_by_field_name("body")
+            if body is None:
+                continue
+            if record.class_like:
+                bases: list[str] = []
+                for child in self.children(decl):
+                    heritage = (
+                        self.children(child)
+                        if child.type == "class_heritage"
+                        else [child]
+                        if child.type in {"extends_clause", "implements_clause"}
+                        else []
+                    )
+                    for clause in heritage:
+                        if clause.type not in {
+                            "extends_clause", "implements_clause",
+                        }:
+                            continue
+                        for name_node in self.children(clause):
+                            text = self.text(name_node).strip()
+                            match = re.match(
+                                r"[A-Za-z_$][A-Za-z0-9_$]*", text
+                            )
+                            if match:
+                                bases.append(match.group(0))
+                self._type_bases[decl.id] = bases
+                for member in self.children(body):
+                    name_node = member.child_by_field_name("name")
+                    if name_node is None and member.type == "enum_assignment":
+                        name_node = next(
+                            (
+                                child
+                                for child in self.children(member)
+                                if child.type == "property_identifier"
+                            ),
+                            None,
+                        )
+                    if (
+                        name_node is None
+                        and body.type == "enum_body"
+                        and member.type == "property_identifier"
+                    ):
+                        name_node = member
+                    if name_node is None or name_node.type in {
+                        "computed_property_name",
+                    }:
+                        continue
+                    modifiers = [
+                        child
+                        for child in member.children
+                        if child.type != "comment"
+                    ]
+                    is_static = any(
+                        child.type == "static" or self.text(child) == "static"
+                        for child in modifiers
+                    )
+                    visibility = self._member_visibility(member, name_node)
+                    if member.type in {
+                        "method_definition", "method_signature",
+                        "abstract_method_signature",
+                    }:
+                        member_record = self.function_records.get(member.id)
+                        if member_record is None:
+                            member_record = self._predeclare_function(
+                                member, name_node, method=True
+                            )
+                    elif member.type in {
+                        "public_field_definition", "property_signature",
+                    }:
+                        member_record = self.add_binding(
+                            name_node,
+                            "struct_field",
+                            self.span(body),
+                            frozenset(),
+                            type_node=member.child_by_field_name("type"),
+                            mutable=not any(
+                                self.text(child) == "readonly"
+                                for child in modifiers
+                            ),
+                        )
+                    elif (
+                        member.type == "enum_assignment"
+                        or body.type == "enum_body"
+                    ) and name_node.type == "property_identifier":
+                        member_record = self.add_binding(
+                            name_node,
+                            "enum_member",
+                            self.span(body),
+                            frozenset(),
+                        )
+                    else:
+                        continue
+                    member_record.member_of = decl.id
+                    member_record.member_static = is_static
+                    member_record.member_visibility = visibility
+            elif decl.type == "internal_module":
+                for other in self.records:
+                    if other is record or other.member_of is not None:
+                        continue
+                    node = other.node
+                    boundary = False
+                    while (
+                        node.parent is not None
+                        and node.parent.id != body.id
+                    ):
+                        node = node.parent
+                        if node.type in {
+                            "internal_module", "class_body",
+                            "interface_body", "enum_body",
+                            "statement_block",
+                        }:
+                            boundary = True
+                            break
+                    if (
+                        not boundary
+                        and node.parent is not None
+                        and node.parent.id == body.id
+                        and node.type in self._MEMBER_DECLARATIONS
+                    ):
+                        other.member_of = decl.id
+
+    def _type_record_by_id(self, binding_id_value: str) -> _Record | None:
+        for record in self.records:
+            if record.binding.id == binding_id_value and (
+                record.class_like or record.binding.kind == "namespace"
+            ):
+                return record
+        return None
+
+    def _type_record_for_node(self, decl_node: Any | None) -> _Record | None:
+        if decl_node is None:
+            return None
+        name = decl_node.child_by_field_name("name")
+        name_id = None if name is None else name.id
+        for record in self.records:
+            if record.node.id == name_id and (
+                record.class_like or record.binding.kind == "namespace"
+            ):
+                return record
+        return None
+
+    def _enclosing_type_record(self, node: Any) -> _Record | None:
+        ancestor = node.parent
+        while ancestor is not None:
+            if ancestor.type in {
+                "function_declaration", "function_expression",
+                "generator_function_declaration", "generator_function",
+            }:
+                return None
+            if ancestor.type in {
+                "class_declaration", "class", "abstract_class_declaration",
+            }:
+                return self._type_record_for_node(ancestor)
+            ancestor = ancestor.parent
+        return None
+
+    def _member_lookup(
+        self,
+        type_record: _Record,
+        name: str,
+        position: int,
+        *,
+        static: bool,
+        via_this: bool,
+    ) -> _Record | None:
+        """BFS over the declaring type and its bases for member `name`."""
+        queue = [type_record]
+        visited: set[str] = set()
+        first = True
+        while queue:
+            current = queue.pop(0)
+            if current.binding.id in visited:
+                continue
+            visited.add(current.binding.id)
+            decl = current.node.parent
+            decl_id = None if decl is None else decl.id
+            namespace_member = current.binding.kind == "namespace"
+            for candidate in self.records:
+                if (
+                    decl_id is None
+                    or candidate.member_of != decl_id
+                    or candidate.binding.name != name
+                ):
+                    continue
+                if (
+                    not namespace_member
+                    and candidate.binding.kind != "enum_member"
+                    and candidate.member_static != static
+                ):
+                    continue
+                if candidate.member_visibility == "private" and (
+                    not via_this or not first
+                ):
+                    continue
+                if candidate.member_visibility == "protected" and not via_this:
+                    continue
+                return candidate
+            if decl_id is not None:
+                for base in self._type_bases.get(decl_id, ()):
+                    base_record = self._lookup(base, position, "type")
+                    if base_record is not None:
+                        queue.append(base_record)
+            first = False
+        return None
+
+    def _return_type_record(self, node: Any) -> _Record | None:
+        """Type record named by a call's return annotation, if resolvable."""
+        callee = node.child_by_field_name("function")
+        record: _Record | None = None
+        if callee is not None and callee.type == "identifier":
+            record = self._lookup(
+                self.text(callee), node.start_byte, "value"
+            )
+        elif callee is not None and callee.type == "member_expression":
+            property_node = callee.child_by_field_name("property")
+            if (
+                property_node is not None
+                and property_node.type == "property_identifier"
+            ):
+                record = self._resolve_member(
+                    callee.child_by_field_name("object"),
+                    self.text(property_node),
+                    node.start_byte,
+                )
+        if record is None or record.function_node is None:
+            return None
+        return_node = record.function_node.child_by_field_name("return_type")
+        if return_node is None:
+            for child in self.children(record.function_node):
+                if child.type in {"type_annotation", "return_type"}:
+                    return_node = child
+        if return_node is None:
+            return None
+        fact = self._type_fact(next(iter(self.children(return_node)), None))
+        if fact.kind != "named":
+            return None
+        return self._type_record_by_id(fact.type_id)
+
+    def _object_type(
+        self, node: Any | None, position: int
+    ) -> tuple[_Record | None, bool, bool]:
+        """(type record, static side, via this/super) for a member object."""
+        if node is None:
+            return None, False, False
+        if node.type == "this":
+            record = self._enclosing_type_record(node)
+            return record, False, True
+        if node.type == "super":
+            current = self._enclosing_type_record(node)
+            if current is None:
+                return None, True, True
+            decl = current.node.parent
+            for base in self._type_bases.get(
+                None if decl is None else decl.id, ()
+            )[:1]:
+                base_record = self._lookup(base, position, "type")
+                if base_record is not None:
+                    return base_record, True, True
+            return None, True, True
+        if node.type == "identifier":
+            record = self._lookup(self.text(node), position, "value")
+            if record is None:
+                return None, False, False
+            if record.class_like or record.binding.kind == "namespace":
+                return record, True, False
+            fact = record.binding.type
+            if fact is not None and fact.kind == "named":
+                return self._type_record_by_id(fact.type_id), False, False
+            fact = self._type_fact(record.type_node)
+            if fact.kind != "named":
+                return None, False, False
+            return self._type_record_by_id(fact.type_id), False, False
+        if node.type == "member_expression":
+            property_node = node.child_by_field_name("property")
+            if (
+                property_node is None
+                or property_node.type != "property_identifier"
+            ):
+                return None, False, False
+            member = self._resolve_member(
+                node.child_by_field_name("object"),
+                self.text(property_node),
+                position,
+            )
+            if member is None:
+                return None, False, False
+            if member.class_like or member.binding.kind == "namespace":
+                return member, True, False
+            fact = self._type_fact(member.type_node)
+            if fact.kind != "named":
+                return None, False, False
+            return self._type_record_by_id(fact.type_id), False, False
+        if node.type == "call_expression":
+            return self._return_type_record(node), False, False
+        if node.type == "new_expression":
+            constructor = node.child_by_field_name("constructor")
+            if constructor is not None and constructor.type in {
+                "identifier", "type_identifier",
+            }:
+                return (
+                    self._lookup(self.text(constructor), position, "type"),
+                    False,
+                    False,
+                )
+            return None, False, False
+        if node.type in {
+            "parenthesized_expression", "non_null_expression",
+            "as_expression", "satisfies_expression", "await_expression",
+        }:
+            return self._object_type(
+                next(iter(self.children(node)), None), position
+            )
+        return None, False, False
+
+    def _resolve_member(
+        self, object_node: Any | None, name: str, position: int
+    ) -> _Record | None:
+        type_record, static, via_this = self._object_type(
+            object_node, position
+        )
+        if type_record is None:
+            return None
+        return self._member_lookup(
+            type_record,
+            name,
+            position,
+            static=static,
+            via_this=via_this,
+        )
+
     def _resolve(
         self,
         node: Any,
@@ -1334,13 +1705,54 @@ class _TypeScriptBindings:
         if callee.type == "member_expression":
             receiver = callee.child_by_field_name("object")
             self._scan(receiver, owner, function_context, with_scopes)
+            property_node = callee.child_by_field_name("property")
+            member = None
+            if property_node is not None and property_node.type in {
+                "property_identifier", "private_property_identifier",
+            }:
+                member = self._resolve_member(
+                    receiver,
+                    self.text(property_node),
+                    node.start_byte,
+                )
+                if member is not None:
+                    self.add_reference(property_node, member, "call")
+            kind = "opaque_method"
             if optional:
                 kind = "opaque_optional"
             elif receiver is not None and receiver.type == "super":
                 kind = "opaque_super"
-            else:
-                kind = "opaque_method"
-            self._append_call(Call(self.span(node), args, owner, "", kind))
+            elif member is not None and member.binding.kind in {
+                "function", "associated_function",
+            }:
+                info = (
+                    self.function_infos.get(member.function_node.id)
+                    if member.function_node is not None
+                    else None
+                )
+                if member.body is None or info is None:
+                    kind = "opaque_bodyless"
+                elif info.is_async:
+                    kind = "opaque_async"
+                elif info.generator:
+                    kind = "opaque_generator"
+                elif info.generic:
+                    kind = "opaque_generic"
+                else:
+                    kind = "direct_local"
+            target = (
+                member.binding.id
+                if member is not None
+                and kind
+                in {
+                    "direct_local", "opaque_generic", "opaque_async",
+                    "opaque_bodyless",
+                }
+                else ""
+            )
+            self._append_call(
+                Call(self.span(node), args, owner, target, kind)
+            )
             return
         if callee.type == "super":
             self._append_call(
@@ -1640,8 +2052,9 @@ class _TypeScriptBindings:
             )
             return
         if node_type == "member_expression":
+            object_node = node.child_by_field_name("object")
             self._scan(
-                node.child_by_field_name("object"),
+                object_node,
                 owner,
                 function_context,
                 with_scopes,
@@ -1649,6 +2062,16 @@ class _TypeScriptBindings:
             property_node = node.child_by_field_name("property")
             if property_node is not None and property_node.type == "computed_property_name":
                 self._scan(property_node, owner, function_context, with_scopes)
+            elif property_node is not None and property_node.type in {
+                "property_identifier", "private_property_identifier",
+            }:
+                member = self._resolve_member(
+                    object_node,
+                    self.text(property_node),
+                    node.start_byte,
+                )
+                if member is not None:
+                    self.add_reference(property_node, member, "read")
             return
         if node_type == "subscript_expression":
             self._scan(node.child_by_field_name("object"), owner, function_context, with_scopes)
