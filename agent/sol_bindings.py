@@ -826,14 +826,6 @@ class _SolBindings:
                             ),
                             None,
                         )
-        elif obj.type == "member_expression":
-            # Member chains (`vault.token.transfer`): resolve the inner
-            # member first, then use its declared type.
-            _inner_member, inner, _inner_reason = self._resolve_member(obj)
-            if inner is not None:
-                contract = self._contract_for_type_node(
-                    inner.type_node, inner.owner
-                )
         elif obj.type == "array_access":
             # `tokens[0].transfer()`: the element type of a contract
             # array is contract-typed.
@@ -948,6 +940,18 @@ class _SolBindings:
         if obj.type == "member_expression":
             _member, record, _reason = self._resolve_member(obj)
             return record
+        if obj.type == "new_expression":
+            type_name = next(
+                (
+                    child
+                    for child in self.children(obj)
+                    if child.type == "type_name"
+                ),
+                None,
+            )
+            root = self._root_type_name(type_name)
+            if root:
+                return self._lookup_type_record(root, obj.start_byte, None)
         return None
 
     def _array_element_contract(
@@ -982,6 +986,13 @@ class _SolBindings:
             # contract itself.
             return self.contracts.get(record.binding.name)
         if record.binding.kind != "function":
+            if record.type_node is not None:
+                # Getter-style call on a declared variable, e.g.
+                # `this.token().f()` — the value has the variable's
+                # declared type.
+                return self._contract_for_type_node(
+                    record.type_node, record.owner
+                )
             return None
         function_node = record.node.parent
         if function_node is None:
@@ -989,9 +1000,15 @@ class _SolBindings:
         returns = self._return_parameters(function_node)
         if not returns:
             return None
-        return self._contract_for_type_node(
-            returns[0].child_by_field_name("type"), record.owner
-        )
+        type_node = returns[0].child_by_field_name("type")
+        if type_node is not None and re.match(
+            r"\s*function\b", self.text(type_node)
+        ):
+            # A function-typed return (`returns (function() ...)`) has
+            # no contract member surface; `_type_fact` would root at the
+            # first identifier inside the signature.
+            return None
+        return self._contract_for_type_node(type_node, record.owner)
 
     def _canonical_type_text(self, text: str) -> str:
         # Whitespace (`uint256 [ ]`) and the bare `uint`/`int`/`byte`

@@ -9710,10 +9710,12 @@ the named library's scope when the object's declared type text equals
 the `for` target (bare `uint`/`int`/`byte` spellings normalize to
 their canonical widths — `uint`/`int` are `uint256`/`int256`, `byte`
 is `bytes1`; dynamic `bytes` is distinct). Member resolution also
-follows non-identifier objects: chains (`this.token.transfer`), array
+follows non-identifier objects: array
 elements of contract arrays (`tokens[0].transfer`), call returns and
 constructors/casts (`getToken().transfer`, `Token(addr).transfer`)
-resolve against the value's declared contract type. solc picks among
+resolve against the value's declared contract type (`new Token().f`
+via the `new_expression` type name, `this.token().f` via the public
+getter's declared variable type). solc picks among
 several applicable directives by implicit argument types, which the
 lexical side does not model, so a name declared by more than one
 matching library reports `ambiguous_overload` rather than binding the
@@ -9723,8 +9725,10 @@ emits a `read` reference like any other type name. Declared members
 still win over directives, matching solc's lookup order. The aliased
 form `using {f as g} for T` fails parse at the grammar level, so the
 whole source stays fail-closed rather than resolving half of it.
-Nested arrays, mappings, member objects on non-contract types and
-overloaded library functions keep their opaque treatment.
+Nested arrays, mappings, member objects on non-contract types,
+function-typed returns (`returns (function() ...)`), member
+chains on inner members and overloaded library functions keep
+their opaque treatment.
 
 **回帰ゲート**: `uv run pytest tests/test_sol_bindings.py tests/test_sol_compiler_snapshot.py -q`
 ### C06 second compiler-backed Solidity binding slice — MemberAccess
@@ -9738,8 +9742,9 @@ while builtins (`.length`, `.push`, `msg.sender`) carry no
 `member_access.sol` fixture exercises member calls, a public getter,
 builtin members, reassignment, `this.`/`super.`/inherited member
 calls, a `using SafeMath for uint256` member call and a file-level
-`using Stamps for Coin global` call: 25 `agree` and 5 `builtin`
-statuses against the lexical report's member resolution. Envelope shape, pinned-version allowlist
+`using Stamps for Coin global` call, contract-array element calls,
+call returns, `new Token()` and public-getter calls: 35 `agree` and
+6 `builtin` statuses against the lexical report's member resolution. Envelope shape, pinned-version allowlist
 and fail-closed boundary are unchanged. Metadata comparison only — no
 new capture surface, route or claim.
 
