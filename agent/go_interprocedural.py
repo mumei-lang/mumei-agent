@@ -21866,6 +21866,44 @@ class _Builder:
             for dirty_id in double_pointer_dirty_targets.values():
                 self._double_pointer_dirty.add(dirty_id)
             for i, (ref, value) in enumerate(zip(refs, values)):
+                if (
+                    ref is not None
+                    and len(lefts) == len(rights)
+                    and rights[i].type == "call_expression"
+                ):
+                    target_id = getattr(ref, "binding_id", None)
+                    target_binding = (
+                        self.bindings.get(target_id)
+                        if target_id is not None
+                        else None
+                    )
+                    rhs = self._strip_parens(rights[i])
+                    callee = self._strip_parens(
+                        rhs.child_by_field_name("function")
+                    )
+                    callee_ref = (
+                        self.references.get(self.node_key(callee))
+                        if callee is not None
+                        and callee.type == "identifier"
+                        else None
+                    )
+                    callee_id = (
+                        callee_ref.binding_id
+                        if callee_ref is not None
+                        else None
+                    )
+                    if (
+                        (conditional or self._may_skip > 0)
+                        and target_binding is not None
+                        and target_binding.type is not None
+                        and target_binding.type.kind == "function"
+                        and callee_id is not None
+                        and callee_id not in self.closure_factory_literals
+                        and callee_id in self.opaque_callees
+                    ):
+                        raise _Unsupported(
+                            "unsupported_statement", _span(node)
+                        )
                 if ref is None:
                     if i in external_write_targets:
                         # The member/package-var store landed in
@@ -34684,6 +34722,9 @@ class _Builder:
             ).append((node, func_arg_id))
         if bound_id is not None:
             may_skip = self._conditional or self._may_skip > 0
+            was_factory_literal = (
+                bound_id in self.closure_factory_literals
+            )
             if in_composite:
                 # An element literal inside `fs := []func(){…}` —
                 # the container may hold other elements with their
@@ -34828,6 +34869,8 @@ class _Builder:
                 )
             else:
                 self.closure_factory_literals.pop(bound_id, None)
+            if may_skip and was_factory_literal:
+                self.opaque_callees.add(bound_id)
         return deps
 
     def _bound_closure_call(

@@ -20496,7 +20496,7 @@ def test_conditional_literal_rebind_keeps_factory_result_snapshot(
             "if c { g = func() func() { "
             "return func() { w = v } } }; "
             "h := g(); h(); return w }",
-            frozenset({0}),
+            frozenset({0, 2}),
             id="callback-write",
         ),
     ],
@@ -20516,10 +20516,11 @@ def test_conditional_factory_assignment_retains_current_capture_dependency(
     result = named(
         *unit(
             go_types_helper,
-            "func F(x, y int64, c bool) int64 { "
+            "func F(x, y int64, c bool, cb func() int64) int64 { "
             "v := y; u := y; "
-            "g := func() func() int64 { "
-            "return func() int64 { return v } }; "
+            "g := func() func() int64 { return cb }; "
+            "if c { g = func() func() int64 { "
+            "return func() int64 { return v } } }; "
             "h := func() int64 { return u }; "
             "if c { h = g() }; v = x; return h() }",
         )
