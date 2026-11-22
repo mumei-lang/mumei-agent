@@ -1209,6 +1209,23 @@ class _TypeScriptBindings:
             )
         return None
 
+    def _initializer_type_record(
+        self, record: _Record, position: int
+    ) -> _Record | None:
+        """Type named by a variable's `new T(...)` initializer."""
+        declarator = record.node.parent
+        if declarator is None or declarator.type != "variable_declarator":
+            return None
+        value = declarator.child_by_field_name("value")
+        if value is None or value.type != "new_expression":
+            return None
+        constructor = value.child_by_field_name("constructor")
+        if constructor is None or constructor.type not in {
+            "identifier", "type_identifier",
+        }:
+            return None
+        return self._lookup(self.text(constructor), position, "type")
+
     def _object_type(
         self, node: Any | None, position: int
     ) -> tuple[_Record | None, bool, bool]:
@@ -1242,9 +1259,14 @@ class _TypeScriptBindings:
             if fact is not None and fact.kind == "named":
                 return self._type_record_by_id(fact.type_id), False, False
             fact = self._type_fact(record.type_node)
-            if fact.kind != "named":
-                return None, False, False
-            return self._type_record_by_id(fact.type_id), False, False
+            if fact.kind == "named":
+                return (
+                    self._type_record_by_id(fact.type_id),
+                    False,
+                    False,
+                )
+            inferred = self._initializer_type_record(record, position)
+            return inferred, False, False
         if node.type == "member_expression":
             property_node = node.child_by_field_name("property")
             if (

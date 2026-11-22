@@ -1000,10 +1000,11 @@ c.method(); C.count;
     base = _member_bindings(report, "base", "associated_function")[0]
     assert any(r.binding_id == base.id for r in _refs(report, source, "base"))
     method = _member_bindings(report, "method", "associated_function")[0]
-    assert any(
-        c.kind == "direct_local" and c.target == method.id
-        for c in report.calls
-    )
+    virtual = [
+        c for c in report.calls
+        if c.kind == "opaque_virtual" and c.target == method.id
+    ]
+    assert len(virtual) == 2  # `other.method()` and `c.method()`
     field = _member_bindings(report, "field", "struct_field")[0]
     assert any(r.binding_id == field.id for r in _refs(report, source, "field"))
     count = _member_bindings(report, "count", "struct_field")[0]
@@ -1058,12 +1059,12 @@ getCar().drive();
     assert any(r.binding_id == engine.id for r in _refs(report, source, "engine"))
     start = _member_bindings(report, "start", "associated_function")[0]
     assert any(
-        c.kind == "direct_local" and c.target == start.id
+        c.kind == "opaque_virtual" and c.target == start.id
         for c in report.calls
     )
     drive = _member_bindings(report, "drive", "associated_function")[0]
     assert any(
-        c.kind == "direct_local" and c.target == drive.id
+        c.kind == "opaque_virtual" and c.target == drive.id
         for c in report.calls
     )
 
@@ -1080,7 +1081,7 @@ function go(cars: Car[], row: Car[][]) {
     start = _member_bindings(report, "start", "associated_function")[0]
     calls = [
         c for c in report.calls
-        if c.kind == "direct_local" and c.target == start.id
+        if c.kind == "opaque_virtual" and c.target == start.id
     ]
     assert len(calls) == 2
 
@@ -1106,6 +1107,48 @@ class C extends Lib.Base { run(): void { this.base(); } }
     report = build_ts_bindings(source)
     base = _member_bindings(report, "base", "associated_function")[0]
     assert any(
-        c.kind == "direct_local" and c.target == base.id
+        c.kind == "opaque_virtual" and c.target == base.id
         for c in report.calls
     )
+
+
+def test_member_call_kinds_follow_method_modifiers():
+    source = """
+class C {
+    static async fetch(): Promise<number> { return 0 }
+    *items(): Generator<number> { yield 1 }
+    static make(): void {}
+}
+namespace N { export function *gen(): Generator<number> { yield 2 } }
+C.fetch(); C.make(); const c = new C(); c.items(); N.gen();
+"""
+    report = build_ts_bindings(source)
+    fetch = _member_bindings(report, "fetch", "associated_function")[0]
+    items = _member_bindings(report, "items", "associated_function")[0]
+    make = _member_bindings(report, "make", "associated_function")[0]
+    gen = [b for b in report.bindings if b.name == "gen"][0]
+    kinds = {(c.kind, c.target) for c in report.calls}
+    assert ("opaque_async", fetch.id) in kinds
+    assert ("opaque_generator", items.id) in kinds
+    assert ("opaque_generator", gen.id) in kinds
+    assert ("direct_local", make.id) in kinds
+
+
+def test_member_base_resolves_at_declaration_scope():
+    source = """
+class Base { greet(): void {} }
+class Derived extends Base { }
+function scope() {
+    class Base { other(): void {} }
+    const d = new Derived();
+    d.greet();
+}
+"""
+    report = build_ts_bindings(source)
+    greet = _member_bindings(report, "greet", "associated_function")[0]
+    other = _member_bindings(report, "other", "associated_function")[0]
+    assert any(
+        c.kind == "opaque_virtual" and c.target == greet.id
+        for c in report.calls
+    )
+    assert not any(c.target == other.id for c in report.calls)
