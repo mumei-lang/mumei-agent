@@ -5044,6 +5044,22 @@ effects. Receiver values without recorded function fields keep the
 ordinary bound-method path; method-value escapes to other consumers
 stay `unsupported_expression`.
 
+### C07 slice and array element function fields
+
+Direct calls through indexed slice/array elements of local or parameter
+containers now carry recorded function-field closure dependencies. Value
+struct element arguments likewise propagate captures and queued writes;
+deferred and goroutine calls use the same records. Inferred elided struct
+literals inside supported collection literals record their function fields.
+Map access, pointer-element arguments and unsupported element-copy shapes
+remain fail-closed.
+
+Elided struct elements also resolve through local named slice, array and map
+types, including bounded chains of local type declarations. Ambiguous
+closure-valued elided literals through imported, generic or otherwise
+unresolved collection shapes fail closed; elided values without function
+fields retain ordinary analysis.
+
 ### C06 imported method calls on concrete named types
 
 A method call `recv.M(args)` now classifies as `direct_import` when

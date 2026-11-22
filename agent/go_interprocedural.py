@@ -4458,26 +4458,292 @@ class _Builder:
                 return None
         return tuple(result)
 
+    def _local_type_declaration_type_node(
+        self, binding: Any
+    ) -> tuple[Any, int] | None:
+        span = getattr(binding, "span", None)
+        if span is None:
+            return None
+        file = getattr(span, "file", self.current_file)
+        raw = self.raws.get(file)
+        root = _syntax(raw) if raw is not None else None
+        if root is None:
+            return None
+        pending = [root]
+        while pending:
+            candidate = pending.pop()
+            if candidate.type in {"type_spec", "type_alias"}:
+                name = candidate.child_by_field_name("name")
+                if (
+                    name is not None
+                    and name.start_byte == span.start
+                    and name.end_byte == span.end
+                ):
+                    if candidate.child_by_field_name(
+                        "type_parameters"
+                    ) is not None:
+                        return None
+                    type_node = candidate.child_by_field_name("type")
+                    return (
+                        (type_node, file) if type_node is not None
+                        else None
+                    )
+            pending.extend(reversed(candidate.named_children))
+        return None
+
+    def _local_collection_element_type_node(
+        self, node: Any, file: int
+    ) -> tuple[Any, int, bool]:
+        seen: set[str] = set()
+        current = node
+        collection = False
+        for _ in range(8):
+            while (
+                current is not None
+                and current.type == "parenthesized_type"
+            ):
+                current = next(
+                    (
+                        child
+                        for child in current.named_children
+                        if child.type != "comment"
+                    ),
+                    None,
+                )
+            if current is None:
+                return None, file, collection
+            if current.type in {"slice_type", "array_type"}:
+                collection = True
+                return (
+                    current.child_by_field_name("element"),
+                    file,
+                    collection,
+                )
+            if current.type == "map_type":
+                collection = True
+                return (
+                    current.child_by_field_name("value"),
+                    file,
+                    collection,
+                )
+            if current.type != "type_identifier":
+                return None, file, collection
+            ref = self.references.get(
+                (file, current.start_byte, current.end_byte)
+            )
+            if ref is None or ref.kind == "import" or not ref.binding_id:
+                return None, file, collection
+            binding = self.bindings.get(ref.binding_id)
+            if binding is None or binding.kind != "type":
+                return None, file, collection
+            collection |= binding.type.kind in {
+                "slice",
+                "array",
+                "map",
+            }
+            if (
+                binding.id in seen
+                or getattr(binding.type, "has_type_args", False)
+            ):
+                return None, file, collection
+            seen.add(binding.id)
+            self.pinned.add(binding.type.type_id or binding.id)
+            declared = self._local_type_declaration_type_node(binding)
+            if declared is None:
+                return None, file, collection
+            current, file = declared
+        return None, file, collection
+
+    def _literal_value_has_func_closure(self, literal: Any) -> bool:
+        for element in _children(literal):
+            if element.type == "keyed_element":
+                value = element.child_by_field_name("value")
+            elif element.type == "literal_element":
+                value = next(iter(element.named_children), None)
+            else:
+                continue
+            while value is not None and value.type == "literal_element":
+                value = next(iter(value.named_children), None)
+            value = self._strip_parens(value)
+            if value is None:
+                continue
+            if value.type == "func_literal":
+                return True
+            if value.type == "identifier":
+                ref = self.references.get(self.node_key(value))
+                binding = (
+                    self.bindings.get(ref.binding_id)
+                    if ref is not None
+                    else None
+                )
+                if (
+                    binding is not None
+                    and binding.type is not None
+                    and binding.type.kind == "function"
+                    and self._has_closure_records(binding.id)
+                ):
+                    return True
+            if (
+                value.type == "literal_value"
+                and self._literal_value_has_func_closure(value)
+            ):
+                return True
+        return False
+
     def _local_struct_literal_fact(
         self, literal: Any
     ) -> tuple[Any, Any] | None:
         type_node = literal.child_by_field_name("type")
+        type_file = self.current_file
+        ambiguous_elided_type = False
+        elided_element = False
+        if type_node is None and literal.type == "literal_value":
+            current = literal
+            nested_levels = 0
+            while (
+                current.parent is not None
+                and current.parent.type
+                in {
+                    "keyed_element",
+                    "literal_element",
+                    "literal_value",
+                    "parenthesized_expression",
+                }
+            ):
+                if current.parent.type == "literal_value":
+                    nested_levels += 1
+                current = current.parent
+            elided_element = (
+                current.start_byte != literal.start_byte
+                or current.end_byte != literal.end_byte
+            )
+            outer = current.parent
+            if outer is None or outer.type != "composite_literal":
+                return None
+            container_type = outer.child_by_field_name("type")
+            if container_type is None:
+                return None
+            if nested_levels > 1:
+                type_node = container_type
+                for _ in range(nested_levels):
+                    if type_node is not None and type_node.type in {
+                        "slice_type",
+                        "array_type",
+                    }:
+                        type_node = type_node.child_by_field_name(
+                            "element"
+                        )
+                        ambiguous_elided_type = True
+                    elif (
+                        type_node is not None
+                        and type_node.type == "map_type"
+                    ):
+                        type_node = type_node.child_by_field_name(
+                            "value"
+                        )
+                        ambiguous_elided_type = True
+                    elif (
+                        type_node is not None
+                        and type_node.type == "type_identifier"
+                    ):
+                        (
+                            type_node,
+                            type_file,
+                            collection_type,
+                        ) = self._local_collection_element_type_node(
+                            type_node, self.current_file
+                        )
+                        ambiguous_elided_type |= collection_type
+                        if type_node is None:
+                            ambiguous_elided_type = True
+                            break
+                    else:
+                        ambiguous_elided_type = True
+                        type_node = None
+                        break
+            elif container_type.type in {"slice_type", "array_type"}:
+                type_node = container_type.child_by_field_name("element")
+                ambiguous_elided_type = True
+            elif container_type.type == "map_type":
+                type_node = container_type.child_by_field_name("value")
+                ambiguous_elided_type = True
+            elif container_type.type == "type_identifier":
+                ref = self.references.get(self.node_key(container_type))
+                container_binding = (
+                    self.bindings.get(ref.binding_id)
+                    if ref is not None
+                    and ref.kind != "import"
+                    and ref.binding_id
+                    else None
+                )
+                if (
+                    container_binding is not None
+                    and self._struct_value_fact(container_binding.type)
+                    is not None
+                ):
+                    ambiguous_elided_type = False
+                else:
+                    (
+                        type_node,
+                        type_file,
+                        collection_type,
+                    ) = self._local_collection_element_type_node(
+                        container_type, self.current_file
+                    )
+                    ambiguous_elided_type = (
+                        collection_type
+                        or container_binding is None
+                    )
+            else:
+                ambiguous_elided_type = True
+
+        def fail_if_unresolved() -> None:
+            if (
+                elided_element
+                and ambiguous_elided_type
+                and (
+                    type_node is None
+                    or type_node.type
+                    in {
+                        "type_identifier",
+                        "qualified_type",
+                        "generic_type",
+                        "struct_type",
+                    }
+                )
+                and self._literal_value_has_func_closure(literal)
+            ):
+                raise _Unsupported(
+                    "unsupported_expression", _span(literal)
+                )
+
         if type_node is None or type_node.type != "type_identifier":
+            fail_if_unresolved()
             return None
-        ref = self.references.get(self.node_key(type_node))
+        ref = self.references.get(
+            (type_file, type_node.start_byte, type_node.end_byte)
+        )
         if (
             ref is None
             or ref.kind == "import"
             or ref.binding_id is None
         ):
+            fail_if_unresolved()
             return None
         binding = self.bindings.get(ref.binding_id)
-        if binding is None or binding.kind != "type":
+        if binding is None:
+            fail_if_unresolved()
             return None
-        if self._struct_literal_type_id(type_node) is None:
+        if binding.kind != "type":
+            return None
+        if getattr(binding.type, "has_type_args", False):
+            fail_if_unresolved()
             return None
         fact = self._struct_value_fact(binding.type)
-        return (fact, binding) if fact is not None else None
+        if fact is None:
+            return None
+        self.pinned.add(binding.type.type_id or binding.id)
+        return fact, binding
 
     def _func_literal_struct_member(
         self, literal: Any, node: Any
@@ -4485,6 +4751,38 @@ class _Builder:
         body = literal.child_by_field_name("body")
         if body is None:
             return None
+
+        def nested_member(value: Any) -> Any | None:
+            value = self._strip_parens(value)
+            if value is None or value.type != "literal_value":
+                return None
+            inferred = self._local_struct_literal_fact(value)
+            if inferred is not None:
+                fact, anchor = inferred
+                field_values = self._struct_literal_field_values(
+                    value, fact, anchor
+                )
+                if field_values is not None:
+                    for member, field_value in field_values:
+                        if self._strip_parens(field_value) == node:
+                            return member
+            for child in _children(value):
+                if child.type == "keyed_element":
+                    nested = child.child_by_field_name("value")
+                elif child.type == "literal_element":
+                    nested = next(iter(child.named_children), None)
+                else:
+                    continue
+                while (
+                    nested is not None
+                    and nested.type == "literal_element"
+                ):
+                    nested = next(iter(nested.named_children), None)
+                member = nested_member(nested)
+                if member is not None:
+                    return member
+            return None
+
         element = None
         for candidate in _children(body):
             if candidate.type == "keyed_element":
@@ -4495,6 +4793,16 @@ class _Builder:
                 continue
             while value is not None and value.type == "literal_element":
                 value = next(iter(value.named_children), None)
+            nested = nested_member(value)
+            if nested is not None:
+                if (
+                    nested.type is not None
+                    and nested.type.kind == "function"
+                ):
+                    return nested.id
+                raise _Unsupported(
+                    "unsupported_expression", _span(node)
+                )
             if self._strip_parens(value) == node:
                 element = candidate
                 break
@@ -4516,6 +4824,49 @@ class _Builder:
     def _func_literal_struct_element_member(
         self, literal: Any, element: Any, node: Any
     ) -> tuple[bool, Any | None]:
+        element_value = (
+            element.child_by_field_name("value")
+            if element.type == "keyed_element"
+            else next(iter(element.named_children), None)
+            if element.type == "literal_element"
+            else None
+        )
+        while (
+            element_value is not None
+            and element_value.type == "literal_element"
+        ):
+            element_value = next(
+                iter(element_value.named_children), None
+            )
+        if (
+            element_value is not None
+            and element_value.type == "literal_value"
+            and element_value.start_byte <= node.start_byte
+            and node.end_byte <= element_value.end_byte
+        ):
+            inferred = self._local_struct_literal_fact(element_value)
+            if inferred is not None:
+                fact, anchor = inferred
+                field_values = self._struct_literal_field_values(
+                    element_value, fact, anchor
+                )
+                if field_values is not None:
+                    for member, value in field_values:
+                        if self._strip_parens(value) == node:
+                            return True, member
+                return True, None
+        if literal.type == "literal_value":
+            inferred = self._local_struct_literal_fact(literal)
+            if inferred is not None:
+                fact, anchor = inferred
+                field_values = self._struct_literal_field_values(
+                    literal, fact, anchor
+                )
+                if field_values is not None:
+                    for member, value in field_values:
+                        if self._strip_parens(value) == node:
+                            return True, member
+                return True, None
         type_node = literal.child_by_field_name("type")
         type_id = self._struct_literal_type_id(type_node)
         if type_id is None:
@@ -4593,6 +4944,8 @@ class _Builder:
         records_before: dict[str, Any] | None = None,
     ) -> None:
         body = literal.child_by_field_name("body")
+        if body is None and literal.type == "literal_value":
+            body = literal
         if body is None:
             return
         captures = (
@@ -4655,7 +5008,17 @@ class _Builder:
             while value is not None and value.type == "literal_element":
                 value = next(iter(value.named_children), None)
             value = self._strip_parens(value)
-            if value is None or value.type != "identifier":
+            if value is None:
+                continue
+            if (
+                value.type == "literal_value"
+                and self._local_struct_literal_fact(value) is not None
+            ):
+                self._adopt_struct_composite_closure_records(
+                    value, params, records_before
+                )
+                continue
+            if value.type != "identifier":
                 continue
             ref = self.references.get(self.node_key(value))
             src_id = ref.binding_id if ref is not None else None
@@ -12898,6 +13261,68 @@ class _Builder:
             and not self._package_level(binding)
         )
 
+    def _struct_collection_element_field_record_ids(
+        self, fact: Any, anchor: Any | None = None
+    ) -> tuple[str, ...]:
+        if (
+            fact is None
+            or fact.kind not in {"slice", "array", "map", "chan"}
+            or getattr(fact, "elem", None) is None
+        ):
+            return ()
+        element_fact = fact.elem
+        if element_fact.kind == "pointer":
+            element_fact = getattr(element_fact, "elem", None)
+        struct_fact = self._struct_value_fact(element_fact)
+        if struct_fact is None:
+            return ()
+        return self._struct_field_closure_record_ids(
+            struct_fact, anchor
+        )
+
+    def _slice_array_struct_element_parts(
+        self,
+        node: Any,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+    ) -> tuple[Any, Any] | None:
+        value = self._strip_parens(node)
+        if value is None or value.type != "index_expression":
+            return None
+        container = self._strip_parens(
+            value.child_by_field_name("operand")
+        )
+        if container is None or container.type not in {
+            "identifier",
+            "selector_expression",
+        }:
+            return None
+        root_ref = self._receiver_root_ref(container)
+        if (
+            root_ref is None
+            or root_ref.kind == "import"
+            or root_ref.binding_id not in params
+            and root_ref.binding_id not in locals_
+        ):
+            return None
+        container_fact = self._deferred_expression_type(container)
+        if (
+            container_fact is None
+            or container_fact.kind not in {"slice", "array"}
+            or getattr(container_fact, "elem", None) is None
+            or container_fact.elem.kind == "pointer"
+        ):
+            return None
+        element_struct = self._struct_value_fact(container_fact.elem)
+        if (
+            element_struct is None
+            or not element_struct.type_id
+            or self._type_fact_has_type_args(container_fact.elem)
+        ):
+            return None
+        index = value.child_by_field_name("index")
+        return (container, index) if index is not None else None
+
     def _struct_argument_field_record_ids(
         self, node: Any
     ) -> tuple[str, ...]:
@@ -12956,9 +13381,46 @@ class _Builder:
                             anchor = self.bindings.get(ref.binding_id)
                     elif container.type == "selector_expression":
                         anchor = self._field_member(container)
-        struct_fact = self._struct_value_fact(fact)
+        collection_element = False
+        if fact is not None and fact.kind in {
+            "slice",
+            "array",
+            "map",
+            "chan",
+        }:
+            collection_records = (
+                self._struct_collection_element_field_record_ids(
+                    fact, anchor
+                )
+            )
+            element_fact = getattr(fact, "elem", None)
+            if (
+                fact.kind not in {"slice", "array"}
+                or element_fact is None
+                or element_fact.kind == "pointer"
+            ):
+                if collection_records:
+                    raise _Unsupported(
+                        "unsupported_expression", _span(node)
+                    )
+                return ()
+            struct_fact = self._struct_value_fact(element_fact)
+            if (
+                struct_fact is None
+                or not struct_fact.type_id
+                or self._type_fact_has_type_args(element_fact)
+            ):
+                if collection_records:
+                    raise _Unsupported(
+                        "unsupported_expression", _span(node)
+                    )
+                return ()
+            collection_element = True
+        else:
+            struct_fact = self._struct_value_fact(fact)
         if (
-            struct_fact is None
+            not collection_element
+            and struct_fact is None
             and fact is not None
             and fact.kind == "pointer"
             and getattr(fact, "elem", None) is not None
@@ -36781,6 +37243,7 @@ class _Builder:
         resolves to neither stays closed."""
         target_id: str | None = None
         nested_record_ids: set[str] | None = None
+        indexed_struct_record_id: str | None = None
         pin_fact: Any = None
         callee_deps: frozenset[int] = frozenset()
         operand = callee_node.child_by_field_name("operand")
@@ -36831,13 +37294,55 @@ class _Builder:
                     )
                 )
             elif operand is not None:
-                # `s.f` reads `s` — the operand's deps are the
-                # callee's own read set (a `func` field itself has
-                # no dep model).
-                callee_deps = self.expression(
-                    operand, fn, params, locals_, transfers, count,
-                    depth + 1,
+                indexed_struct_parts = (
+                    self._slice_array_struct_element_parts(
+                        operand, params, locals_
+                    )
+                    if (
+                        member is not None
+                        and member.kind in {"var", "variable"}
+                        and member.type is not None
+                        and member.type.kind == "function"
+                    )
+                    else None
                 )
+                if indexed_struct_parts is not None:
+                    container, element_index = indexed_struct_parts
+                    container_member = self._field_member(container)
+                    container_ref = (
+                        self._receiver_root_ref(container)
+                        if container_member is None
+                        else None
+                    )
+                    indexed_struct_record_id = (
+                        container_member.id
+                        if container_member is not None
+                        else container_ref.binding_id
+                        if container_ref is not None
+                        else None
+                    )
+                    callee_deps = self.expression(
+                        container, fn, params, locals_, transfers,
+                        count, depth + 1,
+                    )
+                    if element_index.type not in {
+                        "int_literal",
+                        "rune_literal",
+                        "interpreted_string_literal",
+                        "raw_string_literal",
+                    }:
+                        callee_deps |= self.expression(
+                            element_index, fn, params, locals_,
+                            transfers, count, depth + 1,
+                        )
+                else:
+                    # `s.f` reads `s` — the operand's deps are the
+                    # callee's own read set (a `func` field itself has
+                    # no dep model).
+                    callee_deps = self.expression(
+                        operand, fn, params, locals_, transfers, count,
+                        depth + 1,
+                    )
         elif callee_node.type == "index_expression":
             index = callee_node.child_by_field_name("index")
             if operand_member_import is not None:
@@ -37050,6 +37555,16 @@ class _Builder:
                 callee_node, locals_, params
             )
             target_id = self._immediate_span_id(callee_node)
+        if (
+            indexed_struct_record_id is not None
+            and target_id is not None
+            and indexed_struct_record_id != target_id
+            and self._has_closure_records(indexed_struct_record_id)
+        ):
+            nested_record_ids = {
+                target_id,
+                indexed_struct_record_id,
+            }
         if target_id is None:
             raise _Unsupported("unsupported_expression", _span(node))
         deps = callee_deps | self.indirect_writes
