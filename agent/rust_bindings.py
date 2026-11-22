@@ -2330,11 +2330,29 @@ class _RustBindings:
                 if declared is not None:
                     return declared
                 return self._record_type(member, node.start_byte)
-            element = self._tuple_element_node(
-                node.child_by_field_name("value"),
-                node.child_by_field_name("field"),
-            )
-            return self._annotation_type(element)
+            value_node = node.child_by_field_name("value")
+            field_node = node.child_by_field_name("field")
+            element = self._tuple_element_node(value_node, field_node)
+            if element is not None:
+                return self._annotation_type(element)
+            # `p.0` on a spelled tuple binding (`for p in a.zip(b)`)
+            # has no annotation node — index into the spelled args.
+            if field_node is not None:
+                index_text = self.text(field_node).strip()
+                if index_text.isdigit():
+                    _, spelled_args = self._receiver_type(value_node)
+                    if spelled_args is not None:
+                        spelled_args = spelled_args.strip()
+                        if self._paren_wraps(spelled_args):
+                            spelled = self._type_arg_list(
+                                spelled_args[1:-1]
+                            )
+                            index = int(index_text)
+                            if index < len(spelled):
+                                return self._spelled_type(
+                                    spelled[index], node.start_byte
+                                )
+            return None, None
         if node.type == "call_expression":
             callee_node = node.child_by_field_name("function")
             callee = (

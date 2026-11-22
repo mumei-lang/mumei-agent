@@ -5376,3 +5376,27 @@ fn f(m: HashMap<Q, P>, v: Vec<P>) {
     assert _call(report, source, "k.q()").target == q.id
     assert _call(report, source, "val.p()").target == p.id
     assert _call(report, source, "o.p()").target == p.id
+
+
+def test_tuple_index_on_spelled_zip_pair_binding() -> None:
+    source = """
+struct P;
+struct Q;
+impl P { fn m(&self) {} }
+impl Q { fn q(&self) {} }
+fn f(a: Vec<P>, b: Vec<Q>) {
+    for p in a.iter().zip(b.iter()) {
+        p.0.m();
+        p.1.q();
+    }
+    for t in a.iter().enumerate() {
+        t.1.m();
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = _bindings(report, "m", "associated_function")[0]
+    q = _bindings(report, "q", "associated_function")[0]
+    assert _call(report, source, "p.0.m()").target == m.id
+    assert _call(report, source, "p.1.q()").target == q.id
+    assert _call(report, source, "t.1.m()").target == m.id
