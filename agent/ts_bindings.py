@@ -1445,6 +1445,7 @@ class _TypeScriptBindings:
         extra_seed: tuple[_Record, ...] = (),
         collect_extras: list[_Record] | None = None,
         args_node: Any | None = None,
+        arg_nodes: list | None = None,
     ) -> _Record | None:
         """BFS over the declaring type and its bases for member `name`.
 
@@ -1472,6 +1473,7 @@ class _TypeScriptBindings:
                 extra_seed=extra_seed,
                 collect_extras=collect_extras,
                 args_node=args_node,
+                arg_nodes=arg_nodes,
             )
         finally:
             self._member_lookup_active.discard(active_key)
@@ -1488,6 +1490,7 @@ class _TypeScriptBindings:
         extra_seed: tuple[_Record, ...] = (),
         collect_extras: list[_Record] | None = None,
         args_node: Any | None = None,
+        arg_nodes: list | None = None,
     ) -> _Record | None:
         queue: list[tuple[Any, bool]] = [(type_record, False)]
         # Declaration merging: a namespace may merge with a class,
@@ -1603,7 +1606,9 @@ class _TypeScriptBindings:
                 else 1
             )
         if args_node is not None:
-            narrowed = self._narrow_overloads(matches, args_node)
+            narrowed = self._narrow_overloads(
+                matches, args_node, arg_nodes
+            )
             # A clause-authored name (`export {f as g}` in one sibling
             # block) pins the referent to that block's declaration —
             # keep it ahead of overload narrowing, which would drop it
@@ -1661,22 +1666,43 @@ class _TypeScriptBindings:
         return matches[0]
 
     def _narrow_overloads(
-        self, matches: list[_Record], args_node: Any
+        self,
+        matches: list[_Record],
+        args_node: Any,
+        arg_nodes: list | None = None,
+        type_args: list[str] | None = None,
     ) -> list[_Record]:
         """Pick the first overload whose signature the arguments fit.
 
         Mirrors tsc's first-matching-signature rule over arity and
-        literal/identifier argument kinds. A `...arg` spread or fewer
-        than two signature-shaped candidates leaves the list untouched;
-        when nothing fits, the original match order is kept so the
-        reference still lands on a same-named member."""
-        args = [
-            child
-            for child in self.children(args_node)
-            if child.type != "comment"
-        ]
-        if any(arg.type == "spread_element" for arg in args):
-            return matches
+        literal/identifier argument kinds. A `...arg` spread expands
+        when its operand's declared type is a tuple; other spreads or
+        fewer than two signature-shaped candidates leave the list
+        untouched. `type_args` carries the call's explicit type
+        arguments so constraints disqualify an overload and defaults
+        inform the value-argument matching. When nothing fits, the
+        original match order is kept so the reference still lands on
+        a same-named member."""
+        args = (
+            arg_nodes
+            if arg_nodes is not None
+            else [
+                child
+                for child in self.children(args_node)
+                if child.type != "comment"
+            ]
+        )
+        specs: list[tuple[Any | None, str | None, int]] = []
+        for arg in args:
+            if arg.type == "spread_element":
+                expanded = self._spread_arg_specs(arg)
+                if expanded is None:
+                    return matches
+                specs.extend(expanded)
+            else:
+                specs.append(
+                    (arg, self._arg_kind(arg), arg.start_byte)
+                )
         if matches and matches[0].function_node is None:
             # A same-named property/const member overrides everything
             # behind it — narrowing must not cross the nearest
@@ -1719,23 +1745,46 @@ class _TypeScriptBindings:
         if len(signatures) < 2:
             return matches
 
+        bindings_map: dict[str, dict[str, str] | None] = {}
+        if type_args is not None:
+            bindings_map = {
+                candidate.binding.id: self._type_arg_bindings(
+                    candidate, type_args, args_node.start_byte
+                )
+                for candidate in signatures
+            }
+            eligible = [
+                candidate
+                for candidate in signatures
+                if bindings_map[candidate.binding.id] is not None
+            ]
+            if eligible:
+                # An explicit type argument that breaks a constraint
+                # (`f<number>` against `f<T extends string>`)
+                # disqualifies that overload entirely.
+                signatures = eligible
+
         remaining = [
             candidate
             for candidate in signatures
-            if self._arity_accepts(candidate, len(args))
+            if self._arity_accepts(candidate, len(specs))
         ]
         if not remaining:
             return matches
         proven = len(remaining) < len(signatures)
-        for index, arg in enumerate(args):
-            kind = self._arg_kind(arg)
+        for index, (arg, kind, position) in enumerate(specs):
             if kind is None:
                 continue
             filtered = [
                 candidate
                 for candidate in remaining
                 if self._param_accepts(
-                    candidate, index, arg, kind, arg.start_byte
+                    candidate,
+                    index,
+                    arg,
+                    kind,
+                    position,
+                    bindings=bindings_map.get(candidate.binding.id),
                 )
             ]
             if filtered:
@@ -1754,8 +1803,8 @@ class _TypeScriptBindings:
         # signature the call actually fits.
         literal_match = {
             candidate.binding.id: any(
-                self._param_literal_match(candidate, index, arg)
-                for index, arg in enumerate(args)
+                self._param_literal_match(candidate, index, arg, kind)
+                for index, (arg, kind, position) in enumerate(specs)
             )
             for candidate in remaining
         }
@@ -1805,10 +1854,16 @@ class _TypeScriptBindings:
         return inner
 
     def _param_literal_match(
-        self, candidate: _Record, index: int, arg: Any
+        self,
+        candidate: _Record,
+        index: int,
+        arg: Any | None,
+        kind: str | None = None,
     ) -> bool:
         """The parameter's annotation is a literal type spelled exactly
-        like the argument — `m(x: "s")` vs argument `"s"`."""
+        like the argument — `m(x: "s")` vs argument `"s"`. A spread
+        element expanded from a tuple annotation carries no argument
+        node and is read through `kind` instead."""
         annotation = self._param_annotation_node(candidate, index)
         if annotation is None or annotation.type != "literal_type":
             return False
@@ -1820,8 +1875,11 @@ class _TypeScriptBindings:
             ),
             None,
         )
-        return inner is not None and self._literal_equal(
-            self.text(inner), self.text(arg)
+        actual = self.text(arg) if arg is not None else kind
+        return (
+            inner is not None
+            and actual is not None
+            and self._literal_equal(self.text(inner), actual)
         )
 
     @staticmethod
@@ -1864,12 +1922,20 @@ class _TypeScriptBindings:
                             return nonconstant
                         pos = idx + 2
                 return inner.replace("\\$", "$")
+            cleaned = spelling.replace("_", "")
+            if len(cleaned) > 1 and cleaned.endswith("n"):
+                # `1_000n` and `1000n` spell the same bigint — the
+                # `n` tag keeps `1n` distinct from `1`.
+                try:
+                    return ("bigint", int(cleaned[:-1], 0))
+                except ValueError:
+                    return spelling
             try:
-                return int(spelling.replace("_", ""), 0)
+                return int(cleaned, 0)
             except ValueError:
                 pass
             try:
-                return float(spelling.replace("_", ""))
+                return float(cleaned)
             except ValueError:
                 return spelling
 
@@ -1924,11 +1990,270 @@ class _TypeScriptBindings:
             items.append(item)
         return items
 
+    def _call_type_args_node(self, node: Any) -> Any | None:
+        """The `type_arguments` node a call carries — `f<T, U>(...)`,
+        also nested in parentheses or an instantiation expression
+        (`(f<T, U>)(...)`); None when the call supplies none."""
+        type_args = node.child_by_field_name("type_arguments")
+        callee = node.child_by_field_name("function")
+        while callee is not None and callee.type in {
+            "parenthesized_expression",
+            "instantiation_expression",
+        }:
+            inner = next(
+                (
+                    child
+                    for child in self.children(callee)
+                    if child.type == "type_arguments"
+                ),
+                None,
+            )
+            if inner is not None:
+                type_args = inner
+            callee = next(
+                (
+                    child
+                    for child in self.children(callee)
+                    if child.type != "type_arguments"
+                ),
+                None,
+            )
+        return type_args
+
+    def _call_type_args_count(self, node: Any) -> int | None:
+        """Explicit type-argument count on a call — `f<T, U>(...)`."""
+        type_args = self._call_type_args_node(node)
+        if type_args is None:
+            return None
+        return len(self.children(type_args))
+
+    def _type_param_count(self, record: _Record) -> int:
+        """Type parameters a signature declares — `f<T, U>` is 2,
+        a non-generic signature 0."""
+        function_node = record.function_node
+        if function_node is None:
+            return 0
+        parameters = function_node.child_by_field_name(
+            "type_parameters"
+        )
+        if parameters is None:
+            return 0
+        return sum(
+            1
+            for child in self.children(parameters)
+            if child.type in {"type_parameter", "required_type_parameter"}
+        )
+
+    def _required_type_param_count(self, record: _Record) -> int:
+        """Type parameters without defaults — explicit type arguments
+        must supply at least this many, so `f<T, U = string>` accepts
+        `f<A>(...)` while `f<T, U>` does not."""
+        function_node = record.function_node
+        if function_node is None:
+            return 0
+        parameters = function_node.child_by_field_name(
+            "type_parameters"
+        )
+        if parameters is None:
+            return 0
+        return sum(
+            1
+            for child in self.children(parameters)
+            if child.type == "required_type_parameter"
+            or (
+                child.type == "type_parameter"
+                and child.child_by_field_name("value") is None
+            )
+        )
+
+    def _type_param_specs(
+        self, record: _Record
+    ) -> list[tuple[str | None, Any | None, Any | None]]:
+        """(name, constraint inner node, default inner node) per
+        declared type parameter — `f<T extends string, U = number>`
+        reads `[("T", string-node, None), ("U", None, number-node)]`."""
+        function_node = record.function_node
+        if function_node is None:
+            return []
+        parameters = function_node.child_by_field_name(
+            "type_parameters"
+        )
+        if parameters is None:
+            return []
+        specs = []
+        for child in self.children(parameters):
+            if child.type not in {
+                "type_parameter",
+                "required_type_parameter",
+            }:
+                continue
+            name_node = child.child_by_field_name("name")
+            name = (
+                None
+                if name_node is None
+                else self.text(name_node).strip()
+            )
+            constraint = child.child_by_field_name("constraint")
+            constraint_inner = (
+                next(
+                    (
+                        inner
+                        for inner in self.children(constraint)
+                        if self.text(inner) != "extends"
+                    ),
+                    None,
+                )
+                if constraint is not None
+                else None
+            )
+            default = child.child_by_field_name("value")
+            default_inner = (
+                next(
+                    (
+                        inner
+                        for inner in self.children(default)
+                        if self.text(inner) != "="
+                    ),
+                    None,
+                )
+                if default is not None
+                else None
+            )
+            specs.append((name, constraint_inner, default_inner))
+        return specs
+
+    def _literal_primitive_kind(self, text: str) -> str | None:
+        """Primitive kind a literal type argument spells —
+        `"s"`/`3`/`true`/`1n` — or None for non-literals."""
+        text = text.strip()
+        if not text:
+            return None
+        if text[0] in "\"'`":
+            return "string"
+        if text in {"true", "false"}:
+            return "boolean"
+        cleaned = text.replace("_", "")
+        if cleaned.endswith("n"):
+            cleaned = cleaned[:-1]
+            if cleaned and all(c in "0123456789abcdefxobABCDEFXOB." for c in cleaned):
+                return "bigint"
+            return None
+        if cleaned and all(
+            c in "0123456789abcdefxobABCDEFXOB.eE+-" for c in cleaned
+        ) and any(c.isdigit() for c in cleaned):
+            return "number"
+        return None
+
+    def _bound_type_satisfies(
+        self, bound: str, constraint_inner: Any, position: int
+    ) -> bool:
+        """Whether an explicit type argument can stand in for the
+        parameter's `extends` constraint. Literal spellings satisfy
+        both literal-typed and primitive-typed constraints."""
+        if self._annotation_accepts(constraint_inner, None, bound, position):
+            return True
+        primitive = self._literal_primitive_kind(bound)
+        return primitive is not None and self._annotation_accepts(
+            constraint_inner, None, primitive, position
+        )
+
+    def _bound_type_accepts(
+        self, bound: str, arg: Any | None, kind: str, position: int
+    ) -> bool:
+        """Whether a parameter annotated `T` accepts `kind` when `T`
+        is bound to `bound` by explicit type arguments (or a
+        default). Unresolvable bound names accept — the bindings stay
+        honest rather than guessing."""
+        bound = bound.strip()
+        if bound in {"any", "unknown", "object"}:
+            return True
+        if bound in {"number", "string", "boolean", "bigint", "symbol"}:
+            return kind == bound
+        if self._literal_primitive_kind(bound) is not None:
+            actual = (
+                self.text(arg)
+                if arg is not None
+                and arg.type
+                in {"string", "number", "template_string", "true", "false"}
+                else kind
+            )
+            return self._literal_equal(bound, actual)
+        if " | " in bound:
+            return any(
+                self._bound_type_accepts(part, arg, kind, position)
+                for part in bound.split(" | ")
+            )
+        if self._lookup(bound, position, "type") is None:
+            return True
+        return kind == bound or self._type_derives_from(
+            kind, bound, position, position
+        )
+
+    def _type_arg_bindings(
+        self, candidate: _Record, type_args: list[str], position: int
+    ) -> dict[str, str] | None:
+        """Type-parameter bindings `f<A, B>` gives a candidate —
+        supplied arguments plus defaults. None when a supplied
+        argument verifiably violates the parameter's constraint, so
+        that overload cannot be the callee."""
+        specs = self._type_param_specs(candidate)
+        if not specs:
+            return {}
+        bindings: dict[str, str] = {}
+        for index, (name, constraint_inner, default_inner) in enumerate(
+            specs
+        ):
+            if index < len(type_args):
+                bound = type_args[index].strip()
+                if (
+                    constraint_inner is not None
+                    and self._verifiable_type_text(bound, position)
+                    and not self._bound_type_satisfies(
+                        bound, constraint_inner, position
+                    )
+                ):
+                    return None
+            elif default_inner is not None:
+                bound = self.text(default_inner).strip()
+            else:
+                return None
+            if name is not None:
+                bindings[name] = bound
+        # A default can name an earlier parameter (`U = T`) — resolve
+        # one hop so it reads the same concrete type.
+        for name, bound in bindings.items():
+            bindings[name] = bindings.get(bound, bound)
+        return bindings
+
+    def _verifiable_type_text(self, text: str, position: int) -> bool:
+        """Whether a type-argument spelling is concrete enough to
+        check — primitives, literals, or a resolvable named type.
+        An outer generic like `T` cannot be judged here."""
+        text = text.strip()
+        if text in {"any", "unknown", "object", "number", "string",
+                    "boolean", "bigint", "symbol"}:
+            return True
+        if self._literal_primitive_kind(text) is not None:
+            return True
+        record = self._lookup(text, position, "type")
+        # A generic parameter's concrete type is unknowable here —
+        # it cannot be judged against the constraint either way.
+        return (
+            record is not None
+            and record.binding.kind != "generic_parameter"
+        )
+
     def _arg_kind(self, arg: Any) -> str | None:
         """Primitive kind of a literal, or the declared name for
         identifiers — `None` when the argument type is not pinned."""
         if arg.type == "number":
-            return "number"
+            # `1n`/`0xfn` literals are bigint — a hex digit is never
+            # `n`, so the suffix is unambiguous.
+            return (
+                "bigint"
+                if self.text(arg).strip().endswith("n")
+                else "number"
+            )
         if arg.type in {"string", "template_string"}:
             return "string"
         if arg.type in {"true", "false"}:
@@ -1952,6 +2277,88 @@ class _TypeScriptBindings:
                 return self.text(constructor)
         return None
 
+    def _spread_arg_specs(
+        self, arg: Any
+    ) -> list[tuple[Any | None, str | None, int]] | None:
+        """(arg_node, kind, position) triples a `...expr` expands to
+        when `expr`'s declared type is a tuple — `f(...t)` with
+        `t: [number, string]` supplies two arguments. None when the
+        operand's arity cannot be pinned (array types, unresolved or
+        non-identifier operands), so the caller keeps the overloads
+        untouched."""
+        operand = next(
+            (
+                child
+                for child in self.children(arg)
+                if child.type != "comment"
+            ),
+            None,
+        )
+        if operand is None or operand.type != "identifier":
+            return None
+        record = self._lookup(
+            self.text(operand), operand.start_byte, "value"
+        )
+        if record is None or record.type_node is None:
+            return None
+        inner = next(iter(self.children(record.type_node)), None)
+        elements = self._tuple_element_nodes(inner)
+        if elements is None:
+            return None
+        return [
+            (None, self._type_node_kind(element), arg.start_byte)
+            for element in elements
+        ]
+
+    def _tuple_element_nodes(self, node: Any | None) -> list | None:
+        """Element type nodes of a `tuple_type`, following one
+        `type_alias` hop — `type Pair = [number, string]` exposes the
+        same elements as the spelled tuple."""
+        if node is None:
+            return None
+        if node.type == "tuple_type":
+            return [
+                child
+                for child in self.children(node)
+                if child.type != "comment"
+            ]
+        if node.type == "type_identifier":
+            record = self._lookup(
+                self.text(node).strip(), node.start_byte, "type"
+            )
+            if (
+                record is not None
+                and record.binding.kind == "type_alias"
+                and record.alias_node is not None
+            ):
+                inner = next(iter(self.children(record.alias_node)), None)
+                if inner is not None and inner.type == "tuple_type":
+                    return [
+                        child
+                        for child in self.children(inner)
+                        if child.type != "comment"
+                    ]
+        return None
+
+    def _type_node_kind(self, node: Any | None) -> str | None:
+        """Kind a tuple element type contributes to a spread call —
+        primitives and named types by spelling, literals by their
+        spelled text so literal-typed parameters still compare."""
+        if node is None:
+            return None
+        if node.type == "literal_type":
+            inner = next(
+                (
+                    child
+                    for child in self.children(node)
+                    if child.type != "comment"
+                ),
+                None,
+            )
+            return None if inner is None else self.text(inner)
+        text = self.text(node).strip()
+        return text or None
+
     def _param_accepts(
         self,
         candidate: _Record,
@@ -1959,6 +2366,7 @@ class _TypeScriptBindings:
         arg: Any,
         kind: str,
         position: int,
+        bindings: dict[str, str] | None = None,
     ) -> bool:
         params = (
             candidate.function_node.child_by_field_name("parameters")
@@ -1991,6 +2399,7 @@ class _TypeScriptBindings:
                 arg,
                 kind,
                 position,
+                bindings,
             )
         item = items[index]
         pattern = item.child_by_field_name("pattern")
@@ -2004,7 +2413,7 @@ class _TypeScriptBindings:
         inner = next(iter(self.children(annotation)), None)
         if variadic:
             inner = self._rest_element_node(inner)
-        return self._annotation_accepts(inner, arg, kind, position)
+        return self._annotation_accepts(inner, arg, kind, position, bindings)
 
     def _rest_element_node(self, node: Any | None) -> Any | None:
         """Element annotation of a rest parameter — `...x: T[]` and
@@ -2021,18 +2430,27 @@ class _TypeScriptBindings:
 
 
     def _annotation_accepts(
-        self, node: Any | None, arg: Any | None, kind: str, position: int
+        self,
+        node: Any | None,
+        arg: Any | None,
+        kind: str,
+        position: int,
+        bindings: dict[str, str] | None = None,
     ) -> bool:
         """Whether the parameter annotation can hold `kind`.
 
         `kind` is a primitive name or a named type's spelling. Missing
         or unknown annotations accept — only spelled contradictions
-        eliminate a candidate."""
+        eliminate a candidate. `bindings` maps the candidate's type
+        parameters to the explicit type arguments (and defaults) a
+        call supplied, so `x: T` checks against the bound type."""
         if node is None:
             return True
         if node.type == "union_type":
             return any(
-                self._annotation_accepts(child, arg, kind, position)
+                self._annotation_accepts(
+                    child, arg, kind, position, bindings
+                )
                 for child in self.children(node)
                 if child.type != "|"
             )
@@ -2066,6 +2484,10 @@ class _TypeScriptBindings:
         if text in {"number", "string", "boolean", "bigint", "symbol"}:
             return kind == text
         if node.type == "type_identifier":
+            if bindings is not None and text in bindings:
+                return self._bound_type_accepts(
+                    bindings[text], arg, kind, position
+                )
             record = self._lookup(text, node.start_byte, "type")
             if record is not None and record.binding.kind == "type_alias":
                 inner = (
@@ -2073,7 +2495,9 @@ class _TypeScriptBindings:
                     if record.alias_node is not None
                     else None
                 )
-                return self._annotation_accepts(inner, arg, kind, position)
+                return self._annotation_accepts(
+                    inner, arg, kind, position, bindings
+                )
             if (
                 record is not None
                 and record.binding.kind == "generic_parameter"
@@ -2097,7 +2521,9 @@ class _TypeScriptBindings:
                     ),
                     None,
                 )
-                return self._annotation_accepts(inner, arg, kind, position)
+                return self._annotation_accepts(
+                    inner, arg, kind, position, bindings
+                )
             return text == kind or self._type_derives_from(
                 kind, text, position, node.start_byte
             )
@@ -2212,13 +2638,103 @@ class _TypeScriptBindings:
         return record
 
     def _callee_return_node(self, node: Any) -> Any | None:
-        """Return-type annotation node of a call's resolved callee."""
+        """Return-type annotation node of a call's resolved callee —
+        the signature the arguments narrow to, so `make(1).method()`
+        reads `make`'s chosen overload's return type."""
         callee = node.child_by_field_name("function")
+        # Explicit type arguments on the call (`make<T, U>(...)`,
+        # `(make<T, U>)(...)`) pin the signature's declared arity —
+        # an overload whose required/total range excludes it cannot
+        # be the callee.
+        type_args_node = self._call_type_args_node(node)
+        type_arg_texts = (
+            [self.text(child) for child in self.children(type_args_node)]
+            if type_args_node is not None
+            else None
+        )
+        type_args_count = (
+            None if type_arg_texts is None else len(type_arg_texts)
+        )
+        while callee is not None and callee.type in {
+            "parenthesized_expression", "instantiation_expression",
+        }:
+            callee = next(
+                (
+                    child
+                    for child in self.children(callee)
+                    if child.type not in {"type_arguments"}
+                ),
+                None,
+            )
+        args_node = node.child_by_field_name("arguments")
+        arg_nodes: list | None = None
+        if args_node is not None and args_node.type == "template_string":
+            # A tag is called `(strings, ...values)` — the template
+            # itself plus one argument per interpolation. The first
+            # argument is a strings array, not the template's literal
+            # text, so it is represented by an unpinned node; each
+            # substitution narrows by its expression's type.
+            arg_nodes = [node] + [
+                expr
+                for child in self.children(args_node)
+                if child.type == "template_substitution"
+                for expr in [next(iter(self.children(child)), None)]
+                if expr is not None
+            ]
         record: _Record | None = None
         if callee is not None and callee.type == "identifier":
-            record = self._lookup(
+            candidates = self._lookup_candidates(
                 self.text(callee), node.start_byte, "value"
             )
+            if candidates:
+                # A nearer scope's declaration shadows outer ones —
+                # only the innermost scope's overloads may be picked,
+                # matching the call-site rule in `_reference`.
+                scope = candidates[0].binding.scope
+                key = (
+                    None if scope is None else (scope.start, scope.end)
+                )
+                candidates = [
+                    candidate
+                    for candidate in candidates
+                    if (
+                        None
+                        if candidate.binding.scope is None
+                        else (
+                            candidate.binding.scope.start,
+                            candidate.binding.scope.end,
+                        )
+                    ) == key
+                ]
+                if type_args_count is not None:
+                    # Defaults keep an overload eligible — `f<T, U = V>`
+                    # accepts `f<A>(...)`.
+                    matching = [
+                        candidate
+                        for candidate in candidates
+                        if self._required_type_param_count(candidate)
+                        <= type_args_count
+                        <= self._type_param_count(candidate)
+                    ]
+                    if matching:
+                        candidates = matching
+                narrowed = self._narrow_overloads(
+                    candidates, args_node, arg_nodes,
+                    type_args=type_arg_texts,
+                )
+                if (
+                    narrowed is candidates
+                    and type_args_count is not None
+                    and narrowed
+                ):
+                    # Explicit type args, indiscriminate value args —
+                    # tsc picks the earliest declared signature that
+                    # fits, not the lookup's latest-first head.
+                    record = min(
+                        narrowed, key=lambda c: c.binding.span.start
+                    )
+                else:
+                    record = narrowed[0] if narrowed else candidates[0]
         elif callee is not None and callee.type == "member_expression":
             property_node = callee.child_by_field_name("property")
             if (
@@ -2229,6 +2745,8 @@ class _TypeScriptBindings:
                     callee.child_by_field_name("object"),
                     self.text(property_node),
                     node.start_byte,
+                    args_node=args_node,
+                    arg_nodes=arg_nodes,
                 )
         if record is None or record.function_node is None:
             return None
@@ -2714,6 +3232,7 @@ class _TypeScriptBindings:
         *,
         collect_extras: list[_Record] | None = None,
         args_node: Any | None = None,
+        arg_nodes: list | None = None,
     ) -> _Record | None:
         # Exported-name collisions on the object segment: the losing
         # members stay reachable for this one lookup step, so a value
@@ -2737,6 +3256,7 @@ class _TypeScriptBindings:
             extra_seed=tuple(inner_extras),
             collect_extras=collect_extras,
             args_node=args_node,
+            arg_nodes=arg_nodes,
         )
 
     def _resolve(
@@ -2750,6 +3270,7 @@ class _TypeScriptBindings:
         check_tdz: bool = True,
         constructible: bool = False,
         args_node: Any | None = None,
+        type_args: list[str] | None = None,
     ) -> tuple[_Record | None, str | None]:
         name = self.text(node)
         if name == "arguments" and namespace == "value":
@@ -2791,8 +3312,36 @@ class _TypeScriptBindings:
                         )
                     ) == key
                 ]
-            narrowed = self._narrow_overloads(signatures, args_node)
-            if narrowed:
+            type_args_count = (
+                None if type_args is None else len(type_args)
+            )
+            if type_args_count is not None:
+                # The call target narrows by the same explicit type
+                # arguments the return-type side uses — `make<A, B>(x)`
+                # cannot bind an overload that lacks that arity.
+                matching = [
+                    candidate
+                    for candidate in signatures
+                    if self._required_type_param_count(candidate)
+                    <= type_args_count
+                    <= self._type_param_count(candidate)
+                ]
+                if matching:
+                    signatures = matching
+            narrowed = self._narrow_overloads(
+                signatures, args_node, type_args=type_args
+            )
+            if (
+                narrowed is signatures
+                and type_args_count is not None
+                and narrowed
+            ):
+                # Same tsc rule as the return-type side: explicit type
+                # args, indiscriminate value args — earliest declared.
+                record = min(
+                    narrowed, key=lambda c: c.binding.span.start
+                )
+            elif narrowed:
                 record = narrowed[0]
         if record is not None and constructible:
             # `new N()` on a merged declaration must name the class, so
@@ -3371,6 +3920,7 @@ class _TypeScriptBindings:
             self.add_unresolved(callee, name, "builtin")
             self._append_call(Call(self.span(node), args, owner, "", "builtin"))
             return
+        call_type_args = self._call_type_args_node(node)
         record, reason = self._resolve(
             callee,
             "value",
@@ -3378,6 +3928,14 @@ class _TypeScriptBindings:
             with_scopes,
             constructible=new,
             args_node=node.child_by_field_name("arguments"),
+            type_args=(
+                [
+                    self.text(child)
+                    for child in self.children(call_type_args)
+                ]
+                if call_type_args is not None
+                else None
+            ),
         )
         if name == "eval" and not new:
             self.add_gap("dynamic_eval", node)

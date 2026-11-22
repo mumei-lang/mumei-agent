@@ -22,10 +22,11 @@ stamp)` binds it to the descriptor's declared `max_timeout_ms` /
 gets, and a descriptor without the declaration is a static error, never
 a wildcard probe. Probes use a minimal environment, isolated network, a
 private user+mount namespace with a read-only mount tree, and process-spawn
-restrictions by default where the host can enforce them. Inherited
-environment, network access, and filesystem writes require the adapter to
-declare the corresponding permission and policy to allow it; process
-spawning requires the same declaration and policy to avoid isolation.
+and filesystem-read restrictions by default where the host can enforce them.
+Inherited environment, network access, and filesystem writes require the
+adapter to declare the corresponding permission and policy to allow it;
+process spawning and filesystem reads require the same declaration and
+policy to avoid isolation.
 
 For scheduling, `probe_requests_for(registry, request, policy,
 observations, stamp=...)` runs `plan()` and emits a request for each
@@ -73,6 +74,7 @@ from dataclasses import dataclass, replace
 from agent.attempt_runner import (
     MAX_MEMORY_BOUND_MB,
     AttemptRunner,
+    filesystem_read_isolation_enforceable,
     filesystem_write_isolation_enforceable,
     minimal_environment,
     memory_bound_spawn_thread_safe,
@@ -168,6 +170,7 @@ class AdapterProbeRequest:
     isolate_network: bool = True
     isolate_filesystem_write: bool = True
     isolate_process_spawn: bool = True
+    isolate_filesystem_read: bool = True
 
     def __post_init__(self) -> None:
         _label(self.adapter_id)
@@ -204,6 +207,7 @@ class AdapterProbeRequest:
             or type(self.isolate_network) is not bool
             or type(self.isolate_filesystem_write) is not bool
             or type(self.isolate_process_spawn) is not bool
+            or type(self.isolate_filesystem_read) is not bool
         ):
             raise ValueError("invalid adapter probe enforcement")
 
@@ -321,6 +325,10 @@ def run_probe(
             request.isolate_process_spawn
             and process_spawn_isolation_enforceable()
         ),
+        isolate_filesystem_read=(
+            request.isolate_filesystem_read
+            and filesystem_read_isolation_enforceable()
+        ),
     ).normalized()
     observation = RuntimeObservation(
         request.adapter_id,
@@ -380,6 +388,12 @@ def probe_request_for(
         and allowed is not None
         and "process.spawn" in allowed
     )
+    isolate_filesystem_read = not (
+        required is not None
+        and "filesystem.read" in required
+        and allowed is not None
+        and "filesystem.read" in allowed
+    )
     return AdapterProbeRequest(
         descriptor.adapter_id,
         descriptor.probe_argv,
@@ -392,6 +406,7 @@ def probe_request_for(
         isolate_network=isolate_network,
         isolate_filesystem_write=isolate_filesystem_write,
         isolate_process_spawn=isolate_process_spawn,
+        isolate_filesystem_read=isolate_filesystem_read,
     )
 
 

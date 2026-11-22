@@ -28,6 +28,9 @@ from agent.verification_planner import (
 )
 
 SUMMARY_DERIVATION = "summary_derivation"
+_SUMMARY_ALLOWED_PERMISSIONS = frozenset(
+    {"filesystem.read", "process.spawn"}
+)
 
 # The declared bound and relation identifiers: a derivation is bounded
 # by exactly the inputs the request declares, and the emitted manifest
@@ -35,6 +38,11 @@ SUMMARY_DERIVATION = "summary_derivation"
 # closes it — never validated by the adapter itself.
 _DECLARED_INPUT_BOUND = "declared-inputs"
 _CONSERVATIVE_SUMMARY = "conservative-summary"
+
+
+def summary_planner_policy() -> PlannerPolicy:
+    """Allow the permissions declared by the built-in summary routes."""
+    return PlannerPolicy(allowed_permissions=_SUMMARY_ALLOWED_PERMISSIONS)
 
 
 def summary_requirements(profile: str) -> RouteRequirements:
@@ -282,7 +290,7 @@ def run_plan(args, *, runner=None) -> dict:
     """
     probe_plan = plan_summary_route(
         args.profile,
-        PlannerPolicy(),
+        summary_planner_policy(),
         stamp=args.stamp,
         tool_version=args.tool_version,
         histories=load_plan_histories(args.histories),

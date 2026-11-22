@@ -329,14 +329,10 @@ def test_unresolved_range_path_bounds_are_not_bound(source, name, reason):
             None,
             "prelude_name",
         ),
-        (
-            "enum E { V(i32) } fn f(value:E){ match value { E::V(x) => x } }",
-            "E::V",
-            None,
-            "qualified_path",
-        ),
     ],
 )
+
+
 def test_pattern_constructor_paths_are_referenced_or_explicitly_unresolved(
     source, constructor, binding_kind, reason
 ):
@@ -349,6 +345,19 @@ def test_pattern_constructor_paths_are_referenced_or_explicitly_unresolved(
         if constructor == "Some" and "Ok(_)" in source:
             for name in ("Some", "Ok", "Err", "None"):
                 assert _unresolved(report, name, "prelude_name")
+
+
+def test_pattern_enum_variant_path_resolves_to_the_member():
+    source = "enum E { V(i32) } fn f(value:E){ match value { E::V(x) => x } }"
+    report = build_rust_bindings(source, pointer_width=64)
+    variant = _bindings(report, "V", "enum_member")[0]
+    assert any(
+        ref.binding_id == variant.id
+        and source[ref.span.start:ref.span.end] == "V"
+        and ref.span.start > source.index("match")
+        for ref in report.references
+    )
+    assert not _unresolved(report, "E::V", "qualified_path")
 
 
 def test_match_guards_resolve_inside_the_arm_after_pattern_bindings():
@@ -3342,3 +3351,734 @@ fn main() { g(); h(); }
         if b.name == "h" and b.kind == "function"
     )
     assert calls["h()"].target == h.id
+
+
+def test_match_enum_variant_payload_is_typed():
+    # `match e { E::C(p) => p.m() }` types `p` by the variant's
+    # declared payload.
+    source = """
+enum E { C(P), D }
+struct P;
+impl P { fn m(&self) {} }
+fn f(e: E) {
+    match e { E::C(p) => p.m(), E::D => {} }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = _bindings(report, "m", "associated_function")[0]
+    call = _call(report, source, "p.m()")
+    assert call.target == method.id
+
+
+def test_let_condition_variant_payload_is_typed():
+    source = """
+enum E { C(P), D }
+struct P;
+impl P { fn m(&self) {} }
+fn f(e: E) {
+    if let E::C(p) = e { p.m(); }
+    while let E::C(q) = e { q.m(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = _bindings(report, "m", "associated_function")[0]
+    for text in ("p.m()", "q.m()"):
+        assert _call(report, source, text).target == method.id
+
+
+def test_match_named_variant_fields_are_typed():
+    source = """
+enum E { D { x: P } }
+struct P;
+impl P { fn m(&self) {} }
+fn f(e: E) {
+    match e { E::D { x } => x.m(), E::D { x: q } => q.m() }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = _bindings(report, "m", "associated_function")[0]
+    for text in ("x.m()", "q.m()"):
+        assert _call(report, source, text).target == method.id
+
+
+def test_struct_pattern_fields_are_typed():
+    source = """
+struct W { p: P }
+struct P;
+impl P { fn m(&self) {} }
+fn f(w: W) {
+    let W { p } = w;
+    p.m();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = _bindings(report, "m", "associated_function")[0]
+    assert _call(report, source, "p.m()").target == method.id
+
+
+def test_pattern_head_must_name_the_scrutinee():
+    # A pattern naming another type does not type its names by the
+    # scrutinee — `p` stays unpinned.
+    source = """
+enum E { C(P), D }
+enum F { G(P) }
+struct P;
+impl P { fn m(&self) {} }
+fn f(e: E) {
+    match e { F::G(p) => p.m(), _ => {} }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    assert _call(report, source, "p.m()").target == ""
+
+
+def test_generic_scrutinee_substitutes_field_types():
+    source = """
+struct W<T> { f: T }
+struct P;
+impl P { fn m(&self) {} }
+fn f(w: W<P>) {
+    match w { W { f } => f.m() }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = _bindings(report, "m", "associated_function")[0]
+    assert _call(report, source, "f.m()").target == method.id
+
+
+def test_prelude_variant_payload_stays_opaque_through_alias():
+    # Prelude gating needs the spelled container name — `type O =
+    # Option<P>` hides it, so `Some(p)` on `O` stays unpinned.
+    source = """
+struct P;
+type O = Option<P>;
+impl P { fn m(&self) {} }
+fn f(o: O) {
+    match o { Some(p) => p.m(), None => {} }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    assert _call(report, source, "p.m()").target == ""
+
+
+def test_reference_and_cast_receivers_are_typed():
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn f(v: Vec<P>, x: u32) {
+    let p = &v[0];
+    p.m();
+    let q = x as P;
+    q.m();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = _bindings(report, "m", "associated_function")[0]
+    assert _call(report, source, "p.m()").target == method.id
+    assert _call(report, source, "q.m()").target == method.id
+
+
+def test_variant_constructor_initializer_types_the_binding():
+    source = """
+enum E { C(P), F }
+struct P;
+impl P { fn m(&self) {} }
+fn f() {
+    let e = E::C(P);
+    match e { E::C(p) => p.m(), E::F => {} }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = _bindings(report, "m", "associated_function")[0]
+    assert _call(report, source, "p.m()").target == method.id
+
+
+def test_pattern_field_args_keep_string_type_id():
+    # `items: Vec<P>` resolves args-only — the emitted fact keeps a
+    # string (empty) type_id so the shared loader re-reads it.
+    source = "struct W { items: Vec<P> } struct P; fn f(w: W) { let W { items } = w; }"
+    report = build_rust_bindings(source, pointer_width=64)
+    items = next(b for b in report.bindings if b.name == "items")
+    assert isinstance(items.type.type_id, str)
+
+
+def test_rest_pattern_skips_to_trailing_payload():
+    source = """
+enum E { V(A, B, C) }
+struct A; struct B; struct C;
+impl C { fn n(&self) {} }
+fn f(e: E) {
+    match e { E::V(.., x) => x.n() }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = next(b for b in report.bindings if b.name == "n")
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "x.n()"
+    )
+    assert call.target == method.id
+
+
+def test_pub_tuple_fields_do_not_shift_positions():
+    source = """
+struct W(pub A, pub B);
+struct A; struct B;
+impl A { fn a(&self) {} }
+impl B { fn b(&self) {} }
+fn f(w: W) {
+    match w { W(a, b) => { a.a(); b.b(); } }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    for text, name in (("a.a()", "a"), ("b.b()", "b")):
+        method = next(b for b in report.bindings if b.name == name)
+        call = next(
+            c for c in report.calls
+            if source[c.span.start:c.span.end] == text
+        )
+        assert call.target == method.id
+
+
+def test_module_field_types_resolve_in_the_module_scope():
+    source = """
+mod m {
+    pub struct P;
+    impl P { fn m(&self) {} }
+    pub struct W { pub f: P }
+}
+struct P;
+impl P { fn n(&self) {} }
+fn f(w: m::W) {
+    match w { m::W { f } => f.m() }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = next(
+        b for b in report.bindings
+        if b.name == "m" and b.kind == "associated_function"
+    )
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "f.m()"
+    )
+    assert call.target == method.id
+
+
+def test_for_loop_binds_element_type_from_container_args():
+    # `for p in v` types `p` as the container's element — `Vec<P>`
+    # yields `P`, so `p.m()` binds.
+    source = """
+struct P { x: i32 }
+impl P { fn m(&self) {} }
+fn f(v: Vec<P>) {
+    for p in v { p.m(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = next(b for b in report.bindings if b.name == "m")
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "p.m()"
+    )
+    assert call.target == method.id
+
+
+def test_for_loop_binds_element_type_through_reference():
+    source = """
+struct P { x: i32 }
+impl P { fn m(&self) {} }
+fn f(v: Vec<P>) {
+    for p in &v { p.m(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = next(b for b in report.bindings if b.name == "m")
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "p.m()"
+    )
+    assert call.target == method.id
+
+
+def test_for_loop_binds_nested_container_elements():
+    # `Vec<Vec<P>>` binds the inner loop variable to `Vec<P>` whose
+    # own args still unwrap — `p2` is `P`.
+    source = """
+struct P { x: i32 }
+impl P { fn m(&self) {} }
+fn f(w: Vec<Vec<P>>) {
+    for inner in w {
+        for p2 in inner { p2.m(); }
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = next(b for b in report.bindings if b.name == "m")
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "p2.m()"
+    )
+    assert call.target == method.id
+
+
+def test_for_loop_stays_opaque_on_ranges_and_undeclared_iterables():
+    source = """
+struct P { x: i32 }
+impl P { fn m(&self) {} }
+fn f() {
+    for i in 0..10 { i.m(); }
+    for s in ps { s.m(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    for text in ("i.m()", "s.m()"):
+        call = next(
+            c for c in report.calls
+            if source[c.span.start:c.span.end] == text
+        )
+        assert call.target == ""
+
+
+def test_for_loop_destructuring_pattern_stays_opaque():
+    # `for P { x } in v` binds `x` to a field, not the element — its
+    # type is unpinned so neither impl is picked up.
+    source = """
+struct P { x: i32 }
+impl P { fn m(&self) {} }
+impl i32 { fn bogus(&self) {} }
+fn f(v: Vec<P>) {
+    for P { x } in v { x.m(); x.bogus(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    for text in ("x.m()", "x.bogus()"):
+        call = next(
+            c for c in report.calls
+            if source[c.span.start:c.span.end] == text
+        )
+        assert call.target == ""
+
+
+def test_for_loop_over_map_stays_opaque():
+    # Map iteration yields (K, V) pairs — a shape the element model
+    # cannot spell, so neither `for e in map` nor a destructured
+    # `(k, v)` picks up `P`'s methods.
+    source = """
+use std::collections::HashMap;
+struct P;
+impl P { fn m(&self) {} }
+fn f(map: HashMap<u32, P>) {
+    for e in map { e.m(); }
+    for (k, v) in map { v.m(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    for text in ("e.m()", "v.m()"):
+        call = next(
+            c for c in report.calls
+            if source[c.span.start:c.span.end] == text
+        )
+        assert call.target == ""
+
+
+def test_for_loop_element_keeps_own_generic_args():
+    # `Vec<W<u8>>` binds the element as `W` carrying "u8" — a
+    # specialization impl's member resolves.
+    source = """
+struct W<T>(T);
+impl W<u8> { fn m(&self) {} }
+fn f(v: Vec<W<u8>>) {
+    for w in v { w.m(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = next(b for b in report.bindings if b.name == "m")
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "w.m()"
+    )
+    assert call.target == method.id
+
+
+def test_for_loop_mutable_binding_keeps_element_type():
+    # `for mut p in v` still binds one identifier — `mut` only marks
+    # it writable, so `p.m()` resolves.
+    source = """
+struct P { x: i32 }
+impl P { fn m(&self) {} }
+fn f(v: Vec<P>) {
+    for mut p in v { p.m(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = next(b for b in report.bindings if b.name == "m")
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "p.m()"
+    )
+    assert call.target == method.id
+
+
+def test_for_loop_ref_binding_stays_opaque():
+    # `for ref p in v` binds `&P`, not `P` — the pattern is left
+    # unpinned rather than guessing the reference's target.
+    source = """
+struct P { x: i32 }
+impl P { fn m(&self) {} }
+fn f(v: Vec<P>) {
+    for ref p in v { p.m(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "p.m()"
+    )
+    assert call.target == ""
+
+
+def test_use_target_resolves_scoped_calls():
+    # `use m::P` — `P::new()` resolves the module's `P`, then the
+    # associated function.
+    source = """
+mod m { pub struct P; impl P { pub fn new() -> P { P } pub fn v(&self) {} } }
+use m::P;
+fn f() { let x = P::new(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    new = next(
+        b for b in report.bindings
+        if b.name == "new" and b.span.start == source.rindex("fn new") + 3
+    )
+    call = _call(report, source, "P::new()")
+    assert call.target == new.id
+
+
+def test_use_alias_target_resolves_scoped_calls():
+    # `use m::P as Q` — `Q::new()` resolves through the alias's path.
+    source = """
+mod m { pub struct P; impl P { pub fn new() -> P { P } } }
+use m::P as Q;
+fn f() { let x = Q::new(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    new = next(
+        b for b in report.bindings
+        if b.name == "new" and b.span.start == source.rindex("fn new") + 3
+    )
+    call = _call(report, source, "Q::new()")
+    assert call.target == new.id
+
+
+def test_use_target_types_annotated_receivers():
+    # `let x: P` with `use m::P` — `x.v()` resolves the module
+    # type's methods.
+    source = """
+mod m { pub struct P; impl P { pub fn v(&self) {} } }
+use m::P;
+fn f() { let x: P = P; x.v(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    v = next(
+        b for b in report.bindings
+        if b.name == "v" and b.span.start == source.rindex("fn v") + 3
+    )
+    call = _call(report, source, "x.v()")
+    assert call.target == v.id
+
+
+def test_use_target_unresolvable_module_stays_opaque():
+    # A use whose module path does not resolve keeps scoped calls
+    # opaque rather than guessing.
+    source = """
+mod m { pub struct P; impl P { pub fn new() -> P { P } } }
+use other::P;
+fn f() { let x = P::new(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    call = _call(report, source, "P::new()")
+    assert call.kind == "opaque_path"
+
+
+def test_use_target_resolves_at_declaration_scope():
+    # `use m::P` resolves `m` where the import is declared — an
+    # inner same-named `mod m` at the call site does not redirect.
+    source = """
+mod m { pub struct P; impl P { pub fn new() -> P { P } } }
+use m::P;
+fn main() { mod m { pub struct P; } let x = P::new(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    p = next(
+        b for b in report.bindings
+        if b.name == "new" and b.kind == "associated_function"
+    )
+    call = _call(report, source, "P::new()")
+    assert call.target == p.id
+
+
+def test_use_target_trait_alias_resolves_impl_members_and_ufcs():
+    source = """
+mod m { pub trait Tr { fn m(&self); } }
+use m::Tr as Q;
+struct P;
+impl Q for P { fn m(&self) {} }
+fn f(p: P) { p.m(); <P as Q>::m(&p); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    impl_m = next(
+        b for b in report.bindings
+        if b.name == "m"
+        and b.span.start == source.rindex("fn m(&self) {}") + 3
+    )
+    assert _call(report, source, "p.m()").target == impl_m.id
+    assert _call(report, source, "<P as Q>::m(&p)").target == impl_m.id
+
+
+def test_use_target_trait_default_via_alias():
+    source = """
+mod m { pub trait Tr { fn m(&self) {} } }
+use m::Tr as Q;
+struct P;
+impl Q for P {}
+fn f(p: P) { p.m(); <P as Q>::m(&p); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    default_m = next(
+        b for b in report.bindings
+        if b.name == "m"
+        and b.span.start == source.index("fn m(&self) {}") + 3
+    )
+    assert _call(report, source, "p.m()").target == default_m.id
+    assert (
+        _call(report, source, "<P as Q>::m(&p)").target == default_m.id
+    )
+
+
+def test_use_target_unresolvable_external_trait_keeps_impl_members():
+    # `use ext::Trait` — `ext` cannot be resolved, but the imported
+    # name is still the trait the impl matches against.
+    source = """
+use ext::Trait;
+struct P;
+impl Trait for P { fn m(&self) {} }
+fn f(p: P) { p.m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = next(b for b in report.bindings if b.name == "m")
+    assert _call(report, source, "p.m()").target == m.id
+
+
+def test_use_target_prefers_the_type_namespace_for_annotations():
+    source = """
+mod m {
+    pub struct P;
+    impl P { pub fn new() -> P { P } }
+    pub const P: i32 = 0;
+}
+use m::P;
+fn f() { let x: P = P::new(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    new = next(b for b in report.bindings if b.name == "new")
+    assert _call(report, source, "P::new()").target == new.id
+
+
+def test_parent_module_use_does_not_leak_into_child_module():
+    # `use x::Tr` in `mod outer` names `Tr` in outer only — `p.m()`
+    # inside `mod inner` cannot reach the trait's impl. The receiver's
+    # `P` resolves through inner's own `use x::P`, so trait visibility
+    # — not type resolution — is what keeps the call opaque.
+    source = """
+mod x { pub struct P; pub trait Tr { fn m(&self) {} } impl Tr for P {} }
+mod outer {
+    use x::Tr;
+    mod inner {
+        use x::P;
+        fn f(p: P) { p.m(); }
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "p.m()"
+    )
+    assert call.target == ""
+
+
+def test_child_module_use_makes_the_trait_visible():
+    # Control case: the same receiver resolves when `mod inner`
+    # imports the trait itself.
+    source = """
+mod x { pub struct P; pub trait Tr { fn m(&self) {} } impl Tr for P {} }
+mod outer {
+    mod inner {
+        use x::P;
+        use x::Tr;
+        fn f(p: P) { p.m(); }
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = next(b for b in report.bindings if b.name == "m")
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "p.m()"
+    )
+    assert call.target == method.id
+
+
+def test_prelude_some_pattern_binds_option_element():
+    # `match opt { Some(p) => p.m() }` types `p` as Option's element —
+    # the prelude constructor's payload is pinned by the scrutinee's
+    # declared container.
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn f(opt: Option<P>) {
+    match opt { Some(p) => p.m(), None => {} }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = next(b for b in report.bindings if b.name == "m")
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "p.m()"
+    )
+    assert call.target == method.id
+
+
+def test_prelude_ok_err_patterns_bind_result_args():
+    # `Ok(p)` binds Result's first arg, `Err(e)` its second — each
+    # element keeps its declared position.
+    source = """
+struct P;
+struct E;
+impl P { fn m(&self) {} }
+impl E { fn n(&self) {} }
+fn f(r: Result<P, E>) {
+    match r { Ok(p) => p.m(), Err(e) => e.n() }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = next(b for b in report.bindings if b.name == "m")
+    n = next(b for b in report.bindings if b.name == "n")
+    by_text = {
+        source[c.span.start:c.span.end]: c for c in report.calls
+    }
+    assert by_text["p.m()"].target == m.id
+    assert by_text["e.n()"].target == n.id
+
+
+def test_prelude_pattern_in_let_while_and_let_else():
+    # `if let Some(p)`, `while let Ok(p)` and `let Some(p) = ... else`
+    # all pin the payload through the same scrutinee typing.
+    source = """
+struct P;
+struct E;
+impl P { fn m(&self) {} }
+fn f(opt: Option<P>, r: Result<P, E>) {
+    if let Some(p) = opt { p.m(); }
+    while let Ok(q) = r { q.m(); }
+    let Some(s) = opt else { return };
+    s.m();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = next(b for b in report.bindings if b.name == "m")
+    for text in ("p.m()", "q.m()", "s.m()"):
+        call = next(
+            c for c in report.calls
+            if source[c.span.start:c.span.end] == text
+        )
+        assert call.target == method.id
+
+
+def test_prelude_pattern_stays_opaque_on_wrong_container():
+    # `Some(x)` only pins Option's element — on `Vec<P>` (or an
+    # undeclared scrutinee) the payload name stays untyped.
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn f(v: Vec<P>, mystery: Undeclared) {
+    match v { Some(bad) => bad.m(), _ => {} }
+    match mystery { Some(unknown) => unknown.m(), _ => {} }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    for text in ("bad.m()", "unknown.m()"):
+        call = next(
+            c for c in report.calls
+            if source[c.span.start:c.span.end] == text
+        )
+        assert call.target == ""
+
+
+def test_bare_match_arm_on_prelude_container_keeps_valid_type_fact():
+    # `match opt { x => }` on `Option<P>` binds `x` with an `unknown`
+    # fact (no record exists for Option) — never a null type_id.
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn f(o: Option<P>) {
+    match o { x => x.m(), _ => {} }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "x.m()"
+    )
+    assert call.target == ""
+    assert all(
+        isinstance(b.to_dict()["type"]["type_id"], str)
+        for b in report.bindings
+        if isinstance(b.to_dict().get("type"), dict)
+        and "type_id" in b.to_dict()["type"]
+    )
+
+
+def test_user_defined_option_keeps_payload_unpinned():
+    # A user `enum Option` whose `Some` doesn't resolve at the
+    # pattern must not be typed by the std prelude payload.
+    source = """
+struct P;
+struct Q;
+impl Q { fn m(&self) {} }
+enum Option<T> { Some(Q, T), None }
+fn f(o: Option<P>) {
+    match o { Some(q, _) => q.m(), None => {} }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "q.m()"
+    )
+    assert call.target == ""
+
+
+def test_prelude_payload_args_resolve_at_annotation_scope():
+    # `o: Option<P>`'s `P` is the outer declaration — a `struct P`
+    # shadowing it inside the body must not capture `Some(p)`'s
+    # payload type.
+    source = """
+struct P;
+impl P { fn outer(&self) {} }
+fn f(o: Option<P>) {
+    struct P;
+    impl P { fn inner(&self) {} }
+    match o { Some(p) => p.outer(), None => {} }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    outer = next(b for b in report.bindings if b.name == "outer")
+    inner = next(b for b in report.bindings if b.name == "inner")
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "p.outer()"
+    )
+    assert call.target == outer.id
+    assert call.target != inner.id

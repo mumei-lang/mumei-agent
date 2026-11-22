@@ -66,6 +66,14 @@ _PRELUDE_TYPE_NAMES = frozenset(
     }
 )
 _PRELUDE_PATTERN_PATHS = frozenset({"Some", "None", "Ok", "Err"})
+# Prelude constructors whose tuple payload position is fixed by the
+# container type — `Some(x)` binds `Option<T>`'s first arg, `Err(e)`
+# binds `Result<T, E>`'s second.
+_PRELUDE_CONTAINER_PAYLOAD = {
+    "Some": ("Option", 0),
+    "Ok": ("Result", 0),
+    "Err": ("Result", 1),
+}
 _INERT_ATTRIBUTES = frozenset(
     {
         "allow",
@@ -188,6 +196,10 @@ class _Record:
     # A `let` initializer node — used to infer the binding's type
     # when no annotation is present.
     value_node: Any = None
+    # Normalized generic arguments of a destructured binding's type
+    # (`for inner in Vec<Vec<P>>` carries "P") so nested unwrapping
+    # stays typed.
+    type_args: str | None = None
     # A `mod` item's body scope — lets `m::T` annotations resolve.
     module_scope: Any = None
     # The scope the record was declared into — a type alias's body
@@ -196,6 +208,9 @@ class _Record:
     # The item carries a `pub` visibility modifier — only `pub` items
     # come through a `use m::*` glob.
     public: bool = False
+    # An `import` record's full use path (`use m::P as Q` → "m::P")
+    # — the name it binds resolves through this target.
+    import_path: str | None = None
 
 
 class _RustBindings:
@@ -539,7 +554,9 @@ class _RustBindings:
             child.type == "visibility_modifier"
             for child in node.named_children
         )
-        for name_node, is_glob, bound_name in self._use_names(node):
+        for name_node, is_glob, bound_name, target_path in self._use_names(
+            node
+        ):
             if is_glob:
                 scope.glob_import = True
                 if bound_name:
@@ -558,6 +575,7 @@ class _RustBindings:
                 name_override=bound_name,
             )
             record.public = is_pub
+            record.import_path = target_path
             self._add_to_scope(scope, record)
 
     def _add_generic_parameters(
@@ -771,8 +789,15 @@ class _RustBindings:
             if gap not in self.gaps:
                 self.gaps.append(gap)
 
-    def _use_names(self, node: Any) -> list[tuple[Any, bool, str | None]]:
-        out: list[tuple[Any, bool, str | None]] = []
+    def _use_names(
+        self, node: Any
+    ) -> list[tuple[Any, bool, str | None, str | None]]:
+        out: list[tuple[Any, bool, str | None, str | None]] = []
+
+        def joined(prefix: tuple[str, ...], text: str) -> str:
+            return "::".join(
+                prefix + tuple(part for part in text.split("::") if part)
+            )
 
         def add_leaf(tree: Any, prefix: tuple[str, ...] = ()) -> None:
             if tree.type == "use_list":
@@ -789,14 +814,43 @@ class _RustBindings:
             elif tree.type == "use_as_clause":
                 alias = tree.child_by_field_name("alias")
                 if alias is not None:
-                    out.append((alias, False, self.text(alias)))
+                    path_node = next(
+                        (
+                            child
+                            for child in self._children(tree)
+                            if child.id != alias.id
+                        ),
+                        None,
+                    )
+                    out.append(
+                        (
+                            alias,
+                            False,
+                            self.text(alias),
+                            None
+                            if path_node is None
+                            else joined(prefix, self.text(path_node)),
+                        )
+                    )
             elif tree.type in {"use_wildcard", "wildcard_pattern"} or self.text(tree).endswith("*"):
                 path = self.text(tree).removesuffix("*").removesuffix("::")
                 out.append(
-                    (tree, True, "::".join(prefix + (path,)) if prefix else path)
+                    (
+                        tree,
+                        True,
+                        "::".join(prefix + (path,)) if prefix else path,
+                        None,
+                    )
                 )
             elif tree.type == "self":
-                out.append((tree, False, prefix[-1] if prefix else "self"))
+                out.append(
+                    (
+                        tree,
+                        False,
+                        prefix[-1] if prefix else "self",
+                        "::".join(prefix) if prefix else None,
+                    )
+                )
             else:
                 candidates = [
                     child for child in self._descendants(tree)
@@ -807,7 +861,9 @@ class _RustBindings:
                     final = self.text(picked)
                     if final == "self":
                         final = prefix[-1] if prefix else "self"
-                    out.append((picked, False, final))
+                    out.append(
+                        (picked, False, final, joined(prefix, self.text(tree)))
+                    )
 
         for child in node.named_children:
             add_leaf(child)
@@ -817,7 +873,17 @@ class _RustBindings:
                 None,
             )
             if candidate is not None:
-                out.append((candidate, False, self.text(candidate)))
+                out.append(
+                    (
+                        candidate,
+                        False,
+                        self.text(candidate),
+                        self.text(node)
+                        .removeprefix("use")
+                        .removesuffix(";")
+                        .strip(),
+                    )
+                )
         return out
 
     def _scan_container(self, container: Any, scope: _Scope) -> None:
@@ -1270,10 +1336,13 @@ class _RustBindings:
             return (None if record is None else record.binding.id), args
         if node is None or node.type != "type_identifier":
             return None, None
-        record = self._lookup(
-            self._normalize_identifier(self.text(node)),
+        record = self._through_import(
+            self._lookup(
+                self._normalize_identifier(self.text(node)),
+                node.start_byte,
+                "type",
+            ),
             node.start_byte,
-            "type",
         )
         name = self._normalize_identifier(self.text(node))
         if (
@@ -1318,6 +1387,54 @@ class _RustBindings:
             parts = self._type_arg_list(args)
             args = parts[-1] if parts else None
         return (None if record is None else record.binding.id), args
+
+    def _resolve_use_path(
+        self, path: str, position: int, namespace: str
+    ) -> "_Record | None":
+        """Record a `use` target path names — `m::P` walks the module
+        chain and returns `P`'s own binding in `namespace` (a name
+        that only exists in the other namespace does not resolve)."""
+        segments = path.split("::")
+        if len(segments) < 2:
+            return None
+        module = self._lookup_module_path(
+            "::".join(segments[:-1]), position
+        )
+        if module is None or module.module_scope is None:
+            return None
+        for record in reversed(
+            module.module_scope.bindings.get(segments[-1], ())
+        ):
+            if self._in_namespace(record, namespace):
+                return record
+        return None
+
+    def _through_import(
+        self, record: "_Record | None", position: int,
+        namespace: str = "type",
+    ) -> "_Record | None":
+        """Follow `import` records to their use-path target —
+        `use m::P` makes `P::new` read `m`'s `P`. The path resolves
+        where the `use` is declared, not at the reference site, and
+        an unresolvable target keeps the import record itself (the
+        name is still what `impl Trait for P` matches against)."""
+        seen: set[str] = set()
+        while (
+            record is not None
+            and record.binding.kind == "import"
+            and record.import_path is not None
+            and record.binding.id not in seen
+        ):
+            seen.add(record.binding.id)
+            resolved = self._resolve_use_path(
+                record.import_path,
+                record.binding.span.start,
+                namespace,
+            )
+            if resolved is None:
+                break
+            record = resolved
+        return record
 
     def _lookup_module_path(
         self, path: str, position: int
@@ -1452,6 +1569,7 @@ class _RustBindings:
                 item=True,
             )
             member.member_of = record.binding.id
+            member.body_node = variant.child_by_field_name("body")
             value = variant.child_by_field_name("value")
             if value is not None:
                 self._expr(value)
@@ -1469,10 +1587,13 @@ class _RustBindings:
         if path.type == "generic_type":
             type_id, args = self._annotation_type(path)
         elif path.type in {"identifier", "type_identifier"}:
-            record = self._lookup(
-                self._normalize_identifier(self.text(path)),
+            record = self._through_import(
+                self._lookup(
+                    self._normalize_identifier(self.text(path)),
+                    path.start_byte,
+                    "type",
+                ),
                 path.start_byte,
-                "type",
             )
             type_id, args = (
                 None
@@ -1574,10 +1695,7 @@ class _RustBindings:
             trait = self.records.get(record.member_trait)
             if trait is None:
                 return False
-            resolved = self._lookup(
-                trait.binding.name, position, "type"
-            )
-            return resolved is trait
+            return self._trait_visible(trait, position)
 
         pool = [
             record
@@ -1626,10 +1744,7 @@ class _RustBindings:
                 trait = self.records.get(trait_id)
                 if trait is None:
                     continue
-                resolved = self._lookup(
-                    trait.binding.name, position, "type"
-                )
-                if resolved is not trait:
+                if not self._trait_visible(trait, position):
                     continue
                 pool.extend(
                     record
@@ -1751,6 +1866,53 @@ class _RustBindings:
             type_id = resolved
         return type_id
 
+    def _trait_visible(
+        self, trait: "_Record", position: int
+    ) -> bool:
+        """Whether `trait` is in scope at `position` — directly, or
+        through an import whose use path lands on it (`use m::Tr`,
+        `use m::Tr as Q`). An import record stands for an externally
+        declared trait: only its own binding satisfies membership."""
+        resolved = self._through_import(
+            self._lookup(trait.binding.name, position, "type"),
+            position,
+        )
+        if resolved is trait:
+            return True
+        if trait.binding.kind == "import":
+            return False
+        # A `use` is name-visible only inside its own module — neither
+        # `use` nor `pub use` in a parent module brings the name into a
+        # nested `mod` (that needs `use super::Tr`). The span check keeps
+        # block-local `use` scoped to its block; the depth check drops a
+        # parent module's `use`, whose span encloses nested mods.
+        depth = (
+            self.scopes[-1].module_depth
+            if self.scopes
+            else self.module_depth
+        )
+        for scope in self.scopes:
+            for records in scope.bindings.values():
+                for candidate in records:
+                    if (
+                        candidate.binding.kind == "import"
+                        and candidate.module_depth == depth
+                        and (
+                            candidate.binding.scope is None
+                            or candidate.binding.scope
+                            == ByteSpan(0, 0)
+                            or (
+                                candidate.binding.scope.start
+                                <= position
+                                < candidate.binding.scope.end
+                            )
+                        )
+                        and self._through_import(candidate, position)
+                        is trait
+                    ):
+                        return True
+        return False
+
     def _resolve_trait_node(self, trait_node: Any) -> "_Record | None":
         """Trait record for a UFCS `as` qualifier — plain, scoped
         (`m::T`) or generic (`T<A>`) spellings all resolve."""
@@ -1765,10 +1927,13 @@ class _RustBindings:
             return None
         if node.type in {"scoped_identifier", "scoped_type_identifier"}:
             return self._scoped_type(node)
-        return self._lookup(
-            self._normalize_identifier(self.text(node)),
+        return self._through_import(
+            self._lookup(
+                self._normalize_identifier(self.text(node)),
+                node.start_byte,
+                "type",
+            ),
             node.start_byte,
-            "type",
         )
 
     def _ufcs_member(
@@ -1878,7 +2043,12 @@ class _RustBindings:
             # from them.
             return annotated
         if record.binding.type is not None and record.binding.type.type_id:
-            return record.binding.type.type_id, None
+            # A declared element type keeps its own generics —
+            # `Vec<W<u8>>` binds the element as `W` with "u8" here so
+            # `impl W<u8>` members still match.
+            return record.binding.type.type_id, record.type_args
+        if record.type_args is not None:
+            return None, record.type_args
         if record.value_node is not None:
             return self._receiver_type(record.value_node)
         return None, None
@@ -1887,8 +2057,18 @@ class _RustBindings:
         self, node: Any
     ) -> tuple[str | None, str | None]:
         """(type id, generic-args key) of a member-access receiver."""
+        while node is not None and node.type == "reference_expression":
+            # Auto-deref — `&P` calls `P`'s methods.
+            node = next(iter(node.named_children), None)
+        if node is not None and node.type == "parenthesized_expression":
+            inner = self._children(node)
+            if len(inner) == 1:
+                node = inner[0]
         if node is None:
             return None, None
+        if node.type == "type_cast_expression":
+            # `x as T` reads as `T` — the cast pins the receiver.
+            return self._annotation_type(node.child_by_field_name("type"))
         if node.type in {"identifier", "self"}:
             record = self._lookup(
                 self._normalize_identifier(self.text(node)),
@@ -1922,45 +2102,8 @@ class _RustBindings:
                 # the next index can still unwrap. A call like
                 # `v[f(0..10)]` keeps its integer index.
                 return None, elem_args
-            # A resolved container whose `Index::Output` is not its
-            # generic argument (a custom `Wrapper<P>`) stays opaque —
-            # only the known element-indexing collections apply.
-            if container_id is not None:
-                container_name = next(
-                    (
-                        b.name
-                        for b in self.bindings
-                        if b.id == container_id
-                    ),
-                    None,
-                )
-                if container_name not in _INDEX_ELEMENT_CONTAINERS:
-                    return None, None
-            # A slice or array element exposes its own element type —
-            # `&[[P; 2]]` indexes first to `[P; 2]`, then to `P`.
-            bracket = re.fullmatch(
-                r"\[(.+?)(?:\s*;.+)?\]", elem_args
-            )
-            if bracket is not None:
-                # The element is an anonymous slice/array — `v[i]` has
-                # that anonymous type, indexed further by its own
-                # element (`[P; 2]` → `P`), not `P` itself.
-                return None, bracket.group(1).strip()
-            match = re.fullmatch(
-                r"([A-Za-z_][\w:]*)\s*(?:<(.+)>)?", elem_args
-            )
-            if match is None:
-                # The element is a reference or composite type —
-                # keep its text so deeper indexing still reads args.
-                return None, elem_args
-            elem = self._lookup(
-                self._normalize_identifier(match.group(1)),
-                node.start_byte,
-                "type",
-            )
-            return (
-                None if elem is None else elem.binding.id,
-                match.group(2),
+            return self._element_of(
+                container_id, elem_args, node.start_byte
             )
         if node.type == "field_expression":
             member = self._field_member(
@@ -1994,6 +2137,10 @@ class _RustBindings:
                 )
             if member is None:
                 return None, None
+            if member.binding.kind == "enum_member":
+                # A variant constructor spells its enum — `E::C(P)`
+                # constructs an `E`.
+                return self._concrete_type_id(member.member_of), None
             function = next(
                 (
                     entry
@@ -2020,11 +2167,126 @@ class _RustBindings:
             # `W<i32>{..}` keeps its type arguments — the annotation
             # walk reads them off the generic name node.
             return self._annotation_type(node.child_by_field_name("name"))
+        if node.type in {"scoped_identifier", "scoped_type_identifier"}:
+            # A unit variant spells its enum — `let e = E::F` is an `E`.
+            member, _ = self._scoped_member(node)
+            if member is not None and member.binding.kind == "enum_member":
+                return self._concrete_type_id(member.member_of), None
+            return None, None
         if node.type == "parenthesized_expression":
             children = self._children(node)
             if len(children) == 1:
                 return self._receiver_type(children[0])
         return None, None
+
+    def _element_of(
+        self,
+        container_id: str | None,
+        elem_args: str,
+        position: int,
+    ) -> tuple[str | None, str | None]:
+        """(type id, generic-args key) one collection step in —
+        `Vec<P>`/`[P; N]`/`&Vec<P>` yield `P`; a resolved container
+        whose element is not its generic argument (a custom
+        `Wrapper<P>`) stays opaque."""
+        # A resolved container whose `Index::Output` is not its
+        # generic argument (a custom `Wrapper<P>`) stays opaque —
+        # only the known element-indexing collections apply.
+        if container_id is not None:
+            container_name = next(
+                (
+                    b.name
+                    for b in self.bindings
+                    if b.id == container_id
+                ),
+                None,
+            )
+            if container_name not in _INDEX_ELEMENT_CONTAINERS:
+                return None, None
+        # A slice or array element exposes its own element type —
+        # `&[[P; 2]]` reads first to `[P; 2]`, then to `P`.
+        bracket = re.fullmatch(
+            r"\[(.+?)(?:\s*;.+)?\]", elem_args
+        )
+        if bracket is not None:
+            # The element is an anonymous slice/array — it is indexed
+            # further by its own element (`[P; 2]` → `P`), not `P`.
+            return None, bracket.group(1).strip()
+        match = re.fullmatch(
+            r"([A-Za-z_][\w:]*)\s*(?:<(.+)>)?", elem_args
+        )
+        if match is None:
+            # The element is a reference or composite type — keep its
+            # text so deeper indexing still reads args.
+            return None, elem_args
+        elem = self._lookup(
+            self._normalize_identifier(match.group(1)),
+            position,
+            "type",
+        )
+        return (
+            None if elem is None else elem.binding.id,
+            match.group(2),
+        )
+
+    def _for_element(
+        self, iterator: Any | None
+    ) -> "tuple[TypeFact, str | None]":
+        """(TypeFact, element-args) bound by `for <pat> in <iterator>`
+        — `Vec<P>`, `[P; N]` and their `&`/`&mut` forms yield `P`; a
+        range, an iterator method call or anything else unpinned stays
+        `_UNKNOWN`. The args carry the element's own generics
+        (`Vec<Vec<P>>` binds `inner : Vec<P>`) so a nested loop keeps
+        unwrapping."""
+        if iterator is None:
+            return _UNKNOWN, None
+        while iterator.type == "reference_expression":
+            iterator = next(iter(iterator.named_children), None)
+            if iterator is None:
+                return _UNKNOWN, None
+        if iterator.type == "parenthesized_expression":
+            children = self._children(iterator)
+            if len(children) != 1:
+                return _UNKNOWN, None
+            iterator = children[0]
+        container_id, elem_args = self._receiver_type(iterator)
+        if elem_args is None or "," in elem_args:
+            return _UNKNOWN, None
+        # Iterating a map yields (K, V) pairs — index typing keeps
+        # only the value type, so the pair's shape is unpinned here.
+        if container_id is not None and next(
+            (
+                True
+                for b in self.bindings
+                if b.id == container_id
+                and b.name in {"HashMap", "BTreeMap"}
+            ),
+            False,
+        ):
+            return _UNKNOWN, None
+        if iterator.type == "identifier":
+            irec = self._lookup(
+                self._normalize_identifier(self.text(iterator)),
+                iterator.start_byte,
+                "value",
+            )
+            if irec is not None and irec.type_node is not None and (
+                re.search(
+                    r"\b(?:HashMap|BTreeMap)\s*<",
+                    self.text(irec.type_node),
+                )
+                is not None
+            ):
+                return _UNKNOWN, None
+        elem_id, rest = self._element_of(
+            container_id, elem_args.strip(), iterator.start_byte
+        )
+        if elem_id is None:
+            return _UNKNOWN, rest
+        name = next(
+            (b.name for b in self.bindings if b.id == elem_id), ""
+        )
+        return TypeFact("named", name, 0, None, elem_id), rest
 
     def _receiver_type_node(self, node: Any | None) -> Any | None:
         """Annotation node of the receiver's declared type, if any."""
@@ -2633,6 +2895,23 @@ class _RustBindings:
         self, node: Any, namespace: str, expected_kinds: set[str]
     ) -> None:
         if node.type in {"scoped_identifier", "scoped_type_identifier"}:
+            member, name_node = self._scoped_member(node)
+            if member is None:
+                # `m::W` heads resolve a module's type, not a member.
+                member = self._scoped_type(node)
+            if member is not None and member.binding.kind in {
+                "enum_member",
+                "struct",
+                "associated_const",
+            }:
+                self.references.append(
+                    Reference(
+                        self.span(name_node or node),
+                        member.binding.id,
+                        "read",
+                    )
+                )
+                return
             self.unresolved.append(
                 Unresolved(
                     self.span(node),
@@ -2845,8 +3124,24 @@ class _RustBindings:
         names = self._apply_outer_mutability(
             names, pattern, mutable_specifier
         )
+        scrut_id, scrut_args = (
+            (None, None)
+            if value is None
+            else self._receiver_type(value)
+        )
+        scrut_name, scrut_position = self._scrutinee_shape(
+            value, scrut_id
+        )
+        type_map = (
+            {}
+            if whole_names
+            else self._pattern_type_map(
+                pattern, scrut_id, scrut_args, scrut_name, scrut_position
+            )
+        )
         for name_node, name_mutable in names:
             whole = name_node.id in whole_names
+            pinned = type_map.get(name_node.start_byte)
             record = self._make_record(
                 name_node,
                 "local",
@@ -2854,10 +3149,16 @@ class _RustBindings:
                 self.current_function,
                 self.module_depth,
                 item=False,
-                type_fact=fact if whole else _UNKNOWN,
+                type_fact=(
+                    pinned[0]
+                    if pinned is not None
+                    else fact if whole else _UNKNOWN
+                ),
                 mutable=name_mutable,
                 type_node=annotation if whole else None,
             )
+            if pinned is not None:
+                record.type_args = pinned[1]
             if whole:
                 record.value_node = value
             self._add_to_scope(scope, record)
@@ -3110,7 +3411,7 @@ class _RustBindings:
 
     def _condition(
         self, condition: Any, scope: _Scope
-    ) -> list[tuple[Any, bool]]:
+    ) -> tuple[list[tuple[Any, bool]], dict]:
         if condition.type == "let_condition":
             pattern = condition.child_by_field_name("pattern")
             value = condition.child_by_field_name("value")
@@ -3119,12 +3420,26 @@ class _RustBindings:
                 value = named[-1] if named else None
             if value is not None:
                 self._expr(value)
-            return self._pattern_names(pattern, scope)
+            scrut_id, scrut_args = (
+                (None, None)
+                if value is None
+                else self._receiver_type(value)
+            )
+            scrut_name, scrut_position = self._scrutinee_shape(
+                value, scrut_id
+            )
+            return (
+                self._pattern_names(pattern, scope),
+                self._pattern_type_map(
+                    pattern, scrut_id, scrut_args,
+                    scrut_name, scrut_position,
+                ),
+            )
         if any(node.type == "let_condition" for node in self._descendants(condition)):
             self.gaps.append(Gap("unsupported_syntax", self.span(condition)))
-            return []
+            return [], {}
         self._expr(condition)
-        return []
+        return [], {}
 
     def _if(self, node: Any) -> None:
         condition = node.child_by_field_name("condition")
@@ -3133,8 +3448,14 @@ class _RustBindings:
         if consequence is not None:
             scope = _Scope(consequence, self.module_depth, self.current_function)
             self.scopes.append(scope)
-            names = [] if condition is None else self._condition(condition, scope)
-            self._bind_pattern_names(names, scope, self.span(consequence))
+            names, type_map = (
+                ([], {})
+                if condition is None
+                else self._condition(condition, scope)
+            )
+            self._bind_pattern_names(
+                names, scope, self.span(consequence), type_map=type_map
+            )
             self._expr(consequence)
             self.scopes.pop()
         elif condition is not None:
@@ -3148,8 +3469,14 @@ class _RustBindings:
         if body is not None:
             scope = _Scope(body, self.module_depth, self.current_function)
             self.scopes.append(scope)
-            names = [] if condition is None else self._condition(condition, scope)
-            self._bind_pattern_names(names, scope, self.span(body))
+            names, type_map = (
+                ([], {})
+                if condition is None
+                else self._condition(condition, scope)
+            )
+            self._bind_pattern_names(
+                names, scope, self.span(body), type_map=type_map
+            )
             self._expr(body)
             self.scopes.pop()
         elif condition is not None:
@@ -3164,7 +3491,42 @@ class _RustBindings:
         if body is not None:
             scope = _Scope(body, self.module_depth, self.current_function)
             self.scopes.append(scope)
-            self._bind_pattern(pattern, scope, self.span(body), _UNKNOWN)
+            names = self._pattern_names(pattern, scope)
+            single = pattern
+            # `for mut p in v` still binds one identifier — `mut` only
+            # marks the binding writable. `ref p` binds `&T`, not `T`,
+            # so it stays unpinned here.
+            while (
+                single is not None
+                and single.type == "mut_pattern"
+            ):
+                # `mutable_specifier` is also a named child — pick the
+                # nested pattern node.
+                single = next(
+                    (
+                        child
+                        for child in self._children(single)
+                        if child.type != "mutable_specifier"
+                    ),
+                    None,
+                )
+            if (
+                single is not None
+                and single.type == "identifier"
+                and len(names) == 1
+            ):
+                element_fact, element_args = self._for_element(iterator)
+            else:
+                # Destructuring binds fields/elements, not the iterated
+                # value — `for P { x } in v` leaves `x` unpinned.
+                element_fact, element_args = _UNKNOWN, None
+            self._bind_pattern_names(
+                names,
+                scope,
+                self.span(body),
+                element_fact,
+                element_args,
+            )
             self._expr(body)
             self.scopes.pop()
 
@@ -3172,6 +3534,11 @@ class _RustBindings:
         value = node.child_by_field_name("value")
         if value is not None:
             self._expr(value)
+        scrut_id, scrut_args = (
+            (None, None)
+            if value is None
+            else self._receiver_type(value)
+        )
         body = node.child_by_field_name("body")
         if body is None:
             return
@@ -3200,7 +3567,13 @@ class _RustBindings:
                 )
             )
             names = self._pattern_names(pattern, arm_scope)
-            self._bind_pattern_names(names, arm_scope, self.span(arm))
+            type_map = self._pattern_type_map(
+                pattern, scrut_id, scrut_args,
+                *self._scrutinee_shape(value, scrut_id),
+            )
+            self._bind_pattern_names(
+                names, arm_scope, self.span(arm), type_map=type_map
+            )
             if guard is not None:
                 self._expr(guard)
             result = arm.child_by_field_name("value")
@@ -3208,24 +3581,488 @@ class _RustBindings:
                 self._expr(result)
             self.scopes.pop()
 
+    def _pattern_head_record(
+        self, head: Any | None, scrut_id: str
+    ) -> "_Record | None":
+        """The record a destructuring pattern's head names — the
+        scrutinee's own type (`W { .. }`) or an enum member of it
+        (`E::V(..)`); anything else stays unpinned."""
+        if head is None:
+            return None
+        record = None
+        if head.type in {"identifier", "type_identifier"}:
+            record = self._lookup(
+                self._normalize_identifier(self.text(head)),
+                head.start_byte,
+                "type",
+            )
+        elif head.type in {"scoped_identifier", "scoped_type_identifier"}:
+            member, _ = self._scoped_member(head)
+            record = (
+                member
+                if member is not None
+                else self._scoped_type(head)
+            )
+        if record is None:
+            return None
+        if (
+            record.binding.id == scrut_id
+            or record.member_of == scrut_id
+        ):
+            return record
+        return None
+
+    def _pattern_param_map(
+        self, container: "_Record | None", scrut_args: str | None
+    ) -> dict[str, str]:
+        """{declared param name: spelled arg} of a generic scrutinee
+        — `W<P>` substitutes a `T` field annotation with `P`."""
+        if container is None or scrut_args is None:
+            return {}
+        body = container.body_node
+        item = None if body is None else body.parent
+        names = self._type_param_names(
+            None
+            if item is None
+            else item.child_by_field_name("type_parameters")
+        )
+        args = self._type_arg_list(scrut_args)
+        if not names or len(args) < len(names):
+            return {}
+        return dict(zip(names, args))
+
+    def _field_annotation(
+        self,
+        type_node: Any,
+        param_map: dict[str, str],
+        position: int,
+        container: "_Record | None" = None,
+    ) -> tuple[str | None, str | None]:
+        """(type id, args) of a declared field, substituting the
+        scrutinee's generic arguments — `W<T>` at `W<P>` reads the
+        field as `P`. The parameters themselves resolve at the
+        container's declaration site, not the pattern's scope stack,
+        so the map is consulted before the annotation; the declared
+        type itself resolves in the container's own scope — `m::W`'s
+        field `P` is `m::P`, never a root-level `P`."""
+        if param_map and type_node is not None and type_node.type in {
+            "identifier",
+            "type_identifier",
+        }:
+            spelled = param_map.get(
+                self._normalize_identifier(self.text(type_node))
+            )
+            if spelled is not None:
+                return self._spelled_type(spelled, position)
+        scope = None if container is None else container.home_scope
+        push = scope is not None and scope not in self.scopes
+        if push:
+            self.scopes.append(scope)
+        try:
+            type_id, args = self._annotation_type(type_node)
+        finally:
+            if push:
+                self.scopes.pop()
+        if not param_map:
+            return type_id, args
+        if type_id is not None:
+            param = self.records.get(type_id)
+            if (
+                param is not None
+                and param.binding.kind == "generic_parameter"
+            ):
+                spelled = param_map.get(param.binding.name)
+                if spelled is not None:
+                    return self._spelled_type(spelled, position)
+        if args is not None:
+            for name, spelled in param_map.items():
+                args = re.sub(
+                    r"\b" + re.escape(name) + r"\b", spelled, args
+                )
+        return type_id, args
+
+    def _spelled_type(
+        self, spelled: str, position: int
+    ) -> tuple[str | None, str | None]:
+        """(type id, args) for a type argument's spelling — `P`
+        resolves to its record, `Vec<P>` keeps its args, an
+        unresolvable shape stays args-only."""
+        match = re.fullmatch(
+            r"([A-Za-z_][\w:]*)\s*(?:<(.+)>)?", spelled.strip()
+        )
+        if match is None:
+            return None, spelled
+        record = self._lookup(
+            self._normalize_identifier(match.group(1)),
+            position,
+            "type",
+        )
+        return (
+            None if record is None else record.binding.id,
+            match.group(2),
+        )
+
+    def _pattern_head_fields(
+        self, head: Any | None, scrut_id: str, scrut_args: str | None
+    ) -> "dict[str, tuple[str | None, str | None]] | None":
+        """{field name: (type id, args)} for `W { .. }` / `E::V { .. }`
+        heads — None when the head does not name the scrutinee's
+        declared type."""
+        record = self._pattern_head_record(head, scrut_id)
+        if record is None:
+            return None
+        container = (
+            record
+            if record.binding.id == scrut_id
+            else self.records.get(record.member_of)
+        )
+        body = record.body_node
+        if body is None or body.type != "field_declaration_list":
+            return None
+        param_map = self._pattern_param_map(container, scrut_args)
+        fields: dict[str, tuple[str | None, str | None]] = {}
+        for decl in self._children(body):
+            if decl.type != "field_declaration":
+                continue
+            name_node = decl.child_by_field_name("name")
+            type_node = decl.child_by_field_name("type")
+            if name_node is None or type_node is None:
+                continue
+            fields[
+                self._normalize_identifier(self.text(name_node))
+            ] = self._field_annotation(
+                type_node, param_map, head.start_byte, container
+            )
+        return fields
+
+    def _pattern_head_payload(
+        self,
+        head: Any | None,
+        scrut_id: str | None,
+        scrut_args: str | None,
+        scrut_name: str | None = None,
+        scrut_position: int | None = None,
+    ) -> "list[tuple[str | None, str | None]] | None":
+        """Positional [(type id, args)] for `W(..)` / `E::V(..)`
+        heads — None when the head does not name the scrutinee."""
+        record = self._pattern_head_record(head, scrut_id)
+        if record is None:
+            if scrut_id is not None or scrut_position is None:
+                # A resolved scrutinee (a user `enum Option`) does
+                # not reach the prelude path, and prelude payloads
+                # need the annotation position to resolve args.
+                return None
+            return self._prelude_pattern_payload(
+                head, scrut_name, scrut_args, scrut_position
+            )
+        container = (
+            record
+            if record.binding.id == scrut_id
+            else self.records.get(record.member_of)
+        )
+        body = record.body_node
+        if (
+            body is None
+            or body.type != "ordered_field_declaration_list"
+        ):
+            return None
+        param_map = self._pattern_param_map(container, scrut_args)
+        return [
+            self._field_annotation(
+                child, param_map, head.start_byte, container
+            )
+            for child in self._children(body)
+            if child.type != "visibility_modifier"
+        ]
+
+    def _annotation_head_name(self, node: Any | None) -> str | None:
+        """Head type name of an annotation — `Option<P>` gives
+        "Option"; a scoped `m::Option` returns None (prelude gating
+        needs the unqualified name)."""
+        while node is not None and node.type in {
+            "reference_type",
+            "generic_type",
+            "generic_type_with_turbofish",
+            "return_type",
+        }:
+            node = node.child_by_field_name("type")
+        if node is not None and node.type in {
+            "identifier",
+            "type_identifier",
+        }:
+            return self._normalize_identifier(self.text(node))
+        return None
+
+    def _type_head_name(
+        self, type_id: str | None, args: str | None
+    ) -> str | None:
+        """Head name of a (type id, args) pair — the record's name,
+        or the spelled head when the type stayed unresolvable
+        (`Vec<P>`'s args carry "Option<P>" for nesting)."""
+        if type_id is not None:
+            record = self.records.get(type_id)
+            if record is not None:
+                return record.binding.name
+            return None
+        if args is None:
+            return None
+        match = re.match(r"[A-Za-z_]\w*", args.strip())
+        return None if match is None else match.group(0)
+
+    def _scrutinee_shape(
+        self, value: Any | None, scrut_id: str | None
+    ) -> "tuple[str | None, int | None]":
+        """(head name, annotation position) of the scrutinee's
+        declared type — `opt` in `match opt` reads `opt`'s
+        annotation (`Option<P>` → ("Option", <pos>)). The position
+        is where the type was written, so spelled args resolve
+        against the names visible there, not the pattern's scope."""
+        if scrut_id is not None:
+            record = self.records.get(scrut_id)
+            return (
+                (None, None)
+                if record is None
+                else (record.binding.name, None)
+            )
+        node = value
+        while node is not None and node.type == "reference_expression":
+            node = next(iter(node.named_children), None)
+        if node is None or node.type != "identifier":
+            return None, None
+        record = self._lookup(
+            self._normalize_identifier(self.text(node)),
+            node.start_byte,
+            "value",
+        )
+        if record is None:
+            return None, None
+        position = (
+            None
+            if record.type_node is None
+            else record.type_node.start_byte
+        )
+        return self._annotation_head_name(record.type_node), position
+
+    def _prelude_pattern_payload(
+        self,
+        head: Any | None,
+        scrut_name: str | None,
+        scrut_args: str | None,
+        scrut_position: int,
+    ) -> "list[tuple[str | None, str | None]] | None":
+        """Positional payload for a prelude constructor
+        (`Some(x)`/`Ok(x)`/`Err(e)`) when the scrutinee's declared
+        container is the matching prelude type — `Option<P>` lets
+        `Some(p)` bind `p` to `P`. A head that resolves to a real
+        record or names a different container stays unpinned."""
+        if head is None or head.type not in {"identifier", "type_identifier"}:
+            return None
+        entry = _PRELUDE_CONTAINER_PAYLOAD.get(
+            self._normalize_identifier(self.text(head))
+        )
+        if entry is None or scrut_name != entry[0]:
+            return None
+        args = self._type_arg_list(scrut_args or "")
+        if entry[1] >= len(args):
+            return None
+        # The spelled arg refers to names visible where the
+        # scrutinee's type was annotated — resolving at the pattern
+        # position would pick up a same-named shadow.
+        type_id, fargs = self._spelled_type(
+            args[entry[1]], scrut_position
+        )
+        return [(type_id, fargs)]
+
+    def _pattern_type_map(
+        self,
+        pattern: Any | None,
+        scrut_id: str | None,
+        scrut_args: str | None,
+        scrut_name: str | None = None,
+        scrut_position: int | None = None,
+    ) -> dict:
+        """start_byte -> (TypeFact, args) for the names a destructuring
+        pattern binds, resolved against the scrutinee's declared
+        type — `match e { E::V(p) => ... }` types `p` by V's payload;
+        a name the shape cannot pin is simply absent."""
+        if pattern is None or (scrut_id is None and scrut_name is None):
+            return {}
+        kind = pattern.type
+        if kind in {"identifier", "self"}:
+            name = self._normalize_identifier(self.text(pattern))
+            # An unresolvable scrutinee (`Option<P>` has no record)
+            # still carries its args — the fact stays `unknown` so
+            # no null type_id is emitted.
+            fact = (
+                TypeFact("named", name, 0, None, scrut_id)
+                if scrut_id is not None
+                else _UNKNOWN
+            )
+            return {pattern.start_byte: (fact, scrut_args)}
+        if kind in {"ref_pattern", "mut_pattern"}:
+            inner = next(
+                (
+                    child
+                    for child in self._children(pattern)
+                    if child.type != "mutable_specifier"
+                ),
+                None,
+            )
+            return self._pattern_type_map(
+                inner, scrut_id, scrut_args, scrut_name, scrut_position
+            )
+        if kind == "captured_pattern":
+            mapping: dict = {}
+            for child in self._children(pattern):
+                mapping.update(
+                    self._pattern_type_map(
+                        child, scrut_id, scrut_args,
+                        scrut_name, scrut_position,
+                    )
+                )
+            return mapping
+        if kind == "or_pattern":
+            # Each alternative binds the same names — typing the
+            # first one covers the arm.
+            inner = next(iter(self._children(pattern)), None)
+            return self._pattern_type_map(
+                inner, scrut_id, scrut_args, scrut_name, scrut_position
+            )
+        if kind in {"match_pattern", "condition"}:
+            mapping = {}
+            for child in self._children(pattern):
+                if child.type in {"binary_expression", "call_expression"}:
+                    continue
+                mapping.update(
+                    self._pattern_type_map(
+                        child, scrut_id, scrut_args,
+                        scrut_name, scrut_position,
+                    )
+                )
+            return mapping
+        if kind == "struct_pattern":
+            head = pattern.child_by_field_name("type")
+            fields = self._pattern_head_fields(
+                head, scrut_id, scrut_args
+            )
+            if fields is None:
+                return {}
+            mapping = {}
+            for child in self._children(pattern):
+                if child.type != "field_pattern":
+                    continue
+                fname_node = child.child_by_field_name("name")
+                bound = child.child_by_field_name("pattern")
+                fname = (
+                    None
+                    if fname_node is None
+                    else self._normalize_identifier(
+                        self.text(fname_node)
+                    )
+                )
+                field_type = fields.get(fname) if fname else None
+                if bound is not None:
+                    tid, fargs = (
+                        field_type
+                        if field_type is not None
+                        else (None, None)
+                    )
+                    mapping.update(
+                        self._pattern_type_map(
+                            bound, tid, fargs,
+                            self._type_head_name(tid, fargs),
+                            scrut_position,
+                        )
+                    )
+                    continue
+                if fname_node is not None and field_type is not None:
+                    tid, fargs = field_type
+                    if tid is not None or fargs is not None:
+                        mapping[fname_node.start_byte] = (
+                            TypeFact(
+                                "named", fname or "", 0, None, tid or ""
+                            ),
+                            fargs,
+                        )
+            return mapping
+        if kind == "tuple_struct_pattern":
+            head = pattern.child_by_field_name("type")
+            payload = self._pattern_head_payload(
+                head, scrut_id, scrut_args, scrut_name, scrut_position
+            )
+            if payload is None:
+                return {}
+            children = [
+                child
+                for child in self._children(pattern)
+                if child != head
+            ]
+            rest_at = next(
+                (
+                    index
+                    for index, child in enumerate(children)
+                    if child.type == "remaining_field_pattern"
+                ),
+                None,
+            )
+            mapping = {}
+            for index, child in enumerate(children):
+                if child.type == "remaining_field_pattern":
+                    continue
+                if rest_at is not None and index > rest_at:
+                    # `V(.., x)` binds `x` to the LAST payload
+                    # element — `..` covers the skipped middle.
+                    position = len(payload) - (len(children) - index)
+                else:
+                    position = index
+                if position < 0 or position >= len(payload):
+                    continue
+                tid, fargs = payload[position]
+                mapping.update(
+                    self._pattern_type_map(
+                        child, tid, fargs,
+                        self._type_head_name(tid, fargs),
+                        scrut_position,
+                    )
+                )
+            return mapping
+        return {}
+
     def _bind_pattern_names(
         self,
         names: list[tuple[Any, bool]],
         scope: _Scope,
         binding_scope: ByteSpan,
         type_fact: TypeFact = _UNKNOWN,
+        type_args: str | None = None,
+        type_map: dict | None = None,
     ) -> None:
         for name_node, mutable in names:
+            fact, args = (type_map or {}).get(
+                name_node.start_byte, (type_fact, type_args)
+            )
             record = self._make_record(
                 name_node, "local", binding_scope, self.current_function,
-                self.module_depth, item=False, type_fact=type_fact, mutable=mutable,
+                self.module_depth, item=False, type_fact=fact, mutable=mutable,
             )
+            record.type_args = args
             self._add_to_scope(scope, record)
 
     def _bind_pattern(
-        self, pattern: Any, scope: _Scope, binding_scope: ByteSpan, type_fact: TypeFact
+        self,
+        pattern: Any,
+        scope: _Scope,
+        binding_scope: ByteSpan,
+        type_fact: TypeFact,
+        type_args: str | None = None,
     ) -> None:
-        self._bind_pattern_names(self._pattern_names(pattern, scope), scope, binding_scope, type_fact)
+        self._bind_pattern_names(
+            self._pattern_names(pattern, scope),
+            scope,
+            binding_scope,
+            type_fact,
+            type_args,
+        )
 
     def _closure(self, node: Any) -> None:
         params = node.child_by_field_name("parameters")

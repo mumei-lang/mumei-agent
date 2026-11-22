@@ -5,6 +5,7 @@ import copy
 import hashlib
 import json
 import os
+import shutil
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -47,6 +48,7 @@ from agent.strategies.spec_health_strategy import SpecHealthReport
 from agent.strategies.spec_health_strategy_helpers import ContradictionInfo
 
 FIXTURES = Path(__file__).parent / "fixtures"
+ATTEMPT_PY = shutil.which("python3", path="/usr/bin:/bin") or sys.executable
 
 
 def _triage_file(
@@ -4331,8 +4333,8 @@ def _scheduled_verification_files(
         "argv_map": write(
             "argv",
             {
-                "alpha": [sys.executable, "-c", f"import sys; sys.exit({alpha_exit})"],
-                "beta": [sys.executable, "-c", beta_code],
+                "alpha": [ATTEMPT_PY, "-c", f"import sys; sys.exit({alpha_exit})"],
+                "beta": [ATTEMPT_PY, "-c", beta_code],
             },
         ),
         "policy": write(

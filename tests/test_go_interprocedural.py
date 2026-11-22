@@ -18719,6 +18719,640 @@ def test_bound_closure_parenthesized_and_var_literals_keep_records(
     assert result.return_dependencies == frozenset({0})
 
 
+@pytest.mark.parametrize(
+    ("declarations", "expected"),
+    [
+        pytest.param(
+            "type S struct{ F func() int64 }\n"
+            "func Composite(x, y int64) int64 { v := y; "
+            "s := S{F: func() int64 { return v }}; v = x; return s.F() }\n"
+            "func Assigned(x, y int64) int64 { v := y; var s S; "
+            "s.F = func() int64 { return v }; v = x; return s.F() }",
+            frozenset({0, 1}),
+            id="s1-keyed",
+        ),
+        pytest.param(
+            "type S struct{ F func() int64 }\n"
+            "func Composite(x, y int64) int64 { v := y; "
+            "s := S{F: func() int64 { return v }}; return s.F() + x }\n"
+            "func Assigned(x, y int64) int64 { v := y; var s S; "
+            "s.F = func() int64 { return v }; return s.F() + x }",
+            frozenset({0, 1}),
+            id="s4-result-plus-input",
+        ),
+        pytest.param(
+            "type W struct{ F func() }\n"
+            "func Composite(x, y int64) int64 { w := int64(0); v := y; "
+            "s := W{F: func() { w = v }}; v = x; s.F(); return w }\n"
+            "func Assigned(x, y int64) int64 { w := int64(0); v := y; "
+            "var s W; s.F = func() { w = v }; v = x; s.F(); return w }",
+            frozenset({0, 1}),
+            id="s5-write",
+        ),
+        pytest.param(
+            "type S struct{ F func() int64 }\n"
+            "func Composite(x, y int64) int64 { v := y; "
+            "s := S{F: func() int64 { return v }}; t := s; v = x; "
+            "return t.F() }\n"
+            "func Assigned(x, y int64) int64 { v := y; var s S; "
+            "s.F = func() int64 { return v }; t := s; v = x; "
+            "return t.F() }",
+            frozenset({0, 1}),
+            id="s7-field-copy",
+        ),
+        pytest.param(
+            "type W struct{ F func() }\n"
+            "func Composite(x, y int64) int64 { w := int64(0); "
+            "s := W{F: func() { w = x }}; s.F(); return w }\n"
+            "func Assigned(x, y int64) int64 { w := int64(0); var s W; "
+            "s.F = func() { w = x }; s.F(); return w }",
+            frozenset({0}),
+            id="t5-write-without-later-store",
+        ),
+        pytest.param(
+            "type S struct{ F func() int64 }\n"
+            "func Composite(x, y int64) int64 { v := y; "
+            "s := S{func() int64 { return v }}; v = x; return s.F() }\n"
+            "func Assigned(x, y int64) int64 { v := y; var s S; "
+            "s.F = func() int64 { return v }; v = x; return s.F() }",
+            frozenset({0, 1}),
+            id="t6-positional",
+        ),
+        pytest.param(
+            "type S struct{ F func() int64 }\n"
+            "func Composite(x, y int64) int64 { v := y; "
+            "var s = S{F: func() int64 { return v }}; v = x; "
+            "return s.F() }\n"
+            "func Assigned(x, y int64) int64 { v := y; var s S; "
+            "s.F = func() int64 { return v }; v = x; return s.F() }",
+            frozenset({0, 1}),
+            id="t7-var-composite",
+        ),
+        pytest.param(
+            "type S struct{ F func() int64 }\n"
+            "func Composite(x, y int64) int64 { v := y; var s S; "
+            "s = S{F: func() int64 { return v }}; v = x; return s.F() }\n"
+            "func Assigned(x, y int64) int64 { v := y; var s S; "
+            "s.F = func() int64 { return v }; v = x; return s.F() }",
+            frozenset({0, 1}),
+            id="t8-assignment-composite",
+        ),
+        pytest.param(
+            "type S struct{ F func() int64 }\n"
+            "type O struct{ S S }\n"
+            "func Composite(x, y int64) int64 { v := y; "
+            "o := O{S: S{F: func() int64 { return v }}}; v = x; "
+            "return o.S.F() }\n"
+            "func Assigned(x, y int64) int64 { v := y; var o O; "
+            "o.S.F = func() int64 { return v }; v = x; return o.S.F() }",
+            frozenset({0, 1}),
+            id="a7-nested-composite",
+        ),
+    ],
+)
+def test_struct_composite_func_literals_match_field_assignments(
+    go_types_helper, declarations, expected
+):
+    source, snapshot, summaries = unit(go_types_helper, declarations)
+    composite = named(source, snapshot, summaries, "Composite")
+    assigned = named(source, snapshot, summaries, "Assigned")
+    assert composite.available, composite.gaps
+    assert assigned.available, assigned.gaps
+    assert composite.return_dependencies == assigned.return_dependencies
+    assert composite.return_dependencies == expected
+    assert composite.effects == assigned.effects == "unknown"
+
+
+def test_struct_composite_func_literal_controls_match_develop(
+    go_types_helper,
+):
+    declarations = (
+        "type S struct{ F func() int64 }\n"
+        "type W struct{ F func() }\n"
+        "func T1(x, y int64) int64 { var s, t S; v := y; u := x; "
+        "s.F = func() int64 { return v }; "
+        "t.F = func() int64 { return 0 }; _ = u; return s.F() }\n"
+        "func T2(x, y int64) int64 { var s, t S; "
+        "s.F = func() int64 { return x }; "
+        "t.F = func() int64 { return y }; return s.F() }\n"
+        "func S10(x, y int64) int64 { "
+        "s := S{F: func() int64 { return y }}; return s.F() }\n"
+        "func S11(x, y int64, s S) int64 { return s.F() + x }\n"
+        "func J1(x, y int64) int64 { v := y; "
+        "fs := []func() int64{func() int64 { return v }}; "
+        "v = x; return fs[0]() }\n"
+        "func J2(x, y int64) int64 { w := int64(0); v := y; "
+        "fs := []func(){func() { w = v }}; v = x; fs[0](); return w }"
+    )
+    source, snapshot, summaries = unit(go_types_helper, declarations)
+    expected = {
+        "T1": frozenset({1}),
+        "T2": frozenset({0, 1}),
+        "S10": frozenset({1}),
+        "S11": frozenset({0, 2}),
+        "J1": frozenset({0, 1}),
+        "J2": frozenset({0, 1}),
+    }
+    for name, dependencies in expected.items():
+        result = named(source, snapshot, summaries, name)
+        assert result.available, (name, result.gaps)
+        assert result.return_dependencies == dependencies
+        assert result.effects == "unknown"
+
+
+def test_struct_composite_unresolved_positional_func_field_fails_closed(
+    go_types_helper,
+):
+    files = {
+        "main.go": 'package p\nimport "lib"\n'
+        "func F(x int64) int64 { "
+        "s := lib.S{func() int64 { return x }}; return s.F() }\n"
+    }
+    imports = {
+        "lib": {
+            "lib.go": "package lib\ntype S struct{ F func() int64 }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, imports),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files,
+        snapshot,
+        ip.summarize_go_package(files, snapshot),
+        "F",
+    )
+    assert not result.available
+    assert any(
+        gap.reason == "unsupported_expression" for gap in result.gaps
+    )
+
+
+def test_nested_imported_positional_struct_func_field_fails_closed(
+    go_types_helper,
+):
+    files = {
+        "main.go": 'package p\nimport "lib"\n'
+        "type O struct { F func() int64; In lib.S }\n"
+        "func F(x, y int64) int64 { w := int64(0); _ = w; "
+        "f0 := func() int64 { return y }; "
+        "o := O{F: f0, In: lib.S{func() { w = x }}}; "
+        "return o.F() }\n"
+    }
+    imports = {
+        "lib": {
+            "lib.go": "package lib\ntype S struct{ F func() }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, imports),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files,
+        snapshot,
+        ip.summarize_go_package(files, snapshot),
+        "F",
+    )
+    assert not result.available
+    assert any(
+        gap.reason == "unsupported_expression" for gap in result.gaps
+    )
+
+
+def test_nested_local_positional_struct_func_field_keeps_field_identity(
+    go_types_helper,
+):
+    declarations = (
+        "type S struct{ F func() }\n"
+        "type O struct{ F func() int64; In S }\n"
+        "func CompositeRead(x, y int64) int64 { w := int64(0); _ = w; "
+        "f0 := func() int64 { return y }; "
+        "o := O{F: f0, In: S{func() { w = x }}}; "
+        "return o.F() }\n"
+        "func AssignedRead(x, y int64) int64 { w := int64(0); _ = w; "
+        "f0 := func() int64 { return y }; var o O; "
+        "o.F = f0; o.In.F = func() { w = x }; return o.F() }\n"
+        "func CompositeWrite(x, y int64) int64 { w := int64(0); "
+        "f0 := func() int64 { return y }; "
+        "o := O{F: f0, In: S{func() { w = x }}}; "
+        "o.In.F(); return w }\n"
+        "func AssignedWrite(x, y int64) int64 { w := int64(0); "
+        "f0 := func() int64 { return y }; var o O; "
+        "o.F = f0; o.In.F = func() { w = x }; "
+        "o.In.F(); return w }"
+    )
+    source, snapshot, summaries = unit(go_types_helper, declarations)
+    composite_read = named(source, snapshot, summaries, "CompositeRead")
+    assigned_read = named(source, snapshot, summaries, "AssignedRead")
+    assert composite_read.available, composite_read.gaps
+    assert assigned_read.available, assigned_read.gaps
+    assert composite_read.return_dependencies == assigned_read.return_dependencies
+    assert composite_read.return_dependencies == frozenset({0, 1})
+    assert composite_read.effects == assigned_read.effects == "unknown"
+    composite_write = named(source, snapshot, summaries, "CompositeWrite")
+    assigned_write = named(source, snapshot, summaries, "AssignedWrite")
+    assert composite_write.available, composite_write.gaps
+    assert assigned_write.available, assigned_write.gaps
+    assert composite_write.return_dependencies == assigned_write.return_dependencies
+    assert composite_write.return_dependencies == frozenset({0, 1})
+    assert composite_write.effects == assigned_write.effects == "unknown"
+
+
+def test_named_closures_stored_in_struct_fields_match_literals(
+    go_types_helper,
+):
+    declarations = (
+        "type S struct{ F func() int64 }\n"
+        "type W struct{ F func() }\n"
+        "type O struct{ S S }\n"
+        "func ReadAssignmentNamed(x, y int64) int64 { v := y; "
+        "g := func() int64 { return v }; var s S; s.F = g; "
+        "v = x; return s.F() }\n"
+        "func ReadAssignmentLiteral(x, y int64) int64 { v := y; "
+        "var s S; s.F = func() int64 { return v }; "
+        "v = x; return s.F() }\n"
+        "func WriteAssignmentNamed(x int64) int64 { w := int64(0); "
+        "g := func() { w = x }; var s W; s.F = g; "
+        "s.F(); return w }\n"
+        "func WriteAssignmentLiteral(x int64) int64 { w := int64(0); "
+        "var s W; s.F = func() { w = x }; s.F(); return w }\n"
+        "func ReadCompositeKeyedNamed(x, y int64) int64 { v := y; "
+        "g := func() int64 { return v }; s := S{F: g}; "
+        "v = x; return s.F() }\n"
+        "func ReadCompositeKeyedLiteral(x, y int64) int64 { v := y; "
+        "s := S{F: func() int64 { return v }}; "
+        "v = x; return s.F() }\n"
+        "func WriteCompositeKeyedNamed(x int64) int64 { "
+        "w := int64(0); g := func() { w = x }; "
+        "s := W{F: g}; s.F(); return w }\n"
+        "func WriteCompositeKeyedLiteral(x int64) int64 { "
+        "w := int64(0); s := W{F: func() { w = x }}; "
+        "s.F(); return w }\n"
+        "func ReadCompositePositionalNamed(x, y int64) int64 { "
+        "v := y; g := func() int64 { return v }; "
+        "s := S{g}; v = x; return s.F() }\n"
+        "func ReadCompositePositionalLiteral(x, y int64) int64 { "
+        "v := y; s := S{func() int64 { return v }}; "
+        "v = x; return s.F() }\n"
+        "func WriteCompositePositionalNamed(x int64) int64 { "
+        "w := int64(0); g := func() { w = x }; "
+        "s := W{g}; s.F(); return w }\n"
+        "func WriteCompositePositionalLiteral(x int64) int64 { "
+        "w := int64(0); s := W{func() { w = x }}; "
+        "s.F(); return w }\n"
+        "func ReadNestedCompositeNamed(x, y int64) int64 { v := y; "
+        "g := func() int64 { return v }; "
+        "o := O{S: S{F: g}}; v = x; return o.S.F() }\n"
+        "func ReadNestedCompositeLiteral(x, y int64) int64 { "
+        "v := y; o := O{S: S{F: func() int64 { return v }}}; "
+        "v = x; return o.S.F() }\n"
+        "func ReadNestedPositionalNamed(x, y int64) int64 { v := y; "
+        "g := func() int64 { return v }; "
+        "o := O{S: S{g}}; v = x; return o.S.F() }\n"
+        "func ReadNestedPositionalLiteral(x, y int64) int64 { "
+        "v := y; o := O{S: S{func() int64 { return v }}}; "
+        "v = x; return o.S.F() }\n"
+    )
+    source, snapshot, summaries = unit(go_types_helper, declarations)
+    pairs = (
+        ("ReadAssignmentNamed", "ReadAssignmentLiteral", {0, 1}),
+        ("WriteAssignmentNamed", "WriteAssignmentLiteral", {0}),
+        ("ReadCompositeKeyedNamed", "ReadCompositeKeyedLiteral", {0, 1}),
+        ("WriteCompositeKeyedNamed", "WriteCompositeKeyedLiteral", {0}),
+        (
+            "ReadCompositePositionalNamed",
+            "ReadCompositePositionalLiteral",
+            {0, 1},
+        ),
+        (
+            "WriteCompositePositionalNamed",
+            "WriteCompositePositionalLiteral",
+            {0},
+        ),
+        ("ReadNestedCompositeNamed", "ReadNestedCompositeLiteral", {0, 1}),
+        (
+            "ReadNestedPositionalNamed",
+            "ReadNestedPositionalLiteral",
+            {0, 1},
+        ),
+    )
+    for named_function, literal_function, dependencies in pairs:
+        named_result = named(
+            source, snapshot, summaries, named_function
+        )
+        literal_result = named(
+            source, snapshot, summaries, literal_function
+        )
+        assert named_result.available, (named_function, named_result.gaps)
+        assert literal_result.available, (
+            literal_function,
+            literal_result.gaps,
+        )
+        assert (
+            named_result.return_dependencies
+            == literal_result.return_dependencies
+            == frozenset(dependencies)
+        )
+        assert named_result.effects == literal_result.effects == "unknown"
+
+
+def test_struct_field_closure_copies_use_parallel_assignment_prestate(
+    go_types_helper,
+):
+    declarations = (
+        "type W struct{ F func() }\n"
+        "func NewBeforeField(x, y int64) int64 { w := int64(0); "
+        "g := func() { w = x }; var s W; "
+        "g, s.F = func() { w = y }, g; s.F(); return w }\n"
+        "func FieldBeforeNew(x, y int64) int64 { w := int64(0); "
+        "g := func() { w = x }; var s W; "
+        "s.F, g = g, func() { w = y }; s.F(); return w }\n"
+        "func CompositeBeforeStore(x, y int64) int64 { "
+        "w := int64(0); g := func() { w = x }; var s W; "
+        "g, s = func() { w = y }, W{F: g}; "
+        "s.F(); return w }\n"
+    )
+    source, snapshot, summaries = unit(go_types_helper, declarations)
+    for function_name in (
+        "NewBeforeField",
+        "FieldBeforeNew",
+        "CompositeBeforeStore",
+    ):
+        result = named(source, snapshot, summaries, function_name)
+        assert result.available, (function_name, result.gaps)
+        assert 0 in result.return_dependencies
+        assert result.effects == "unknown"
+
+
+def test_function_values_read_from_struct_fields_keep_closure_records(
+    go_types_helper,
+):
+    declarations = (
+        "type S struct{ F func() int64 }\n"
+        "type W struct{ F func() }\n"
+        "type O struct{ S S }\n"
+        "type N struct{ F int64 }\n"
+        "func ReadDirect(x, y int64) int64 { v := y; var s S; "
+        "s.F = func() int64 { return v }; v = x; return s.F() }\n"
+        "func ReadShort(x, y int64) int64 { v := y; var s S; "
+        "s.F = func() int64 { return v }; f := s.F; "
+        "v = x; return f() }\n"
+        "func ReadVar(x, y int64) int64 { v := y; var s S; "
+        "s.F = func() int64 { return v }; var f = s.F; "
+        "v = x; return f() }\n"
+        "func ReadAssign(x, y int64) int64 { v := y; var s S; "
+        "s.F = func() int64 { return v }; var f func() int64; "
+        "f = s.F; v = x; return f() }\n"
+        "func ReadCompositeDirect(x, y int64) int64 { v := y; "
+        "s := S{F: func() int64 { return v }}; "
+        "v = x; return s.F() }\n"
+        "func ReadCompositeExtracted(x, y int64) int64 { v := y; "
+        "s := S{F: func() int64 { return v }}; f := s.F; "
+        "v = x; return f() }\n"
+        "func ReadNestedDirect(x, y int64) int64 { v := y; var o O; "
+        "o.S.F = func() int64 { return v }; v = x; return o.S.F() }\n"
+        "func ReadNestedExtracted(x, y int64) int64 { v := y; "
+        "var o O; o.S.F = func() int64 { return v }; "
+        "f := o.S.F; v = x; return f() }\n"
+        "func WriteDirect(x int64) int64 { w := int64(0); "
+        "g := func() { w = x }; var s W; s.F = g; "
+        "s.F(); return w }\n"
+        "func WriteExtracted(x int64) int64 { w := int64(0); "
+        "g := func() { w = x }; var s W; s.F = g; "
+        "f := s.F; f(); return w }\n"
+        "func WriteCompositeDirect(x int64) int64 { w := int64(0); "
+        "s := W{F: func() { w = x }}; s.F(); return w }\n"
+        "func WriteCompositeExtracted(x int64) int64 { w := int64(0); "
+        "s := W{F: func() { w = x }}; f := s.F; "
+        "f(); return w }\n"
+        "func Conditional(x, y int64, b bool) int64 { "
+        "g := func() int64 { return x }; h := func() int64 { return y }; "
+        "var s S; s.F = h; f := g; if b { f = s.F }; return f() }\n"
+        "func ParallelField(x, y int64) int64 { var s S; "
+        "s.F = func() int64 { return x }; "
+        "g := func() int64 { return y }; var f func() int64; "
+        "s.F, f = g, s.F; return f() }\n"
+        "func ParamFieldControl(s S, x int64) int64 { "
+        "f := s.F; return f() + x }\n"
+        "func NonFuncFieldControl(x, y int64) int64 { "
+        "s := N{F: y}; f := s.F; return f + x }\n"
+    )
+    source, snapshot, summaries = unit(go_types_helper, declarations)
+    pairs = (
+        ("ReadDirect", "ReadShort", {0, 1}),
+        ("ReadDirect", "ReadVar", {0, 1}),
+        ("ReadDirect", "ReadAssign", {0, 1}),
+        ("ReadCompositeDirect", "ReadCompositeExtracted", {0, 1}),
+        ("ReadNestedDirect", "ReadNestedExtracted", {0, 1}),
+        ("WriteDirect", "WriteExtracted", {0}),
+        ("WriteCompositeDirect", "WriteCompositeExtracted", {0}),
+    )
+    for direct_function, extracted_function, dependencies in pairs:
+        direct_result = named(
+            source, snapshot, summaries, direct_function
+        )
+        extracted_result = named(
+            source, snapshot, summaries, extracted_function
+        )
+        assert direct_result.available, (
+            direct_function,
+            direct_result.gaps,
+        )
+        assert extracted_result.available, (
+            extracted_function,
+            extracted_result.gaps,
+        )
+        assert (
+            direct_result.return_dependencies
+            == extracted_result.return_dependencies
+            == frozenset(dependencies)
+        )
+        assert direct_result.effects == extracted_result.effects == "unknown"
+
+    conditional = named(source, snapshot, summaries, "Conditional")
+    assert conditional.available, conditional.gaps
+    assert conditional.return_dependencies == frozenset({0, 1})
+    assert conditional.effects == "unknown"
+
+    parallel = named(source, snapshot, summaries, "ParallelField")
+    assert parallel.available, parallel.gaps
+    assert parallel.return_dependencies == frozenset({0})
+    assert parallel.effects == "unknown"
+
+    parameter = named(source, snapshot, summaries, "ParamFieldControl")
+    assert parameter.available, parameter.gaps
+    assert parameter.return_dependencies == frozenset({0, 1})
+    assert parameter.effects == "unknown"
+
+    non_function = named(
+        source, snapshot, summaries, "NonFuncFieldControl"
+    )
+    assert non_function.available, non_function.gaps
+    assert non_function.return_dependencies == frozenset({0, 1})
+    assert non_function.effects == "none_in_supported_fragment"
+
+
+def test_struct_field_closures_keep_records_through_escapes(
+    go_types_helper,
+):
+    declarations = (
+        "type S struct{ F func() int64 }\n"
+        "type W struct{ F func() }\n"
+        "type N struct{ F int64 }\n"
+        "func apRead(cb func() int64) int64 { return cb() }\n"
+        "func apWrite(cb func()) { cb() }\n"
+        "func FieldArgument(x int64) int64 { v := int64(0); var s S; "
+        "s.F = func() int64 { return v }; v = x; return apRead(s.F) }\n"
+        "func TrackedArgument(x int64) int64 { v := int64(0); "
+        "g := func() int64 { return v }; v = x; return apRead(g) }\n"
+        "func ExtractedArgument(x int64) int64 { v := int64(0); var s S; "
+        "s.F = func() int64 { return v }; f := s.F; v = x; "
+        "return apRead(f) }\n"
+        "func FieldWriteArgument(x int64) int64 { w := int64(0); "
+        "g := func() { w = x }; var s W; s.F = g; "
+        "apWrite(s.F); return w }\n"
+        "func TrackedWriteArgument(x int64) int64 { w := int64(0); "
+        "g := func() { w = x }; apWrite(g); return w }\n"
+        "func DeferFieldWrite(x int64) (r int64) { "
+        "g := func() { r = x }; var s W; s.F = g; "
+        "defer s.F(); return 0 }\n"
+        "func DeferTrackedWrite(x int64) (r int64) { "
+        "g := func() { r = x }; defer g(); return 0 }\n"
+        "func DeferFieldCapture(x int64) (r int64) { "
+        "v := int64(0); g := func() { r = v }; var s W; s.F = g; "
+        "defer s.F(); v = x; return 0 }\n"
+        "func DeferTrackedCapture(x int64) (r int64) { "
+        "v := int64(0); g := func() { r = v }; "
+        "defer g(); v = x; return 0 }\n"
+        "func DeferApField(x int64) (r int64) { "
+        "v := int64(0); g := func() { r = v }; var s W; s.F = g; "
+        "defer apWrite(s.F); v = x; return 0 }\n"
+        "func DeferApTracked(x int64) (r int64) { "
+        "v := int64(0); g := func() { r = v }; "
+        "defer apWrite(g); v = x; return 0 }\n"
+        "func GoField(x int64) int64 { w := int64(0); "
+        "g := func() { w = x }; var s W; s.F = g; "
+        "go s.F(); return w }\n"
+        "func GoFieldRace(x int64) int64 { v := int64(0); "
+        "w := int64(0); g := func() { w = v }; var s W; s.F = g; "
+        "go s.F(); v = x; return w }\n"
+        "func NoRecordsControl(x int64) int64 { "
+        "var s S; return apRead(s.F) + x }\n"
+        "func ParamStructControl(s S, x int64) int64 { "
+        "return apRead(s.F) + x }\n"
+        "func ParamCallbackControl(cb func() int64, x int64) int64 { "
+        "return apRead(cb) + x }\n"
+        "func NonFuncFieldControl(x, y int64) int64 { "
+        "s := N{F: y}; return s.F + x }\n"
+    )
+    source, snapshot, summaries = unit(go_types_helper, declarations)
+
+    def assert_parity(field_function, tracked_function, dependencies):
+        field_result = named(source, snapshot, summaries, field_function)
+        tracked_result = named(source, snapshot, summaries, tracked_function)
+        assert field_result.available, (field_function, field_result.gaps)
+        assert tracked_result.available, (
+            tracked_function,
+            tracked_result.gaps,
+        )
+        assert (
+            field_result.return_dependencies
+            == tracked_result.return_dependencies
+            == frozenset(dependencies)
+        )
+        assert field_result.effects == tracked_result.effects == "unknown"
+
+    for field_function, tracked_function, dependencies in (
+        ("FieldArgument", "TrackedArgument", {0}),
+        ("ExtractedArgument", "TrackedArgument", {0}),
+        ("FieldWriteArgument", "TrackedWriteArgument", {0}),
+        ("DeferFieldWrite", "DeferTrackedWrite", {0}),
+        ("DeferFieldCapture", "DeferTrackedCapture", {0}),
+        ("DeferApField", "DeferApTracked", {0}),
+    ):
+        assert_parity(field_function, tracked_function, dependencies)
+
+    go_field = named(source, snapshot, summaries, "GoField")
+    assert go_field.available, go_field.gaps
+    assert go_field.return_dependencies == frozenset({0})
+    assert go_field.effects == "unknown"
+
+    go_race = named(source, snapshot, summaries, "GoFieldRace")
+    assert not go_race.available
+    assert any(gap.reason == "unsupported_statement" for gap in go_race.gaps)
+
+    for function_name, dependencies, effects in (
+        ("NoRecordsControl", {0}, "unknown"),
+        ("ParamStructControl", {0, 1}, "unknown"),
+        ("ParamCallbackControl", {0, 1}, "unknown"),
+        (
+            "NonFuncFieldControl",
+            {0, 1},
+            "none_in_supported_fragment",
+        ),
+    ):
+        result = named(source, snapshot, summaries, function_name)
+        assert result.available, (function_name, result.gaps)
+        assert result.return_dependencies == frozenset(dependencies)
+        assert result.effects == effects
+
+
+def test_struct_field_factory_results_fail_closed(
+    go_types_helper,
+):
+    declarations = (
+        "type S struct{ F func() int64 }\n"
+        "func Assigned(x, y int64) int64 { v := y; "
+        "factory := func() func() int64 { "
+        "return func() int64 { return v } }; "
+        "g := factory(); var s S; s.F = g; "
+        "v = x; return s.F() }\n"
+        "func Composite(x, y int64) int64 { v := y; "
+        "factory := func() func() int64 { "
+        "return func() int64 { return v } }; "
+        "g := factory(); s := S{F: g}; "
+        "v = x; return s.F() }\n"
+    )
+    source, snapshot, summaries = unit(go_types_helper, declarations)
+    for function_name in ("Assigned", "Composite"):
+        result = named(source, snapshot, summaries, function_name)
+        assert not result.available, (function_name, result.gaps)
+        assert any(
+            gap.reason == "unsupported_expression"
+            for gap in result.gaps
+        )
+
+
+def test_struct_field_named_closure_controls_match_develop(
+    go_types_helper,
+):
+    declarations = (
+        "type S struct{ F func() int64 }\n"
+        "func Named() int64 { return 1 }\n"
+        "func ParameterControl(x int64, cb func() int64) int64 { "
+        "var s S; s.F = cb; return s.F() + x }\n"
+        "func NamedFunctionControl(x int64) int64 { "
+        "var s S; s.F = Named; return s.F() + x }\n"
+    )
+    source, snapshot, summaries = unit(go_types_helper, declarations)
+    parameter = named(source, snapshot, summaries, "ParameterControl")
+    assert parameter.available, parameter.gaps
+    assert parameter.return_dependencies == frozenset({0, 1})
+    assert parameter.effects == "unknown"
+    named_function = named(
+        source, snapshot, summaries, "NamedFunctionControl"
+    )
+    assert not named_function.available
+    assert any(
+        gap.reason == "non_parameter_reference"
+        for gap in named_function.gaps
+    )
+
+
 def test_bound_closure_local_channel_send_imported_callback(
     go_types_helper,
 ):
@@ -31720,6 +32354,260 @@ def test_struct_parameter_argument_carries_deps(go_types_helper):
     )
     assert result.available
     assert result.return_dependencies == frozenset({0})
+
+
+def test_struct_argument_field_closures_match_field_callback_arguments(
+    go_types_helper,
+):
+    data = unit(
+        go_types_helper,
+        "type R struct { F func() int64 }\n"
+        "type W struct { F func() }\n"
+        "func ap(f func() int64) int64 { return f() }\n"
+        "func apw(f func()) { f() }\n"
+        "func use(s R) int64 { return s.F() }\n"
+        "func usew(s W) { s.F() }\n"
+        "func ReadViaUse(x, y int64) int64 {\n"
+        "\tv := y\n"
+        "\tvar s R\n"
+        "\ts.F = func() int64 { return v }\n"
+        "\tv = x\n"
+        "\treturn use(s)\n"
+        "}\n"
+        "func ReadViaField(x, y int64) int64 {\n"
+        "\tv := y\n"
+        "\tvar s R\n"
+        "\ts.F = func() int64 { return v }\n"
+        "\tv = x\n"
+        "\treturn ap(s.F)\n"
+        "}\n"
+        "func WriteViaUse(x int64) int64 {\n"
+        "\tvar w int64\n"
+        "\tvar s W\n"
+        "\ts.F = func() { w = x }\n"
+        "\tusew(s)\n"
+        "\treturn w\n"
+        "}\n"
+        "func WriteViaField(x int64) int64 {\n"
+        "\tvar w int64\n"
+        "\tvar s W\n"
+        "\ts.F = func() { w = x }\n"
+        "\tapw(s.F)\n"
+        "\treturn w\n"
+        "}\n",
+    )
+    for use_name, field_name, expected in (
+        ("ReadViaUse", "ReadViaField", frozenset({0, 1})),
+        ("WriteViaUse", "WriteViaField", frozenset({0})),
+    ):
+        use_result = named(*data, name=use_name)
+        field_result = named(*data, name=field_name)
+        assert use_result.available and field_result.available
+        assert use_result.return_dependencies == expected
+        assert use_result.return_dependencies == (
+            field_result.return_dependencies
+        )
+        assert use_result.effects == field_result.effects
+
+
+def test_nested_struct_arguments_propagate_field_closures(go_types_helper):
+    data = unit(
+        go_types_helper,
+        "type S struct { F func() int64 }\n"
+        "type O struct { S S }\n"
+        "type E struct { S }\n"
+        "func useO(o O) int64 { return o.S.F() }\n"
+        "func useS(s S) int64 { return s.F() }\n"
+        "func useE(e E) int64 { return e.S.F() }\n"
+        "func UseOuter(x, y int64) int64 {\n"
+        "\tv := y\n"
+        "\tvar o O\n"
+        "\to.S.F = func() int64 { return v }\n"
+        "\tv = x\n"
+        "\treturn useO(o)\n"
+        "}\n"
+        "func UseInner(x, y int64) int64 {\n"
+        "\tv := y\n"
+        "\tvar o O\n"
+        "\to.S.F = func() int64 { return v }\n"
+        "\tv = x\n"
+        "\treturn useS(o.S)\n"
+        "}\n"
+        "func UseEmbedded(x, y int64) int64 {\n"
+        "\tv := y\n"
+        "\tvar e E\n"
+        "\te.S.F = func() int64 { return v }\n"
+        "\tv = x\n"
+        "\treturn useE(e)\n"
+        "}\n",
+    )
+    for name in ("UseOuter", "UseInner", "UseEmbedded"):
+        result = named(*data, name=name)
+        assert result.available
+        assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_deferred_struct_argument_folds_recorded_field_writes(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type W struct { F func() }\n"
+            "func use(s W) { s.F() }\n"
+            "func F(x int64) (w int64) {\n"
+            "\ts := W{F: func() { w = x }}\n"
+            "\tdefer use(s)\n"
+            "\treturn\n"
+            "}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_go_struct_argument_keeps_racy_field_closure_closed(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type S struct { F func() }\n"
+            "func use(s S) { s.F() }\n"
+            "func F(x int64) int64 {\n"
+            "\tvar s S\n"
+            "\ts.F = func() { _ = x }\n"
+            "\tgo use(s)\n"
+            "\tx = 1\n"
+            "\treturn x\n"
+            "}\n",
+        )
+    )
+    assert not result.available
+
+
+def test_struct_literal_argument_with_recorded_field_propagates(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type W struct { F func() }\n"
+            "func use(s W) { s.F() }\n"
+            "func F(x int64) int64 {\n"
+            "\tw := int64(0)\n"
+            "\tuse(W{F: func() { w = x }})\n"
+            "\treturn w\n"
+            "}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_named_closure_struct_composite_argument_propagates(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type W struct { F func() }\n"
+            "func use(s W) { s.F() }\n"
+            "func F(x int64) int64 {\n"
+            "\tw := int64(0)\n"
+            "\tg := func() { w = x }\n"
+            "\tuse(W{F: g})\n"
+            "\treturn w\n"
+            "}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_nested_named_closure_struct_composite_argument_matches_local(
+    go_types_helper,
+):
+    data = unit(
+        go_types_helper,
+        "type S struct { F func() }\n"
+        "type O struct { S S }\n"
+        "func use(o O) { o.S.F() }\n"
+        "func Composite(x int64) int64 {\n"
+        "\tw := int64(0)\n"
+        "\tg := func() { w = x }\n"
+        "\tuse(O{S: S{F: g}})\n"
+        "\treturn w\n"
+        "}\n"
+        "func Local(x int64) int64 {\n"
+        "\tw := int64(0)\n"
+        "\tg := func() { w = x }\n"
+        "\ts := O{S: S{F: g}}\n"
+        "\tuse(s)\n"
+        "\treturn w\n"
+        "}\n",
+    )
+    composite = named(*data, name="Composite")
+    local = named(*data, name="Local")
+    assert composite.available and local.available
+    assert composite.return_dependencies == frozenset({0})
+    assert composite.return_dependencies == local.return_dependencies
+    assert composite.effects == local.effects
+
+
+def test_nonreference_struct_arguments_with_records_stay_closed(
+    go_types_helper,
+):
+    data = unit(
+        go_types_helper,
+        "type W struct { F func() }\n"
+        "func use(s W) { s.F() }\n"
+        "func makeW(x int64) W { return W{F: func() { _ = x }} }\n"
+        "func FromCall(x int64) int64 {\n"
+        "\tuse(makeW(x))\n"
+        "\treturn x\n"
+        "}\n"
+        "func FromIndex(x int64) int64 {\n"
+        "\ta := [1]W{{F: func() { _ = x }}}\n"
+        "\tuse(a[0])\n"
+        "\treturn x\n"
+        "}\n",
+    )
+    for name in ("FromCall", "FromIndex"):
+        result = named(*data, name=name)
+        assert not result.available
+        assert result.gaps
+
+
+def test_struct_arguments_without_recorded_func_fields_keep_behavior(
+    go_types_helper,
+):
+    data = unit(
+        go_types_helper,
+        "type S struct { F func() int64; V int64 }\n"
+        "type Plain struct { V int64 }\n"
+        "func use(s S) int64 { return s.V }\n"
+        "func usePlain(s Plain) int64 { return s.V }\n"
+        "func Param(s S) int64 { return use(s) }\n"
+        "func Local(x int64) int64 {\n"
+        "\tvar s S\n"
+        "\ts.V = x\n"
+        "\treturn use(s)\n"
+        "}\n"
+        "func WithoutFuncField(x int64) int64 {\n"
+        "\ts := Plain{V: x}\n"
+        "\treturn usePlain(s)\n"
+        "}\n",
+    )
+    param = named(*data, name="Param")
+    local = named(*data, name="Local")
+    plain = named(*data, name="WithoutFuncField")
+    assert param.available
+    assert param.return_dependencies == frozenset({0})
+    assert local.available
+    assert local.return_dependencies == frozenset({0})
+    assert plain.available
+    assert plain.return_dependencies == frozenset({0})
 
 
 def test_struct_parameter_boundaries_stay_closed(go_types_helper):
@@ -53289,6 +54177,64 @@ def test_reslice_bind_negative_controls(go_types_helper, declarations, expected)
             "\treturn p.M[k].A[0]\n}\n",
             frozenset({0, 1, 2}),
         ),
+        # Nested maps — every intermediate element crossed by the
+        # index chain is itself a map, so the pair is a lookup on
+        # the innermost map.
+        (
+            "type S struct { M map[int64]map[int64]int64 }\n"
+            "func F(p *S, k1, k2 int64) int64 {\n"
+            "\tv, ok := p.M[k1][k2]\n"
+            "\tif ok { return v }\n"
+            "\treturn 0\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        (
+            "type E struct { V int64 }\n"
+            "type S struct { M map[int64]map[int64]E }\n"
+            "func F(p *S, k1, k2 int64) int64 {\n"
+            "\te, ok := p.M[k1][k2]\n"
+            "\tif ok { return e.V }\n"
+            "\treturn 0\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # A store into the nested slot is observed by the read.
+        (
+            "type S struct { M map[int64]map[int64]int64 }\n"
+            "func F(p *S, k1, k2, x int64) int64 {\n"
+            "\tp.M[k1][k2] = x\n"
+            "\tv, ok := p.M[k1][k2]\n"
+            "\tif ok { return v }\n"
+            "\treturn 0\n}\n",
+            frozenset({0, 1, 2, 3}),
+        ),
+        # Three levels.
+        (
+            "type S struct { M map[int64]map[int64]map[int64]int64 }\n"
+            "func F(p *S, k1, k2, k3 int64) int64 {\n"
+            "\tv, ok := p.M[k1][k2][k3]\n"
+            "\tif ok { return v }\n"
+            "\treturn 0\n}\n",
+            frozenset({0, 1, 2, 3}),
+        ),
+        # The `var` and assignment forms admit the same nested
+        # lookup — value and flag carry the field slot plus every
+        # key's deps.
+        (
+            "type S struct { M map[int64]map[int64]int64 }\n"
+            "func F(p *S, k1, k2 int64) int64 {\n"
+            "\tvar v, ok = p.M[k1][k2]\n"
+            "\tif ok { return v }\n"
+            "\treturn 0\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        (
+            "type S struct { M map[int64]map[int64]int64 }\n"
+            "func F(p *S, k1, k2 int64) int64 {\n"
+            "\tv := int64(0)\n"
+            "\tv, _ = p.M[k1][k2]\n"
+            "\treturn v\n}\n",
+            frozenset({0, 1, 2}),
+        ),
     ],
 )
 def test_map_field_comma_ok_read(go_types_helper, declarations, expected):
@@ -53318,8 +54264,84 @@ def test_map_field_comma_ok_read(go_types_helper, declarations, expected):
         "\te, ok := i.(I)\n"
         "\tif ok { return e.M() }\n"
         "\treturn 0\n}\n",
+        # An interface INNER element stays closed even when every
+        # outer level is a map — the bound value loses the dispatch
+        # provenance the single-name read keeps.
+        "type I interface { M() int64 }\n"
+        "type S struct { M map[int64]map[int64]I }\n"
+        "func F(p *S, k1, k2 int64) int64 {\n"
+        "\te, ok := p.M[k1][k2]\n"
+        "\tif ok { return e.M() }\n"
+        "\treturn 0\n}\n",
+        # A nested element whose struct type carries a collection
+        # member stays closed — the element-share machinery resolves
+        # only a single-level `p.M[k]` extraction, so the bound
+        # element's collection paths cannot be named.
+        "type E struct { V int64; A []int64 }\n"
+        "type S struct { M map[int64]map[int64]E }\n"
+        "func F(p *S, k1, k2, x int64) int64 {\n"
+        "\te, _ := p.M[k1][k2]\n"
+        "\tp.M[k1][k2].A[0] = x\n"
+        "\treturn e.A[0]\n}\n",
     ],
 )
 def test_map_field_comma_ok_read_closed(go_types_helper, declarations):
     result = named(*unit(go_types_helper, declarations))
     assert not result.available
+
+
+@pytest.mark.parametrize(
+    "declarations,expected",
+    [
+        # A callee in the key may write the field's container through
+        # the pointer argument before the lookup runs — the read must
+        # observe the store like the statement-call form does.
+        (
+            "type S struct { M map[int64]int64 }\n"
+            "func W(p *S, k, x int64) int64 { p.M[k] = x; return k }\n"
+            "func F(p *S, x int64) int64 {\n"
+            "\tv, ok := p.M[W(p, 1, x)]\n"
+            "\tif ok { return v }\n"
+            "\treturn 0\n}\n",
+            frozenset({0, 1}),
+        ),
+        (
+            "type S struct { M map[int64]int64 }\n"
+            "func W(p *S, k, x int64) int64 { p.M[k] = x; return k }\n"
+            "func F(p *S, x int64) int64 { return p.M[W(p, 1, x)] }\n",
+            frozenset({0, 1}),
+        ),
+        # Nested map — the write lands before either lookup.
+        (
+            "type S struct { M map[int64]map[int64]int64 }\n"
+            "func W(p *S, k, x int64) int64 {\n"
+            "\tp.M[k] = map[int64]int64{x: 1}\n"
+            "\treturn k\n}\n"
+            "func F(p *S, k2, x int64) int64 {\n"
+            "\tv, ok := p.M[W(p, 1, x)][k2]\n"
+            "\tif ok { return v }\n"
+            "\treturn 0\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # Slice field — same fold through a pointer argument.
+        (
+            "type S struct { A []int64 }\n"
+            "func W(p *S, i, x int64) int64 { p.A[i] = x; return i }\n"
+            "func F(p *S, x int64) int64 { return p.A[W(p, 0, x)] }\n",
+            frozenset({0, 1}),
+        ),
+        # No call in the index — reads stay exactly as tight as
+        # before (no indirect-write union when nothing was written).
+        (
+            "type S struct { M map[int64]int64 }\n"
+            "func F(p *S, k int64) int64 { return p.M[k] }\n",
+            frozenset({0, 1}),
+        ),
+    ],
+)
+def test_field_container_read_index_call_writes(
+    go_types_helper, declarations, expected
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == expected

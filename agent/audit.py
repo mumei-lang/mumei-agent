@@ -1852,8 +1852,8 @@ def _collect_summary_plans(
         build_plan_document,
         load_plan_histories,
         plan_summary_route,
+        summary_planner_policy,
     )
-    from agent.verification_planner import PlannerPolicy
 
     route_profile = {
         "go-summaries": GO_SUMMARY_PROFILE,
@@ -1889,7 +1889,7 @@ def _collect_summary_plans(
         try:
             probe_plan = plan_summary_route(
                 profile,
-                PlannerPolicy(),
+                summary_planner_policy(),
                 stamp=stamp,
                 tool_version=tool_version,
                 histories=histories,

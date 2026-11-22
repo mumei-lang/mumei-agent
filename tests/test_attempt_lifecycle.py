@@ -10,6 +10,7 @@ declaration.
 """
 
 import hashlib
+import shutil
 import sys
 
 from agent.adapter_probe import (
@@ -37,6 +38,7 @@ from agent.verification_planner import (
 
 ADAPTER_ID = "zendingsol.host.lifecycle_fake"
 PROFILE = "zendingsol.host.lifecycle_fake/v0"
+PY = shutil.which("python3", path="/usr/bin:/bin") or sys.executable
 SOURCE = b"FAKE_PRIVATE_LIFECYCLE_SOURCE"
 CONTRACT = ResultContract(
     PROFILE, "deductive_proof", "unbounded",
@@ -53,7 +55,7 @@ def _manifest(**kw):
         "methods": ["deductive_proof"],
         "max_timeout_ms": 30_000,
         "max_memory_mb": 256,
-        "probe_argv": [sys.executable, "-c", "import sys; sys.exit(0)"],
+        "probe_argv": [PY, "-c", "import sys; sys.exit(0)"],
         "result_contracts": [CONTRACT.to_dict()],
         "input_formats": [SOURCE_INPUT_FORMAT],
         "required_permissions": [],
@@ -120,7 +122,7 @@ def test_manifest_probe_plan_dispatch_publish_composes():
     store.publish(sequence)
     dispatch = dispatch_and_publish(
         store,
-        (sys.executable, "-c", "import sys; sys.stdout.write('ok')"),
+        (PY, "-c", "import sys; sys.stdout.write('ok')"),
     )
     lineage = store.current
     assert lineage.selected_result is not None
@@ -168,7 +170,7 @@ def test_probe_history_composes_with_retry_scheduling():
 
     # An adapter still excluded by observation gets the next ordinal.
     missing_registry = _registry(
-        probe_argv=[sys.executable, "-c", "import sys; sys.exit(3)"]
+        probe_argv=[PY, "-c", "import sys; sys.exit(3)"]
     )
     missing = missing_registry.descriptor(ADAPTER_ID)
     miss_probe = probe_request_for(
@@ -206,7 +208,7 @@ def test_plan_with_probes_runs_the_full_observe_replan_loop():
 
 def test_missing_probe_excludes_candidate_without_substitution():
     registry = _registry(
-        probe_argv=[sys.executable, "-c", "import sys; sys.exit(3)"]
+        probe_argv=[PY, "-c", "import sys; sys.exit(3)"]
     )
     plan = plan_with_probes(
         registry, _request(), _policy(), stamp=1,

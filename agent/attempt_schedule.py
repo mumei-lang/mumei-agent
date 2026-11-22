@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from agent.attempt_runner import (
     AttemptRunner,
     dispatch_attempt,
+    filesystem_read_isolation_enforceable,
     filesystem_write_isolation_enforceable,
     memory_bound_enforceable,
     minimal_environment,
@@ -109,6 +110,17 @@ def _process_spawn_isolated(plan: VerificationPlan) -> bool:
         and "process.spawn" in required
         and allowed is not None
         and "process.spawn" in allowed
+    )
+
+
+def _filesystem_read_isolated(plan: VerificationPlan) -> bool:
+    required = plan.selected.required_permissions
+    allowed = plan.policy.allowed_permissions
+    return not (
+        required is not None
+        and "filesystem.read" in required
+        and allowed is not None
+        and "filesystem.read" in allowed
     )
 
 
@@ -648,6 +660,10 @@ def run_attempt_schedule(
                 isolate_network=isolate,
                 isolate_filesystem_write=isolate_filesystem_write,
                 isolate_process_spawn=isolate_process_spawn,
+                isolate_filesystem_read=(
+                    _filesystem_read_isolated(plan)
+                    and filesystem_read_isolation_enforceable()
+                ),
                 # No declared feed means a closed pipe — a scheduled child
                 # must never inherit the parent's stdin and block on it.
                 feed_bytes=feed if feed is not None else b"",

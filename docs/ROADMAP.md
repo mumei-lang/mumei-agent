@@ -171,8 +171,8 @@ Scheduled adapter attempts run with only `PATH` (and `SYSTEMROOT` on
 Windows) unless the selected adapter declares `environment.read` and the
 explicit policy permits it. Undeclared permissions fail closed. This
 enforces the environment category and, where available, `network.connect`;
-`filesystem.read` remains declared-only. Environment scrubbing is not a
-sandbox and is not Evidence.
+filesystem-read enforcement is described in the C04 section below.
+Environment scrubbing is not a sandbox and is not Evidence.
 
 ### C04 declarative adapter overlay
 
@@ -198,7 +198,8 @@ Scheduled attempts whose adapter does not declare `network.connect` or whose
 policy does not permit it run in a fresh network namespace via
 `unshare --net --map-current-user` where the host supports unprivileged user
 namespaces; otherwise it remains unenforced as before. This is not a sandbox
-or Evidence; `filesystem.read` remains declared-only.
+or Evidence; filesystem-read enforcement is described in the C04 section
+below.
 
 ### C04 self-reported failure is not a scheduling success
 
@@ -228,8 +229,8 @@ Windows) unless the adapter declares `environment.read` and policy allows it,
 and in a fresh network namespace unless `network.connect` is declared and
 allowed, where the host supports it; otherwise network remains unenforced.
 `probe_request_for` without policy fails closed. Command fingerprints and
-probe-history records are unchanged; `filesystem.read` remains
-declared-only. This is not a sandbox or Evidence.
+probe-history records are unchanged; filesystem-read enforcement is
+described in the C04 section below. This is not a sandbox or Evidence.
 
 ### C04 filesystem.write enforcement
 
@@ -238,10 +239,10 @@ mount tree in a private user+mount namespace created by the launcher, unless
 the adapter declares `filesystem.write` and policy allows it, where the host
 supports unprivileged user and mount namespaces plus `mount_setattr`;
 otherwise it remains unenforced as before. `/dev` character devices and
-stdout/stderr pipes still work. `filesystem.read` remains declared-only. The
-launcher drops all capabilities and locks securebits before running the
-adapter, so even a root host cannot undo the read-only tree. This is not a
-sandbox or Evidence.
+stdout/stderr pipes still work. Filesystem-read enforcement is described in
+the C04 section below. The launcher drops all capabilities and locks
+securebits before running the adapter, so even a root host cannot undo the
+read-only tree. This is not a sandbox or Evidence.
 
 ### C04 process.spawn enforcement
 
@@ -250,8 +251,18 @@ adapter declares `process.spawn` and policy allows it, where the host supports
 the seccomp-BPF filter. The filter denies `fork`, `vfork`, and non-thread
 `clone` with `EPERM`, returns `ENOSYS` for `clone3`, and allows `execve` and
 thread creation. It is host-dependent, currently supported on Linux
-x86_64/aarch64, and is not a sandbox or Evidence; `filesystem.read` remains
-declared-only.
+x86_64/aarch64, and is not a sandbox or Evidence. Filesystem-read
+enforcement is described in the C04 section below.
+
+### C04 filesystem.read enforcement
+
+Scheduled attempts and availability probes use Landlock on supported Linux
+hosts to limit `READ_FILE` and `READ_DIR` to fixed system roots plus the
+resolved target executable's directory and its realpath directory. Home,
+the working directory and temporary paths are otherwise outside the
+allowlist, except when the target executable itself is in one of those
+directories. This is a host-dependent read-scope allowlist, not a sandbox
+or Evidence; `EXECUTE` is not restricted.
 
 ### C11 declared memory bounds for attempted executions
 
@@ -2481,9 +2492,10 @@ audit/CLI/MCP keys, grades and fallbacks are unchanged.
 
 `agent.control_flow.unassigned_uses(body, graph)` connects the fixed-point
 facts to reads: it reports `UnassignedUse(node_id, name, span)` when a
-simple identifier is textually assigned somewhere in the body yet absent
-from that node's `all_paths` pre-state — a possibly-unassigned read, e.g.
-a name assigned in only one branch or inside a loop and then returned.
+simple identifier is textually assigned or declared somewhere in the body
+yet absent from that node's `all_paths` pre-state — a possibly-unassigned
+read, e.g. a name assigned in only one branch or inside a loop and then
+returned.
 Checks run against the pre-state, so a statement's own targets never
 count as uses, and `if x := f(); x > 0` initializers flow correctly into
 their conditions.
@@ -2494,9 +2506,12 @@ uses = control_flow.unassigned_uses(body, graph)
 ```
 
 A finding is a **hint for the host's own analysis, not a defect verdict**:
-only recognized simple identifiers are considered — names never textually
-assigned anywhere are ignored, fields/elements, calls, shadowing and
-closures are not modelled, and the normal-flow profile's gaps still apply.
+only recognized simple identifiers are considered — names neither assigned
+nor declared in the body are ignored. The read scan excludes identifiers
+inside function literals and a direct `&x` operand; `&x.f` and `&a[i]`
+still read their roots. If parsing the read text fails, the hint falls back
+to its conservative identifier scan. Fields/elements, calls, shadowing and
+closures remain unmodelled, and the normal-flow profile's gaps still apply.
 Both directions still say nothing about memory truth or proof grades.
 The existing walker owns must/may resource facts; audit/CLI/MCP keys,
 grades and fallbacks are unchanged.
@@ -2504,8 +2519,8 @@ grades and fallbacks are unchanged.
 ### C05 definite unassigned-use classes over the same facts
 
 `UnassignedUse` gains a `definite` flag over the same fixed-point facts:
-a finding is definite when the name is textually assigned somewhere in
-the body yet absent from the node's `some_path` pre-state too — no
+a finding is definite when the name is textually assigned or declared
+somewhere in the body yet absent from the node's `some_path` pre-state too — no
 remaining path can deliver it (assignment only after the use, or only in
 a sibling the use's path never takes). `definite = False` keeps the
 earlier class: some path may deliver the value.
@@ -2527,8 +2542,9 @@ the previous slice's construction.
 `agent.control_flow.unused_assignments(body, graph)` reports
 `UnusedAssignment(node_id, name, span)` when a recognized assignment
 statement targets a simple identifier that appears in no use position
-anywhere in the body — the dead-store hint at name granularity, over the
-same conservative identifier scan `unassigned_uses` performs.
+anywhere in the body — the dead-store hint at name granularity. It keeps
+the conservative regex scan, so references inside function literals and
+address-taking still count as uses here.
 
 ```python
 unread = control_flow.unused_assignments(body, graph)
@@ -2775,15 +2791,17 @@ frames stay unanalysed.
 ### C05 labeled flow-hint corpus
 
 The labeled Go corpus measures per-family agreement: `unassigned`
-matched 0, missed 12, unexpected 2; `unused` matched 5, missed 2,
-unexpected 0; `unreachable` matched 4, missed 0, unexpected 0. Labels
-cover local names only: parameters, named results, and package-level
-names are assigned on entry; bare zero-value `var` declarations are not
-explicit assignments. All 12 `unassigned` misses are reads of a
-conditionally set pointer declared with a bare `var`: the hint counts
-the zero-value declaration as an assignment, so possible nil reads are
-not flagged. This is measurement only: it makes no analysis
-changes and is not a proof of soundness or completeness.
+matched 12, missed 0, unexpected 1; `unused` matched 5, missed 2,
+unexpected 0; `unreachable` matched 4, missed 0, unexpected 0. Bare
+zero-value `var` declarations kill prior assignment facts without
+generating an assignment. Entry seeding uses
+`go_entry_assigned_names(source, units, function)` for receivers,
+parameters, named results, and top-level `var`/`const` names in that
+single source file; declarations in other package files are unavailable.
+The remaining `unassigned` unexpected is the path-insensitive read of
+`value` after the backward-goto loop's nil check; backward `goto` support
+is unchanged. These results remain hints, not verdicts or proof of
+soundness or completeness.
 
 ### C06 first compiler-backed Go binding slice
 
@@ -3179,6 +3197,28 @@ A tracked literal factory propagates a result only when every return
 is an immediate function literal; the result re-resolves captures at
 invocation time while retaining its bind-time dependency snapshot, and
 unsupported return shapes remain opaque.
+When an immediate func literal or a tracked named closure initializes a
+function-typed struct field, its captures, writes, and effect marks also
+union onto the resolved field member (keyed and positional composite
+forms included), in addition to the existing container record. Factory
+results and unresolved tracked-closure fields fail closed because their
+bind-time snapshot or member cannot be represented. Named functions and
+passing the containing struct remain outside this propagation path.
+A later local read from a recorded function-typed field (`f := s.F`,
+`var f = s.F`, or `f = s.F`, including nested selectors) unions the
+field member's captured bindings, writes, and effect marks onto `f`
+from the pre-statement snapshot. The copied value remains opaque and
+external-capable because field member ids conflate possible instances;
+fields without closure records keep the existing behavior.
+Passing a recorded field value as a callback argument also re-resolves
+its captures and writes while retaining the opaque external fold.
+Deferred and goroutine calls through recorded field members use those
+records at exit, preserving the existing race fail-closed behavior.
+Passing a named value struct argument carries records from its
+function-valued fields and recursively embedded value-struct fields into
+the callee's argument deps and callback-write fold. Other struct-valued
+argument expressions with recorded function fields fail closed; structs
+without such records retain the existing behavior.
 A package-level `var Alias = Id` call
 admits as an opaque external call — the callee is
 reassignable by any caller, so `Alias(args)` is dep-free

@@ -2783,3 +2783,304 @@ f(`\\\\${n}`);
         if source[c.span.start:c.span.end] == "f(`\\\\${n}`)"
     )
     assert call.target == string_fn.id
+
+def test_call_receiver_uses_the_narrowed_overloads_return_type():
+    # `make(1).methodA()` reads the `number` overload's `A` return,
+    # not the last-declared `string -> B` signature.
+    source = """
+class A { methodA(): void {} }
+class B { methodB(): void {} }
+function make(x: number): A;
+function make(x: string): B;
+function make(x: any): any { return null as any; }
+make(1).methodA();
+"""
+    report = build_ts_bindings(source)
+    method_a = _bindings(report, "methodA", "associated_function")[0]
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start:c.span.end] == "make(1).methodA()"
+    )
+    assert call.target == method_a.id
+
+
+def test_return_type_ignores_shadowed_outer_overloads():
+    # Both `make`s accept the argument, so only the inner scope's
+    # shadowing picks `string -> A` — scope, not arg types, excludes
+    # the outer declaration.
+    source = """
+class A { methodA(): void {} }
+class B { methodB(): void {} }
+function make(x: string): B { return null as any; }
+{
+    function make(x: string): A { return null as any; }
+    make("s").methodA();
+}
+"""
+    report = build_ts_bindings(source)
+    method_a = _bindings(report, "methodA", "associated_function")[0]
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == 'make("s").methodA()'
+    )
+    assert call.target == method_a.id
+
+
+def test_tagged_template_return_types_the_receiver():
+    # A tag is called `(strings, ...values)` — `tag`x`` fits the
+    # one-parameter overload, not the zero-parameter one.
+    source = """
+class A { methodA(): void {} }
+class B { methodB(): void {} }
+function tag(s: TemplateStringsArray): A;
+function tag(): B;
+function tag(...args: any[]): any { return null as any; }
+tag`x`.methodA();
+"""
+    report = build_ts_bindings(source)
+    method_a = _bindings(report, "methodA", "associated_function")[0]
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "tag`x`.methodA()"
+    )
+    assert call.target == method_a.id
+
+
+def test_parenthesized_callee_return_types_the_receiver():
+    source = """
+class A { methodA(): void {} }
+class B { methodB(): void {} }
+function make(x: number): A;
+function make(x: string): B;
+function make(x: any): any { return null as any; }
+(make)(1).methodA();
+"""
+    report = build_ts_bindings(source)
+    method_a = _bindings(report, "methodA", "associated_function")[0]
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "(make)(1).methodA()"
+    )
+    assert call.target == method_a.id
+
+
+def test_member_overload_return_types_the_receiver():
+    # The narrowed member overload's return type feeds the chained
+    # member call, same as the top-level function path.
+    source = """
+class A { methodA(): void {} }
+class B { methodB(): void {} }
+interface Factory {
+    make(x: number): A;
+    make(x: string): B;
+}
+declare const factory: Factory;
+factory.make(1).methodA();
+"""
+    report = build_ts_bindings(source)
+    method_a = _bindings(report, "methodA", "associated_function")[0]
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "factory.make(1).methodA()"
+    )
+    assert call.target == method_a.id
+
+
+def test_tagged_template_narrows_by_interpolation_types():
+    # Each `${...}` substitution narrows overloads by its
+    # expression's type — `tag`x${1}`` picks the number overload.
+    source = """
+class A { methodA(): void {} }
+class B { methodB(): void {} }
+declare function tag(s: TemplateStringsArray, n: number): A;
+declare function tag(s: TemplateStringsArray, n: string): B;
+tag`x${1}`.methodA();
+"""
+    report = build_ts_bindings(source)
+    method_a = _bindings(report, "methodA", "associated_function")[0]
+    call = next(
+        c for c in report.calls
+        if "methodA()" in source[c.span.start:c.span.end]
+    )
+    assert call.target == method_a.id
+
+
+def test_return_type_narrows_by_explicit_type_argument_count():
+    # `(make<number, string>)(1)` cannot name a single-parameter
+    # overload — the declared type-parameter count pins the signature.
+    source = """
+class A { methodA(): void {} }
+class B { methodB(): void {} }
+declare function make<T, U>(x: T): A;
+declare function make<T>(x: T): B;
+(make<number, string>)(1).methodA();
+"""
+    report = build_ts_bindings(source)
+    method_a = _bindings(report, "methodA", "associated_function")[0]
+    call = next(
+        c for c in report.calls
+        if "methodA()" in source[c.span.start:c.span.end]
+    )
+    assert call.target == method_a.id
+
+
+def test_type_argument_defaults_keep_the_overload_eligible():
+    # `make<number, string>` fits `make<T, U, V = string>` — a
+    # defaulted type parameter need not be spelled.
+    source = """
+class A { methodA(): void {} }
+class B { methodB(): void {} }
+declare function make<T, U = string>(x: T): A;
+declare function make<T>(x: T): B;
+make<number>(1).methodA();
+"""
+    report = build_ts_bindings(source)
+    method_a = _bindings(report, "methodA", "associated_function")[0]
+    call = next(
+        c for c in report.calls
+        if "methodA()" in source[c.span.start:c.span.end]
+    )
+    assert call.target == method_a.id
+
+
+def test_interpolation_bigint_narrows_overloads():
+    # `${1n}` is a bigint literal — it fits `n: bigint`, not
+    # `n: number`.
+    source = """
+class A { methodA(): void {} }
+class B { methodB(): void {} }
+declare function tag(s: TemplateStringsArray, n: bigint): A;
+declare function tag(s: TemplateStringsArray, n: number): B;
+tag`x${1n}`.methodA();
+"""
+    report = build_ts_bindings(source)
+    method_a = _bindings(report, "methodA", "associated_function")[0]
+    call = next(
+        c for c in report.calls
+        if "methodA()" in source[c.span.start:c.span.end]
+    )
+    assert call.target == method_a.id
+
+
+def test_type_argument_pick_is_the_earliest_fitting_overload():
+    # Both signatures fit the explicit count and the arguments cannot
+    # discriminate — tsc binds the earliest declared overload.
+    source = """
+class A { methodA(): void {} }
+class B { methodB(): void {} }
+declare function make<T, U>(x: any): A;
+declare function make<T, U>(x: any): B;
+make<number, string>({}).methodA();
+"""
+    report = build_ts_bindings(source)
+    method_a = _bindings(report, "methodA", "associated_function")[0]
+    call = next(
+        c for c in report.calls
+        if "methodA()" in source[c.span.start:c.span.end]
+    )
+    assert call.target == method_a.id
+
+
+def test_call_target_narrows_by_the_same_type_arguments():
+    # `make<number, string>(1)` binds the `<T, U>` overload — the
+    # reference and the return-type receiver must pick the same
+    # signature.
+    source = """
+class A { methodA(): void {} }
+class B { methodB(): void {} }
+declare function make<T, U>(x: T): A;
+declare function make<T>(x: T): B;
+make<number, string>(1).methodA();
+"""
+    report = build_ts_bindings(source)
+    overloads = _bindings(report, "make", "ambient")
+    two_param = min(overloads, key=lambda b: b.span.start)
+    ref = next(
+        r for r in report.references
+        if source[r.span.start:r.span.end] == "make"
+        and r.span.start > source.index("): B")
+    )
+    assert ref.binding_id == two_param.id
+    method_a = _bindings(report, "methodA", "associated_function")[0]
+    call = next(
+        c for c in report.calls
+        if "methodA()" in source[c.span.start:c.span.end]
+    )
+    assert call.target == method_a.id
+
+
+def test_type_argument_constraints_disqualify_overloads():
+    # `make<number>` cannot bind `make<T extends string>` — the
+    # explicit type argument violates the constraint, so the
+    # unconstrained overload wins even though it is declared later.
+    source = """
+declare function make<T extends string>(x: T): number;
+declare function make<T>(x: T): string;
+make<number>(1);
+"""
+    report = build_ts_bindings(source)
+    overloads = _bindings(report, "make", "ambient")
+    unconstrained = max(overloads, key=lambda b: b.span.start)
+    ref = next(
+        r for r in report.references
+        if source[r.span.start:r.span.end] == "make"
+    )
+    assert ref.binding_id == unconstrained.id
+
+
+def test_type_argument_defaults_check_value_arguments():
+    # `make<number>` binds `U = string` by default on the first
+    # overload — `2n` does not fit `y: string`, so the `U = bigint`
+    # overload takes the call despite being declared second.
+    source = """
+declare function make<T, U = string>(x: T, y: U): number;
+declare function make<T, U = bigint>(x: T, y: U): string;
+make<number>(1, 2n);
+"""
+    report = build_ts_bindings(source)
+    overloads = _bindings(report, "make", "ambient")
+    bigint_default = max(overloads, key=lambda b: b.span.start)
+    ref = next(
+        r for r in report.references
+        if source[r.span.start:r.span.end] == "make"
+    )
+    assert ref.binding_id == bigint_default.id
+
+
+def test_tuple_spread_arguments_narrow_overloads():
+    # `make(...t)` with `t: [string, number]` supplies a string then a
+    # number — only the second overload's parameters accept them.
+    source = """
+declare function make(x: number, y: string): number;
+declare function make(x: string, y: number): string;
+const t: [string, number] = ["s", 1];
+make(...t);
+"""
+    report = build_ts_bindings(source)
+    overloads = _bindings(report, "make", "ambient")
+    fitting = max(overloads, key=lambda b: b.span.start)
+    ref = next(
+        r for r in report.references
+        if source[r.span.start:r.span.end] == "make"
+        and r.span.start > source.index("];")
+    )
+    assert ref.binding_id == fitting.id
+
+
+def test_bigint_literal_separators_match_by_value():
+    # `1_000n` and `1000n` spell the same bigint — the literal-typed
+    # overload keeps the call over the generic `bigint` one.
+    source = """
+declare function m(x: 1000n): number;
+declare function m(x: bigint): string;
+m(1_000n);
+"""
+    report = build_ts_bindings(source)
+    overloads = _bindings(report, "m", "ambient")
+    literal_overload = min(overloads, key=lambda b: b.span.start)
+    ref = next(
+        r for r in report.references
+        if source[r.span.start:r.span.end] == "m"
+        and r.span.start > source.index(": string;")
+    )
+    assert ref.binding_id == literal_overload.id
