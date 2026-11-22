@@ -19,10 +19,11 @@ library Stamps {
 using Stamps for Coin global;
 contract Vault is Base {
     using SafeMath for uint256;
-    Token token;
+    Token public token;
     uint256[] values;
     uint256 total;
     Coin coin;
+    Token[] tokens;
     function run() external {
         token.transfer(address(0), 1);
         uint256 s = token.supply();
@@ -33,6 +34,11 @@ contract Vault is Base {
         s = this.seed();
         total.add(s);
         coin.stamp();
+        tokens[0].transfer(address(0), 1);
+        getToken().transfer(address(0), 1);
+        new Token().transfer(address(0), 1);
+        this.token().transfer(address(0), 1);
     }
     function vaultFn() public {}
+    function getToken() internal returns (Token) {}
 }

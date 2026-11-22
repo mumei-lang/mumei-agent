@@ -1533,6 +1533,198 @@ contract Vault {
     )
 
 
+def test_member_call_on_array_element_resolves():
+    source = """
+contract Token {
+    function transfer(address to, uint256 amount) external {}
+}
+contract Vault {
+    Token[] tokens;
+    uint256[] values;
+    function run() external {
+        tokens[0].transfer(address(0), 1);
+        values[0].push;
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    transfer = next(
+        binding
+        for binding in report.bindings
+        if binding.name == "transfer"
+    )
+    assert any(
+        ref.binding_id == transfer.id and ref.kind == "call"
+        for ref in report.references
+    )
+
+
+def test_member_call_on_call_return_resolves():
+    source = """
+contract Token {
+    function transfer(address to, uint256 amount) external {}
+}
+contract Vault {
+    function getToken() internal returns (Token) {}
+    function run() external {
+        getToken().transfer(address(0), 1);
+        Token(address(0)).transfer(address(0), 1);
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    transfer = next(
+        binding
+        for binding in report.bindings
+        if binding.name == "transfer"
+    )
+    transfer_refs = [
+        ref
+        for ref in report.references
+        if ref.binding_id == transfer.id and ref.kind == "call"
+    ]
+    assert len(transfer_refs) == 2
+
+
+def test_member_call_on_new_expression_resolves():
+    source = """
+contract Token {
+    function transfer(address to, uint256 amount) external {}
+}
+contract Vault {
+    function run() external {
+        new Token().transfer(address(0), 1);
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    transfer = next(
+        binding
+        for binding in report.bindings
+        if binding.name == "transfer"
+    )
+    assert any(
+        ref.binding_id == transfer.id and ref.kind == "call"
+        for ref in report.references
+    )
+
+
+def test_member_call_on_public_getter_call_resolves():
+    source = """
+contract Token {
+    function transfer(address to, uint256 amount) external {}
+}
+contract Vault {
+    Token public token;
+    function run() external {
+        this.token().transfer(address(0), 1);
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    transfer = next(
+        binding
+        for binding in report.bindings
+        if binding.name == "transfer"
+    )
+    assert any(
+        ref.binding_id == transfer.id and ref.kind == "call"
+        for ref in report.references
+    )
+
+
+def test_member_call_on_function_typed_return_stays_opaque():
+    source = """
+contract Token {
+    function transfer(address to, uint256 amount) external {}
+}
+contract Vault {
+    function getCallback()
+        internal
+        returns (function() external returns (Token) cb)
+    {}
+    function run() external {
+        getCallback().transfer(address(0), 1);
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    transfer = next(
+        binding
+        for binding in report.bindings
+        if binding.name == "transfer"
+    )
+    assert not any(
+        ref.binding_id == transfer.id for ref in report.references
+    )
+
+
+def test_member_call_on_function_pointer_stays_opaque():
+    source = """
+contract Token {
+    function transfer(address to, uint256 amount) external {}
+}
+contract Vault {
+    function(Token) external returns (Token) cb;
+    function run(Token t) external {
+        cb(t).transfer(address(0), 1);
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    transfer = next(
+        binding
+        for binding in report.bindings
+        if binding.name == "transfer"
+    )
+    assert not any(
+        ref.binding_id == transfer.id for ref in report.references
+    )
+
+
+def test_member_on_new_dynamic_array_stays_opaque():
+    source = """
+contract Token {
+    function length() external {}
+}
+contract Vault {
+    function run() external {
+        new Token[](1).length;
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    length = next(
+        binding for binding in report.bindings if binding.name == "length"
+    )
+    assert not any(
+        ref.binding_id == length.id for ref in report.references
+    )
+
+
+def test_member_call_on_mapping_index_stays_opaque():
+    source = """
+contract Token {
+    function transfer(address to, uint256 amount) external {}
+}
+contract Vault {
+    mapping(uint256 => Token) byId;
+    function run() external {
+        byId[0].transfer(address(0), 1);
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    transfer = next(
+        binding
+        for binding in report.bindings
+        if binding.name == "transfer"
+    )
+    assert not any(
+        ref.binding_id == transfer.id for ref in report.references
+    )
+
+
 def test_using_member_binds_before_opaque_fallback():
     source = """
 contract Owned {
