@@ -2441,3 +2441,55 @@ f(1);
         if source[c.span.start : c.span.end] == "f(1)"
     )
     assert call.target == array_sig.id
+
+
+def test_overload_split_interface_blocks_merge_signatures():
+    # Declaration merging puts `m` signatures on two `member_of`
+    # blocks; both are overloads of the same member, not overrides.
+    source = """
+interface I { m(x: number): void }
+interface I { m(x: string): void }
+declare const i: I;
+i.m("s");
+"""
+    report = build_ts_bindings(source)
+    string_m = next(
+        b for b in report.bindings
+        if b.kind == "associated_function"
+        and "string" in source[b.span.start : b.span.start + 30]
+    )
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == 'i.m("s")'
+    )
+    assert call.target == string_m.id
+
+
+def test_overload_generic_constraint_rejects_violating_argument():
+    # `T extends string` does not accept a numeric argument — the
+    # number overload wins even though the generic is declared first.
+    source = """
+function f<T extends string>(x: T): void {}
+function f(x: number): void {}
+f(1);
+"""
+    report = build_ts_bindings(source)
+    fs = sorted(
+        _bindings(report, "f", "function"), key=lambda b: b.span.start
+    )
+    call = _calls(report)[0]
+    assert call.target == fs[1].id
+
+
+def test_overload_generic_constraint_accepts_matching_argument():
+    source = """
+function f<T extends string>(x: T): void {}
+function f(x: number): void {}
+f("s");
+"""
+    report = build_ts_bindings(source)
+    fs = sorted(
+        _bindings(report, "f", "function"), key=lambda b: b.span.start
+    )
+    call = _calls(report)[0]
+    assert call.target == fs[0].id
