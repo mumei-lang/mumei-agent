@@ -1332,6 +1332,43 @@ namespace Lib { export class C { m(): void {} } }
     assert not any(r.binding_id == cls.id for r in call_refs)
 
 
+def test_member_ambient_class_function_merge():
+    # `declare class C` + `declare function C` and `declare class D` +
+    # bodied `function D` are legal merges (functions may only merge
+    # with ambient classes). `new C()` must name the class and the
+    # instance-side member must resolve through the merge.
+    source = """
+declare class C { m(): void; }
+declare function C(): void;
+const c = new C();
+c.m();
+declare class D { n(): void; }
+function D() {}
+const d = new D();
+d.n();
+"""
+    report = build_ts_bindings(source)
+    classes = [
+        b for b in report.bindings
+        if b.name in {"C", "D"} and b.kind == "ambient"
+    ]
+    ambient = {b.name: b.id for b in classes}
+    # The ambient class records are the first declared C/D.
+    c_cls = _member_bindings(report, "m", "associated_function")[0]
+    d_cls = _member_bindings(report, "n", "associated_function")[0]
+    ambient_new = [c for c in report.calls if c.kind == "opaque_ambient"]
+    assert len(ambient_new) == 2
+    bodyless = {
+        c.target for c in report.calls if c.kind == "opaque_bodyless"
+    }
+    assert c_cls.id in bodyless
+    assert d_cls.id in bodyless
+    # `new D()` names the ambient class, not the bodied function.
+    call_refs = [r for r in report.references if r.kind == "call"]
+    d_ambient = [b for b in classes if b.name == "D"][0]
+    assert any(r.binding_id == d_ambient.id for r in call_refs)
+
+
 def test_member_ambient_declarations_have_no_tdz():
     # `declare class`/`declare namespace` initialize nothing at
     # runtime: `new A()` textually before the declarations is not a

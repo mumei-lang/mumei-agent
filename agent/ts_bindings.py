@@ -1310,28 +1310,59 @@ class _TypeScriptBindings:
             node = node.parent
         return ".".join(parts)
 
-    @staticmethod
-    def _mergeable_kind_pair(first: str, second: str) -> bool:
+    def _merge_kind(self, record: _Record) -> str:
+        """Declaration-merging kind of a record.
+
+        `declare` statements all carry binding kind `ambient`, but the
+        merge rules treat an ambient class, an ambient function and an
+        ambient variable differently — recover the declared kind from
+        the declaration node the record's name node climbs to.
+        """
+        if record.binding.kind != "ambient":
+            return record.binding.kind
+        node = record.node
+        while node is not None and node.type in {
+            "identifier", "type_identifier", "property_identifier",
+            "variable_declarator",
+        }:
+            node = node.parent
+        node_type = node.type if node is not None else ""
+        if node_type in {
+            "class_declaration", "abstract_class_declaration", "class",
+        }:
+            return "ambient_class"
+        if node_type in {"function_declaration", "function_signature"}:
+            return "ambient_function"
+        return "ambient_var"
+
+    def _mergeable_kind_pair(self, first: str, second: str) -> bool:
         """Whether two same-named declarations may merge (verified
         against tsc): `namespace` merges with anything; `enum` only
-        with `enum`; `interface` with `interface`/`class`/`ambient`/
-        `function`; `ambient` with `interface`/`function`; `function`
-        overloads. `class`+`class`, `ambient`+`ambient`, `class`+
-        `ambient`, `class`+`function` and pairs involving non-
-        declaration kinds (`local`, `import`, `type_alias`) are
-        duplicate-identifier errors, not merges."""
+        with `enum`; `interface` with `interface`/`class`/ambient
+        class/`function`/ambient function; an ambient class with
+        `interface`/`function`/ambient function; `function` overloads.
+        `class`+`class`, ambient+ambient class, `class`+ambient class,
+        `class`+`function`, `enum`+anything-but-{enum,namespace} and
+        pairs involving non-declaration kinds (`local`, `import`,
+        `type_alias`, ambient variables) are duplicate-identifier
+        errors, not merges."""
         kinds = {first, second}
         if "namespace" in kinds:
             return True
         if "enum" in kinds:
             return kinds == {"enum"}
-        if kinds <= {"class", "ambient"}:
+        if "ambient_var" in kinds:
             return False
-        if "ambient" in kinds:
-            return kinds <= {"ambient", "interface", "function"}
+        if kinds <= {"class", "ambient_class"}:
+            return False
+        if "ambient_class" in kinds:
+            return kinds <= {
+                "ambient_class", "interface", "function",
+                "ambient_function",
+            }
         return (
             kinds <= {"interface", "class"}
-            or kinds <= {"interface", "function"}
+            or kinds <= {"interface", "function", "ambient_function"}
         )
 
     def _merge_siblings(self, record: _Record) -> list[_Record]:
@@ -1349,7 +1380,7 @@ class _TypeScriptBindings:
             ):
                 continue
             if not self._mergeable_kind_pair(
-                record.binding.kind, sibling.binding.kind
+                self._merge_kind(record), self._merge_kind(sibling)
             ):
                 continue
             if (
@@ -1369,19 +1400,21 @@ class _TypeScriptBindings:
 
     def _merged_constructible(self, record: _Record) -> _Record:
         """Prefer the class (or ambient class) of a merged declaration."""
-        if record.binding.kind in {"class", "ambient"}:
+        merge_kind = self._merge_kind(record)
+        if merge_kind in {"class", "ambient_class"}:
             return record
-        if record.binding.kind not in {
-            "interface", "enum", "namespace",
+        if merge_kind not in {
+            "interface", "enum", "namespace", "function",
+            "ambient_function",
         }:
             # Only declaration-merging participants can stand in for a
-            # class: a `local`/`import`/`function` named like a class in
-            # a sibling namespace block is a duplicate identifier, not
+            # class: a `local`/`import`/ambient variable named like a
+            # class in a sibling block is a duplicate identifier, not
             # a merge — its references must name the variable.
             return record
-        for preferred in ("class", "ambient"):
+        for preferred in ("class", "ambient_class"):
             for sibling in self._merge_siblings(record):
-                if sibling.binding.kind == preferred:
+                if self._merge_kind(sibling) == preferred:
                     return sibling
         return record
 
