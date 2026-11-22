@@ -4147,6 +4147,15 @@ class _RustBindings:
                     # misbind calls. Only a real std re-export
                     # (`use std::vec::Vec`) keeps the prelude
                     # container's own args.
+||||||| parent of 19b8e1c2 (fix: forward the whole receiver type through clone/to_owned, and keep declared containers opaque in flatten)
+                if (
+                    head is not None
+                    and head not in _INDEX_ELEMENT_CONTAINERS
+                    and head != "Option"
+                ):
+                    # `Vec<W<P>>` — a declared `W` can
+                    # `IntoIterator` to a different element;
+                    # guessing `P` would misbind calls.
                     return None, None
             return (
                 "&" + inner_args if borrow else inner_args
