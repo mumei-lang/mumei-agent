@@ -5604,3 +5604,21 @@ fn g(m: HashMap<u32, P>) {
     # HashMap has no `pop` — the Some payload stays untyped.
     assert not calls[3].target
 
+
+
+def test_unwrap_receiver_resolves_at_return_annotation():
+    source = """
+use std::option::Option;
+struct Q;
+impl Q { fn qm(&self) {} }
+struct W;
+impl W { fn get(&self) -> Option<Q> { None } }
+fn f(w: W) {
+    struct Q;
+    impl Q { fn bad(&self) {} }
+    w.get().unwrap().qm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    qm = _bindings(report, "qm", "associated_function")[0]
+    assert _call(report, source, "w.get().unwrap().qm()").target == qm.id

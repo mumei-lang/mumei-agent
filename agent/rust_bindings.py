@@ -2177,6 +2177,24 @@ class _RustBindings:
             # — walk the declaration to recover one, or the spelled
             # args would resolve at the call site and hit shadows.
             _, spelled_pos, _ = self._scrutinee_shape(value, None)
+        if value.type == "call_expression":
+            # `o.unwrap()` reads the args the method's return
+            # annotation wrote (`fn get(&self) -> Option<Q>`) —
+            # resolving at the receiver's own annotation position
+            # picks up a `Q` shadowed there instead.
+            callee = value.child_by_field_name("function")
+            member = (
+                self._field_member(callee, ("associated_function",))
+                if callee is not None
+                and callee.type == "field_expression"
+                else None
+            )
+            if member is not None and member.type_node is not None:
+                ret = member.type_node.child_by_field_name(
+                    "return_type"
+                )
+                if ret is not None:
+                    spelled_pos = ret.start_byte
         args = self._type_arg_list(value_args or "")
         if len(args) <= index:
             return None, None
