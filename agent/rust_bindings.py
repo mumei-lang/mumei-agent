@@ -2578,6 +2578,16 @@ class _RustBindings:
                     node.start_byte,
                     "value",
                 )
+            if member is None and (
+                callee is not None
+                and callee.type == "field_expression"
+            ):
+                # A trait-inherited `first()`/`get()` on a slice or
+                # array declares its own `Option<&Q>` — resolve the
+                # method before the prelude recipe guesses `P`.
+                member = self._field_member(
+                    callee, ("associated_function",)
+                )
             if member is None:
                 field = (
                     callee.child_by_field_name("field")
@@ -2604,6 +2614,9 @@ class _RustBindings:
                             and self._is_slice_receiver(
                                 callee.child_by_field_name("value")
                             )
+                            and not self._slice_has_declared_method(
+                                self.text(field).strip()
+                            )
                         )
                     )
                 ):
@@ -2619,6 +2632,29 @@ class _RustBindings:
                         if -len(elements) <= index < len(elements)
                         else None
                     )
+                    if self.text(field).strip() == "get" and element:
+                        arg_list = node.child_by_field_name(
+                            "arguments"
+                        )
+                        first_arg = (
+                            None
+                            if arg_list is None
+                            else next(
+                                (
+                                    c
+                                    for c in arg_list.named_children
+                                    if "comment" not in c.type
+                                ),
+                                None,
+                            )
+                        )
+                        if (
+                            first_arg is not None
+                            and first_arg.type == "range_expression"
+                        ):
+                            # `s.get(0..1)` yields `Option<&[P]>`,
+                            # not `Option<&P>`.
+                            element = "[" + element + "]"
                     if self.text(field).strip() == "and":
                         # `Option::and<U>(self, optb: Option<U>)`
                         # yields the ARGUMENT's payload, not the
@@ -5514,6 +5550,47 @@ class _RustBindings:
             return None
         return head.group(0).split("::")[-1]
 
+    def _slice_has_declared_method(self, name: str) -> bool:
+        """True when an impl block declares `name` on a slice/array
+        target — `impl T for [P]` means `s.first()` uses the trait's
+        `Option<&Q>`, not the std recipe's `Option<&P>`."""
+        for impl in self._descendants(self.root):
+            if impl.type != "impl_item":
+                continue
+            tn = impl.child_by_field_name("type")
+            while tn is not None and tn.type == "reference_type":
+                tn = next(
+                    (
+                        c
+                        for c in tn.named_children
+                        if c.type
+                        not in {"lifetime", "mutable_specifier"}
+                    ),
+                    None,
+                )
+            if tn is None or tn.type != "array_type":
+                continue
+            body = next(
+                (
+                    c
+                    for c in impl.named_children
+                    if c.type == "declaration_list"
+                ),
+                None,
+            )
+            for item in [] if body is None else body.named_children:
+                if item.type in {
+                    "function_item",
+                    "function_signature_item",
+                }:
+                    name_node = self._item_name(item)
+                    if (
+                        name_node is not None
+                        and self.text(name_node).strip() == name
+                    ):
+                        return True
+        return False
+
     def _is_slice_receiver(self, node: Any | None) -> bool:
         """True when `node` is annotated `&[T]`/`[T]`/`[T; N]` —
         slices and arrays share `first`/`last`/`get`/`chunks` with
@@ -5530,7 +5607,16 @@ class _RustBindings:
         )
         tn = record.type_node if record is not None else None
         while tn is not None and tn.type == "reference_type":
-            tn = next(iter(tn.named_children), None)
+            # `&'a [P]`/`&'a mut [P]` lead their named children with
+            # the lifetime — the type is the non-lifetime child.
+            tn = next(
+                (
+                    c
+                    for c in tn.named_children
+                    if c.type not in {"lifetime", "mutable_specifier"}
+                ),
+                None,
+            )
         return tn is not None and tn.type == "array_type"
 
     def _scrutinee_shape(
@@ -5688,6 +5774,9 @@ class _RustBindings:
                             in _SLICE_OPTION_METHODS
                             and self._is_slice_receiver(
                                 callee.child_by_field_name("value")
+                            )
+                            and not self._slice_has_declared_method(
+                                self.text(field).strip()
                             )
                         )
                     )
