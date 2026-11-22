@@ -287,7 +287,63 @@ def _make_mounts_readonly():
         ctypes.byref(attr),
         ctypes.c_size_t(ctypes.sizeof(attr)),
     )
-    return result == 0
+    if result != 0:
+        return False
+    libc.prctl.argtypes = [
+        ctypes.c_int,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+    ]
+    libc.prctl.restype = ctypes.c_int
+    ctypes.set_errno(0)
+    if libc.prctl(28, 0xEF, 0, 0, 0) != 0:
+        return False
+    ctypes.set_errno(0)
+    if libc.prctl(47, 4, 0, 0, 0) != 0:
+        return False
+    try:
+        with open(
+            "/proc/sys/kernel/cap_last_cap", "r", encoding="ascii"
+        ) as cap_last_file:
+            cap_last = int(cap_last_file.read())
+    except Exception:
+        return False
+    if cap_last < 0:
+        return False
+    for capability in range(cap_last + 1):
+        ctypes.set_errno(0)
+        if libc.prctl(24, capability, 0, 0, 0) != 0:
+            return False
+
+    class _CapHeader(ctypes.Structure):
+        _fields_ = [
+            ("version", ctypes.c_uint32),
+            ("pid", ctypes.c_int),
+        ]
+
+    class _CapData(ctypes.Structure):
+        _fields_ = [
+            ("effective", ctypes.c_uint32),
+            ("permitted", ctypes.c_uint32),
+            ("inheritable", ctypes.c_uint32),
+        ]
+
+    header = _CapHeader(0x20080522, 0)
+    data = (_CapData * 2)()
+    libc.capset.argtypes = [
+        ctypes.POINTER(_CapHeader),
+        ctypes.POINTER(_CapData),
+    ]
+    libc.capset.restype = ctypes.c_int
+    ctypes.set_errno(0)
+    if libc.capset(ctypes.byref(header), data) != 0:
+        return False
+    ctypes.set_errno(0)
+    if libc.prctl(38, 1, 0, 0, 0) != 0:
+        return False
+    return True
 """
 _FILESYSTEM_WRITE_PROBE_SCRIPT = (
     f"exec({_FILESYSTEM_WRITE_ISOLATION_SETUP_SCRIPT!r}, globals())\n"

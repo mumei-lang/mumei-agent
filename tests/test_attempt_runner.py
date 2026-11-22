@@ -1822,7 +1822,11 @@ def test_run_filesystem_write_isolation_blocks_writes_and_preserves_host(
     child_argv = (
         PY,
         "-c",
-        "import pathlib,sys; print('attempting-write', flush=True); "
+        "import pathlib,sys; "
+        "print('capeff='+next(line.split()[1] "
+        "for line in pathlib.Path('/proc/self/status').read_text().splitlines() "
+        "if line.startswith('CapEff:')), flush=True); "
+        "print('attempting-write', flush=True); "
         "pathlib.Path(sys.argv[1]).write_text('child')",
         str(child_path),
     )
@@ -1834,7 +1838,9 @@ def test_run_filesystem_write_isolation_blocks_writes_and_preserves_host(
     )
     assert isolated.record.state == "exited"
     assert isolated.record.events[-1].exit_code != 0
-    assert isolated.stdout == b"attempting-write\n"
+    assert isolated.stdout == (
+        b"capeff=0000000000000000\nattempting-write\n"
+    )
     assert not child_path.exists()
 
     host_path = tmp_path / "host-write.txt"
@@ -1845,6 +1851,107 @@ def test_run_filesystem_write_isolation_blocks_writes_and_preserves_host(
     assert direct.record.state == "exited"
     assert direct.record.events[-1].exit_code == 0
     assert child_path.read_text() == "child"
+
+
+def test_root_mapped_filesystem_isolation_drops_capabilities(tmp_path):
+    if not attempt_runner.filesystem_write_isolation_enforceable():
+        pytest.skip("filesystem write isolation is unavailable")
+    unshare = attempt_runner.shutil.which("unshare")
+    if unshare is None:
+        pytest.skip("unshare is unavailable")
+    try:
+        root_mapping = subprocess.run(
+            [unshare, "--user", "--map-root-user", "true"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pytest.skip("root-mapped user namespace is unavailable")
+    if root_mapping.returncode != 0:
+        pytest.skip("root-mapped user namespace is unavailable")
+
+    child_path = tmp_path / "root-child-write.txt"
+    target_script = """import ctypes, pathlib, sys
+status = pathlib.Path("/proc/self/status").read_text().splitlines()
+cap_eff = next(line.split()[1] for line in status if line.startswith("CapEff:"))
+print(f"capeff={cap_eff}", flush=True)
+class _MountAttr(ctypes.Structure):
+    _fields_ = [
+        ("attr_set", ctypes.c_uint64),
+        ("attr_clr", ctypes.c_uint64),
+        ("propagation", ctypes.c_uint64),
+        ("userns_fd", ctypes.c_uint64),
+    ]
+libc = ctypes.CDLL(None, use_errno=True)
+libc.syscall.restype = ctypes.c_long
+ctypes.set_errno(0)
+clear_result = libc.syscall(
+    ctypes.c_long(442),
+    ctypes.c_long(-100),
+    ctypes.c_char_p(b"/"),
+    ctypes.c_long(0x8000),
+    ctypes.byref(_MountAttr(0, 1, 0, 0)),
+    ctypes.c_size_t(ctypes.sizeof(_MountAttr)),
+)
+print(f"clear_result={clear_result} clear_errno={ctypes.get_errno()}", flush=True)
+try:
+    pathlib.Path(sys.argv[1]).write_text("child")
+except OSError as error:
+    print(f"write_errno={error.errno}", flush=True)
+else:
+    print("write_succeeded", flush=True)
+"""
+    outer_script = f"""import sys
+from agent.attempt_runner import AttemptRunner
+from agent.verification_attempt import AttemptExecutionRequest
+target_script = {target_script!r}
+result = AttemptRunner().run(
+    AttemptExecutionRequest("a" * 64, 1, 10000),
+    (sys.executable, "-c", target_script, sys.argv[1]),
+    isolate_filesystem_write=True,
+)
+sys.stdout.buffer.write(result.stdout)
+sys.exit(
+    0
+    if result.record.state == "exited"
+    and result.record.events[-1].exit_code == 0
+    else 1
+)
+"""
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__))
+    )
+    mapped = subprocess.run(
+        [
+            unshare,
+            "--user",
+            "--map-root-user",
+            "--",
+            PY,
+            "-c",
+            outer_script,
+            str(child_path),
+        ],
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=30,
+    )
+
+    assert mapped.returncode == 0
+    output = dict(
+        line.split("=", 1) for line in mapped.stdout.splitlines()
+    )
+    assert int(output["capeff"], 16) == 0
+    assert output["clear_result"] == "-1 clear_errno=1"
+    assert output["write_errno"] == "30"
+    assert not child_path.exists()
+
+    host_path = tmp_path / "root-host-write.txt"
+    host_path.write_text("host")
+    assert host_path.read_text() == "host"
 
 
 @pytest.mark.skipif(

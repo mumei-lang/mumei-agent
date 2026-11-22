@@ -227,7 +227,9 @@ the adapter declares `filesystem.write` and policy allows it, where the host
 supports unprivileged user and mount namespaces plus `mount_setattr`;
 otherwise it remains unenforced as before. `/dev` character devices and
 stdout/stderr pipes still work. `filesystem.read` and `process.spawn` remain
-declared-only. This is not a sandbox or Evidence.
+declared-only. The launcher drops all capabilities and locks securebits before
+running the adapter, so even a root host cannot undo the read-only tree. This
+is not a sandbox or Evidence.
 
 ### C11 declared memory bounds for attempted executions
 
