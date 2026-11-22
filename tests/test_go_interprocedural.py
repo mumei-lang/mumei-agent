@@ -33157,6 +33157,42 @@ def test_named_struct_element_pointer_param_reseat_alias_in_init(
             )
         )
         assert result.available, (body, result.gaps)
+        # The condition's read of p.A[i].V attributes to q's entry
+        # pointee — deps {q, i} — not to p's.
+        assert any(
+            r.deps == frozenset({1, 2}) for r in result.statement_reads
+        ), (body, result.statement_reads)
+
+
+def test_named_struct_element_pointer_param_reseat_alias_dirty_target(
+    go_types_helper,
+):
+    # The alias target's name is only its entry pointee while it is
+    # clean — once the target is itself reseated or re-seated, its
+    # slot tracks the NEW pointee, and a read through `p` can no
+    # longer recover the entry it still points at. The model has no
+    # separate entry slot to fall back to, so those reads close
+    # rather than mis-attribute the dependency (e.g. `p, q = q, p`
+    # would otherwise read p's own entry through q's slot).
+    for body in (
+        "p = q; q = r; return p.A[i].V",
+        "p, q = q, p; return p.A[i].V",
+        "p, q = q, p; r = p; return p.A[i].V",
+    ):
+        result = named(
+            *unit(
+                go_types_helper,
+                "type E struct { V int64 }\n"
+                "type S2 struct { A []E }\n"
+                "func F(p *S2, q *S2, r *S2, i int64) int64 {\n"
+                f"\t{body}\n"
+                "\treturn 0\n}\n",
+            )
+        )
+        assert not result.available, (body, result)
+        assert "non_parameter_reference" in {
+            g.reason for g in result.gaps
+        }, (body, result.gaps)
 
 
 def test_named_struct_element_pointer_param_reseat_alias_write(

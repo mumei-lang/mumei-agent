@@ -4305,11 +4305,21 @@ deref — is not a root field chain). A reseat onto another `*S`
 parameter is an alias: `p = q` makes reads through `p` resolve on
 `q`'s entry slot (with the same may-write `caller-backing`
 over-report the shared-container params already make), while a
-reseat onto opaque memory closes the root. Reseats take effect at
+reseat onto opaque memory closes the root. A reseat back onto the
+name's own entry — `q = p; p = r; p = q` — restores the entry
+state, while a literal `p = p` is a no-op. Reseats take effect at
 the next statement — `p, x = q, p.A[i].V` still reads the entry
-pointee — and scope per if/else arm: the arms join pointwise, so
-an alias only survives when every path agrees and a may-alias or
-may-reseat closes the root afterwards. A
+pointee — and scope per control-flow arm: if/else arms, each
+switch and select clause (case guards evaluate once at the
+statement's entry), and a for body's may-not-run path all join
+pointwise on the entry state, so an alias only survives when every
+path agrees and a may-alias or may-reseat closes the root
+afterwards. The alias target's name is only its entry pointee
+while it is clean — if the target is itself reseated or re-seated
+(`p = q; q = r`, `p, q = q, p`), its slot tracks the new pointee,
+and a read through `p` closes rather than mis-attribute the
+dependency; a store through `p` still lands in the target's entry
+pointee (an over-report is sound there). A
 store through the parameter lands in the caller's pointee, so the
 param joins the caller-visible set and a grown dep set emits the
 `caller-backing` transfer like a shared slice. Two `*S` parameters
