@@ -3446,9 +3446,9 @@ fn f(w: W<P>) {
     assert _call(report, source, "f.m()").target == method.id
 
 
-def test_prelude_variant_payload_stays_opaque_through_alias():
-    # Prelude gating needs the spelled container name — `type O =
-    # Option<P>` hides it, so `Some(p)` on `O` stays unpinned.
+def test_prelude_variant_payload_on_unresolvable_option():
+    # `Option` has no record, but the spelled arg still types the
+    # prelude payload — `Some(p)` binds `p: P`.
     source = """
 struct P;
 type O = Option<P>;
@@ -3458,7 +3458,8 @@ fn f(o: O) {
 }
 """
     report = build_rust_bindings(source, pointer_width=64)
-    assert _call(report, source, "p.m()").target == ""
+    m = next(b for b in report.bindings if b.name == "m")
+    assert _call(report, source, "p.m()").target == m.id
 
 
 def test_reference_and_cast_receivers_are_typed():
