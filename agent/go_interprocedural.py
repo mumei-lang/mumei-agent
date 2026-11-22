@@ -2443,11 +2443,13 @@ class _Builder:
             if root is not None and root.type == "identifier"
             else None
         )
+        self._last_write_alias_src = None
         aliased_root = (
             root_ref is not None
             and root_ref.binding_id in self._param_pointer_aliases
         )
         if aliased_root:
+            alias_src_id = root_ref.binding_id
             # `p = q` copied `q`'s pointer — a read through `p`
             # names `q`'s entry pointee, so the slot resolves on
             # the target's identity (the target's own reseat does
@@ -2479,6 +2481,18 @@ class _Builder:
                 raise _Unsupported(
                     "non_parameter_reference", _span(sel)
                 )
+            if (
+                root_ref.binding_id in self._pointer_param_reseats
+                or root_ref.binding_id in self._param_pointer_aliases
+            ):
+                # Under a write the substitution still resolves the
+                # target's tokens, but the ADDRESSING read went
+                # through the alias source — its own slot (the
+                # pointer value `p` holds) is a real dependency the
+                # substituted slot lost (`p = q; q = r; p.F[i] = x`
+                # still reads `p`=={1}, not `r`=={2}). The caller
+                # unions the source's slot back in.
+                self._last_write_alias_src = alias_src_id
         if (
             member is None
             or member.type is None
@@ -25797,6 +25811,11 @@ class _Builder:
                     field_deps = locals_.get(
                         field_root, frozenset()
                     )
+                    src_id = self._last_write_alias_src
+                    if src_id is not None:
+                        field_deps |= locals_.get(
+                            src_id, frozenset()
+                        )
                     field_deps |= field_index_deps
                     field_operand = node.child_by_field_name(
                         "operand"
