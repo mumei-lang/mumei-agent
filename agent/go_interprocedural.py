@@ -3110,11 +3110,30 @@ class _Builder:
         if (
             container_fact is None
             or container_fact.kind not in {"slice", "array", "map"}
-            or not self._named_value_struct_supported(element_fact)
+            or not (
+                self._named_value_struct_supported(element_fact)
+                or (
+                    getattr(element_fact, "kind", None) == "pointer"
+                    and self._named_value_struct_supported(
+                        getattr(element_fact, "elem", None)
+                    )
+                )
+            )
         ):
             return None
         path_members = []
         field_fact = element_fact
+        if (
+            getattr(field_fact, "kind", None) == "pointer"
+            and self._named_value_struct_supported(
+                getattr(field_fact, "elem", None)
+            )
+        ):
+            # `a[i]` yields `*E` — `.V` reads through the element
+            # pointer the way `a[i].F` reads through a struct
+            # element: the pointer conflates into the collection's
+            # group, so the field's slot is the group's.
+            field_fact = field_fact.elem
         for field_node in reversed(fields):
             if (
                 not self._named_value_struct_supported(field_fact)
@@ -26175,6 +26194,7 @@ class _Builder:
                         if (
                             operand_fact is not None
                             and operand_fact.kind == "pointer"
+                            and field_operand.type != "index_expression"
                             and not self._param_pointer_struct_root(
                                 field_operand, params
                             )
