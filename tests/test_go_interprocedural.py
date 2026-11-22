@@ -6695,6 +6695,24 @@ def test_interface_collection_chain_index_call_once(
     assert len(result.calls) == 1
 
 
+def test_interface_collection_bound_local_store(go_types_helper):
+    # `x[i] = e` on `x := p.A` — the bound `[]I` local sits in the
+    # field's share group, so the element store reaches `p.A`'s
+    # slot like the scalar-element `x := p.A; x[i] = v` store.
+    declarations = (
+        "type I interface{ M() int64 }\n"
+        "type S struct{ A []I }\n"
+        "func F(p *S, e I, i int64) int64 {\n"
+        "\tx := p.A\n"
+        "\tx[i] = e\n"
+        "\treturn p.A[0].M()\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1, 2})
+
+
 @pytest.mark.parametrize(
     "declarations",
     [
@@ -6715,14 +6733,13 @@ def test_interface_collection_chain_index_call_once(
             "type S struct{ I I }\n"
             "func F(p *S) int64 { return p.I.M() }\n"
         ),
-        # `x[i] = e` — a store into the bare `[]I` binding's
-        # element: the share-group machinery has no token for a
-        # field-bound local, so the write stays unmodelled.
+        # `x[i] = e` — a store into a bare `[]I` binding that has
+        # no tracked backing: `var x []I` never joined a share
+        # group, so the write stays unmodelled.
         (
             "type I interface{ M() int64 }\n"
-            "type S struct{ A []I }\n"
-            "func F(p *S, e I, i int64) int64 {\n"
-            "\tx := p.A\n"
+            "func F(e I, i int64) int64 {\n"
+            "\tvar x []I\n"
             "\tx[i] = e\n"
             "\treturn x[0].M()\n"
             "}\n"

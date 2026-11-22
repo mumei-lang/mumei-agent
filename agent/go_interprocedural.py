@@ -18445,6 +18445,22 @@ class _Builder:
                             # write path folds `e`'s deps into the
                             # element slot like any element write.
                             pass
+                        elif (
+                            lhs.type == "index_expression"
+                            and self._opaque_container_index_target(
+                                lhs
+                            )
+                            is not None
+                        ):
+                            # `x[i] = e` — `x` binds a `[]I` local
+                            # that sits in a share group (`x := p.A`
+                            # mints the field slot's tokens), so the
+                            # element-write path folds `e`'s deps
+                            # into every sharer's slot like a
+                            # scalar-element store. An unbound `x`
+                            # has no tracked backing and stays
+                            # closed.
+                            pass
                         else:
                             target_ref = (
                                 self.references.get(
