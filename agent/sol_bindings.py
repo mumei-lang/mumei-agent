@@ -1287,6 +1287,17 @@ class _SolBindings:
             != (member_node.start_byte, member_node.end_byte)
         ):
             return None
+        # Named arguments (`f({y: true, x: 1})`) reorder by parameter
+        # name — the scanner has no parameter names to reorder by, so
+        # the position falls back to name-only resolution.
+        for child in self.children(parent):
+            if child.type != "call_argument":
+                continue
+            if any(
+                inner.type == "call_struct_argument"
+                for inner in self.children(child)
+            ):
+                return None
         _spans, expressions = self._call_arguments(parent)
         return [self._unwrap(expr) for expr in expressions]
 
