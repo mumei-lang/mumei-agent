@@ -336,20 +336,28 @@ needs_mumei = pytest.mark.skipif(not MUMEI, reason="mumei binary not available")
 
 @needs_mumei
 @pytest.mark.parametrize(
-    ("reply", "outcome"),
+    ("reply", "outcome", "reason_fragment", "needs_counterexample"),
     [
-        ('{"body": "if x > hi { hi } else { x }"}', "proven"),
-        ('{"body": "x"}', "refuted"),
-        ('{"body": "if x > hi { hi } else { x + 1 }"}', "refuted"),
-        ('{"body": "x +"}', "inconclusive"),
+        ('{"body": "if x > hi { hi } else { x }"}', "proven", "", False),
+        ('{"body": "x"}', "refuted", "Postcondition", True),
+        (
+            '{"body": "if x > hi { hi } else { x + 1 }"}',
+            "refuted",
+            "Integer arithmetic may overflow",
+            False,
+        ),
+        ('{"body": "x +"}', "inconclusive", "", False),
     ],
 )
-def test_porter_verifies_with_mumei(reply, outcome):
+def test_porter_verifies_with_mumei(reply, outcome, reason_fragment, needs_counterexample):
     porter = BodyPorter(ScriptedClient(reply), "m", create_mumei_client(MUMEI))
     (entry,) = porter.port(GO_CLAMP, "go", {"atoms": [CLAMP]})
     assert entry["outcome"] == outcome, entry
-    if outcome == "refuted":
+    assert reason_fragment in entry["reason"], entry
+    if needs_counterexample:
         assert entry["counterexample"]
+    elif "counterexample" in entry:
+        assert isinstance(entry["counterexample"], dict)
 
 
 # --- AuditPipeline wiring --------------------------------------------------
