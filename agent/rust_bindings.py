@@ -150,7 +150,24 @@ _OPTION_HEAD_METHODS = {
     # `o1.zip(o2)` yields `Option<(P, Q)>` — the payload pairs the
     # receiver's arg with the argument's, spelled below.
     "zip": ("", {"Option"}, 0),
+    # `m.insert(k, v)` yields `Option<V>` — the pair's value arg.
+    "insert": ("", {"HashMap", "BTreeMap"}, -1),
 }
+
+# `o.insert(p)`/`o.get_or_insert(..)`/`o.or_insert(..)` yield
+# `&mut P` — the mutable borrow carries `Option`'s own payload.
+_OPTION_MUT_PAYLOAD_METHODS = frozenset(
+    {
+        "insert",
+        "get_or_insert",
+        "get_or_insert_with",
+        "get_or_insert_default",
+        "or_insert",
+        "or_insert_with",
+        "or_insert_else",
+        "or_insert_with_else",
+    }
+)
 
 _PRELUDE_NAMES = frozenset(
     {
@@ -3425,6 +3442,28 @@ class _RustBindings:
                         # same `&[P]` — the Option case is handled
                         # by the prelude recipe above.
                         return None, "&[" + receiver[1] + "]"
+                    if (
+                        method_name in _OPTION_MUT_PAYLOAD_METHODS
+                        and receiver[1] is not None
+                        and self._container_head_name(
+                            callee.child_by_field_name("value")
+                        )
+                        == "Option"
+                    ):
+                        # `o.get_or_insert(d)`/`o.or_insert(d)`
+                        # yield `&mut P` — the payload resolves at
+                        # the receiver's own annotation.
+                        parts = self._type_arg_list(receiver[1])
+                        if len(parts) == 1:
+                            return self._spelled_type(
+                                "&mut " + parts[0].strip(),
+                                self._receiver_annotation_position(
+                                    callee.child_by_field_name(
+                                        "value"
+                                    )
+                                )
+                                or node.start_byte,
+                            )
                     return self._unwrapped(
                         callee, node.start_byte, receiver
                     )
