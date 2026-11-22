@@ -3098,6 +3098,18 @@ class _Builder:
                     and (
                         self._named_value_struct_supported(fact.elem)
                         or fact.elem.kind == "interface"
+                        or (
+                            # A named struct element carrying
+                            # pointer members resolves under a
+                            # param pointer root like the slice
+                            # element does — downstream leaf
+                            # checks still decide each op.
+                            self._struct_value_fact(fact.elem)
+                            is not None
+                            and bool(
+                                getattr(fact.elem, "type_id", "")
+                            )
+                        )
                     )
                 )
             )
@@ -3487,7 +3499,10 @@ class _Builder:
             # and a store into it (`p.A[i].W = q`) resolves the
             # chain to the member's pointee the LHS consumer folds
             # opaquely like `p.P = q`. A local composite's pointer
-            # member escapes the slot model either way.
+            # member escapes the slot model either way. The write
+            # side (`for_pointer_leaf`) only reseats the member's
+            # slot, so any pointer leaf admits — including one
+            # whose pointee is not a struct (`*int64`).
             if not (
                 mid_pointer_root
                 and path_members
@@ -3495,10 +3510,13 @@ class _Builder:
                     path_members[-1].type, "kind", None
                 )
                 == "pointer"
-                and self._struct_value_fact(
-                    getattr(path_members[-1].type, "elem", None)
+                and (
+                    for_pointer_leaf
+                    or self._struct_value_fact(
+                        getattr(path_members[-1].type, "elem", None)
+                    )
+                    is not None
                 )
-                is not None
             ):
                 return None
         if share_extract is not None and not any(

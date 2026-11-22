@@ -37154,28 +37154,46 @@ def test_named_struct_value_element_extract_share_closed(
 
 
 @pytest.mark.parametrize(
-    "declarations",
+    ("declarations", "expected"),
     [
-        # `R [N]Elem` — an array member's value-copy semantics keep
-        # its elements outside the share-group slot model; the
-        # pointer-member read and store stay closed.
-        "type E2 struct { V int64 }\n"
-        "type Elem struct { W *E2 }\n"
-        "type S struct { R [4]Elem }\n"
-        "func F(p *S, i int64) int64 {\n"
-        "\treturn p.R[i].W.V\n}\n",
-        "type E2 struct { V int64 }\n"
-        "type Elem struct { W *E2 }\n"
-        "type S struct { R [4]Elem }\n"
-        "func F(p *S, i int64, q *E2) {\n"
-        "\tp.R[i].W = q\n}\n",
+        (
+            # `p.R[i].W.V` — under a `*S` root the array backing
+            # is caller memory, so the pointer-member chain reads
+            # like the slice element's does.
+            "type E2 struct { V int64 }\n"
+            "type Elem struct { W *E2 }\n"
+            "type S struct { R [4]Elem }\n"
+            "func F(p *S, i int64) int64 {\n"
+            "\treturn p.R[i].W.V\n}\n",
+            frozenset({0, 1}),
+        ),
+        (
+            # `p.R[i].W = q` — a store into the element's
+            # pointer-member slot lands in caller memory.
+            "type E2 struct { V int64 }\n"
+            "type Elem struct { W *E2 }\n"
+            "type S struct { R [4]Elem }\n"
+            "func F(p *S, i int64, q *E2) {\n"
+            "\tp.R[i].W = q\n}\n",
+            None,
+        ),
+        (
+            # A `*int64` pointer member reseats the same slot.
+            "type Elem struct { W *int64; V int64 }\n"
+            "type S struct { R [4]Elem }\n"
+            "func F(p *S, i int64, q *int64) {\n"
+            "\tp.R[i].W = q\n}\n",
+            None,
+        ),
     ],
 )
-def test_named_struct_value_element_pointer_member_array_closed(
-    go_types_helper, declarations
+def test_named_struct_value_element_pointer_member_array(
+    go_types_helper, declarations, expected
 ):
     result = named(*unit(go_types_helper, declarations))
-    assert result.gaps
+    assert result.available, result.gaps
+    if expected is not None:
+        assert result.return_dependencies == expected
 
 
 def test_named_struct_element_double_pointer_param_root_collection(
