@@ -3502,20 +3502,36 @@ class _Builder:
             # member escapes the slot model either way. The write
             # side (`for_pointer_leaf`) only reseats the member's
             # slot, so any pointer leaf admits — including one
-            # whose pointee is not a struct (`*int64`).
+            # whose pointee is not a struct (`*int64`) — and an
+            # interface member (`p.B[i].J = e`) reseats the same
+            # slot way.
+            _leaf_kind = (
+                getattr(path_members[-1].type, "kind", None)
+                if path_members
+                else None
+            )
             if not (
                 mid_pointer_root
                 and path_members
-                and getattr(
-                    path_members[-1].type, "kind", None
-                )
-                == "pointer"
                 and (
-                    for_pointer_leaf
-                    or self._struct_value_fact(
-                        getattr(path_members[-1].type, "elem", None)
+                    (
+                        _leaf_kind == "pointer"
+                        and (
+                            for_pointer_leaf
+                            or self._struct_value_fact(
+                                getattr(
+                                    path_members[-1].type,
+                                    "elem",
+                                    None,
+                                )
+                            )
+                            is not None
+                        )
                     )
-                    is not None
+                    or (
+                        for_pointer_leaf
+                        and _leaf_kind == "interface"
+                    )
                 )
             ):
                 return None
@@ -18577,6 +18593,38 @@ class _Builder:
                             # `p.I.M()` observes them through the
                             # field receiver's conflated deps.
                             pass
+                        elif (
+                            lhs.type
+                            in {
+                                "selector_expression",
+                                "field_expression",
+                            }
+                            and (
+                                _elem_iface_lhs := (
+                                    self._opaque_container_struct_element_field_target(
+                                        lhs,
+                                        params,
+                                        for_pointer_leaf=True,
+                                    )
+                                )
+                            )
+                            is not None
+                            and _elem_iface_lhs[6]
+                            and getattr(
+                                _elem_iface_lhs[6][-1].type,
+                                "kind",
+                                None,
+                            )
+                            == "interface"
+                        ):
+                            # `p.B[i].J = e` — a store into an
+                            # interface member inside a struct
+                            # element: the LHS loop's element-member
+                            # write path folds `e`'s deps into the
+                            # element's member slot like the
+                            # pointer-member reseat does, so a later
+                            # `p.B[j].J.M()` observes them.
+                            pass
                         else:
                             target_ref = (
                                 self.references.get(
@@ -18657,24 +18705,53 @@ class _Builder:
                             and field is not None
                             and field.type is not None
                             and field.type.kind == "interface"
-                            and self._opaque_write_target(
-                                lhs, locals_, params
-                            )
-                            is not None
                             and (
-                                _iface_w := (
-                                    self._scalar_container_field(
-                                        lhs,
-                                        params,
-                                        for_write=True,
-                                        allow_struct_elements=True,
-                                        allow_interface_member=True,
+                                (
+                                    self._opaque_write_target(
+                                        lhs, locals_, params
                                     )
-                                )[1]
+                                    is not None
+                                    and (
+                                        _iface_w := (
+                                            self._scalar_container_field(
+                                                lhs,
+                                                params,
+                                                for_write=True,
+                                                allow_struct_elements=True,
+                                                allow_interface_member=True,
+                                            )
+                                        )[1]
+                                    )
+                                    is not None
+                                    and _iface_w.type is not None
+                                    and _iface_w.type.kind
+                                    == "interface"
+                                )
+                                # `p.B[i].J = e` — the interface
+                                # member sits inside an element:
+                                # the element-member write path
+                                # below folds the RHS into the
+                                # element's member slot.
+                                or (
+                                    (
+                                        _elem_w := (
+                                            self._opaque_container_struct_element_field_target(
+                                                lhs,
+                                                params,
+                                                for_pointer_leaf=True,
+                                            )
+                                        )
+                                    )
+                                    is not None
+                                    and _elem_w[6]
+                                    and getattr(
+                                        _elem_w[6][-1].type,
+                                        "kind",
+                                        None,
+                                    )
+                                    == "interface"
+                                )
                             )
-                            is not None
-                            and _iface_w.type is not None
-                            and _iface_w.type.kind == "interface"
                         ):
                             raise _Unsupported(
                                 "unsupported_statement", _span(node)

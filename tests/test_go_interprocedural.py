@@ -6542,6 +6542,62 @@ def test_interface_element_store_literal_impl(
     assert result.effects == "unknown"
 
 
+def test_interface_member_store_inside_element(
+    go_types_helper,
+):
+    # `p.B[i].J = e` — a store into an interface member inside a
+    # struct element reseats the member's slot like a pointer
+    # member does; a later `p.B[j].J.M()` on the same field
+    # observes the stored value's deps.
+    declarations = (
+        "type I interface{ M() int64 }\n"
+        "type E struct{ J I; V int64 }\n"
+        "type S struct{ B []E }\n"
+        "func F(p *S, e I) int64 {\n"
+        "\tp.B[0].J = e\n"
+        "\treturn p.B[1].J.M()\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+
+
+def test_interface_member_store_inside_element_roots(
+    go_types_helper,
+):
+    # The same member store admits through `**S` and a `q := p`
+    # alias — all name caller memory — while a value-struct root
+    # (`o.B[i].J` writes the parameter's copy of the slice header,
+    # not the element) stays closed.
+    for body in ("(*pp).B[0].J = e", "q := p; q.B[0].J = e"):
+        declarations = (
+            "type I interface{ M() int64 }\n"
+            "type E struct{ J I; V int64 }\n"
+            "type S struct{ B []E }\n"
+            + (
+                "func F(pp **S, e I) {\n"
+                if body.startswith("(*pp)")
+                else "func F(p *S, e I) {\n"
+            )
+            + f"\t{body}\n"
+            + "}\n"
+        )
+        result = named(*unit(go_types_helper, declarations))
+        assert result.available, (body, result.gaps)
+    declarations = (
+        "type I interface{ M() int64 }\n"
+        "type E struct{ J I; V int64 }\n"
+        "type S struct{ B []E }\n"
+        "func F(o S, e I) {\n"
+        "\to.B[0].J = e\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available
+
+
 def test_interface_element_store_evaluates_chain_index_calls(
     go_types_helper,
 ):
