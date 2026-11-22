@@ -87,9 +87,13 @@ class _Record:
     member_static: bool = False
     member_visibility: str = "public"
     member_container: str | None = None
-    # Exported alias when a member is only reachable under a
-    # different name (`export {A as B}`); None otherwise.
-    member_alias: str | None = None
+    # Public names a member is reachable under when they differ from
+    # its declared name (`export {A as B}` → {B}, `export {A as B, A}`
+    # → {A, B}). Empty means the declared name applies as usual.
+    member_public_names: frozenset[str] = frozenset()
+    # Reachable on the type side only (`export type {A}` /
+    # `export {type A}`) — no value-side export.
+    member_type_exported: bool = False
 
 
 @dataclass
@@ -133,6 +137,13 @@ class _TypeScriptBindings:
 
     def text(self, node: Any | None) -> str:
         return "" if node is None else self.raw[node.start_byte : node.end_byte].decode("utf-8")
+
+    def _export_name(self, node: Any | None) -> str:
+        """Export-clause specifier text without surrounding quotes."""
+        text = self.text(node).strip()
+        if len(text) > 1 and text[0] == text[-1] and text[0] in "\"'":
+            return text[1:-1]
+        return text
 
     @staticmethod
     def children(node: Any | None) -> list[Any]:
@@ -1031,6 +1042,8 @@ class _TypeScriptBindings:
                 export_clause = False
                 exported_names: set[str] = set()
                 exported_aliases: dict[str, str] = {}
+                exported_type_names: set[str] = set()
+                exported_type_aliases: dict[str, str] = {}
                 for statement in body.named_children:
                     if statement.type != "export_statement":
                         continue
@@ -1042,29 +1055,33 @@ class _TypeScriptBindings:
                         if child.type != "export_clause":
                             continue
                         export_clause = True
-                        if type_only:
-                            continue
                         for spec in child.named_children:
-                            if spec.type != "export_specifier" or any(
+                            if spec.type != "export_specifier":
+                                continue
+                            spec_type_only = type_only or any(
                                 part.type == "type"
                                 for part in spec.children
-                            ):
-                                continue
+                            )
                             local_name = spec.child_by_field_name("name")
                             alias_node = spec.child_by_field_name("alias")
                             if local_name is None:
                                 continue
-                            if alias_node is None:
-                                exported_names.add(
-                                    self.text(local_name)
-                                )
+                            local_text = self._export_name(local_name)
+                            alias_text = self._export_name(alias_node)
+                            if spec_type_only:
+                                if alias_node is None:
+                                    exported_type_names.add(local_text)
+                                else:
+                                    exported_type_aliases[alias_text] = (
+                                        local_text
+                                    )
+                            elif alias_node is None:
+                                exported_names.add(local_text)
                             else:
-                                exported_aliases[self.text(alias_node)] = (
-                                    self.text(local_name)
-                                )
+                                exported_aliases[alias_text] = local_text
                 if ambient and export_clause:
                     ambient = False
-                alias_targets = set(exported_aliases.values())
+                type_alias_targets = set(exported_type_aliases.values())
                 for other in self.records:
                     if other is record or other.member_of is not None:
                         continue
@@ -1126,22 +1143,28 @@ class _TypeScriptBindings:
                         # exported under an alias (`export {A as B}`)
                         # is reachable only through the alias.
                         member_name = self.text(other.node)
-                        public = (
+                        public_names = {
+                            exported
+                            for exported, local in exported_aliases.items()
+                            if local == member_name
+                        }
+                        if (
                             node.type == "export_statement"
                             or ambient
                             or member_name in exported_names
-                            or member_name in alias_targets
-                        )
+                        ):
+                            public_names.add(member_name)
                         other.member_visibility = (
-                            "public" if public else "private"
+                            "public" if public_names else "private"
                         )
-                        if member_name in alias_targets:
-                            other.member_alias = next(
-                                exported
-                                for exported, local
-                                in exported_aliases.items()
-                                if local == member_name
+                        if public_names and public_names != {member_name}:
+                            other.member_public_names = frozenset(
+                                public_names
                             )
+                        other.member_type_exported = (
+                            member_name in exported_type_names
+                            or member_name in type_alias_targets
+                        )
                         other.member_container = (
                             self._decl_qualified_name(decl)
                         )
@@ -1189,8 +1212,12 @@ class _TypeScriptBindings:
         *,
         static: bool,
         via_this: bool,
+        for_type: bool = False,
     ) -> _Record | None:
-        """BFS over the declaring type and its bases for member `name`."""
+        """BFS over the declaring type and its bases for member `name`.
+
+        `for_type` resolves on the type side (extends/implements
+        spellings), where `export type`-only members are reachable."""
         queue = [type_record]
         # Declaration merging: a namespace may merge with a class,
         # interface or enum of the same name in the same container, so
@@ -1216,8 +1243,11 @@ class _TypeScriptBindings:
                 if (
                     decl_id is None
                     or candidate.member_of != decl_id
-                    or (candidate.member_alias or candidate.binding.name)
-                    != name
+                    or name
+                    not in (
+                        candidate.member_public_names
+                        or frozenset({candidate.binding.name})
+                    )
                 ):
                     continue
                 if (
@@ -1226,8 +1256,12 @@ class _TypeScriptBindings:
                     and candidate.member_static != static
                 ):
                     continue
-                if candidate.member_visibility == "private" and (
-                    not via_this or not first
+                if (
+                    candidate.member_visibility == "private"
+                    and (not via_this or not first)
+                    and not (
+                        for_type and candidate.member_type_exported
+                    )
                 ):
                     continue
                 if candidate.member_visibility == "protected" and not via_this:
@@ -1257,7 +1291,12 @@ class _TypeScriptBindings:
             if record is None:
                 return None
             record = self._member_lookup(
-                record, segment, position, static=True, via_this=False
+                record,
+                segment,
+                position,
+                static=True,
+                via_this=False,
+                for_type=True,
             )
         return record
 
@@ -1482,8 +1521,10 @@ class _TypeScriptBindings:
             if (
                 sibling is record
                 or sibling.binding.name != record.binding.name
+                or sibling.member_public_names != record.member_public_names
                 or (
                     sibling.member_of is not None
+                    and sibling.member_of != record.member_of
                     and sibling.member_visibility == "private"
                 )
             ):

@@ -1663,3 +1663,61 @@ const c = new C();
     assert any(c.target == cls.id for c in new_calls)
     call_refs = [r for r in report.references if r.kind == "call"]
     assert any(r.binding_id == cls.id for r in call_refs)
+
+
+def test_member_alias_does_not_merge_into_same_named_namespace():
+    # `export {A as B}` exports the class only as `B` — it must not
+    # merge into the same-named `namespace A` from a sibling block.
+    source = """
+declare namespace N { export {A as B}; class A { static s(): void; } }
+declare namespace N { export namespace A { export function s(): void; } }
+N.B.s();
+N.A.s();
+"""
+    report = build_ts_bindings(source)
+    s_bindings = [
+        b for b in report.bindings if b.name == "s"
+    ]
+    assert len(s_bindings) == 2
+    call_targets = {c.target for c in report.calls if c.target}
+    assert call_targets == {b.id for b in s_bindings}
+
+
+def test_member_type_only_export_resolves_on_type_side():
+    # `export type {A}` keeps A value-private but type-visible:
+    # `interface B extends N.A` is legal and `b.a()` must resolve.
+    source = """
+declare namespace N { export type {A}; interface A { a(): void } }
+interface B extends N.A {}
+declare const b: B;
+b.a();
+"""
+    report = build_ts_bindings(source)
+    a_method = _member_bindings(report, "a", "associated_function")
+    assert a_method
+    assert any(
+        c.target == a_method[0].id for c in report.calls
+    )
+
+
+def test_member_multiple_export_names_all_resolve():
+    # `export {A as B, A as C, A}` publishes the member under A, B and C.
+    source = """
+declare namespace M { export {A as B, A as C, A}; class A {} }
+new M.A(); new M.B(); new M.C();
+"""
+    report = build_ts_bindings(source)
+    a_rec = _member_bindings(report, "A", "ambient")[0]
+    call_targets = {c.target for c in report.calls if c.target}
+    assert call_targets == {a_rec.id}
+
+
+def test_member_quoted_export_alias_resolves():
+    # `export {A as "Q"}` exports under the literal name Q.
+    source = """
+declare namespace M { export {A as "Q"}; class A {} }
+new M.Q();
+"""
+    report = build_ts_bindings(source)
+    a_rec = _member_bindings(report, "A", "ambient")[0]
+    assert any(c.target == a_rec.id for c in report.calls)
