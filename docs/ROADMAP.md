@@ -192,6 +192,15 @@ Scheduled attempts without a host `memory_bound_mb` use the plan's effective
 it remains unenforced as before. This is a resource bound, not a sandbox or
 Evidence.
 
+### C04 self-reported failure is not a scheduling success
+
+A scheduled attempt that exits with a declared success code is still not
+selected when the adapter's first matching manifest verdict marker reports
+`failed` or `inconclusive`; the round falls back like a failed run. A
+`valid` marker never overrides a non-success exit code. Markers can only
+withhold selection: they are adapter self-reports, not Evidence, and Core
+acceptance is unchanged.
+
 ### C11 declared memory bounds for attempted executions
 
 `AttemptRunner.run(request, argv, cancel_event=None, memory_bound_mb=None)`
@@ -6867,8 +6876,9 @@ The result, `AttemptScheduleResult`, folds into
 `cancelled`}. Each adapter attempt is its own `AttemptSequence`, so a
 fallback never contaminates the prior attempt's lineage. The descriptor
 carries fingerprints only — no argv, source or output bytes — and
-`selected` names which adapter produced a declared-success exit, never
-an Evidence acceptance. This is partial C11: scheduling is observed
+`selected` names which adapter produced a declared-success exit (without
+a `failed`/`inconclusive` self-report, see C04), never an Evidence
+acceptance. This is partial C11: scheduling is observed
 dispatch, not authorization, output normalization, arbitration or
 acceptance.
 
@@ -7036,10 +7046,10 @@ records it as the attempt entry's `reported_outcome` on
 
 The reported outcome is the adapter's own declared self-report — the
 schedule interprets bytes only through the manifest's declared
-markers, never through a guessed format. `reported_outcome` is not a
-selection signal (exit codes still decide `selected`), not an
-evidence-check outcome, and never Evidence acceptance — Core owns the
-meaning of what an adapter claims.
+markers, never through a guessed format. `reported_outcome` can only
+withhold selection (a `failed`/`inconclusive` report on a success exit is
+not selected; see C04 above), not an evidence-check outcome, and never
+Evidence acceptance — Core owns the meaning of what an adapter claims.
 
 ```python
 descriptor = AdapterDescriptor.from_manifest({

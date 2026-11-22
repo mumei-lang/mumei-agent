@@ -3344,7 +3344,8 @@ def verify_schedule(
     (adapter_id → argv) feed `run_attempt_schedule`, and the
     `mumei.attempt-schedule/v1` descriptor is returned. The schedule
     is a dispatch record only — a `selected` outcome names which
-    adapter produced a declared-success exit, never an Evidence
+    adapter produced a declared-success exit without a declared
+    `failed`/`inconclusive` self-report marker, never an Evidence
     acceptance.
 
     Args:

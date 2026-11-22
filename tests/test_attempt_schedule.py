@@ -14,13 +14,14 @@ from agent.attempt_schedule import (
     run_attempt_schedule,
 )
 from agent.verification_planner import (
+    SOURCE_INPUT_FORMAT,
     AdapterDescriptor,
     AdapterRegistry,
     PlannerPolicy,
     ResultContract,
     RouteRequirements,
     RuntimeObservation,
-    SOURCE_INPUT_FORMAT,
+    VerdictMarker,
 )
 
 PY = sys.executable
@@ -433,9 +434,109 @@ def _argv_spew(text, code=0):
     )
 
 
-def test_verdict_marker_reports_declared_outcome():
-    from agent.verification_planner import VerdictMarker
+def _registry_with_marker(stream, text, outcome):
+    registry = AdapterRegistry()
+    registry.register(
+        descriptor(
+            "alpha",
+            priority=10,
+            verdict_markers=(VerdictMarker(stream, text, outcome),),
+        )
+    )
+    registry.register(descriptor("beta", priority=1))
+    return registry
 
+
+def test_failed_marker_withholds_success_and_falls_back():
+    registry = _registry_with_marker("stdout", "FAILED", "failed")
+    result = schedule(
+        registry,
+        ("alpha", "beta"),
+        {"alpha": _argv_spew("FAILED\n"), "beta": argv(0)},
+    )
+
+    alpha, beta = result.entries
+    assert result.outcome == "selected"
+    assert result.selected_adapter_id == "beta"
+    assert alpha.adapter_id == "alpha"
+    assert alpha.terminal_state == "exited"
+    assert alpha.exit_code == 0
+    assert alpha.reported_outcome == "failed"
+    assert beta.adapter_id == "beta"
+    assert beta.reported_outcome is None
+
+
+def test_inconclusive_marker_on_stderr_withholds_success_and_falls_back():
+    registry = _registry_with_marker("stderr", "INCONCLUSIVE", "inconclusive")
+    argv_err = (
+        PY,
+        "-c",
+        "import sys; sys.stderr.write('INCONCLUSIVE')",
+    )
+    result = schedule(
+        registry,
+        ("alpha", "beta"),
+        {"alpha": argv_err, "beta": argv(0)},
+    )
+
+    alpha, beta = result.entries
+    assert result.outcome == "selected"
+    assert result.selected_adapter_id == "beta"
+    assert alpha.adapter_id == "alpha"
+    assert alpha.terminal_state == "exited"
+    assert alpha.exit_code == 0
+    assert alpha.reported_outcome == "inconclusive"
+    assert beta.adapter_id == "beta"
+
+
+def test_failed_marker_with_explicit_selection_denies_fallback_without_core_check(
+    tmp_path,
+):
+    registry = _registry_with_marker("stdout", "FAILED", "failed")
+    core = _core_stub(tmp_path)
+    result = schedule(
+        registry,
+        ("alpha", "beta"),
+        {"alpha": _argv_spew("FAILED\n"), "beta": argv(0)},
+        policy=policy(selected_adapter="alpha"),
+        core_executable=core,
+    )
+
+    assert result.outcome == "fallback_denied"
+    assert result.selected_adapter_id is None
+    assert result.entries[0].reported_outcome == "failed"
+    assert result.evidence_check is None
+
+
+def test_valid_marker_allows_success_exit_to_select():
+    registry = _registry_with_marker("stdout", "VALID", "valid")
+    result = schedule(
+        registry,
+        ("alpha", "beta"),
+        {"alpha": _argv_spew("VALID\n"), "beta": argv(0)},
+    )
+
+    assert result.outcome == "selected"
+    assert result.selected_adapter_id == "alpha"
+    assert result.entries[0].reported_outcome == "valid"
+
+
+def test_valid_marker_does_not_rescue_non_success_exit():
+    registry = _registry_with_marker("stdout", "VALID", "valid")
+    result = schedule(
+        registry,
+        ("alpha", "beta"),
+        {"alpha": _argv_spew("VALID\n", code=1), "beta": argv(0)},
+    )
+
+    assert result.outcome == "selected"
+    assert result.selected_adapter_id == "beta"
+    assert result.entries[0].terminal_state == "exited"
+    assert result.entries[0].exit_code == 1
+    assert result.entries[0].reported_outcome == "valid"
+
+
+def test_verdict_marker_reports_declared_outcome():
     registry = AdapterRegistry()
     registry.register(
         AdapterDescriptor(
@@ -462,8 +563,6 @@ def test_verdict_marker_reports_declared_outcome():
 
 
 def test_verdict_marker_first_match_wins_and_no_match_is_null():
-    from agent.verification_planner import VerdictMarker
-
     registry = AdapterRegistry()
     registry.register(
         AdapterDescriptor(
@@ -493,8 +592,6 @@ def test_verdict_marker_first_match_wins_and_no_match_is_null():
 
 
 def test_verdict_marker_stderr_stream():
-    from agent.verification_planner import VerdictMarker
-
     registry = AdapterRegistry()
     registry.register(
         AdapterDescriptor(
@@ -521,8 +618,6 @@ def test_verdict_marker_stderr_stream():
 
 
 def test_verdict_marker_validation():
-    from agent.verification_planner import VerdictMarker
-
     import pytest as _pytest
 
     with _pytest.raises(ValueError):

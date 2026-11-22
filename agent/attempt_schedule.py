@@ -56,6 +56,9 @@ SCHEDULE_OUTCOMES = frozenset(
 )
 NOT_DISPATCHED = "not_dispatched"
 
+# A declared negative self-report can withhold, never grant, selection.
+_NON_SUCCESS_REPORTS = frozenset({"failed", "inconclusive"})
+
 _MAX_LABEL = 128
 
 
@@ -160,8 +163,8 @@ class ScheduledAttemptEntry:
 class AttemptScheduleResult:
     """A bounded schedule record: the tried entries, the resulting plans and
     reconciled sequences, and the host-meaning outcome — `selected` only
-    names which adapter produced a declared-success exit, never an
-    Evidence acceptance."""
+    names which adapter produced a declared-success exit without a
+    `failed`/`inconclusive` self-report, never an Evidence acceptance."""
 
     entries: tuple[ScheduledAttemptEntry, ...]
     plans: tuple[VerificationPlan, ...]
@@ -380,10 +383,12 @@ def run_attempt_schedule(
     selected adapter; `None` means nothing declared — the round is recorded
     `not_dispatched` and the schedule falls back like a failed run.
     `success_exit_codes` is the host's declared exit mapping (default
-    `{0}`): `exited` with any other code is a failure for scheduling, not
-    a verdict. Fallback requires permissive routing (no explicit
-    non-fallback selection); without it a failed attempt ends the schedule
-    as `fallback_denied`.
+    `{0}`): `exited` with any other code is a scheduling failure, not a
+    verdict; a declared `failed` or `inconclusive` self-report also blocks
+    selection. A `valid` report does not rescue a non-success exit.
+    Fallback requires permissive routing (no explicit non-fallback
+    selection); without it a failed attempt ends the schedule as
+    `fallback_denied`.
     """
     if type(registry) is not AdapterRegistry:
         raise ValueError("attempt scheduling requires an adapter registry")
@@ -556,7 +561,11 @@ def run_attempt_schedule(
                 # so check the event, not just the terminal state.
                 outcome = "cancelled"
                 break
-            if terminal == "exited" and exit_code in success_exit_codes:
+            if (
+                terminal == "exited"
+                and exit_code in success_exit_codes
+                and reported not in _NON_SUCCESS_REPORTS
+            ):
                 outcome = "selected"
                 selected_adapter_id = adapter_id
                 if core_executable is not None:
