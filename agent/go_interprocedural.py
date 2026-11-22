@@ -5658,6 +5658,50 @@ class _Builder:
             # unbound/deeper/scalar-element operand has no group.
             sharer = self._opaque_container_index_sharer_toks(rhs)
             return frozenset(sharer) if sharer else None
+        if rhs.type == "slice_expression":
+            # `t = s[lo:hi]` — a reslice re-heads the operand's
+            # backing: element writes through `t` land on `s`'s
+            # memory, so the binding shares the operand's group.
+            operand = rhs.named_children[0] if rhs.named_children else None
+            inner = operand
+            while (
+                inner is not None
+                and inner.type == "parenthesized_expression"
+            ):
+                inner = next(
+                    (
+                        c
+                        for c in inner.named_children
+                        if c.type != "comment"
+                    ),
+                    None,
+                )
+            if inner is not None and inner.type == "identifier":
+                ref = self.references.get(self.node_key(inner))
+                binding = (
+                    self.bindings.get(ref.binding_id)
+                    if ref is not None and ref.binding_id is not None
+                    else None
+                )
+                if (
+                    binding is not None
+                    and binding.type is not None
+                    and binding.type.kind == "array"
+                    and not self._type_embeds_collection(binding.type)
+                ):
+                    # `s = a[:]` VIEWS the array — `s[j]` writes land
+                    # on `a`'s elements, unlike the `s = a` copy. The
+                    # operand joins the binding's own share group.
+                    toks = self._opaque_container_tokens.get(
+                        binding.id
+                    )
+                    if not toks:
+                        toks = frozenset({self.node_key(rhs)})
+                        self._opaque_container_tokens[binding.id] = (
+                            toks
+                        )
+                    return toks
+            return self._opaque_container_bind(operand, params)
         if rhs.type in {"selector_expression", "field_expression"}:
             imported = self._opaque_container_imported_var_bind(rhs)
             if imported is not None:
@@ -16950,6 +16994,18 @@ class _Builder:
                 for t in chan_elem_targets
                 if t is not None
             }
+            # RHS binds resolve the pre-state too — `a, c = b, a[:]`
+            # reslices `a`'s OLD group, not the group `b` is about to
+            # reseat `a` onto, so every operand's share set is
+            # snapshotted before the first LHS rebinds.
+            pre_opaque_toks: list = [
+                (
+                    self._opaque_container_bind(rights[i], params)
+                    if len(lefts) == len(rights)
+                    else None
+                )
+                for i in range(len(lefts))
+            ]
             for i, (lhs, value) in enumerate(zip(lefts, values)):
                 # `_` discards its value — the RHS was still evaluated.
                 if lhs.text == b"_":
@@ -16969,11 +17025,7 @@ class _Builder:
                 # element; the fresh backing keys on the call node.
                 # `s2 := s` aliases it (shared backing for slice/map,
                 # a copy for array).
-                opaque_toks = (
-                    self._opaque_container_bind(rights[i], params)
-                    if len(lefts) == len(rights)
-                    else None
-                )
+                opaque_toks = pre_opaque_toks[i]
                 struct_call_result = (
                     self._call_result_fact(rights[i])[1]
                     if len(lefts) == len(rights)
@@ -30094,6 +30146,20 @@ class _Builder:
             return self._imported_index_read(
                 node, fn, params, locals_, transfers, count, depth
             )
+        if kind == "slice_expression":
+            # `s[lo:hi]` — the reslice header carries the operand's
+            # deps plus whatever the bounds name. A string operand
+            # yields a substring (scalar deps stay honest); array
+            # and container operands share the backing.
+            deps = frozenset()
+            for child in node.named_children:
+                if child.type == "comment":
+                    continue
+                deps |= self.expression(
+                    child, fn, params, locals_, transfers, count,
+                    depth + 1,
+                )
+            return deps
         if kind == "call_expression":
             call = self.calls.get(self.node_key(node))
             if (
