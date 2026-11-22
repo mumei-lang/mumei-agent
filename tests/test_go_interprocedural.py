@@ -8206,11 +8206,13 @@ def test_local_named_pointee_write_is_admitted(
     assert result.effects == "unknown"
 
 
-def test_local_named_pointee_composites_stay_closed(
+def test_local_named_pointee_composites_match_value_control(
     go_types_helper,
 ):
-    # A non-scalar field type keeps the read closed — indexing a
-    # slice *field* (`p.V[0]`) never reaches a container pointee.
+    # `p.V[0]` on `p *P` resolves the same way `o.V[0]` does — the
+    # pointer shares its pointee with the caller the way a slice
+    # shares its backing, so the element read is dep-free like the
+    # value root's.
     decl, expression = "type P struct{ V []int64 }", "p.V[0]"
     files = {
         "a.go": f"package p\n{decl}\n"
@@ -8221,7 +8223,19 @@ def test_local_named_pointee_composites_stay_closed(
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    files_o = {
+        "a.go": f"package p\n{decl}\n"
+        f"func F(o {decl.split()[1]}, x int64) int64 {{ "
+        f"_ = o.V[0]; return x }}\n"
+    }
+    snapshot_o = _snapshot_for(go_types_helper, files_o)
+    direct = named_package(
+        files_o, snapshot_o,
+        ip.summarize_go_package(files_o, snapshot_o), "F",
+    )
+    assert result.available == direct.available
+    assert result.available
+    assert result.return_dependencies == direct.return_dependencies
 
 
 def test_local_named_container_pointee_index_read(
@@ -9576,8 +9590,17 @@ def test_field_write_through_pointer_is_admitted(go_types_helper):
     )
     assert result.available and result.return_dependencies == frozenset()
     assert result.effects == "unknown"
-    (write,) = [c for c in result.calls if c.imported]
-    assert write.target == members["S"]["id"] and write.arguments == ()
+    imported = {c.target for c in result.calls if c.imported}
+    # The field write records the declaring member, and — the
+    # pointee is caller memory — the param's caller-visible backing
+    # the store landed in.
+    s_id = next(
+        b.id for b in snapshot.bindings if b.name == "s"
+    )
+    assert imported == {
+        members["S"]["id"],
+        f"{s_id}/caller-backing",
+    }
 
 
 def test_field_write_dependencies_survive_into_later_reads(go_types_helper):
@@ -9617,8 +9640,17 @@ def test_deref_base_field_write_is_admitted(go_types_helper):
     )
     assert result.available and result.return_dependencies == frozenset()
     assert result.effects == "unknown"
-    (write,) = [c for c in result.calls if c.imported]
-    assert write.target == members["S"]["id"] and write.arguments == ()
+    imported = {c.target for c in result.calls if c.imported}
+    # The field write records the declaring member, and — the
+    # pointee is caller memory — the param's caller-visible backing
+    # the store landed in.
+    s_id = next(
+        b.id for b in snapshot.bindings if b.name == "s"
+    )
+    assert imported == {
+        members["S"]["id"],
+        f"{s_id}/caller-backing",
+    }
 
 
 def test_deref_base_field_write_comment_parens_is_admitted(go_types_helper):
@@ -12752,7 +12784,6 @@ def test_empty_struct_literal_address_supports_nested_field_write(
     ("types", "field_expr"),
     [
         ("type S struct{ A struct{ B int64 } }\n", "t.A.B"),
-        ("type S struct{ A []int64 }\n", "t.A[0]"),
     ],
 )
 def test_bound_pointer_anonymous_or_slice_intermediate_stays_closed(
@@ -12820,8 +12851,17 @@ def test_nested_field_write_is_admitted(go_types_helper):
     )
     assert result.available and result.return_dependencies == frozenset()
     assert result.effects == "unknown"
-    (write,) = [c for c in result.calls if c.imported]
-    assert write.target == members["W2"]["id"] and write.arguments == ()
+    imported = {c.target for c in result.calls if c.imported}
+    # The field write records the declaring member, and — the
+    # pointee is caller memory — the param's caller-visible backing
+    # the store landed in.
+    t_id = next(
+        b.id for b in snapshot.bindings if b.name == "t"
+    )
+    assert imported == {
+        members["W2"]["id"],
+        f"{t_id}/caller-backing",
+    }
 
 
 def test_nested_field_write_folds_deps_into_root(go_types_helper):
@@ -12880,8 +12920,17 @@ def test_nested_field_write_deref_base_is_admitted(go_types_helper):
     )
     assert result.available and result.return_dependencies == frozenset()
     assert result.effects == "unknown"
-    (write,) = [c for c in result.calls if c.imported]
-    assert write.target == members["W2"]["id"] and write.arguments == ()
+    imported = {c.target for c in result.calls if c.imported}
+    # The field write records the declaring member, and — the
+    # pointee is caller memory — the param's caller-visible backing
+    # the store landed in.
+    t_id = next(
+        b.id for b in snapshot.bindings if b.name == "t"
+    )
+    assert imported == {
+        members["W2"]["id"],
+        f"{t_id}/caller-backing",
+    }
 
 
 def test_nested_field_write_receiver_observes_folded_deps(go_types_helper):
@@ -26320,9 +26369,19 @@ def test_bound_pointer_value_struct_channel_leaf_matches_pointer(
         assert value.return_dependencies == expected
         assert pointer.return_dependencies == expected
         assert value.effects == pointer.effects == "unknown"
-    assert [call.target for call in value.calls] == [
-        call.target for call in pointer.calls
+    # The caller-backing transfer is keyed on each function's own
+    # `t` binding — normalize it before comparing the two lists.
+    normalize = [
+        "caller-backing" if c.target.endswith("/caller-backing")
+        else c.target
+        for c in value.calls
     ]
+    normalize_pointer = [
+        "caller-backing" if c.target.endswith("/caller-backing")
+        else c.target
+        for c in pointer.calls
+    ]
+    assert normalize == normalize_pointer
 
 
 def test_bound_field_channel_range_rejoins_sends(go_types_helper):
@@ -30705,13 +30764,6 @@ def test_container_builtin_dep_free_param_write_marks_effects(
         "\tb := a[0][0]\n"
         "\tb[0] = x\n"
         "\treturn a[0][0][0]\n}\n",
-        # `a := s.F` on a POINTER-to-composite root — field
-        # shares need a local-composite root, so the extraction
-        # stays closed.
-        "func F(s *struct{ F [][][]int64 }, x int64) int64 {\n"
-        "\ta := s.F\n"
-        "\ta[0][0][0] = x\n"
-        "\treturn a[0][0][0]\n}\n",
         # `a := <-cc` — a container received off a channel has no
         # identity to share; the bind stays closed.
         "func F(cc chan []int64, x int64) int64 {\n"
@@ -32086,11 +32138,6 @@ def test_struct_field_scalar_element_callee_write_reaches_source(
     "source",
     [
         (
-            "type E struct { V int64 }\n"
-            "type S2 struct { A []E }\n"
-            "func F(p *S2, i int64) int64 { return p.A[i].V }\n"
-        ),
-        (
             "type P struct { V int64 }\n"
             "type E struct { P *P }\n"
             "type S2 struct { A []E }\n"
@@ -32126,7 +32173,6 @@ def test_struct_field_scalar_element_callee_write_reaches_source(
         ),
         ],
         ids=[
-            "pointer-root",
             "pointer-field",
             "anonymous-element",
             "generic-element",
@@ -32981,14 +33027,6 @@ def test_named_struct_extraction_applies_index_effects_before_read(
         ),
         (
             "type E struct { V int64 }\n"
-            "type S2 struct { A []E }\n"
-            "func F(p *S2) int64 {\n"
-            "\tr := int64(0)\n"
-            "\tfor _, e := range p.A { r += e.V }\n"
-            "\treturn r\n}\n"
-        ),
-        (
-            "type E struct { V int64 }\n"
             "func F(p *[][]E, i int64) int64 {\n"
             "\te := (*p)[0][i]\n"
             "\treturn e.V\n}\n"
@@ -33005,12 +33043,400 @@ def test_named_struct_extraction_applies_index_effects_before_read(
         "anonymous",
         "generic",
         "comma-ok",
-        "pointer-root-field",
         "pointer-root-index",
         "deep-nested-root",
     ],
 )
 def test_named_struct_element_unsupported_shapes_stay_closed(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available
+
+
+TYPES_E_S2 = (
+    "type E struct { F []int64; V int64 }\n"
+    "type S2 struct { A []E; M map[int64]E }\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("pointer", "control", "signature", "expected"),
+    [
+        (
+            "return p.A[i].V",
+            "return o.A[i].V",
+            "p *S2, i int64",
+            frozenset({0, 1}),
+        ),
+        (
+            "p.A[0].V = x; return p.A[0].V",
+            "o.A[0].V = x; return o.A[0].V",
+            "p *S2, x int64",
+            frozenset({0, 1}),
+        ),
+        (
+            "return p.M[k].V",
+            "return o.M[k].V",
+            "p *S2, k int64",
+            frozenset({0, 1}),
+        ),
+        (
+            "return (*p).A[i].V",
+            "return o.A[i].V",
+            "p *S2, i int64",
+            frozenset({0, 1}),
+        ),
+        (
+            "return (*p).M[k].V",
+            "return o.M[k].V",
+            "p *S2, k int64",
+            frozenset({0, 1}),
+        ),
+    ],
+)
+def test_named_struct_element_pointer_param_root_matches_value_control(
+    go_types_helper, pointer, control, signature, expected
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            TYPES_E_S2 + f"func F({signature}) int64 {{ {pointer} }}\n",
+        )
+    )
+    value_signature = signature.replace("p *S2", "o S2")
+    direct = named(
+        *unit(
+            go_types_helper,
+            TYPES_E_S2
+            + f"func F({value_signature}) int64 {{ {control} }}\n",
+        )
+    )
+    assert result.available == direct.available
+    assert result.available, result.gaps
+    assert result.return_dependencies == direct.return_dependencies
+    assert result.return_dependencies == expected
+
+
+def test_named_struct_element_pointer_param_reseat_alias(
+    go_types_helper,
+):
+    # `p = q` reseats p onto q's entry pointee — reads through p
+    # resolve to q's slot family instead of closing.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "type E struct { V int64 }\n"
+        "type S2 struct { A []E; F []int64 }\n"
+        "func F(p *S2, q *S2, i int64) int64 {"
+        " p = q; return p.A[i].V }\n",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({1, 2})
+
+
+def test_named_struct_element_pointer_param_reseat_alias_in_init(
+    go_types_helper,
+):
+    # An alias reseat in an if/for/switch initializer takes effect
+    # before the condition evaluates — the condition reads q's
+    # entry pointee, not p's.
+    for body in (
+        "if p = q; p.A[i].V > 0 { return 1 }",
+        "for p = q; (*p).A[i].V > 0; { return 1 }",
+        "switch p = q; (*p).A[i].V { case 1: return 1 }",
+    ):
+        result = named(
+            *unit(
+                go_types_helper,
+                "type E struct { V int64 }\n"
+                "type S2 struct { A []E }\n"
+                "func F(p *S2, q *S2, i int64) int64 {\n"
+                f"\t{body}\n"
+                "\treturn 0\n}\n",
+            )
+        )
+        assert result.available, (body, result.gaps)
+        # The condition's read of p.A[i].V attributes to q's entry
+        # pointee — deps {q, i} — not to p's.
+        assert any(
+            r.deps == frozenset({1, 2}) for r in result.statement_reads
+        ), (body, result.statement_reads)
+
+
+def test_named_struct_element_pointer_param_reseat_alias_dirty_target(
+    go_types_helper,
+):
+    # The alias target's name is only its entry pointee while it is
+    # clean — once the target is itself reseated or re-seated, its
+    # slot tracks the NEW pointee, and a read through `p` can no
+    # longer recover the entry it still points at. The model has no
+    # separate entry slot to fall back to, so those reads close
+    # rather than mis-attribute the dependency (e.g. `p, q = q, p`
+    # would otherwise read p's own entry through q's slot).
+    for body in (
+        "p = q; q = r; return p.A[i].V",
+        "p, q = q, p; return p.A[i].V",
+        "p, q = q, p; r = p; return p.A[i].V",
+    ):
+        result = named(
+            *unit(
+                go_types_helper,
+                "type E struct { V int64 }\n"
+                "type S2 struct { A []E }\n"
+                "func F(p *S2, q *S2, r *S2, i int64) int64 {\n"
+                f"\t{body}\n"
+                "\treturn 0\n}\n",
+            )
+        )
+        assert not result.available, (body, result)
+        assert "non_parameter_reference" in {
+            g.reason for g in result.gaps
+        }, (body, result.gaps)
+
+
+def test_named_struct_element_pointer_param_reseat_alias_write(
+    go_types_helper,
+):
+    # A store through an aliased param lands in the TARGET's
+    # pointee, so the caller-backing transfer keys on q.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "type S3 struct { F []int64 }\n"
+        "func F(p *S3, q *S3, x int64) int64 {"
+        " p = q; p.F[0] = x; return p.F[0] }\n",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({1, 2})
+    imported = {c.target for c in result.calls if c.imported}
+    q_id = next(
+        b.id for b in snapshot.bindings if b.name == "q"
+    )
+    p_id = next(
+        b.id for b in snapshot.bindings if b.name == "p"
+    )
+    # q carries the real store; p also emits because the reseat
+    # grew its dep set — the same may-write approximation the
+    # slice/map params already make.
+    assert imported == {
+        f"{q_id}/caller-backing",
+        f"{p_id}/caller-backing",
+    }
+
+
+def test_named_pointer_param_alias_dirty_target_write(
+    go_types_helper,
+):
+    # `p = q; q = r; p.F[0] = x` still lands in q's ENTRY pointee —
+    # the caller-backing keys on q — while the addressing read
+    # through the alias keeps p's own slot ({1}, p's stored value
+    # is q's entry) instead of mis-attributing to r ({2}).
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "type S3 struct { F []int64 }\n"
+        "func F(p *S3, q *S3, r *S3, x int64) {"
+        " p = q; q = r; p.F[0] = x }\n",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available, result.gaps
+    imported = {c.target for c in result.calls if c.imported}
+    q_id = next(
+        b.id for b in snapshot.bindings if b.name == "q"
+    )
+    p_id = next(
+        b.id for b in snapshot.bindings if b.name == "p"
+    )
+    r_id = next(
+        b.id for b in snapshot.bindings if b.name == "r"
+    )
+    # The store lands in what the caller passed as q.
+    assert f"{q_id}/caller-backing" in imported
+    # r never gets a backing transfer — it is not the store's
+    # target — though the addressing union may over-approx it.
+    assert f"{r_id}/caller-backing" not in imported
+    # The write statement's recorded reads keep the alias source's
+    # dep (p==1 is the addressing read), not just the dirty
+    # target's slot. x==3 pins the write's own read set.
+    write_read = next(
+        r for r in result.statement_reads if 3 in r.deps
+    )
+    assert 1 in write_read.deps
+
+
+def test_named_select_clause_break_does_not_leak(
+    go_types_helper,
+):
+    # A plain `break` in an earlier select clause does not mark the
+    # later clause's statements conditional — `p = q` there still
+    # resolves `p.F[0]` through the alias.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "type S3 struct { F []int64 }\n"
+        "func F(p *S3, q *S3, ch chan int64) int64 {\n"
+        "\tselect {\n"
+        "\tcase <-ch:\n"
+        "\t\tbreak\n"
+        "\tcase x := <-ch:\n"
+        "\t\t_ = x\n"
+        "\t\tp = q\n"
+        "\t\treturn p.F[0]\n"
+        "\t}\n"
+        "\treturn 0\n"
+        "}\n",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({1})
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        # May-alias: only the if arm reseats p — post-join the
+        # pointee is ambiguous, so the root closes.
+        (
+            "type E struct { V int64 }\n"
+            "type S2 struct { A []E }\n"
+            "func F(p *S2, q *S2, c int64, i int64) int64 {\n"
+            "\tif c > 0 {\n"
+            "\t\tp = q\n"
+            "\t}\n"
+            "\treturn p.A[i].V\n}\n"
+        ),
+        # Reseat onto opaque (non-param) memory.
+        (
+            "type E struct { V int64 }\n"
+            "type S2 struct { A []E }\n"
+            "func F(p *S2, q *S2, i int64) int64 {\n"
+            "\ts := S2{}\n"
+            "\tp = &s\n"
+            "\treturn p.A[i].V\n}\n"
+        ),
+        # A later reseat to opaque memory overrides the alias.
+        (
+            "type E struct { V int64 }\n"
+            "type S2 struct { A []E }\n"
+            "func F(p *S2, q *S2, i int64) int64 {\n"
+            "\ts := S2{}\n"
+            "\tp = q\n"
+            "\tp = &s\n"
+            "\treturn p.A[i].V\n}\n"
+        ),
+        # An element-pointer deref — `(*p.A[i])` reads a pointee
+        # reached through the field chain, not p's root slot.
+        (
+            "type E struct { F []int64 }\n"
+            "type S struct { A []*E }\n"
+            "func F(p *S, i int64) int64 {\n"
+            "\treturn (*p.A[i]).F[0]\n}\n"
+        ),
+        # An opaque reseat inside an if/for/switch initializer
+        # takes effect before the condition reads — the condition
+        # must not see the pre-update pointee.
+        (
+            "type S struct { F []int64 }\n"
+            "func F(p *S, q *S) int64 {\n"
+            "\ts := S{}\n"
+            "\tif p = &s; p.F[0] > 0 {\n"
+            "\t\treturn 1\n"
+            "\t}\n"
+            "\treturn 0\n}\n"
+        ),
+        (
+            "type S struct { F []int64 }\n"
+            "func F(p *S, q *S) int64 {\n"
+            "\ts := S{}\n"
+            "\tfor p = &s; (*p).F[0] > 0; {\n"
+            "\t\treturn 1\n"
+            "\t}\n"
+            "\treturn 0\n}\n"
+        ),
+        (
+            "type S struct { F []int64 }\n"
+            "func F(p *S, q *S) int64 {\n"
+            "\ts := S{}\n"
+            "\tswitch p = &s; (*p).F[0] {\n"
+            "\tcase 1:\n"
+            "\t\treturn 1\n"
+            "\t}\n"
+            "\treturn 0\n}\n"
+        ),
+    ],
+    ids=[
+        "may-alias-join",
+        "opaque-reseat",
+        "alias-then-opaque",
+        "element-pointer-deref",
+        "if-init-reseat",
+        "for-init-reseat",
+        "switch-init-reseat",
+    ],
+)
+def test_named_struct_element_pointer_param_reseat_stay_closed(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available
+
+
+def test_named_struct_element_pointer_param_explicit_deref_write(
+    go_types_helper,
+):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "type S3 struct { F []int64 }\n"
+        "func F(p *S3, x int64) int64 {"
+        " (*p).F[0] = x; return (*p).F[0] }\n",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+    imported = {c.target for c in result.calls if c.imported}
+    param_id = next(
+        b.id for b in snapshot.bindings if b.name == "p"
+    )
+    assert imported == {f"{param_id}/caller-backing"}
+
+
+def test_named_struct_element_pointer_param_root_scalar_collection_field(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type S3 struct { F []int64 }\n"
+            "func F(p *S3, x int64) int64 {"
+            " p.F[0] = x; return p.F[0] }\n",
+        )
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        (
+            "type E struct { V int64 }\n"
+            "type S2 struct { A []E }\n"
+            "func F(p *S2, i int64) int64 {\n"
+            "\tq := p\n"
+            "\treturn q.A[i].V\n}\n"
+        ),
+        (
+            "type E struct { V int64 }\n"
+            "type S2 struct { A []E }\n"
+            "func F(pp **S2, i int64) int64 {\n"
+            "\treturn (*pp).A[i].V\n}\n"
+        ),
+    ],
+    ids=[
+        "local-pointer-alias",
+        "double-pointer",
+    ],
+)
+def test_named_struct_element_pointer_param_root_unsupported_shapes_stay_closed(
     go_types_helper, declarations
 ):
     result = named(*unit(go_types_helper, declarations))
@@ -33571,8 +33997,6 @@ def test_struct_field_parallel_assignment_field_rhs_preserves_alias(
         "type P struct { A []int64 }\n"
         "type Q struct { P *P }\n"
         "func F(q Q) int64 { return q.P.A[0] }\n",
-        "type S struct { A []int64 }\n"
-        "func F(p *S) int64 { return (*p).A[0] }\n",
         "type S struct { A [2]int64 }\n"
         "func F(s S, x int64) int64 { s.A[0] = x; return s.A[0] }\n",
         "type S struct { A []int64 }\n"

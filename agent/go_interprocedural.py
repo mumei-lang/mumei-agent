@@ -127,6 +127,10 @@ _UNARY = frozenset({"+", "-", "!", "^", "&"})
 # deref member write — the stored value's dependencies fold into
 # every escaped binding at store time.
 _ALIAS_FOLD = object()
+# A pending param-pointer assignment that restores the parameter's
+# own entry pointee (`p = q` when `q` already names `p`'s slot) —
+# distinct from a reseat onto opaque memory, which closes the root.
+_PARAM_POINTER_RESTORE = object()
 _COMPOUND_ASSIGN = frozenset(
     {"+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", "&^="}
 )
@@ -2367,7 +2371,11 @@ class _Builder:
         }
 
     def _scalar_container_field(
-        self, sel: Any
+        self,
+        sel: Any,
+        params: dict | None = None,
+        *,
+        for_write: bool = False,
     ) -> tuple[str | None, Any]:
         """`s.F` (or a nested `s.W.F`) naming a scalar-element
         collection field — or its one-level nested form — on a
@@ -2393,6 +2401,7 @@ class _Builder:
             "field_expression",
             "index_expression",
             "dereference_expression",
+            "unary_expression",
         }:
             if root.type == "parenthesized_expression":
                 root = next(
@@ -2403,6 +2412,30 @@ class _Builder:
                     ),
                     None,
                 )
+            elif root.type == "unary_expression":
+                # `(*p)` — only a dereference unwraps, and only onto
+                # a bare name: `(*p.A[i])` derefs an ELEMENT pointer,
+                # not the root's field chain, and `&x`, `!b`, `-n`
+                # keep their computed operand closed.
+                unary_op = root.child_by_field_name("operator")
+                inner = root.child_by_field_name("operand")
+                while inner is not None and inner.type == "parenthesized_expression":
+                    inner = next(
+                        (
+                            c
+                            for c in inner.named_children
+                            if c.type != "comment"
+                        ),
+                        None,
+                    )
+                if (
+                    unary_op is None
+                    or unary_op.text != b"*"
+                    or inner is None
+                    or inner.type != "identifier"
+                ):
+                    break
+                root = inner
             else:
                 root = root.child_by_field_name("operand")
         root_ref = (
@@ -2410,6 +2443,56 @@ class _Builder:
             if root is not None and root.type == "identifier"
             else None
         )
+        self._last_write_alias_src = None
+        aliased_root = (
+            root_ref is not None
+            and root_ref.binding_id in self._param_pointer_aliases
+        )
+        if aliased_root:
+            alias_src_id = root_ref.binding_id
+            # `p = q` copied `q`'s pointer — a read through `p`
+            # names `q`'s entry pointee, so the slot resolves on
+            # the target's identity (the target's own reseat does
+            # not reseat `p`, which kept the pointer it copied).
+            root_ref = self._param_pointer_aliases[
+                root_ref.binding_id
+            ]
+            if (
+                not (
+                    for_write
+                    or getattr(self, "_for_write_target", False)
+                )
+                and (
+                    root_ref.binding_id in self._pointer_param_reseats
+                    or root_ref.binding_id in self._param_pointer_aliases
+                )
+            ):
+                # The target's name was itself reseated or re-seated
+                # onto another entry — its slot no longer names the
+                # entry pointee `p` points at (`p, q = q, p` swaps
+                # both: `p.A[i]` reads q's entry, whose slot now
+                # tracks p's). The model has no separate entry slot
+                # to fall back to, so the read closes rather than
+                # mis-attribute the dependency. A write still lands
+                # in the target's entry pointee — `p = q; q = r;
+                # p.F[0] = x` mutates what the caller passed as `q`
+                # — so the store keeps the substituted root and
+                # over-reports instead (sound).
+                raise _Unsupported(
+                    "non_parameter_reference", _span(sel)
+                )
+            if (
+                root_ref.binding_id in self._pointer_param_reseats
+                or root_ref.binding_id in self._param_pointer_aliases
+            ):
+                # Under a write the substitution still resolves the
+                # target's tokens, but the ADDRESSING read went
+                # through the alias source — its own slot (the
+                # pointer value `p` holds) is a real dependency the
+                # substituted slot lost (`p = q; q = r; p.F[i] = x`
+                # still reads `p`=={1}, not `r`=={2}). The caller
+                # unions the source's slot back in.
+                self._last_write_alias_src = alias_src_id
         if (
             member is None
             or member.type is None
@@ -2425,6 +2508,23 @@ class _Builder:
                 )
                 or root_ref.binding_id
                 in self._opaque_container_tokens
+                or (
+                    params is not None
+                    and root_ref.binding_id in params
+                    and root_ref.binding_id
+                    not in self._pointer_param_reseats
+                    and (
+                        (root_binding := self.bindings.get(
+                            root_ref.binding_id
+                        )) is not None
+                    )
+                    and root_binding.type is not None
+                    and root_binding.type.kind == "pointer"
+                    and getattr(
+                        root_binding.type, "elem", None
+                    ) is not None
+                    and root_binding.type.elem.kind == "struct"
+                )
             )
         ):
             return None, None
@@ -2434,7 +2534,7 @@ class _Builder:
         return field_key.rsplit("\x00", 1)[0], member
 
     def _scalar_container_field_pointer_crossing(
-        self, sel: Any
+        self, sel: Any, params: dict | None = None
     ) -> bool:
         current = sel
         while current is not None:
@@ -2475,6 +2575,25 @@ class _Builder:
                     or operator is not None
                     and operator.text == b"*"
                 ):
+                    # `(*p)` on a `*S` parameter names the same
+                    # caller-shared pointee as `p` — keep walking
+                    # into it so `(*p).A[i].V` slots like `p.A[i].V`.
+                    inner = current.child_by_field_name("operand")
+                    while (
+                        inner is not None
+                        and inner.type == "parenthesized_expression"
+                    ):
+                        inner = next(
+                            (
+                                child
+                                for child in inner.named_children
+                                if child.type != "comment"
+                            ),
+                            None,
+                        )
+                    if self._param_pointer_struct_root(inner, params):
+                        current = inner
+                        continue
                     return True
                 current = current.child_by_field_name("operand")
                 continue
@@ -2485,13 +2604,58 @@ class _Builder:
                     if ref is not None and ref.binding_id is not None
                     else None
                 )
-                return (
+                if (
                     binding is not None
                     and binding.type is not None
                     and binding.type.kind == "pointer"
-                )
+                ):
+                    # A `*S` function parameter shares its pointee
+                    # with the caller the way a slice shares its
+                    # backing, so `p.A[i].V` slots on `(p, A)` and
+                    # carries `p`'s dep. Only the bare parameter is
+                    # admitted: local pointer bindings (`q := p`),
+                    # reseats, double pointers and explicit derefs
+                    # stay closed because their aliasing cannot be
+                    # resolved in this slot model.
+                    elem = getattr(binding.type, "elem", None)
+                    return not (
+                        params is not None
+                        and ref.binding_id in params
+                        and elem is not None
+                        and elem.kind == "struct"
+                    )
+                return False
             return False
         return False
+
+    def _param_pointer_struct_root(
+        self, node: Any, params: dict | None = None
+    ) -> bool:
+        """`p` where `p` is a `*S` function parameter with a struct
+        pointee — the pointer shares its pointee with the caller the
+        way a slice shares its backing, so fields reached through it
+        slot on the parameter. Local pointer bindings (`q := p`),
+        reseats and `**S` roots stay closed because their aliasing
+        cannot be resolved in this slot model."""
+        if params is None or node is None or node.type != "identifier":
+            return False
+        ref = self.references.get(self.node_key(node))
+        if (
+            ref is None
+            or ref.binding_id is None
+            or ref.binding_id not in params
+            or ref.binding_id in self._pointer_param_reseats
+        ):
+            return False
+        binding = self.bindings.get(ref.binding_id)
+        if (
+            binding is None
+            or binding.type is None
+            or binding.type.kind != "pointer"
+        ):
+            return False
+        elem = getattr(binding.type, "elem", None)
+        return elem is not None and elem.kind == "struct"
 
     def _opaque_container_field_index_path_supported(
         self, sel: Any, root_binding: Any
@@ -2573,11 +2737,14 @@ class _Builder:
         *,
         allow_struct_elements: bool = False,
         allow_struct_element_arrays: bool = False,
+        for_write: bool = False,
     ) -> tuple[str, str, Any, frozenset, Any] | None:
-        root_id, member = self._scalar_container_field(sel)
+        root_id, member = self._scalar_container_field(
+                sel, params, for_write=for_write
+            )
         if root_id is None or member is None:
             return None
-        if self._scalar_container_field_pointer_crossing(sel):
+        if self._scalar_container_field_pointer_crossing(sel, params):
             raise _Unsupported(
                 "non_parameter_reference", _span(sel)
             )
@@ -2598,8 +2765,30 @@ class _Builder:
                 "selector_expression",
                 "field_expression",
                 "index_expression",
+                "dereference_expression",
             }:
                 root = root.child_by_field_name("operand")
+                continue
+            if root.type == "unary_expression":
+                unary_op = root.child_by_field_name("operator")
+                inner = root.child_by_field_name("operand")
+                while inner is not None and inner.type == "parenthesized_expression":
+                    inner = next(
+                        (
+                            c
+                            for c in inner.named_children
+                            if c.type != "comment"
+                        ),
+                        None,
+                    )
+                if (
+                    unary_op is None
+                    or unary_op.text != b"*"
+                    or inner is None
+                    or inner.type != "identifier"
+                ):
+                    break
+                root = inner
                 continue
             break
         root_ref = (
@@ -2609,6 +2798,15 @@ class _Builder:
         )
         if root_ref is None or root_ref.binding_id is None:
             return None
+        aliased_ref = self._param_pointer_aliases.get(
+            root_ref.binding_id
+        )
+        if aliased_ref is not None:
+            # The same substitution `_scalar_container_field`
+            # applied above: `p = q` means a write through `p`
+            # lands on `q`'s entry pointee — the store must fold
+            # into the target's dep set, not the alias's.
+            root_ref = aliased_ref
         root_binding = self.bindings.get(root_ref.binding_id)
         fact = member.type
         operand = sel.child_by_field_name("operand")
@@ -2734,7 +2932,9 @@ class _Builder:
             or not indexes
         ):
             return None
-        target = self._opaque_container_field_target(current, params)
+        target = self._opaque_container_field_target(
+            current, params, for_write=True
+        )
         if target is None:
             return None
         field_key, _root_id, member, tokens, root_ref = target
@@ -2804,6 +3004,7 @@ class _Builder:
             params,
             allow_struct_elements=True,
             allow_struct_element_arrays=True,
+            for_write=True,
         )
         if target is None:
             return None
@@ -4757,6 +4958,37 @@ class _Builder:
                     )
                 return tokens
             if (
+                binding is not None
+                and binding.type is not None
+                and binding.type.kind == "pointer"
+                and ref.binding_id in (params or {})
+            ):
+                # `p *S` parameter — the pointer shares its pointee
+                # with the caller the way a slice shares its
+                # backing, so a struct pointee with collection
+                # members mints a container token keyed on `p`.
+                # Local pointer bindings (`q := &o`), reseats and
+                # `**S` roots stay closed: their aliasing cannot be
+                # resolved in this slot model.
+                pointee = getattr(binding.type, "elem", None)
+                if (
+                    pointee is not None
+                    and pointee.kind == "struct"
+                    and self._struct_collection_members(
+                        pointee, binding
+                    )
+                ):
+                    tokens = self._opaque_container_tokens.get(
+                        ref.binding_id
+                    )
+                    if not tokens:
+                        tokens = frozenset({ref.binding_id})
+                        self._opaque_container_tokens[
+                            ref.binding_id
+                        ] = tokens
+                    return tokens
+                return None
+            if (
                 binding is None
                 or binding.type is None
                 or binding.type.kind not in {"slice", "array", "map"}
@@ -4832,7 +5064,9 @@ class _Builder:
             imported = self._opaque_container_imported_var_bind(rhs)
             if imported is not None:
                 return imported
-            root_id, member = self._scalar_container_field(rhs)
+            root_id, member = self._scalar_container_field(
+                rhs, params, for_write=True
+            )
             if root_id is None:
                 return None
             if member.type.kind == "array" and not (
@@ -13930,7 +14164,14 @@ class _Builder:
         # it) — seed it with the parameter's own index so reads
         # carry the caller's provenance.
         for p in sig_params:
-            if p.binding_id and p.type.kind == "struct":
+            if p.binding_id and (
+                p.type.kind == "struct"
+                or (
+                    p.type.kind == "pointer"
+                    and getattr(p.type, "elem", None) is not None
+                    and p.type.elem.kind == "struct"
+                )
+            ):
                 locals_[p.binding_id] = frozenset(
                     {params[p.binding_id]}
                 )
@@ -13983,6 +14224,11 @@ class _Builder:
             and (
                 p.binding_id in shared_container_ids
                 or p.type.kind == "struct"
+                or (
+                    p.type.kind == "pointer"
+                    and getattr(p.type, "elem", None) is not None
+                    and p.type.elem.kind == "struct"
+                )
             )
         }
         # Anonymous-struct signature slots declare their fields
@@ -14032,9 +14278,21 @@ class _Builder:
         saved_caller_visible = getattr(
             self, "_caller_visible_params", None
         )
+        saved_pointer_param_reseats = getattr(
+            self, "_pointer_param_reseats", frozenset()
+        )
+        saved_pending_param_reseats = getattr(
+            self, "_pending_param_reseats", []
+        )
+        saved_pointer_param_aliases = getattr(
+            self, "_param_pointer_aliases", {}
+        )
         self._pending_labels = []
         self._goto_seen = False
         self._seen_labels = set()
+        self._pointer_param_reseats = set()
+        self._pending_param_reseats = []
+        self._param_pointer_aliases = {}
         self.frames = []
         self.pinned = set()
         self.escaped = set()
@@ -14076,6 +14334,7 @@ class _Builder:
                     p.type,
                     self.bindings.get(p.binding_id),
                 )
+
         # The summary embeds the function's declared parameter and
         # result type facts, so the named/alias identities they carry
         # pin it directly: redeclaring one makes this summary's
@@ -14163,6 +14422,9 @@ class _Builder:
                 saved_chan_chan_container_call_deps
             )
             self._caller_visible_params = saved_caller_visible
+            self._pointer_param_reseats = saved_pointer_param_reseats
+            self._pending_param_reseats = saved_pending_param_reseats
+            self._param_pointer_aliases = saved_pointer_param_aliases
             self._defer_result_deps = saved_defer_result_deps
             self._deferred_exits = saved_deferred_exits
             self._func_arg_invocations = saved_func_args
@@ -14296,6 +14558,152 @@ class _Builder:
             # union, never replace, so the record stays idempotent.
             entry[1] |= union
 
+    def _param_pointer_state(self) -> dict:
+        # The current per-param pointer root status: ref → aliased
+        # to that `*S` param's entry pointee, None → reseated onto
+        # opaque memory, _PARAM_POINTER_RESTORE → restored to the
+        # param's own entry, absent → still its own entry pointee.
+        state = dict(self._param_pointer_aliases)
+        for pid in self._pointer_param_reseats:
+            state[pid] = None
+        for pid, ref in self._pending_param_reseats:
+            state[pid] = ref
+        return state
+
+    def _merge_param_pointer_states(self, first, second) -> dict:
+        # Join two branch arms' pointer states: a param keeps its
+        # alias/reseat only when EVERY path agrees — a may-alias or
+        # may-reseat (`p = q` in one arm) leaves the pointee
+        # ambiguous, so the root closes (merged None).
+        def key(v):
+            return None if v is None else v.binding_id
+
+        merged: dict = {}
+        for pid in set(first) | set(second):
+            a = first.get(pid, "missing")
+            b = second.get(pid, "missing")
+            # A pending restore means "the param's own entry" — the
+            # same status an absent key already carries.
+            if a is _PARAM_POINTER_RESTORE:
+                a = "missing"
+            if b is _PARAM_POINTER_RESTORE:
+                b = "missing"
+            if a == "missing" and b == "missing":
+                continue
+            if (
+                a != "missing"
+                and b != "missing"
+                and key(a) == key(b)
+            ):
+                merged[pid] = a
+            else:
+                merged[pid] = None
+        return merged
+
+    def _restore_param_pointer_state(self, state) -> None:
+        # Settle a snapshot into the three tracking structures —
+        # the snapshot already folds pending writes, so pending is
+        # cleared here like the branch joins below expect.
+        self._param_pointer_aliases = {}
+        self._pointer_param_reseats = set()
+        self._for_write_target = False
+        self._pending_param_reseats = []
+        for pid, value in state.items():
+            if value is None:
+                self._pointer_param_reseats.add(pid)
+            elif value is _PARAM_POINTER_RESTORE:
+                continue
+            else:
+                self._param_pointer_aliases[pid] = value
+
+    def _join_param_pointer_states(self, first, second) -> None:
+        self._restore_param_pointer_state(
+            self._merge_param_pointer_states(first, second)
+        )
+
+
+    def _clause_tail_reaches_post(self, stmts: list) -> bool:
+        """Whether a switch/select clause ending in `stmts[-1]` can
+        still reach the statement after the construct.
+
+        return/continue never reach it; a `break` exits the
+        construct itself unless its label names an outer frame; a
+        `goto` may land after it, so both keep their end state (a
+        label outside just makes the merge an over-approx — still
+        sound).
+        """
+        if not stmts:
+            return True
+        tail = stmts[-1]
+        if tail.type in {"return_statement", "continue_statement"}:
+            return False
+        if tail.type == "break_statement":
+            lab = next(
+                (
+                    c
+                    for c in tail.named_children
+                    if c.type == "label_name"
+                ),
+                None,
+            )
+            if lab is None:
+                return True
+            want = lab.text.decode("utf-8", "replace")
+            for index in range(len(self.frames) - 1, -1, -1):
+                if self.frames[index].get("label") == want:
+                    return index == len(self.frames) - 1
+            return True
+        return True
+
+    def _flush_pending_param_reseats(self) -> None:
+        # A `p = q` marks the reseat only AFTER its own statement's
+        # right-hand sides evaluate — `p, x = q, p.A[i].V` still
+        # reads the pre-update pointee — so it takes effect at the
+        # next statement boundary or control-flow condition. Each
+        # entry is (binding_id, target_ref|None|RESTORE): a target
+        # ref records an alias onto another `*S` parameter's entry
+        # pointee, None a reseat onto opaque memory (closes), and
+        # RESTORE the return to the param's own entry pointee.
+        for pending_id, alias_ref in self._pending_param_reseats:
+            if (
+                getattr(self, "_conditional", False)
+                and alias_ref is not None
+            ):
+                # The producing statement may not have run (a goto or
+                # break skipped it) — the reseat is a maybe, and a
+                # maybe-reseated pointee is ambiguous: close it like
+                # a may-alias join. A pending `None` already closes.
+                # A pending that is already a no-op (`p = p`, or an
+                # alias/restore the state already holds) stays one —
+                # the skipped path agrees with the applied path.
+                if alias_ref is _PARAM_POINTER_RESTORE:
+                    if (
+                        pending_id not in self._pointer_param_reseats
+                        and pending_id
+                        not in self._param_pointer_aliases
+                    ):
+                        continue
+                elif (
+                    self._param_pointer_aliases.get(pending_id)
+                    is not None
+                    and self._param_pointer_aliases[
+                        pending_id
+                    ].binding_id
+                    == alias_ref.binding_id
+                ):
+                    continue
+                alias_ref = None
+            if alias_ref is _PARAM_POINTER_RESTORE:
+                self._pointer_param_reseats.discard(pending_id)
+                self._param_pointer_aliases.pop(pending_id, None)
+            elif alias_ref is None:
+                self._pointer_param_reseats.add(pending_id)
+                self._param_pointer_aliases.pop(pending_id, None)
+            else:
+                self._param_pointer_aliases[pending_id] = alias_ref
+                self._pointer_param_reseats.discard(pending_id)
+        self._pending_param_reseats = []
+
     def _statement(
         self,
         node: Any,
@@ -14312,6 +14720,7 @@ class _Builder:
         if count[0] > MAX_EXPRESSION_NODES:
             raise _Unsupported("analysis_limit", _span(node))
         self._conditional = conditional
+        self._flush_pending_param_reseats()
         kind = node.type
         if kind in {"block", "statement_list"}:
             self._sequence(
@@ -16706,6 +17115,7 @@ class _Builder:
                     initializer, fn, params, scope, transfers, count,
                     deps, saw_return, conditional,
                 )
+                self._flush_pending_param_reseats()
             # The condition is evaluated but its dependencies cannot reach
             # the result: every fragment statement is effect-free.
             self.expression(
@@ -16714,6 +17124,10 @@ class _Builder:
             chan_origin_entry = dict(
                 self._chan_chan_param_origins
             )
+            reseat_entry = set(self._pointer_param_reseats)
+            pending_reseat_entry = list(self._pending_param_reseats)
+            alias_entry = dict(self._param_pointer_aliases)
+            entry_state = self._param_pointer_state()
             scope_entry = dict(scope)
             # Branch-local bindings never escape their scope, matching the
             # compiler — a later reference simply would not resolve.
@@ -16728,11 +17142,21 @@ class _Builder:
             consequence_origins = dict(
                 self._chan_chan_param_origins
             )
+            consequence_state = self._param_pointer_state()
             self._join(scope, branch, params)
             self._join_ptr(ptr_branch, params)
             alternative = node.child_by_field_name("alternative")
             if alternative is not None:
                 self._chan_chan_param_origins = dict(chan_origin_entry)
+                # The `if` arm's reseats do not reach the `else`
+                # arm — it still reads the entry pointee — so each
+                # arm runs from the same entry set and joins them
+                # after, like `chan_chan_param_origins` above.
+                self._pointer_param_reseats = set(reseat_entry)
+                self._pending_param_reseats = list(
+                    pending_reseat_entry
+                )
+                self._param_pointer_aliases = dict(alias_entry)
                 branch = dict(scope_entry)
                 ptr_branch = dict(self._ptr_deps)
                 if alternative.type == "if_statement":
@@ -16750,8 +17174,13 @@ class _Builder:
                 )
                 self._join(scope, branch, params)
                 self._join_ptr(ptr_branch, params)
+                alternative_state = self._param_pointer_state()
             else:
                 alternative_origins = chan_origin_entry
+                alternative_state = entry_state
+            self._join_param_pointer_states(
+                consequence_state, alternative_state
+            )
             self._chan_chan_param_origins = (
                 self._merge_chan_chan_param_origin_states(
                     consequence_origins, alternative_origins
@@ -16788,6 +17217,114 @@ class _Builder:
                 or (len(lefts) != len(rights) and not multi)
             ):
                 raise _Unsupported("unsupported_statement", _span(node))
+            for index, lhs in enumerate(lefts):
+                lhs_ref = (
+                    self.references.get(self.node_key(lhs))
+                    if lhs.type == "identifier"
+                    else None
+                )
+                lhs_binding = (
+                    self.bindings.get(lhs_ref.binding_id)
+                    if lhs_ref is not None
+                    else None
+                )
+                # Any `*S` param can take a reseat — including one a
+                # branch merge already closed (`switch { p = q }; p = r`
+                # still reseats `p` deterministically), so unlike the
+                # read root this does not reject reseated names.
+                if not (
+                    lhs_ref is not None
+                    and params is not None
+                    and lhs_ref.binding_id in params
+                    and lhs_binding is not None
+                    and lhs_binding.type is not None
+                    and lhs_binding.type.kind == "pointer"
+                    and getattr(lhs_binding.type, "elem", None)
+                    is not None
+                    and lhs_binding.type.elem.kind == "struct"
+                ):
+                    continue
+                # `p = q` reseats the `*S` param onto `q`'s pointee.
+                # When `q` is itself a `*S` parameter the copy is
+                # an alias — reads through `p` still name a param
+                # entry slot (the target's), so it is recorded and
+                # resolved rather than closed. Anything else makes
+                # the pointee opaque and the root closes from the
+                # NEXT statement on (the rights here still read the
+                # entry pointee).
+                rhs = (
+                    rights[index]
+                    if len(rights) == len(lefts)
+                    else None
+                )
+                rhs_ref = (
+                    self.references.get(self.node_key(rhs))
+                    if rhs is not None and rhs.type == "identifier"
+                    else None
+                )
+                # Resolve the rhs name to the pointee it holds at
+                # this statement's entry: an alias value already
+                # names the entry pointee the TARGET held when the
+                # copy ran — the copied pointer does not follow the
+                # target's later rebinding, so a single lookup
+                # resolves it. A chain walk would not only
+                # over-resolve (`p = q; q = r` still reads q's
+                # entry) but never terminate on a swap
+                # (`p, q = q, p` cycles p → q → p). A reseated name
+                # holds opaque memory, so its value resolves to
+                # None — which makes `p, p = r, p` assign the
+                # pre-state value on the second element instead of
+                # skipping it, and `p = p` in any state a no-op.
+                if rhs_ref is not None:
+                    if (
+                        rhs_ref.binding_id
+                        in self._pointer_param_reseats
+                    ):
+                        rhs_ref = None
+                    else:
+                        rhs_ref = self._param_pointer_aliases.get(
+                            rhs_ref.binding_id, rhs_ref
+                        )
+                if (
+                    rhs_ref is not None
+                    and rhs_ref.binding_id == lhs_ref.binding_id
+                ):
+                    # `p = q` where `q` already points at `p`'s own
+                    # entry slot restores the original pointee —
+                    # the alias/reseat clears, not a reseat. A
+                    # literal `p = p` resolves here the same way and
+                    # stays a no-op in every state.
+                    self._pending_param_reseats.append(
+                        (
+                            lhs_ref.binding_id,
+                            _PARAM_POINTER_RESTORE,
+                        )
+                    )
+                    continue
+                rhs_binding = (
+                    self.bindings.get(rhs_ref.binding_id)
+                    if rhs_ref is not None
+                    else None
+                )
+                if (
+                    rhs_ref is not None
+                    and params is not None
+                    and rhs_ref.binding_id in params
+                    and rhs_binding is not None
+                    and rhs_binding.type is not None
+                    and rhs_binding.type.kind == "pointer"
+                    and getattr(
+                        rhs_binding.type, "elem", None
+                    ) is not None
+                    and rhs_binding.type.elem.kind == "struct"
+                ):
+                    self._pending_param_reseats.append(
+                        (lhs_ref.binding_id, rhs_ref)
+                    )
+                else:
+                    self._pending_param_reseats.append(
+                        (lhs_ref.binding_id, None)
+                    )
             if not compound:
                 for index, rhs in enumerate(rights):
                     if self._local_chan_chan_id(rhs) is None:
@@ -17184,7 +17721,7 @@ class _Builder:
                     # reads that field's contents too.
                     refs.append((ref, True, bool(type_id), nested))
                     field_root, field_member = (
-                        self._scalar_container_field(lhs)
+                        self._scalar_container_field(lhs, params)
                     )
                     if field_root is not None:
                         # `s.F = v` — the field's share group
@@ -17488,10 +18025,14 @@ class _Builder:
                     container_fact = _container_member.type
                     if container_fact.kind == "array":
                         opaque_elem_root_slots[ri] = oref.binding_id
-                    opaque_elem_index_deps[ri] = self.expression(
-                        field_selector, fn, params, locals_,
-                        transfers, count, 0,
-                    )
+                    self._for_write_target = True
+                    try:
+                        opaque_elem_index_deps[ri] = self.expression(
+                            field_selector, fn, params, locals_,
+                            transfers, count, 0,
+                        )
+                    finally:
+                        self._for_write_target = False
                     self._record_read(opaque_elem_index_deps[ri])
                     for index in reversed(indexes):
                         if (
@@ -17524,10 +18065,14 @@ class _Builder:
                     ri = len(refs) - 1
                     opaque_elem_targets[ri] = frozenset(field_tokens)
                     opaque_elem_slot_ids[ri] = field_key
-                    opaque_elem_index_deps[ri] = self.expression(
-                        field_selector, fn, params, locals_,
-                        transfers, count, 0,
-                    )
+                    self._for_write_target = True
+                    try:
+                        opaque_elem_index_deps[ri] = self.expression(
+                            field_selector, fn, params, locals_,
+                            transfers, count, 0,
+                        )
+                    finally:
+                        self._for_write_target = False
                     self._record_read(opaque_elem_index_deps[ri])
                     for inner_index in reversed(inner_indexes or ()):
                         if (
@@ -22127,6 +22672,7 @@ class _Builder:
                         init, fn, params, scope, transfers, count, deps,
                         saw_return, conditional,
                     )
+                    self._flush_pending_param_reseats()
                 condition = clause.child_by_field_name("condition")
                 if condition is not None:
                     self.expression(
@@ -22162,6 +22708,10 @@ class _Builder:
             # each iteration resets the set to the labels seen BEFORE
             # the loop.
             loop_seen_labels = frozenset(self._seen_labels)
+            # The body may run zero times — a `p = q` inside keeps
+            # its status only when it also held on entry; a may-be
+            # reseat joins to a closed root like a one-arm `if`.
+            ptr_loop_entry = self._param_pointer_state()
             self.frames.append(frame)
             try:
                 while True:
@@ -22485,6 +23035,9 @@ class _Builder:
             # execute zero or many times.
             self._join(locals_, scope, params)
             self._join_ptr(ptr_scope, params)
+            self._join_param_pointer_states(
+                ptr_loop_entry, self._param_pointer_state()
+            )
             return
         if kind == "expression_switch_statement":
             initializer = node.child_by_field_name("initializer")
@@ -22497,6 +23050,7 @@ class _Builder:
                     initializer, fn, params, scope, transfers, count,
                     deps, saw_return, conditional,
                 )
+                self._flush_pending_param_reseats()
             value = node.child_by_field_name("value")
             if value is not None:
                 # The tag is evaluated but its dependencies cannot reach the
@@ -22523,6 +23077,14 @@ class _Builder:
                 )
                 chan_origin_exits: list[dict[str, frozenset[int]]] = []
                 branch_origins: dict[str, frozenset[int]] | None = None
+                # The pointer-param root status scopes per clause
+                # like the channel origins above: a `p = q` inside
+                # `case 1:` must not leak into `case 2:`. Each
+                # clause runs from the entry state; the join keeps
+                # a status only where every exit agrees.
+                ptr_entry_state = self._param_pointer_state()
+                ptr_exits: list[dict] = []
+                ptr_branch_state: dict | None = None
                 for index, clause in enumerate(clauses):
                     body = next(
                         (
@@ -22553,6 +23115,13 @@ class _Builder:
                     self._chan_chan_param_origins = dict(
                         chan_origin_entry
                     )
+                    # Case guards evaluate once at switch entry, in
+                    # source order, before any clause body — they
+                    # always read the entry state, not a carried
+                    # fall-through one.
+                    self._restore_param_pointer_state(
+                        ptr_entry_state
+                    )
                     for sub in clause.named_children:
                         if sub.type == "expression_list":
                             # Case guards are evaluated like the tag.
@@ -22568,6 +23137,9 @@ class _Builder:
                         self._chan_chan_param_origins = dict(
                             chan_origin_entry
                         )
+                        self._restore_param_pointer_state(
+                            ptr_entry_state
+                        )
                         frame["exited"] = False
                         branch = dict(scope)
                         ptr_branch = dict(self._ptr_deps)
@@ -22578,14 +23150,23 @@ class _Builder:
                         direct_origins = dict(
                             self._chan_chan_param_origins
                         )
+                        direct_ptr = self._param_pointer_state()
                         if not falls:
                             chan_origin_exits.append(direct_origins)
+                            # A clause that ends in return/goto/
+                            # continue never reaches post-state —
+                            # its end state is not a switch exit.
+                            if self._clause_tail_reaches_post(
+                                statements
+                            ):
+                                ptr_exits.append(direct_ptr)
                             self._join(scope, branch, params)
                             self._join_ptr(ptr_branch, params)
                             branch = None
                             branch_origins = None
                         else:
                             branch_origins = direct_origins
+                            ptr_branch_state = direct_ptr
                         continue
                     # Fall-through target — the body runs twice: once in
                     # the carried chain scope (the fallthrough path, with
@@ -22596,6 +23177,13 @@ class _Builder:
                     self._chan_chan_param_origins = dict(
                         branch_origins or chan_origin_entry
                     )
+                    self._restore_param_pointer_state(
+                        (
+                            ptr_branch_state
+                            if ptr_branch_state is not None
+                            else ptr_entry_state
+                        )
+                    )
                     self._branch_sequence(
                         statements, fn, params, branch, transfers,
                         count, deps, saw_return, conditional,
@@ -22603,6 +23191,7 @@ class _Builder:
                     chain_origins = dict(
                         self._chan_chan_param_origins
                     )
+                    chain_ptr = self._param_pointer_state()
                     chain_exited = frame["exited"]
                     frame["exited"] = False
                     # The second walk must not see the labels the first
@@ -22611,6 +23200,9 @@ class _Builder:
                     self._seen_labels = clause_seen_labels
                     self._chan_chan_param_origins = dict(
                         chan_origin_entry
+                    )
+                    self._restore_param_pointer_state(
+                        ptr_entry_state
                     )
                     fresh = dict(scope)
                     ptr_fresh = dict(self._ptr_deps)
@@ -22621,6 +23213,7 @@ class _Builder:
                     fresh_origins = dict(
                         self._chan_chan_param_origins
                     )
+                    fresh_ptr = self._param_pointer_state()
                     self._join(scope, fresh, params)
                     self._join_ptr(ptr_fresh, params)
                     if falls:
@@ -22630,20 +23223,39 @@ class _Builder:
                                 chain_origins, fresh_origins
                             )
                         )
+                        ptr_branch_state = (
+                            self._merge_param_pointer_states(
+                                chain_ptr, fresh_ptr
+                            )
+                        )
                     else:
                         chan_origin_exits.extend(
                             [chain_origins, fresh_origins]
                         )
+                        if self._clause_tail_reaches_post(
+                            statements
+                        ):
+                            ptr_exits.extend([chain_ptr, fresh_ptr])
                         self._join(scope, branch, params)
                         self._join_ptr(ptr_branch, params)
                         branch = None
                         branch_origins = None
+                        ptr_branch_state = None
             finally:
                 self.frames.pop()
             if not any(
                 clause.type == "default_case" for clause in clauses
             ):
                 chan_origin_exits.append(chan_origin_entry)
+                # No `default:` — the switch may match nothing, so
+                # the entry state is one of the exits.
+                ptr_exits.append(ptr_entry_state)
+            ptr_merged = ptr_exits[0] if ptr_exits else ptr_entry_state
+            for exit_state in ptr_exits[1:]:
+                ptr_merged = self._merge_param_pointer_states(
+                    ptr_merged, exit_state
+                )
+            self._restore_param_pointer_state(ptr_merged)
             self._chan_chan_param_origins = (
                 self._merge_chan_chan_param_origin_states(
                     *chan_origin_exits
@@ -23275,6 +23887,8 @@ class _Builder:
                 clause_aliases: list[dict] = []
                 clause_externals: list[set] = []
                 clause_origins: list[dict[str, frozenset[int]]] = []
+                ptr_entry_state = self._param_pointer_state()
+                clause_ptr_states: list[dict] = []
                 for clause, receive in zip(clauses, receives):
                     branch = dict(locals_)
                     # `_branch_sequence` rewrites the shared
@@ -23290,6 +23904,13 @@ class _Builder:
                     self._chan_chan_param_origins = dict(
                         chan_origin_entry
                     )
+                    self._restore_param_pointer_state(
+                        ptr_entry_state
+                    )
+                    # Each clause is a fresh alternative — a `break`
+                    # in an earlier clause must not mark this one's
+                    # statements conditional.
+                    frame["exited"] = False
                     if receive is not None:
                         lefts, recv, recv_deps = receive
                         self._select_receive_store(
@@ -23308,10 +23929,19 @@ class _Builder:
                         ),
                         None,
                     )
+                    clause_stmts = (
+                        _children(body) if body is not None else []
+                    )
                     self._branch_sequence(
-                        _children(body) if body is not None else [],
+                        clause_stmts,
                         fn, params, branch, transfers,
                         count, deps, saw_return, conditional,
+                    )
+                    # A clause that ends in return/goto/continue
+                    # never reaches post-state — its end state is
+                    # not a select exit.
+                    clause_reaches_post = (
+                        self._clause_tail_reaches_post(clause_stmts)
                     )
                     for bid, bdeps in branch.items():
                         joined[bid] = joined.get(
@@ -23328,6 +23958,10 @@ class _Builder:
                     clause_origins.append(
                         dict(self._chan_chan_param_origins)
                     )
+                    if clause_reaches_post:
+                        clause_ptr_states.append(
+                            self._param_pointer_state()
+                        )
                 self._chan_chan_param_origins = (
                     self._merge_chan_chan_param_origin_states(
                         *clause_origins
@@ -23357,6 +23991,18 @@ class _Builder:
                         detached_queues[bid] = {
                             v for v in alias_values if v is not None
                         }
+                # Every select clause runs or the select blocks —
+                # the post state joins the clause exits only (the
+                # entry is not a reachable post-select state).
+                if clause_ptr_states:
+                    ptr_merged = clause_ptr_states[0]
+                    for clause_state in clause_ptr_states[1:]:
+                        ptr_merged = (
+                            self._merge_param_pointer_states(
+                                ptr_merged, clause_state
+                            )
+                        )
+                    self._restore_param_pointer_state(ptr_merged)
                 self._join(locals_, joined, params)
                 if (
                     len(clauses) == 1
@@ -25197,12 +25843,17 @@ class _Builder:
                         self._pin_value_promotion_chain(ref, promotion)
                     return locals_.get(ref.binding_id, frozenset())
                 field_root, _field_member = self._scalar_container_field(
-                    node
+                    node, params
                 )
                 if field_root is not None:
                     field_deps = locals_.get(
                         field_root, frozenset()
                     )
+                    src_id = self._last_write_alias_src
+                    if src_id is not None:
+                        field_deps |= locals_.get(
+                            src_id, frozenset()
+                        )
                     field_deps |= field_index_deps
                     field_operand = node.child_by_field_name(
                         "operand"
@@ -25271,6 +25922,9 @@ class _Builder:
                         if (
                             operand_fact is not None
                             and operand_fact.kind == "pointer"
+                            and not self._param_pointer_struct_root(
+                                field_operand, params
+                            )
                         ):
                             pointer_crossed = True
                         if field_operand.type == "selector_expression":
@@ -25294,12 +25948,27 @@ class _Builder:
                                 )
                             )
                         elif field_operand.type == "dereference_expression":
-                            pointer_crossed = True
-                            field_operand = (
-                                field_operand.child_by_field_name(
-                                    "operand"
-                                )
+                            inner = field_operand.child_by_field_name(
+                                "operand"
                             )
+                            while (
+                                inner is not None
+                                and inner.type
+                                == "parenthesized_expression"
+                            ):
+                                inner = next(
+                                    (
+                                        child
+                                        for child in inner.named_children
+                                        if child.type != "comment"
+                                    ),
+                                    None,
+                                )
+                            if not self._param_pointer_struct_root(
+                                inner, params
+                            ):
+                                pointer_crossed = True
+                            field_operand = inner
                         elif field_operand.type == "field_expression":
                             field_operand = (
                                 field_operand.child_by_field_name(
@@ -32789,7 +33458,7 @@ class _Builder:
                     self.indirect_writes |= stored
                 else:
                     root_id, member = self._scalar_container_field(
-                        arg_node
+                        arg_node, params
                     )
                     if (
                         root_id is not None

@@ -4291,8 +4291,48 @@ composite: `b := s[i].F` /
 share group — minted under the root container and joined to
 its group — so a store through one extraction reaches the
 others, and direct `s[i].F[j]` reads and writes now match that
-extraction model; pointer crossings and pure array fields remain
-closed.
+extraction model; pure array fields reached through an index stay
+closed. A *bare `*S` parameter root* is admitted the same way —
+`p.A[i].V`, `p.M[k].V`, `p.F[0]` slot on the parameter the way a
+slice shares its backing — while local pointer bindings (`q :=
+p`), reseats onto opaque memory (`p = &local`), `**S` roots and
+pointer-typed fields remain closed. An explicit `(*p)` deref of a
+`*S` param resolves through the same slot machinery as the
+implicit deref — Go's grammar parses `(*p)` as a parenthesized
+unary `*`, so the root walks unwrap it (a non-`*` unary operand
+like `(&x).F` stays closed, and `(*p.A[i])` — an element-pointer
+deref — is not a root field chain). A reseat onto another `*S`
+parameter is an alias: `p = q` makes reads through `p` resolve on
+`q`'s entry slot (with the same may-write `caller-backing`
+over-report the shared-container params already make), while a
+reseat onto opaque memory closes the root. A reseat back onto the
+name's own entry — `q = p; p = r; p = q` — restores the entry
+state, while a literal `p = p` is a no-op. Reseats take effect at
+the next statement — `p, x = q, p.A[i].V` still reads the entry
+pointee — and scope per control-flow arm: if/else arms, each
+switch and select clause (case guards evaluate once at the
+statement's entry), and a for body's may-not-run path all join
+pointwise on the entry state, so an alias only survives when every
+path agrees and a may-alias or may-reseat closes the root
+afterwards. A clause whose tail statement unconditionally leaves
+the construct's post-state contributes no exit state —
+return/continue always leave it, and `break L` only leaves it
+when the label names an outer construct; a plain `break` exits
+the switch/select itself and a `goto` may land after it, so both
+keep their end state. `switch { case 1: p = q; return 0 }` keeps
+`p` on its entry pointee after the switch. The alias target's name is only
+its entry pointee
+while it is clean — if the target is itself reseated or re-seated
+(`p = q; q = r`, `p, q = q, p`), its slot tracks the new pointee,
+and a read through `p` closes rather than mis-attribute the
+dependency; a store through `p` still lands in the target's entry
+pointee (an over-report is sound there). A
+store through the parameter lands in the caller's pointee, so the
+param joins the caller-visible set and a grown dep set emits the
+`caller-backing` transfer like a shared slice. Two `*S` parameters
+that alias the same struct are not tracked as one group — the same
+may-alias gap the model already accepts between two slice or map
+parameters.
 
 A *scalar-payload channel element* admits the same conflated way
 — `s := []chan int64{c}`, `var m map[K]chan int64 = {...}` bind
