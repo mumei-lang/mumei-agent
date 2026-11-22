@@ -8071,3 +8071,43 @@ fn f(v: Vec<P>, h: std::collections::BinaryHeap<P>) {
     # `&[P]`, so `chunk[0]` still reads `P`.
     assert bound.get("chunk[0].pm()") == pm.id
     assert bound.get("c2[0].pm()") == pm.id
+
+    assert bound.get("d.pm()") == pm.id
+
+    assert bound.get("d.pm()") == pm.id
+def test_extract_if_and_set_replace_bind_elements():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(s: std::collections::HashSet<P>, b: std::collections::BTreeSet<P>, m: std::collections::BTreeMap<i32, P>, h: std::collections::HashMap<i32, P>, v: Vec<P>) {
+    for a in s.extract_if(|x| true) { a.pm(); }
+    for c in b.extract_if(|x| true) { c.pm(); }
+    for (k, e1) in m.extract_if(|k, e1| true) { e1.pm(); }
+    for (k2, e2) in h.extract_if(|k2, e2| true) { e2.pm(); }
+    let g = s.extract_if(|x| true);
+    for ge in g { ge.pm(); }
+    for ve in v.extract_if(|x| true) { ve.pm(); }
+    if let Some(rp) = s.replace(P) { rp.pm(); }
+    if let Some(rb) = b.replace(P) { rb.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `s.extract_if(f)` drains the set's `P` elements.
+    assert bound.get("a.pm()") == pm.id
+    assert bound.get("c.pm()") == pm.id
+    # The map variant yields `(K, V)` pairs — the value binds.
+    assert bound.get("e1.pm()") == pm.id
+    assert bound.get("e2.pm()") == pm.id
+    # A let-bound `extract_if` iterator keeps the element too.
+    assert bound.get("ge.pm()") == pm.id
+    # `Vec` names no `extract_if` — stays opaque.
+    assert not bound.get("ve.pm()")
+    # `s.replace(v)` returns the old element — `Option<P>`.
+    assert bound.get("rp.pm()") == pm.id
+    assert bound.get("rb.pm()") == pm.id
