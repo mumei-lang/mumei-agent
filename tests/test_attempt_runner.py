@@ -2532,13 +2532,41 @@ def test_run_filesystem_read_isolation_requires_boundary_before_spawn(
 @pytest.mark.skipif(
     not attempt_runner.process_spawn_isolation_enforceable()
     or not attempt_runner.filesystem_write_isolation_enforceable()
+    or not attempt_runner.network_isolation_enforceable()
+    or not attempt_runner.memory_bound_enforceable()
+    or SYSTEM_PY is None,
+    reason="requires seccomp, mount/network namespaces, and memory bounds",
+)
+def test_process_spawn_isolation_combines_with_network_filesystem_and_memory():
+    result = AttemptRunner().run(
+        request(),
+        (
+            SYSTEM_PY,
+            "-c",
+            "import resource\n"
+            "print(resource.getrlimit(resource.RLIMIT_AS)[0])",
+        ),
+        memory_bound_mb=256,
+        isolate_network=True,
+        isolate_filesystem_write=True,
+        isolate_process_spawn=True,
+    )
+
+    assert result.record.state == "exited"
+    assert result.record.events[-1].exit_code == 0
+    assert int(result.stdout.strip()) == 256 * 1_048_576
+
+
+@pytest.mark.skipif(
+    not attempt_runner.process_spawn_isolation_enforceable()
+    or not attempt_runner.filesystem_write_isolation_enforceable()
     or not attempt_runner.filesystem_read_isolation_enforceable()
     or not attempt_runner.network_isolation_enforceable()
     or not attempt_runner.memory_bound_enforceable()
     or SYSTEM_PY is None,
     reason="requires seccomp, Landlock, mount/network namespaces, and memory bounds",
 )
-def test_process_spawn_isolation_combines_with_network_filesystem_and_memory():
+def test_process_spawn_isolation_combines_with_network_filesystem_read_and_memory():
     result = AttemptRunner().run(
         request(),
         (
