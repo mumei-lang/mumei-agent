@@ -2548,6 +2548,79 @@ class _RustBindings:
         )
         return TypeFact("named", name, 0, None, elem_id), rest
 
+    def _for_pair_type_map(
+        self, pattern: Any | None, iterator: Any | None
+    ) -> dict:
+        """Pair typings for `for (k, v) in m` — a map iterates its
+        `(K, V)` pairs, so a two-name tuple pattern binds K and V.
+        `m.iter()`/`into_iter()`/`iter_mut()`/`drain()` only count
+        when the call does not resolve to a declared method."""
+        if (
+            pattern is None
+            or pattern.type != "tuple_pattern"
+            or iterator is None
+        ):
+            return {}
+        node = iterator
+        while node is not None and node.type in {
+            "reference_expression",
+            "parenthesized_expression",
+        }:
+            children = self._children(node)
+            if len(children) != 1:
+                return {}
+            node = children[0]
+        if node is None:
+            return {}
+        receiver = node
+        position = node.start_byte
+        if node.type == "call_expression":
+            callee = node.child_by_field_name("function")
+            if callee is None or callee.type != "field_expression":
+                return {}
+            method_node = callee.child_by_field_name("field")
+            receiver = callee.child_by_field_name("value")
+            if method_node is None or receiver is None:
+                return {}
+            if (
+                self._normalize_identifier(self.text(method_node))
+                not in _ITER_ELEMENT_METHODS
+            ):
+                return {}
+            if (
+                self._field_member(callee, ("associated_function",))
+                is not None
+            ):
+                return {}
+        container_id, _ = self._receiver_type(receiver)
+        if not self._is_map_container(container_id, receiver):
+            return {}
+        spelled = self._map_spelled_args(receiver)
+        if spelled is None:
+            return {}
+        parts = self._type_arg_list(spelled)
+        if len(parts) != 2:
+            return {}
+        annotated = self._receiver_annotation_position(receiver)
+        if annotated is not None:
+            position = annotated
+        mapping = {}
+        names = [
+            child
+            for child in self._children(pattern)
+            if child.type == "identifier"
+        ]
+        if len(names) != 2:
+            return {}
+        for name_node, arg in zip(names, parts):
+            tid, rest = self._spelled_type(arg, position)
+            name = self._normalize_identifier(self.text(name_node))
+            mapping[name_node.start_byte] = (
+                TypeFact("named", name, 0, None, tid or ""),
+                rest,
+            )
+        return mapping
+
     def _for_element(
         self, iterator: Any | None
     ) -> "tuple[TypeFact, str | None]":
@@ -3818,14 +3891,17 @@ class _RustBindings:
                 element_fact, element_args = self._for_element(iterator)
             else:
                 # Destructuring binds fields/elements, not the iterated
-                # value — `for P { x } in v` leaves `x` unpinned.
+                # value — `for P { x } in v` leaves `x` unpinned;
+                # `for (k, v) in m` still reads the map's pair.
                 element_fact, element_args = _UNKNOWN, None
+            type_map = self._for_pair_type_map(pattern, iterator)
             self._bind_pattern_names(
                 names,
                 scope,
                 self.span(body),
                 element_fact,
                 element_args,
+                type_map,
             )
             self._expr(body)
             self.scopes.pop()
