@@ -4446,3 +4446,70 @@ fn f(w: W<Q>) {
     q = _bindings(report, "q", "associated_function")[0]
     bound = _bindings(report, "p", "local")
     assert bound and _call(report, source, "p.q()").target == q.id
+
+
+def test_impl_param_reorder_maps_receiver_args() -> None:
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct Q;
+impl Q { fn qm(&self) {} }
+struct W<X, Y> { a: X, b: Y }
+impl<A, B> W<B, A> {
+    fn get(&self) -> A { panic!() }
+}
+fn f(w: W<P, Q>) {
+    let t = w.get();
+    t.qm();
+    t.pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    qm = _bindings(report, "qm", "associated_function")[0]
+    # impl<A,B> W<B,A> at W<P,Q>: return A is the second arg — Q.
+    assert _call(report, source, "t.qm()").target == qm.id
+    assert _call(report, source, "t.pm()").target == ""
+
+
+def test_generic_field_substitution_is_simultaneous() -> None:
+    source = """
+struct B;
+impl B { fn bm(&self) {} }
+struct P;
+impl P { fn pm(&self) {} }
+struct W<A, B2> { res: Result<A, B2> }
+fn f(w: W<B, P>) {
+    match w.res {
+        Ok(x) => x.bm(),
+        Err(e) => e.pm(),
+        _ => {}
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    bm = _bindings(report, "bm", "associated_function")[0]
+    pm = _bindings(report, "pm", "associated_function")[0]
+    # W<B, P> reads Result<A, B2> as Result<B, P> — A→B must not then
+    # get rewritten by B2→P.
+    assert _call(report, source, "x.bm()").target == bm.id
+    assert _call(report, source, "e.pm()").target == pm.id
+
+
+def test_field_scrutinee_substituted_arg_resolves_fn_local_type() -> None:
+    source = """
+struct W<T> { opt: Option<T> }
+fn f() {
+    struct Q;
+    impl Q { fn qm(&self) {} }
+    let w: W<Q> = W { opt: Some(Q) };
+    match w.opt {
+        Some(p) => p.qm(),
+        _ => {}
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    qm = _bindings(report, "qm", "associated_function")[0]
+    # Q is fn-local — invisible at the field's declaration site, so
+    # substituted args resolve at the receiver's annotation.
+    assert _call(report, source, "p.qm()").target == qm.id

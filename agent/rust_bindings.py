@@ -2070,22 +2070,35 @@ class _RustBindings:
             ]
         return pool[0] if pool else None
 
+    def _field_member_typed(
+        self, node: Any, kinds: tuple[str, ...] = ()
+    ) -> "tuple[_Record | None, str | None, str | None]":
+        """(member record, receiver type id, receiver args) for
+        `expr.name` — the receiver type is returned so callers do not
+        resolve `value` twice (once here, once in
+        `_member_declared_type`)."""
+        value = node.child_by_field_name("value")
+        field_node = node.child_by_field_name("field")
+        if field_node is None:
+            return None, None, None
+        name = self.text(field_node).strip()
+        if not name or name[0].isdigit():
+            # Tuple fields are positional; honest opaque.
+            return None, None, None
+        type_id, impl_args = self._receiver_type(value)
+        return (
+            self._member_record(
+                type_id, name, kinds, impl_args, node.start_byte
+            ),
+            type_id,
+            impl_args,
+        )
+
     def _field_member(
         self, node: Any, kinds: tuple[str, ...] = ()
     ) -> _Record | None:
         """Resolve `expr.name` member access against the declared type."""
-        value = node.child_by_field_name("value")
-        field_node = node.child_by_field_name("field")
-        if field_node is None:
-            return None
-        name = self.text(field_node).strip()
-        if not name or name[0].isdigit():
-            # Tuple fields are positional; honest opaque.
-            return None
-        type_id, impl_args = self._receiver_type(value)
-        return self._member_record(
-            type_id, name, kinds, impl_args, node.start_byte
-        )
+        return self._field_member_typed(node, kinds)[0]
 
     def _record_type(
         self, record: _Record, position: int
@@ -2161,13 +2174,14 @@ class _RustBindings:
                 container_id, elem_args, node.start_byte
             )
         if node.type == "field_expression":
-            member = self._field_member(
+            member, receiver_id, receiver_args = self._field_member_typed(
                 node, ("struct_field", "associated_const")
             )
             if member is not None:
                 declared = self._member_declared_type(
                     node.child_by_field_name("value"), member,
                     node.start_byte,
+                    (receiver_id, receiver_args),
                 )
                 if declared is not None:
                     return declared
@@ -2183,8 +2197,12 @@ class _RustBindings:
             if callee is not None and callee.type == "generic_function":
                 callee = callee.child_by_field_name("function")
             member = None
+            receiver: "tuple[str | None, str | None]" = (None, None)
             if callee is not None and callee.type == "field_expression":
-                member = self._field_member(callee, ("associated_function",))
+                member, recv_id, recv_args = self._field_member_typed(
+                    callee, ("associated_function",)
+                )
+                receiver = (recv_id, recv_args)
             elif callee is not None and callee.type in {
                 "scoped_identifier",
                 "scoped_type_identifier",
@@ -2224,6 +2242,7 @@ class _RustBindings:
                 else None,
                 member,
                 node.start_byte,
+                receiver,
             )
             if annotated is None:
                 annotated = self._annotation_type(member.type_node)
@@ -3875,15 +3894,20 @@ class _RustBindings:
         value_node: Any | None,
         member: _Record,
         position: int,
+        receiver: "tuple[str | None, str | None] | None" = None,
     ) -> "tuple[str | None, str | None] | None":
         """(type id, args) of a member's declared annotation with the
         receiver's generic arguments substituted — `W<T>` at `W<P>`
         reads `opt: Option<T>` as `Option<P>`, and `m::W`'s `P` is
         `m::P`, never a root-level `P` of the same spelling."""
         type_id, impl_args = (
-            (None, None)
-            if value_node is None
-            else self._receiver_type(value_node)
+            receiver
+            if receiver is not None
+            else (
+                (None, None)
+                if value_node is None
+                else self._receiver_type(value_node)
+            )
         )
         container = (
             None if type_id is None else self.records.get(type_id)
@@ -3897,9 +3921,15 @@ class _RustBindings:
             )
             if record is not None and record.type_node is not None:
                 pos = record.type_node.start_byte
+        param_map = self._pattern_param_map(container, impl_args)
+        if member.member_impl_type_params:
+            # An `impl<A, B> W<B, A>` member's annotation spells the
+            # impl's own parameters — map those positions to the
+            # receiver's args, not the struct's.
+            param_map = self._impl_param_map(member, impl_args)
         type_id, args = self._field_annotation(
             member.type_node,
-            self._pattern_param_map(container, impl_args),
+            param_map,
             pos,
             container,
         )
@@ -3930,6 +3960,22 @@ class _RustBindings:
             return member.home_scope
         owner = self.records.get(member.member_of)
         return None if owner is None else owner.home_scope
+
+    def _impl_param_map(
+        self, member: _Record, impl_args: str | None
+    ) -> dict[str, str]:
+        """{impl param name: spelled use arg} for an `impl` member —
+        `impl<A, B> W<B, A>` at `W<P, Q>` maps `B→P` and `A→Q`, so a
+        return spelled `A` reads as `Q`."""
+        spelled = self._type_arg_list(member.member_impl_args or "")
+        used = self._type_arg_list(impl_args or "")
+        if not spelled or len(used) < len(spelled):
+            return {}
+        return {
+            name: arg
+            for name, arg in zip(spelled, used)
+            if name in member.member_impl_type_params
+        }
 
     def _pattern_param_map(
         self, container: "_Record | None", scrut_args: str | None
@@ -3993,11 +4039,16 @@ class _RustBindings:
                 spelled = param_map.get(param.binding.name)
                 if spelled is not None:
                     return self._spelled_type(spelled, position)
-        if args is not None:
-            for name, spelled in param_map.items():
-                args = re.sub(
-                    r"\b" + re.escape(name) + r"\b", spelled, args
-                )
+        if args is not None and param_map:
+            # Substitute in one pass — a positional map like
+            # {A: B, B: P} must read `A,B` as `B,P`, not `P,P`.
+            args = re.sub(
+                r"\b("
+                + "|".join(re.escape(n) for n in param_map)
+                + r")\b",
+                lambda match: param_map[match.group(1)],
+                args,
+            )
         return type_id, args
 
     def _spelled_type(
@@ -4157,12 +4208,32 @@ class _RustBindings:
             )
             if field is None or field.type_node is None:
                 return None, None, None
+            args_scope = self._member_scope_for_args(
+                node.child_by_field_name("value"), field
+            )
+            position = field.type_node.start_byte
+            if args_scope is None:
+                # Substituted args were spelled at the receiver's
+                # annotation — a fn-local `Q` is invisible at the
+                # field's declaration site.
+                receiver = node.child_by_field_name("value")
+                if receiver is not None and receiver.type == "identifier":
+                    record = self._lookup(
+                        self._normalize_identifier(
+                            self.text(receiver)
+                        ),
+                        receiver.start_byte,
+                        "value",
+                    )
+                    if (
+                        record is not None
+                        and record.type_node is not None
+                    ):
+                        position = record.type_node.start_byte
             return (
                 self._annotation_head_name(field.type_node),
-                field.type_node.start_byte,
-                self._member_scope_for_args(
-                    node.child_by_field_name("value"), field
-                ),
+                position,
+                args_scope,
             )
         if node.type != "identifier":
             return None, None, None
