@@ -6453,3 +6453,24 @@ fn f(o: Option<W<P>>, u: Option<W<P>>) {
     report = build_rust_bindings(source, pointer_width=64)
     pm = _bindings(report, "pm", "associated_function")[0]
     assert _call(report, source, "w.pm()").target == pm.id
+
+
+def test_specialized_impl_args_resolve_through_use_alias():
+    # `use m::P` makes `P` an alias — `impl W<P>` is the same
+    # specialization as `W<m::P>` and must answer for it.
+    source = """
+mod m {
+    pub struct P;
+}
+use m::P;
+struct W<T>;
+impl W<P> {
+    fn pm(&self) {}
+}
+fn f(w: W<m::P>) {
+    w.pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    assert _call(report, source, "w.pm()").target == pm.id

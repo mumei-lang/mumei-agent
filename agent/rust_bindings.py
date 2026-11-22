@@ -1248,12 +1248,30 @@ class _RustBindings:
         parts.append("".join(current))
         return [part.strip() for part in parts]
 
+    def _resolve_spelled_in_scope(
+        self, spelled: str, scope: "_Scope | None", position: int
+    ) -> "str | None":
+        """Resolve a written type name inside `scope` (the impl's
+        declaring scope) — `use m::P` aliases and module members
+        resolve exactly as the impl side wrote them."""
+        pushed = scope is not None and scope not in self.scopes
+        if pushed:
+            self.scopes.append(scope)
+        try:
+            type_id, _ = self._spelled_type(spelled, position)
+        finally:
+            if pushed:
+                self.scopes.pop()
+        return type_id
+
     def _type_arg_match(
         self,
         pattern: str,
         concrete: str,
         params: frozenset[str],
         bindings: dict[str, str],
+        pattern_scope: "_Scope | None" = None,
+        position: "int | None" = None,
     ) -> bool:
         """Does impl-side arg `pattern` cover receiver arg `concrete`?
 
@@ -1287,7 +1305,12 @@ class _RustBindings:
             if bool(ref_a.group(1)) != bool(ref_b.group(1)):
                 return False
             return self._type_arg_match(
-                ref_a.group(2), ref_b.group(2), params, bindings
+                ref_a.group(2),
+                ref_b.group(2),
+                params,
+                bindings,
+                pattern_scope,
+                position,
             )
         if a.startswith("(") and a.endswith(")"):
             if not (b.startswith("(") and b.endswith(")")):
@@ -1295,7 +1318,9 @@ class _RustBindings:
             sub_a = self._type_arg_list(a[1:-1])
             sub_b = self._type_arg_list(b[1:-1])
             return len(sub_a) == len(sub_b) and all(
-                self._type_arg_match(x, y, params, bindings)
+                self._type_arg_match(
+                    x, y, params, bindings, pattern_scope, position
+                )
                 for x, y in zip(sub_a, sub_b)
             )
         if a.startswith("[") and a.endswith("]"):
@@ -1308,7 +1333,9 @@ class _RustBindings:
             if len(parts_a) != len(parts_b):
                 return False
             return all(
-                self._type_arg_match(x, y, params, bindings)
+                self._type_arg_match(
+                    x, y, params, bindings, pattern_scope, position
+                )
                 for x, y in zip(parts_a, parts_b)
             )
         match_a = re.fullmatch(r"(.+?)\s*<(.+)>", a)
@@ -1323,10 +1350,25 @@ class _RustBindings:
             sub_a = self._type_arg_list(match_a.group(2))
             sub_b = self._type_arg_list(match_b.group(2))
             return len(sub_a) == len(sub_b) and all(
-                self._type_arg_match(x, y, params, bindings)
+                self._type_arg_match(
+                    x, y, params, bindings, pattern_scope, position
+                )
                 for x, y in zip(sub_a, sub_b)
             )
-        return self._path_name_equal(a, b)
+        if self._path_name_equal(a, b):
+            return True
+        if position is None:
+            return False
+        # `use m::P` makes the impl-side `P` and the receiver's
+        # `m::P` the same type — compare resolved identities when
+        # the spellings differ.
+        pattern_id = self._resolve_spelled_in_scope(
+            a, pattern_scope, position
+        )
+        if pattern_id is None:
+            return False
+        concrete_id, _ = self._spelled_type(b, position)
+        return concrete_id == pattern_id
 
     @staticmethod
     def _path_name_equal(a: str, b: str) -> bool:
@@ -1348,12 +1390,16 @@ class _RustBindings:
         b: str | None,
         params: frozenset[str],
         bindings: dict[str, str] | None = None,
+        pattern_scope: "_Scope | None" = None,
+        position: "int | None" = None,
     ) -> bool:
         """Positional structural equality of two type-argument keys
         — `W<(u8,u16)>` and `W<(u8, u16)>` are the same type. The
         caller may pass a shared `bindings` map so parameter bindings
         established on one side (trait args) constrain the other
-        (impl type args)."""
+        (impl type args). `pattern_scope`/`position` let unequal
+        spellings compare by resolved identity (`use m::P` vs
+        `m::P`)."""
         if (a is None) != (b is None):
             return False
         if a is None:
@@ -1363,7 +1409,9 @@ class _RustBindings:
         if bindings is None:
             bindings = {}
         return len(parts_a) == len(parts_b) and all(
-            self._type_arg_match(x, y, params, bindings)
+            self._type_arg_match(
+                x, y, params, bindings, pattern_scope, position
+            )
             for x, y in zip(parts_a, parts_b)
         )
 
@@ -1921,7 +1969,11 @@ class _RustBindings:
                 record.member_impl_args is not None
                 and not record.member_impl_generic
                 and not self._type_args_match(
-                    record.member_impl_args, impl_args, frozenset()
+                    record.member_impl_args,
+                    impl_args,
+                    frozenset(),
+                    pattern_scope=record.home_scope,
+                    position=position,
                 )
             ):
                 return False
@@ -2230,7 +2282,12 @@ class _RustBindings:
                     set(parts)
                 ) == len(parts)
             return self._type_args_match(
-                record.member_impl_args, impl_args, params, bindings
+                record.member_impl_args,
+                impl_args,
+                params,
+                bindings,
+                pattern_scope=record.home_scope,
+                position=position,
             )
 
         pool = [
