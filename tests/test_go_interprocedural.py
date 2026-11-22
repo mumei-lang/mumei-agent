@@ -55120,14 +55120,26 @@ def test_multi_index_slice_array_struct_element_func_fields(
     declarations = (
         "type S struct { F func() int64; V int64 }\n"
         "type W struct { F func() }\n"
+        "type E struct { V int64 }\n"
         "type H struct { B [][]S }\n"
         "var GSS [][]S\n"
         "func ap(cb func() int64) int64 { return cb() }\n"
         "func g() int { return 0 }\n"
         "func (s S) Run() int64 { return s.F() }\n"
+        "func (e E) Get() int64 { return e.V }\n"
+        "func (e *E) Set(v int64) { e.V = v }\n"
         "func useSS(ss [][]S) int64 { return ss[0][0].F() }\n"
         "func useWW(ws [][]W) { ws[0][0].F() }\n"
         "func mkSS(ss [][]S) [][]S { return ss }\n"
+        "func sc_get(x int64) int64 {\n"
+        "\tes := [][]E{{{V: x}}}; return es[0][0].Get()\n"
+        "}\n"
+        "func sc_set(x int64) int64 {\n"
+        "\tes := [][]E{{{}}}; es[0][0].Set(x); return es[0][0].V\n"
+        "}\n"
+        "func sc_param(es [][]E, x int64) int64 {\n"
+        "\tes[0][1].V = x; return es[0][1].V\n"
+        "}\n"
         "func FStore(x, y int64) int64 {\n"
         "\tv := y; ss := make([][]S, 1); ss[0] = make([]S, 1)\n"
         "\tss[0][0].F = func() int64 { return v }; v = x\n"
@@ -55248,6 +55260,9 @@ def test_multi_index_slice_array_struct_element_func_fields(
         "FReturnSS": frozenset({0, 1}),
         "FThreeLevel": frozenset({0, 1}),
         "FPointerLevel": frozenset({0, 1}),
+        "sc_get": frozenset({0}),
+        "sc_set": frozenset({0}),
+        "sc_param": frozenset({0, 1}),
     }
     for function_name, dependencies in expected.items():
         result = named_package(files, snapshot, summaries, function_name)

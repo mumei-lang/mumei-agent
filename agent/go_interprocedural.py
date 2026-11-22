@@ -10403,7 +10403,6 @@ class _Builder:
                 or self._multi_index_func_field_selector(node)
                 or (
                     len(indexes) == 2
-                    and not self._multi_index_method_selector(node)
                     and not self._multi_index_struct_element_has_field_records(
                         node
                     )
