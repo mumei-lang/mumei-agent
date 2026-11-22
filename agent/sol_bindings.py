@@ -1850,7 +1850,10 @@ class _SolBindings:
         # (`uint[]` is `uint256[]`). Dynamic `bytes` is a distinct
         # type and stays as written.
         canonical = re.sub(r"\s+", " ", text).strip()
-        canonical = re.sub(r"\s*([\[\]().,<>])\s*", r"\1", canonical)
+        # Only identifier characters keep surrounding whitespace —
+        # `uint => uint`, `uint=>uint` and `uint256[2 + 3]` are each
+        # one spelling, while `address payable` stays two words.
+        canonical = re.sub(r"\s*([^A-Za-z0-9_$ ])\s*", r"\1", canonical)
         canonical = re.sub(r"\buint\b", "uint256", canonical)
         canonical = re.sub(r"\bint\b", "int256", canonical)
         canonical = re.sub(r"\bbyte\b", "bytes1", canonical)
