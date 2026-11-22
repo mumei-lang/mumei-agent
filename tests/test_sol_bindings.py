@@ -1606,6 +1606,81 @@ contract Vault {
     )
 
 
+def test_using_for_star_filters_incompatible_receiver():
+    source = """
+library Star {
+    function f(string memory s, uint256 x) internal pure {}
+}
+contract T {
+    function f(uint256 a) external {}
+}
+contract Vault {
+    using Star for *;
+    T t;
+    uint256 n;
+    function run() external { t.f(1); }
+}
+"""
+    # The `for *` extension f(string, uint256) cannot take a T
+    # receiver, so the member f(uint256) owns the call.
+    report = build_sol_bindings(source)
+    member_f = max(
+        (
+            binding
+            for binding in report.bindings
+            if binding.name == "f" and binding.kind == "function"
+        ),
+        key=lambda binding: binding.span.start,
+    )
+    assert any(
+        call.target == member_f.id for call in report.calls
+    )
+
+
+def test_named_argument_member_call_binds():
+    source = """
+contract T {
+    function f(uint256 a, bool b) external {}
+}
+contract C {
+    T t;
+    function g() external { t.f({b: true, a: 1}); }
+}
+"""
+    # Named arguments reorder by parameter name — beyond the scanner's
+    # type model, so the position keeps name-only resolution.
+    report = build_sol_bindings(source)
+    f = next(binding for binding in report.bindings if binding.name == "f")
+    assert any(
+        ref.binding_id == f.id and ref.kind == "call"
+        for ref in report.references
+    )
+
+
+def test_overload_unknown_argument_stays_ambiguous():
+    source = """
+contract T {
+    function f(uint256 a, address b) external {}
+    function f(uint256 a, bytes32 b) external {}
+}
+contract C {
+    T t;
+    uint256 n;
+    function g() external { t.f(n, msg.sender); }
+}
+"""
+    # `msg.sender` has no declared-type text, so its conversion options
+    # are unknowable — the overload set stays ambiguous rather than
+    # ranking a winner.
+    report = build_sol_bindings(source)
+    assert not any(
+        ref.kind == "call" for ref in report.references
+    )
+    assert any(
+        call.kind == "opaque_overload" for call in report.calls
+    )
+
+
 def test_using_member_private_stays_fail_closed():
     source = """
 library SafeMath {

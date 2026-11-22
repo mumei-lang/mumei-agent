@@ -1455,6 +1455,14 @@ class _SolBindings:
             return survivors[0][0], "ok"
         if not survivors:
             return None, "none"
+        if any(
+            self._argument_kind(arg)[0] == "unknown" for arg in args
+        ):
+            # An argument whose type cannot be named could be an exact
+            # match for any survivor — solc would still disambiguate,
+            # but ranking here could pick a wrong winner, so the set
+            # stays ambiguous rather than binding the best-ranked.
+            return None, "ambiguous"
         best = max(rank for _record, rank in survivors)
         winners = [
             record
