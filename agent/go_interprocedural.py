@@ -15486,6 +15486,11 @@ class _Builder:
                         operand, fn, params, locals_,
                         transfers, count, depth + 1,
                     )
+                    for escaped_id in self.escaped:
+                        if escaped_id in locals_:
+                            result |= locals_[escaped_id]
+                        elif escaped_id in params:
+                            result |= {params[escaped_id]}
                     return result | self.indirect_writes
         elif inner is not None and inner.type == "identifier":
             # A dot-imported `*PV` classifies by the declared member
@@ -15512,26 +15517,17 @@ class _Builder:
                 # shallow kind — `*lib.PU` reads an `int64`, `*lib.PPV`
                 # a `*T` — provided the pointee tree is fully
                 # pinnable (`pointee_type_ids` present), which a
-                # `*struct{ F T }` member fails. A scalar pointee
-                # (`*int64`) names no identity at all, so nothing
-                # pins and it admits the same way — the synthetic
-                # `<member>/pointee` id records the read. Non-scalar
-                # shapes (`*[4]int64`, `*[]T`, `*struct`) stay closed
-                # like a named struct pointee does.
-                if member.pointee_kind not in {
-                    "integer",
-                    "boolean",
-                    "pointer",
-                } or (
-                    member.pointee_type_ids is None
-                    and member.pointee_kind == "pointer"
+                # `*struct{ F T }` member fails. Non-scalar shapes
+                # (`*[4]int64`, `*[]T`, `*struct`) stay closed like a
+                # named struct pointee does.
+                if member.pointee_type_ids is None or (
+                    member.pointee_kind
+                    not in {"integer", "boolean", "pointer"}
                 ):
                     raise _Unsupported(
                         "non_parameter_reference", _span(node)
                     )
-                if member.pointee_type_ids is not None:
-                    self.pinned.update(member.pointee_type_ids)
-                pointee_id = f"{member.id}/pointee"
+                self.pinned.update(member.pointee_type_ids)
         else:
             # `*t` — a dereference read of a bound pointer. The
             # pointee is memory the dep model never tracks, so the

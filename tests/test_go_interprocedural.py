@@ -38777,6 +38777,18 @@ def test_named_struct_element_pointer_member_pointee_operand_eval(
             "\treturn i\n}\n",
             frozenset({1}),
         ),
+        # `p.A[0].W = &x` reseats the member onto an escaped local —
+        # the pointee read observes `x`'s current value like `*p`
+        # after `p := &x` does.
+        (
+            "type Elem struct { W *int64 }\n"
+            "type S struct { A []Elem }\n"
+            "func F(p *S, x int64, y int64) int64 {\n"
+            "\tp.A[0].W = &x\n"
+            "\tx = y\n"
+            "\treturn *p.A[0].W\n}\n",
+            frozenset({0, 1, 2}),
+        ),
     ],
 )
 def test_named_struct_element_pointer_member_scalar_pointee(
