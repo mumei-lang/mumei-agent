@@ -2931,3 +2931,26 @@ contract C {
         b for b in takes if "uint256 x" in source[b.span.start : b.span.start + 40]
     )
     assert call.target == uint_take.id
+
+
+def test_elementary_conversion_argument_types_overload_resolution():
+    # `this.take(uint(1))` infers the argument's type from the cast,
+    # so the uint256 overload wins over address.
+    source = """
+contract C {
+    function take(address a) external {}
+    function take(uint256 x) external {}
+    function run() external { this.take(uint(1)); }
+}
+"""
+    report = build_sol_bindings(source)
+    take_overloads = sorted(
+        (b for b in report.bindings if b.name == "take"),
+        key=lambda b: b.span.start,
+    )
+    assert len(take_overloads) == 2
+    uint_take = take_overloads[1]
+    assert any(
+        ref.binding_id == uint_take.id and ref.kind == "call"
+        for ref in report.references
+    )
