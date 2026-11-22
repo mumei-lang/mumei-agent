@@ -44,7 +44,15 @@ POSITIVE_FIXTURES = (
     ("intrinsic_globals", ["builtin", "builtin", "builtin", "builtin"]),
     ("tsx_fragment", ["agree"]),
     ("state_write_operators", ["agree", "agree"]),
-    ("member_access", ["agree"] * 29 + ["builtin", "agree", "agree", "builtin"]),
+    (
+        "member_access",
+        ["agree"] * 29
+        + ["builtin"]
+        + ["agree"] * 2
+        + ["builtin"]
+        + ["agree"] * 3
+        + ["builtin", "agree", "builtin", "agree", "builtin"],
+    ),
 )
 _STATUSES = (
     "builtin",

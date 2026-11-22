@@ -26,3 +26,8 @@ const cars: Car[] = [new Car()];
 cars[0].base();
 cars.push(new Car());
 cars.length;
+class Quoted { "m"(): void {} }
+const quoted = new Quoted(); quoted.m();
+declare const record: Record<"undefined", number>;
+record.undefined;
+Car.prototype;

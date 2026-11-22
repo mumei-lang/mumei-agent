@@ -465,9 +465,106 @@
         "end": 649,
         "start": 643
       }
+    },
+    {
+      "declarations": [
+        {
+          "end": 663,
+          "start": 657
+        }
+      ],
+      "library": false,
+      "name": "Quoted",
+      "span": {
+        "end": 708,
+        "start": 702
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 695,
+          "start": 689
+        }
+      ],
+      "library": false,
+      "name": "quoted",
+      "span": {
+        "end": 718,
+        "start": 712
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 668,
+          "start": 667
+        }
+      ],
+      "library": false,
+      "name": "m",
+      "span": {
+        "end": 720,
+        "start": 719
+      }
+    },
+    {
+      "declarations": [],
+      "library": true,
+      "name": "Record",
+      "span": {
+        "end": 752,
+        "start": 746
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 744,
+          "start": 738
+        }
+      ],
+      "library": false,
+      "name": "record",
+      "span": {
+        "end": 781,
+        "start": 775
+      }
+    },
+    {
+      "declarations": [],
+      "library": true,
+      "name": "undefined",
+      "span": {
+        "end": 791,
+        "start": 782
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 78,
+          "start": 75
+        }
+      ],
+      "library": false,
+      "name": "Car",
+      "span": {
+        "end": 796,
+        "start": 793
+      }
+    },
+    {
+      "declarations": [],
+      "library": true,
+      "name": "prototype",
+      "span": {
+        "end": 806,
+        "start": 797
+      }
     }
   ],
-  "source": "interface Shape { area(): number }\nclass Engine { start(): void {} }\nclass Car implements Shape {\n    engine: Engine = new Engine();\n    base(): void {}\n    area(): number { return 0 }\n    run(other: Car): void {\n        this.engine.start();\n        other.engine.start();\n        this.base();\n        other.area();\n    }\n}\nnamespace N {\n    export function help(): void {}\n    export class Inner { ping(): void {} }\n}\nenum Direction { Up, Down }\nconst heading = Direction.Up;\nN.help();\nconst inner = new N.Inner();\ninner.ping();\nconst s: Shape = new Car();\ns.area();\nconst cars: Car[] = [new Car()];\ncars[0].base();\ncars.push(new Car());\ncars.length;\n",
+  "source": "interface Shape { area(): number }\nclass Engine { start(): void {} }\nclass Car implements Shape {\n    engine: Engine = new Engine();\n    base(): void {}\n    area(): number { return 0 }\n    run(other: Car): void {\n        this.engine.start();\n        other.engine.start();\n        this.base();\n        other.area();\n    }\n}\nnamespace N {\n    export function help(): void {}\n    export class Inner { ping(): void {} }\n}\nenum Direction { Up, Down }\nconst heading = Direction.Up;\nN.help();\nconst inner = new N.Inner();\ninner.ping();\nconst s: Shape = new Car();\ns.area();\nconst cars: Car[] = [new Car()];\ncars[0].base();\ncars.push(new Car());\ncars.length;\nclass Quoted { \"m\"(): void {} }\nconst quoted = new Quoted(); quoted.m();\ndeclare const record: Record<\"undefined\", number>;\nrecord.undefined;\nCar.prototype;\n",
   "typescript_version": "5.9.3",
   "unsupported": []
 }
