@@ -1918,9 +1918,19 @@ class _RustBindings:
                     self.gaps.append(Gap("unsupported_syntax", self.span(bound)))
             return []
         if pattern.type in {"scoped_identifier", "scoped_type_identifier"}:
-            self.unresolved.append(
-                Unresolved(self.span(pattern), self.text(pattern), "qualified_path")
-            )
+            member, name_node = self._scoped_member(pattern)
+            if member is not None:
+                self.references.append(
+                    Reference(
+                        self.span(name_node), member.binding.id, "read"
+                    )
+                )
+            else:
+                self.unresolved.append(
+                    Unresolved(
+                        self.span(pattern), self.text(pattern), "qualified_path"
+                    )
+                )
             return []
         if pattern.type == "mut_pattern":
             inner = next(

@@ -2460,3 +2460,19 @@ fn f() { let e = E::A; let g = E::B; }
     assert a_ref.binding_id == variants["A"].id
     assert b_ref.binding_id == variants["B"].id
     assert not [u for u in report.unresolved if u.name == "E::A"]
+
+
+def test_member_enum_variant_in_match_pattern_resolves():
+    source = """
+enum E { A, B }
+fn f(e: E) { match e { E::A => {}, E::B => {} } }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    variants = {b.name: b for b in report.bindings if b.kind == "enum_member"}
+    reads = {
+        source[r.span.start : r.span.end]: r.binding_id
+        for r in report.references
+        if source[r.span.start : r.span.end] in {"A", "B"}
+    }
+    assert reads == {"A": variants["A"].id, "B": variants["B"].id}
+    assert not [u for u in report.unresolved if u.name.startswith("E::")]
