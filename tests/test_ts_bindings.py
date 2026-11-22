@@ -1415,6 +1415,76 @@ const k = new K();
     )
 
 
+def test_member_new_prefers_exported_over_private_duplicate():
+    # Split-namespace blocks can hold a block-private duplicate of an
+    # exported name: `new N.C()` must name the exported constructor
+    # (`export const C`) and `c.m()` the exported interface, not the
+    # private const/interface siblings in the later block.
+    source = """
+namespace N {
+    export interface C { m(): void }
+    export const C: { new(): C } = {} as any;
+}
+namespace N {
+    const C = {} as any;
+    interface C { n(): void }
+}
+const c = new N.C();
+c.m();
+"""
+    report = build_ts_bindings(source)
+    exported_const = [
+        b for b in report.bindings
+        if b.name == "C" and b.kind == "local"
+    ]
+    assert len(exported_const) == 2
+    call_refs = [r for r in report.references if r.kind == "call"]
+    # The exported const is the first `local C` (declared first).
+    assert any(r.binding_id == exported_const[0].id for r in call_refs)
+    assert not any(r.binding_id == exported_const[1].id for r in call_refs)
+    method = _member_bindings(report, "m", "associated_function")[0]
+    assert {
+        c.target for c in report.calls if c.kind == "opaque_bodyless"
+    } == {method.id}
+
+
+def test_member_type_only_namespace_merges_with_var():
+    # A namespace that exports only types coexists with a same-named
+    # const (tsc accepts the pair); `new K()` names the const.
+    source = """
+const K: { new(): K } = {} as any;
+namespace K { export interface I { im(): void } }
+interface K { m(): void }
+const k = new K();
+k.m();
+"""
+    report = build_ts_bindings(source)
+    var = _member_bindings(report, "K", "local")[0]
+    call_refs = [r for r in report.references if r.kind == "call"]
+    assert any(r.binding_id == var.id for r in call_refs)
+    method = _member_bindings(report, "m", "associated_function")[0]
+    assert any(
+        c.target == method.id
+        for c in report.calls if c.kind == "opaque_bodyless"
+    )
+
+
+def test_member_new_on_type_alias_falls_back_to_value():
+    # `type T` + `const T` is a legal cross-space pair: `new T()`
+    # names the const (a type alias can't be called).
+    source = """
+type T = { m(): void }
+const T: { new(): T } = {} as any;
+const t = new T();
+"""
+    report = build_ts_bindings(source)
+    var = _member_bindings(report, "T", "local")[0]
+    call_refs = [r for r in report.references if r.kind == "call"]
+    assert call_refs and all(
+        r.binding_id == var.id for r in call_refs
+    )
+
+
 def test_member_ambient_declarations_have_no_tdz():
     # `declare class`/`declare namespace` initialize nothing at
     # runtime: `new A()` textually before the declarations is not a

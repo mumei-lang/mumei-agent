@@ -1044,6 +1044,21 @@ class _TypeScriptBindings:
                         # Namespace members sit on the namespace object —
                         # treat them as static for call-kind selection.
                         other.member_static = True
+                        # Only `export`ed members are reachable through
+                        # qualified `N.x` access — a block-private
+                        # declaration is module-local, like a class's
+                        # private member. Ambient namespaces export
+                        # every member implicitly.
+                        other.member_visibility = (
+                            "public"
+                            if node.type == "export_statement"
+                            or (
+                                decl.parent is not None
+                                and decl.parent.type
+                                == "ambient_declaration"
+                            )
+                            else "private"
+                        )
                         other.member_container = (
                             self._decl_qualified_name(decl)
                         )
@@ -1352,9 +1367,13 @@ class _TypeScriptBindings:
         if "enum" in kinds:
             return kinds == {"enum"}
         if "ambient_var" in kinds or "local" in kinds:
-            # A variable only merges with an `interface` (type side) —
-            # `const`/`declare const` + `namespace` is a redeclaration.
-            return kinds - {"ambient_var", "local"} == {"interface"}
+            # A variable only merges with an `interface`/`type` (the
+            # type side of the name) — `const`/`declare const` +
+            # `namespace` is legal only when the namespace exports no
+            # value members, which _merge_siblings checks separately.
+            return kinds - {"ambient_var", "local"} in (
+                {"interface"}, {"type_alias"},
+            )
         if kinds <= {"class", "ambient_class"}:
             return False
         if "ambient_class" in kinds:
@@ -1385,9 +1404,66 @@ class _TypeScriptBindings:
                 self._merge_kind(record), self._merge_kind(sibling)
             ):
                 continue
+            if (
+                "namespace" in {
+                    self._merge_kind(record), self._merge_kind(sibling)
+                }
+                and {
+                    self._merge_kind(record), self._merge_kind(sibling)
+                }
+                & {"ambient_var", "local"}
+            ):
+                ns = (
+                    record
+                    if self._merge_kind(record) == "namespace"
+                    else sibling
+                )
+                if self._namespace_exports_value(ns):
+                    continue
             if self._same_declaration_family(record, sibling):
                 siblings.append(sibling)
+        # Exported members are the public face of the merged name — a
+        # block-private duplicate (non-exported member of a namespace
+        # block) must not shadow them in member or `new` resolution.
+        siblings.sort(key=lambda s: not self._is_exported_member(s))
         return siblings
+
+    def _is_exported_member(self, record: _Record) -> bool:
+        if record.member_of is None:
+            return True
+        node = record.node
+        while node is not None and node.id != record.member_of:
+            if node.type == "export_statement":
+                return True
+            node = node.parent
+        return False
+
+    def _namespace_exports_value(self, ns_record: _Record) -> bool:
+        """Whether any same-named namespace block exports a value.
+
+        tsc only accepts `namespace K` next to a same-named variable
+        when the merged namespace exports types alone — a single
+        exported value member makes the pair a redeclaration.
+        """
+        decl = ns_record.node.parent
+        if decl is None:
+            return False
+        qname = self._decl_qualified_name(decl)
+        owner_ids = {
+            s.node.parent.id
+            for s in self.records
+            if s.binding.kind == "namespace"
+            and s.node.parent is not None
+            and self._decl_qualified_name(s.node.parent) == qname
+        }
+        for member in self.records:
+            if (
+                member.member_of in owner_ids
+                and member.binding.kind not in {"interface", "type_alias"}
+                and self._is_exported_member(member)
+            ):
+                return True
+        return False
 
     def _merged_constructible(self, record: _Record) -> _Record:
         """Prefer the class (or ambient class) of a merged declaration."""
@@ -1395,7 +1471,7 @@ class _TypeScriptBindings:
         if merge_kind in {"class", "ambient_class"}:
             return record
         if merge_kind not in {
-            "interface", "enum", "namespace", "function",
+            "interface", "enum", "namespace", "type_alias", "function",
             "ambient_function",
         }:
             # Only declaration-merging participants can stand in for a
@@ -1403,23 +1479,29 @@ class _TypeScriptBindings:
             # class in a sibling block is a duplicate identifier, not
             # a merge — its references must name the variable.
             return record
+        siblings = self._merge_siblings(record)
         for preferred in ("class", "ambient_class"):
-            for sibling in self._merge_siblings(record):
+            for sibling in siblings:
                 if self._merge_kind(sibling) == preferred:
                     return sibling
         if merge_kind in {"interface", "namespace", "type_alias"}:
             # Type-only names can't be `new`'d: a same-scope value-side
             # declaration (e.g. `declare const C` carrying a construct
             # signature) is the honest referent for the constructor.
-            for sibling in self.records:
-                if (
-                    sibling is not record
-                    and sibling.binding.name == record.binding.name
-                    and self._same_declaration_family(record, sibling)
-                    and self._merge_kind(sibling)
-                    in {"local", "ambient_var", "function"}
-                ):
-                    return sibling
+            candidates = [
+                sibling
+                for sibling in self.records
+                if sibling is not record
+                and sibling.binding.name == record.binding.name
+                and self._same_declaration_family(record, sibling)
+                and self._merge_kind(sibling)
+                in {"local", "ambient_var", "function"}
+            ]
+            candidates.sort(
+                key=lambda s: not self._is_exported_member(s)
+            )
+            if candidates:
+                return candidates[0]
         return record
 
     def _same_declaration_family(
