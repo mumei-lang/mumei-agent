@@ -55114,6 +55114,58 @@ def test_alias_free_slice_array_struct_element_copies(go_types_helper):
         assert not result.available, (function_name, result.gaps)
 
 
+def test_returned_structs_resolve_current_func_field_captures(
+    go_types_helper,
+):
+    files = {
+        "a.go": (
+            "package p\n"
+            "type S struct { F func() int64 }\n"
+            "func RetElem(x, y int64) S {\n"
+            "\tv := y; ss := make([]S, 1)\n"
+            "\tss[0].F = func() int64 { return v }; v = x\n"
+            "\treturn ss[0]\n"
+            "}\n"
+            "func RetLocal(x, y int64) S {\n"
+            "\tv := y; var s S\n"
+            "\ts.F = func() int64 { return v }; v = x\n"
+            "\treturn s\n"
+            "}\n"
+            "func RetCopy(x, y int64) S {\n"
+            "\tv := y; ss := make([]S, 1)\n"
+            "\tss[0].F = func() int64 { return v }; e := ss[0]\n"
+            "\tv = x; return e\n"
+            "}\n"
+            "func RetSlice(x, y int64) []S {\n"
+            "\tv := y; ss := make([]S, 1)\n"
+            "\tss[0].F = func() int64 { return v }; v = x\n"
+            "\treturn ss\n"
+            "}\n"
+            "func RetNamed(x, y int64) (r S) {\n"
+            "\tv := y; r.F = func() int64 { return v }; v = x\n"
+            "\treturn\n"
+            "}\n"
+        )
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    for function_name in (
+        "RetElem",
+        "RetLocal",
+        "RetCopy",
+        "RetSlice",
+        "RetNamed",
+    ):
+        result = named_package(
+            files, snapshot, summaries, function_name
+        )
+        assert result.available, (function_name, result.gaps)
+        assert result.return_dependencies == frozenset({0, 1}), (
+            function_name,
+            result.return_dependencies,
+        )
+
+
 def test_named_collection_elided_struct_function_fields(go_types_helper):
     declarations = (
         "type S struct { F func() int64 }\n"

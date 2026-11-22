@@ -15033,6 +15033,56 @@ class _Builder:
             if not changed:
                 return result_deps
 
+    def _struct_binding_field_record_ids(
+        self, binding_id: str, node: Any
+    ) -> tuple[str, ...]:
+        binding = self.bindings.get(binding_id)
+        fact = getattr(binding, "type", None)
+        if fact is None:
+            return ()
+        if fact.kind in {"slice", "array", "map", "chan"}:
+            records = self._struct_collection_element_field_record_ids(
+                fact, binding
+            )
+            element_fact = getattr(fact, "elem", None)
+            if records and (
+                fact.kind not in {"slice", "array"}
+                or element_fact is None
+                or element_fact.kind == "pointer"
+            ):
+                raise _Unsupported(
+                    "unsupported_expression", _span(node)
+                )
+            if fact.kind not in {"slice", "array"}:
+                return ()
+            struct_fact = self._struct_value_fact(element_fact)
+            if (
+                struct_fact is None
+                or not struct_fact.type_id
+                or self._type_fact_has_type_args(element_fact)
+            ):
+                if records:
+                    raise _Unsupported(
+                        "unsupported_expression", _span(node)
+                    )
+                return ()
+        else:
+            struct_fact = self._struct_value_fact(fact)
+            if (
+                struct_fact is None
+                and fact.kind == "pointer"
+                and getattr(fact, "elem", None) is not None
+            ):
+                struct_fact = self._struct_value_fact(fact.elem)
+            if struct_fact is None:
+                return ()
+            records = self._struct_field_closure_record_ids(
+                struct_fact, binding
+            )
+        if self._has_closure_records(binding_id):
+            records = tuple(dict.fromkeys((*records, binding_id)))
+        return records
+
     def _return_expr_deps(
         self,
         expr: Any,
@@ -15122,6 +15172,16 @@ class _Builder:
             deps |= self._return_local_chan_chan_deps(
                 binding_id, locals_
             )
+        for record_id in self._struct_argument_field_record_ids(expr):
+            extra = self._captured_current_deps(
+                self.closure_captures.get(
+                    record_id, frozenset()
+                ),
+                params,
+                locals_,
+            )
+            deps |= extra
+            self._record_read(extra)
         idents = [expr] if expr.type == "identifier" else []
         if not idents and expr.type == "composite_literal":
             # `return []func(){cl}` — a closure returned as a
@@ -18416,6 +18476,20 @@ class _Builder:
                         result_deps |= locals_.get(
                             result_root, frozenset()
                         )
+                    for record_id in (
+                        self._struct_binding_field_record_ids(
+                            result_id, node
+                        )
+                    ):
+                        extra = self._captured_current_deps(
+                            self.closure_captures.get(
+                                record_id, frozenset()
+                            ),
+                            params,
+                            locals_,
+                        )
+                        result_deps |= extra
+                        self._record_read(extra)
                 deps[0] |= result_deps
                 self._record_read(result_deps)
             elif len(expressions) == 1:
