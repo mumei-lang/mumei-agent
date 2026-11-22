@@ -6295,3 +6295,67 @@ fn f(o: Option<Q>) {
     # The payload still resolves in `u`'s scope — `q` is `m::Q`.
     assert calls["q.qm()"] == qm.id
 
+
+
+def test_borrowed_slice_return_keeps_the_substituted_element():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct W<T> { _m: T }
+impl<T> W<T> { fn sref(&self) -> &mut [T] { &mut [] } }
+fn f(w: W<P>) { w.sref()[0].pm(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    targets = [
+        call.target
+        for call in report.calls
+        if raw[call.span.start:call.span.end].decode() == "w.sref()[0].pm()"
+    ]
+    assert targets == [pm.id]
+
+
+def test_first_on_array_elements_keeps_the_array_shape():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(v: Vec<[P; 2]>) {
+    match v.first() { Some(a) => a[0].pm(), _ => () }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    targets = [
+        call.target
+        for call in report.calls
+        if raw[call.span.start:call.span.end].decode() == "a[0].pm()"
+    ]
+    assert targets == [pm.id]
+
+
+def test_fixed_field_args_stay_in_the_declaring_module():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct E;
+mod m {
+    pub struct E;
+    impl E { pub fn em(&self) {} }
+    pub struct W<T> { pub res: Result<T, E> }
+}
+fn f(w: m::W<P>) {
+    let m::W { res } = w;
+    match res { Err(e) => e.em(), _ => () }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    em = _bindings(report, "em", "associated_function")[0]
+    raw = source.encode()
+    targets = [
+        call.target
+        for call in report.calls
+        if raw[call.span.start:call.span.end].decode() == "e.em()"
+    ]
+    assert targets == [em.id]

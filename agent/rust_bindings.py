@@ -2830,17 +2830,16 @@ class _RustBindings:
                     # spelling is carried; the head stays for
                     # `_scrutinee_shape` to declare.
                     slice_args = re.fullmatch(
-                        r"&\s*(?:'\w+\s+)?(?:mut\s+)?\[(.+)\]"
-                        r"|\[(.+)\]",
+                        r"&\s*(?:'\w+\s+)?(?:mut\s+)?\[(.+)\]",
                         receiver[1].strip(),
                     )
                     if slice_args is not None:
-                        # The receiver itself spelled a slice
-                        # (`s.as_ref()` → `&[P]`) — the element is
-                        # inside the brackets, not the whole arg.
-                        element = (
-                            slice_args.group(1) or slice_args.group(2)
-                        ).strip()
+                        # The receiver itself spelled a borrowed
+                        # slice (`s.as_ref()` → `&[P]`) — the element
+                        # is inside the brackets, not the whole arg.
+                        # Bare `[P; N]` args are an element spelling
+                        # (`Vec<[P; 2]>`), never peeled.
+                        element = slice_args.group(1).strip()
                     else:
                         elements = self._type_arg_list(receiver[1])
                         index = option_head[2]
@@ -5583,6 +5582,14 @@ class _RustBindings:
             # impl's own parameters — map those positions to the
             # receiver's args, not the struct's.
             param_map = self._impl_param_map(member, impl_args)
+        if param_map:
+            # Spell each substituted arg `crate::`-qualified — it
+            # was written at the receiver's annotation site, so the
+            # member's own scope must not steal a same-named type.
+            param_map = {
+                param: self._qualified_spelling(spelled, pos)
+                for param, spelled in param_map.items()
+            }
         if (
             not param_map
             and member.type_node is not None
@@ -5615,6 +5622,17 @@ class _RustBindings:
             spelled = None
             if borrow is not None:
                 borrowed = borrow.group(1).strip()
+                if param_map:
+                    # `W<P>::sref() -> &mut [T]` — substitute the
+                    # declared param with the receiver's own
+                    # (already `crate::`-qualified) arg.
+                    borrowed = re.sub(
+                        r"\b("
+                        + "|".join(re.escape(n) for n in param_map)
+                        + r")\b",
+                        lambda match: param_map[match.group(1)],
+                        borrowed,
+                    )
                 if borrowed.startswith("[") and borrowed.endswith("]"):
                     # `&mut [P]` — the receiver stays a borrowed
                     # slice so `first`/`get` still apply.
@@ -5921,6 +5939,21 @@ class _RustBindings:
                     candidate
                     for candidate in reversed(scope.bindings.get(head, ()))
                     if self._in_namespace(candidate, "type")
+                    and (
+                        # Generic params live in the root scope's
+                        # bindings but are only visible in their
+                        # item's body; module members reached through
+                        # a path are position-independent.
+                        not self.scopes
+                        or scope is not self.scopes[0]
+                        or candidate.binding.scope is None
+                        or candidate.binding.scope == ByteSpan(0, 0)
+                        or (
+                            candidate.binding.scope.start
+                            <= position
+                            < candidate.binding.scope.end
+                        )
+                    )
                 ),
                 None,
             )
@@ -5997,7 +6030,11 @@ class _RustBindings:
         return re.sub(r"[A-Za-z_][\w:]*", replace, spelled)
 
     def _pattern_head_fields(
-        self, head: Any | None, scrut_id: str, scrut_args: str | None
+        self,
+        head: Any | None,
+        scrut_id: str,
+        scrut_args: str | None,
+        scrut_position: int | None = None,
     ) -> "dict[str, tuple[str | None, str | None]] | None":
         """{field name: (type id, args)} for `W { .. }` / `E::V { .. }`
         heads — None when the head does not name the scrutinee's
@@ -6014,6 +6051,21 @@ class _RustBindings:
         if body is None or body.type != "field_declaration_list":
             return None
         param_map = self._pattern_param_map(container, scrut_args)
+        if param_map:
+            site = (
+                head.start_byte
+                if scrut_position is None
+                else scrut_position
+            )
+            # Substituted args were spelled at the call site —
+            # `crate::`-qualify them so a field like `Result<T, E>`
+            # keeps BOTH scopes: the substituted `T` lands on the
+            # call-site record while a fixed `E` still resolves in
+            # the declaring module.
+            param_map = {
+                param: self._qualified_spelling(spelled, site)
+                for param, spelled in param_map.items()
+            }
         fields: dict[str, tuple[str | None, str | None]] = {}
         for decl in self._children(body):
             if decl.type != "field_declaration":
@@ -6022,14 +6074,6 @@ class _RustBindings:
             type_node = decl.child_by_field_name("type")
             if name_node is None or type_node is None:
                 continue
-            field_text = self.text(type_node)
-            substituted = any(
-                re.search(
-                    r"(?<![\w:])" + re.escape(param) + r"(?![\w:])",
-                    field_text,
-                )
-                for param in param_map
-            )
             fields[
                 self._normalize_identifier(self.text(name_node))
             ] = (
@@ -6037,13 +6081,7 @@ class _RustBindings:
                     type_node, param_map, head.start_byte, container
                 ),
                 type_node,
-                # Substituted args were spelled at the call site
-                # (`m::W<Q>`'s `Q` resolves there); only a field
-                # spelling the module's own names (`opt: Option<Q>`)
-                # resolves them in the declaring scope.
-                None
-                if container is None or substituted
-                else container.home_scope,
+                None if container is None else container.home_scope,
             )
         return fields
 
@@ -6085,6 +6123,16 @@ class _RustBindings:
         ):
             return None
         param_map = self._pattern_param_map(container, scrut_args)
+        if param_map:
+            site = (
+                head.start_byte
+                if scrut_position is None
+                else scrut_position
+            )
+            param_map = {
+                param: self._qualified_spelling(spelled, site)
+                for param, spelled in param_map.items()
+            }
         return [
             self._field_annotation(
                 child, param_map, head.start_byte, container
@@ -6700,7 +6748,7 @@ class _RustBindings:
         if kind == "struct_pattern":
             head = pattern.child_by_field_name("type")
             fields = self._pattern_head_fields(
-                head, scrut_id, scrut_args
+                head, scrut_id, scrut_args, scrut_position
             )
             if fields is None:
                 return {}
