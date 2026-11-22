@@ -4328,7 +4328,7 @@ fn f() {
 }
 fn g(w: W) {
     // `impl Iterator<Item = P>` hides the element inside an
-    // associated binding the model does not spell — opaque.
+    // associated binding the model does not spell - opaque.
     for p in w.iter() {
         p.m();
     }
