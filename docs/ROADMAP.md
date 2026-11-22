@@ -4303,9 +4303,14 @@ way a struct element's `a[i].V` does — the element pointer
 conflates into the collection's group, and like a bare `*p`
 deref the read unions every indirect store and the escaped
 bindings' live slots (`a[0] = &e; e.V = x` keeps reporting the
-update) — while an array of pointer elements (`A [N]*E`), a map
-of them (`M map[string]*E`), and a deeper pointer member inside
-the element (`a[i].W.V`) stay closed. An explicit `(*p)` deref of a
+update). Map fields of pointer elements admit reads the same
+way — `p.M[k].V` on `M map[K]*E` conflates like the slice —
+while a map element's field write (`p.M[k].V = x`) stays closed
+because the element is not addressable, and `map[string]…`
+closes on the key's side (string indices sit outside the scalar
+fragment). An array of pointer elements (`A [N]*E`) and a
+deeper pointer member inside the element (`a[i].W.V`) stay
+closed too. An explicit `(*p)` deref of a
 `*S` param resolves through the same slot machinery as the
 implicit deref — Go's grammar parses `(*p)` as a parenthesized
 unary `*`, so the root walks unwrap it (a non-`*` unary operand
@@ -4359,7 +4364,12 @@ so `(*qq).A[0]` observes it). A store into the middle pointer
 is marked dirty and every later `(*pp)` root stays closed — the
 mark lands with the store, so `*pp, x = r, (*pp).V` still reads
 the old pointee — while a deeper `**pp = s` writes the struct
-pointee itself and leaves the root live.
+pointee itself and leaves the root live. A whole-pointee store
+(`*p = s`, `**pp = s`) broadcasts through `indirect_writes` like
+any aliased store, so a later element read (`p.A[i]`,
+`(*pp).A[i]`, and their `a[i].V` field forms) reports the stored
+value's dependency the way `p.V` already did — and an unrelated
+`*q = s` may-alias union the same way `(*p)[i]` already did.
 
 A *scalar-payload channel element* admits the same conflated way
 — `s := []chan int64{c}`, `var m map[K]chan int64 = {...}` bind

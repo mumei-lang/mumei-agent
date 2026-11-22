@@ -33691,6 +33691,17 @@ def test_named_double_pointer_deep_store_keeps_root(
         # A pointer-slice parameter root directly: `ss[i].F[0]`.
         "type E struct { F []int64 }\n"
         "func F(ss []*E, i int) int64 { return ss[i].F[0] }\n",
+        # A map field of pointer elements reads the same way.
+        "type E struct { V int64 }\n"
+        "type S struct { M map[int]*E }\n"
+        "func F(p *S, k int) int64 { return p.M[k].V }\n",
+        "type E struct { V int64 }\n"
+        "type S struct { M map[int]*E }\n"
+        "func F(o S, k int) int64 { return o.M[k].V }\n",
+        # `ss[i].V` — a scalar field read directly on the `*E`
+        # element pointer of a bare `[]*E` parameter.
+        "type E struct { V int64 }\n"
+        "func F(ss []*E, i int) int64 { return ss[i].V }\n",
     ],
 )
 def test_named_pointer_element_field_reads(
@@ -33713,6 +33724,39 @@ def test_named_pointer_element_field_local_read(go_types_helper):
     assert result.return_dependencies == frozenset({0})
 
 
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        # `*p = s` overwrites the whole pointee — element reads
+        # through `p` must observe the store like `p.V` does.
+        "type S struct { V int64; A []int64 }\n"
+        "func F(p *S, s S) int64 { *p = s; return p.A[0] }\n",
+        # Struct-element field read — `p.A[0].V`.
+        "type E struct { V int64 }\n"
+        "type S struct { A []E }\n"
+        "func F(p *S, s S) int64 { *p = s; return p.A[0].V }\n",
+        # One level down — `**pp = s` writes `(*pp)`'s pointee.
+        "type S struct { V int64; A []int64 }\n"
+        "func F(pp **S, s S) int64 { **pp = s; return (*pp).A[0] }\n",
+        "type E struct { V int64 }\n"
+        "type S struct { A []E }\n"
+        "func F(pp **S, s S) int64 { **pp = s; return (*pp).A[0].V }\n",
+    ],
+    ids=[
+        "scalar-slice",
+        "struct-element-field",
+        "double-scalar-slice",
+        "double-struct-element-field",
+    ],
+)
+def test_named_pointee_overwrite_element_read(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+
+
 def test_named_pointer_element_read_observes_late_pointee_store(
     go_types_helper,
 ):
@@ -33729,6 +33773,21 @@ def test_named_pointer_element_read_observes_late_pointee_store(
     result = named(*unit(go_types_helper, declarations))
     assert result.available, result.gaps
     assert result.return_dependencies == frozenset({0})
+
+
+def test_named_pointer_element_param_observes_late_pointee_store(
+    go_types_helper,
+):
+    # `ss = []*E{e}` — the same late-store rule on a bare `[]*E`
+    # parameter root: `ss[i].V` observes `e.V = x`.
+    declarations = (
+        "type E struct { V int64 }\n"
+        "func F(ss []*E, x int64) int64 { "
+        "e := &E{}; ss = []*E{e}; e.V = x; return ss[0].V }\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({1})
 
 
 def test_named_pointer_element_field_write_emit_caller_backing(
@@ -33756,7 +33815,8 @@ def test_named_pointer_element_field_write_emit_caller_backing(
         "type E struct { V int64; W *E }\n"
         "type S struct { A []*E }\n"
         "func F(p *S, i int64) int64 { return p.A[i].W.V }\n",
-        # Map-of-pointer-element fields stay closed.
+        # `map[string]` closes on the key's side — string indices
+        # sit outside the scalar fragment (any element type).
         "type E struct { V int64 }\n"
         "type S struct { M map[string]*E }\n"
         "func F(p *S, k string) int64 { return p.M[k].V }\n",
@@ -33765,6 +33825,11 @@ def test_named_pointer_element_field_write_emit_caller_backing(
         "type E struct { V int64 }\n"
         "type S struct { A [1]*E }\n"
         "func F(p *S) int64 { return p.A[0].V }\n",
+        # A map element's field write stays closed — the element
+        # is not addressable.
+        "type E struct { V int64 }\n"
+        "type S struct { M map[int]*E }\n"
+        "func F(p *S, k int, x int64) int64 { p.M[k].V = x; return 0 }\n",
     ],
 )
 def test_named_pointer_element_field_unsupported_stays_closed(

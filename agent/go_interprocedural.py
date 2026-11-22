@@ -2455,6 +2455,7 @@ class _Builder:
             else None
         )
         self._last_write_alias_src = None
+        self._scalar_field_pointer_root = False
         aliased_root = (
             root_ref is not None
             and root_ref.binding_id in self._param_pointer_aliases
@@ -2554,6 +2555,14 @@ class _Builder:
             return None, None
         field_key = self._opaque_container_field_key(
             root_ref.binding_id, member.id
+        )
+        root_binding = self.bindings.get(root_ref.binding_id)
+        self._scalar_field_pointer_root = (
+            params is not None
+            and root_ref.binding_id in params
+            and root_binding is not None
+            and root_binding.type is not None
+            and root_binding.type.kind == "pointer"
         )
         return field_key.rsplit("\x00", 1)[0], member
 
@@ -26121,6 +26130,12 @@ class _Builder:
                     field_deps = locals_.get(
                         field_root, frozenset()
                     )
+                    if self._scalar_field_pointer_root:
+                        # The collection lives in caller-shared
+                        # pointee memory — a whole-pointee store
+                        # (`*p = s`) or any aliased write lands in
+                        # `indirect_writes` like `(*p)[i]` observes.
+                        field_deps |= self.indirect_writes
                     src_id = self._last_write_alias_src
                     if src_id is not None:
                         field_deps |= locals_.get(
@@ -26410,6 +26425,20 @@ class _Builder:
                     deps |= self._opaque_container_deps(
                         field_key, locals_
                     )
+                    _elem_root_binding = self.bindings.get(
+                        _root_ref.binding_id
+                    )
+                    if (
+                        _elem_root_binding is not None
+                        and _elem_root_binding.type is not None
+                        and _elem_root_binding.type.kind == "pointer"
+                        and params is not None
+                        and _root_ref.binding_id in params
+                    ):
+                        # `p.A[i].V` on a `*S`/`**S` root reads
+                        # pointee memory a whole-pointee store
+                        # (`*p = s`) may have overwritten.
+                        deps |= self.indirect_writes
                     if (
                         getattr(
                             _container_member.type, "elem", None
@@ -26453,6 +26482,18 @@ class _Builder:
                     extracted = getattr(cbound, "type", None)
                     for _ in range(1 + len(container_idx[2] or ())):
                         extracted = getattr(extracted, "elem", None)
+                    # `ss[i]` on `[]*E` descends the element pointer
+                    # — the leaf lives in the element's pointee
+                    # memory like `p.A[i].V` does.
+                    elem_pointer = (
+                        extracted is not None
+                        and extracted.kind == "pointer"
+                        and getattr(extracted, "elem", None)
+                        is not None
+                        and extracted.elem.kind == "struct"
+                    )
+                    if elem_pointer:
+                        extracted = extracted.elem
                     if extracted is not None and extracted.kind == "struct":
                         deps = field_index_deps
                         # Innermost index first (Go's order) —
@@ -26514,8 +26555,19 @@ class _Builder:
                         deps |= self._opaque_container_deps(
                             cref.binding_id, locals_
                         )
-                        if pointee:
+                        if pointee or elem_pointer:
                             deps |= self.indirect_writes
+                        if elem_pointer:
+                            # The `*E` element may aim at any
+                            # escaped binding — union their live
+                            # slots like a bare `*p` deref does.
+                            for escaped_id in self.escaped:
+                                if escaped_id in locals_:
+                                    deps |= locals_[escaped_id]
+                                elif escaped_id in params:
+                                    deps |= {
+                                        params[escaped_id]
+                                    }
                         return deps
             if (
                 member is None
