@@ -16981,25 +16981,35 @@ class _Builder:
                 factory_source = None
                 if (
                     len(lefts) == len(rights)
-                    and not conditional
                     and binding.type is not None
                     and binding.type.kind == "function"
                 ):
-                    factory_source = self._closure_factory_source(
-                        rights[i],
-                        params,
-                        locals_pre,
-                        captures_before=factory_captures_pre,
-                        writes_before=factory_writes_pre,
-                        star_before=factory_star_pre,
-                        calls_before=factory_calls_pre,
-                        pointee_before=factory_pointee_pre,
-                        opaque_before=factory_opaque_pre,
-                        aliases_before=factory_aliases_pre,
-                        mv_before=factory_mv_pre,
-                        imv_before=factory_imv_pre,
-                        factory_literals_before=factory_literals_pre,
+                    candidate_factory_source = (
+                        self._closure_factory_source(
+                            rights[i],
+                            params,
+                            locals_pre,
+                            captures_before=factory_captures_pre,
+                            writes_before=factory_writes_pre,
+                            star_before=factory_star_pre,
+                            calls_before=factory_calls_pre,
+                            pointee_before=factory_pointee_pre,
+                            opaque_before=factory_opaque_pre,
+                            aliases_before=factory_aliases_pre,
+                            mv_before=factory_mv_pre,
+                            imv_before=factory_imv_pre,
+                            factory_literals_before=factory_literals_pre,
+                        )
                     )
+                    if (
+                        (conditional or self._may_skip > 0)
+                        and candidate_factory_source is not None
+                    ):
+                        raise _Unsupported(
+                            "unsupported_statement", _span(node)
+                        )
+                    if not (conditional or self._may_skip > 0):
+                        factory_source = candidate_factory_source
                 # `s := lib.G(a)` — a container-typed call result
                 # binds a local whose single dep set conflates every
                 # element; the fresh backing keys on the call node.
@@ -18212,25 +18222,37 @@ class _Builder:
                         not multi
                         and value_nodes
                         and len(names) == len(value_nodes)
-                        and not conditional
                         and binding.type is not None
                         and binding.type.kind == "function"
                     ):
-                        factory_source = self._closure_factory_source(
-                            value_nodes[i],
-                            params,
-                            locals_pre,
-                            captures_before=factory_captures_pre,
-                            writes_before=factory_writes_pre,
-                            star_before=factory_star_pre,
-                            calls_before=factory_calls_pre,
-                            pointee_before=factory_pointee_pre,
-                            opaque_before=factory_opaque_pre,
-                            aliases_before=factory_aliases_pre,
-                            mv_before=factory_mv_pre,
-                            imv_before=factory_imv_pre,
-                            factory_literals_before=factory_literals_pre,
+                        candidate_factory_source = (
+                            self._closure_factory_source(
+                                value_nodes[i],
+                                params,
+                                locals_pre,
+                                captures_before=factory_captures_pre,
+                                writes_before=factory_writes_pre,
+                                star_before=factory_star_pre,
+                                calls_before=factory_calls_pre,
+                                pointee_before=factory_pointee_pre,
+                                opaque_before=factory_opaque_pre,
+                                aliases_before=factory_aliases_pre,
+                                mv_before=factory_mv_pre,
+                                imv_before=factory_imv_pre,
+                                factory_literals_before=(
+                                    factory_literals_pre
+                                ),
+                            )
                         )
+                        if (
+                            (conditional or self._may_skip > 0)
+                            and candidate_factory_source is not None
+                        ):
+                            raise _Unsupported(
+                                "unsupported_statement", _span(spec)
+                            )
+                        if not (conditional or self._may_skip > 0):
+                            factory_source = candidate_factory_source
                     if binding.type.kind == "interface" and value_nodes:
                         rhs = (
                             value_nodes[i]
@@ -21866,10 +21888,16 @@ class _Builder:
             for dirty_id in double_pointer_dirty_targets.values():
                 self._double_pointer_dirty.add(dirty_id)
             for i, (ref, value) in enumerate(zip(refs, values)):
+                rhs = (
+                    self._strip_parens(rights[i])
+                    if len(lefts) == len(rights)
+                    else None
+                )
                 if (
                     ref is not None
                     and len(lefts) == len(rights)
-                    and rights[i].type == "call_expression"
+                    and rhs is not None
+                    and rhs.type == "call_expression"
                 ):
                     target_id = getattr(ref, "binding_id", None)
                     target_binding = (
@@ -21877,7 +21905,6 @@ class _Builder:
                         if target_id is not None
                         else None
                     )
-                    rhs = self._strip_parens(rights[i])
                     callee = self._strip_parens(
                         rhs.child_by_field_name("function")
                     )
@@ -21892,14 +21919,42 @@ class _Builder:
                         if callee_ref is not None
                         else None
                     )
-                    if (
+                    conditional_function_bind = (
                         (conditional or self._may_skip > 0)
                         and target_binding is not None
                         and target_binding.type is not None
                         and target_binding.type.kind == "function"
-                        and callee_id is not None
-                        and callee_id not in self.closure_factory_literals
-                        and callee_id in self.opaque_callees
+                    )
+                    factory_source = None
+                    if conditional_function_bind:
+                        factory_source = self._closure_factory_source(
+                            rhs,
+                            params,
+                            locals_pre,
+                            captures_before=captures_before,
+                            writes_before=writes_before,
+                            star_before=star_before,
+                            calls_before=calls_before,
+                            pointee_before=pointee_before,
+                            opaque_before=opaque_before,
+                            aliases_before=aliases_before,
+                            mv_before=mv_before,
+                            imv_before=imv_before,
+                            factory_literals_before=(
+                                factory_literals_before
+                            ),
+                        )
+                    if (
+                        conditional_function_bind
+                        and (
+                            factory_source is not None
+                            or (
+                                callee_id is not None
+                                and callee_id
+                                not in self.closure_factory_literals
+                                and callee_id in self.opaque_callees
+                            )
+                        )
                     ):
                         raise _Unsupported(
                             "unsupported_statement", _span(node)
