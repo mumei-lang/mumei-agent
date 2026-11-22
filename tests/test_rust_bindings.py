@@ -7918,3 +7918,34 @@ fn f(s: std::collections::HashSet<P>, b: std::collections::BTreeSet<P>, m: std::
     # `s.replace(v)` returns the old element — `Option<P>`.
     assert bound.get("rp.pm()") == pm.id
     assert bound.get("rb.pm()") == pm.id
+def test_set_get_or_insert_binds_the_borrowed_element():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(s: std::collections::HashSet<P>, b: std::collections::BTreeSet<P>, v: Vec<P>) {
+    let g = s.get_or_insert(P);
+    g.pm();
+    let g2 = s.get_or_insert_owned(P);
+    g2.pm();
+    let g3 = s.get_or_insert_with(|| P);
+    g3.pm();
+    let gb = b.get_or_insert(P);
+    gb.pm();
+    let gv = v.get_or_insert(P);
+    gv.pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `s.get_or_insert*` borrow the element — `&P`.
+    assert bound.get("g.pm()") == pm.id
+    assert bound.get("g2.pm()") == pm.id
+    assert bound.get("g3.pm()") == pm.id
+    assert bound.get("gb.pm()") == pm.id
+    # `Vec` names no `get_or_insert` — stays opaque.
+    assert not bound.get("gv.pm()")
