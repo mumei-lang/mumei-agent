@@ -4873,3 +4873,53 @@ fn f(v: Vec<(P, Q)>) {
         if source[c.span.start : c.span.end].endswith(("m()", "q()"))
     ]
     assert [c.target for c in calls] == [m.id, q.id]
+
+
+def test_prelude_pattern_on_call_returned_option_tuple() -> None:
+    source = """\
+struct P;
+impl P { fn m(&self) {} }
+struct Q;
+impl Q { fn q(&self) {} }
+fn make_opt() -> Option<(P, Q)> { None }
+fn f() {
+    if let Some((a, b)) = make_opt() {
+        a.m();
+        b.q();
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = next(b for b in report.bindings if b.name == "m")
+    q = next(b for b in report.bindings if b.name == "q")
+    calls = [
+        c
+        for c in report.calls
+        if source[c.span.start : c.span.end].endswith(("m()", "q()"))
+    ]
+    assert [c.target for c in calls] == [m.id, q.id]
+
+
+def test_err_pattern_on_call_returned_result() -> None:
+    source = """\
+struct P;
+impl P { fn m(&self) {} }
+struct E2;
+impl E2 { fn e(&self) {} }
+fn mk() -> Result<P, E2> { Err(E2) }
+fn f() {
+    match mk() {
+        Ok(p) => p.m(),
+        Err(e) => e.e(),
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = next(b for b in report.bindings if b.name == "m")
+    e = next(b for b in report.bindings if b.name == "e")
+    calls = [
+        c
+        for c in report.calls
+        if source[c.span.start : c.span.end].endswith(("m()", "e()"))
+    ]
+    assert [c.target for c in calls] == [m.id, e.id]

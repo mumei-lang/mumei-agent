@@ -4394,6 +4394,8 @@ class _RustBindings:
             return self._prelude_pattern_payload(
                 head, scrut_name, scrut_args, scrut_position
             )
+||||||| parent of 3ba57951 (C06: resolve prelude payloads when the scrutinee type id is unresolvable)
+            return None
         container = (
             record
             if record.binding.id == scrut_id
@@ -4769,6 +4771,43 @@ class _RustBindings:
                         child, scrut_id, scrut_args,
                         scrut_name, scrut_position,
                     )
+                )
+            return mapping
+        if kind == "tuple_struct_pattern":
+            head = pattern.child_by_field_name("type")
+            payload = self._pattern_head_payload(
+                head, scrut_id, scrut_args
+            )
+            if payload is None:
+                return {}
+            children = [
+                child
+                for child in self._children(pattern)
+                if child != head
+            ]
+            rest_at = next(
+                (
+                    index
+                    for index, child in enumerate(children)
+                    if child.type == "remaining_field_pattern"
+                ),
+                None,
+            )
+            mapping = {}
+            for index, child in enumerate(children):
+                if child.type == "remaining_field_pattern":
+                    continue
+                if rest_at is not None and index > rest_at:
+                    # `V(.., x)` binds `x` to the LAST payload
+                    # element — `..` covers the skipped middle.
+                    position = len(payload) - (len(children) - index)
+                else:
+                    position = index
+                if position < 0 or position >= len(payload):
+                    continue
+                tid, fargs = payload[position]
+                mapping.update(
+                    self._pattern_type_map(child, tid, fargs)
                 )
             return mapping
         if scrut_id is None:
