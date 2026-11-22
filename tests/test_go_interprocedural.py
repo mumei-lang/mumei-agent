@@ -33995,6 +33995,43 @@ def test_named_struct_value_element_pointer_member_read(
             "\treturn x.V\n}\n",
             frozenset({0, 1}),
         ),
+        (
+            # `i = 0` after the extraction freezes the index's
+            # deps — the share still names `p.B[i]`'s element.
+            "type E2 struct { V int64 }\n"
+            "type Elem struct { V int64; W *E2 }\n"
+            "type S struct { B []Elem }\n"
+            "func F(p *S, i int64) int64 {\n"
+            "\tx := p.B[i]\n"
+            "\ti = 0\n"
+            "\treturn x.W.V\n}\n",
+            frozenset({0, 1}),
+        ),
+        (
+            # A scalar-field store on the copy leaves the
+            # pointer member sharing the element's memory.
+            "type E2 struct { V int64 }\n"
+            "type Elem struct { V int64; W *E2 }\n"
+            "type S struct { B []Elem }\n"
+            "func F(p *S, i int64) int64 {\n"
+            "\tx := p.B[i]\n"
+            "\tx.V = 1\n"
+            "\treturn x.W.V\n}\n",
+            frozenset({0, 1}),
+        ),
+        (
+            # `x, r = e, x.W.V` — the right-hand side still
+            # reads the pre-state share before the reseat
+            # lands.
+            "type E2 struct { V int64 }\n"
+            "type Elem struct { V int64; W *E2 }\n"
+            "type S struct { B []Elem }\n"
+            "func F(p *S, i int64, e Elem, r int64) int64 {\n"
+            "\tx := p.B[i]\n"
+            "\tx, r = e, x.W.V\n"
+            "\treturn r\n}\n",
+            frozenset({0, 1}),
+        ),
     ],
 )
 def test_named_struct_value_element_extract_share(
@@ -34024,6 +34061,16 @@ def test_named_struct_value_element_extract_share(
         "type S struct { B []Elem }\n"
         "func F(o S, i int64) int64 {\n"
         "\tx := o.B[i]\n"
+        "\treturn x.W.V\n}\n",
+        # `x.W = q` replaces the copy's pointer-member slot —
+        # the share ends, and a bound struct's pointer-member
+        # contents stay closed.
+        "type E2 struct { V int64 }\n"
+        "type Elem struct { W *E2 }\n"
+        "type S struct { B []Elem }\n"
+        "func F(p *S, i int64, q *E2) int64 {\n"
+        "\tx := p.B[i]\n"
+        "\tx.W = q\n"
         "\treturn x.W.V\n}\n",
     ],
 )
