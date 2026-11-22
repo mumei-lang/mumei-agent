@@ -1873,12 +1873,20 @@ class _TypeScriptBindings:
                             return nonconstant
                         pos = idx + 2
                 return inner.replace("\\$", "$")
+            cleaned = spelling.replace("_", "")
+            if len(cleaned) > 1 and cleaned.endswith("n"):
+                # `1_000n` and `1000n` spell the same bigint — the
+                # `n` tag keeps `1n` distinct from `1`.
+                try:
+                    return ("bigint", int(cleaned[:-1], 0))
+                except ValueError:
+                    return spelling
             try:
-                return int(spelling.replace("_", ""), 0)
+                return int(cleaned, 0)
             except ValueError:
                 pass
             try:
-                return float(spelling.replace("_", ""))
+                return float(cleaned)
             except ValueError:
                 return spelling
 

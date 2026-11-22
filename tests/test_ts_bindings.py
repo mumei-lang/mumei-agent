@@ -3007,3 +3007,22 @@ make<number, string>(1).methodA();
         if "methodA()" in source[c.span.start:c.span.end]
     )
     assert call.target == method_a.id
+
+
+def test_bigint_literal_separators_match_by_value():
+    # `1_000n` and `1000n` spell the same bigint — the literal-typed
+    # overload keeps the call over the generic `bigint` one.
+    source = """
+declare function m(x: 1000n): number;
+declare function m(x: bigint): string;
+m(1_000n);
+"""
+    report = build_ts_bindings(source)
+    overloads = _bindings(report, "m", "ambient")
+    literal_overload = min(overloads, key=lambda b: b.span.start)
+    ref = next(
+        r for r in report.references
+        if source[r.span.start:r.span.end] == "m"
+        and r.span.start > source.index(": string;")
+    )
+    assert ref.binding_id == literal_overload.id
