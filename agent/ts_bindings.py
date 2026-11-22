@@ -635,7 +635,10 @@ class _TypeScriptBindings:
             namespaces,
             alias_node=node.child_by_field_name("value"),
             class_like=kind in {"class", "interface", "enum", "ambient"},
-            tdz=node.type in {"class_declaration", "enum_declaration"},
+            # Ambient declarations (`declare class`/`declare enum`)
+            # don't initialize anything at runtime — no TDZ.
+            tdz=node.type in {"class_declaration", "enum_declaration"}
+            and not self._is_ambient(node),
             declaration_function=self._function_parent_id(node),
             self_scope=self.span(node) if expression_name else None,
         )
@@ -1307,6 +1310,30 @@ class _TypeScriptBindings:
             node = node.parent
         return ".".join(parts)
 
+    @staticmethod
+    def _mergeable_kind_pair(first: str, second: str) -> bool:
+        """Whether two same-named declarations may merge (verified
+        against tsc): `namespace` merges with anything; `enum` only
+        with `enum`; `interface` with `interface`/`class`/`ambient`/
+        `function`; `ambient` with `interface`/`function`; `function`
+        overloads. `class`+`class`, `ambient`+`ambient`, `class`+
+        `ambient`, `class`+`function` and pairs involving non-
+        declaration kinds (`local`, `import`, `type_alias`) are
+        duplicate-identifier errors, not merges."""
+        kinds = {first, second}
+        if "namespace" in kinds:
+            return True
+        if "enum" in kinds:
+            return kinds == {"enum"}
+        if kinds <= {"class", "ambient"}:
+            return False
+        if "ambient" in kinds:
+            return kinds <= {"ambient", "interface", "function"}
+        return (
+            kinds <= {"interface", "class"}
+            or kinds <= {"interface", "function"}
+        )
+
     def _merge_siblings(self, record: _Record) -> list[_Record]:
         """Same-named declarations that merge into `record`'s entity.
 
@@ -1321,15 +1348,8 @@ class _TypeScriptBindings:
                 or sibling.binding.name != record.binding.name
             ):
                 continue
-            # TS declaration-merging rules for same-named pairs:
-            # `class C` + `class C` in one container is a
-            # duplicate-identifier error, not a merge — keep them
-            # distinct so a sibling's methods don't shadow the base's.
-            # `enum` only merges with `namespace` or another `enum`
-            # (split `enum E` blocks merge their members).
-            kinds = {record.binding.kind, sibling.binding.kind}
-            if kinds == {"class"} or (
-                "enum" in kinds and kinds - {"enum", "namespace"}
+            if not self._mergeable_kind_pair(
+                record.binding.kind, sibling.binding.kind
             ):
                 continue
             if (
@@ -1350,6 +1370,14 @@ class _TypeScriptBindings:
     def _merged_constructible(self, record: _Record) -> _Record:
         """Prefer the class (or ambient class) of a merged declaration."""
         if record.binding.kind in {"class", "ambient"}:
+            return record
+        if record.binding.kind not in {
+            "interface", "enum", "namespace",
+        }:
+            # Only declaration-merging participants can stand in for a
+            # class: a `local`/`import`/`function` named like a class in
+            # a sibling namespace block is a duplicate identifier, not
+            # a merge — its references must name the variable.
             return record
         for preferred in ("class", "ambient"):
             for sibling in self._merge_siblings(record):
