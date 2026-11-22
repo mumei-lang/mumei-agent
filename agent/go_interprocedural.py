@@ -3141,6 +3141,144 @@ class _Builder:
             tokens, current,
         )
 
+    def _value_struct_scalar_array_field_target(
+        self, node: Any, params: dict | None = None
+    ) -> tuple[Any, Any, Any] | None:
+        """A scalar array field on a named value-struct local or param."""
+        current = node
+        while current is not None and current.type == "parenthesized_expression":
+            current = next(
+                (
+                    child
+                    for child in current.named_children
+                    if child.type != "comment"
+                ),
+                None,
+            )
+        fields = []
+        while current is not None and current.type == "selector_expression":
+            field = current.child_by_field_name("field")
+            if field is None:
+                return None
+            fields.append(field)
+            current = current.child_by_field_name("operand")
+            while (
+                current is not None
+                and current.type == "parenthesized_expression"
+            ):
+                current = next(
+                    (
+                        child
+                        for child in current.named_children
+                        if child.type != "comment"
+                    ),
+                    None,
+                )
+        if not fields or current is None or current.type != "identifier":
+            return None
+        root_ref = self.references.get(self.node_key(current))
+        root_binding = (
+            self.bindings.get(root_ref.binding_id)
+            if root_ref is not None and root_ref.binding_id
+            else None
+        )
+        if (
+            root_ref is None
+            or root_ref.kind == "import"
+            or root_binding is None
+            or root_binding.type is None
+            or root_binding.type.kind != "struct"
+            or not root_binding.type.type_id
+            or self._type_fact_has_type_args(root_binding.type)
+            or self._package_level(root_binding)
+            or (
+                root_ref.binding_id not in (params or {})
+                and not self._is_local_composite(root_binding)
+            )
+            or self._scalar_container_field_pointer_crossing(
+                node, params
+            )
+        ):
+            return None
+        fact = root_binding.type
+        members = []
+        for index, field in enumerate(reversed(fields)):
+            field_ref = self.references.get(self.node_key(field))
+            member = self._field_identity(field_ref)
+            if (
+                member is None
+                or member.type is None
+                or member.name.encode("utf-8") != field.text
+                or member.id
+                not in {
+                    direct_member.id
+                    for direct_member in self._struct_fields_for_fact(
+                        fact
+                    )
+                }
+            ):
+                return None
+            members.append(member)
+            if index < len(fields) - 1:
+                fact = self._struct_value_fact(member.type)
+                if (
+                    fact is None
+                    or not fact.type_id
+                    or self._type_fact_has_type_args(member.type)
+                ):
+                    return None
+        member = members[-1]
+        if (
+            member.type.kind != "array"
+            or getattr(member.type, "elem", None) is None
+            or not self._scalar_value_fact(member.type.elem)
+        ):
+            return None
+        self._pin_fact_identities(root_binding.type)
+        for field_member in members:
+            self.pinned.add(field_member.id)
+            self._pin_fact_identities(field_member.type)
+        return root_ref, member, node
+
+    def _value_struct_scalar_array_index_target(
+        self, node: Any, params: dict | None = None
+    ) -> tuple[Any, Any, Any, list[Any]] | None:
+        indexes = []
+        current = node
+        while current is not None and current.type == "parenthesized_expression":
+            current = next(
+                (
+                    child
+                    for child in current.named_children
+                    if child.type != "comment"
+                ),
+                None,
+            )
+        while current is not None and current.type == "index_expression":
+            indexes.append(current.child_by_field_name("index"))
+            current = current.child_by_field_name("operand")
+            while (
+                current is not None
+                and current.type == "parenthesized_expression"
+            ):
+                current = next(
+                    (
+                        child
+                        for child in current.named_children
+                        if child.type != "comment"
+                    ),
+                    None,
+                )
+        if len(indexes) != 1:
+            return None
+        field_target = self._value_struct_scalar_array_field_target(
+            current, params
+        )
+        if field_target is None:
+            return None
+        root_ref, member, field_selector = field_target
+        return root_ref, member, field_selector, indexes
+
     def _opaque_container_struct_element_field_target(
         self,
         node: Any,
@@ -8372,6 +8510,28 @@ class _Builder:
                 break
             indexes.append(inner.child_by_field_name("index"))
             inner = inner.child_by_field_name("operand")
+        if len(indexes) == 1:
+            value_array_field = (
+                self._value_struct_scalar_array_field_target(
+                    inner, params
+                )
+            )
+            if value_array_field is not None:
+                base_deps = self.expression(
+                    inner, fn, params, locals_, transfers, count,
+                    depth + 1,
+                )
+                index_node = indexes[0]
+                index_deps = (
+                    self.expression(
+                        index_node, fn, params, locals_, transfers, count,
+                        depth + 1,
+                    )
+                    if index_node is not None
+                    and index_node.type not in _INDEX_LITERALS
+                    else frozenset()
+                )
+                return base_deps | index_deps
         member = None
         package_var = None
         bound_pointer = None
@@ -14869,9 +15029,9 @@ class _Builder:
             # the conflated set cannot tell a rebinding from a
             # backing write — which stays on the sound side.
             for pid, ordinal in caller_visible_params.items():
-                if locals_.get(pid, frozenset({ordinal})) != frozenset(
-                    {ordinal}
-                ):
+                if locals_.get(
+                    pid, frozenset({ordinal})
+                ) != frozenset({ordinal}):
                     transfers.append(
                         CallTransfer(
                             FileSpan(
@@ -18247,6 +18407,9 @@ class _Builder:
             opaque_elem_old_deps: dict[int, frozenset[int]] = {}
             opaque_elem_slot_ids: dict[int, str] = {}
             opaque_elem_root_slots: dict[int, str] = {}
+            value_struct_array_field_writes: dict[
+                int, frozenset[int]
+            ] = {}
             # `p.A[i].W = q` — the pointer-member store folds
             # opaquely into the root's set and `indirect_writes`;
             # the index's deps join that value too — whether the
@@ -18402,6 +18565,53 @@ class _Builder:
                 # the escaped-binding fold: `p := &x` may aim the
                 # store at a tracked local, so the union keeps it
                 # sound.
+                value_array_elem_lhs = (
+                    self._value_struct_scalar_array_index_target(
+                        lhs, params
+                    )
+                )
+                if value_array_elem_lhs is not None:
+                    (
+                        root_ref, _member, field_selector, indexes,
+                    ) = value_array_elem_lhs
+                    refs.append((root_ref, True, False, False))
+                    ri = len(refs) - 1
+                    self._for_write_target = True
+                    try:
+                        field_deps = self.expression(
+                            field_selector, fn, params, locals_,
+                            transfers, count, 0,
+                        )
+                    finally:
+                        self._for_write_target = False
+                    self._record_read(field_deps)
+                    index_deps = frozenset()
+                    for index in reversed(indexes):
+                        if (
+                            index is not None
+                            and index.type not in _INDEX_LITERALS
+                        ):
+                            index_deps |= self.expression(
+                                index, fn, params, locals_,
+                                transfers, count, 0,
+                            )
+                    self._record_read(index_deps)
+                    value_struct_array_field_writes[ri] = index_deps
+                    continue
+                value_array_field_lhs = (
+                    self._value_struct_scalar_array_field_target(
+                        lhs, params
+                    )
+                )
+                if value_array_field_lhs is not None:
+                    root_ref, _member, _field_selector = (
+                        value_array_field_lhs
+                    )
+                    refs.append((root_ref, True, False, False))
+                    value_struct_array_field_writes[
+                        len(refs) - 1
+                    ] = frozenset()
+                    continue
                 write_target = self._opaque_write_target(
                     lhs, locals_, params
                 )
@@ -19906,6 +20116,9 @@ class _Builder:
                     # field reads observe it.
                     broadcast = len(ref) >= 3 and ref[2]
                     ref, accumulating = ref[0], ref[1]
+                array_index_deps = value_struct_array_field_writes.get(i)
+                if array_index_deps is not None:
+                    value = value | array_index_deps
                 if accumulating:
                     # `x op= e` reads the old value too — the result unions
                     # the binding's current dependencies with the RHS's.
@@ -22007,21 +22220,57 @@ class _Builder:
                 computed_pointer_result = False
                 opaque_range = None
                 opaque_range_field = None
+                range_field_operand = right
+                while (
+                    range_field_operand is not None
+                    and range_field_operand.type
+                    == "parenthesized_expression"
+                ):
+                    range_field_operand = next(
+                        (
+                            child
+                            for child in range_field_operand.named_children
+                            if child.type != "comment"
+                        ),
+                        None,
+                    )
                 if (
-                    right is not None
+                    range_field_operand is not None
                     and member is None
                     and container_var is None
-                    and right.type in {
+                    and range_field_operand.type in {
                         "selector_expression", "field_expression"
                     }
                 ):
-                    opaque_range_field = (
-                        self._opaque_container_field_target(
-                            right,
-                            params,
-                            allow_struct_elements=True,
+                    if (
+                        right is not None
+                        and right.type in {
+                            "selector_expression", "field_expression"
+                        }
+                    ):
+                        opaque_range_field = (
+                            self._opaque_container_field_target(
+                                right,
+                                params,
+                                allow_struct_elements=True,
+                            )
                         )
-                    )
+                    if opaque_range_field is None:
+                        value_array_field = (
+                            self._value_struct_scalar_array_field_target(
+                                range_field_operand, params
+                            )
+                        )
+                        if value_array_field is not None:
+                            root_ref, value_array_member, _ = (
+                                value_array_field
+                            )
+                            opaque_range_field = (
+                                root_ref.binding_id,
+                                root_ref.binding_id,
+                                value_array_member,
+                                frozenset(),
+                            )
                 if (
                     right is not None
                     and member is None
@@ -22627,7 +22876,7 @@ class _Builder:
                     value_deps = frozenset()
                     if opaque_range_field is not None:
                         value_deps = self.expression(
-                            right, fn, params, scope, transfers,
+                            range_field_operand, fn, params, scope, transfers,
                             count, 0,
                         ) | self._opaque_container_deps(
                             opaque_range_field[0], scope
@@ -24356,6 +24605,43 @@ class _Builder:
                         imported=True,
                     )
                 )
+                return
+            value_array_elem = (
+                self._value_struct_scalar_array_index_target(
+                    operand, params
+                )
+            )
+            if value_array_elem is not None:
+                (
+                    root_ref, _member, field_selector, indexes,
+                ) = value_array_elem
+                self._for_write_target = True
+                try:
+                    field_deps = self.expression(
+                        field_selector, fn, params, locals_,
+                        transfers, count, 0,
+                    )
+                finally:
+                    self._for_write_target = False
+                self._record_read(field_deps)
+                index_deps = frozenset()
+                for index in reversed(indexes):
+                    if (
+                        index is not None
+                        and index.type not in _INDEX_LITERALS
+                    ):
+                        index_deps |= self.expression(
+                            index, fn, params, locals_,
+                            transfers, count, 0,
+                        )
+                self._record_read(index_deps)
+                root_id = root_ref.binding_id
+                old = (
+                    locals_.get(root_id, frozenset())
+                    if root_id in locals_
+                    else frozenset({params[root_id]})
+                )
+                locals_[root_id] = old | index_deps
                 return
             # `t.F++` — an increment through a bound field mutates the
             # pointee's caller memory like `t.F = v`, and records the
@@ -28883,6 +29169,16 @@ class _Builder:
                     if len(arguments) != 1:
                         raise _Unsupported(
                             "unresolved_or_opaque_call", _span(node)
+                        )
+                    value_array_field = (
+                        self._value_struct_scalar_array_field_target(
+                            arguments[0], params
+                        )
+                    )
+                    if value_array_field is not None:
+                        return self.expression(
+                            arguments[0], fn, params, locals_,
+                            transfers, count, depth + 1,
                         )
                     local_chan_chan_elem = (
                         self._chan_chan_elem_index_target(

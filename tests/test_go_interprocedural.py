@@ -32416,6 +32416,501 @@ def test_struct_field_scalar_element_callee_write_reaches_source(
 
 
 @pytest.mark.parametrize(
+    ("signature", "direct", "alias", "expected"),
+    [
+        (
+            "o Sz, i int64",
+            "return o.R[i]",
+            "r := o.R; return r[i]",
+            frozenset({0, 1}),
+        ),
+        (
+            "o Sz, x int64",
+            "o.R[0] = x; return o.R[0]",
+            "r := o.R; r[0] = x; return r[0]",
+            frozenset({0, 1}),
+        ),
+        (
+            "o Sz, i int64, x int64",
+            "o.R[i] = x; return o.R[i]",
+            "r := o.R; r[i] = x; return r[i]",
+            frozenset({0, 1, 2}),
+        ),
+        (
+            "o Sz, x int64",
+            "o.R[0] += x; return o.R[0]",
+            "r := o.R; r[0] += x; return r[0]",
+            frozenset({0, 1}),
+        ),
+        (
+            "o Sz",
+            "o.R[0]++; return o.R[0]",
+            "r := o.R; r[0]++; return r[0]",
+            frozenset({0}),
+        ),
+        (
+            "o Sz, x int64",
+            "o.R = [2]int64{x, 0}; return o.R[0]",
+            "r := o.R; r[0] = x; return r[0]",
+            frozenset({0, 1}),
+        ),
+        (
+            "o Sz",
+            "return int64(len(o.R))",
+            "r := o.R; return int64(len(r))",
+            None,
+        ),
+        (
+            "o Sz",
+            "return int64(cap(o.R))",
+            "r := o.R; return int64(cap(r))",
+            None,
+        ),
+        (
+            "o Sz",
+            "sum := int64(0); for _, v := range o.R { sum += v }; "
+            "return sum",
+            "r := o.R; sum := int64(0); "
+            "for _, v := range r { sum += v }; return sum",
+            None,
+        ),
+        (
+            "o Oz, x int64",
+            "o.S.R[0] = x; return o.S.R[0]",
+            "r := o.S.R; r[0] = x; return r[0]",
+            frozenset({0, 1}),
+        ),
+        (
+            "x int64",
+            "o := Sz{R: [2]int64{x, 0}}; return o.R[0]",
+            "o := Sz{R: [2]int64{x, 0}}; r := o.R; return r[0]",
+            frozenset({0}),
+        ),
+    ],
+    ids=[
+        "read",
+        "store-literal-index",
+        "store-variable-index",
+        "compound",
+        "increment",
+        "whole-field-store",
+        "len",
+        "cap",
+        "range",
+        "nested-value-field",
+        "local-composite",
+    ],
+)
+def test_value_struct_scalar_array_field_operations_match_alias(
+    go_types_helper, signature, direct, alias, expected
+):
+    declarations = (
+        "type Sz struct { A []int64; R [2]int64; V int64 }\n"
+        "type Oz struct { S Sz }\n"
+    )
+    direct_result = named(
+        *unit(
+            go_types_helper,
+            declarations + f"func F({signature}) int64 {{ {direct} }}\n",
+        )
+    )
+    alias_result = named(
+        *unit(
+            go_types_helper,
+            declarations + f"func F({signature}) int64 {{ {alias} }}\n",
+        )
+    )
+    assert direct_result.available == alias_result.available
+    assert direct_result.available, direct_result.gaps
+    assert direct_result.return_dependencies == (
+        alias_result.return_dependencies
+    )
+    if direct in {
+        "o.R[0] = x; return o.R[0]",
+        "o.R[i] = x; return o.R[i]",
+        "o.R[0] += x; return o.R[0]",
+        "o.R = [2]int64{x, 0}; return o.R[0]",
+        "o.S.R[0] = x; return o.S.R[0]",
+    }:
+        assert direct_result.effects == "unknown"
+        assert alias_result.effects == "none_in_supported_fragment"
+    else:
+        assert direct_result.effects == alias_result.effects
+    if expected is not None:
+        assert direct_result.return_dependencies == expected
+
+
+@pytest.mark.parametrize(
+    ("binding", "term"),
+    [
+        ("i := range", "int64(i)"),
+        ("_, v := range", "v"),
+    ],
+    ids=["index", "value"],
+)
+def test_value_struct_scalar_array_range_parentheses_match_plain(
+    go_types_helper, binding, term
+):
+    declarations = "type Sz struct { R [2]int64 }\n"
+
+    def result_for(operand):
+        return named(
+            *unit(
+                go_types_helper,
+                declarations
+                + "func F(o Sz) int64 {\n"
+                + "\tsum := int64(0)\n"
+                + f"\tfor {binding} {operand} {{ sum += {term} }}\n"
+                + "\treturn sum\n"
+                + "}\n",
+            )
+        )
+
+    plain = result_for("o.R")
+    parenthesized = result_for("(o.R)")
+    assert plain.available, plain.gaps
+    assert parenthesized.available, parenthesized.gaps
+    assert parenthesized.return_dependencies == plain.return_dependencies
+    assert parenthesized.effects == plain.effects
+
+
+def test_value_struct_scalar_array_field_updates_are_weak(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type Sz struct { R [2]int64 }\n"
+            "func F(o Sz, x, y int64) int64 {\n"
+            "\to.R[0] = x\n"
+            "\to.R[1] = y\n"
+            "\treturn o.R[0]\n"
+            "}\n",
+        )
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1, 2})
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        (
+            "t := o; t.R[0] = x; return o.R[0]",
+            frozenset({0}),
+        ),
+        (
+            "r := o.R; o.R[0] = x; return r[0]",
+            frozenset({0}),
+        ),
+        (
+            "o.R[0] = x; t := o; return t.R[0]",
+            frozenset({0, 1}),
+        ),
+    ],
+    ids=["struct-copy", "array-copy", "copy-after-write"],
+)
+def test_value_struct_scalar_array_field_copies_are_isolated(
+    go_types_helper, body, expected
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type Sz struct { R [2]int64 }\n"
+            f"func F(o Sz, x int64) int64 {{ {body} }}\n",
+        )
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == expected
+
+
+def test_value_struct_scalar_array_field_callee_write_matches_scalar_field(
+    go_types_helper,
+):
+    data = unit(
+        go_types_helper,
+        "type Sz struct { R [2]int64; V int64 }\n"
+        "func GArray(o Sz, x int64) { o.R[0] = x }\n"
+        "func FArray(o Sz, x int64) int64 {\n"
+        "\tGArray(o, x)\n"
+        "\treturn o.R[0]\n"
+        "}\n"
+        "func GScalar(o Sz, x int64) { o.V = x }\n"
+        "func FScalar(o Sz, x int64) int64 {\n"
+        "\tGScalar(o, x)\n"
+        "\treturn o.V\n"
+        "}\n",
+    )
+    array_result = named(*data, "FArray")
+    scalar_result = named(*data, "FScalar")
+    array_callee = named(*data, "GArray")
+    scalar_callee = named(*data, "GScalar")
+    assert array_result.available, array_result.gaps
+    assert scalar_result.available, scalar_result.gaps
+    assert array_result.return_dependencies == frozenset({0})
+    assert array_result.return_dependencies == (
+        scalar_result.return_dependencies
+    )
+    assert array_result.effects == scalar_result.effects == "unknown"
+
+    def caller_backing_shape(summary):
+        return [
+            (call.imported, call.arguments)
+            for call in summary.calls
+            if call.target.endswith("/caller-backing")
+        ]
+
+    assert caller_backing_shape(array_callee) == [
+        (True, ())
+    ]
+    assert caller_backing_shape(array_callee) == (
+        caller_backing_shape(scalar_callee)
+    )
+
+
+def test_value_struct_scalar_array_callee_mixed_writes_keep_x(
+    go_types_helper,
+):
+    data = unit(
+        go_types_helper,
+        "type Sz struct { A []int64; R [2]int64 }\n"
+        "func Fill(a []int64, x int64) { a[0] = x }\n"
+        "func G1(o Sz, x int64) { o.R[0] = x; o.A[0] = x }\n"
+        "func G2(o Sz, x int64) { o.R[0] = x; Fill(o.A, x) }\n"
+        "func G6(o Sz, x int64) { o.R[0] = x; o.A[0] = o.R[0] }\n"
+        "func F1(a []int64, x int64) int64 {\n"
+        "\to := Sz{A: a}\n"
+        "\tG1(o, x)\n"
+        "\treturn a[0]\n"
+        "}\n"
+        "func F2(a []int64, x int64) int64 {\n"
+        "\to := Sz{A: a}\n"
+        "\tG2(o, x)\n"
+        "\treturn a[0]\n"
+        "}\n"
+        "func F6(a []int64, x int64) int64 {\n"
+        "\to := Sz{A: a}\n"
+        "\tG6(o, x)\n"
+        "\treturn a[0]\n"
+        "}\n",
+    )
+    for function in ("F1", "F2", "F6"):
+        result = named(*data, function)
+        assert result.available, (function, result.gaps)
+        assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_value_struct_scalar_array_promoted_pointer_fields_stay_closed(
+    go_types_helper,
+):
+    declarations = (
+        "type EmbedB struct { R [2]int64 }\n"
+        "type EmbedOuter struct { *EmbedB; A []int64 }\n"
+    )
+    read = named(
+        *unit(
+            go_types_helper,
+            declarations
+            + "func F(s EmbedOuter, i int64) int64 { return s.R[i] }\n",
+        )
+    )
+    whole_store = named(
+        *unit(
+            go_types_helper,
+            declarations
+            + "func G(s EmbedOuter) { s.R = [2]int64{1, 2} }\n"
+            "func F(s EmbedOuter) int64 { G(s); return s.R[0] }\n",
+        )
+    )
+    element_store = named(
+        *unit(
+            go_types_helper,
+            declarations
+            + "func G(s EmbedOuter, x int64) { s.R[0] = x }\n"
+            "func F(s EmbedOuter, x int64) int64 {\n"
+            "\tG(s, x)\n"
+            "\treturn s.R[0]\n"
+            "}\n",
+        )
+    )
+    assert not read.available
+    assert read.gaps[0].reason == "non_parameter_reference"
+    assert not whole_store.available
+    assert whole_store.gaps[0].reason == "callee_unsupported"
+    assert not element_store.available
+    assert element_store.gaps[0].reason == "callee_unsupported"
+
+
+def test_caller_backing_transfer_survives_param_slice_reseat(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func G(a []int64, x int64) {\n"
+            "\ta[0] = x\n"
+            "\ta = []int64{0}\n"
+            "}\n"
+            "func F(a []int64, x int64) int64 {\n"
+            "\tG(a, x)\n"
+            "\treturn a[0]\n"
+            "}\n",
+        )
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_value_struct_scalar_array_field_index_call_runs_once(
+    go_types_helper,
+):
+    declarations = (
+        "type Sz struct { R [2]int64 }\n"
+        "func Index(i int64) int64 { return i }\n"
+    )
+    direct_data = unit(
+        go_types_helper,
+        declarations
+        + "func F(o Sz, i int64) int64 { return o.R[Index(i)] }\n",
+    )
+    direct = named(*direct_data)
+    alias = named(
+        *unit(
+            go_types_helper,
+            declarations
+            + "func F(o Sz, i int64) int64 {\n"
+            "\tr := o.R\n"
+            "\treturn r[Index(i)]\n"
+            "}\n",
+        )
+    )
+    assert direct.available, direct.gaps
+    assert alias.available, alias.gaps
+    assert direct.return_dependencies == alias.return_dependencies
+    index_id = named(*direct_data, "Index").binding_id
+    assert sum(call.target == index_id for call in direct.calls) == 1
+    direct_write_data = unit(
+        go_types_helper,
+        declarations
+        + "func F(o Sz, i, x int64) int64 {\n"
+        "\to.R[Index(i)] = x\n"
+        "\treturn o.R[0]\n"
+        "}\n",
+    )
+    direct_write = named(*direct_write_data)
+    alias_write = named(
+        *unit(
+            go_types_helper,
+            declarations
+            + "func F(o Sz, i, x int64) int64 {\n"
+            "\tr := o.R\n"
+            "\tr[Index(i)] = x\n"
+            "\treturn r[0]\n"
+            "}\n",
+        )
+    )
+    assert direct_write.available, direct_write.gaps
+    assert alias_write.available, alias_write.gaps
+    assert direct_write.return_dependencies == (
+        alias_write.return_dependencies
+    ) == frozenset({0, 1, 2})
+    assert direct_write.effects == "unknown"
+    assert alias_write.effects == "none_in_supported_fragment"
+    write_index_id = named(*direct_write_data, "Index").binding_id
+    assert sum(
+        call.target == write_index_id for call in direct_write.calls
+    ) == 1
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        (
+            "type Sz struct { R [2]int64 }\n"
+            "func F(p *Sz, i int64) int64 { return p.R[i] }\n"
+        ),
+        (
+            "type Sz struct { R [2]int64 }\n"
+            "func F(p *Sz, i int64) int64 { return (*p).R[i] }\n"
+        ),
+        (
+            "type Sz struct { R [2]int64 }\n"
+            "func F(o Sz) int64 { p := &o; return p.R[0] }\n"
+        ),
+        (
+            "type Sz struct { R [2][2]int64 }\n"
+            "func F(o Sz) int64 { return o.R[0][0] }\n"
+        ),
+        (
+            "type Sz struct { R [2]int64 }\n"
+            "func F(o Sz) int64 { p := &o.R; return p[0] }\n"
+        ),
+    ],
+    ids=[
+        "pointer-root",
+        "explicit-pointer-root",
+        "address-of-struct-root",
+        "multidimensional-array",
+        "address-of-field",
+    ],
+)
+def test_value_struct_scalar_array_field_unsupported_shapes_stay_closed(
+    go_types_helper, source
+):
+    result = named(*unit(go_types_helper, source))
+    assert not result.available
+
+
+def test_value_struct_scalar_array_field_pins_declared_type(
+    go_types_helper,
+):
+    function = (
+        "package p\n"
+        "func F(o Sz, i int64) int64 { return int64(o.R[i]) }\n"
+    )
+    old_files = {
+        "types.go": "package p\ntype Sz struct { R [2]int64 }\n",
+        "function.go": function,
+    }
+    old_report = package_report(go_types_helper, old_files)
+    old_snapshot = load_go_package_snapshot(
+        old_report, old_files, target_arch="amd64"
+    )
+    old_summaries = ip.summarize_go_package(old_files, old_snapshot)
+    old_result = named_package(
+        old_files, old_snapshot, old_summaries, "F"
+    )
+    assert old_result.available, old_result.gaps
+    old_type_id = next(
+        binding.id
+        for binding in old_snapshot.bindings
+        if binding.name == "Sz" and binding.kind == "type"
+    )
+    assert old_type_id in old_result.pinned
+
+    changed_files = {
+        "types.go": "package p\ntype Sz struct { R [2]int32 }\n",
+        "function.go": function,
+    }
+    changed_report = package_report(go_types_helper, changed_files)
+    changed_snapshot = load_go_package_snapshot(
+        changed_report, changed_files, target_arch="amd64"
+    )
+    changed_summaries = ip.summarize_go_package(
+        changed_files, changed_snapshot
+    )
+    restored = ip.GoSummarySet.from_dict(old_summaries.to_dict())
+    from agent import go_summaries
+
+    reusable, stale, missing = go_summaries._reuse_partition(
+        restored, changed_summaries, changed_report
+    )
+    assert old_result.binding_id not in reusable
+    assert old_result.binding_id in stale
+    assert old_result.binding_id not in missing
+
+
+@pytest.mark.parametrize(
     "source",
     [
         (
@@ -35477,8 +35972,6 @@ def test_struct_field_parallel_assignment_field_rhs_preserves_alias(
         "type P struct { A []int64 }\n"
         "type Q struct { P *P }\n"
         "func F(q Q) int64 { return q.P.A[0] }\n",
-        "type S struct { A [2]int64 }\n"
-        "func F(s S, x int64) int64 { s.A[0] = x; return s.A[0] }\n",
         "type S struct { A []int64 }\n"
         "var GS S\n"
         "func F() int64 { return GS.A[0] }\n",

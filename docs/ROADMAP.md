@@ -4668,8 +4668,11 @@ fields and scalar-only structs remain value copies.
 Pointer-root or otherwise untracked field shapes stay closed
 rather than inventing a backing relationship.
 Direct operations on collection-valued fields are admitted as implicit
-extractions; plain array fields and pointer roots stay closed. Comma-ok
-map reads and select-receive targets on direct fields remain closed.
+extractions. Fixed-size scalar array fields on named value structs admit
+indexed reads and writes, whole-field stores, `len`/`cap`, and range while
+retaining value-copy semantics; pointer roots and other plain array fields
+stay closed. Comma-ok map reads and select-receive targets on direct fields
+remain closed.
 Caller-visible container element reads observe pointer writes and opaque or
 dynamic call writes through shared backing tokens; imported calls remain out
 of scope.
