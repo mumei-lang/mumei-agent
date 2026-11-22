@@ -2706,11 +2706,11 @@ f(new Widget());
 
 
 def test_overload_interpolated_template_is_not_a_literal():
-    # `f(`${name}`)` is computed — it does not fit a `f(x: "${name}")`
-    # literal overload, so the wider `string` signature wins.
+    # `f(`value-${n}`)` is computed — it does not fit the same-value
+    # literal overload `f(x: "value-${n}")`, so `string` wins.
     name = "n"
     source = """
-function f(a: "${name}"): void {}
+function f(a: "value-${n}"): void {}
 function f(a: string): void {}
 declare const n: string;
 f(`value-${n}`);
@@ -2724,3 +2724,22 @@ f(`value-${n}`);
         if source[c.span.start:c.span.end] == "f(`value-${n}`)"
     )
     assert call.target == string_fn.id
+
+def test_overload_escaped_template_is_a_literal():
+    # `` `\${n}` `` evaluates to the literal `${n}` — the escape makes
+    # it constant, so it fits the `"${n}"` literal overload.
+    source = """
+function f(a: "${n}"): void {}
+function f(a: string): void {}
+declare const n: string;
+f(`\\${n}`);
+"""
+    report = build_ts_bindings(source)
+    literal_fn = sorted(
+        _bindings(report, "f", "function"), key=lambda b: b.span.start
+    )[0]
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start:c.span.end] == "f(`\\${n}`)"
+    )
+    assert call.target == literal_fn.id

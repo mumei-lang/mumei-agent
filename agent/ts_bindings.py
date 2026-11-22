@@ -1846,9 +1846,13 @@ class _TypeScriptBindings:
         def value(spelling: str) -> object:
             if quoted(spelling):
                 inner = spelling[1:-1]
-                if spelling[0] == "`" and "${" in inner:
+                # An unescaped `${` starts interpolation; `\${` is
+                # literal text (`` `\${x}` `` is the string `${x}`).
+                if spelling[0] == "`" and re.search(
+                    r"(?<!\\)\$\{", inner
+                ):
                     return nonconstant
-                return inner
+                return inner.replace("\\$", "$")
             try:
                 return int(spelling.replace("_", ""), 0)
             except ValueError:
