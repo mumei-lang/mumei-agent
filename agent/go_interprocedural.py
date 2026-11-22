@@ -34585,6 +34585,24 @@ class _Builder:
             value = self._strip_parens(argument)
             if value is None:
                 continue
+            bound_method = None
+            if value.type == "identifier":
+                value_ref = self.references.get(self.node_key(value))
+                if value_ref is not None:
+                    bound_method = self.bound_method_values.get(
+                        value_ref.binding_id
+                    )
+            elif value.type == "selector_expression":
+                bound_method = self._method_value_parts(value)
+            if bound_method is not None:
+                actual_values[index] = (
+                    self._bound_method_live_receiver_deps(
+                        bound_method,
+                        actual_values[index],
+                        params,
+                        locals_,
+                    )
+                )
             binding_id = self._closure_argument_record_id(value, params)
             if binding_id is not None:
                 actual_values[index] |= self._captured_current_deps(
@@ -39040,6 +39058,28 @@ class _Builder:
                 continue
             self.escaped.add(binding_id)
 
+    def _bound_method_live_receiver_deps(
+        self,
+        bound_mv: tuple[str, str | None, str | None],
+        receiver_deps: frozenset[int],
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+    ) -> frozenset[int]:
+        method_id, recv_id, _ = bound_mv
+        method = self.functions.get(method_id)
+        if (
+            recv_id is None
+            or method is None
+            or method.receiver is None
+            or method.receiver.type.kind != "pointer"
+        ):
+            return receiver_deps
+        if recv_id in locals_:
+            return receiver_deps | locals_[recv_id]
+        if recv_id in params:
+            return receiver_deps | frozenset({params[recv_id]})
+        return receiver_deps
+
     def _bound_method_call(
         self,
         node: Any,
@@ -39137,6 +39177,9 @@ class _Builder:
                 raise _Unsupported(
                     "unsupported_expression", _span(node)
                 )
+            recv_deps = self._bound_method_live_receiver_deps(
+                bound_mv, recv_deps, params, locals_
+            )
             if (
                 recv_binding is not None
                 and recv_binding.type.kind == "pointer"

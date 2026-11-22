@@ -55125,6 +55125,7 @@ def test_slice_array_element_method_values(go_types_helper):
         "func g() int { return 0 }\n"
         "func (s S) Run() int64 { return s.F() }\n"
         "func (s *S) PRun() int64 { return s.F() }\n"
+        "func (s *S) PGet() int64 { return s.V }\n"
         "func (w W) Do() { w.F() }\n"
         "func (s S) Get() int64 { return s.V }\n"
         "func (s *S) Set(x int64) { s.V = x }\n"
@@ -55144,6 +55145,26 @@ def test_slice_array_element_method_values(go_types_helper):
         "\tv := y; ss := make([]S, 1)\n"
         "\tss[0].F = func() int64 { return v }; f := ss[0].PRun\n"
         "\tv = x; return f()\n"
+        "}\n"
+        "func FPointerSlice(x, y int64) int64 {\n"
+        "\tss := []S{{V: y}}; f := ss[0].PGet\n"
+        "\tss[0].V = x; return f()\n"
+        "}\n"
+        "func FPointerArray(x, y int64) int64 {\n"
+        "\tss := [1]S{{V: y}}; f := ss[0].PGet\n"
+        "\tss[0].V = x; return f()\n"
+        "}\n"
+        "func FPointerParam(ss []S, x int64) int64 {\n"
+        "\tf := ss[0].PGet; ss[0].V = x; return f()\n"
+        "}\n"
+        "func FPointerIdentifier(x, y int64) int64 {\n"
+        "\ts := S{V: y}; f := s.PGet; s.V = x; return f()\n"
+        "}\n"
+        "func FPointerIdentifierReseat(x, y int64) int64 {\n"
+        "\ts := S{V: y}; f := s.PGet; s = S{V: x}; return f()\n"
+        "}\n"
+        "func FPointerCallback(x, y int64) int64 {\n"
+        "\ts := S{V: y}; f := s.PGet; s.V = x; return ap(f)\n"
         "}\n"
         "func FIndex(x, y int64, i int) int64 {\n"
         "\tv := y; ss := make([]S, 2)\n"
@@ -55231,6 +55252,21 @@ def test_slice_array_element_method_values(go_types_helper):
         result = named_package(files, snapshot, summaries, function_name)
         assert result.available, (function_name, result.gaps)
         assert result.return_dependencies == dependencies, function_name
+    for function_name, dependency in (
+        ("FPointerSlice", 0),
+        ("FPointerArray", 0),
+        ("FPointerParam", 1),
+        ("FPointerIdentifierReseat", 0),
+        ("FPointerCallback", 0),
+    ):
+        result = named_package(files, snapshot, summaries, function_name)
+        assert result.available, (function_name, result.gaps)
+        assert dependency in result.return_dependencies, function_name
+    pointer_identifier = named_package(
+        files, snapshot, summaries, "FPointerIdentifier"
+    )
+    assert pointer_identifier.available, pointer_identifier.gaps
+    assert pointer_identifier.return_dependencies == frozenset({0, 1})
     set_result = named_package(files, snapshot, summaries, "FSet")
     assert (
         not set_result.available
