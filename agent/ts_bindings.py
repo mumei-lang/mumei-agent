@@ -1933,6 +1933,23 @@ class _TypeScriptBindings:
             items.append(item)
         return items
 
+    def _type_param_count(self, record: _Record) -> int:
+        """Type parameters a signature declares — `f<T, U>` is 2,
+        a non-generic signature 0."""
+        function_node = record.function_node
+        if function_node is None:
+            return 0
+        parameters = function_node.child_by_field_name(
+            "type_parameters"
+        )
+        if parameters is None:
+            return 0
+        return sum(
+            1
+            for child in self.children(parameters)
+            if child.type in {"type_parameter", "required_type_parameter"}
+        )
+
     def _arg_kind(self, arg: Any) -> str | None:
         """Primitive kind of a literal, or the declared name for
         identifiers — `None` when the argument type is not pinned."""
@@ -2225,9 +2242,26 @@ class _TypeScriptBindings:
         the signature the arguments narrow to, so `make(1).method()`
         reads `make`'s chosen overload's return type."""
         callee = node.child_by_field_name("function")
+        # Explicit type arguments on the call (`make<T, U>(...)`,
+        # `(make<T, U>)(...)`) pin the signature's declared count —
+        # an overload with a different arity cannot be the callee.
+        type_args_count: int | None = None
+        call_type_args = node.child_by_field_name("type_arguments")
+        if call_type_args is not None:
+            type_args_count = len(self.children(call_type_args))
         while callee is not None and callee.type in {
             "parenthesized_expression", "instantiation_expression",
         }:
+            inner_type_args = next(
+                (
+                    child
+                    for child in self.children(callee)
+                    if child.type == "type_arguments"
+                ),
+                None,
+            )
+            if inner_type_args is not None:
+                type_args_count = len(self.children(inner_type_args))
             callee = next(
                 (
                     child
@@ -2242,11 +2276,14 @@ class _TypeScriptBindings:
             # A tag is called `(strings, ...values)` — the template
             # itself plus one argument per interpolation. The first
             # argument is a strings array, not the template's literal
-            # text, so it is represented by an unpinned node.
+            # text, so it is represented by an unpinned node; each
+            # substitution narrows by its expression's type.
             arg_nodes = [node] + [
-                child
+                expr
                 for child in self.children(args_node)
                 if child.type == "template_substitution"
+                for expr in [next(iter(self.children(child)), None)]
+                if expr is not None
             ]
         record: _Record | None = None
         if callee is not None and callee.type == "identifier":
@@ -2273,6 +2310,15 @@ class _TypeScriptBindings:
                         )
                     ) == key
                 ]
+                if type_args_count is not None:
+                    matching = [
+                        candidate
+                        for candidate in candidates
+                        if self._type_param_count(candidate)
+                        == type_args_count
+                    ]
+                    if matching:
+                        candidates = matching
                 narrowed = self._narrow_overloads(
                     candidates, args_node, arg_nodes
                 )
