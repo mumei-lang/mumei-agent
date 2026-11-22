@@ -14963,7 +14963,10 @@ class _Builder:
                 # `*p` on a `*S` parameter dereferences to the whole
                 # caller-shared pointee: the read carries the
                 # parameter's own dependencies, like `p.V` does for
-                # one member. A `q := *p` copy binds its member
+                # one member, plus the stores that broadcast into
+                # `indirect_writes` (`*p = s`), which a scalar
+                # `*p` read already folds via `_deref_read_deps`.
+                # A `q := *p` copy binds its member
                 # slots separately in _bind_struct_container_value.
                 # Through a `q := p` alias the pointee is p's entry
                 # slot — p's deps carry the stores (`p.V = x`) that
@@ -14992,17 +14995,17 @@ class _Builder:
                                 if bound_ref.binding_id in params
                                 else frozenset()
                             )
-                        return deps
+                        return deps | self.indirect_writes
                     deps = locals_.get(alias.binding_id)
                     return (
                         deps
                         if deps is not None
                         else frozenset({params[alias.binding_id]})
-                    )
+                    ) | self.indirect_writes
                 return self.expression(
                     inner, fn, params, locals_, transfers, count,
                     depth + 1,
-                )
+                ) | self.indirect_writes
             if extra:
                 # `**pp`, `***t` — descend the fact chain `extra`
                 # levels past the pointer's own type: every level

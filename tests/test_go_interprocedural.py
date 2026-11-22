@@ -6719,6 +6719,19 @@ def test_callee_pointee_read_observes_prior_writes(
     result = named(*unit(go_types_helper, declarations), "F")
     assert result.available, result.gaps
     assert result.return_dependencies == frozenset({0})
+    # A whole-pointee copy (`x := *p`) observes the same stores:
+    # `*p = s` and `p.V = x` both reach the bound copy's reads.
+    declarations = (
+        "type S struct{ V int64 }\n"
+        "func F(p *S, s S) int64 {\n"
+        "\t*p = s\n"
+        "\tx := *p\n"
+        "\treturn x.V\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, declarations), "F")
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
 
 
 def test_imported_pointer_receiver_observes_prior_pointee_write(
