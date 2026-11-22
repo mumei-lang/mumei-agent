@@ -4308,3 +4308,22 @@ fn f(m: MyMap) {
     report = build_rust_bindings(source, pointer_width=64)
     method = _bindings(report, "m", "associated_function")[0]
     assert _call(report, source, "v.m()").target == method.id
+
+
+def test_for_loop_over_extern_call_stays_opaque() -> None:
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn f() {
+    for x in std::iter::once(1) {
+        x.m();
+    }
+    for p in P.make() {
+        p.m();
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    assert _call(report, source, "x.m()").target == ""
+    # An unresolved extern method's element also stays opaque.
+    assert _call(report, source, "p.m()").target == ""

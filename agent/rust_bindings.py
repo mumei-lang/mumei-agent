@@ -2258,6 +2258,11 @@ class _RustBindings:
             )
             if container_name not in _INDEX_ELEMENT_CONTAINERS:
                 return None, None
+        if elem_args is None:
+            # The iterable exposes no spelled args (`for x in
+            # std::iter::once(1)` reaches an unresolvable extern
+            # call) — the element stays opaque.
+            return None, None
         # A slice or array element exposes its own element type —
         # `&[[P; 2]]` reads first to `[P; 2]`, then to `P`.
         bracket = re.fullmatch(
