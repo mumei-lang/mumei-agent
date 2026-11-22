@@ -14621,6 +14621,40 @@ class _Builder:
             self._merge_param_pointer_states(first, second)
         )
 
+
+    def _clause_tail_reaches_post(self, stmts: list) -> bool:
+        """Whether a switch/select clause ending in `stmts[-1]` can
+        still reach the statement after the construct.
+
+        return/continue never reach it; a `break` exits the
+        construct itself unless its label names an outer frame; a
+        `goto` may land after it, so both keep their end state (a
+        label outside just makes the merge an over-approx — still
+        sound).
+        """
+        if not stmts:
+            return True
+        tail = stmts[-1]
+        if tail.type in {"return_statement", "continue_statement"}:
+            return False
+        if tail.type == "break_statement":
+            lab = next(
+                (
+                    c
+                    for c in tail.named_children
+                    if c.type == "label_name"
+                ),
+                None,
+            )
+            if lab is None:
+                return True
+            want = lab.text.decode("utf-8", "replace")
+            for index in range(len(self.frames) - 1, -1, -1):
+                if self.frames[index].get("label") == want:
+                    return index == len(self.frames) - 1
+            return True
+        return True
+
     def _flush_pending_param_reseats(self) -> None:
         # A `p = q` marks the reseat only AFTER its own statement's
         # right-hand sides evaluate — `p, x = q, p.A[i].V` still
@@ -23100,20 +23134,8 @@ class _Builder:
                             # A clause that ends in return/goto/
                             # continue never reaches post-state —
                             # its end state is not a switch exit.
-                            # A clause that ends in return/continue
-                            # never reaches post-state; a `break`
-                            # exits the switch itself and a `goto`
-                            # may land after it, so both keep their
-                            # end state in the exits (a label outside
-                            # just makes the merge an over-approx —
-                            # still sound).
-                            if not (
+                            if self._clause_tail_reaches_post(
                                 statements
-                                and statements[-1].type
-                                in {
-                                    "return_statement",
-                                    "continue_statement",
-                                }
                             ):
                                 ptr_exits.append(direct_ptr)
                             self._join(scope, branch, params)
@@ -23188,13 +23210,8 @@ class _Builder:
                         chan_origin_exits.extend(
                             [chain_origins, fresh_origins]
                         )
-                        if not (
+                        if self._clause_tail_reaches_post(
                             statements
-                            and statements[-1].type
-                            in {
-                                "return_statement",
-                                "continue_statement",
-                            }
                         ):
                             ptr_exits.extend([chain_ptr, fresh_ptr])
                         self._join(scope, branch, params)
@@ -23901,13 +23918,8 @@ class _Builder:
                     # A clause that ends in return/goto/continue
                     # never reaches post-state — its end state is
                     # not a select exit.
-                    clause_reaches_post = not (
-                        clause_stmts
-                        and clause_stmts[-1].type
-                        in {
-                            "return_statement",
-                            "continue_statement",
-                        }
+                    clause_reaches_post = (
+                        self._clause_tail_reaches_post(clause_stmts)
                     )
                     for bid, bdeps in branch.items():
                         joined[bid] = joined.get(
