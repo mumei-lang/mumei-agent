@@ -251,6 +251,11 @@ class _RustBindings:
         self.in_extern = False
         self._function_records: dict[str, _Record] = {}
         self._receiver_memo: dict[tuple, tuple] = {}
+        # Receiver-resolution epoch — bumped only by declarations that
+        # can change a `_receiver_type` result (type/function/impl
+        # items, or a record overwrite), so long `let` chains do not
+        # flush the memo on every line.
+        self._resolution_epoch = 0
 
     def span(self, node: Any) -> ByteSpan:
         return ByteSpan(node.start_byte, node.end_byte)
@@ -377,6 +382,17 @@ class _RustBindings:
             type_node,
         )
         self.bindings.append(binding)
+        # `local`/`parameter` bindings never change what a receiver
+        # resolves to — locals are bound before their scope is visited
+        # and parameters at function entry — so they leave the memo
+        # epoch alone. An overwrite (same identifier redeclared) always
+        # bumps, whatever the kind.
+        if identifier in self.records or kind not in {
+            "local",
+            "parameter",
+            "self_parameter",
+        }:
+            self._resolution_epoch += 1
         self.records[identifier] = record
         return record
 
@@ -2209,8 +2225,7 @@ class _RustBindings:
                 node.type,
                 node.start_byte,
                 node.end_byte,
-                len(self.bindings),
-                len(self.records),
+                self._resolution_epoch,
             )
         )
         if key is not None and key in self._receiver_memo:
