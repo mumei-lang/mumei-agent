@@ -1868,3 +1868,28 @@ y.n();
     assert calls["x.m()"].target == m_rec.id
     assert calls["new N.A()"].target != calls["new N.B()"].target
     assert calls["y.n()"].target == n_rec.id
+
+
+def test_member_alias_prefers_clause_block_declaration():
+    # `export {f as g}` exports the merged `f` symbol; when the same
+    # block also declares an `f`, `N.g` binds that declaration.
+    source = """
+declare namespace N {
+  function f(): string { return "" }
+}
+declare namespace N {
+  function f(x: number): number { return x }
+  export { f as g }
+}
+N.g();
+"""
+    report = build_ts_bindings(source)
+    clause_block_f = next(
+        b for b in report.bindings
+        if b.name == "f" and b.span.start == source.index("f(x")
+    )
+    call = next(
+        c for c in report.calls
+        if source[c.span.start : c.span.end] == "N.g()"
+    )
+    assert call.target == clause_block_f.id

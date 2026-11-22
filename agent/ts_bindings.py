@@ -98,6 +98,13 @@ class _Record:
     # Reachable on the type side only (`export type {A}` /
     # `export {type A}`) — no value-side export.
     member_type_exported: bool = False
+    # Public names authored by the member's OWN namespace block's
+    # `export {…}` clause (aliases and listed names). Sibling blocks
+    # may re-export the member under further names through declaration
+    # merging, but the clause's own block is the canonical referent for
+    # the exported name.
+    member_authored_names: frozenset[str] = frozenset()
+    member_authored_type_names: frozenset[str] = frozenset()
 
 
 @dataclass
@@ -1163,6 +1170,18 @@ class _TypeScriptBindings:
                             or member_name in exported_names
                         ):
                             public_names.add(member_name)
+                        other.member_authored_names = frozenset(
+                            {
+                                exported
+                                for exported, local in exported_aliases.items()
+                                if local == member_name
+                            }
+                            | (
+                                {member_name}
+                                if member_name in exported_names
+                                else set()
+                            )
+                        )
                         other.member_visibility = (
                             "public" if public_names else "private"
                         )
@@ -1184,6 +1203,18 @@ class _TypeScriptBindings:
                         other.member_type_exported = (
                             member_name in exported_type_names
                             or member_name in type_alias_targets
+                        )
+                        other.member_authored_type_names = frozenset(
+                            {
+                                exported
+                                for exported, local in exported_type_aliases.items()
+                                if local == member_name
+                            }
+                            | (
+                                {member_name}
+                                if member_name in exported_type_names
+                                else set()
+                            )
                         )
                         other.member_container = (
                             self._decl_qualified_name(decl)
@@ -1305,6 +1336,7 @@ class _TypeScriptBindings:
             queue.append(sibling)
         visited: set[str] = set()
         seed_ids = {record.binding.id for record in queue}
+        matches: list[_Record] = []
         while queue:
             current = queue.pop(0)
             if current.binding.id in visited:
@@ -1343,7 +1375,7 @@ class _TypeScriptBindings:
                     continue
                 if candidate.member_visibility == "protected" and not via_this:
                     continue
-                return candidate
+                matches.append(candidate)
             if decl_id is not None and decl is not None:
                 for base, base_value in self._type_bases.get(
                     decl_id, ()
@@ -1358,7 +1390,20 @@ class _TypeScriptBindings:
                     )
                     if base_record is not None:
                         queue.append(base_record)
-        return None
+        if not matches:
+            return None
+        # When sibling `namespace` blocks re-export each other's members
+        # (`namespace N { export {f as g} }` publishes the merged `f`),
+        # prefer the member whose own block authored the looked-up name —
+        # it is the referent the clause itself points at.
+        authored = (
+            "member_authored_type_names" if for_type
+            else "member_authored_names"
+        )
+        for candidate in matches:
+            if name in getattr(candidate, authored):
+                return candidate
+        return matches[0]
 
     def _member_name_sets(
         self, candidate: _Record
