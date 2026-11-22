@@ -4338,6 +4338,60 @@ class _RustBindings:
                             annotated,
                         )
                     if (
+                        method_name == "into_boxed_slice"
+                        and receiver[1] is not None
+                        and self._container_head_name(
+                            callee.child_by_field_name("value")
+                        )
+                        == "Vec"
+                    ):
+                        # `v.into_boxed_slice()` yields
+                        # `Box<[T]>` — `b[0]` peels the `Box` and
+                        # the slice to `P`.
+                        return self._spelled_type(
+                            "Box<[" + receiver[1] + "]>",
+                            self._receiver_annotation_position(
+                                callee.child_by_field_name("value")
+                            )
+                            or node.start_byte,
+                        )
+                    if (
+                        method_name in {"cloned", "copied"}
+                        and receiver[1] is not None
+                        and self._container_head_name(
+                            callee.child_by_field_name("value")
+                        )
+                        == "Result"
+                    ):
+                        # `Result<&P, E>::cloned()`/`copied()`
+                        # yield `Result<P, E>` — the borrow peels
+                        # off the `Ok` arg only; a non-borrowed
+                        # `Result` names no such method and stays
+                        # opaque.
+                        cloned_parts = self._type_arg_list(
+                            receiver[1]
+                        )
+                        if len(cloned_parts) == 2:
+                            ok_arg = cloned_parts[0].strip()
+                            peeled = re.sub(
+                                r"^&\s*(?:'\w+\s+)?(?:mut\s+)?",
+                                "",
+                                ok_arg,
+                            )
+                            if peeled != ok_arg:
+                                # The full `Result<...>` spelling
+                                # keeps the head for the
+                                # `_scrutinee_shape` args-head
+                                # fallback (`if let Ok(p) = a`).
+                                return (
+                                    None,
+                                    "Result<{}, {}>".format(
+                                        peeled,
+                                        cloned_parts[1].strip(),
+                                    ),
+                                )
+                        return None, None
+                    if (
                         method_name in {"as_slices", "as_mut_slices"}
                         and receiver[1] is not None
                         and self._container_head_name(
