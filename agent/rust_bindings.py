@@ -3241,6 +3241,26 @@ class _RustBindings:
             container_id, args = self._receiver_type(receiver)
             if args is None:
                 return None, None
+            container_name = (
+                next(
+                    (
+                        b.name
+                        for b in self.bindings
+                        if b.id == container_id
+                    ),
+                    None,
+                )
+                if container_id is not None
+                else None
+            )
+            if (
+                container_id is not None
+                and container_name not in _INDEX_ELEMENT_CONTAINERS
+            ):
+                # A custom `W<P>` can `Deref` to a different
+                # element — `w.chunks(n)` yields `&[Q]` there,
+                # not `&[P]`.
+                return None, None
             spelled = args.strip() or None
             if spelled is None:
                 return None, None
@@ -3448,6 +3468,26 @@ class _RustBindings:
             # index/iter sites unwrap to `P`.
             container_id, args = self._receiver_type(receiver)
             if args is None:
+                return _UNKNOWN, None
+            container_name = (
+                next(
+                    (
+                        b.name
+                        for b in self.bindings
+                        if b.id == container_id
+                    ),
+                    None,
+                )
+                if container_id is not None
+                else None
+            )
+            if (
+                container_id is not None
+                and container_name not in _INDEX_ELEMENT_CONTAINERS
+            ):
+                # A custom `W<P>` can `Deref` to a different
+                # element — `w.chunks(n)` yields `&[Q]` there,
+                # not `&[P]`.
                 return _UNKNOWN, None
             spelled = args.strip() or None
             return _UNKNOWN, None if spelled is None else "&" + spelled
@@ -3736,15 +3776,9 @@ class _RustBindings:
         # only the value type, so the pair's shape is unpinned here.
         if self._is_map_container(container_id, iterator):
             return _UNKNOWN, None
-        if (
-            self._receiver_type_node(iterator) is None
-            and elem_args.strip().startswith("&")
-        ):
+        if elem_args.strip().startswith("&"):
             # `let it = v.chunks(n)` — `it`'s spelled args ARE the
-            # element (`&[P]`), not a container's type args. A
-            # declared `Vec<&P>`/`[&P]` still names a container
-            # head — its `&` arg is the element's own reference
-            # type, unwrapped by `_element_of` below.
+            # element (`&[P]`), not a container's type args.
             return _UNKNOWN, elem_args.strip()
         # Spelled element names on `it` (`let it = v.iter()`) were
         # written in `it`'s annotation — resolve them there.
