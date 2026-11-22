@@ -2218,9 +2218,9 @@ class _RustBindings:
                     callee_value = callee.child_by_field_name(
                         "value"
                     )
-                    receiver_head = self._receiver_type(
-                        callee_value
-                    )[0]
+                    receiver_head, receiver_args = (
+                        self._receiver_type(callee_value)
+                    )
                     container = (
                         None
                         if receiver_head is None
@@ -2230,7 +2230,7 @@ class _RustBindings:
                         {}
                         if container is None
                         else self._pattern_param_map(
-                            container, receiver[1]
+                            container, receiver_args
                         )
                     )
                     member_text = self.text(member.type_node)
@@ -2252,7 +2252,7 @@ class _RustBindings:
                         else re.match(
                             r"[A-Za-z_][\w:]*",
                             re.sub(
-                                r"^(?:[\s&*()]+|(?:const|mut)\s+)+",
+                                r"^(?:[\s&*()]+|(?:const|mut)\s+|'\w+\s*)+",
                                 "",
                                 ret_args[index],
                             ),
