@@ -3127,7 +3127,11 @@ call `h(args)` admits with deps(captured) ∪ deps(args) ∪
 indirect writes, and a literal that captures a pointer-typed
 enclosing binding records an imported transfer on the bound
 name's identity (effects unknown — the captured pointer may aim
-at caller memory). A package-level `var Alias = Id` call
+at caller memory).
+Passing a tracked literal as a direct-call function value resolves its
+captures at invocation time (recursively for nested captures); `defer`
+and `go` shapes carry those captures into exit/race analysis.
+A package-level `var Alias = Id` call
 admits as an opaque external call — the callee is
 reassignable by any caller, so `Alias(args)` is dep-free
 for the callee, unions the args and indirect writes, and

@@ -20281,6 +20281,293 @@ def test_bound_closure_resolves_captures_at_call(go_types_helper):
     assert result.return_dependencies == frozenset({1})
 
 
+def test_chained_closure_values_resolve_shared_captures_once(
+    go_types_helper,
+):
+    declarations = [
+        "func ap(f func() int64) int64 { return f() }",
+        "func F(x, y int64) int64 {",
+        "v := y",
+        "g0 := func() int64 { return v }",
+    ]
+    for index in range(1, 30):
+        previous = max(index - 2, 0)
+        calls = f"g{index - 1}() + g{previous}()"
+        declarations.append(
+            f"g{index} := func() int64 {{ return {calls} }}"
+        )
+    declarations.extend(
+        ["v = x", "return ap(g29)", "}"]
+    )
+    result = named(
+        *unit(go_types_helper, "\n".join(declarations))
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(
+            "func ap(f func() int64, _ int64) int64 { return f() }\n"
+            "func set(p *int64, a int64) int64 { *p = a; return 0 }\n"
+            "func F(x, y int64) int64 { "
+            "v := y; g := func() int64 { return v }; "
+            "return ap(g, set(&v, x)) }",
+            id="pointer-write-argument",
+        ),
+        pytest.param(
+            "func ap(f func() int64, _ int64) int64 { return f() }\n"
+            "func F(x, y int64) int64 { "
+            "v := y; g := func() int64 { return v }; "
+            "return ap(g, func() int64 { v = x; return 0 }()) }",
+            id="immediate-literal-argument",
+        ),
+        pytest.param(
+            "func ap(f func() int64, _ int64) int64 { return f() }\n"
+            "func F(x, y int64) int64 { "
+            "v := y; g := func() int64 { return v }; "
+            "s := func() int64 { v = x; return 0 }; "
+            "return ap(g, s()) }",
+            id="bound-literal-call-argument",
+        ),
+    ],
+)
+def test_closure_argument_uses_captures_after_all_arguments(
+    go_types_helper, source
+):
+    result = named(*unit(go_types_helper, source))
+    assert result.available, result.gaps
+    assert 0 in result.return_dependencies
+
+
+def test_later_defer_literal_binding_is_available_after_go(go_types_helper):
+    source = (
+        "func ap(f func()) { f() }\n"
+        "func send(ch chan int64, v int64) { ch <- v }\n"
+        "func F(x, y int64) (r int64) { "
+        "ch := make(chan int64, 1); go send(ch, y); "
+        "w := x; defer ap(func(){ r = w }); return <-ch }"
+    )
+    result = named(*unit(go_types_helper, source))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_later_defer_literal_write_remains_race_closed(go_types_helper):
+    source = (
+        "func ap(f func()) { f() }\n"
+        "func setp(p *int64, a int64) { *p = a }\n"
+        "func F(x, y int64) int64 { "
+        "w0 := y; go setp(&w0, y); z := x; "
+        "defer ap(func(){ w0 = z }); return w0 }"
+    )
+    result = named(*unit(go_types_helper, source))
+    assert not result.available
+
+
+@pytest.mark.parametrize(
+    ("source", "dependencies"),
+    [
+        pytest.param(
+            "func ap(f func()) { f() }\n"
+            "func F(x, y int64) int64 { "
+            "v := y; w := int64(0); g := func(){ w = v }; "
+            "go ap(g); v = x; return w }",
+            None,
+            id="bound-write-after-go",
+        ),
+        pytest.param(
+            "func ap(f func()) { f() }\n"
+            "func F(x, y int64) int64 { "
+            "v := y; w := int64(0); "
+            "go ap(func(){ w = v }); v = x; return w }",
+            None,
+            id="literal-write-after-go",
+        ),
+        pytest.param(
+            "func ap(f func()) { f() }\n"
+            "func F(x, y int64) int64 { "
+            "v := y; w := int64(0); g := func(){ w = v }; "
+            "v = x; go ap(g); return w }",
+            frozenset({0}),
+            id="bound-write-before-go",
+        ),
+        pytest.param(
+            "func ap(f func() int64) int64 { return f() }\n"
+            "func F(x, y int64) int64 { "
+            "v := y; g := func() int64 { return v }; "
+            "go ap(g); v = x; return 0 }",
+            None,
+            id="bound-read-after-go",
+        ),
+    ],
+)
+def test_go_higher_order_literal_races_use_capture_shape(
+    go_types_helper, source, dependencies
+):
+    result = named(*unit(go_types_helper, source))
+    if dependencies is None:
+        assert not result.available
+        assert any(
+            gap.reason == "unsupported_statement" for gap in result.gaps
+        )
+    else:
+        assert result.available, result.gaps
+        assert result.return_dependencies == dependencies
+
+
+@pytest.mark.parametrize(
+    ("source", "dependencies"),
+    [
+        pytest.param(
+            "func ap(f func() int64) int64 { return f() }\n"
+            "func F(x, y int64) int64 { "
+            "v := y; g := func() int64 { return v }; "
+            "v = x; return ap(g) }",
+            frozenset({0}),
+            id="c8-hof",
+        ),
+        pytest.param(
+            "func ap(f func() int64) int64 { return f() }\n"
+            "func F(x, y int64) int64 { "
+            "v := y; f := func() int64 { return v }; "
+            "v = x; return ap(f) + 0 }",
+            frozenset({0}),
+            id="h3-hof-inline-then",
+        ),
+        pytest.param(
+            "func ap(f func() int64) int64 { return f() }\n"
+            "func F(x, y int64) int64 { "
+            "v := y; g := func() int64 { return v }; "
+            "a := ap(g); v = x; return a + ap(g) }",
+            frozenset({0, 1}),
+            id="h4-hof-twice",
+        ),
+        pytest.param(
+            "func ap(f func(int64) int64, a int64) int64 { "
+            "return f(a) }\n"
+            "func F(x, y int64) int64 { "
+            "k := y; g := func(a int64) int64 { return a + k }; "
+            "k = x; return ap(g, 0) }",
+            frozenset({0}),
+            id="h6-hof-arg",
+        ),
+        pytest.param(
+            "func ap(f func() int64) int64 { return f() }\n"
+            "func F(x, y int64) int64 { "
+            "v := y; g := func() int64 { return v }; "
+            "h := g; v = x; return ap(h) }",
+            frozenset({0}),
+            id="h9-alias",
+        ),
+        pytest.param(
+            "func ap(f func()) { f() }\n"
+            "func F(x, y int64) (r int64) { "
+            "v := y; g := func() { r = v }; v = x; "
+            "defer ap(g); return 0 }",
+            frozenset({0}),
+            id="d1-defer-hof-before",
+        ),
+        pytest.param(
+            "func ap(f func()) { f() }\n"
+            "func F(x, y int64) (r int64) { "
+            "v := y; g := func() { r = v }; defer ap(g); "
+            "v = x; return 0 }",
+            frozenset({0, 1}),
+            id="n6-hof-defer",
+        ),
+        pytest.param(
+            "func ap(f func()) { f() }\n"
+            "func F(x, y int64) (r int64) { "
+            "v := y; defer ap(func() { r = v }); "
+            "v = x; return 0 }",
+            frozenset({0, 1}),
+            id="n7-hof-defer-literal",
+        ),
+        pytest.param(
+            "func ap(f func() int64) int64 { return f() }\n"
+            "func F(x, y int64) (r int64) { "
+            "v := y; g := func() int64 { return v }; "
+            "defer func() { r = ap(g) }(); v = x; return 0 }",
+            frozenset({0, 1}),
+            id="d2-defer-hof-return",
+        ),
+    ],
+)
+def test_function_literal_argument_uses_invocation_time_captures(
+    go_types_helper, source, dependencies
+):
+    result = named(*unit(go_types_helper, source))
+    assert result.available, result.gaps
+    assert result.return_dependencies == dependencies
+
+
+@pytest.mark.parametrize(
+    ("source", "dependencies"),
+    [
+        pytest.param(
+            "func ap(f func() int64) int64 { return f() }\n"
+            "func F(x, y int64) int64 { "
+            "v := x; g := func() int64 { return v }; "
+            "r := ap(g); v = y; return r }",
+            frozenset({0}),
+            id="h1-hof-before",
+        ),
+        pytest.param(
+            "func ap(f func() int64) int64 { return f() }\n"
+            "func F(x, y int64) int64 { "
+            "v := y; v = x; return ap(func() int64 { return v }) }",
+            frozenset({0}),
+            id="h2-hof-inline",
+        ),
+        pytest.param(
+            "func F(x, y int64) int64 { "
+            "v := x; g := func() int64 { return v }; "
+            "v = y; return g() }",
+            frozenset({1}),
+            id="c2-rebind-y",
+        ),
+        pytest.param(
+            "func F(x, y int64) (r int64) { "
+            "v := x; defer func(a int64) { r = a }(v); "
+            "v = y; return 0 }",
+            frozenset({0}),
+            id="c4-defer-argument",
+        ),
+    ],
+)
+def test_function_literal_value_controls_keep_dependency_sets(
+    go_types_helper, source, dependencies
+):
+    result = named(*unit(go_types_helper, source))
+    assert result.available, result.gaps
+    assert result.return_dependencies == dependencies
+
+
+def test_go_higher_order_later_write_stays_closed(go_types_helper):
+    source = (
+        "func ap(f func()) { f() }\n"
+        "func F(x, y int64) int64 { "
+        "v := y; ch := make(chan int64, 1); "
+        "g := func() { ch <- v }; go ap(g); v = x; return <-ch }"
+    )
+    result = named(*unit(go_types_helper, source))
+    assert not result.available
+
+
+def test_go_higher_order_before_write_stays_closed(go_types_helper):
+    source = (
+        "func ap(f func()) { f() }\n"
+        "func F(x, y int64) int64 { "
+        "v := y; ch := make(chan int64, 1); "
+        "g := func() { ch <- v }; v = x; go ap(g); return <-ch }"
+    )
+    result = named(*unit(go_types_helper, source))
+    assert not result.available
+
+
 def test_bound_closure_rebind_clears_captures(go_types_helper):
     # Rebinding `h` to a literal that captures nothing clears the
     # capture set the earlier literal left.

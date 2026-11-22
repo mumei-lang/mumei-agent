@@ -12039,17 +12039,37 @@ class _Builder:
                 deps = deps | (arg_slot or frozenset())
         return deps
 
+    def _is_tracked_literal_value(
+        self, binding_id: str, params: dict[str, int]
+    ) -> bool:
+        binding = self.bindings.get(binding_id)
+        return (
+            binding is not None
+            and binding.type is not None
+            and binding.type.kind == "function"
+            and binding_id in self.closure_captures
+            and binding_id not in self.opaque_callees
+            and binding_id not in params
+            and binding_id not in self.func_aliases
+            and binding_id not in self.bound_method_values
+            and binding_id not in self.bound_interface_methods
+        )
+
     def _captured_current_deps(
         self,
         captured: frozenset[str],
         params: dict[str, int],
         locals_: dict[str, frozenset[int]],
+        *,
+        _seen: set[str] | None = None,
     ) -> frozenset[int]:
         """Resolve each captured binding's deps NOW — reassignments
         between the literal and the read move what a bound closure
         actually observes (`p := &a; h := func(){*p}; p = &b; h()`
         reads `b`, not `a`). `locals_` wins over the parameter index:
         `x = y` stores the param's current value under its binding id."""
+        if _seen is None:
+            _seen = set()
         resolved: frozenset[int] = frozenset()
         for cbid in captured:
             # A captured channel name may have been reseated
@@ -12062,7 +12082,19 @@ class _Builder:
                 else cbid
             )
             if root in locals_:
-                resolved |= locals_[root]
+                if self._is_tracked_literal_value(root, params):
+                    if root not in _seen:
+                        _seen.add(root)
+                        resolved |= self._captured_current_deps(
+                            self.closure_captures.get(
+                                root, frozenset()
+                            ),
+                            params,
+                            locals_,
+                            _seen=_seen,
+                        )
+                else:
+                    resolved |= locals_[root]
                 binding = self.bindings.get(root)
                 if (
                     binding is not None
@@ -12422,6 +12454,57 @@ class _Builder:
                 and target.receiver.type.kind == "pointer"
             ):
                 star_or_external = True
+        if call is not None and call.kind == "direct_local":
+            arguments = node.child_by_field_name("arguments")
+            if arguments is not None:
+                for argument in _children(arguments):
+                    value = self._strip_parens(argument)
+                    if value is None:
+                        continue
+                    if value.type == "identifier":
+                        ref = self.references.get(
+                            self.node_key(value)
+                        )
+                        binding_id = (
+                            ref.binding_id if ref is not None else None
+                        )
+                        if (
+                            binding_id is None
+                            or not self._is_tracked_literal_value(
+                                binding_id, params
+                            )
+                        ):
+                            continue
+                        captured |= self.closure_captures.get(
+                            binding_id, frozenset()
+                        )
+                        writes |= self.closure_writes.get(
+                            binding_id, frozenset()
+                        )
+                        star_or_external |= (
+                            binding_id in self.closure_star_writes
+                            or binding_id in self.closure_inner_calls
+                            or binding_id in self.pointee_closures
+                        )
+                    elif value.type == "func_literal":
+                        try:
+                            (
+                                _,
+                                literal_captured,
+                                captures_pointer,
+                                literal_writes,
+                                star_write,
+                                has_call,
+                            ) = self._func_literal_capture(
+                                value, params, locals_
+                            )
+                        except _Unsupported:
+                            continue
+                        captured |= frozenset(literal_captured)
+                        writes |= frozenset(literal_writes)
+                        star_or_external |= (
+                            captures_pointer or star_write or has_call
+                        )
         arguments = node.child_by_field_name("arguments")
         if arguments is not None:
             for argument in _children(arguments):
@@ -27908,6 +27991,27 @@ class _Builder:
                         chan_root, locals_
                     )
                 deps = locals_[ref.binding_id]
+                if self._is_tracked_literal_value(
+                    ref.binding_id, params
+                ):
+                    deps = (
+                        self._captured_current_deps(
+                            self.closure_captures.get(
+                                ref.binding_id, frozenset()
+                            ),
+                            params,
+                            locals_,
+                        )
+                        | self.indirect_writes
+                    )
+                    if ref.binding_id in self.pointee_closures:
+                        for escaped_id in self.escaped:
+                            if escaped_id in locals_:
+                                deps |= locals_[escaped_id]
+                            elif escaped_id in params:
+                                deps |= frozenset(
+                                    {params[escaped_id]}
+                                )
                 if ref.binding_id in self.external_chan_locals:
                     # `ch := g()` names a callee-produced queue —
                     # contents live in `indirect_writes`, like a
@@ -31635,6 +31739,22 @@ class _Builder:
                 # argument's own dep set.
                 actual_values[index] = (
                     actual_values[index] | self.indirect_writes
+                )
+        for index, argument in enumerate(arguments):
+            value = self._strip_parens(argument)
+            if value is None or value.type != "identifier":
+                continue
+            ref = self.references.get(self.node_key(value))
+            binding_id = ref.binding_id if ref is not None else None
+            if binding_id is not None and self._is_tracked_literal_value(
+                binding_id, params
+            ):
+                actual_values[index] |= self._captured_current_deps(
+                    self.closure_captures.get(
+                        binding_id, frozenset()
+                    ),
+                    params,
+                    locals_,
                 )
         if local_chan_chan_roots is not None:
             for index, argument in enumerate(arguments):
