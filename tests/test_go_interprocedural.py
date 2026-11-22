@@ -33525,6 +33525,19 @@ def test_named_struct_element_double_pointer_param_root(go_types_helper):
         "type S struct { A []*Elem }\n"
         "func F(p *S, i int64) int64 {\n"
         "\treturn p.A[i].V\n}\n",
+        # A pointer leaf (`p.A[i].W`) reads the member's slot
+        # value — the group's deps like a scalar leaf.
+        "type E2 struct { V int64 }\n"
+        "type Elem struct { W *E2 }\n"
+        "type S struct { A []*Elem }\n"
+        "func F(p *S, i int64) *E2 {\n"
+        "\treturn p.A[i].W\n}\n",
+        # `p.A[i].W == nil` — the same pointer-slot read.
+        "type E2 struct { V int64 }\n"
+        "type Elem struct { W *E2 }\n"
+        "type S struct { A []*Elem }\n"
+        "func F(p *S, i int64) bool {\n"
+        "\treturn p.A[i].W == nil\n}\n",
     ],
 )
 def test_named_struct_element_pointer_param_root_member_pointee(
@@ -33555,28 +33568,21 @@ def test_named_struct_element_pointer_param_root_member_pointee_observes_store(
     assert result.return_dependencies == frozenset({0, 2})
 
 
-@pytest.mark.parametrize(
-    "declarations",
-    [
-        # A local composite's pointer member escapes the slot
-        # model — `o.A[i].W.V` stays closed.
-        "type E2 struct { V int64 }\n"
-        "type Elem struct { W *E2 }\n"
-        "type S struct { A []Elem }\n"
-        "func F(o S, i int64) int64 {\n"
-        "\treturn o.A[i].W.V\n}\n",
-        # A pointer leaf (`p.A[i].W`) is not a scalar read.
-        "type E2 struct { V int64 }\n"
-        "type Elem struct { W *E2 }\n"
-        "type S struct { A []*Elem }\n"
-        "func F(p *S, i int64) *E2 {\n"
-        "\treturn p.A[i].W\n}\n",
-    ],
-)
 def test_named_struct_element_pointer_param_root_member_pointee_closed(
-    go_types_helper, declarations
+    go_types_helper,
 ):
-    result = named(*unit(go_types_helper, declarations))
+    # A local composite's pointer member escapes the slot
+    # model — `o.A[i].W.V` stays closed.
+    result = named(
+        *unit(
+            go_types_helper,
+            "type E2 struct { V int64 }\n"
+            "type Elem struct { W *E2 }\n"
+            "type S struct { A []Elem }\n"
+            "func F(o S, i int64) int64 {\n"
+            "\treturn o.A[i].W.V\n}\n",
+        )
+    )
     assert not result.available
     assert any(
         gap.reason == "non_parameter_reference" for gap in result.gaps
@@ -33862,6 +33868,16 @@ def test_named_struct_value_element_pointer_member_store(
             "\treturn ss[0].W.V\n}\n",
             frozenset({0, 1, 2}),
         ),
+        # A `map[int64]Elem` field resolves the value element's
+        # pointer member read the same way.
+        (
+            "type E2 struct { V int64 }\n"
+            "type Elem struct { W *E2 }\n"
+            "type S struct { B map[int64]Elem }\n"
+            "func F(p *S, k int64) int64 {\n"
+            "\treturn p.B[k].W.V\n}\n",
+            frozenset({0, 1}),
+        ),
     ],
 )
 def test_named_struct_value_element_pointer_member_read(
@@ -33870,6 +33886,31 @@ def test_named_struct_value_element_pointer_member_read(
     result = named(*unit(go_types_helper, declarations))
     assert result.available, result.gaps
     assert result.return_dependencies == expected
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        # `R [N]Elem` — an array member's value-copy semantics keep
+        # its elements outside the share-group slot model; the
+        # pointer-member read and store stay closed.
+        "type E2 struct { V int64 }\n"
+        "type Elem struct { W *E2 }\n"
+        "type S struct { R [4]Elem }\n"
+        "func F(p *S, i int64) int64 {\n"
+        "\treturn p.R[i].W.V\n}\n",
+        "type E2 struct { V int64 }\n"
+        "type Elem struct { W *E2 }\n"
+        "type S struct { R [4]Elem }\n"
+        "func F(p *S, i int64, q *E2) {\n"
+        "\tp.R[i].W = q\n}\n",
+    ],
+)
+def test_named_struct_value_element_pointer_member_array_closed(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.gaps
 
 
 def test_named_struct_element_double_pointer_param_root_collection(

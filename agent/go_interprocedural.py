@@ -3243,7 +3243,8 @@ class _Builder:
             # element: the pointer conflates into the collection's
             # group, so the field's slot is the group's.
             field_fact = field_fact.elem
-        for field_node in reversed(fields):
+        fields_seq = list(reversed(fields))
+        for field_index, field_node in enumerate(fields_seq):
             if not _elem_struct_ok(field_fact):
                 return None
             field_ref = self.references.get(
@@ -3257,31 +3258,34 @@ class _Builder:
             self._pin_fact_identities(field_member.type)
             field_fact = field_member.type
             if (
-                mid_pointer_root
+                field_index < len(fields_seq) - 1
+                and mid_pointer_root
                 and getattr(field_fact, "kind", None) == "pointer"
                 and self._named_value_struct_supported(
                     getattr(field_fact, "elem", None)
                 )
             ):
-                # `p.A[i].W` yields `*E` — the next field resolves
+                # `p.A[i].W` yields `*E` — a mid-chain field resolves
                 # on the member's pointee like the element pointer.
                 field_fact = field_fact.elem
         if not self._scalar_value_fact(field_fact):
-            # A store into a pointer leaf (`p.A[i].W = q`) resolves
-            # the chain to the member's pointee — caller memory for
-            # a param pointer root. The LHS consumer folds the write
-            # opaquely like `p.P = q`, so admit the target shape;
-            # a pointer leaf read stays closed.
+            # A pointer leaf (`p.A[i].W`) reads the member's slot
+            # value — caller memory under a param pointer root —
+            # and a store into it (`p.A[i].W = q`) resolves the
+            # chain to the member's pointee the LHS consumer folds
+            # opaquely like `p.P = q`. A local composite's pointer
+            # member escapes the slot model either way.
             if not (
-                for_pointer_leaf
-                and mid_pointer_root
+                mid_pointer_root
                 and path_members
                 and getattr(
                     path_members[-1].type, "kind", None
                 )
                 == "pointer"
-                and getattr(field_fact, "kind", None) == "struct"
-                and self._struct_value_fact(field_fact) is not None
+                and self._struct_value_fact(
+                    getattr(path_members[-1].type, "elem", None)
+                )
+                is not None
             ):
                 return None
         self._pin_fact_identities(container_fact)

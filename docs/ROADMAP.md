@@ -4323,17 +4323,22 @@ the stored value plus the index's dependencies unioned into
 the root's set and `indirect_writes`. A value-struct element's
 pointer member resolves the same way once the field admits a
 named element type — `p.B[i].W.V` and `p.B[i].W = q` on
-`B []Elem` (and `ss[i].W` on a `[]Elem` parameter) fold into
-the collection's group like the `[]*Elem` forms. Whole-element
-stores admit the same way on every supported root — `p.A[i] = e`,
-`o.A[i] = e`, `p.M[k] = e`, `p.A[i][j] = e` — and an inline
+`B []Elem` or `B map[int64]Elem` (and `ss[i].W` on a `[]Elem`
+parameter) fold into the collection's group like the `[]*Elem`
+forms. A pointer member read with no deeper field —
+`p.A[i].W`, `p.B[i].W`, `p.A[i].W == nil` — reads the
+member's slot value, which names the same group deps as a
+scalar leaf. Whole-element stores admit the same way on every
+supported root — `p.A[i] = e`, `o.A[i] = e`, `p.M[k] = e`,
+`p.A[i][j] = e` — and an inline
 *array* member (`o.R[i] = e` on `R [N]E`) folds into the
 field's own slot too, since its tokens name no share-group
 holder a `o.R[i].V` read could observe the store through.
-A pointer member read with no deeper field (`p.A[i].W`), a
-local root's member store (`o.A[i].W = q`, `o.B[i].W = q`),
-a nested array member's element (`o.R[i][j]`), and a `&x`
-escape into an element (`p.A[i] = &e`) stay closed.
+An array member's element pointer member (`p.R[i].W` on
+`R [N]Elem`), a local root's member store
+(`o.A[i].W = q`, `o.B[i].W = q`), a nested array member's
+element (`o.R[i][j]`), and a `&x` escape into an element
+(`p.A[i] = &e`) stay closed.
 An explicit `(*p)` deref of a
 `*S` param resolves through the same slot machinery as the
 implicit deref — Go's grammar parses `(*p)` as a parenthesized
