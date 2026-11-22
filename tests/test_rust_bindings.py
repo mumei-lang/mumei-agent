@@ -3068,3 +3068,59 @@ fn f() { <W<[u8; 4]> as T>::m(&W([0u8; 4])); }
     )
     call = _call(report, source, "<W<[u8; 4]> as T>::m(&W([0u8; 4]))")
     assert call.target == impl_m.id
+
+
+def test_ufcs_generic_alias_substitutes_spelled_args():
+    # `type Alias<B> = W<B>` — `<Alias<u8> as T<u8>>::m` substitutes
+    # B = u8, so `impl<A> T<A> for W<A>` binds A = u8 and matches.
+    source = """
+trait T<A> { fn m(&self) {} }
+struct W<A>(A);
+impl<A> T<A> for W<A> { fn m(&self) {} }
+type Alias<B> = W<B>;
+fn f() { <Alias<u8> as T<u8>>::m(&W(0u8)); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    impl_m = next(
+        b for b in report.bindings
+        if b.name == "m" and b.span.start == source.rindex("fn m") + 3
+    )
+    call = _call(report, source, "<Alias<u8> as T<u8>>::m(&W(0u8))")
+    assert call.target == impl_m.id
+
+
+def test_ufcs_omitted_args_reject_repeated_param_impl():
+    # `impl<A> T for W<A, A>` cannot cover `<W as T>::m` — an omitted
+    # arg list cannot satisfy `A` at both positions; the trait default
+    # answers instead.
+    source = """
+trait T { fn m(&self) {} }
+struct W<A = u8, B = u16>(A, B);
+impl<A> T for W<A, A> { fn m(&self) {} }
+fn f() { <W as T>::m(&W(0u8, 0u16)); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    impl_m = next(
+        b for b in report.bindings
+        if b.name == "m" and b.span.start == source.rindex("fn m") + 3
+    )
+    call = _call(report, source, "<W as T>::m(&W(0u8, 0u16))")
+    assert call.target != impl_m.id
+
+
+def test_ufcs_const_expr_shift_arg_splits():
+    # `{1 << 2}, N` — the shift's `<`/`>` inside braces are not
+    # generic brackets; the trailing comma still splits.
+    source = """
+trait T { fn m(&self) {} }
+struct W<const A: usize, const B: usize>;
+impl<const N: usize> T for W<{1 << 2}, N> { fn m(&self) {} }
+fn f() { <W<{1 << 2}, 4> as T>::m(&W::<{1 << 2}, 4>); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    impl_m = next(
+        b for b in report.bindings
+        if b.name == "m" and b.span.start == source.rindex("fn m") + 3
+    )
+    call = _call(report, source, "<W<{1 << 2}, 4> as T>::m(&W::<{1 << 2}, 4>)")
+    assert call.target == impl_m.id

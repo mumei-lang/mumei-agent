@@ -984,22 +984,53 @@ class _RustBindings:
             None,
         )
 
+    def _type_param_names(self, parameters: Any | None) -> list[str]:
+        """Declared names of a `type_parameters` node — `<A, const N:
+        usize, 'b>` → `["A", "N", "b"]`."""
+        names: list[str] = []
+        if parameters is None:
+            return names
+        for parameter in self._children(parameters):
+            if parameter.type not in {
+                "type_parameter",
+                "lifetime_parameter",
+                "const_parameter",
+            }:
+                continue
+            name_node = parameter.child_by_field_name("name")
+            if name_node is not None:
+                names.append(self.text(name_node))
+        return names
+
     @staticmethod
     def _type_arg_list(args: str) -> list[str]:
         """Top-level comma split of a type-argument key — commas
         inside `(...)`, `[...]` or `<...>` stay inside their arg."""
         parts: list[str] = []
         depth = 0
+        braces = 0
         current: list[str] = []
         for index, ch in enumerate(args):
-            if ch in "([{<":
+            if ch in "([{":
                 depth += 1
+                if ch == "{":
+                    # `{1 << 2}` — inside a const block `<` and `>`
+                    # are operators, not generic brackets.
+                    braces += 1
             elif ch in ")]}":
                 depth -= 1
+                if ch == "}":
+                    braces -= 1
+            elif ch == "<":
+                if braces == 0:
+                    depth += 1
             elif ch == ">":
                 # `>` also spells `->` in `dyn Fn(A) -> B` — only a
                 # `>` not closing a function type's arrow counts.
-                if index == 0 or args[index - 1] != "-":
+                if (
+                    braces == 0
+                    and (index == 0 or args[index - 1] != "-")
+                ):
                     depth -= 1
             if ch == "," and depth <= 0:
                 parts.append("".join(current))
@@ -1530,6 +1561,28 @@ class _RustBindings:
                 break
             type_id = resolved
             if resolved_args is not None:
+                # `type Alias<B> = W<B>` at `Alias<u8>` — substitute
+                # the alias's declared params with the spelled args.
+                params_node = record.alias_node.parent
+                param_names = (
+                    []
+                    if params_node is None
+                    else self._type_param_names(
+                        params_node.child_by_field_name("type_parameters")
+                    )
+                )
+                if param_names and args is not None:
+                    mapping = dict(
+                        zip(param_names, self._type_arg_list(args))
+                    )
+                    resolved_args = re.sub(
+                        r"\b(" + "|".join(
+                            re.escape(name) for name in mapping
+                        )
+                        + r")\b",
+                        lambda match: mapping[match.group(1)],
+                        resolved_args,
+                    )
                 args = resolved_args
         return type_id, args
 
@@ -1618,15 +1671,14 @@ class _RustBindings:
                 return False
             if impl_args is None and record.member_impl_args is not None:
                 # `<W as T>::m` omits the receiver's arguments — only
-                # an impl whose every arg is a parameter still applies
-                # (`impl<A> T for W<A>`); a concrete `impl T for
-                # W<i32>` cannot be decided, so it stays out.
-                return all(
-                    part in params
-                    for part in self._type_arg_list(
-                        record.member_impl_args
-                    )
-                )
+                # an impl whose every arg is a distinct parameter still
+                # applies (`impl<A> T for W<A>`); `impl<A> T for
+                # W<A, A>` would need the same parameter at both
+                # positions, which an omitted list cannot satisfy.
+                parts = self._type_arg_list(record.member_impl_args)
+                return all(part in params for part in parts) and len(
+                    set(parts)
+                ) == len(parts)
             return self._type_args_match(
                 record.member_impl_args, impl_args, params, bindings
             )
