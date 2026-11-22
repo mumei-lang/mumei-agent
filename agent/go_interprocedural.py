@@ -2409,6 +2409,7 @@ class _Builder:
         *,
         for_write: bool = False,
         allow_struct_elements: bool = False,
+        allow_interface_member: bool = False,
     ) -> tuple[str | None, Any]:
         """`s.F` (or a nested `s.W.F`) naming a scalar-element
         collection field — or its one-level nested form — on a
@@ -2576,6 +2577,10 @@ class _Builder:
                         )
                         or member.type.elem.kind == "interface"
                     )
+                )
+                or (
+                    allow_interface_member
+                    and member.type.kind == "interface"
                 )
             )
             or root_ref is None
@@ -33906,6 +33911,45 @@ class _Builder:
                 field_receiver = self._interface_parameter_field_receiver(
                     receiver_id, params
                 )
+                if field_receiver is None:
+                    # `p.I` — an interface-typed field through a
+                    # pointer-parameter (or bound local) root: the
+                    # member gate admits it only for this receiver,
+                    # and the deps recipe is the same one the
+                    # element receiver uses (root's pointee provenance
+                    # plus the field slot's conflated deps).
+                    ptr_field_receiver = self._scalar_container_field(
+                        receiver_id,
+                        params,
+                        allow_struct_elements=True,
+                        allow_interface_member=True,
+                    )
+                    if (
+                        ptr_field_receiver[1] is not None
+                        and ptr_field_receiver[1].type is not None
+                        and ptr_field_receiver[1].type.kind
+                        == "interface"
+                        and not (
+                            self._scalar_container_field_pointer_crossing(
+                                receiver_id, params
+                            )
+                        )
+                    ):
+                        element_receiver = (
+                            ptr_field_receiver[1],
+                            ptr_field_receiver[0],
+                            [],
+                            self._opaque_container_field_key(
+                                ptr_field_receiver[0],
+                                ptr_field_receiver[1].id,
+                            ),
+                            [],
+                        )
+                        self._pin_method_binding(function_node)
+                        self._pin_fact_identities(
+                            ptr_field_receiver[1].type
+                        )
+                        admitted = True
                 if field_receiver is not None:
                     _, struct_type_ids, interface_type_id = field_receiver
                     self.pinned.update(struct_type_ids)

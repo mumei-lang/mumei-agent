@@ -6070,8 +6070,25 @@ def test_interface_dispatch_field_receiver_pins_method_set(
 
 
 @pytest.mark.parametrize(
-    ("declarations", "reason"),
+    ("declarations", "expected"),
     [
+        # `p.I.M()` — the interface field on a `*S` parameter root.
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "type S struct{ I I }\n"
+            "func F(p *S, x int64) int64 { return p.I.M(x) }\n",
+            frozenset({0, 1}),
+        ),
+        # `(*w).i.M(x)` — an explicit deref lands on the same
+        # caller-shared pointee.
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "type W struct{ i I }\n"
+            "func F(w *W, x int64) int64 { return (*w).i.M(x) }\n",
+            frozenset({0, 1}),
+        ),
+        # `w.i.M(0)` — a bound local-composite root; `w` binds a
+        # constant literal, so its dep set is empty.
         (
             "type I interface{ M(int64) int64 }\n"
             "type T struct{}\n"
@@ -6079,32 +6096,42 @@ def test_interface_dispatch_field_receiver_pins_method_set(
             "type W struct{ i I }\n"
             "func F(x int64) int64 { "
             "w := W{i: T{}}; return w.i.M(0) }",
-            "unresolved_or_opaque_call",
+            frozenset(),
         ),
+        # `w.i.M(x)` — a named type over the struct resolves its
+        # underlying member.
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "type B struct{ i I }\n"
+            "type WD B\n"
+            "func F(w WD, x int64) int64 { return w.i.M(x) }\n",
+            frozenset({0, 1}),
+        ),
+        # `p.W.I.M()` — the nested selector chain resolves through
+        # the same root.
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "type W struct{ I I }\n"
+            "type S struct{ W W }\n"
+            "func F(p *S, x int64) int64 { return p.W.I.M(x) }\n",
+            frozenset({0, 1}),
+        ),
+    ],
+)
+def test_interface_field_dispatch(go_types_helper, declarations, expected):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == expected
+
+
+@pytest.mark.parametrize(
+    ("declarations", "reason"),
+    [
         (
             "type I interface{ M(int64) int64 }\n"
             "type P struct{ i I }\n"
             "type W struct{ p *P }\n"
             "func F(w W, x int64) int64 { return w.p.i.M(x) }",
-            "unresolved_or_opaque_call",
-        ),
-        (
-            "type I interface{ M(int64) int64 }\n"
-            "type W struct{ i I }\n"
-            "func F(w *W, x int64) int64 { return w.i.M(x) }",
-            "unresolved_or_opaque_call",
-        ),
-        (
-            "type I interface{ M(int64) int64 }\n"
-            "type W struct{ i I }\n"
-            "func F(w *W, x int64) int64 { return (*w).i.M(x) }",
-            "unresolved_or_opaque_call",
-        ),
-        (
-            "type I interface{ M(int64) int64 }\n"
-            "type B struct{ i I }\n"
-            "type WD B\n"
-            "func F(w WD, x int64) int64 { return w.i.M(x) }",
             "unresolved_or_opaque_call",
         ),
         (
@@ -6726,12 +6753,26 @@ def test_interface_collection_bound_local_store(go_types_helper):
             "\treturn t\n"
             "}\n"
         ),
-        # `p.I` — an interface-typed field, deliberately closed on
-        # the read/store/dispatch paths alike.
+        # `p.I` — an interface-typed field is still closed on the
+        # bare read path (dispatch `p.I.M()` is supported).
         (
             "type I interface{ M() int64 }\n"
             "type S struct{ I I }\n"
-            "func F(p *S) int64 { return p.I.M() }\n"
+            "func F(p *S) int64 {\n"
+            "\tv := p.I\n"
+            "\treturn v.M()\n"
+            "}\n"
+        ),
+        # `p.I = e` — a store into an interface-typed field: the
+        # interface-value store gate admits only `_`, index and
+        # identifier LHSs, so the selector stays unmodelled.
+        (
+            "type I interface{ M() int64 }\n"
+            "type S struct{ I I }\n"
+            "func F(p *S, e I) int64 {\n"
+            "\tp.I = e\n"
+            "\treturn 0\n"
+            "}\n"
         ),
         # `x[i] = e` — a store into a bare `[]I` binding that has
         # no tracked backing: `var x []I` never joined a share
@@ -6760,7 +6801,7 @@ def test_interface_collection_stays_closed(
     assert not result.available
 
 
-def test_interface_dispatch_imported_struct_root_stays_closed(
+def test_interface_dispatch_imported_struct_root(
     go_types_helper,
 ):
     files = {
@@ -6786,10 +6827,12 @@ def test_interface_dispatch_imported_struct_root_stays_closed(
     )
     summaries = ip.summarize_go_package(files, snapshot)
     result = named_package(files, snapshot, summaries, "F")
-    assert not result.available
-    assert any(
-        gap.reason == "unresolved_or_opaque_call" for gap in result.gaps
-    )
+    # `w.I` — the imported struct's interface field resolves
+    # through the same member machinery as a domestic one: the
+    # receiver folds `w`'s provenance plus the field slot's
+    # conflated deps.
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
 
 
 def test_interface_dispatch_local_interface_call_result_stays_closed(
@@ -6815,7 +6858,7 @@ def test_interface_dispatch_local_interface_call_result_stays_closed(
     )
 
 
-def test_interface_dispatch_local_struct_pointer_value_stays_closed(
+def test_interface_dispatch_local_struct_pointer_value(
     go_types_helper,
 ):
     declarations = (
@@ -6831,10 +6874,10 @@ def test_interface_dispatch_local_struct_pointer_value_stays_closed(
         "}\n"
     )
     result = named(*unit(go_types_helper, declarations))
-    assert not result.available
-    assert any(
-        gap.reason == "unresolved_or_opaque_call" for gap in result.gaps
-    )
+    # The opaque dispatch may run `(*P).M`, whose store reaches
+    # `q.V` — so the read observes `x`'s dep.
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
 
 
 @pytest.mark.parametrize(
