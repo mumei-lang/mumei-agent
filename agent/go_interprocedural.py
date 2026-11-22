@@ -17660,7 +17660,8 @@ class _Builder:
                             else value
                         )
                     )
-                self.closure_factory_results.discard(binding.id)
+                if not (conditional or self._may_skip > 0):
+                    self.closure_factory_results.discard(binding.id)
                 self._store(locals_, params, binding.id, value, conditional)
                 # `q := p` hands q the caller-shared pointee p's
                 # entry names — register it like the `p = q`
@@ -17798,7 +17799,7 @@ class _Builder:
                     )
                     if src_id in factory_results_pre:
                         self.closure_factory_results.add(binding.id)
-                    else:
+                    elif not (conditional or self._may_skip > 0):
                         self.closure_factory_results.discard(
                             binding.id
                         )
@@ -18984,7 +18985,8 @@ class _Builder:
                                 else value
                             )
                         )
-                    self.closure_factory_results.discard(binding.id)
+                    if not (conditional or self._may_skip > 0):
+                        self.closure_factory_results.discard(binding.id)
                     self._store(
                         locals_, params, binding.id, value, conditional
                     )
@@ -19019,7 +19021,7 @@ class _Builder:
                             self.closure_factory_results.add(
                                 binding.id
                             )
-                        else:
+                        elif not (conditional or self._may_skip > 0):
                             self.closure_factory_results.discard(
                                 binding.id
                             )
@@ -21982,7 +21984,10 @@ class _Builder:
                     # field reads observe it.
                     broadcast = len(ref) >= 3 and ref[2]
                     ref, accumulating = ref[0], ref[1]
-                if not compound:
+                if (
+                    not compound
+                    and not (conditional or self._may_skip > 0)
+                ):
                     self.closure_factory_results.discard(
                         ref.binding_id
                     )
@@ -23307,7 +23312,7 @@ class _Builder:
                         self.closure_factory_results.add(
                             ref.binding_id
                         )
-                    else:
+                    elif not (conditional or self._may_skip > 0):
                         self.closure_factory_results.discard(
                             ref.binding_id
                         )
@@ -34806,7 +34811,8 @@ class _Builder:
                 # — a conditional rebind keeps it for the path
                 # that keeps the old literal.
                 self.pointee_closures.discard(bound_id)
-            self.closure_factory_results.discard(bound_id)
+            if not may_skip:
+                self.closure_factory_results.discard(bound_id)
             binding = self.bindings.get(bound_id)
             if (
                 not in_composite

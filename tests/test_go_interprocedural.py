@@ -20457,6 +20457,25 @@ def test_closure_factory_result_controls_match_develop(
         assert result.return_dependencies == dependencies
 
 
+def test_conditional_literal_rebind_keeps_factory_result_snapshot(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x, y int64, c bool) int64 { "
+            "g := func(a int64) func() int64 { "
+            "return func() int64 { return a } }; "
+            "h := g(x); "
+            "if c { h = func() int64 { return y } }; "
+            "return h() }",
+        )
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "none_in_supported_fragment"
+
+
 @pytest.mark.parametrize(
     ("source", "dependencies", "effects"),
     [
