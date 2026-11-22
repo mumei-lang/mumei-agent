@@ -5526,8 +5526,6 @@ fn g(m: HashMap<u32, P>) {
     # HashMap has no `pop` — the Some payload stays untyped.
     assert not calls[3].target
 
-
-
 def test_unwrap_receiver_resolves_at_return_annotation():
     source = """
 use std::option::Option;
@@ -5544,3 +5542,54 @@ fn f(w: W) {
     report = build_rust_bindings(source, pointer_width=64)
     qm = _bindings(report, "qm", "associated_function")[0]
     assert _call(report, source, "w.get().unwrap().qm()").target == qm.id
+
+
+def test_reference_pattern_tuple_bindings() -> None:
+    source = """
+struct P;
+struct Q;
+impl P { fn m(&self) {} }
+impl Q { fn q(&self) {} }
+fn f() {
+    let t: (P, Q) = (P, Q);
+    let &(x, y) = &t;
+    x.m(); y.q();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = _bindings(report, "m", "associated_function")[0]
+    q = _bindings(report, "q", "associated_function")[0]
+    assert _call(report, source, "x.m()").target == m.id
+    assert _call(report, source, "y.q()").target == q.id
+
+
+def test_reference_pattern_on_option_match() -> None:
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn f(o: Option<P>) {
+    match &o {
+        Some(p) => p.m(),
+        None => (),
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = _bindings(report, "m", "associated_function")[0]
+    assert _call(report, source, "p.m()").target == m.id
+
+
+def test_reference_pattern_whole_binding_tuple_index() -> None:
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn f() {
+    let t: (P, P) = (P, P);
+    let &w = &t;
+    w.0.m(); w.1.m();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = _bindings(report, "m", "associated_function")[0]
+    assert _call(report, source, "w.0.m()").target == m.id
+    assert _call(report, source, "w.1.m()").target == m.id
