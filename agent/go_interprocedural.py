@@ -22581,6 +22581,10 @@ class _Builder:
             # each iteration resets the set to the labels seen BEFORE
             # the loop.
             loop_seen_labels = frozenset(self._seen_labels)
+            # The body may run zero times — a `p = q` inside keeps
+            # its status only when it also held on entry; a may-be
+            # reseat joins to a closed root like a one-arm `if`.
+            ptr_loop_entry = self._param_pointer_state()
             self.frames.append(frame)
             try:
                 while True:
@@ -22904,6 +22908,9 @@ class _Builder:
             # execute zero or many times.
             self._join(locals_, scope, params)
             self._join_ptr(ptr_scope, params)
+            self._join_param_pointer_states(
+                ptr_loop_entry, self._param_pointer_state()
+            )
             return
         if kind == "expression_switch_statement":
             initializer = node.child_by_field_name("initializer")
@@ -22943,6 +22950,14 @@ class _Builder:
                 )
                 chan_origin_exits: list[dict[str, frozenset[int]]] = []
                 branch_origins: dict[str, frozenset[int]] | None = None
+                # The pointer-param root status scopes per clause
+                # like the channel origins above: a `p = q` inside
+                # `case 1:` must not leak into `case 2:`. Each
+                # clause runs from the entry state; the join keeps
+                # a status only where every exit agrees.
+                ptr_entry_state = self._param_pointer_state()
+                ptr_exits: list[dict] = []
+                ptr_branch_state: dict | None = None
                 for index, clause in enumerate(clauses):
                     body = next(
                         (
@@ -22973,6 +22988,13 @@ class _Builder:
                     self._chan_chan_param_origins = dict(
                         chan_origin_entry
                     )
+                    # Case guards evaluate once at switch entry, in
+                    # source order, before any clause body — they
+                    # always read the entry state, not a carried
+                    # fall-through one.
+                    self._restore_param_pointer_state(
+                        ptr_entry_state
+                    )
                     for sub in clause.named_children:
                         if sub.type == "expression_list":
                             # Case guards are evaluated like the tag.
@@ -22988,6 +23010,9 @@ class _Builder:
                         self._chan_chan_param_origins = dict(
                             chan_origin_entry
                         )
+                        self._restore_param_pointer_state(
+                            ptr_entry_state
+                        )
                         frame["exited"] = False
                         branch = dict(scope)
                         ptr_branch = dict(self._ptr_deps)
@@ -22998,14 +23023,17 @@ class _Builder:
                         direct_origins = dict(
                             self._chan_chan_param_origins
                         )
+                        direct_ptr = self._param_pointer_state()
                         if not falls:
                             chan_origin_exits.append(direct_origins)
+                            ptr_exits.append(direct_ptr)
                             self._join(scope, branch, params)
                             self._join_ptr(ptr_branch, params)
                             branch = None
                             branch_origins = None
                         else:
                             branch_origins = direct_origins
+                            ptr_branch_state = direct_ptr
                         continue
                     # Fall-through target — the body runs twice: once in
                     # the carried chain scope (the fallthrough path, with
@@ -23016,6 +23044,9 @@ class _Builder:
                     self._chan_chan_param_origins = dict(
                         branch_origins or chan_origin_entry
                     )
+                    self._restore_param_pointer_state(
+                        ptr_branch_state or ptr_entry_state
+                    )
                     self._branch_sequence(
                         statements, fn, params, branch, transfers,
                         count, deps, saw_return, conditional,
@@ -23023,6 +23054,7 @@ class _Builder:
                     chain_origins = dict(
                         self._chan_chan_param_origins
                     )
+                    chain_ptr = self._param_pointer_state()
                     chain_exited = frame["exited"]
                     frame["exited"] = False
                     # The second walk must not see the labels the first
@@ -23031,6 +23063,9 @@ class _Builder:
                     self._seen_labels = clause_seen_labels
                     self._chan_chan_param_origins = dict(
                         chan_origin_entry
+                    )
+                    self._restore_param_pointer_state(
+                        ptr_entry_state
                     )
                     fresh = dict(scope)
                     ptr_fresh = dict(self._ptr_deps)
@@ -23041,6 +23076,7 @@ class _Builder:
                     fresh_origins = dict(
                         self._chan_chan_param_origins
                     )
+                    fresh_ptr = self._param_pointer_state()
                     self._join(scope, fresh, params)
                     self._join_ptr(ptr_fresh, params)
                     if falls:
@@ -23050,20 +23086,36 @@ class _Builder:
                                 chain_origins, fresh_origins
                             )
                         )
+                        ptr_branch_state = (
+                            self._merge_param_pointer_states(
+                                chain_ptr, fresh_ptr
+                            )
+                        )
                     else:
                         chan_origin_exits.extend(
                             [chain_origins, fresh_origins]
                         )
+                        ptr_exits.extend([chain_ptr, fresh_ptr])
                         self._join(scope, branch, params)
                         self._join_ptr(ptr_branch, params)
                         branch = None
                         branch_origins = None
+                        ptr_branch_state = None
             finally:
                 self.frames.pop()
             if not any(
                 clause.type == "default_case" for clause in clauses
             ):
                 chan_origin_exits.append(chan_origin_entry)
+                # No `default:` — the switch may match nothing, so
+                # the entry state is one of the exits.
+                ptr_exits.append(ptr_entry_state)
+            ptr_merged = ptr_exits[0] if ptr_exits else ptr_entry_state
+            for exit_state in ptr_exits[1:]:
+                ptr_merged = self._merge_param_pointer_states(
+                    ptr_merged, exit_state
+                )
+            self._restore_param_pointer_state(ptr_merged)
             self._chan_chan_param_origins = (
                 self._merge_chan_chan_param_origin_states(
                     *chan_origin_exits
@@ -23695,6 +23747,8 @@ class _Builder:
                 clause_aliases: list[dict] = []
                 clause_externals: list[set] = []
                 clause_origins: list[dict[str, frozenset[int]]] = []
+                ptr_entry_state = self._param_pointer_state()
+                clause_ptr_states: list[dict] = []
                 for clause, receive in zip(clauses, receives):
                     branch = dict(locals_)
                     # `_branch_sequence` rewrites the shared
@@ -23709,6 +23763,9 @@ class _Builder:
                     self.external_chan_locals = set(chan_external_entry)
                     self._chan_chan_param_origins = dict(
                         chan_origin_entry
+                    )
+                    self._restore_param_pointer_state(
+                        ptr_entry_state
                     )
                     if receive is not None:
                         lefts, recv, recv_deps = receive
@@ -23748,6 +23805,9 @@ class _Builder:
                     clause_origins.append(
                         dict(self._chan_chan_param_origins)
                     )
+                    clause_ptr_states.append(
+                        self._param_pointer_state()
+                    )
                 self._chan_chan_param_origins = (
                     self._merge_chan_chan_param_origin_states(
                         *clause_origins
@@ -23777,6 +23837,18 @@ class _Builder:
                         detached_queues[bid] = {
                             v for v in alias_values if v is not None
                         }
+                # Every select clause runs or the select blocks —
+                # the post state joins the clause exits only (the
+                # entry is not a reachable post-select state).
+                if clause_ptr_states:
+                    ptr_merged = clause_ptr_states[0]
+                    for clause_state in clause_ptr_states[1:]:
+                        ptr_merged = (
+                            self._merge_param_pointer_states(
+                                ptr_merged, clause_state
+                            )
+                        )
+                    self._restore_param_pointer_state(ptr_merged)
                 self._join(locals_, joined, params)
                 if (
                     len(clauses) == 1
