@@ -4650,3 +4650,38 @@ fn f(w: W) {
     report = build_rust_bindings(source, pointer_width=64)
     same = _bindings(report, "same", "associated_function")[0]
     assert _call(report, source, "p.same()").target == same.id
+
+
+def test_parenthesized_field_call_reads_the_field_fn_return():
+    # `(w.get)()` invokes the field's function pointer — a
+    # struct_field of that name shadows the same-named method.
+    source = """
+struct P; struct Q;
+impl P { fn same(&self) {} }
+impl Q { fn same(&self) {} }
+struct W {
+    get: fn() -> Option<Q>,
+}
+impl W {
+    fn get(&self) -> Option<P> { None }
+}
+fn f(w: W) {
+    match (w.get)() {
+        Some(p) => { p.same(); }
+        _ => {}
+    }
+    match w.get() {
+        Some(p) => { p.same(); }
+        _ => {}
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    methods = [b for b in report.bindings if b.name == "same"]
+    p_same, q_same = methods[0], methods[1]
+    calls = [
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "p.same()"
+    ]
+    assert calls[0].target == q_same.id
+    assert calls[1].target == p_same.id
