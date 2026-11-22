@@ -18962,6 +18962,156 @@ def test_nested_local_positional_struct_func_field_keeps_field_identity(
     assert composite_write.effects == assigned_write.effects == "unknown"
 
 
+def test_named_closures_stored_in_struct_fields_match_literals(
+    go_types_helper,
+):
+    declarations = (
+        "type S struct{ F func() int64 }\n"
+        "type W struct{ F func() }\n"
+        "type O struct{ S S }\n"
+        "func ReadAssignmentNamed(x, y int64) int64 { v := y; "
+        "g := func() int64 { return v }; var s S; s.F = g; "
+        "v = x; return s.F() }\n"
+        "func ReadAssignmentLiteral(x, y int64) int64 { v := y; "
+        "var s S; s.F = func() int64 { return v }; "
+        "v = x; return s.F() }\n"
+        "func WriteAssignmentNamed(x int64) int64 { w := int64(0); "
+        "g := func() { w = x }; var s W; s.F = g; "
+        "s.F(); return w }\n"
+        "func WriteAssignmentLiteral(x int64) int64 { w := int64(0); "
+        "var s W; s.F = func() { w = x }; s.F(); return w }\n"
+        "func ReadCompositeKeyedNamed(x, y int64) int64 { v := y; "
+        "g := func() int64 { return v }; s := S{F: g}; "
+        "v = x; return s.F() }\n"
+        "func ReadCompositeKeyedLiteral(x, y int64) int64 { v := y; "
+        "s := S{F: func() int64 { return v }}; "
+        "v = x; return s.F() }\n"
+        "func WriteCompositeKeyedNamed(x int64) int64 { "
+        "w := int64(0); g := func() { w = x }; "
+        "s := W{F: g}; s.F(); return w }\n"
+        "func WriteCompositeKeyedLiteral(x int64) int64 { "
+        "w := int64(0); s := W{F: func() { w = x }}; "
+        "s.F(); return w }\n"
+        "func ReadCompositePositionalNamed(x, y int64) int64 { "
+        "v := y; g := func() int64 { return v }; "
+        "s := S{g}; v = x; return s.F() }\n"
+        "func ReadCompositePositionalLiteral(x, y int64) int64 { "
+        "v := y; s := S{func() int64 { return v }}; "
+        "v = x; return s.F() }\n"
+        "func WriteCompositePositionalNamed(x int64) int64 { "
+        "w := int64(0); g := func() { w = x }; "
+        "s := W{g}; s.F(); return w }\n"
+        "func WriteCompositePositionalLiteral(x int64) int64 { "
+        "w := int64(0); s := W{func() { w = x }}; "
+        "s.F(); return w }\n"
+        "func ReadNestedCompositeNamed(x, y int64) int64 { v := y; "
+        "g := func() int64 { return v }; "
+        "o := O{S: S{F: g}}; v = x; return o.S.F() }\n"
+        "func ReadNestedCompositeLiteral(x, y int64) int64 { "
+        "v := y; o := O{S: S{F: func() int64 { return v }}}; "
+        "v = x; return o.S.F() }\n"
+        "func ReadNestedPositionalNamed(x, y int64) int64 { v := y; "
+        "g := func() int64 { return v }; "
+        "o := O{S: S{g}}; v = x; return o.S.F() }\n"
+        "func ReadNestedPositionalLiteral(x, y int64) int64 { "
+        "v := y; o := O{S: S{func() int64 { return v }}}; "
+        "v = x; return o.S.F() }\n"
+    )
+    source, snapshot, summaries = unit(go_types_helper, declarations)
+    pairs = (
+        ("ReadAssignmentNamed", "ReadAssignmentLiteral", {0, 1}),
+        ("WriteAssignmentNamed", "WriteAssignmentLiteral", {0}),
+        ("ReadCompositeKeyedNamed", "ReadCompositeKeyedLiteral", {0, 1}),
+        ("WriteCompositeKeyedNamed", "WriteCompositeKeyedLiteral", {0}),
+        (
+            "ReadCompositePositionalNamed",
+            "ReadCompositePositionalLiteral",
+            {0, 1},
+        ),
+        (
+            "WriteCompositePositionalNamed",
+            "WriteCompositePositionalLiteral",
+            {0},
+        ),
+        ("ReadNestedCompositeNamed", "ReadNestedCompositeLiteral", {0, 1}),
+        (
+            "ReadNestedPositionalNamed",
+            "ReadNestedPositionalLiteral",
+            {0, 1},
+        ),
+    )
+    for named_function, literal_function, dependencies in pairs:
+        named_result = named(
+            source, snapshot, summaries, named_function
+        )
+        literal_result = named(
+            source, snapshot, summaries, literal_function
+        )
+        assert named_result.available, (named_function, named_result.gaps)
+        assert literal_result.available, (
+            literal_function,
+            literal_result.gaps,
+        )
+        assert (
+            named_result.return_dependencies
+            == literal_result.return_dependencies
+            == frozenset(dependencies)
+        )
+        assert named_result.effects == literal_result.effects == "unknown"
+
+
+def test_struct_field_factory_results_fail_closed(
+    go_types_helper,
+):
+    declarations = (
+        "type S struct{ F func() int64 }\n"
+        "func Assigned(x, y int64) int64 { v := y; "
+        "factory := func() func() int64 { "
+        "return func() int64 { return v } }; "
+        "g := factory(); var s S; s.F = g; "
+        "v = x; return s.F() }\n"
+        "func Composite(x, y int64) int64 { v := y; "
+        "factory := func() func() int64 { "
+        "return func() int64 { return v } }; "
+        "g := factory(); s := S{F: g}; "
+        "v = x; return s.F() }\n"
+    )
+    source, snapshot, summaries = unit(go_types_helper, declarations)
+    for function_name in ("Assigned", "Composite"):
+        result = named(source, snapshot, summaries, function_name)
+        assert not result.available, (function_name, result.gaps)
+        assert any(
+            gap.reason == "unsupported_expression"
+            for gap in result.gaps
+        )
+
+
+def test_struct_field_named_closure_controls_match_develop(
+    go_types_helper,
+):
+    declarations = (
+        "type S struct{ F func() int64 }\n"
+        "func Named() int64 { return 1 }\n"
+        "func ParameterControl(x int64, cb func() int64) int64 { "
+        "var s S; s.F = cb; return s.F() + x }\n"
+        "func NamedFunctionControl(x int64) int64 { "
+        "var s S; s.F = Named; return s.F() + x }\n"
+    )
+    source, snapshot, summaries = unit(go_types_helper, declarations)
+    parameter = named(source, snapshot, summaries, "ParameterControl")
+    assert parameter.available, parameter.gaps
+    assert parameter.return_dependencies == frozenset({0, 1})
+    assert parameter.effects == "unknown"
+    named_function = named(
+        source, snapshot, summaries, "NamedFunctionControl"
+    )
+    assert not named_function.available
+    assert any(
+        gap.reason == "non_parameter_reference"
+        for gap in named_function.gaps
+    )
+
+
 def test_bound_closure_local_channel_send_imported_callback(
     go_types_helper,
 ):

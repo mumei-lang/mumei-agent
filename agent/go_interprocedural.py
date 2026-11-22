@@ -4344,6 +4344,22 @@ class _Builder:
                 break
         if element is None:
             return None
+        is_struct, member = self._func_literal_struct_element_member(
+            literal, element, node
+        )
+        if not is_struct:
+            return None
+        if (
+            member is not None
+            and member.type is not None
+            and member.type.kind == "function"
+        ):
+            return member.id
+        raise _Unsupported("unsupported_expression", _span(node))
+
+    def _func_literal_struct_element_member(
+        self, literal: Any, element: Any, node: Any
+    ) -> tuple[bool, Any | None]:
         type_node = literal.child_by_field_name("type")
         type_id = self._struct_literal_type_id(type_node)
         if type_id is None:
@@ -4361,9 +4377,7 @@ class _Builder:
                     None,
                 )
             if current_type is not None and current_type.type == "struct_type":
-                raise _Unsupported(
-                    "unsupported_expression", _span(node)
-                )
+                return True, None
             named_type = (
                 current_type.child_by_field_name("type")
                 if current_type is not None
@@ -4390,10 +4404,8 @@ class _Builder:
                 and identity.type is not None
                 and identity.type.kind == "struct"
             ):
-                raise _Unsupported(
-                    "unsupported_expression", _span(node)
-                )
-            return None
+                return True, None
+            return False, None
         if element.type == "keyed_element":
             key = element.child_by_field_name("key")
             while key is not None and key.type == "literal_element":
@@ -4404,15 +4416,7 @@ class _Builder:
                 else None
             )
             member = self._field_identity(key_ref)
-            if (
-                member is not None
-                and member.type is not None
-                and member.type.kind == "function"
-            ):
-                return member.id
-            raise _Unsupported(
-                "unsupported_expression", _span(node)
-            )
+            return True, member
         struct_fact = self._local_struct_literal_fact(literal)
         if struct_fact is not None:
             fact, anchor = struct_fact
@@ -4423,15 +4427,56 @@ class _Builder:
                 for member, value in field_values:
                     if self._strip_parens(value) != node:
                         continue
-                    if (
-                        member.type is not None
-                        and member.type.kind == "function"
-                    ):
-                        return member.id
+                    return True, member
+        return True, None
+
+    def _adopt_struct_composite_closure_records(
+        self, literal: Any, params: dict[str, int]
+    ) -> None:
+        body = literal.child_by_field_name("body")
+        if body is None:
+            return
+        for element in _children(body):
+            if element.type == "keyed_element":
+                value = element.child_by_field_name("value")
+            elif element.type == "literal_element":
+                value = next(iter(element.named_children), None)
+            else:
+                continue
+            while value is not None and value.type == "literal_element":
+                value = next(iter(value.named_children), None)
+            value = self._strip_parens(value)
+            if value is None or value.type != "identifier":
+                continue
+            ref = self.references.get(self.node_key(value))
+            src_id = ref.binding_id if ref is not None else None
+            if src_id is None:
+                continue
+            tracked = self._is_tracked_literal_value(src_id, params)
+            factory_result = src_id in self.closure_factory_results
+            if not tracked and not factory_result:
+                continue
+            is_struct, member = (
+                self._func_literal_struct_element_member(
+                    literal, element, value
+                )
+            )
+            if not is_struct:
+                continue
+            if member is not None and member.type is not None:
+                if member.type.kind != "function":
+                    continue
+                if factory_result:
                     raise _Unsupported(
-                        "unsupported_expression", _span(node)
+                        "unsupported_expression", _span(value)
                     )
-        raise _Unsupported("unsupported_expression", _span(node))
+                if not tracked:
+                    continue
+                self._adopt_element_records(src_id, member.id)
+                if src_id in self.pointee_closures:
+                    self.pointee_closures.add(member.id)
+                continue
+            raise _Unsupported("unsupported_expression", _span(value))
 
     def _struct_selector_container(
         self,
@@ -20322,6 +20367,7 @@ class _Builder:
             # id, member id). Applied at pre-state — after every LHS
             # resolves but before `values` or any store runs.
             field_container_reseats: dict[int, tuple[str, str]] = {}
+            field_func_member_targets: dict[int, str] = {}
             for lhs in lefts:
                 if lhs.type == "identifier":
                     if lhs.text == b"_":
@@ -20552,6 +20598,16 @@ class _Builder:
                     # (`p.Next.V = v`) — computing the destination
                     # reads that field's contents too.
                     refs.append((ref, True, bool(type_id), nested))
+                    field_member = self._field_member(lhs)
+                    if (
+                        field_member is not None
+                        and field_member.kind in {"var", "variable"}
+                        and field_member.type is not None
+                        and field_member.type.kind == "function"
+                    ):
+                        field_func_member_targets[
+                            len(refs) - 1
+                        ] = field_member.id
                     # `(*p.A[i].W).V = x` — computing the
                     # destination evaluates the dereferenced
                     # chain: the `p.A[i]` index (calls included)
@@ -22153,6 +22209,25 @@ class _Builder:
             # the old pointee while the store marks the root dirty.
             for dirty_id in double_pointer_dirty_targets.values():
                 self._double_pointer_dirty.add(dirty_id)
+            if not compound and len(lefts) == len(rights):
+                for i, member_id in field_func_member_targets.items():
+                    rhs = self._strip_parens(rights[i])
+                    if rhs is None or rhs.type != "identifier":
+                        continue
+                    src_ref = self.references.get(self.node_key(rhs))
+                    src_id = (
+                        src_ref.binding_id if src_ref is not None else None
+                    )
+                    if src_id in factory_results_before:
+                        raise _Unsupported(
+                            "unsupported_expression", _span(rhs)
+                        )
+                    if src_id is not None and self._is_tracked_literal_value(
+                        src_id, params
+                    ):
+                        self._adopt_element_records(src_id, member_id)
+                        if src_id in pointee_before:
+                            self.pointee_closures.add(member_id)
             for i, (ref, value) in enumerate(zip(refs, values)):
                 if (
                     (conditional or self._may_skip > 0)
@@ -29960,6 +30035,7 @@ class _Builder:
             body = node.child_by_field_name("body")
             if body is None:
                 raise _Unsupported("unsupported_expression", _span(node))
+            self._adopt_struct_composite_closure_records(node, params)
             return self.expression(
                 body, fn, params, locals_, transfers, count, depth + 1
             )

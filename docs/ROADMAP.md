@@ -3167,12 +3167,14 @@ A tracked literal factory propagates a result only when every return
 is an immediate function literal; the result re-resolves captures at
 invocation time while retaining its bind-time dependency snapshot, and
 unsupported return shapes remain opaque.
-When an immediate func literal initializes a function-typed field of a
-struct composite literal, its captures, writes, and effect marks also
-union onto the resolved field member (keyed and positional forms), in
-addition to the existing container record. An unresolved function field
-fails closed; named function values, later field-value copies, and
-passing the containing struct remain outside this propagation path.
+When an immediate func literal or a tracked named closure initializes a
+function-typed struct field, its captures, writes, and effect marks also
+union onto the resolved field member (keyed and positional composite
+forms included), in addition to the existing container record. Factory
+results and unresolved tracked-closure fields fail closed because their
+bind-time snapshot or member cannot be represented. Named functions,
+later field-value copies, and passing the containing struct remain
+outside this propagation path.
 A package-level `var Alias = Id` call
 admits as an opaque external call — the callee is
 reassignable by any caller, so `Alias(args)` is dep-free
