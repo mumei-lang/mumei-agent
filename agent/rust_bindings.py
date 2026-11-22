@@ -102,19 +102,24 @@ _SPLIT_PAIR_METHODS = frozenset({"split_first", "split_last"})
 # type arg that becomes Option's payload (`ok` reads P of
 # `Result<P, E>`, `err` reads E); -1 is the last arg.
 _OPTION_HEAD_METHODS = {
-    "get": ("&", {"Vec", "VecDeque", "HashMap", "BTreeMap"}, -1),
+    "get": ("&", {"Vec", "VecDeque", "HashMap", "BTreeMap",
+                  "HashSet", "BTreeSet"}, -1),
     "get_mut": ("&mut ", {"Vec", "VecDeque", "HashMap", "BTreeMap"}, -1),
-    "first": ("&", {"Vec"}, -1),
+    "first": ("&", {"Vec", "BTreeSet"}, -1),
     "first_mut": ("&mut ", {"Vec"}, -1),
-    "last": ("&", {"Vec"}, -1),
+    "last": ("&", {"Vec", "BTreeSet"}, -1),
     "last_mut": ("&mut ", {"Vec"}, -1),
-    "front_mut": ("&mut ", {"VecDeque"}, -1),
-    "back_mut": ("&mut ", {"VecDeque"}, -1),
-    "pop": ("", {"Vec"}, -1),
-    "front": ("&", {"VecDeque"}, -1),
-    "back": ("&", {"VecDeque"}, -1),
-    "pop_front": ("", {"VecDeque"}, -1),
-    "pop_back": ("", {"VecDeque"}, -1),
+    "front_mut": ("&mut ", {"VecDeque", "LinkedList"}, -1),
+    "back_mut": ("&mut ", {"VecDeque", "LinkedList"}, -1),
+    "pop": ("", {"Vec", "BinaryHeap"}, -1),
+    "front": ("&", {"VecDeque", "LinkedList"}, -1),
+    "back": ("&", {"VecDeque", "LinkedList"}, -1),
+    "pop_front": ("", {"VecDeque", "LinkedList"}, -1),
+    "pop_back": ("", {"VecDeque", "LinkedList"}, -1),
+    # `h.peek()` yields `Option<&P>` — `peek_mut` returns a
+    # `PeekMut` wrapper instead of a plain borrow and stays
+    # opaque.
+    "peek": ("&", {"BinaryHeap"}, -1),
     "remove": ("", {"HashMap", "BTreeMap", "VecDeque"}, -1),
     "next": ("&", None, -1),
     # `Option` exposes no `ok()` — only `Result::ok()` narrows to
@@ -122,7 +127,9 @@ _OPTION_HEAD_METHODS = {
     # opaque rather than pinning a payload.
     "ok": ("", {"Result"}, 0),
     "err": ("", {"Result"}, -1),
-    "take": ("", {"Option"}, 0),
+    # `s.take(&k)` removes and returns the element — `Option<P>`
+    # on both `Option` and the std sets.
+    "take": ("", {"Option", "HashSet", "BTreeSet"}, 0),
     # `o.as_ref()`/`o.as_mut()` keep `Option` with a borrowed
     # payload — spelled `&P`/`&mut P`.
     "as_ref": ("&", {"Option"}, 0),
@@ -157,8 +164,11 @@ _OPTION_HEAD_METHODS = {
     # `m.remove_entry(k)`/`m.pop_first()`/`m.pop_last()` yield
     # `Option<(K, V)>` — `_MAP_PAIR_METHODS` spells the pair.
     "remove_entry": ("", {"HashMap", "BTreeMap"}, 0),
-    "pop_first": ("", {"BTreeMap"}, 0),
-    "pop_last": ("", {"BTreeMap"}, 0),
+    # `pop_first`/`pop_last` on `BTreeMap` yield `Option<(K, V)>`
+    # (the `_MAP_PAIR_METHODS` pair below); on `BTreeSet` plain
+    # `Option<P>`.
+    "pop_first": ("", {"BTreeMap", "BTreeSet"}, 0),
+    "pop_last": ("", {"BTreeMap", "BTreeSet"}, 0),
     # `q.swap_remove_front(i)`/`swap_remove_back(i)` yield
     # `Option<P>`.
     "swap_remove_front": ("", {"VecDeque"}, -1),
