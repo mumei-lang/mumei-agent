@@ -350,6 +350,9 @@ class PackageCall:
     # normally since the arguments evaluate at the statement; only
     # the invocation's timing differs.
     special: str = ""
+    # `receiver_pointer` distinguishes imported pointer- and value-receiver
+    # methods. `None` means an older or incomplete report did not determine it.
+    receiver_pointer: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -1186,6 +1189,7 @@ def load_go_package_snapshot(
                     "results",
                     "type_arg_type_ids",
                     "special",
+                    "receiver_pointer",
                 }
             )
             c = item
@@ -1283,6 +1287,15 @@ def load_go_package_snapshot(
             )
             special = _string(c.get("special", ""))
             _require(special in {"", "concurrent", "deferred"})
+            receiver_pointer = c.get("receiver_pointer")
+            _require(
+                receiver_pointer is None
+                or (
+                    type(receiver_pointer) is bool
+                    and kind == "direct_import"
+                    and (method or method_expr)
+                )
+            )
             calls.append(
                 PackageCall(
                     sp,
@@ -1295,6 +1308,7 @@ def load_go_package_snapshot(
                     results,
                     tuple(type_arg_ids),
                     special,
+                    receiver_pointer,
                 )
             )
         gaps = []

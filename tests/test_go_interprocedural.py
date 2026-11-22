@@ -50889,3 +50889,211 @@ def test_parallel_struct_assignment_mixed_rhs(go_types_helper):
     )
     assert not nested.available
     assert "unsupported_expression" in {gap.reason for gap in nested.gaps}
+
+
+# --- C06 opaque-call writes through addressable operands ----------------------
+
+_ADDRESSABLE_WRITE_LIB = {
+    "lib": {
+        "lib.go": "package lib\n"
+        "type T struct { V int64 }\n"
+        "func (t *T) Set(v int64) { t.V = v }\n"
+        "func (t *T) Get() int64 { return t.V }\n"
+        "func (t T) Value(v int64) int64 { return v }\n"
+        "func ReadT(t T) int64 { return t.V }\n"
+        "func Set(p *int64, v int64) { *p = v }\n"
+        "func Fill(b []int64, v int64) { b[0] = v }\n"
+        "func FillPP(pp **int64, v int64) { **pp = v }\n"
+        "func Identity(p *int64) *int64 { return p }\n"
+    }
+}
+
+
+def _addressable_import_result(helper, body, *, declared=None):
+    files = {
+        "a.go": 'package p\nimport "lib"\n' + body,
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(helper, files, _ADDRESSABLE_WRITE_LIB),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(
+        files, snapshot, declared=declared
+    )
+    return files, snapshot, named_package(
+        files, snapshot, summaries, "F", declared=declared
+    )
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        (
+            "func F(x int64) int64 { var t lib.T; t.Set(x); return t.Get() }",
+            {0},
+        ),
+        (
+            "func F(x int64) int64 { var t lib.T; t.Set(x); return lib.ReadT(t) }",
+            {0},
+        ),
+        (
+            "func F(z, x int64) int64 { t := lib.T{V: z}; t.Set(x); return t.Get() }",
+            {0, 1},
+        ),
+        (
+            "func F(t lib.T, x int64) int64 { t.Set(x); return t.Get() }",
+            {0, 1},
+        ),
+        (
+            "func F(z, x int64) int64 { w := z; p := &w; lib.FillPP(&p, x); return w }",
+            {0, 1},
+        ),
+        (
+            "func F(z, x int64) int64 { a := [2]int64{z, z}; lib.Set(&a[0], x); return a[0] }",
+            {0, 1},
+        ),
+        (
+            "func F(z, x int64) int64 { b := []int64{z}; lib.Set(&b[0], x); return b[0] }",
+            {0, 1},
+        ),
+        (
+            "func F(x, z int64) int64 { w := z; p := &w; "
+            "b := []*int64{p}; lib.FillPP(&b[0], x); return w }",
+            {0, 1},
+        ),
+        (
+            "type O struct { t lib.T }; func F(z, x int64) int64 { o := O{t: lib.T{V: z}}; o.t.Set(x); return o.t.Get() }",
+            {0, 1},
+        ),
+        (
+            "func F(z, x int64) int64 { a := [1]lib.T{{V: z}}; a[0].Set(x); return a[0].Get() }",
+            {0, 1},
+        ),
+    ],
+)
+def test_imported_opaque_call_writes_through_addressable_operands(
+    go_types_helper, body, expected
+):
+    _files, snapshot, result = _addressable_import_result(
+        go_types_helper, body
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset(expected)
+    if ".Set(" in body and "lib.Set(" not in body:
+        method_calls = [
+            call
+            for call in snapshot.calls
+            if call.method and call.target
+        ]
+        assert method_calls
+        assert all(call.receiver_pointer is True for call in method_calls)
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        (
+            "type B []int64\n"
+            "func (b B) Set(v int64) { b[0] = v }\n"
+            "func F(x int64) int64 { b := B{0}; b.Set(x); return b[0] }\n",
+            {0},
+        ),
+        (
+            "type B []int64\n"
+            "func (b B) Set(v int64) { b[0] = v }\n"
+            "func F(b B, x int64) int64 { b.Set(x); return b[0] }\n",
+            {0, 1},
+        ),
+    ],
+    ids=["local", "parameter"],
+)
+def test_local_named_slice_value_receiver_write_propagates(
+    go_types_helper, body, expected
+):
+    result = named(*unit(go_types_helper, body))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset(expected)
+
+
+def test_imported_value_receiver_does_not_write_its_receiver(go_types_helper):
+    body = (
+        "func F(z, x int64) int64 { t := lib.T{V: z}; "
+        "t.Value(x); return t.Get() }"
+    )
+    _files, snapshot, result = _addressable_import_result(
+        go_types_helper, body
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+    calls = [call for call in snapshot.calls if call.method]
+    assert [call.receiver_pointer for call in calls] == [False, True]
+
+
+def test_local_opaque_pointer_receiver_and_double_pointer_writes(
+    go_types_helper,
+):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func FillPP(pp **int64, v int64) { **pp = v }\n"
+        "func Put(p *int64, v int64) { *p = v }\n"
+        "type U struct { V int64 }\n"
+        "func (u *U) Set(v int64) { Put(&u.V, v) }\n"
+        "func F(z, x int64) int64 {\n"
+        "\tw := z\n"
+        "\tp := &w\n"
+        "\tFillPP(&p, x)\n"
+        "\tu := U{V: z}\n"
+        "\tu.Set(x)\n"
+        "\treturn w + u.V\n"
+        "}",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_value_receiver_call_does_not_write_receiver_binding(go_types_helper):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type U struct { V int64 }\n"
+            "func (u U) Set(v int64) { u.V = v }\n"
+            "func F(z, x int64) int64 {\n"
+            "\tu := U{V: z}\n"
+            "\tu.Set(x)\n"
+            "\treturn u.V\n"
+            "}",
+        )
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_opaque_write_controls_keep_existing_call_semantics(go_types_helper):
+    _files, _snapshot, pointer = _addressable_import_result(
+        go_types_helper,
+        "func F(z, x int64) int64 { w := z; lib.Set(&w, x); return w }",
+    )
+    assert pointer.available and pointer.return_dependencies == frozenset({0, 1})
+
+    _files, _snapshot, container = _addressable_import_result(
+        go_types_helper,
+        "func F(z, x int64) int64 { b := []int64{z}; lib.Fill(b, x); return b[0] }",
+    )
+    assert container.available
+    assert container.return_dependencies == frozenset({0, 1})
+
+
+def test_declared_bounded_call_does_not_fold_address_write(go_types_helper):
+    declared = _declared_lib_set(
+        go_types_helper, _ADDRESSABLE_WRITE_LIB["lib"]
+    )
+    _files, _snapshot, result = _addressable_import_result(
+        go_types_helper,
+        "func F(z int64) int64 { w := z; lib.Identity(&w); return w }",
+        declared=declared,
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+    assert result.calls[0].imported is False

@@ -23728,70 +23728,42 @@ class _Builder:
                             scope,
                             params,
                         )
-                        if (
+                        range_receiver_operand = (
+                            range_receiver_node
+                            if call.method
+                            else (
+                                args[0]
+                                if call.method_expr and args
+                                else None
+                            )
+                        )
+                        pointer_receiver = (
                             target_fn is not None
                             and target_fn.receiver is not None
-                            and target_fn.receiver.type.kind
-                            == "pointer"
+                            and target_fn.receiver.type.kind == "pointer"
+                        ) or (
+                            target_fn is None
+                            and call.kind == "direct_import"
+                            and call.method
+                            and getattr(call, "receiver_pointer", None)
+                            is not False
+                        )
+                        if (
+                            pointer_receiver
+                            and range_receiver_operand is not None
                         ):
-                            range_receiver_operand = (
-                                range_receiver_node
-                                if call.method
-                                else (args[0] if args else None)
+                            range_stored = (
+                                frozenset().union(*computed_args)
+                                if computed_args
+                                else frozenset()
                             )
-                            range_rref = (
-                                self._receiver_root_ref(
-                                    range_receiver_operand
-                                )
-                                if range_receiver_operand is not None
-                                else None
+                            self._store_call_addressable_write(
+                                range_receiver_operand,
+                                range_stored,
+                                scope,
+                                params,
+                                pointer_receiver=True,
                             )
-                            range_rbinding = (
-                                self.bindings.get(
-                                    range_rref.binding_id
-                                )
-                                if range_rref is not None
-                                else None
-                            )
-                            if (
-                                range_rref is not None
-                                and range_rbinding is not None
-                                and (
-                                    range_rref.binding_id in scope
-                                    or range_rref.binding_id in params
-                                )
-                            ):
-                                range_stored = (
-                                    frozenset().union(*computed_args)
-                                    if computed_args
-                                    else frozenset()
-                                )
-                                if (
-                                    range_rbinding.type.kind
-                                    == "pointer"
-                                ):
-                                    self.indirect_writes |= (
-                                        range_stored
-                                    )
-                                else:
-                                    range_base = (
-                                        scope.get(
-                                            range_rref.binding_id
-                                        )
-                                        if range_rref.binding_id
-                                        in scope
-                                        else frozenset(
-                                            {
-                                                params[
-                                                    range_rref
-                                                    .binding_id
-                                                ]
-                                            }
-                                        )
-                                    )
-                                    scope[range_rref.binding_id] = (
-                                        range_base | range_stored
-                                    )
                     if not (
                         opaque_range is not None
                         and opaque_range == local_chan_chan_range
@@ -31308,11 +31280,24 @@ class _Builder:
                 else frozenset()
             )
             write_args = list(arguments)
-            if receiver_node is not None:
-                # `st.M()` hands the callee `&st` under a `*T`
-                # receiver — stores inside `M` land in the
-                # caller's `st` like an `&x` argument's do.
-                write_args.append(receiver_node)
+            if (
+                receiver_node is not None
+                and target.receiver is not None
+                and target.receiver.type.kind != "pointer"
+            ):
+                receiver_binding = self.bindings.get(
+                    target.receiver.binding_id
+                )
+                if (
+                    receiver_binding is not None
+                    and (
+                        receiver_binding.type.kind in {"slice", "map"}
+                        or self._struct_collection_members(
+                            receiver_binding.type, receiver_binding
+                        )
+                    )
+                ):
+                    write_args.append(receiver_node)
             self._store_call_writes(
                 write_args, stored, locals_, params
             )
@@ -31338,50 +31323,13 @@ class _Builder:
                 and target.receiver is not None
                 and target.receiver.type.kind == "pointer"
             ):
-                # Resolve the operand's ROOT identifier — `st.M()`
-                # gives `st`, `s.A.Set(x)` gives `s` (a field
-                # receiver auto-takes `&s.A`, whose stores land in
-                # the root's conflated set), `(*p).M()` gives `p`.
-                rref = self._receiver_root_ref(receiver_operand)
-                rbinding = (
-                    self.bindings.get(rref.binding_id)
-                    if rref is not None
-                    else None
+                self._store_call_addressable_write(
+                    receiver_operand,
+                    stored,
+                    locals_,
+                    params,
+                    pointer_receiver=True,
                 )
-                if rref is not None and rbinding is not None and (
-                    rref.binding_id in locals_
-                    or rref.binding_id in params
-                ):
-                    if rbinding.type.kind == "pointer":
-                        # `(*p).Set(x)` / `p.Set(x)` writes through
-                        # the pointer — pointee memory, broadcast
-                        # into `indirect_writes` like `*p = v`,
-                        # plus every escaped binding it may aim at.
-                        self.indirect_writes |= stored
-                        for escaped_id in self.escaped:
-                            if (
-                                escaped_id in locals_
-                                or escaped_id in params
-                            ):
-                                esc_base = (
-                                    locals_.get(escaped_id)
-                                    if escaped_id in locals_
-                                    else frozenset(
-                                        {params[escaped_id]}
-                                    )
-                                )
-                                locals_[escaped_id] = (
-                                    esc_base | stored
-                                )
-                    else:
-                        base = (
-                            locals_.get(rref.binding_id)
-                            if rref.binding_id in locals_
-                            else frozenset(
-                                {params[rref.binding_id]}
-                            )
-                        )
-                        locals_[rref.binding_id] = base | stored
             # A callee's ops on an external channel — `GC <- x`,
             # `<-lib.VC` — mutate a queue the caller shares:
             # `G(ch)`'s sends already broadcast through the arg
@@ -35754,10 +35702,22 @@ class _Builder:
                     frozenset().union(*actual)
                     if actual
                     else frozenset()
-                )
+                ) | receiver_deps
                 self._store_call_writes(
                     arguments, stored, locals_, params
                 )
+                if (
+                    receiver is not None
+                    and getattr(call, "method", False)
+                    and getattr(call, "receiver_pointer", None) is not False
+                ):
+                    self._store_call_addressable_write(
+                        receiver,
+                        stored,
+                        locals_,
+                        params,
+                        pointer_receiver=True,
+                    )
                 # The declared callee's recorded ops on an external
                 # channel share its queue with the caller — same
                 # broadcast the local-callee site applies.
@@ -35804,6 +35764,18 @@ class _Builder:
         # conservatively depends on every argument (its own old deps are
         # already inside `result` because `&x` contributed them).
         self._store_call_writes(arguments, result, locals_, params)
+        if (
+            receiver is not None
+            and getattr(call, "method", False)
+            and getattr(call, "receiver_pointer", None) is not False
+        ):
+            self._store_call_addressable_write(
+                receiver,
+                result,
+                locals_,
+                params,
+                pointer_receiver=True,
+            )
         chan_chan_argument = bool(local_chan_chan_roots)
         if not chan_chan_argument:
             for arg in arguments:
@@ -35945,6 +35917,107 @@ class _Builder:
                     | stored
                 )
 
+    def _store_call_addressable_write(
+        self,
+        operand: Any,
+        stored: frozenset[int],
+        locals_: dict[Any, Any],
+        params: dict[Any, int],
+        *,
+        explicit_address: bool = False,
+        pointer_receiver: bool = False,
+    ) -> None:
+        original = self._strip_parens(operand)
+        if original is None:
+            self._fold_pointer_call_writes(stored, locals_, params)
+            return
+
+        root = original
+        pointer_crossing = False
+        shared_container = False
+        current = original
+        while current is not None:
+            current_type = self._deferred_expression_type(current)
+            if current_type is not None and current_type.kind in {
+                "slice",
+                "map",
+            }:
+                shared_container = True
+            if current.type in {
+                "selector_expression",
+                "field_expression",
+                "index_expression",
+            }:
+                base = current.child_by_field_name("operand")
+                if base is None:
+                    break
+                base_type = self._deferred_expression_type(base)
+                if base_type is not None:
+                    if base_type.kind == "pointer":
+                        pointer_crossing = True
+                    elif base_type.kind in {"slice", "map"}:
+                        shared_container = True
+                root = base
+                current = self._strip_parens(base)
+                continue
+            if current.type == "unary_expression":
+                operator = current.child_by_field_name("operator")
+                if operator is not None and operator.type == "*":
+                    pointer_crossing = True
+                    root = current.child_by_field_name("operand")
+                    current = self._strip_parens(root)
+                    continue
+            break
+
+        final_type = self._deferred_expression_type(original)
+        root_type = self._deferred_expression_type(root)
+        if pointer_receiver and final_type is not None:
+            pointer_crossing |= final_type.kind == "pointer"
+        root = self._strip_parens(root)
+        ref = (
+            self.references.get(self.node_key(root))
+            if root is not None and root.type == "identifier"
+            else None
+        )
+        if (
+            ref is None
+            or not ref.binding_id
+            or ref.binding_id not in locals_
+            and ref.binding_id not in params
+        ):
+            self._fold_pointer_call_writes(stored, locals_, params)
+            return
+        root_id = ref.binding_id
+        if pointer_crossing:
+            self._fold_pointer_call_writes(stored, locals_, params)
+            return
+        if shared_container or (
+            root_type is not None and root_type.kind in {"slice", "map"}
+        ):
+            self._store_call_writes([root], stored, locals_, params)
+            if (
+                explicit_address
+                and final_type is not None
+                and final_type.kind == "pointer"
+            ):
+                self._fold_pointer_call_writes(
+                    stored, locals_, params
+                )
+            return
+
+        self._store(locals_, params, root_id, stored, True)
+        if (
+            explicit_address
+            and root_type is not None
+            and root_type.kind == "pointer"
+        ):
+            self._ptr_deps[root_id] = (
+                self._pointer_deps(root_id, params, locals_) | stored
+            )
+        if explicit_address and final_type is not None:
+            if final_type.kind == "pointer":
+                self._fold_pointer_call_writes(stored, locals_, params)
+
     def _store_call_writes(
         self,
         arguments: list[Any],
@@ -35982,56 +36055,13 @@ class _Builder:
                 and arg_node.children[0].type == "&"
             ):
                 (operand,) = _children(arg_node)
-                literal_operand = operand
-                while (
-                    literal_operand is not None
-                    and literal_operand.type
-                    == "parenthesized_expression"
-                ):
-                    literal_operand = next(
-                        (
-                            child
-                            for child in literal_operand.named_children
-                            if child.type != "comment"
-                        ),
-                        None,
-                    )
-                if (
-                    literal_operand is not None
-                    and literal_operand.type == "composite_literal"
-                ):
-                    self._fold_pointer_call_writes(
-                        stored, locals_, params
-                    )
-                    continue
-                ref = (
-                    self.references.get(self.node_key(operand))
-                    if operand.type == "identifier"
-                    else None
+                self._store_call_addressable_write(
+                    operand,
+                    stored,
+                    locals_,
+                    params,
+                    explicit_address=True,
                 )
-                if ref is not None and (
-                    ref.binding_id in locals_ or ref.binding_id in params
-                ):
-                    base = (
-                        locals_.get(ref.binding_id)
-                        if ref.binding_id in locals_
-                        else frozenset({params[ref.binding_id]})
-                    )
-                    locals_[ref.binding_id] = base | stored
-                    arg_binding = self.bindings.get(ref.binding_id)
-                    if (
-                        arg_binding is not None
-                        and arg_binding.type.kind == "pointer"
-                    ):
-                        # `G(&p)` — the callee's `*q` IS p itself:
-                        # a `*q = r` store reseats the pointer, so
-                        # its provenance gains the write's deps.
-                        self._ptr_deps[ref.binding_id] = (
-                            self._pointer_deps(
-                                ref.binding_id, params, locals_
-                            )
-                            | stored
-                        )
             elif arg_node.type == "identifier":
                 # `G(p)` hands the callee a pointer binding — the
                 # callee's `*q` stores write caller memory, so every

@@ -159,6 +159,10 @@ type call struct {
 	// arguments at the statement itself, so only the invocation's
 	// timing differs from a plain call.
 	Special string `json:"special,omitempty"`
+	// ReceiverPointer records imported method receiver pointerness
+	// when go/types resolves the method selection. Omission means the
+	// receiver shape was unavailable to this producer.
+	ReceiverPointer *bool `json:"receiver_pointer,omitempty"`
 }
 
 type gap struct {
@@ -1792,6 +1796,19 @@ func analyze(req request) (out snapshot) {
 				if kind != "direct_import" || results <= 1 {
 					results = 0
 				}
+				var receiverPointer *bool
+				if kind == "direct_import" && (method || methodExpr) {
+					if selector, ok := unparen(node.Fun).(*ast.SelectorExpr); ok {
+						if selection := info.Selections[selector]; selection != nil {
+							if method, ok := selection.Obj().(*types.Func); ok {
+								if signature, ok := method.Type().(*types.Signature); ok && signature.Recv() != nil {
+									_, isPointer := types.Unalias(signature.Recv().Type()).(*types.Pointer)
+									receiverPointer = &isPointer
+								}
+							}
+						}
+					}
+				}
 				sp := ix.nodeSpan(node)
 				if fn, ok := functions[owner]; !ok || fn.Body == nil || sp.Start < fn.Body.Start || sp.End > fn.Body.End || spanFile(&sp) != spanFile(fn.Body) {
 					owner = ""
@@ -1800,7 +1817,7 @@ func analyze(req request) (out snapshot) {
 				for _, arg := range node.Args {
 					args = append(args, ix.nodeSpan(arg))
 				}
-				out.Calls = append(out.Calls, call{sp, args, owner, target, kind, method, results, typeArgIDs, methodExpr, specialKind})
+				out.Calls = append(out.Calls, call{sp, args, owner, target, kind, method, results, typeArgIDs, methodExpr, specialKind, receiverPointer})
 				if owner == "" {
 					out.Gaps = append(out.Gaps, gap{"call_outside_named_body", &sp})
 				}
