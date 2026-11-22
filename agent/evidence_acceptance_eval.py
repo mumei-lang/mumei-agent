@@ -70,11 +70,15 @@ def build_eval_parser(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _read_declared(path: str) -> dict:
+def _read_declared_bytes(path: str) -> bytes:
     with open(path, "rb") as handle:
         data = handle.read(MAX_DESCRIPTOR_BYTES + 1)
     if len(data) > MAX_DESCRIPTOR_BYTES:
         raise ValueError("declared document exceeds the bounded read limit")
+    return data
+
+
+def _parse_declared(data: bytes) -> dict:
     try:
         value = json.loads(data.decode("utf-8"))
     except (UnicodeDecodeError, ValueError, RecursionError) as exc:
@@ -87,7 +91,8 @@ def _read_declared(path: str) -> dict:
 
 
 def run_eval(args: argparse.Namespace) -> dict:
-    descriptor = _read_declared(args.descriptor)
+    descriptor_bytes = _read_declared_bytes(args.descriptor)
+    descriptor = _parse_declared(descriptor_bytes)
     output_path = getattr(args, "output", None)
     if output_path is not None:
         out_path = Path(output_path)
@@ -99,7 +104,9 @@ def run_eval(args: argparse.Namespace) -> dict:
         except FileNotFoundError:
             pass
     return evaluate_core_acceptance(
-        descriptor, getattr(args, "expected_fingerprint", None)
+        descriptor,
+        getattr(args, "expected_fingerprint", None),
+        descriptor_bytes=descriptor_bytes,
     )
 
 

@@ -1112,6 +1112,47 @@ def test_pinned_signature_verification_recovers_producer_authenticity():
     assert evaluation["checks"]["producer_authenticity"] == "recovered"
 
 
+def test_pinned_signature_verification_recovers_descriptor_authenticity():
+    descriptor_digest = "a" * 64
+    eval_digest = "b" * 64
+    # The acceptance-evaluation doc declares `descriptor_authenticity`
+    # unperformed and pins the assessed descriptor by
+    # `descriptor_digest`; a signed-descriptor verification bound to
+    # those bytes performs it — the same
+    # signature_valid + key_pinned + subject_digest shape as
+    # `producer_authenticity`.
+    record = _record("descriptor_authenticity")
+    record["descriptor_digest"] = descriptor_digest
+    evaluation = evaluate_unperformed_check_recovery(
+        record,
+        [_signature_verification_doc(descriptor_digest)],
+        record_digest=eval_digest,
+    )
+    assert (
+        evaluation["checks"]["descriptor_authenticity"] == "recovered"
+    )
+
+    # Signing the eval doc itself does not authenticate the
+    # descriptor — the verification binds to the record's own bytes,
+    # not the declared descriptor, so the evidence fails. An unpinned
+    # key or a failed signature never authenticates either.
+    for doc in (
+        _signature_verification_doc(eval_digest),
+        _signature_verification_doc(descriptor_digest, key_pinned=False),
+        _signature_verification_doc(
+            descriptor_digest, signature_valid=False
+        ),
+        _signature_verification_doc("c" * 64),
+    ):
+        evaluation = evaluate_unperformed_check_recovery(
+            record, [doc], record_digest=eval_digest,
+        )
+        assert (
+            evaluation["checks"]["descriptor_authenticity"]
+            == "evidence_failed"
+        )
+
+
 def test_producer_authenticity_needs_signature_and_key_pin_and_binding():
     digest = "a" * 64
     record = _record("producer_authenticity")

@@ -9566,3 +9566,33 @@ representation-level のみ — verdict 昇格・grade promotion・Core check �
 `mumei claims --require-evidence-acceptance` に委ねる設計のまま。
 
 **回帰ゲート**: `uv run pytest tests/test_binding_eval.py tests/test_evidence_acceptance_eval.py tests/test_contract_vocabulary.py -q`
+
+## C11 recovery-eval: descriptor_authenticity の performer — ✅ Implemented
+
+`mumei.core-acceptance-evaluation/v1` が宣言する
+`descriptor_authenticity`（**評価対象 descriptor** の真正性）を、
+`mumei.signature-verification/v1` の `signature_valid` + `key_pinned`
+（`subject_digest` carrier）で回収する performer 登録を追加。
+
+- eval doc は `descriptor_digest`（評価対象 descriptor の raw bytes の
+  SHA-256、route が再計算）を emit — eval doc 自身の bytes ではなく
+  評価対象を名指す declared carrier。`_record_bound_digest` と
+  `_BINDING_CARRIERS` に `descriptor_digest` を登録し、署名対象が
+  descriptor bytes であるときだけ verification doc が bind される。
+- `producer_authenticity` と同一の performer 形状（signed + caller-pinned
+  producer key；key 自体の authenticity は別チェックのまま）。
+- **eval doc 自身への署名では回収しない**（bind 先が descriptor digest
+  なので evidence_failed）— Devin Review の指摘（eval doc の署名で
+  descriptor の真正性が誤認 recovered になる）を反映。
+- unpinned key・失敗署名・別 bytes への bind も `evidence_failed`。
+- e2e: 実 mumei `evidence sign` で descriptor に署名 → `signature-verify`
+  → `recovery-eval` で `descriptor_authenticity: recovered` を確認。
+- 残る performer なし check は設計上 unrecoverable:
+  `unperformed_check_recovery`（自己回収の無限後退を回避）、
+  `independent_model_correspondence` / `tool_execution`（Core 領域）、
+  `grade_promotion`（demand gate）。
+
+representation-level のみ — verdict 昇格・grade promotion・Core check の
+新規クレームなし。
+
+**回帰ゲート**: `uv run pytest tests/test_recovery_eval.py tests/test_binding_eval.py tests/test_evidence_acceptance_eval.py tests/test_contract_vocabulary.py -q`
