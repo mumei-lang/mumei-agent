@@ -12487,16 +12487,19 @@ class _Builder:
                             or binding_id in self.pointee_closures
                         )
                     elif value.type == "func_literal":
-                        (
-                            _,
-                            literal_captured,
-                            captures_pointer,
-                            literal_writes,
-                            star_write,
-                            has_call,
-                        ) = self._func_literal_capture(
-                            value, params, locals_
-                        )
+                        try:
+                            (
+                                _,
+                                literal_captured,
+                                captures_pointer,
+                                literal_writes,
+                                star_write,
+                                has_call,
+                            ) = self._func_literal_capture(
+                                value, params, locals_
+                            )
+                        except _Unsupported:
+                            continue
                         captured |= frozenset(literal_captured)
                         writes |= frozenset(literal_writes)
                         star_or_external |= (

@@ -20343,6 +20343,31 @@ def test_closure_argument_uses_captures_after_all_arguments(
     assert 0 in result.return_dependencies
 
 
+def test_later_defer_literal_binding_is_available_after_go(go_types_helper):
+    source = (
+        "func ap(f func()) { f() }\n"
+        "func send(ch chan int64, v int64) { ch <- v }\n"
+        "func F(x, y int64) (r int64) { "
+        "ch := make(chan int64, 1); go send(ch, y); "
+        "w := x; defer ap(func(){ r = w }); return <-ch }"
+    )
+    result = named(*unit(go_types_helper, source))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_later_defer_literal_write_remains_race_closed(go_types_helper):
+    source = (
+        "func ap(f func()) { f() }\n"
+        "func setp(p *int64, a int64) { *p = a }\n"
+        "func F(x, y int64) int64 { "
+        "w0 := y; go setp(&w0, y); z := x; "
+        "defer ap(func(){ w0 = z }); return w0 }"
+    )
+    result = named(*unit(go_types_helper, source))
+    assert not result.available
+
+
 @pytest.mark.parametrize(
     ("source", "dependencies"),
     [
