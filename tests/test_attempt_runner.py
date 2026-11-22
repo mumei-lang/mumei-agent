@@ -102,6 +102,97 @@ def test_run_observes_real_exit_codes(code):
     assert result.complete is True
 
 
+def test_run_inherits_environment_by_default(monkeypatch):
+    monkeypatch.setenv("MUMEI_TEST_FAKE_SENTINEL", "not-a-secret-sentinel")
+    result = AttemptRunner().run(
+        request(),
+        argv(
+            "import os,sys; "
+            "sys.exit(0 if os.getenv('MUMEI_TEST_FAKE_SENTINEL') == "
+            "'not-a-secret-sentinel' else 1)"
+        ),
+    )
+    assert result.record.events[-1].exit_code == 0
+
+
+def test_run_uses_explicit_environment_instead_of_inheriting(monkeypatch):
+    monkeypatch.setenv("MUMEI_TEST_FAKE_SENTINEL", "not-a-secret-sentinel")
+    result = AttemptRunner().run(
+        request(),
+        argv(
+            "import os,sys; "
+            "sys.exit(0 if 'MUMEI_TEST_FAKE_SENTINEL' not in os.environ else 1)"
+        ),
+        environment={"PATH": os.environ.get("PATH", "")},
+    )
+    assert result.record.events[-1].exit_code == 0
+
+
+@pytest.mark.parametrize(
+    "environment",
+    [
+        [],
+        {"": "value"},
+        {1: "value"},
+        {"BAD=KEY": "value"},
+        {"BAD\0KEY": "value"},
+        {"KEY": 1},
+        {"KEY": "bad\0value"},
+    ],
+)
+def test_run_rejects_invalid_environment(environment):
+    with pytest.raises(
+        ValueError, match="^invalid attempt run environment$"
+    ):
+        AttemptRunner().run(request(), argv("pass"), environment=environment)
+
+
+@pytest.mark.skipif(
+    not attempt_runner.memory_bound_enforceable(),
+    reason="memory bounds require a POSIX resource boundary",
+)
+def test_run_memory_bound_spawns_with_scrubbed_environment():
+    result = AttemptRunner().run(
+        request(),
+        argv("print('ok')"),
+        memory_bound_mb=256,
+        environment={"PATH": os.environ.get("PATH", "")},
+    )
+    assert result.record.state == "exited"
+    assert result.record.events[-1].exit_code == 0
+    assert result.stdout == b"ok\n"
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux")
+    or not attempt_runner.memory_bound_spawn_thread_safe(),
+    reason="target PATH bound test requires Linux with prlimit or POSIX sh",
+)
+def test_run_memory_bound_resolves_target_from_child_path(tmp_path):
+    memory_bound_mb = 256
+    script_name = "memory-bound-probe"
+    script = tmp_path / script_name
+    script.write_text(
+        f"#!{sys.executable}\n"
+        "import resource\n"
+        "print(resource.getrlimit(resource.RLIMIT_AS)[0])\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    assert str(tmp_path) not in os.environ.get("PATH", "").split(os.pathsep)
+
+    result = AttemptRunner().run(
+        request(),
+        (script_name,),
+        memory_bound_mb=memory_bound_mb,
+        environment={"PATH": str(tmp_path)},
+    )
+
+    assert result.record.state == "exited"
+    assert result.record.events[-1].exit_code == 0
+    assert result.stdout == f"{memory_bound_mb * 1_048_576}\n".encode()
+
+
 def test_run_captures_bounded_stdout_without_interpreting_it():
     body = b"FAKE_PRIVATE_RUNNER_STDOUT"
     result = AttemptRunner().run(

@@ -910,7 +910,7 @@ def test_attempt_route_skips_candidate_when_inputs_change(
 
     def run_then_modify(
         self, request, argv, memory_bound_mb=None, cancel_event=None,
-        feed_bytes=None,
+        feed_bytes=None, environment=None,
     ):
         src.write_text(_RS_SRC + "//mutated mid-run")
         return real_run(
@@ -920,6 +920,7 @@ def test_attempt_route_skips_candidate_when_inputs_change(
             memory_bound_mb=memory_bound_mb,
             cancel_event=cancel_event,
             feed_bytes=feed_bytes,
+            environment=environment,
         )
 
     monkeypatch.setattr(
@@ -2568,7 +2569,7 @@ def test_reuse_attempt_skips_selection_when_manifest_drifts(
 
     def run_then_modify(
         self, request, argv, memory_bound_mb=None, cancel_event=None,
-        feed_bytes=None,
+        feed_bytes=None, environment=None,
     ):
         manifest.write_text("{}")
         return real_run(
@@ -2578,6 +2579,7 @@ def test_reuse_attempt_skips_selection_when_manifest_drifts(
             memory_bound_mb=memory_bound_mb,
             cancel_event=cancel_event,
             feed_bytes=feed_bytes,
+            environment=environment,
         )
 
     monkeypatch.setattr(

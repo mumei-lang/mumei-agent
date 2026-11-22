@@ -97,7 +97,7 @@ def test_env_registry_covers_reads_without_stale_or_duplicate_entries() -> None:
     names = [entry.name for entry in ENV_VARS]
     assert len(names) == len(set(names))
     registered = set(names)
-    generic_platform_names = {"HOME", "PATH"}
+    generic_platform_names = {"HOME", "PATH", "SYSTEMROOT"}
     assert scan_environment_names(REPO_ROOT) - registered <= generic_platform_names
     assert registered <= referenced_environment_names(REPO_ROOT)
     assert all(entry.category for entry in ENV_VARS)

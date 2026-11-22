@@ -17,6 +17,7 @@ import signal
 import subprocess
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from agent.verification_attempt import (
@@ -217,15 +218,25 @@ def memory_bound_spawn_thread_safe() -> bool:
     return _PRLIMIT is not None or _SH is not None
 
 
-def _spawn_target_resolvable(name: str) -> bool:
-    """Whether execvp would locate `name` under the current PATH.
+def _spawn_target_resolvable(
+    name: str, environment: dict[str, str] | None = None
+) -> bool:
+    """Whether execvp would locate `name` under the child PATH.
 
     `shutil.which` treats an empty PATH as no directories, while
     execvp searches the working directory for it — mirror that one
     case so resolution agrees with the spawn the runner performs."""
-    if shutil.which(name) is not None:
+    if environment is None:
+        if shutil.which(name) is not None:
+            return True
+        path = os.environ.get("PATH")
+        if path == "":
+            return shutil.which(name, path=".") is not None
+        return False
+    path = environment.get("PATH", os.defpath)
+    if shutil.which(name, path=path) is not None:
         return True
-    if os.environ.get("PATH") == "":
+    if path == "":
         return shutil.which(name, path=".") is not None
     return False
 
@@ -341,6 +352,7 @@ class AttemptRunner:
         cancel_event: "threading.Event | None" = None,
         memory_bound_mb: int | None = None,
         feed_bytes: bytes | None = None,
+        environment: Mapping[str, str] | None = None,
     ) -> AttemptRunResult:
         """Spawn `argv`, observe one attempt and return a terminal record.
 
@@ -358,6 +370,10 @@ class AttemptRunner:
         exceeding it surfaces only as an ordinary observed outcome (`exited`
         with its code, `failed` or `timed_out`), never diagnosed as a
         resource violation.
+        `environment=None` inherits the host environment; an explicit
+        mapping is passed to the child as its complete environment.
+        Environment scrubbing is not a sandbox and does not restrict
+        filesystem, network or process access.
         """
         if type(request) is not AttemptExecutionRequest:
             raise ValueError("attempt run requires an execution request")
@@ -387,6 +403,21 @@ class AttemptRunner:
             type(feed_bytes) is not bytes or len(feed_bytes) > MAX_FEED_BYTES
         ):
             raise ValueError("invalid attempt run feed")
+        child_environment = None
+        if environment is not None:
+            if not isinstance(environment, Mapping):
+                raise ValueError("invalid attempt run environment")
+            child_environment = dict(environment)
+            if any(
+                type(key) is not str
+                or not key
+                or "=" in key
+                or "\0" in key
+                or type(value) is not str
+                or "\0" in value
+                for key, value in child_environment.items()
+            ):
+                raise ValueError("invalid attempt run environment")
         record = AttemptRecord(
             request.request_fingerprint,
             request.attempt_number,
@@ -396,7 +427,7 @@ class AttemptRunner:
         preexec = None
         if memory_bound_mb is not None:
             if _PRLIMIT is not None:
-                if _spawn_target_resolvable(spawn_argv[0]):
+                if _spawn_target_resolvable(spawn_argv[0], child_environment):
                     spawn_argv = [
                         _PRLIMIT,
                         f"--as={memory_bound_mb * 1_048_576}",
@@ -408,7 +439,7 @@ class AttemptRunner:
                 # Leave argv unwrapped so a missing target still
                 # reports a spawn failure.
             elif _SH is not None:
-                if _spawn_target_resolvable(spawn_argv[0]):
+                if _spawn_target_resolvable(spawn_argv[0], child_environment):
                     # `ulimit -v` is RLIMIT_AS in KiB; `exec` carries
                     # the limit into the target. The `&&` keeps a
                     # rejected bound from running the target
@@ -426,6 +457,9 @@ class AttemptRunner:
             else:
                 preexec = _memory_bound_preexec(memory_bound_mb)
         try:
+            popen_environment = (
+                {} if child_environment is None else {"env": child_environment}
+            )
             process = subprocess.Popen(
                 spawn_argv,
                 stdin=subprocess.PIPE if feed_bytes is not None else None,
@@ -433,6 +467,7 @@ class AttemptRunner:
                 stderr=subprocess.PIPE,
                 preexec_fn=preexec,
                 start_new_session=_PROCESS_GROUP,
+                **popen_environment,
             )
         except (OSError, subprocess.SubprocessError):
             return AttemptRunResult(
@@ -599,6 +634,7 @@ def dispatch_attempt(
     memory_bound_mb: int | None = None,
     feed_bytes: bytes | None = None,
     report_stamp: int | None = None,
+    environment: Mapping[str, str] | None = None,
 ) -> AttemptDispatch:
     """Run the sequence's outstanding dispatch and reconcile the observation.
 
@@ -634,6 +670,7 @@ def dispatch_attempt(
         cancel_event=cancel_event,
         memory_bound_mb=memory_bound_mb,
         feed_bytes=feed_bytes,
+        environment=environment,
     )
     return AttemptDispatch(
         sequence.reconcile_report(run.record, report_stamp), run

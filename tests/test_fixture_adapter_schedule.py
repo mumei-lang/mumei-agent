@@ -27,6 +27,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 STUB = str(REPO_ROOT / "tests" / "fixtures" / "stub_adapter.py")
 PROFILE = "mumei.test/v1"
 SECRET = "FAKE_SECRET_SENTINEL_VALUE_9f2c1d"
+FAKE_SENTINEL = "not-a-secret-sentinel"
 
 SOURCE_BYTES = b"FAKE_PRIVATE_SOURCE_NOT_EVIDENCE"
 
@@ -96,6 +97,7 @@ def _run(paths, *extra):
         "PYTHONPATH": str(REPO_ROOT),
         "PATH": "/usr/bin:/bin",
         "MUMEI_TEST_SECRET": SECRET,
+        "MUMEI_TEST_FAKE_SENTINEL": FAKE_SENTINEL,
     }
     out = subprocess.run(
         [
@@ -290,6 +292,29 @@ def test_declared_success_exit_code_selects_nonzero_exit(tmp_path):
     assert doc["selected_adapter_id"] == "alpha"
     assert [a["adapter_id"] for a in doc["attempts"]] == ["alpha"]
     assert doc["attempts"][0]["exit_code"] == 7
+
+
+def test_verify_schedule_does_not_pass_environment_to_undeclared_adapter(
+    tmp_path,
+):
+    paths = _base(
+        tmp_path,
+        argv_alpha=stub_argv(
+            "--require-env", "MUMEI_TEST_FAKE_SENTINEL"
+        ),
+    )
+
+    out = _run(paths)
+    doc = _doc(out)
+
+    assert doc["selected_adapter_id"] == "alpha"
+    assert doc["attempts"][0]["exit_code"] == 0
+    sentinel = FAKE_SENTINEL.encode()
+    assert sentinel not in out.stdout.encode()
+    assert sentinel not in out.stderr.encode()
+    for path in tmp_path.rglob("*"):
+        if path.is_file():
+            assert sentinel not in path.read_bytes()
 
 
 def test_invalid_settings_fail_statically(tmp_path):

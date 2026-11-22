@@ -11,13 +11,16 @@ any core edit. Its behavior is entirely declared on the command line:
     --err TEXT      print TEXT on stderr before exiting
     --spew N        print N bytes of 'x' on stdout before exiting
     --alloc-mb N    allocate N MiB then exit (memory-bound induction)
+    --require-env NAME exit 3 if NAME is set, otherwise exit 0
     --die           os._exit(137) mid-flight after any --emit
 
-By construction it reads no environment, opens no file, spawns no
-child and touches no network — anything it does is what the declared
-argv asked for. An unrecognized flag exits 64 (usage).
+By construction it reads environment only when `--require-env` is
+declared, opens no file, spawns no child and touches no network —
+anything it does is what the declared argv asked for. An unrecognized
+flag exits 64 (usage).
 """
 
+import os
 import sys
 import time
 
@@ -29,6 +32,7 @@ def main(argv: list[str]) -> int:
     err: str | None = None
     spew = 0
     alloc_mb = 0
+    require_env: str | None = None
     die = False
     i = 0
     while i < len(argv):
@@ -53,8 +57,12 @@ def main(argv: list[str]) -> int:
             spew = int(value)
         elif flag == "--alloc-mb":
             alloc_mb = int(value)
+        elif flag == "--require-env":
+            require_env = value
         else:
             return 64
+    if require_env is not None:
+        return 3 if require_env in os.environ else 0
     if emit is not None:
         print(emit)
     else:
@@ -65,8 +73,6 @@ def main(argv: list[str]) -> int:
         sys.stdout.write("x" * spew)
         sys.stdout.flush()
     if die:
-        import os
-
         os._exit(137)
     if sleep_s:
         time.sleep(sleep_s)
