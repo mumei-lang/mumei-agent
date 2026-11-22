@@ -12405,6 +12405,15 @@ class _Builder:
         captured, writes, roots, star = self._deferred_exit_shape(
             call_node, call, params, locals_
         )
+        arguments = call_node.child_by_field_name("arguments")
+        if arguments is not None:
+            for argument in _children(arguments):
+                if self._deferred_argument_is_pointer(argument):
+                    root_id = self._deferred_root_binding(
+                        argument, params, locals_
+                    )
+                    if root_id is not None:
+                        self.escaped.add(root_id)
         function_node = self._strip_parens(
             call_node.child_by_field_name("function")
         )
@@ -12428,7 +12437,6 @@ class _Builder:
             set(captured | writes | roots) & local_param_ids
         )
         reference_involved = star or bool(roots)
-        arguments = call_node.child_by_field_name("arguments")
         if arguments is not None:
             reference_involved |= any(
                 self._deferred_argument_is_pointer(argument)
@@ -12609,16 +12617,11 @@ class _Builder:
                     )
                     if not resolved_literal:
                         if (
-                            star
-                            or reference_involved
+                            (star and self.escaped)
                             or any(
-                                (
-                                    binding := self.bindings.get(binding_id)
-                                )
-                                is None
-                                or not self._scalar_value_fact(
-                                    binding.type
-                                )
+                                binding_id in self.escaped
+                                or binding_id
+                                in self.external_chan_locals
                                 for binding_id in touched
                             )
                         ):

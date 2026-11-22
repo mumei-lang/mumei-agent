@@ -18691,6 +18691,53 @@ def test_later_bound_literal_unrelated_scalar_write_stays_available(
     assert result.return_dependencies == frozenset({0})
 
 
+def test_opaque_func_parameter_call_does_not_close_local_channel_race(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func send(ch chan int64, v int64) { ch <- v }\n"
+            "func F(f func(int64) int64, x, z int64) int64 { "
+            "ch := make(chan int64, 1); go send(ch, x); "
+            "y := f(z); return <-ch + y }",
+        )
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1, 2})
+
+
+def test_named_func_alias_call_does_not_close_local_channel_race(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func G(a int64) int64 { return a }\n"
+            "func F(x, z int64) int64 { "
+            "ch := make(chan int64, 1); "
+            "g := func() { ch <- x }; go g(); "
+            "h := G; y := h(z); return <-ch + y }",
+        )
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_opaque_func_call_still_closes_for_escaped_touched_binding(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func H(p *int64, v int64) { *p = v }\n"
+            "func F(f func(int64) int64, x, z int64) int64 { "
+            "w := int64(0); go H(&w, x); f(z); return w }",
+        )
+    )
+    assert not result.available
+
+
 @pytest.mark.parametrize(
     "body",
     [
