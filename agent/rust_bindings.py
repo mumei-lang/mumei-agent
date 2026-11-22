@@ -124,6 +124,11 @@ _OPTION_HEAD_METHODS = {
     # `(element, rest-slice)` pair; `_SPLIT_PAIR_METHODS` spells it.
     "split_first": ("", {"Vec"}, -1),
     "split_last": ("", {"Vec"}, -1),
+    # `o.as_deref()`/`o.as_deref_mut()` deref the payload —
+    # `Option<Box<P>>` yields `Option<&P>`; the element is
+    # post-processed below to peel the wrapper.
+    "as_deref": ("&", {"Option"}, 0),
+    "as_deref_mut": ("&mut ", {"Option"}, 0),
 }
 
 _PRELUDE_NAMES = frozenset(
@@ -149,7 +154,18 @@ _PRELUDE_TYPE_NAMES = frozenset(
 )
 _PRELUDE_PATTERN_PATHS = frozenset({"Some", "None", "Ok", "Err"})
 _UNWRAP_OK_METHODS = frozenset(
-    {"unwrap", "expect", "unwrap_or", "unwrap_or_else", "unwrap_unchecked"}
+    {
+        "unwrap", "expect", "unwrap_or", "unwrap_or_else",
+        "unwrap_or_default", "unwrap_unchecked",
+    }
+)
+# `o.<method>(f)`/`r.<method>(f)` where a named function's return
+# annotation supplies the payload — `map`/`map_or`/`map_or_else`
+# yield `Option<U>` from `f() -> U`, `and_then`/`or_else` unwrap
+# `f() -> Option<U>`/`Result`, `map_err` rewrites `Result`'s last
+# arg. Closures stay opaque (their param types are unwritten).
+_FN_PAYLOAD_METHODS = frozenset(
+    {"map", "and_then", "or_else", "map_or", "map_or_else", "map_err"}
 )
 _UNWRAP_ERR_METHODS = frozenset({"unwrap_err", "expect_err"})
 _TRY_HEADS = frozenset({"Option", "Result"})
@@ -3077,8 +3093,53 @@ class _RustBindings:
                                         # than bind the wrong
                                         # record.
                                         return None, None
+                    if (
+                        element is not None
+                        and self.text(field).strip()
+                        in {"as_deref", "as_deref_mut"}
+                    ):
+                        # Peel one `Deref` layer from the payload:
+                        # `Box<P>`/`Rc<P>`/`Arc<P>`/`Pin<P>` yield
+                        # `P`, `Vec<P>` yields the slice `[P]`, and
+                        # `&P` yields `P` — a non-deref payload
+                        # stays opaque.
+                        wrapper = re.fullmatch(
+                            r"(Box|Rc|Arc|Pin)\s*<(.+)>",
+                            element.strip(),
+                        )
+                        if wrapper is not None:
+                            element = wrapper.group(2).strip()
+                        elif re.fullmatch(
+                            r"Vec\s*<(.+)>", element.strip()
+                        ):
+                            element = (
+                                "["
+                                + re.fullmatch(
+                                    r"Vec\s*<(.+)>", element.strip()
+                                ).group(1).strip()
+                                + "]"
+                            )
+                        elif element.strip().startswith("&"):
+                            element = re.sub(
+                                r"^&\s*(?:'\w+\s+)?(?:mut\s+)?",
+                                "",
+                                element.strip(),
+                            )
+                        else:
+                            element = None
                     if element:
                         return None, prefix + element
+                if (
+                    callee is not None
+                    and callee.type == "field_expression"
+                    and self.text(
+                        callee.child_by_field_name("field")
+                    ).strip()
+                    in _FN_PAYLOAD_METHODS
+                ):
+                    spelled = self._fn_return_payload(node)
+                    if spelled is not None:
+                        return None, spelled
                 if (
                     callee is not None
                     and callee.type == "field_expression"
@@ -3566,6 +3627,88 @@ class _RustBindings:
             ):
                 return False
         return True
+
+    def _fn_return_payload(self, call: Any) -> "str | None":
+        """Payload spelling for `o.map(f)`/`o.and_then(f)`/`o.or_else(f)`
+        /`o.map_or(_, f)`/`o.map_or_else(_, f)`/`r.map_err(f)` — `f`
+        must name a function item whose return annotation supplies
+        the new payload. `map`/`map_or*` yield `Option<U>` from
+        `f() -> U`, `and_then`/`or_else` unwrap `f() -> Option<U>`,
+        `map_err` replaces `Result`'s last arg with `f()`'s return.
+        Closures and non-function args stay opaque."""
+        method = self.text(
+            call.child_by_field_name("function").child_by_field_name(
+                "field"
+            )
+        ).strip()
+        arguments = call.child_by_field_name("arguments")
+        if arguments is None:
+            return None
+        args = [
+            c
+            for c in arguments.named_children
+            if "comment" not in c.type
+        ]
+        target = (
+            args[-1]
+            if method in {"map_or", "map_or_else"}
+            else (args[0] if args else None)
+        )
+        if target is None or target.type != "identifier":
+            return None
+        record = self._through_import(
+            self._lookup(
+                self._normalize_identifier(self.text(target)),
+                target.start_byte,
+                "value",
+            ),
+            target.start_byte,
+            "value",
+        )
+        if (
+            record is None
+            or record.binding.kind
+            not in {"function", "associated_function"}
+            or record.type_node is None
+        ):
+            return None
+        ret = (
+            record.type_node.child_by_field_name("return_type")
+            or record.type_node
+        )
+        text = self.text(ret).strip()
+        if method in {"and_then", "or_else"}:
+            wrap = re.fullmatch(r"(?:Option|Result)\s*<(.+)>", text)
+            if wrap is None:
+                return None
+            text = self._type_arg_list(wrap.group(1))[0].strip()
+        qualified = self._qualified_spelling(text, ret.start_byte)
+        if method == "map_err":
+            # `Result<P, E>` — replace the error arg with `f`'s
+            # return while the ok payload stays.
+            receiver = self._receiver_type(
+                call.child_by_field_name("function").child_by_field_name(
+                    "value"
+                )
+            )
+            if receiver[1] is None:
+                return None
+            parts = self._type_arg_list(receiver[1])
+            if not parts:
+                return None
+            parts[-1] = qualified
+            return ", ".join(parts)
+        bare = re.sub(
+            r"\b(?:[A-Za-z_]\w*::)+[A-Za-z_]\w*", "", qualified
+        )
+        if not self._spelling_scope_stable(
+            bare, ret.start_byte, call.start_byte
+        ):
+            # An unqualifiable name (a generic parameter of `f`,
+            # a function-local type) would re-resolve to a
+            # same-named type at the call site — opaque instead.
+            return None
+        return qualified
 
     def _iterator_spelling(
         self, call: Any, _depth: int = 0
@@ -7212,6 +7355,20 @@ class _RustBindings:
                         self._receiver_annotation_position(
                             callee.child_by_field_name("value")
                         ) or node.start_byte,
+                        None,
+                    )
+                if (
+                    field is not None
+                    and self.text(field).strip() in _FN_PAYLOAD_METHODS
+                    and self._fn_return_payload(node) is not None
+                ):
+                    # `o.map(f)`/`o.and_then(f)` yield `Option<U>`
+                    # spelled from `f`'s return annotation —
+                    # `map_err` yields `Result<_, F>` instead.
+                    method = self.text(field).strip()
+                    return (
+                        "Result" if method == "map_err" else "Option",
+                        node.start_byte,
                         None,
                     )
                 return None, None, None
