@@ -5850,3 +5850,27 @@ fn f(o: Option<P>, v: Vec<P>) {
     assert _call(report, source, "p.pm()").target == pm.id
     assert _call(report, source, "a[0].pm()").target == pm.id
     assert _call(report, source, "b[0].pm()").target == pm.id
+
+
+def test_preserving_adaptors_keep_the_element_type():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(v: Vec<P>) {
+    for p in v.iter().peekable() { p.pm(); }
+    for p in v.iter().inspect(|x| ()) { p.pm(); }
+    for p in v.iter().fuse().by_ref() { p.pm(); }
+    for p in v.iter().skip_while(|x| true).take_while(|x| true) { p.pm(); }
+    for p in v.iter().cycle().take(3) { p.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    calls = [
+        call for call in report.calls
+        if raw[call.span.start:call.span.end].decode() == "p.pm()"
+    ]
+    assert len(calls) == 5
+    for call in calls:
+        assert call.target == pm.id

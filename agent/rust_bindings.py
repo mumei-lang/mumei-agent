@@ -52,7 +52,8 @@ _ITER_ELEMENT_METHODS = frozenset({"iter", "iter_mut", "into_iter", "drain"})
 # change it through a closure and stay opaque.
 _ITER_PRESERVING_METHODS = frozenset(
     {"rev", "skip", "take", "filter", "step_by", "chain",
-     "cloned", "copied"}
+     "cloned", "copied", "peekable", "inspect", "fuse", "by_ref",
+     "cycle", "skip_while", "take_while"}
 )
 # Vec/slice accessors that iterate the same element as `iter()`.
 _ITER_SLICE_METHODS = frozenset({"as_slice", "as_mut_slice"})
