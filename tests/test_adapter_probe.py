@@ -1,5 +1,6 @@
 """Tests for agent.adapter_probe — C11 declared availability probes."""
 
+import shutil
 import sys
 import threading
 import time
@@ -26,11 +27,13 @@ from agent.adapter_probe import (
 )
 from agent.verification_planner import PlannerPolicy, RuntimeObservation
 
+PY = shutil.which("python3", path="/usr/bin:/bin") or sys.executable
+
 
 def _req(**kw):
     argv = kw.pop(
         "argv",
-        (sys.executable, "-c", "import sys; sys.exit(0)"),
+        (PY, "-c", "import sys; sys.exit(0)"),
     )
     return AdapterProbeRequest(
         "zendingsol.host.lean_scaffold",
@@ -54,7 +57,7 @@ def test_exit_zero_observes_available():
 
 def test_nonzero_exit_observes_missing():
     out = run_probe(
-        _req(argv=(sys.executable, "-c", "import sys; sys.exit(3)"))
+        _req(argv=(PY, "-c", "import sys; sys.exit(3)"))
     )
     assert out.observation.availability == "missing"
     assert out.result.outcome == "exited"
@@ -71,7 +74,7 @@ def test_timeout_observes_unknown():
     out = run_probe(
         _req(
             argv=(
-                sys.executable,
+                PY,
                 "-c",
                 "import time; time.sleep(10)",
             ),
@@ -257,7 +260,7 @@ def test_probe_request_runs_declared_command():
     d = AdapterDescriptor.from_manifest(
         _manifest(
             probe_argv=[
-                sys.executable, "-c",
+                PY, "-c",
                 "import sys; sys.exit(0)",
             ]
         )
@@ -365,8 +368,8 @@ def test_probe_requests_validation():
 def test_observe_probes_runs_each_request():
     obs = observe_probes(
         (
-            _req(argv=(sys.executable, "-c", "import sys; sys.exit(0)")),
-            _req(argv=(sys.executable, "-c", "import sys; sys.exit(2)")),
+            _req(argv=(PY, "-c", "import sys; sys.exit(0)")),
+            _req(argv=(PY, "-c", "import sys; sys.exit(2)")),
         )
     )
     assert [o.availability for o in obs] == ["available", "missing"]
@@ -399,7 +402,7 @@ def test_observe_probes_parallel_preserves_request_order():
     slow = _dc.replace(
         _req(
             argv=(
-                sys.executable,
+                PY,
                 "-c",
                 "import time, sys; time.sleep(0.4); sys.exit(0)",
             )
@@ -409,7 +412,7 @@ def test_observe_probes_parallel_preserves_request_order():
     fast = _dc.replace(
         _req(
             argv=(
-                sys.executable,
+                PY,
                 "-c",
                 "import time, sys; time.sleep(0.4); sys.exit(2)",
             )
@@ -458,6 +461,7 @@ class _ConcurrencyStubRunner:
         isolate_network=False,
         isolate_filesystem_write=False,
         isolate_process_spawn=False,
+        isolate_filesystem_read=False,
     ):
         with self._lock:
             self.inflight += 1
@@ -478,6 +482,7 @@ def test_probe_request_defaults_to_fail_closed_enforcement():
     assert request.isolate_network is True
     assert request.isolate_filesystem_write is True
     assert request.isolate_process_spawn is True
+    assert request.isolate_filesystem_read is True
 
 
 def test_probe_request_without_policy_fails_closed_for_process_spawn():
@@ -489,6 +494,15 @@ def test_probe_request_without_policy_fails_closed_for_process_spawn():
     assert request.isolate_process_spawn is True
 
 
+def test_probe_request_without_policy_fails_closed_for_filesystem_read():
+    descriptor = AdapterDescriptor.from_manifest(
+        _manifest(required_permissions=["filesystem.read"])
+    )
+    request = probe_request_for(descriptor, stamp=1)
+
+    assert request.isolate_filesystem_read is True
+
+
 def test_probe_request_enforcement_requires_declared_and_allowed_permissions():
     permissions = frozenset(
         {
@@ -496,6 +510,7 @@ def test_probe_request_enforcement_requires_declared_and_allowed_permissions():
             "network.connect",
             "filesystem.write",
             "process.spawn",
+            "filesystem.read",
         }
     )
     descriptor = AdapterDescriptor.from_manifest(
@@ -511,6 +526,7 @@ def test_probe_request_enforcement_requires_declared_and_allowed_permissions():
     assert request.isolate_network is False
     assert request.isolate_filesystem_write is False
     assert request.isolate_process_spawn is False
+    assert request.isolate_filesystem_read is False
 
 
 @pytest.mark.parametrize(
@@ -520,10 +536,12 @@ def test_probe_request_enforcement_requires_declared_and_allowed_permissions():
         ({"network.connect"}, set()),
         ({"filesystem.write"}, set()),
         ({"process.spawn"}, set()),
+        ({"filesystem.read"}, set()),
         (set(), {"environment.read"}),
         (set(), {"network.connect"}),
         (set(), {"filesystem.write"}),
         (set(), {"process.spawn"}),
+        (set(), {"filesystem.read"}),
         (
             None,
             {
@@ -531,6 +549,7 @@ def test_probe_request_enforcement_requires_declared_and_allowed_permissions():
                 "network.connect",
                 "filesystem.write",
                 "process.spawn",
+                "filesystem.read",
             },
         ),
     ],
@@ -550,6 +569,7 @@ def test_probe_request_permission_mismatch_fails_closed(required, allowed):
     assert request.isolate_network is True
     assert request.isolate_filesystem_write is True
     assert request.isolate_process_spawn is True
+    assert request.isolate_filesystem_read is True
 
 
 @pytest.mark.parametrize(
@@ -559,6 +579,7 @@ def test_probe_request_permission_mismatch_fails_closed(required, allowed):
         ("isolate_network", 1),
         ("isolate_filesystem_write", 1),
         ("isolate_process_spawn", 1),
+        ("isolate_filesystem_read", 1),
     ],
 )
 def test_probe_request_enforcement_fields_require_bools(field, value):
@@ -579,12 +600,14 @@ def test_probe_command_fingerprint_ignores_enforcement_fields():
         isolate_network=False,
         isolate_filesystem_write=False,
         isolate_process_spawn=False,
+        isolate_filesystem_read=False,
     )
     fail_closed = _req(
         inherit_environment=False,
         isolate_network=True,
         isolate_filesystem_write=True,
         isolate_process_spawn=True,
+        isolate_filesystem_read=True,
     )
 
     assert inherited.command_fingerprint() == fail_closed.command_fingerprint()
@@ -594,6 +617,10 @@ def test_probe_command_fingerprint_ignores_enforcement_fields():
     )
     assert (
         "isolate_process_spawn"
+        not in AdapterProbeHistory.start(inherited).to_dict()
+    )
+    assert (
+        "isolate_filesystem_read"
         not in AdapterProbeHistory.start(inherited).to_dict()
     )
 
@@ -613,6 +640,7 @@ def test_run_probe_passes_enforcement_to_runner(monkeypatch):
             isolate_network=False,
             isolate_filesystem_write=False,
             isolate_process_spawn=False,
+            isolate_filesystem_read=False,
         ):
             self.calls.append(
                 (
@@ -620,6 +648,7 @@ def test_run_probe_passes_enforcement_to_runner(monkeypatch):
                     isolate_network,
                     isolate_filesystem_write,
                     isolate_process_spawn,
+                    isolate_filesystem_read,
                 )
             )
             return _ConcurrencyStubRunner._Result()
@@ -637,9 +666,13 @@ def test_run_probe_passes_enforcement_to_runner(monkeypatch):
         "agent.adapter_probe.process_spawn_isolation_enforceable",
         lambda: True,
     )
+    monkeypatch.setattr(
+        "agent.adapter_probe.filesystem_read_isolation_enforceable",
+        lambda: True,
+    )
     run_probe(_req(), runner=runner)
     assert runner.calls[-1] == (
-        minimal_environment(), True, True, True
+        minimal_environment(), True, True, True, True
     )
 
     monkeypatch.setattr(
@@ -648,7 +681,7 @@ def test_run_probe_passes_enforcement_to_runner(monkeypatch):
     )
     run_probe(_req(), runner=runner)
     assert runner.calls[-1] == (
-        minimal_environment(), False, True, True
+        minimal_environment(), False, True, True, True
     )
 
     monkeypatch.setattr(
@@ -661,7 +694,7 @@ def test_run_probe_passes_enforcement_to_runner(monkeypatch):
     )
     run_probe(_req(), runner=runner)
     assert runner.calls[-1] == (
-        minimal_environment(), True, False, True
+        minimal_environment(), True, False, True, True
     )
 
     monkeypatch.setattr(
@@ -674,7 +707,20 @@ def test_run_probe_passes_enforcement_to_runner(monkeypatch):
     )
     run_probe(_req(), runner=runner)
     assert runner.calls[-1] == (
-        minimal_environment(), True, True, False
+        minimal_environment(), True, True, False, True
+    )
+
+    monkeypatch.setattr(
+        "agent.adapter_probe.process_spawn_isolation_enforceable",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "agent.adapter_probe.filesystem_read_isolation_enforceable",
+        lambda: False,
+    )
+    run_probe(_req(), runner=runner)
+    assert runner.calls[-1] == (
+        minimal_environment(), True, True, True, False
     )
 
     run_probe(
@@ -683,17 +729,18 @@ def test_run_probe_passes_enforcement_to_runner(monkeypatch):
             isolate_network=False,
             isolate_filesystem_write=False,
             isolate_process_spawn=False,
+            isolate_filesystem_read=False,
         ),
         runner=runner,
     )
-    assert runner.calls[-1] == (None, False, False, False)
+    assert runner.calls[-1] == (None, False, False, False, False)
 
 
 def test_real_probe_uses_minimal_environment_by_default(monkeypatch):
     sentinel = "fake-sentinel-not-a-secret"
     monkeypatch.setenv("MUMEI_TEST_FAKE_SECRET", sentinel)
     argv = (
-        sys.executable,
+        PY,
         "-c",
         "import os, sys; "
         "sys.exit(0 if 'MUMEI_TEST_FAKE_SECRET' not in os.environ else 3)",
@@ -734,6 +781,18 @@ def test_probe_requests_thread_filesystem_write_policy_into_request():
 
     assert len(requests) == 1
     assert requests[0].isolate_filesystem_write is False
+
+
+def test_probe_requests_thread_filesystem_read_policy_into_request():
+    registry = _registry(required_permissions=["filesystem.read"])
+    policy = PlannerPolicy(
+        allowed_permissions=frozenset({"filesystem.read"})
+    )
+
+    requests = probe_requests_for(registry, _route(), policy, stamp=1)
+
+    assert len(requests) == 1
+    assert requests[0].isolate_filesystem_read is False
 
 
 def test_observe_probes_memory_bound_batch_runs_sequentially(monkeypatch):
@@ -789,7 +848,7 @@ def test_observe_probes_unbound_batch_runs_in_parallel():
 def test_observe_probes_feeds_replan():
     """Round-trip: schedule → observe → plan sees the observation."""
     registry = _registry(
-        probe_argv=[sys.executable, "-c", "import sys; sys.exit(0)"]
+        probe_argv=[PY, "-c", "import sys; sys.exit(0)"]
     )
     policy = PlannerPolicy()
     assert registry.plan(_route(), policy, ()).selected is None
@@ -841,7 +900,7 @@ def test_probe_history_records_outcomes():
 
 def test_probe_history_rejects_fingerprint_mismatch():
     hist = AdapterProbeHistory.start(_req())
-    other = _req(argv=(sys.executable, "-c", "pass"))
+    other = _req(argv=(PY, "-c", "pass"))
     with pytest.raises(ValueError, match="fingerprint"):
         hist.record(other, run_probe(other))
 
@@ -850,7 +909,7 @@ def test_probe_history_rejects_adapter_mismatch():
     hist = AdapterProbeHistory.start(_req())
     other = AdapterProbeRequest(
         "zendingsol.host.other",
-        (sys.executable, "-c", "pass"),
+        (PY, "-c", "pass"),
         timeout_ms=30_000,
         stamp=1,
     )
@@ -860,7 +919,7 @@ def test_probe_history_rejects_adapter_mismatch():
 
 def test_probe_history_rejects_foreign_outcome():
     hist = AdapterProbeHistory.start(_req())
-    other = _req(argv=(sys.executable, "-c", "pass"))
+    other = _req(argv=(PY, "-c", "pass"))
     foreign = run_probe(other)
     with pytest.raises(ValueError, match="match request"):
         hist.record(_req(), foreign)
@@ -901,7 +960,7 @@ def test_probe_history_validation():
 
 def test_plan_with_probes_selects_after_probe():
     registry = _registry(
-        probe_argv=[sys.executable, "-c", "import sys; sys.exit(0)"]
+        probe_argv=[PY, "-c", "import sys; sys.exit(0)"]
     )
     policy = PlannerPolicy()
     out = plan_with_probes(
@@ -1132,7 +1191,7 @@ def test_probe_retry_stops_at_bound():
 
 def test_probe_retry_rejects_stale_fingerprint():
     registry = _registry()
-    other = _req(argv=(sys.executable, "-c", "pass"))
+    other = _req(argv=(PY, "-c", "pass"))
     hist = AdapterProbeHistory.start(other)
     with pytest.raises(ValueError, match="fingerprint"):
         probe_retry_requests(
@@ -1167,22 +1226,27 @@ def test_probe_retry_replaces_observation_in_plan(tmp_path):
     attempt's for that adapter (never appended beside it)."""
     flag = tmp_path / "ready"
     argv = (
-        sys.executable,
+        PY,
         "-c",
         f"import os,sys;sys.exit(0 if os.path.exists({str(flag)!r}) else 1)",
     )
     registry = _registry(
         probe_argv=list(argv),
-        required_permissions=["filesystem.write", "process.spawn"],
+        required_permissions=[
+            "filesystem.write",
+            "process.spawn",
+            "filesystem.read",
+        ],
     )
     policy = PlannerPolicy(
         allowed_permissions=frozenset(
-            {"filesystem.write", "process.spawn"}
+            {"filesystem.write", "process.spawn", "filesystem.read"}
         )
     )
     req = probe_requests_for(registry, _route(), policy, stamp=1)[0]
     assert req.isolate_filesystem_write is False
     assert req.isolate_process_spawn is False
+    assert req.isolate_filesystem_read is False
     miss = run_probe(req)
     assert miss.observation.availability == "missing"
     hist = AdapterProbeHistory.start(req).record(req, miss)
@@ -1198,6 +1262,7 @@ def test_probe_retry_replaces_observation_in_plan(tmp_path):
     assert [r.attempt_number for r in retries] == [2]
     assert retries[0].isolate_filesystem_write is False
     assert retries[0].isolate_process_spawn is False
+    assert retries[0].isolate_filesystem_read is False
     flag.touch()
     ok = run_probe(retries[0])
     assert ok.observation.availability == "available"
@@ -1303,7 +1368,7 @@ def test_probe_acceptance_decisive_outcomes_accept():
 
 def test_probe_acceptance_inconclusive_outcome_not_accepted():
     req = _req(
-        argv=(sys.executable, "-c", "import time; time.sleep(10)"),
+        argv=(PY, "-c", "import time; time.sleep(10)"),
         timeout_ms=150,
     )
     out = evaluate_probe_acceptance(req, run_probe(req))
@@ -1330,7 +1395,7 @@ def test_probe_acceptance_stale_outcome_does_not_match():
 
 def test_probe_acceptance_rejects_inconsistent_outcome():
     req = _req(
-        argv=(sys.executable, "-c", "import time; time.sleep(10)"),
+        argv=(PY, "-c", "import time; time.sleep(10)"),
         timeout_ms=150,
     )
     outcome = run_probe(req)

@@ -275,6 +275,7 @@ def test_builtin_summary_probes_are_available_with_isolation(descriptor):
     assert process_spawn_isolation_enforceable()
     assert descriptor.required_permissions is not None
     assert "filesystem.write" not in descriptor.required_permissions
+    assert "filesystem.read" in descriptor.required_permissions
     expected_process_spawn_isolation = (
         "process.spawn" not in descriptor.required_permissions
     )
@@ -289,6 +290,7 @@ def test_builtin_summary_probes_are_available_with_isolation(descriptor):
         probe_request.isolate_process_spawn
         is expected_process_spawn_isolation
     )
+    assert probe_request.isolate_filesystem_read is False
     plan = plan_summary_route(
         sorted(descriptor.profiles)[0],
         PlannerPolicy(

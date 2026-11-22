@@ -6830,6 +6830,7 @@ def test_attempt_route_skips_candidate_when_inputs_change(
         feed_bytes=None, environment=None, isolate_network=False,
         isolate_filesystem_write=False,
         isolate_process_spawn=False,
+        isolate_filesystem_read=False,
     ):
         src.write_text(_SRC_TWO_CHANGED)
         return real_run(
@@ -6843,6 +6844,7 @@ def test_attempt_route_skips_candidate_when_inputs_change(
             isolate_network=isolate_network,
             isolate_filesystem_write=isolate_filesystem_write,
             isolate_process_spawn=isolate_process_spawn,
+            isolate_filesystem_read=isolate_filesystem_read,
         )
 
     monkeypatch.setattr(
@@ -7765,6 +7767,7 @@ def test_reuse_attempt_skips_selection_when_manifest_drifts(
         feed_bytes=None, environment=None, isolate_network=False,
         isolate_filesystem_write=False,
         isolate_process_spawn=False,
+        isolate_filesystem_read=False,
     ):
         manifest.write_text("{}")
         return real_run(
@@ -7778,6 +7781,7 @@ def test_reuse_attempt_skips_selection_when_manifest_drifts(
             isolate_network=isolate_network,
             isolate_filesystem_write=isolate_filesystem_write,
             isolate_process_spawn=isolate_process_spawn,
+            isolate_filesystem_read=isolate_filesystem_read,
         )
 
     monkeypatch.setattr(

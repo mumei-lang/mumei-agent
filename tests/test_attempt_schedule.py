@@ -1,5 +1,6 @@
 import hashlib
 import json
+import shutil
 import socket
 import sys
 import threading
@@ -30,7 +31,7 @@ from agent.verification_planner import (
     VerdictMarker,
 )
 
-PY = sys.executable
+PY = shutil.which("python3", path="/usr/bin:/bin") or sys.executable
 SOURCE = b"FAKE_PRIVATE_SOURCE_NOT_EVIDENCE"
 PROFILE = "mumei.test/v1"
 CONTRACT = ResultContract(
@@ -236,6 +237,7 @@ def test_schedule_computes_network_isolation_from_permissions(
         kwargs["isolate_network"] = False
         kwargs["isolate_filesystem_write"] = False
         kwargs["isolate_process_spawn"] = False
+        kwargs["isolate_filesystem_read"] = False
         return real_dispatch(sequence, child_argv, **kwargs)
 
     monkeypatch.setattr(attempt_schedule, "dispatch_attempt", record_dispatch)
@@ -299,6 +301,7 @@ def test_schedule_computes_filesystem_write_isolation_from_permissions(
         kwargs["isolate_filesystem_write"] = False
         kwargs["isolate_network"] = False
         kwargs["isolate_process_spawn"] = False
+        kwargs["isolate_filesystem_read"] = False
         return real_dispatch(sequence, child_argv, **kwargs)
 
     monkeypatch.setattr(attempt_schedule, "dispatch_attempt", record_dispatch)
@@ -468,12 +471,128 @@ def test_schedule_gates_process_spawn_isolation(
         kwargs["isolate_process_spawn"] = False
         kwargs["isolate_network"] = False
         kwargs["isolate_filesystem_write"] = False
+        kwargs["isolate_filesystem_read"] = False
         return real_dispatch(sequence, child_argv, **kwargs)
 
     monkeypatch.setattr(attempt_schedule, "dispatch_attempt", record_dispatch)
     monkeypatch.setattr(
         attempt_schedule,
         "process_spawn_isolation_enforceable",
+        lambda: enforceable,
+    )
+    result = schedule(
+        registry,
+        ("alpha",),
+        {"alpha": argv(0)},
+        policy=policy(allowed_permissions=allowed_permissions),
+    )
+
+    assert result.outcome == "selected"
+    assert requested_isolation == [expected]
+
+
+@pytest.mark.parametrize(
+    ("required_permissions", "allowed_permissions", "expected_isolation"),
+    [
+        (
+            frozenset({"filesystem.read"}),
+            frozenset({"filesystem.read"}),
+            False,
+        ),
+        (
+            frozenset({"filesystem.read"}),
+            frozenset(),
+            True,
+        ),
+        (
+            frozenset(),
+            frozenset({"filesystem.read"}),
+            True,
+        ),
+        (None, None, True),
+    ],
+    ids=[
+        "declared-and-allowed",
+        "declared-not-allowed",
+        "allowed-not-declared",
+        "permissions-unspecified",
+    ],
+)
+def test_filesystem_read_isolation_predicate_fails_closed(
+    required_permissions, allowed_permissions, expected_isolation
+):
+    registry = AdapterRegistry()
+    registry.register(descriptor("alpha", required_permissions=frozenset()))
+    plan = registry.plan(
+        request(),
+        policy(allowed_permissions=frozenset()),
+        observations("alpha"),
+    )
+    assert plan.selected is not None
+    plan = replace(
+        plan,
+        selected=replace(
+            plan.selected,
+            required_permissions=required_permissions,
+        ),
+        policy=replace(
+            plan.policy,
+            allowed_permissions=allowed_permissions,
+        ),
+    )
+
+    assert (
+        attempt_schedule._filesystem_read_isolated(plan)
+        is expected_isolation
+    )
+
+
+@pytest.mark.parametrize(
+    ("required_permissions", "allowed_permissions", "enforceable", "expected"),
+    [
+        (
+            frozenset({"filesystem.read"}),
+            frozenset({"filesystem.read"}),
+            True,
+            False,
+        ),
+        (frozenset(), frozenset({"filesystem.read"}), True, True),
+        (frozenset(), frozenset(), True, True),
+        (frozenset(), frozenset(), False, False),
+    ],
+    ids=[
+        "declared-and-allowed",
+        "allowed-not-declared",
+        "undeclared",
+        "boundary-unavailable",
+    ],
+)
+def test_schedule_gates_filesystem_read_isolation(
+    monkeypatch,
+    required_permissions,
+    allowed_permissions,
+    enforceable,
+    expected,
+):
+    registry = AdapterRegistry()
+    registry.register(
+        descriptor("alpha", required_permissions=required_permissions)
+    )
+    requested_isolation = []
+    real_dispatch = attempt_schedule.dispatch_attempt
+
+    def record_dispatch(sequence, child_argv, **kwargs):
+        requested_isolation.append(kwargs["isolate_filesystem_read"])
+        kwargs["isolate_filesystem_read"] = False
+        kwargs["isolate_network"] = False
+        kwargs["isolate_filesystem_write"] = False
+        kwargs["isolate_process_spawn"] = False
+        return real_dispatch(sequence, child_argv, **kwargs)
+
+    monkeypatch.setattr(attempt_schedule, "dispatch_attempt", record_dispatch)
+    monkeypatch.setattr(
+        attempt_schedule,
+        "filesystem_read_isolation_enforceable",
         lambda: enforceable,
     )
     result = schedule(

@@ -171,8 +171,8 @@ Scheduled adapter attempts run with only `PATH` (and `SYSTEMROOT` on
 Windows) unless the selected adapter declares `environment.read` and the
 explicit policy permits it. Undeclared permissions fail closed. This
 enforces the environment category and, where available, `network.connect`;
-`filesystem.read` remains declared-only. Environment scrubbing is not a
-sandbox and is not Evidence.
+filesystem-read enforcement is described in the C04 section below.
+Environment scrubbing is not a sandbox and is not Evidence.
 
 ### C04 declarative adapter overlay
 
@@ -198,7 +198,8 @@ Scheduled attempts whose adapter does not declare `network.connect` or whose
 policy does not permit it run in a fresh network namespace via
 `unshare --net --map-current-user` where the host supports unprivileged user
 namespaces; otherwise it remains unenforced as before. This is not a sandbox
-or Evidence; `filesystem.read` remains declared-only.
+or Evidence; filesystem-read enforcement is described in the C04 section
+below.
 
 ### C04 self-reported failure is not a scheduling success
 
@@ -216,8 +217,8 @@ Windows) unless the adapter declares `environment.read` and policy allows it,
 and in a fresh network namespace unless `network.connect` is declared and
 allowed, where the host supports it; otherwise network remains unenforced.
 `probe_request_for` without policy fails closed. Command fingerprints and
-probe-history records are unchanged; `filesystem.read` remains
-declared-only. This is not a sandbox or Evidence.
+probe-history records are unchanged; filesystem-read enforcement is
+described in the C04 section below. This is not a sandbox or Evidence.
 
 ### C04 filesystem.write enforcement
 
@@ -226,10 +227,10 @@ mount tree in a private user+mount namespace created by the launcher, unless
 the adapter declares `filesystem.write` and policy allows it, where the host
 supports unprivileged user and mount namespaces plus `mount_setattr`;
 otherwise it remains unenforced as before. `/dev` character devices and
-stdout/stderr pipes still work. `filesystem.read` remains declared-only. The
-launcher drops all capabilities and locks securebits before running the
-adapter, so even a root host cannot undo the read-only tree. This is not a
-sandbox or Evidence.
+stdout/stderr pipes still work. Filesystem-read enforcement is described in
+the C04 section below. The launcher drops all capabilities and locks
+securebits before running the adapter, so even a root host cannot undo the
+read-only tree. This is not a sandbox or Evidence.
 
 ### C04 process.spawn enforcement
 
@@ -238,8 +239,18 @@ adapter declares `process.spawn` and policy allows it, where the host supports
 the seccomp-BPF filter. The filter denies `fork`, `vfork`, and non-thread
 `clone` with `EPERM`, returns `ENOSYS` for `clone3`, and allows `execve` and
 thread creation. It is host-dependent, currently supported on Linux
-x86_64/aarch64, and is not a sandbox or Evidence; `filesystem.read` remains
-declared-only.
+x86_64/aarch64, and is not a sandbox or Evidence. Filesystem-read
+enforcement is described in the C04 section below.
+
+### C04 filesystem.read enforcement
+
+Scheduled attempts and availability probes use Landlock on supported Linux
+hosts to limit `READ_FILE` and `READ_DIR` to fixed system roots plus the
+resolved target executable's directory and its realpath directory. Home,
+the working directory and temporary paths are otherwise outside the
+allowlist, except when the target executable itself is in one of those
+directories. This is a host-dependent read-scope allowlist, not a sandbox
+or Evidence; `EXECUTE` is not restricted.
 
 ### C11 declared memory bounds for attempted executions
 

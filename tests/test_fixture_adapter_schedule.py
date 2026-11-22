@@ -16,6 +16,7 @@ code execution, no data egress.
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -23,6 +24,7 @@ from pathlib import Path
 import pytest
 
 PY = sys.executable
+ATTEMPT_PY = shutil.which("python3", path="/usr/bin:/bin") or PY
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STUB = str(REPO_ROOT / "tests" / "fixtures" / "stub_adapter.py")
 PROFILE = "mumei.test/v1"
@@ -57,7 +59,7 @@ def _manifest(adapter_id, **overrides):
 
 def stub_argv(*flags):
     """Declared argv running the checked-in stub adapter."""
-    return [PY, STUB, *map(str, flags)]
+    return [ATTEMPT_PY, STUB, *map(str, flags)]
 
 
 def _write_docs(tmp_path, *, adapters, argv_map, policy, observations,
@@ -120,13 +122,16 @@ def _run(paths, *extra):
 
 def _base(tmp_path, *, policy=None, argv_alpha=None, argv_beta=None,
           observations=None):
-    adapters = [_manifest("alpha"), _manifest("beta")]
+    adapters = [
+        _manifest("alpha", required_permissions=["filesystem.read"]),
+        _manifest("beta", required_permissions=["filesystem.read"]),
+    ]
     argv_map = {
         "alpha": argv_alpha if argv_alpha is not None else stub_argv("--exit", 3),
         "beta": argv_beta if argv_beta is not None else stub_argv(),
     }
     if policy is None:
-        policy = {"allowed_permissions": ["process.spawn"],
+        policy = {"allowed_permissions": ["filesystem.read", "process.spawn"],
                   "allow_fallback": True, "timeout_ms": 10_000}
     if observations is None:
         observations = [
@@ -168,6 +173,7 @@ def test_adapter_overlay_replaces_base_manifest_for_dispatch(tmp_path):
                     adapter_version="2.0.0",
                     priority=10,
                     max_timeout_ms=100,
+                    required_permissions=["filesystem.read"],
                 )
             ]
         ),
@@ -201,7 +207,16 @@ def test_adapter_overlay_addition_dispatches_through_argv_map(tmp_path):
     argv_map_path.write_text(json.dumps(argv_map), encoding="utf-8")
     overlay = tmp_path / "gamma-overlay.json"
     overlay.write_text(
-        json.dumps([_manifest("gamma", priority=20)]), encoding="utf-8"
+        json.dumps(
+            [
+                _manifest(
+                    "gamma",
+                    priority=20,
+                    required_permissions=["filesystem.read"],
+                )
+            ]
+        ),
+        encoding="utf-8",
     )
 
     doc = _doc(_run(paths, "--adapter-overlay", str(overlay)))
@@ -215,7 +230,7 @@ def test_adapter_overlay_addition_dispatches_through_argv_map(tmp_path):
 def test_explicit_selection_runs_only_the_named_adapter(tmp_path):
     paths = _base(
         tmp_path,
-        policy={"allowed_permissions": ["process.spawn"],
+        policy={"allowed_permissions": ["filesystem.read", "process.spawn"],
                 "selected_adapter": "alpha", "timeout_ms": 10_000},
         argv_alpha=stub_argv(),
     )
@@ -228,7 +243,7 @@ def test_explicit_selection_runs_only_the_named_adapter(tmp_path):
 def test_failed_selection_with_fallback_denied_stops(tmp_path):
     paths = _base(
         tmp_path,
-        policy={"allowed_permissions": ["process.spawn"],
+        policy={"allowed_permissions": ["filesystem.read", "process.spawn"],
                 "selected_adapter": "alpha", "timeout_ms": 10_000},
     )
     doc = _doc(_run(paths))
@@ -252,7 +267,7 @@ def test_missing_tool_is_a_failed_round_then_fallback(tmp_path):
 def test_incompatible_tool_version_is_not_scheduled(tmp_path):
     paths = _base(
         tmp_path,
-        policy={"allowed_permissions": ["process.spawn"],
+        policy={"allowed_permissions": ["filesystem.read", "process.spawn"],
                 "tool_version_pins": [["alpha", "9.9.9"]],
                 "timeout_ms": 10_000},
     )
@@ -268,7 +283,7 @@ def test_timeout_marks_round_timed_out_then_fallback(tmp_path):
     paths = _base(
         tmp_path,
         argv_alpha=stub_argv("--sleep", "30"),
-        policy={"allowed_permissions": ["process.spawn"],
+        policy={"allowed_permissions": ["filesystem.read", "process.spawn"],
                 "allow_fallback": True, "timeout_ms": 200},
     )
     doc = _doc(_run(paths))
@@ -281,7 +296,7 @@ def test_memory_bound_kills_overallocating_adapter(tmp_path):
     paths = _base(
         tmp_path,
         argv_alpha=stub_argv("--alloc-mb", "256", "--exit", "0"),
-        policy={"allowed_permissions": ["process.spawn"],
+        policy={"allowed_permissions": ["filesystem.read", "process.spawn"],
                 "allow_fallback": True, "timeout_ms": 10_000,
                 "memory_mb": 64},
     )
@@ -409,7 +424,7 @@ def test_undeclared_argv_is_not_dispatched_and_nothing_runs(tmp_path):
             # would split paths containing spaces and mask a wrong
             # spawn.
             "alpha": [
-                sys.executable,
+                ATTEMPT_PY,
                 "-c",
                 f"open({str(marker)!r}, 'w').write('x')",
             ],

@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -14,6 +15,7 @@ from agent.verify_schedule import (
 )
 
 PY = sys.executable
+ATTEMPT_PY = shutil.which("python3", path="/usr/bin:/bin") or PY
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SOURCE = b"FAKE_PRIVATE_SOURCE_NOT_EVIDENCE"
 PROFILE = "mumei.test/v1"
@@ -80,8 +82,8 @@ def inputs(tmp_path):
     argv_map = write(
         "argv",
         {
-            "alpha": [PY, "-c", "import sys; sys.exit(3)"],
-            "beta": [PY, "-c", "import sys; sys.exit(0)"],
+            "alpha": [ATTEMPT_PY, "-c", "import sys; sys.exit(3)"],
+            "beta": [ATTEMPT_PY, "-c", "import sys; sys.exit(0)"],
         },
     )
     return {
@@ -159,7 +161,7 @@ def test_output_writes_document(inputs, capsys, tmp_path):
 
 def test_exhausted_and_not_schedulable(inputs, capsys):
     argv_map_fail = json.loads(open(inputs["argv_map"]).read())
-    argv_map_fail["beta"] = [PY, "-c", "import sys; sys.exit(2)"]
+    argv_map_fail["beta"] = [ATTEMPT_PY, "-c", "import sys; sys.exit(2)"]
     fail_path = inputs["argv_map"].replace("argv", "argvfail")
     with open(fail_path, "w") as f:
         json.dump(argv_map_fail, f)
@@ -239,7 +241,7 @@ def test_missing_files_fail_statically(inputs, capsys):
 
 
 def test_undeclared_argv_adapter_is_not_dispatched(inputs, capsys, tmp_path):
-    argv_map = {"beta": [PY, "-c", "import sys; sys.exit(0)"]}
+    argv_map = {"beta": [ATTEMPT_PY, "-c", "import sys; sys.exit(0)"]}
     path = tmp_path / "argv_partial.json"
     path.write_text(json.dumps(argv_map))
     args = args_for({**inputs, "argv_map": str(path)})
@@ -261,7 +263,7 @@ def test_cli_subcommand_dispatches(tmp_path):
                     "input_format": "mumei.source-text/v1"},
         "policy": {"allowed_permissions": []},
         "adapters": [manifest("alpha")],
-        "argv": {"alpha": [PY, "-c", "import sys; sys.exit(0)"]},
+        "argv": {"alpha": [ATTEMPT_PY, "-c", "import sys; sys.exit(0)"]},
         "obs": [{"adapter_id": "alpha", "availability": "available", "tool_version": "1.0.0"}],
     }
     paths = {}
@@ -378,7 +380,9 @@ def test_schedule_falls_back_to_manifest_attempt_argv(tmp_path, capsys):
         [
             manifest(
                 "alpha",
-                attempt_argv=[PY, "-c", "import sys; sys.exit(0)"],
+                attempt_argv=[
+                    ATTEMPT_PY, "-c", "import sys; sys.exit(0)"
+                ],
             )
         ],
     )
@@ -455,7 +459,14 @@ def test_manifest_attempt_argv_needs_policy_optin(tmp_path):
     )
     adapters = write(
         "adapters",
-        [manifest("alpha", attempt_argv=[PY, "-c", "import sys; sys.exit(0)"])],
+        [
+            manifest(
+                "alpha",
+                attempt_argv=[
+                    ATTEMPT_PY, "-c", "import sys; sys.exit(0)"
+                ],
+            )
+        ],
     )
     argv_map = write("argv", {})
     argv = [
@@ -525,7 +536,7 @@ def _stdin_case(tmp_path, opt_in):
         [
             manifest(
                 "alpha",
-                attempt_argv=[PY, "-c", probe],
+                attempt_argv=[ATTEMPT_PY, "-c", probe],
                 attempt_stdin="FEED",
             )
         ],
@@ -1065,14 +1076,18 @@ def test_exported_triple_passes_the_real_claim_gate(
     # Core accepts it and the promotable triple is exported.
     argv_map = tmp_path / "argv-real.json"
     argv_map.write_text(json.dumps({
-        "alpha": [PY, "-c", "import sys; sys.exit(3)"],
+        "alpha": [ATTEMPT_PY, "-c", "import sys; sys.exit(3)"],
         "beta": [
-            PY, "-c",
+            ATTEMPT_PY, "-c",
             "import sys; sys.stdout.buffer.write("
             "open(sys.argv[1], 'rb').read())",
             str(record_path),
         ],
     }))
+    adapters_path = Path(inputs["adapters"])
+    adapters = json.loads(adapters_path.read_text(encoding="utf-8"))
+    adapters[1]["required_permissions"] = ["filesystem.read"]
+    adapters_path.write_text(json.dumps(adapters), encoding="utf-8")
     export = tmp_path / "promotable"
     args = args_for(
         dict(inputs, argv_map=str(argv_map)),
