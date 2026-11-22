@@ -8417,3 +8417,30 @@ fn f(m: BTreeMap<i32, P>) {
     # A user-declared `BTreeMap` is not std's — the speculative
     # `Option<(&K, &V)>` produce stays off.
     assert not bound.get("v.pm()")
+
+def test_splice_and_linked_list_extract_if_bind_elements():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(v: Vec<P>, l: std::collections::LinkedList<P>, m: std::collections::BTreeMap<i32, P>) {
+    for a in v.splice(0..1, std::iter::empty()) { a.pm(); }
+    for b in l.extract_if(|x| true) { b.pm(); }
+    let g = l.extract_if(|x| true);
+    for ge in g { ge.pm(); }
+    for ve in m.splice(0..1, std::iter::empty()) { ve.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `v.splice` drains the removed `P` elements.
+    assert bound.get("a.pm()") == pm.id
+    # `LinkedList::extract_if` yields `P` like the sets.
+    assert bound.get("b.pm()") == pm.id
+    assert bound.get("ge.pm()") == pm.id
+    # A map names no `splice` — stays opaque.
+    assert not bound.get("ve.pm()")
