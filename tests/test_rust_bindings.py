@@ -6052,73 +6052,6 @@ fn f() {
     assert len(calls) == 1
     assert calls[0].target == qm.id
 
-    def test_scoped_module_call_picks_its_own_function(self):
-        report = build_rust_bindings(
-            """
-            mod a {
-                pub struct P;
-                impl P { pub fn pm(&self) {} }
-                pub fn make() -> Box<P> { Box::new(P) }
-            }
-            mod b {
-                pub struct Q;
-                impl Q { pub fn qm(&self) {} }
-                pub fn make() -> Box<Q> { Box::new(Q) }
-            }
-            fn g() {
-                let x = b::make();
-                x.qm();
-            }
-            """,
-            pointer_width=64,
-        )
-        calls = {self._call_name(c) for c in report.calls}
-        self.assertIn("qm", calls)
-        self.assertNotIn("pm", calls)
-
-    def test_member_borrowing_a_container_keeps_the_container(self):
-        report = build_rust_bindings(
-            """
-            struct P;
-            impl P { fn pm(&self) {} }
-            struct W { v: Vec<P> }
-            impl W {
-                fn vref(&self) -> &Vec<P> { &self.v }
-                fn oref(&self) -> &Option<P> { &None }
-                fn sref(&self) -> &mut [P] { &mut [] }
-            }
-            fn f(w: &W) {
-                w.vref()[0].pm();
-                match w.oref() { Some(q) => q.pm(), _ => () }
-                match w.sref().first() { Some(r) => r.pm(), _ => () }
-            }
-            """,
-            pointer_width=64,
-        )
-        targets = [c.callee for c in report.calls]
-        self.assertEqual(targets.count("pm"), 3)
-
-    def test_pattern_field_args_resolve_in_the_declaring_module(self):
-        report = build_rust_bindings(
-            """
-            struct Q;
-            impl Q { fn stray(&self) {} }
-            mod m {
-                pub struct Q;
-                impl Q { pub fn qm(&self) {} }
-                pub struct W { pub opt: Option<Q> }
-            }
-            fn f(w: m::W) {
-                let m::W { opt } = w;
-                match opt { Some(q) => q.qm(), _ => () }
-            }
-            """,
-            pointer_width=64,
-        )
-        calls = {self._call_name(c) for c in report.calls}
-        self.assertIn("qm", calls)
-        self.assertNotIn("stray", calls)
-
 def test_scoped_module_call_picks_its_own_function():
     source = """
 mod a {
@@ -6645,6 +6578,41 @@ fn f(w: m::W<P>) {
         if raw[call.span.start:call.span.end].decode() == "e.em()"
     ]
     assert targets == [em.id]
+
+
+def test_deref_clone_as_ref_payload_bindings() -> None:
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(b: Box<P>, v: Vec<P>, o: Option<P>, s: &[P]) {
+    let d = b.deref(); d.pm();
+    let r = o.as_ref(); if let Some(p) = r { p.pm(); }
+    match s.as_ref().first() { Some(p1) => p1.pm(), _ => () }
+    match s.as_ref().last() { Some(l) => l.pm(), _ => () }
+    let c = o.clone(); match c { Some(y) => y.pm(), _ => () }
+    let t = s.to_owned(); t[0].pm();
+    let e = v.clone(); e[0].pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    resolved = sum(
+        1
+        for call in report.calls
+        if raw[call.span.start:call.span.end].decode()
+        in {"d.pm()", "p.pm()", "p1.pm()", "l.pm()", "y.pm()"}
+        and call.target == pm.id
+    )
+    assert resolved == 5
+    resolved_index = sum(
+        1
+        for call in report.calls
+        if raw[call.span.start:call.span.end].decode()
+        in {"t[0].pm()", "e[0].pm()"}
+        and call.target == pm.id
+    )
+    assert resolved_index == 2
 
 
 def test_option_and_drops_an_unspellable_payload():

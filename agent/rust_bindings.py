@@ -3088,6 +3088,54 @@ class _RustBindings:
                     spelled = self._iterator_spelling(node)
                     if spelled is not None:
                         return None, spelled
+                    method_name = self.text(
+                        callee.child_by_field_name("field")
+                    ).strip()
+                    if (
+                        method_name == "deref"
+                        and receiver[1] is not None
+                        and (
+                            (
+                                head_name := self._container_head_name(
+                                    callee.child_by_field_name("value")
+                                )
+                            )
+                            is not None
+                            and head_name.rsplit("::", 1)[-1]
+                            in _DEREF_WRAPPER_NAMES
+                        )
+                    ):
+                        # `b.deref()` on `Box`/`Rc`/`Arc` yields
+                        # the payload — resolve it at the receiver's
+                        # annotation so `d` binds the real record.
+                        return self._spelled_type(
+                            receiver[1],
+                            self._receiver_annotation_position(
+                                callee.child_by_field_name("value")
+                            )
+                            or node.start_byte,
+                        )
+                    if method_name in {"clone", "to_owned"}:
+                        # `o.clone()`/`s.to_owned()` keep the
+                        # spelled payload — the clone's own type
+                        # head stays for `_scrutinee_shape`.
+                        return None, receiver[1]
+                    if (
+                        method_name in {"as_ref", "as_mut"}
+                        and receiver[1] is not None
+                        and (
+                            self._is_slice_receiver(
+                                callee.child_by_field_name("value")
+                            )
+                            or self._container_head_name(
+                                callee.child_by_field_name("value")
+                            ) in _INDEX_ELEMENT_CONTAINERS
+                        )
+                    ):
+                        # `s.as_ref()` on a slice/`Vec` yields the
+                        # same `&[P]` — the Option case is handled
+                        # by the prelude recipe above.
+                        return None, "&[" + receiver[1] + "]"
                     return self._unwrapped(
                         callee, node.start_byte, receiver
                     )
@@ -6661,6 +6709,7 @@ class _RustBindings:
 
         return re.sub(r"[A-Za-z_][\w:]*", replace, spelled)
 
+
     def _pattern_head_fields(
         self,
         head: Any | None,
@@ -7074,6 +7123,20 @@ class _RustBindings:
                     if field is not None
                     else None
                 )
+                if (
+                    option_head is None
+                    and callee is not None
+                    and callee.type == "field_expression"
+                    and field is not None
+                    and self._normalize_identifier(self.text(field))
+                    in {"clone", "to_owned", "as_ref", "as_mut"}
+                ):
+                    # `match o.clone()` — a transparent call keeps
+                    # the receiver's head, so `Some(y)` still
+                    # reads `o`'s `Option<P>` shape.
+                    return self._scrutinee_shape(
+                        callee.child_by_field_name("value"), None
+                    )
                 if (
                     option_head is not None
                     and (
