@@ -19088,6 +19088,114 @@ def test_struct_field_closure_copies_use_parallel_assignment_prestate(
         assert result.effects == "unknown"
 
 
+def test_function_values_read_from_struct_fields_keep_closure_records(
+    go_types_helper,
+):
+    declarations = (
+        "type S struct{ F func() int64 }\n"
+        "type W struct{ F func() }\n"
+        "type O struct{ S S }\n"
+        "type N struct{ F int64 }\n"
+        "func ReadDirect(x, y int64) int64 { v := y; var s S; "
+        "s.F = func() int64 { return v }; v = x; return s.F() }\n"
+        "func ReadShort(x, y int64) int64 { v := y; var s S; "
+        "s.F = func() int64 { return v }; f := s.F; "
+        "v = x; return f() }\n"
+        "func ReadVar(x, y int64) int64 { v := y; var s S; "
+        "s.F = func() int64 { return v }; var f = s.F; "
+        "v = x; return f() }\n"
+        "func ReadAssign(x, y int64) int64 { v := y; var s S; "
+        "s.F = func() int64 { return v }; var f func() int64; "
+        "f = s.F; v = x; return f() }\n"
+        "func ReadCompositeDirect(x, y int64) int64 { v := y; "
+        "s := S{F: func() int64 { return v }}; "
+        "v = x; return s.F() }\n"
+        "func ReadCompositeExtracted(x, y int64) int64 { v := y; "
+        "s := S{F: func() int64 { return v }}; f := s.F; "
+        "v = x; return f() }\n"
+        "func ReadNestedDirect(x, y int64) int64 { v := y; var o O; "
+        "o.S.F = func() int64 { return v }; v = x; return o.S.F() }\n"
+        "func ReadNestedExtracted(x, y int64) int64 { v := y; "
+        "var o O; o.S.F = func() int64 { return v }; "
+        "f := o.S.F; v = x; return f() }\n"
+        "func WriteDirect(x int64) int64 { w := int64(0); "
+        "g := func() { w = x }; var s W; s.F = g; "
+        "s.F(); return w }\n"
+        "func WriteExtracted(x int64) int64 { w := int64(0); "
+        "g := func() { w = x }; var s W; s.F = g; "
+        "f := s.F; f(); return w }\n"
+        "func WriteCompositeDirect(x int64) int64 { w := int64(0); "
+        "s := W{F: func() { w = x }}; s.F(); return w }\n"
+        "func WriteCompositeExtracted(x int64) int64 { w := int64(0); "
+        "s := W{F: func() { w = x }}; f := s.F; "
+        "f(); return w }\n"
+        "func Conditional(x, y int64, b bool) int64 { "
+        "g := func() int64 { return x }; h := func() int64 { return y }; "
+        "var s S; s.F = h; f := g; if b { f = s.F }; return f() }\n"
+        "func ParallelField(x, y int64) int64 { var s S; "
+        "s.F = func() int64 { return x }; "
+        "g := func() int64 { return y }; var f func() int64; "
+        "s.F, f = g, s.F; return f() }\n"
+        "func ParamFieldControl(s S, x int64) int64 { "
+        "f := s.F; return f() + x }\n"
+        "func NonFuncFieldControl(x, y int64) int64 { "
+        "s := N{F: y}; f := s.F; return f + x }\n"
+    )
+    source, snapshot, summaries = unit(go_types_helper, declarations)
+    pairs = (
+        ("ReadDirect", "ReadShort", {0, 1}),
+        ("ReadDirect", "ReadVar", {0, 1}),
+        ("ReadDirect", "ReadAssign", {0, 1}),
+        ("ReadCompositeDirect", "ReadCompositeExtracted", {0, 1}),
+        ("ReadNestedDirect", "ReadNestedExtracted", {0, 1}),
+        ("WriteDirect", "WriteExtracted", {0}),
+        ("WriteCompositeDirect", "WriteCompositeExtracted", {0}),
+    )
+    for direct_function, extracted_function, dependencies in pairs:
+        direct_result = named(
+            source, snapshot, summaries, direct_function
+        )
+        extracted_result = named(
+            source, snapshot, summaries, extracted_function
+        )
+        assert direct_result.available, (
+            direct_function,
+            direct_result.gaps,
+        )
+        assert extracted_result.available, (
+            extracted_function,
+            extracted_result.gaps,
+        )
+        assert (
+            direct_result.return_dependencies
+            == extracted_result.return_dependencies
+            == frozenset(dependencies)
+        )
+        assert direct_result.effects == extracted_result.effects == "unknown"
+
+    conditional = named(source, snapshot, summaries, "Conditional")
+    assert conditional.available, conditional.gaps
+    assert conditional.return_dependencies == frozenset({0, 1})
+    assert conditional.effects == "unknown"
+
+    parallel = named(source, snapshot, summaries, "ParallelField")
+    assert parallel.available, parallel.gaps
+    assert parallel.return_dependencies == frozenset({0})
+    assert parallel.effects == "unknown"
+
+    parameter = named(source, snapshot, summaries, "ParamFieldControl")
+    assert parameter.available, parameter.gaps
+    assert parameter.return_dependencies == frozenset({0, 1})
+    assert parameter.effects == "unknown"
+
+    non_function = named(
+        source, snapshot, summaries, "NonFuncFieldControl"
+    )
+    assert non_function.available, non_function.gaps
+    assert non_function.return_dependencies == frozenset({0, 1})
+    assert non_function.effects == "none_in_supported_fragment"
+
+
 def test_struct_field_factory_results_fail_closed(
     go_types_helper,
 ):

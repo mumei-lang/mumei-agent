@@ -1912,6 +1912,68 @@ class _Builder:
         if src in pointee_before:
             self.pointee_closures.add(bound_id)
 
+    def _bind_struct_field_func_value(
+        self,
+        bound_id: str,
+        source: Any,
+        captures_before: dict[str, frozenset[str]],
+        writes_before: dict[str, frozenset[str]],
+        star_before: set[str],
+        calls_before: set[str],
+        pointee_before: set[str],
+        conditional: bool,
+    ) -> bool:
+        binding = self.bindings.get(bound_id)
+        selector = self._strip_parens(source)
+        member = (
+            self._field_member(selector)
+            if selector is not None
+            and selector.type == "selector_expression"
+            else None
+        )
+        if (
+            binding is None
+            or binding.type is None
+            or binding.type.kind != "function"
+            or member is None
+            or member.kind not in {"var", "variable"}
+            or member.type is None
+            or member.type.kind != "function"
+        ):
+            return False
+        member_id = member.id
+        if not (
+            member_id in captures_before
+            or member_id in writes_before
+            or member_id in star_before
+            or member_id in calls_before
+            or member_id in pointee_before
+        ):
+            return False
+        self._drop_func_value_records(bound_id, conditional)
+        self.closure_factory_literals.pop(bound_id, None)
+        self._adopt_element_records_from_snapshot(
+            member_id,
+            bound_id,
+            captures_before,
+            writes_before,
+            star_before,
+            calls_before,
+            pointee_before,
+        )
+        if member_id in captures_before:
+            self.closure_captures[bound_id] = (
+                self.closure_captures.get(bound_id, frozenset())
+                | captures_before[member_id]
+            )
+        if member_id in writes_before:
+            self.closure_writes[bound_id] = (
+                self.closure_writes.get(bound_id, frozenset())
+                | writes_before[member_id]
+            )
+        self.opaque_callees.add(bound_id)
+        return True
+
     def _assignment_composite_record_snapshot(
         self, literal: Any
     ) -> dict[str, Any] | None:
@@ -18427,6 +18489,22 @@ class _Builder:
                     len(lefts) == len(rights)
                     and self._strip_parens(rights[i]).type
                     == "selector_expression"
+                    and self._bind_struct_field_func_value(
+                        binding.id,
+                        rights[i],
+                        factory_captures_pre,
+                        factory_writes_pre,
+                        factory_star_pre,
+                        factory_calls_pre,
+                        factory_pointee_pre,
+                        conditional or self._may_skip > 0,
+                    )
+                ):
+                    pass
+                elif (
+                    len(lefts) == len(rights)
+                    and self._strip_parens(rights[i]).type
+                    == "selector_expression"
                 ):
                     # `f := s.M` — bind the method value's (method,
                     # receiver) pair under the fresh name; a
@@ -19719,6 +19797,25 @@ class _Builder:
                                 self.anon_struct_field_names.pop(
                                     binding.id, None
                                 )
+                    elif (
+                        not multi
+                        and value_nodes
+                        and len(names) == len(value_nodes)
+                        and self._strip_parens(
+                            value_nodes[i]
+                        ).type == "selector_expression"
+                        and self._bind_struct_field_func_value(
+                            binding.id,
+                            value_nodes[i],
+                            factory_captures_pre,
+                            factory_writes_pre,
+                            factory_star_pre,
+                            factory_calls_pre,
+                            factory_pointee_pre,
+                            conditional or self._may_skip > 0,
+                        )
+                    ):
+                        pass
                     elif (
                         not multi
                         and value_nodes
@@ -24359,6 +24456,25 @@ class _Builder:
                                     member_id, frozenset({member_id})
                                 ),
                             )
+                elif (
+                    not compound
+                    and i not in func_elem_targets
+                    and len(lefts) == len(rights)
+                    and self._strip_parens(rights[i]).type
+                    == "selector_expression"
+                    and ref is not None
+                    and self._bind_struct_field_func_value(
+                        ref.binding_id,
+                        rights[i],
+                        captures_before,
+                        writes_before,
+                        star_before,
+                        calls_before,
+                        pointee_before,
+                        conditional or self._may_skip > 0,
+                    )
+                ):
+                    pass
                 elif (
                     not compound
                     and i not in func_elem_targets
