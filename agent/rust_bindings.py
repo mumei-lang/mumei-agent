@@ -2382,14 +2382,82 @@ class _RustBindings:
                 "value",
             )
             if record is not None and record.type_node is not None:
-                return (
+                if (
                     re.search(
                         r"\b(?:HashMap|BTreeMap)\s*<",
                         self.text(record.type_node),
                     )
                     is not None
+                ):
+                    return True
+                pair = self._generic_head_args(
+                    record.type_node, node.start_byte
                 )
+                seen: set[str] = set()
+                while pair is not None and pair[1] is not None and (
+                    pair[1].binding.kind == "type_alias"
+                    and pair[1].alias_node is not None
+                    and pair[1].binding.id not in seen
+                ):
+                    seen.add(pair[1].binding.id)
+                    pair = self._generic_head_args(
+                        pair[1].alias_node, node.start_byte
+                    )
+                return pair is not None and pair[2] in _MAP_CONTAINER_NAMES
         return False
+
+    def _generic_head_args(
+        self, type_node: Any | None, position: int
+    ) -> "tuple[str | None, _Record | None, str | None] | None":
+        """(spelled args, head record, spelled head) of a generic
+        annotation — `HashMap<K, V>` gives ("K, V", HashMap's
+        record, "HashMap"); a bare `Flip` has no args (None key)
+        but still names its head."""
+        node = type_node
+        while node is not None and node.type in {
+            "reference_type",
+            "generic_type",
+            "generic_type_with_turbofish",
+        }:
+            if node.type != "reference_type":
+                key = self._type_args_key(
+                    node.child_by_field_name("type_arguments")
+                )
+                if key is not None:
+                    head = node.child_by_field_name("type")
+                    record = (
+                        None
+                        if head is None
+                        or head.type
+                        not in {"identifier", "type_identifier"}
+                        else self._lookup(
+                            self._normalize_identifier(
+                                self.text(head)
+                            ),
+                            position,
+                            "type",
+                        )
+                    )
+                    name = (
+                        None
+                        if head is None
+                        else self._normalize_identifier(self.text(head))
+                    )
+                    return key, record, name
+            node = node.child_by_field_name("type")
+        if node is not None and node.type in {
+            "identifier",
+            "type_identifier",
+        }:
+            record = self._lookup(
+                self._normalize_identifier(self.text(node)),
+                position,
+                "type",
+            )
+            return None, record, self._normalize_identifier(
+                self.text(node)
+            )
+        return None
 
     def _map_spelled_args(self, receiver: Any | None) -> str | None:
         """Full `<K, V>` argument key of a map annotation — recovered
@@ -2406,19 +2474,44 @@ class _RustBindings:
             "value",
         )
         tnode = None if record is None else record.type_node
-        while tnode is not None and tnode.type in {
-            "reference_type",
-            "generic_type",
-            "generic_type_with_turbofish",
-        }:
-            if tnode.type != "reference_type":
-                key = self._type_args_key(
-                    tnode.child_by_field_name("type_arguments")
-                )
-                if key is not None:
-                    return key
-            tnode = tnode.child_by_field_name("type")
-        return None
+        pair = self._generic_head_args(tnode, node.start_byte)
+        if pair is None:
+            return None
+        key, head, _ = pair
+        seen: set[str] = set()
+        # `type Flip<A, B> = HashMap<B, A>` — the alias's args must
+        # be substituted into the body's spelling, not read raw.
+        while (
+            head is not None
+            and head.binding.kind == "type_alias"
+            and head.alias_node is not None
+            and head.binding.id not in seen
+        ):
+            seen.add(head.binding.id)
+            body_pair = self._generic_head_args(
+                head.alias_node, node.start_byte
+            )
+            if body_pair is None or body_pair[0] is None:
+                break
+            item = head.alias_node.parent
+            names = self._type_param_names(
+                None
+                if item is None
+                else item.child_by_field_name("type_parameters")
+            )
+            args = self._type_arg_list(key or "")
+            if not names or len(args) < len(names):
+                break
+            mapping = dict(zip(names, args))
+            key = re.sub(
+                r"\b(" + "|".join(
+                    re.escape(name) for name in mapping
+                ) + r")\b",
+                lambda m: mapping[m.group(1)],
+                body_pair[0],
+            )
+            head = body_pair[1]
+        return key
 
     def _receiver_annotation_position(
         self, receiver: Any | None
@@ -2566,7 +2659,11 @@ class _RustBindings:
             "reference_expression",
             "parenthesized_expression",
         }:
-            children = self._children(node)
+            children = [
+                child
+                for child in self._children(node)
+                if child.type != "mutable_specifier"
+            ]
             if len(children) != 1:
                 return {}
             node = children[0]
