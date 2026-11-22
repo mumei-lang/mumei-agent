@@ -3179,9 +3179,14 @@ function-typed struct field, its captures, writes, and effect marks also
 union onto the resolved field member (keyed and positional composite
 forms included), in addition to the existing container record. Factory
 results and unresolved tracked-closure fields fail closed because their
-bind-time snapshot or member cannot be represented. Named functions,
-later field-value copies, and passing the containing struct remain
-outside this propagation path.
+bind-time snapshot or member cannot be represented. Named functions and
+passing the containing struct remain outside this propagation path.
+A later local read from a recorded function-typed field (`f := s.F`,
+`var f = s.F`, or `f = s.F`, including nested selectors) unions the
+field member's captured bindings, writes, and effect marks onto `f`
+from the pre-statement snapshot. The copied value remains opaque and
+external-capable because field member ids conflate possible instances;
+fields without closure records keep the existing behavior.
 A package-level `var Alias = Id` call
 admits as an opaque external call — the callee is
 reassignable by any caller, so `Alias(args)` is dep-free
