@@ -1763,6 +1763,10 @@ contract Vault {
     assert not any(
         ref.binding_id == lib_fn.id for ref in report.references
     )
+    call = report.calls[-1]
+    assert call.kind == "opaque_overload"
+    assert call.target == ""
+    assert _unresolved(report, "f", "ambiguous_overload")
 
 
 def test_function_pointer_selector_does_not_bind_struct_field():
