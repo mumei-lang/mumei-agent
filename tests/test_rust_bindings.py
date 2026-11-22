@@ -4159,3 +4159,85 @@ fn f(p: P) {
 """
     report = build_rust_bindings(source, pointer_width=64)
     assert _call(report, source, "p.t()").target == ""
+
+
+def test_for_loop_iter_methods_bind_container_element():
+    # `for p in v.iter()/iter_mut()/into_iter()` types `p` as the
+    # container's element, same as iterating `v` directly.
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn f(v: Vec<P>) {
+    for p in v.iter() { p.m(); }
+    for p2 in v.iter_mut() { p2.m(); }
+    for p3 in v.into_iter() { p3.m(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = next(b for b in report.bindings if b.name == "m")
+    for text in ("p.m()", "p2.m()", "p3.m()"):
+        call = next(
+            c for c in report.calls
+            if source[c.span.start:c.span.end] == text
+        )
+        assert call.target == method.id
+
+
+def test_for_loop_iter_on_array_element():
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn f(arr: [P; 4]) {
+    for p in arr.iter() { p.m(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = next(b for b in report.bindings if b.name == "m")
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "p.m()"
+    )
+    assert call.target == method.id
+
+
+def test_for_loop_map_values_bind_value_type():
+    # `m.values()` yields `V` of `HashMap<K, V>` — `m.keys()` reads
+    # `K`, and `m.iter()`'s (K, V) pair stays unpinned.
+    source = """
+struct P;
+struct K;
+impl P { fn m(&self) {} }
+impl K { fn k(&self) {} }
+fn f(m: HashMap<K, P>) {
+    for v in m.values() { v.m(); }
+    for k in m.keys() { k.k(); }
+    for pair in m.iter() { pair.m(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = next(b for b in report.bindings if b.name == "m")
+    k = next(b for b in report.bindings if b.name == "k")
+    by_text = {source[c.span.start:c.span.end]: c for c in report.calls}
+    assert by_text["v.m()"].target == m.id
+    assert by_text["k.k()"].target == k.id
+    assert by_text["pair.m()"].target == ""
+
+
+def test_for_loop_chained_iterator_stays_opaque():
+    # `v.iter().enumerate()`/`v.iter().map(f)` yield a new iterator
+    # shape — the element stays unpinned rather than guessed.
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn f(v: Vec<P>) {
+    for p in v.iter().enumerate() { p.m(); }
+    for p2 in v.iter().map(|x| x) { p2.m(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    for text in ("p.m()", "p2.m()"):
+        call = next(
+            c for c in report.calls
+            if source[c.span.start:c.span.end] == text
+        )
+        assert call.target == ""
