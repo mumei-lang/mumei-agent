@@ -6876,8 +6876,9 @@ The result, `AttemptScheduleResult`, folds into
 `cancelled`}. Each adapter attempt is its own `AttemptSequence`, so a
 fallback never contaminates the prior attempt's lineage. The descriptor
 carries fingerprints only — no argv, source or output bytes — and
-`selected` names which adapter produced a declared-success exit, never
-an Evidence acceptance. This is partial C11: scheduling is observed
+`selected` names which adapter produced a declared-success exit (without
+a `failed`/`inconclusive` self-report, see C04), never an Evidence
+acceptance. This is partial C11: scheduling is observed
 dispatch, not authorization, output normalization, arbitration or
 acceptance.
 

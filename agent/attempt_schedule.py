@@ -163,8 +163,8 @@ class ScheduledAttemptEntry:
 class AttemptScheduleResult:
     """A bounded schedule record: the tried entries, the resulting plans and
     reconciled sequences, and the host-meaning outcome — `selected` only
-    names which adapter produced a declared-success exit, never an
-    Evidence acceptance."""
+    names which adapter produced a declared-success exit without a
+    `failed`/`inconclusive` self-report, never an Evidence acceptance."""
 
     entries: tuple[ScheduledAttemptEntry, ...]
     plans: tuple[VerificationPlan, ...]
