@@ -3202,33 +3202,17 @@ class _Builder:
             )
         ):
             return None
-        fact = root_binding.type
         members = []
-        for index, field in enumerate(reversed(fields)):
+        for field in reversed(fields):
             field_ref = self.references.get(self.node_key(field))
             member = self._field_identity(field_ref)
             if (
                 member is None
                 or member.type is None
                 or member.name.encode("utf-8") != field.text
-                or member.id
-                not in {
-                    direct_member.id
-                    for direct_member in self._struct_fields_for_fact(
-                        fact
-                    )
-                }
             ):
                 return None
             members.append(member)
-            if index < len(fields) - 1:
-                fact = self._struct_value_fact(member.type)
-                if (
-                    fact is None
-                    or not fact.type_id
-                    or self._type_fact_has_type_args(member.type)
-                ):
-                    return None
         member = members[-1]
         if member.type.kind != "array":
             return None
@@ -3237,10 +3221,35 @@ class _Builder:
             element = getattr(element, "elem", None)
         if not self._scalar_value_fact(element):
             return None
+        fact = root_binding.type
+        direct_chain = True
+        for index, member in enumerate(members):
+            if member.id not in {
+                direct_member.id
+                for direct_member in self._struct_fields_for_fact(fact)
+            }:
+                direct_chain = False
+            if index < len(members) - 1:
+                fact = self._struct_value_fact(member.type)
+                if (
+                    fact is None
+                    or not fact.type_id
+                    or self._type_fact_has_type_args(member.type)
+                ):
+                    return None
+        promotion = None
+        if not direct_chain:
+            promotion = self._value_promotion_chain(
+                root_ref, tuple(reversed(members))
+            )
+            if promotion is None:
+                return None
         self._pin_fact_identities(root_binding.type)
         for field_member in members:
             self.pinned.add(field_member.id)
             self._pin_fact_identities(field_member.type)
+        if promotion is not None:
+            self._pin_value_promotion_chain(root_ref, promotion)
         return root_ref, member, node
 
     def _value_struct_scalar_array_index_target(
