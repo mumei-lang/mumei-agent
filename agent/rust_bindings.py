@@ -1437,6 +1437,16 @@ class _RustBindings:
                 or record.member_impl_args == impl_args
             )
         ]
+        if not pool:
+            # `<P as T>::m` falls back to the trait's default
+            # implementation when the impl does not spell `m`.
+            pool = [
+                record
+                for record in self.records.values()
+                if record.member_of == trait.binding.id
+                and record.member_trait == trait.binding.id
+                and record.binding.name == name
+            ]
         return pool[0] if pool else None
 
     def _field_member(

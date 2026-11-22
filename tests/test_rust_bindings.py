@@ -2556,3 +2556,54 @@ fn f() { let p: P; (p.callback)(); }
     ]
     assert len(field_refs) == 1
     assert source[field_refs[0].span.start : field_refs[0].span.end] == "callback"
+
+
+def test_ufcs_falls_back_to_trait_default_method():
+    source = """
+trait T { fn m(&self) {} }
+struct P;
+impl T for P {}
+fn f(p: P) { <P as T>::m(&p); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    default_m = next(
+        b
+        for b in report.bindings
+        if b.name == "m" and b.span.start == source.index("fn m") + 3
+    )
+    call = _call(report, source, "<P as T>::m(&p)")
+    assert call.target == default_m.id
+
+
+def test_ufcs_prefers_impl_member_over_trait_default():
+    source = """
+trait T { fn m(&self) {} }
+struct P;
+impl T for P { fn m(&self) {} }
+fn f(p: P) { <P as T>::m(&p); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    impl_m = next(
+        b
+        for b in report.bindings
+        if b.name == "m" and b.span.start == source.rindex("fn m") + 3
+    )
+    call = _call(report, source, "<P as T>::m(&p)")
+    assert call.target == impl_m.id
+
+
+def test_bare_type_path_call_sees_trait_default():
+    source = """
+trait T { fn m(&self) {} }
+struct P;
+impl T for P {}
+fn f(p: P) { P::m(&p); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    default_m = next(
+        b
+        for b in report.bindings
+        if b.name == "m" and b.span.start == source.index("fn m") + 3
+    )
+    call = _call(report, source, "P::m(&p)")
+    assert call.target == default_m.id
