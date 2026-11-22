@@ -2493,3 +2493,25 @@ f("s");
     )
     call = _calls(report)[0]
     assert call.target == fs[0].id
+
+def test_overload_merged_interface_later_block_wins():
+    # Both signatures accept — tsc puts the later merged block's
+    # signatures first, so the `any` overload of block two wins.
+    source = """
+interface I { m(x: string): void }
+interface I { m(x: any): void }
+declare const i: I;
+i.m("s");
+"""
+    report = build_ts_bindings(source)
+    any_m = next(
+        b for b in report.bindings
+        if b.kind == "associated_function"
+        and "any" in source[b.span.start : b.span.start + 30]
+    )
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == 'i.m("s")'
+    )
+    assert call.target == any_m.id
+

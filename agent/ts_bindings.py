@@ -1683,6 +1683,7 @@ class _TypeScriptBindings:
             # declaration to reach a base type's method.
             return matches
         owner_ids = {matches[0].member_of}
+        owner_pos = {}
         # Declaration merging splits one entity's members across
         # several blocks; signatures on merge siblings of the nearest
         # declaring block are overloads of the same member, not
@@ -1698,11 +1699,17 @@ class _TypeScriptBindings:
             None,
         )
         if owner_record is not None:
-            owner_ids.update(
-                sibling.node.parent.id
-                for sibling in self._merge_siblings(owner_record)
-                if sibling.node is not None and sibling.node.parent is not None
+            owner_pos[owner_record.node.parent.id] = (
+                owner_record.node.parent.start_byte
             )
+            for sibling in self._merge_siblings(owner_record):
+                if (
+                    sibling.node is not None
+                    and sibling.node.parent is not None
+                ):
+                    decl = sibling.node.parent
+                    owner_ids.add(decl.id)
+                    owner_pos[decl.id] = decl.start_byte
         signatures = [
             candidate
             for candidate in matches
@@ -1736,9 +1743,16 @@ class _TypeScriptBindings:
             return matches
         # tsc's first-matching-signature rule: the earliest declaration
         # that fits the arguments wins, not the lookup's latest-first
-        # order. Non-signature matches (properties, clause aliases)
-        # lose to a signature the call actually fits.
-        remaining.sort(key=lambda candidate: candidate.binding.span.start)
+        # order. For merged declarations, signatures of a LATER block
+        # precede earlier blocks' signatures; inside one block they
+        # keep declaration order. Non-signature matches (properties,
+        # clause aliases) lose to a signature the call actually fits.
+        remaining.sort(
+            key=lambda candidate: (
+                -owner_pos.get(candidate.member_of, 0),
+                candidate.binding.span.start,
+            )
+        )
         return remaining
 
     def _arity_accepts(self, candidate: _Record, arg_count: int) -> bool:
