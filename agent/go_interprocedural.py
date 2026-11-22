@@ -357,6 +357,34 @@ class _AnonymousChannelBinding:
     type: Any
 
 
+class _FrozenIndex:
+    """The index a `x := p.B[i]` extraction picked, carrying the
+    dependencies `i` had AT the extraction — a later `i = 0`
+    cannot re-seat the share onto another element. It walks like
+    a node (`.type`/`.text`/span fields) so the existing index
+    plumbing accepts it, but `_expression` returns the frozen
+    deps instead of re-reading the live index binding — which is
+    what limits the freeze to the share's own injected uses."""
+
+    __slots__ = (
+        "deps", "text", "children", "named_children", "parent",
+        "start_byte", "end_byte", "start_point", "end_point",
+    )
+
+    type = "frozen_index"
+
+    def __init__(self, node: Any, deps: frozenset) -> None:
+        self.deps = deps
+        self.text = node.text
+        self.children = ()
+        self.named_children = ()
+        self.parent = node.parent
+        self.start_byte = node.start_byte
+        self.end_byte = node.end_byte
+        self.start_point = node.start_point
+        self.end_point = node.end_point
+
+
 def _span_dict(span: ByteSpan | FileSpan | None) -> dict | None:
     if span is None:
         return None
@@ -3178,7 +3206,10 @@ class _Builder:
             )
             if share_extract is not None:
                 indexes.append(
-                    share_extract[0].child_by_field_name("index")
+                    _FrozenIndex(
+                        share_extract[0].child_by_field_name("index"),
+                        share_extract[1],
+                    )
                 )
                 current = share_extract[0].child_by_field_name("operand")
         if (
@@ -14735,9 +14766,6 @@ class _Builder:
             self, "_param_pointer_aliases", {}
         )
         saved_element_share = getattr(self, "_element_share", {})
-        saved_frozen_index_deps = getattr(
-            self, "_frozen_index_deps", {}
-        )
         saved_pending_lhs_pops = getattr(
             self, "_pending_lhs_pops", []
         )
@@ -14748,7 +14776,6 @@ class _Builder:
         self._pending_param_reseats = []
         self._param_pointer_aliases = {}
         self._element_share = {}
-        self._frozen_index_deps = {}
         self._pending_lhs_pops = []
         self.frames = []
         self.pinned = set()
@@ -14883,7 +14910,6 @@ class _Builder:
             self._pending_param_reseats = saved_pending_param_reseats
             self._param_pointer_aliases = saved_pointer_param_aliases
             self._element_share = saved_element_share
-            self._frozen_index_deps = saved_frozen_index_deps
             self._pending_lhs_pops = saved_pending_lhs_pops
             self._defer_result_deps = saved_defer_result_deps
             self._deferred_exits = saved_deferred_exits
@@ -15176,9 +15202,34 @@ class _Builder:
         self._pending_lhs_pops = []
 
     def _drop_element_share(self, binding_id: str) -> None:
-        share = self._element_share.pop(binding_id, None)
-        if share is not None and isinstance(share, tuple):
-            self._frozen_index_deps.pop(share[1], None)
+        self._element_share.pop(binding_id, None)
+
+    def _pure_index_expr(self, node: Any) -> bool:
+        # `p.B[i+1]`'s index is pure — identifiers, literals,
+        # parentheses, arithmetic — so an `x := p.B[i+1]`
+        # extraction may share like `x := p.B[i]` does. A call
+        # or other effectful index stays out: injecting its
+        # node would re-run the call per use.
+        if node is None:
+            return False
+        if node.type in _INDEX_LITERALS or node.type == "identifier":
+            return True
+        if node.type == "parenthesized_expression":
+            inner = _children(node)
+            return len(inner) == 1 and self._pure_index_expr(
+                inner[0]
+            )
+        if node.type == "binary_expression":
+            return self._pure_index_expr(
+                node.child_by_field_name("left")
+            ) and self._pure_index_expr(
+                node.child_by_field_name("right")
+            )
+        if node.type == "unary_expression":
+            return self._pure_index_expr(
+                node.child_by_field_name("operand")
+            )
+        return False
 
     def _statement(
         self,
@@ -16158,29 +16209,28 @@ class _Builder:
                     share_index = extract_rhs.child_by_field_name(
                         "index"
                     )
-                    if share_index is None or share_index.type in {
-                        "identifier",
-                        *_INDEX_LITERALS,
-                    }:
-                        share_key = (
-                            self.node_key(share_index)
-                            if share_index is not None
-                            else ""
-                        )
-                        if (
-                            share_index is not None
-                            and share_index.type == "identifier"
-                        ):
-                            self._frozen_index_deps[share_key] = (
-                                self.expression(
-                                    share_index, fn, params,
-                                    locals_, transfers, count, 0,
-                                )
+                    if (
+                        share_index is None
+                        or share_index.type in {
+                            "identifier",
+                            *_INDEX_LITERALS,
+                        }
+                    ):
+                        # The extraction's index deps freeze at
+                        # mark time — `i = 0` afterwards cannot
+                        # re-seat the share onto another slot.
+                        share_deps = (
+                            self.expression(
+                                share_index, fn, params,
+                                locals_, transfers, count, 0,
                             )
+                            if share_index is not None
+                            else frozenset()
+                        )
                         self._drop_element_share(binding.id)
                         self._element_share[binding.id] = (
                             extract_rhs,
-                            share_key,
+                            share_deps,
                         )
                     else:
                         self._drop_element_share(binding.id)
@@ -26023,16 +26073,8 @@ class _Builder:
         count: list[int],
         depth: int,
     ) -> frozenset[int]:
-        frozen = (
-            self._frozen_index_deps.get(self.node_key(node))
-            if node is not None
-            else None
-        )
-        if frozen is not None:
-            # The index an `x := p.B[i]` extraction picked names
-            # the element at extraction time — `i = 0` afterwards
-            # must not re-seat the share onto another slot.
-            return frozen
+        if node is not None and node.type == "frozen_index":
+            return node.deps
         count[0] += 1
         if depth + len(self.active) >= MAX_DEPTH or count[0] > MAX_EXPRESSION_NODES:
             raise _Unsupported("analysis_limit", _span(node))
