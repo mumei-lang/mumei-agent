@@ -2710,6 +2710,19 @@ each bail shape (backward / undeclared / into an inner block).
 Remaining limits: backward `goto` and labels crossed by non-ancestor
 frames stay unanalysed.
 
+### C05 labeled flow-hint corpus
+
+The labeled Go corpus measures per-family agreement: `unassigned`
+matched 0, missed 12, unexpected 2; `unused` matched 5, missed 1,
+unexpected 0; `unreachable` matched 4, missed 0, unexpected 0. Labels
+cover local names only: parameters, named results, and package-level
+names are assigned on entry; bare zero-value `var` declarations are not
+explicit assignments. All 12 `unassigned` misses are reads of a
+conditionally set pointer declared with a bare `var`: the hint counts
+the zero-value declaration as an assignment, so possible nil reads are
+not flagged. This is measurement only: it makes no analysis
+changes and is not a proof of soundness or completeness.
+
 ### C06 first compiler-backed Go binding slice
 
 `tools/go-types` is an opt-in, standard-library-only metadata producer using
