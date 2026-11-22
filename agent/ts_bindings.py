@@ -1458,7 +1458,13 @@ class _TypeScriptBindings:
             ):
                 value_names.add(declared)
             type_names = set(candidate.member_type_public_names)
-            if candidate.class_like:
+            if (
+                candidate.class_like
+                or candidate.binding.kind == "namespace"
+            ):
+                # A namespace answers its public spellings on the type
+                # side too — it is a qualified-path segment (`N.B.T`),
+                # never a terminal type itself.
                 type_names |= value_names
             if (
                 candidate.member_type_exported

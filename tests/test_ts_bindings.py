@@ -1928,3 +1928,20 @@ const x = new X(); const y = new Y(); x.m(); y.m();
     }
     assert calls["x.m()"].target == base_m.id
     assert calls["y.m()"].target == base_m.id
+
+
+def test_member_clause_aliased_namespace_resolves_on_type_side():
+    # `export {Inner as Public}` publishes the namespace on the type
+    # side too — qualified base paths reach `N.Public.B`, while the
+    # un-exported `N.Inner` spelling stays unreachable.
+    source = """
+namespace N { namespace Inner { export class B { m(): void {} } } export {Inner as Public} }
+class X extends N.Public.B { }
+class Y extends N.Inner.B { }
+const x = new X(); const y = new Y(); x.m(); y.m();
+"""
+    report = build_ts_bindings(source)
+    base_m = _member_bindings(report, "m", "associated_function")[0]
+    calls = {source[c.span.start : c.span.end]: c for c in _calls(report)}
+    assert calls["x.m()"].target == base_m.id
+    assert calls["y.m()"].target is None or calls["y.m()"].target != base_m.id
