@@ -2490,19 +2490,19 @@ class _RustBindings:
                     )
                     if head is None and spelled_args is not None:
                         spelled_args = spelled_args.strip()
-                        if self._paren_wraps(spelled_args):
-                            spelled = self._type_arg_list(
-                                spelled_args[1:-1]
-                            )
-                            index = int(index_text)
-                            if index < len(spelled):
-                                return self._spelled_type(
-                                    spelled[index],
-                                    self._receiver_annotation_position(
-                                        value_node
-                                    )
-                                    or node.start_byte,
+                        wrapped = self._paren_wraps(spelled_args)
+                        spelled = self._type_arg_list(
+                            spelled_args[1:-1] if wrapped else spelled_args
+                        )
+                        index = int(index_text)
+                        if (wrapped or len(spelled) > 1) and index < len(spelled):
+                            return self._spelled_type(
+                                spelled[index],
+                                self._receiver_annotation_position(
+                                    value_node
                                 )
+                                or node.start_byte,
+                            )
             return None, None
         if node.type == "call_expression":
             callee_node = node.child_by_field_name("function")
@@ -4019,8 +4019,8 @@ class _RustBindings:
             return list(first.values())
         if pattern.type in {
             "tuple_pattern", "slice_pattern", "struct_pattern", "ref_pattern",
-            "mut_pattern", "captured_pattern", "remaining_field_pattern",
-            "field_pattern", "tuple_struct_pattern",
+            "reference_pattern", "mut_pattern", "captured_pattern",
+            "remaining_field_pattern", "field_pattern", "tuple_struct_pattern",
         }:
             if pattern.type == "struct_pattern":
                 type_node = pattern.child_by_field_name("type")
@@ -5719,7 +5719,7 @@ class _RustBindings:
                 else _UNKNOWN
             )
             return {pattern.start_byte: (fact, scrut_args)}
-        if kind in {"ref_pattern", "mut_pattern"}:
+        if kind in {"ref_pattern", "reference_pattern", "mut_pattern"}:
             inner = next(
                 (
                     child
