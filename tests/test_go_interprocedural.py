@@ -6210,6 +6210,58 @@ def test_interface_dispatch_collection_element_receivers(
     assert transfer.imported
 
 
+def test_interface_dispatch_element_receiver_inner_indexes_read(
+    go_types_helper,
+):
+    # `s.A[i].F[0].M(x)` — the inner `i` reads like the outer `0`:
+    # the receiver deps must not drop it (and any index call runs).
+    declarations = (
+        "type I interface{ M(int64) int64 }\n"
+        "type E struct{ F []I }\n"
+        "type S struct{ A []E }\n"
+        "func F(s *S, i int64, x int64) int64 { "
+        "return s.A[i].F[0].M(x) }\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1, 2})
+    assert result.effects == "unknown"
+
+
+def test_interface_dispatch_element_receiver_pins_mid_field_type(
+    go_types_helper,
+):
+    # `p.B.A[0].M(x)` — the intermediate named struct `B`'s identity
+    # pins like the container field's, so redeclaring `B` alone
+    # stales this summary.
+    files = {
+        "a.go": (
+            "package p\n"
+            "func F(p *S, x int64) int64 { return p.B.A[0].M(x) }\n"
+        ),
+        "i.go": "package p\ntype I interface{ M(int64) int64 }\n",
+        "s.go": (
+            "package p\n"
+            "type B struct{ A []I }\n"
+            "type S struct{ B B }\n"
+        ),
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, {}),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available, result.gaps
+    b_id = next(
+        binding.id
+        for binding in snapshot.bindings
+        if binding.name == "B" and binding.kind == "type"
+    )
+    assert b_id in result.pinned
+
+
 def test_interface_dispatch_nested_element_receivers_stay_closed(
     go_types_helper,
 ):

@@ -33233,7 +33233,39 @@ class _Builder:
             fact = fact.elem
         if fact is None or fact.kind != "interface":
             return None
-        return member, target[1], index_nodes, target[0]
+        # `s.A[i].F[0]` — the selector's own operand chain may index
+        # too: every intermediate index reads like the outer ones
+        # (its calls run, its deps reach the receiver), and every
+        # member's declared identity pins so redeclaring an
+        # intermediate named struct stales the caller.
+        inner_indexes: list[Any] = []
+        cur = operand
+        while cur is not None:
+            cur = self._strip_parens(cur)
+            if cur is None:
+                break
+            if cur.type == "index_expression":
+                inner_indexes.append(
+                    cur.child_by_field_name("index")
+                )
+                cur = cur.child_by_field_name("operand")
+                continue
+            if cur.type != "selector_expression":
+                break
+            field_node = cur.child_by_field_name("field")
+            field_ref = (
+                self.references.get(self.node_key(field_node))
+                if field_node is not None
+                else None
+            )
+            field_member = self._field_identity(field_ref)
+            if (
+                field_member is not None
+                and field_member.type is not None
+            ):
+                self._pin_fact_identities(field_member.type)
+            cur = cur.child_by_field_name("operand")
+        return member, target[1], index_nodes, target[0], inner_indexes
 
     def _interface_dispatch_call(
         self,
@@ -33363,7 +33395,13 @@ class _Builder:
                 call.target,
             )
         if element_receiver is not None:
-            member, root_id, index_nodes, field_key = element_receiver
+            (
+                member,
+                root_id,
+                index_nodes,
+                field_key,
+                inner_indexes,
+            ) = element_receiver
             # The bare field read `p.A` stays closed for `[]I` —
             # the element read's deps are the root's own provenance
             # plus every index's, which is what a representable
@@ -33371,7 +33409,7 @@ class _Builder:
             receiver_deps = self._pointer_deps(
                 root_id, params, locals_
             ) | self._opaque_container_deps(field_key, locals_)
-            for index_node in index_nodes:
+            for index_node in inner_indexes + index_nodes:
                 if (
                     index_node is not None
                     and index_node.type not in _INDEX_LITERALS
