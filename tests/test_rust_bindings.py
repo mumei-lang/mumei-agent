@@ -3446,9 +3446,9 @@ fn f(w: W<P>) {
     assert _call(report, source, "f.m()").target == method.id
 
 
-def test_prelude_variant_payload_stays_opaque_through_alias():
-    # Prelude gating needs the spelled container name — `type O =
-    # Option<P>` hides it, so `Some(p)` on `O` stays unpinned.
+def test_prelude_variant_payload_on_unresolvable_option():
+    # `Option` has no record, but the spelled arg still types the
+    # prelude payload — `Some(p)` binds `p: P`.
     source = """
 struct P;
 type O = Option<P>;
@@ -3458,7 +3458,8 @@ fn f(o: O) {
 }
 """
     report = build_rust_bindings(source, pointer_width=64)
-    assert _call(report, source, "p.m()").target == ""
+    m = next(b for b in report.bindings if b.name == "m")
+    assert _call(report, source, "p.m()").target == m.id
 
 
 def test_reference_and_cast_receivers_are_typed():
@@ -4781,3 +4782,250 @@ fn f(m: HashMap<K, V>) {
     v = _bindings(report, "v", "associated_function")[0]
     assert _call(report, source, "k.k()").target == k.id
     assert _call(report, source, "v.v()").target == v.id
+
+
+def test_tuple_pattern_binds_elements_by_position():
+    source = """\
+struct P;
+impl P { fn m(&self) {} }
+struct Q;
+impl Q { fn q(&self) {} }
+fn f(t: (P, Q)) {
+    let (a, b) = t;
+    a.m();
+    b.q();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = next(b for b in report.bindings if b.name == "m")
+    q = next(b for b in report.bindings if b.name == "q")
+    calls = [c for c in report.calls if source[c.span.start:c.span.end].endswith(("m()", "q()"))]
+    assert [c.target for c in calls] == [m.id, q.id]
+
+
+def test_tuple_pattern_in_match_and_nested_variant():
+    source = """\
+struct P;
+impl P { fn m(&self) {} }
+enum E { V(P), W }
+fn f(t: (E, P)) {
+    match t {
+        (E::V(p), _) => p.m(),
+        _ => (),
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = next(b for b in report.bindings if b.name == "m")
+    calls = [c for c in report.calls if source[c.span.start:c.span.end].endswith("m()")]
+    assert [c.target for c in calls] == [m.id]
+
+
+def test_tuple_pattern_rest_binds_last_element():
+    source = """\
+struct P;
+impl P { fn m(&self) {} }
+struct Q;
+impl Q { fn q(&self) {} }
+fn f(t: (P, P, Q)) {
+    let (h, .., last) = t;
+    last.q();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    q = next(b for b in report.bindings if b.name == "q")
+    calls = [c for c in report.calls if source[c.span.start:c.span.end].endswith("q()")]
+    assert [c.target for c in calls] == [q.id]
+
+
+def test_tuple_pattern_short_pattern_stays_unpinned():
+    source = """\
+struct P;
+impl P { fn m(&self) {} }
+fn f(t: (P, P, P)) {
+    let (a, b) = t;
+    a.m();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    calls = [c for c in report.calls if source[c.span.start:c.span.end].endswith("m()")]
+    assert calls and all(c.target in {"", None} for c in calls)
+
+
+def test_for_tuple_pattern_binds_vec_of_tuples() -> None:
+    source = """\
+struct P;
+impl P { fn m(&self) {} }
+struct Q;
+impl Q { fn q(&self) {} }
+fn f(v: Vec<(P, Q)>) {
+    for (a, b) in &v {
+        a.m();
+        b.q();
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = next(b for b in report.bindings if b.name == "m")
+    q = next(b for b in report.bindings if b.name == "q")
+    calls = [
+        c
+        for c in report.calls
+        if source[c.span.start : c.span.end].endswith(("m()", "q()"))
+    ]
+    assert [c.target for c in calls] == [m.id, q.id]
+
+
+def test_prelude_pattern_on_call_returned_option_tuple() -> None:
+    source = """\
+struct P;
+impl P { fn m(&self) {} }
+struct Q;
+impl Q { fn q(&self) {} }
+fn make_opt() -> Option<(P, Q)> { None }
+fn f() {
+    if let Some((a, b)) = make_opt() {
+        a.m();
+        b.q();
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = next(b for b in report.bindings if b.name == "m")
+    q = next(b for b in report.bindings if b.name == "q")
+    calls = [
+        c
+        for c in report.calls
+        if source[c.span.start : c.span.end].endswith(("m()", "q()"))
+    ]
+    assert [c.target for c in calls] == [m.id, q.id]
+
+
+def test_err_pattern_on_call_returned_result() -> None:
+    source = """\
+struct P;
+impl P { fn m(&self) {} }
+struct E2;
+impl E2 { fn e(&self) {} }
+fn mk() -> Result<P, E2> { Err(E2) }
+fn f() {
+    match mk() {
+        Ok(p) => p.m(),
+        Err(e) => e.e(),
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = next(b for b in report.bindings if b.name == "m")
+    e = next(b for b in report.bindings if b.name == "e")
+    calls = [
+        c
+        for c in report.calls
+        if source[c.span.start : c.span.end].endswith(("m()", "e()"))
+    ]
+    assert [c.target for c in calls] == [m.id, e.id]
+
+
+def test_let_pattern_uses_inline_annotation() -> None:
+    source = """\
+struct P;
+impl P { fn m(&self) {} }
+struct Q;
+impl Q { fn q(&self) {} }
+struct W { x: P, y: Q }
+fn h() {
+    let (a, b): (P, P) = (P, P);
+    a.m();
+    b.m();
+    let Some(v): Option<P> = Some(P);
+    v.m();
+    let W { x, y }: W = W { x: P, y: Q };
+    x.m();
+    y.q();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = next(b for b in report.bindings if b.name == "m")
+    q = next(b for b in report.bindings if b.name == "q")
+    calls = [
+        c
+        for c in report.calls
+        if source[c.span.start : c.span.end].endswith(("m()", "q()"))
+    ]
+    assert [c.target for c in calls] == [m.id, m.id, m.id, m.id, q.id]
+
+
+def test_tuple_pattern_prelude_variant_in_tuple() -> None:
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn f(t: (Option<P>, P)) {
+    match t {
+        (Some(p), _) => p.m(),
+        _ => (),
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = _bindings(report, "m", "associated_function")[0]
+    assert _call(report, source, "p.m()").target == m.id
+
+
+def test_let_pattern_inferred_annotation_slots() -> None:
+    source = """
+struct P;
+struct Q;
+impl P { fn m(&self) {} }
+impl Q { fn q(&self) {} }
+fn f(t: (P, Q)) {
+    let (a, b): (_, _) = t;
+    a.m(); b.q();
+    let (c, d): (P, _) = t;
+    c.m(); d.q();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = _bindings(report, "m", "associated_function")[0]
+    q = _bindings(report, "q", "associated_function")[0]
+    assert _call(report, source, "a.m()").target == m.id
+    assert _call(report, source, "b.q()").target == q.id
+    assert _call(report, source, "c.m()").target == m.id
+    assert _call(report, source, "d.q()").target == q.id
+
+
+def test_for_tuple_pattern_binds_map_pair_around_rest() -> None:
+    source = """
+struct P;
+struct Q;
+impl P { fn m(&self) {} }
+impl Q { fn q(&self) {} }
+use std::collections::HashMap;
+fn f(m: HashMap<P, Q>) {
+    for (k, .., v) in m { k.m(); v.q(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = _bindings(report, "m", "associated_function")[0]
+    q = _bindings(report, "q", "associated_function")[0]
+    assert _call(report, source, "k.m()").target == m.id
+    assert _call(report, source, "v.q()").target == q.id
+
+
+def test_for_tuple_pattern_binds_partial_map_pair() -> None:
+    source = """
+struct P;
+struct Q;
+impl P { fn m(&self) {} }
+impl Q { fn q(&self) {} }
+use std::collections::HashMap;
+use std::collections::BTreeMap;
+fn f(m: HashMap<P, Q>, t: BTreeMap<P, Q>) {
+    for (k, ..) in m { k.m(); }
+    for (.., v) in t { v.q(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = _bindings(report, "m", "associated_function")[0]
+    q = _bindings(report, "q", "associated_function")[0]
+    assert _call(report, source, "k.m()").target == m.id
+    assert _call(report, source, "v.q()").target == q.id
