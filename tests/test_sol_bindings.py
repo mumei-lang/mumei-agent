@@ -2804,3 +2804,20 @@ contract B {
     assert any(ref.binding_id == x.id for ref in report.references)
     y = next(b for b in report.bindings if b.name == "y")
     assert not any(ref.binding_id == y.id for ref in report.references)
+
+
+def test_member_call_on_array_row_type_alias_binds():
+    source = """
+contract C {
+    uint[][] grid;
+    function take(uint256[] row) external {}
+    function run() external { this.take(grid[0]); }
+}
+"""
+    report = build_sol_bindings(source)
+    # `grid[0]` is `uint[]` — the same type solc spells `uint256[]`.
+    take = next(b for b in report.bindings if b.name == "take")
+    assert any(
+        ref.binding_id == take.id and ref.kind == "call"
+        for ref in report.references
+    )

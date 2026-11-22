@@ -1840,16 +1840,19 @@ class _SolBindings:
         return self._type_record_for_type_node(type_node, record.owner)
 
     def _canonical_type_text(self, text: str) -> str:
-        # Whitespace (`uint256 [ ]`) and the bare `uint`/`int`/`byte`
-        # spellings map to their canonical widths (`uint` is exactly
-        # `uint256`, `byte` is `bytes1` to solc); dynamic `bytes` is a
-        # distinct type and stays as written.
-        canonical = re.sub(r"\s+", "", text)
-        match = re.fullmatch(r"(u?int)([0-9]*)", canonical)
-        if match is not None:
-            return f"{match.group(1)}{match.group(2) or '256'}"
-        if canonical == "byte":
-            return "bytes1"
+        # Whitespace is canonicalized (`uint256 [ ]`, `address
+        # payable`) and the bare `uint`/`int`/`byte`/`fixed`/`ufixed`
+        # spellings map to their canonical widths at every position —
+        # `uint` is exactly `uint256` to solc even inside a composite
+        # (`uint[]` is `uint256[]`). Dynamic `bytes` is a distinct
+        # type and stays as written.
+        canonical = re.sub(r"\s+", " ", text).strip()
+        canonical = re.sub(r"\s*([\[\]().,<>])\s*", r"\1", canonical)
+        canonical = re.sub(r"\buint\b", "uint256", canonical)
+        canonical = re.sub(r"\bint\b", "int256", canonical)
+        canonical = re.sub(r"\bbyte\b", "bytes1", canonical)
+        canonical = re.sub(r"\bufixed\b", "ufixed128x18", canonical)
+        canonical = re.sub(r"\bfixed\b", "fixed128x18", canonical)
         return canonical
 
     def _lookup(
