@@ -4455,7 +4455,7 @@ class _RustBindings:
                             "as_ref", "as_mut",
                             "as_deref", "as_deref_mut",
                             "as_deref_err", "as_deref_mut_err",
-                            "inspect", "inspect_err",
+                            "inspect", "inspect_ok", "inspect_err",
                         }
                         and receiver[1] is not None
                     ):
@@ -4582,15 +4582,16 @@ class _RustBindings:
                                 )
                             return None, None
                         if (
-                            method_name in {"inspect", "inspect_err"}
+                            method_name
+                            in {"inspect", "inspect_ok", "inspect_err"}
                             and head == "Result"
                             and len(recv_args) == 2
                         ):
-                            # `r.inspect(f)`/`r.inspect_err(f)` yield
-                            # the receiver unchanged — `Result<T, E>`.
-                            # A chained `r.inspect(f).inspect_err(g)`
-                            # already spells the whole `Result<T, E>`
-                            # — re-wrapping would fuse it into
+                            # `r.inspect*(f)` yields the receiver
+                            # unchanged — `Result<T, E>`. A chained
+                            # `r.inspect(f).inspect_err(g)` already
+                            # spells the whole `Result<T, E>` —
+                            # re-wrapping would fuse it into
                             # `Result<Result<T, E>>`.
                             if spelled_whole:
                                 return None, receiver[1]
