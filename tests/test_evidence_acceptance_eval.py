@@ -940,22 +940,75 @@ _PRODUCER_SIGNATURE = {
 }
 
 
-def test_native_producer_signature_extra_fields(tmp_path):
+def test_producer_signature_extra_fields():
     # `evidence accept --verify-signature` pins the verification
     # outcome as `producer_signature` (+ `produced_at_signed`) and
-    # reports `producer_signature_binding` — both extras fold.
-    descriptor = _descriptor(
-        schema_version=_NATIVE,
-        checks_performed=["producer_signature_binding"],
-        producer_signature=dict(_PRODUCER_SIGNATURE),
-        produced_at_signed=True,
-    )
-    evaluation = evaluate_core_acceptance(descriptor)
-    assert evaluation["descriptor_match"] is True
-    assert evaluation["accepted"] is True
+    # reports `producer_signature_binding` — both extras fold on the
+    # accept and accept-source descriptor schemas.
+    for descriptor in (
+        _descriptor(
+            schema_version="mumei.source-evidence-acceptance/v1",
+            checks_performed=["producer_signature_binding"],
+            producer_signature=dict(_PRODUCER_SIGNATURE),
+            produced_at_signed=True,
+        ),
+        _evidence_acceptance_descriptor(
+            checks_performed=[
+                "requirement_normalization",
+                "producer_signature_binding",
+            ],
+            producer_signature=dict(_PRODUCER_SIGNATURE),
+            produced_at_signed=True,
+        ),
+    ):
+        evaluation = evaluate_core_acceptance(descriptor)
+        assert evaluation["descriptor_match"] is True
+        assert evaluation["accepted"] is True
 
 
-def test_native_producer_signature_requires_binding_check(tmp_path):
+def test_producer_signature_on_list_descriptors():
+    # accept-list emits `producer_signature` on both list schemas —
+    # but never `produced_at_signed`.
+    for descriptor in (
+        _evidence_list_acceptance_descriptor(
+            checks_performed=[
+                "requirement_normalization",
+                "producer_signature_binding",
+            ],
+            producer_signature=dict(_PRODUCER_SIGNATURE),
+        ),
+        _conjunctive_descriptor(
+            checks_performed=[
+                "requirement_normalization",
+                "producer_signature_binding",
+            ],
+            producer_signature=dict(_PRODUCER_SIGNATURE),
+        ),
+    ):
+        evaluation = evaluate_core_acceptance(descriptor)
+        assert evaluation["descriptor_match"] is True
+    for descriptor in (
+        _evidence_list_acceptance_descriptor(
+            checks_performed=["producer_signature_binding"],
+            produced_at_signed=True,
+        ),
+        _conjunctive_descriptor(
+            checks_performed=["producer_signature_binding"],
+            produced_at_signed=True,
+        ),
+        # produced_at_signed is foreign off the accept/accept-source
+        # routes: a list descriptor carrying it never matches.
+        _evidence_list_acceptance_descriptor(
+            checks_performed=["producer_signature_binding"],
+            producer_signature=dict(_PRODUCER_SIGNATURE),
+            produced_at_signed=True,
+        ),
+    ):
+        evaluation = evaluate_core_acceptance(descriptor)
+        assert evaluation["descriptor_match"] is False
+
+
+def test_producer_signature_requires_binding_check():
     # Without `producer_signature_binding` in checks_performed the
     # signature pins are foreign fields.
     for key, value in (
@@ -964,7 +1017,6 @@ def test_native_producer_signature_requires_binding_check(tmp_path):
     ):
         evaluation = evaluate_core_acceptance(
             _descriptor(
-                schema_version=_NATIVE,
                 checks_performed=["fresh_source_recheck"],
                 **{key: value},
             )
@@ -976,10 +1028,27 @@ def test_native_producer_signature_requires_binding_check(tmp_path):
                 **{key: value},
             )
         )
-        assert evaluation["descriptor_match"] is False, key
+        assert evaluation["descriptor_match"] is True, key
+    # A schema the extras are not admitted on still rejects them.
+    evaluation = evaluate_core_acceptance(
+        _descriptor(
+            schema_version=_NATIVE,
+            checks_performed=["producer_signature_binding"],
+            producer_signature=dict(_PRODUCER_SIGNATURE),
+        )
+    )
+    assert evaluation["descriptor_match"] is False
+    # The check must be performed on the verdict shapes too.
+    evaluation = evaluate_core_acceptance(
+        _evidence_acceptance_descriptor(
+            checks_performed=["requirement_normalization"],
+            producer_signature=dict(_PRODUCER_SIGNATURE),
+        )
+    )
+    assert evaluation["descriptor_match"] is False
 
 
-def test_native_producer_signature_validates_shapes(tmp_path):
+def test_producer_signature_validates_shapes(tmp_path):
     # Malformed signature fields break the match exactly like foreign
     # fields — optional presence, strict types.
     bad_cases = [
@@ -998,7 +1067,7 @@ def test_native_producer_signature_validates_shapes(tmp_path):
     for extra in bad_cases:
         evaluation = evaluate_core_acceptance(
             _descriptor(
-                schema_version=_NATIVE,
+                schema_version="mumei.source-evidence-acceptance/v1",
                 checks_performed=["producer_signature_binding"],
                 **extra,
             )
@@ -1006,13 +1075,13 @@ def test_native_producer_signature_validates_shapes(tmp_path):
         assert evaluation["descriptor_match"] is False, extra
 
 
-def test_native_producer_signature_malformed_checks_never_raise(tmp_path):
+def test_producer_signature_malformed_checks_never_raise(tmp_path):
     # A signature pin beside a malformed checks_performed folds to
     # descriptor_match=False, never raises.
     for bad in (None, 3, "producer_signature_binding", {"x": 1}):
         evaluation = evaluate_core_acceptance(
             _descriptor(
-                schema_version=_NATIVE,
+                schema_version="mumei.source-evidence-acceptance/v1",
                 checks_performed=bad,
                 producer_signature=dict(_PRODUCER_SIGNATURE),
             )
