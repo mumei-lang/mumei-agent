@@ -19140,6 +19140,263 @@ def test_stable_named_func_alias_writer_still_closes_shared_go_race(
 
 
 @pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(
+            "func pipe(in chan int64, out chan int64) { "
+            "out <- <-in }\n"
+            "func F(x int64) int64 { "
+            "ch := make(chan int64, 1); out := make(chan int64, 1); "
+            "go pipe(ch, out); ch <- x; return <-out }",
+            id="named-pipe",
+        ),
+        pytest.param(
+            "func pipe(in chan int64, out chan int64) { "
+            "v := <-in; out <- v }\n"
+            "func F(x int64) int64 { "
+            "ch := make(chan int64, 1); out := make(chan int64, 1); "
+            "go pipe(ch, out); ch <- x; return <-out }",
+            id="named-pipe-temporary",
+        ),
+        pytest.param(
+            "func pipe(in chan int64, out chan int64, k int64) { "
+            "out <- <-in + k }\n"
+            "func F(x, z int64) int64 { "
+            "ch := make(chan int64, 1); out := make(chan int64, 1); "
+            "go pipe(ch, out, z); ch <- x; return <-out }",
+            id="named-pipe-extra-argument",
+        ),
+        pytest.param(
+            "func pipe(in chan int64, out chan int64) { "
+            "out <- <-in }\n"
+            "func F(ch chan int64, x int64) int64 { "
+            "out := make(chan int64, 1); go pipe(ch, out); "
+            "ch <- x; return <-out }",
+            id="channel-parameter",
+        ),
+        pytest.param(
+            "func pipe(in <-chan int64, out chan<- int64) { "
+            "out <- <-in }\n"
+            "func F(x int64) int64 { "
+            "ch := make(chan int64, 1); out := make(chan int64, 1); "
+            "go pipe(ch, out); ch <- x; return <-out }",
+            id="receive-only-parameter",
+        ),
+        pytest.param(
+            "type P struct{}\n"
+            "func (P) pipe(in chan int64, out chan int64) { "
+            "out <- <-in }\n"
+            "func F(x int64) int64 { "
+            "var p P; ch := make(chan int64, 1); "
+            "out := make(chan int64, 1); go p.pipe(ch, out); "
+            "ch <- x; return <-out }",
+            id="method",
+        ),
+        pytest.param(
+            "type P struct{}\n"
+            "func (P) pipe(in chan int64, out chan int64) { "
+            "out <- <-in }\n"
+            "func F(x int64) int64 { "
+            "var p P; ch := make(chan int64, 1); "
+            "out := make(chan int64, 1); "
+            "go P.pipe(p, ch, out); ch <- x; return <-out }",
+            id="method-expression",
+        ),
+        pytest.param(
+            "func inner(in chan int64, out chan int64) { "
+            "out <- <-in }\n"
+            "func pipe(in chan int64, out chan int64) { "
+            "inner(in, out) }\n"
+            "func F(x int64) int64 { "
+            "ch := make(chan int64, 1); out := make(chan int64, 1); "
+            "go pipe(ch, out); ch <- x; return <-out }",
+            id="nested-call",
+        ),
+        pytest.param(
+            "func pipeS(cs []chan int64, out chan int64) { "
+            "out <- <-cs[0] }\n"
+            "func F(x int64) int64 { "
+            "cs := []chan int64{make(chan int64, 1)}; "
+            "out := make(chan int64, 1); go pipeS(cs, out); "
+            "cs[0] <- x; return <-out }",
+            id="slice-of-channels",
+        ),
+        pytest.param(
+            "func pipe(in chan int64, out chan int64) { "
+            "out <- <-in }\n"
+            "func F(x int64) int64 { "
+            "ch := make(chan int64, 1); out := make(chan int64, 1); "
+            "h := pipe; go h(ch, out); ch <- x; return <-out }",
+            id="function-alias",
+        ),
+    ],
+)
+def test_go_channel_argument_receive_closes_later_send(
+    go_types_helper, source
+):
+    result = named(*unit(go_types_helper, source))
+    assert not result.available
+    assert result.gaps[0].reason == "unsupported_statement"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(
+            "func hold(m map[string]chan int64) {}\n"
+            "func later(m map[string]chan int64) {}\n"
+            "func F(m map[string]chan int64, x int64) int64 { "
+            "go hold(m); later(m); return x }",
+            id="map-value",
+        ),
+        pytest.param(
+            "func hold(cs [1]chan int64) {}\n"
+            "func F(x int64) int64 { "
+            "cs := [1]chan int64{make(chan int64, 1)}; "
+            "go hold(cs); cs[0] <- x; return <-cs[0] }",
+            id="array-element",
+        ),
+        pytest.param(
+            "type W struct{ C chan int64 }\n"
+            "func hold(w W) {}\n"
+            "func F(x int64) int64 { "
+            "w := W{C: make(chan int64, 1)}; "
+            "go hold(w); w.C <- x; return <-w.C }",
+            id="struct-field",
+        ),
+        pytest.param(
+            "type W struct{ C chan int64 }\n"
+            "func hold(w *W) {}\n"
+            "func F(x int64) int64 { "
+            "w := new(W); go hold(w); w = nil; return x }",
+            id="pointer-element",
+        ),
+        pytest.param(
+            "func hold(m map[chan int64]bool) {}\n"
+            "func F(x int64) int64 { "
+            "m := map[chan int64]bool{}; ch := make(chan int64, 1); "
+            "go hold(m); m[ch] = true; return x }",
+            id="map-key",
+        ),
+    ],
+)
+def test_go_channel_containing_composite_argument_closes_later_write(
+    go_types_helper, source
+):
+    result = named(*unit(go_types_helper, source))
+    assert not result.available
+    assert result.gaps[0].reason == "unsupported_statement"
+
+
+@pytest.mark.parametrize(
+    ("source", "dependencies"),
+    [
+        pytest.param(
+            "func send(ch chan int64, v int64) { ch <- v }\n"
+            "func F(x int64) int64 { "
+            "ch := make(chan int64, 1); go send(ch, x); return <-ch }",
+            frozenset({0}),
+            id="send-named",
+        ),
+        pytest.param(
+            "func pipe(in chan int64, out chan int64) { "
+            "out <- <-in }\n"
+            "func F(x int64) int64 { "
+            "ch := make(chan int64, 1); out := make(chan int64, 1); "
+            "ch <- x; go pipe(ch, out); return <-out }",
+            frozenset({0}),
+            id="pipe-before-send",
+        ),
+        pytest.param(
+            "func send(ch chan int64, v int64) { ch <- v }\n"
+            "func F(x, y int64) int64 { "
+            "ch := make(chan int64, 2); go send(ch, x); "
+            "ch <- y; return <-ch }",
+            frozenset({0, 1}),
+            id="send-then-send",
+        ),
+        pytest.param(
+            "func send(ch chan<- int64, v int64) { ch <- v }\n"
+            "func F(x, y int64) int64 { "
+            "ch := make(chan int64, 2); go send(ch, x); "
+            "ch <- y; return <-ch }",
+            frozenset({0, 1}),
+            id="declared-send-only",
+        ),
+        pytest.param(
+            "func rcv(ch chan int64, out chan int64) { "
+            "out <- <-ch }\n"
+            "func F(x, y int64) int64 { "
+            "ch := make(chan int64, 2); out := make(chan int64, 1); "
+            "ch <- x; ch <- y; go rcv(ch, out); <-ch; return <-out }",
+            frozenset({0, 1}),
+            id="main-goroutine-receive",
+        ),
+        pytest.param(
+            "func pipe(in chan int64, out chan int64) { "
+            "out <- <-in }\n"
+            "func F(x, z int64) int64 { "
+            "ch := make(chan int64, 1); out := make(chan int64, 2); "
+            "ch <- x; go pipe(ch, out); out <- z; return <-out }",
+            frozenset({0, 1}),
+            id="later-output-send",
+        ),
+    ],
+)
+def test_go_channel_argument_send_only_controls_remain_available(
+    go_types_helper, source, dependencies
+):
+    result = named(*unit(go_types_helper, source))
+    assert result.available, result.gaps
+    assert result.return_dependencies == dependencies
+
+
+def test_go_channel_value_transfer_control_remains_available(
+    go_types_helper,
+):
+    source = (
+        "func put(q chan chan int64, c chan int64) { q <- c }\n"
+        "func F(x int64) int64 { "
+        "q := make(chan chan int64, 1); c := make(chan int64, 1); "
+        "go put(q, c); c <- x; return <-(<-q) }"
+    )
+    result = named(*unit(go_types_helper, source))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(
+            "func put(q chan chan int64, c chan int64) { q <- c }\n"
+            "func reader(q chan chan int64, out chan int64) { "
+            "out <- <-(<-q) }\n"
+            "func F(x int64) int64 { "
+            "q := make(chan chan int64, 1); c := make(chan int64, 1); "
+            "out := make(chan int64, 1); go put(q, c); "
+            "go reader(q, out); c <- x; return <-out }",
+            id="two-goroutines",
+        ),
+        pytest.param(
+            "func put(q chan chan int64, c chan int64) { "
+            "q <- c; _ = <-c }\n"
+            "func F(x int64) int64 { "
+            "q := make(chan chan int64, 1); c := make(chan int64, 1); "
+            "go put(q, c); c <- x; return <-(<-q) }",
+            id="mixed-send-value-and-receive",
+        ),
+    ],
+)
+def test_go_channel_value_transfer_races_remain_closed(
+    go_types_helper, source
+):
+    result = named(*unit(go_types_helper, source))
+    assert not result.available
+    assert result.gaps[0].reason == "unsupported_statement"
+
+
+@pytest.mark.parametrize(
     "body",
     [
         "g := func() { ch <- x }; g(); return <-ch",
@@ -20022,6 +20279,293 @@ def test_bound_closure_resolves_captures_at_call(go_types_helper):
     result = named(*data)
     assert result.available
     assert result.return_dependencies == frozenset({1})
+
+
+def test_chained_closure_values_resolve_shared_captures_once(
+    go_types_helper,
+):
+    declarations = [
+        "func ap(f func() int64) int64 { return f() }",
+        "func F(x, y int64) int64 {",
+        "v := y",
+        "g0 := func() int64 { return v }",
+    ]
+    for index in range(1, 30):
+        previous = max(index - 2, 0)
+        calls = f"g{index - 1}() + g{previous}()"
+        declarations.append(
+            f"g{index} := func() int64 {{ return {calls} }}"
+        )
+    declarations.extend(
+        ["v = x", "return ap(g29)", "}"]
+    )
+    result = named(
+        *unit(go_types_helper, "\n".join(declarations))
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(
+            "func ap(f func() int64, _ int64) int64 { return f() }\n"
+            "func set(p *int64, a int64) int64 { *p = a; return 0 }\n"
+            "func F(x, y int64) int64 { "
+            "v := y; g := func() int64 { return v }; "
+            "return ap(g, set(&v, x)) }",
+            id="pointer-write-argument",
+        ),
+        pytest.param(
+            "func ap(f func() int64, _ int64) int64 { return f() }\n"
+            "func F(x, y int64) int64 { "
+            "v := y; g := func() int64 { return v }; "
+            "return ap(g, func() int64 { v = x; return 0 }()) }",
+            id="immediate-literal-argument",
+        ),
+        pytest.param(
+            "func ap(f func() int64, _ int64) int64 { return f() }\n"
+            "func F(x, y int64) int64 { "
+            "v := y; g := func() int64 { return v }; "
+            "s := func() int64 { v = x; return 0 }; "
+            "return ap(g, s()) }",
+            id="bound-literal-call-argument",
+        ),
+    ],
+)
+def test_closure_argument_uses_captures_after_all_arguments(
+    go_types_helper, source
+):
+    result = named(*unit(go_types_helper, source))
+    assert result.available, result.gaps
+    assert 0 in result.return_dependencies
+
+
+def test_later_defer_literal_binding_is_available_after_go(go_types_helper):
+    source = (
+        "func ap(f func()) { f() }\n"
+        "func send(ch chan int64, v int64) { ch <- v }\n"
+        "func F(x, y int64) (r int64) { "
+        "ch := make(chan int64, 1); go send(ch, y); "
+        "w := x; defer ap(func(){ r = w }); return <-ch }"
+    )
+    result = named(*unit(go_types_helper, source))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_later_defer_literal_write_remains_race_closed(go_types_helper):
+    source = (
+        "func ap(f func()) { f() }\n"
+        "func setp(p *int64, a int64) { *p = a }\n"
+        "func F(x, y int64) int64 { "
+        "w0 := y; go setp(&w0, y); z := x; "
+        "defer ap(func(){ w0 = z }); return w0 }"
+    )
+    result = named(*unit(go_types_helper, source))
+    assert not result.available
+
+
+@pytest.mark.parametrize(
+    ("source", "dependencies"),
+    [
+        pytest.param(
+            "func ap(f func()) { f() }\n"
+            "func F(x, y int64) int64 { "
+            "v := y; w := int64(0); g := func(){ w = v }; "
+            "go ap(g); v = x; return w }",
+            None,
+            id="bound-write-after-go",
+        ),
+        pytest.param(
+            "func ap(f func()) { f() }\n"
+            "func F(x, y int64) int64 { "
+            "v := y; w := int64(0); "
+            "go ap(func(){ w = v }); v = x; return w }",
+            None,
+            id="literal-write-after-go",
+        ),
+        pytest.param(
+            "func ap(f func()) { f() }\n"
+            "func F(x, y int64) int64 { "
+            "v := y; w := int64(0); g := func(){ w = v }; "
+            "v = x; go ap(g); return w }",
+            frozenset({0}),
+            id="bound-write-before-go",
+        ),
+        pytest.param(
+            "func ap(f func() int64) int64 { return f() }\n"
+            "func F(x, y int64) int64 { "
+            "v := y; g := func() int64 { return v }; "
+            "go ap(g); v = x; return 0 }",
+            None,
+            id="bound-read-after-go",
+        ),
+    ],
+)
+def test_go_higher_order_literal_races_use_capture_shape(
+    go_types_helper, source, dependencies
+):
+    result = named(*unit(go_types_helper, source))
+    if dependencies is None:
+        assert not result.available
+        assert any(
+            gap.reason == "unsupported_statement" for gap in result.gaps
+        )
+    else:
+        assert result.available, result.gaps
+        assert result.return_dependencies == dependencies
+
+
+@pytest.mark.parametrize(
+    ("source", "dependencies"),
+    [
+        pytest.param(
+            "func ap(f func() int64) int64 { return f() }\n"
+            "func F(x, y int64) int64 { "
+            "v := y; g := func() int64 { return v }; "
+            "v = x; return ap(g) }",
+            frozenset({0}),
+            id="c8-hof",
+        ),
+        pytest.param(
+            "func ap(f func() int64) int64 { return f() }\n"
+            "func F(x, y int64) int64 { "
+            "v := y; f := func() int64 { return v }; "
+            "v = x; return ap(f) + 0 }",
+            frozenset({0}),
+            id="h3-hof-inline-then",
+        ),
+        pytest.param(
+            "func ap(f func() int64) int64 { return f() }\n"
+            "func F(x, y int64) int64 { "
+            "v := y; g := func() int64 { return v }; "
+            "a := ap(g); v = x; return a + ap(g) }",
+            frozenset({0, 1}),
+            id="h4-hof-twice",
+        ),
+        pytest.param(
+            "func ap(f func(int64) int64, a int64) int64 { "
+            "return f(a) }\n"
+            "func F(x, y int64) int64 { "
+            "k := y; g := func(a int64) int64 { return a + k }; "
+            "k = x; return ap(g, 0) }",
+            frozenset({0}),
+            id="h6-hof-arg",
+        ),
+        pytest.param(
+            "func ap(f func() int64) int64 { return f() }\n"
+            "func F(x, y int64) int64 { "
+            "v := y; g := func() int64 { return v }; "
+            "h := g; v = x; return ap(h) }",
+            frozenset({0}),
+            id="h9-alias",
+        ),
+        pytest.param(
+            "func ap(f func()) { f() }\n"
+            "func F(x, y int64) (r int64) { "
+            "v := y; g := func() { r = v }; v = x; "
+            "defer ap(g); return 0 }",
+            frozenset({0}),
+            id="d1-defer-hof-before",
+        ),
+        pytest.param(
+            "func ap(f func()) { f() }\n"
+            "func F(x, y int64) (r int64) { "
+            "v := y; g := func() { r = v }; defer ap(g); "
+            "v = x; return 0 }",
+            frozenset({0, 1}),
+            id="n6-hof-defer",
+        ),
+        pytest.param(
+            "func ap(f func()) { f() }\n"
+            "func F(x, y int64) (r int64) { "
+            "v := y; defer ap(func() { r = v }); "
+            "v = x; return 0 }",
+            frozenset({0, 1}),
+            id="n7-hof-defer-literal",
+        ),
+        pytest.param(
+            "func ap(f func() int64) int64 { return f() }\n"
+            "func F(x, y int64) (r int64) { "
+            "v := y; g := func() int64 { return v }; "
+            "defer func() { r = ap(g) }(); v = x; return 0 }",
+            frozenset({0, 1}),
+            id="d2-defer-hof-return",
+        ),
+    ],
+)
+def test_function_literal_argument_uses_invocation_time_captures(
+    go_types_helper, source, dependencies
+):
+    result = named(*unit(go_types_helper, source))
+    assert result.available, result.gaps
+    assert result.return_dependencies == dependencies
+
+
+@pytest.mark.parametrize(
+    ("source", "dependencies"),
+    [
+        pytest.param(
+            "func ap(f func() int64) int64 { return f() }\n"
+            "func F(x, y int64) int64 { "
+            "v := x; g := func() int64 { return v }; "
+            "r := ap(g); v = y; return r }",
+            frozenset({0}),
+            id="h1-hof-before",
+        ),
+        pytest.param(
+            "func ap(f func() int64) int64 { return f() }\n"
+            "func F(x, y int64) int64 { "
+            "v := y; v = x; return ap(func() int64 { return v }) }",
+            frozenset({0}),
+            id="h2-hof-inline",
+        ),
+        pytest.param(
+            "func F(x, y int64) int64 { "
+            "v := x; g := func() int64 { return v }; "
+            "v = y; return g() }",
+            frozenset({1}),
+            id="c2-rebind-y",
+        ),
+        pytest.param(
+            "func F(x, y int64) (r int64) { "
+            "v := x; defer func(a int64) { r = a }(v); "
+            "v = y; return 0 }",
+            frozenset({0}),
+            id="c4-defer-argument",
+        ),
+    ],
+)
+def test_function_literal_value_controls_keep_dependency_sets(
+    go_types_helper, source, dependencies
+):
+    result = named(*unit(go_types_helper, source))
+    assert result.available, result.gaps
+    assert result.return_dependencies == dependencies
+
+
+def test_go_higher_order_later_write_stays_closed(go_types_helper):
+    source = (
+        "func ap(f func()) { f() }\n"
+        "func F(x, y int64) int64 { "
+        "v := y; ch := make(chan int64, 1); "
+        "g := func() { ch <- v }; go ap(g); v = x; return <-ch }"
+    )
+    result = named(*unit(go_types_helper, source))
+    assert not result.available
+
+
+def test_go_higher_order_before_write_stays_closed(go_types_helper):
+    source = (
+        "func ap(f func()) { f() }\n"
+        "func F(x, y int64) int64 { "
+        "v := y; ch := make(chan int64, 1); "
+        "g := func() { ch <- v }; v = x; go ap(g); return <-ch }"
+    )
+    result = named(*unit(go_types_helper, source))
+    assert not result.available
 
 
 def test_bound_closure_rebind_clears_captures(go_types_helper):
@@ -38040,7 +38584,178 @@ def test_named_struct_element_pointer_member_store_read_back(
 @pytest.mark.parametrize(
     "declarations, expected",
     [
-        # `G(p.A[i].W, x)` hands the callee the member's pointer —
+        # `*p.A[i].W = W{V:x}` — a whole-pointee store through the
+        # element's pointer member broadcasts like `*p = s`; the
+        # later `p.A[i].W.V` field read observes it.
+        (
+            "type E2 struct { V int64 }\n"
+            "type Elem struct { W *E2 }\n"
+            "type S struct { A []*Elem }\n"
+            "func F(p *S, i int64, x int64) int64 {\n"
+            "\t*p.A[i].W = E2{V: x}\n"
+            "\treturn p.A[i].W.V\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # `p.A[i].W.V = x` broadcasts into `indirect_writes` — the
+        # `(*p.A[i].W).V` pointee-field read observes it.
+        (
+            "type E2 struct { V int64 }\n"
+            "type Elem struct { W *E2 }\n"
+            "type S struct { A []*Elem }\n"
+            "func F(p *S, i int64, x int64) int64 {\n"
+            "\tp.A[i].W.V = x\n"
+            "\treturn (*p.A[i].W).V\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # `(*p.A[i].W).V = x` — the paren-deref store reaches the
+        # same caller-shared pointee.
+        (
+            "type E2 struct { V int64 }\n"
+            "type Elem struct { W *E2 }\n"
+            "type S struct { A []*Elem }\n"
+            "func F(p *S, i int64, x int64) int64 {\n"
+            "\t(*p.A[i].W).V = x\n"
+            "\treturn p.A[i].W.V\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # `e := *p.A[i].W` — a whole-pointee copy binds the read's
+        # deps, including prior broadcast stores.
+        (
+            "type E2 struct { V int64 }\n"
+            "type Elem struct { W *E2 }\n"
+            "type S struct { A []*Elem }\n"
+            "func F(p *S, i int64, x int64) int64 {\n"
+            "\t*p.A[i].W = E2{V: x}\n"
+            "\te := *p.A[i].W\n"
+            "\treturn e.V\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # Value-element collection through a `**S` root.
+        (
+            "type E2 struct { V int64 }\n"
+            "type Elem struct { W *E2 }\n"
+            "type S struct { B []Elem }\n"
+            "func F(pp **S, i int64, x int64) int64 {\n"
+            "\t(*pp).B[i].W.V = x\n"
+            "\treturn (*(*pp).B[i].W).V\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # A `q := p` alias root names the same pointee.
+        (
+            "type E2 struct { V int64 }\n"
+            "type Elem struct { W *E2 }\n"
+            "type S struct { A []*Elem }\n"
+            "func F(p *S, i int64, x int64) int64 {\n"
+            "\tq := p\n"
+            "\t*q.A[i].W = E2{V: x}\n"
+            "\treturn q.A[i].W.V\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+    ],
+)
+def test_named_struct_element_pointer_member_pointee_ops(
+    go_types_helper, declarations, expected
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == expected
+
+
+@pytest.mark.parametrize(
+    "declarations, expected",
+    [
+        # `*p.A[i].W = s` lands in the pointee reached through `i` —
+        # a read through a literal index can still alias it, so the
+        # index's deps broadcast like `p.A[i].W.V = x`'s do.
+        (
+            "type E2 struct { V int64 }\n"
+            "type Elem struct { W *E2 }\n"
+            "type S struct { A []*Elem }\n"
+            "func F(p *S, i int64, x int64) int64 {\n"
+            "\t*p.A[i].W = E2{V: x}\n"
+            "\treturn p.A[0].W.V\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # `(*p.A[G(x)].W).V = y` — the destination's index call
+        # evaluates: `x`'s deps (and the call itself) reach a read
+        # through a different index.
+        (
+            "type E2 struct { V int64 }\n"
+            "type Elem struct { W *E2 }\n"
+            "type S struct { A []*Elem }\n"
+            "func G(x int64) int64 { return x }\n"
+            "func F(p *S, x int64, y int64) int64 {\n"
+            "\t(*p.A[G(x)].W).V = y\n"
+            "\treturn p.A[0].W.V\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # `(*p.A[i].W).Next.V` — a multi-hop read still evaluates
+        # the dereferenced chain's index.
+        (
+            "type E2 struct { V int64; Next *E2 }\n"
+            "type Elem struct { W *E2 }\n"
+            "type S struct { A []*Elem }\n"
+            "func F(p *S, i int64, x int64) int64 {\n"
+            "\t(*p.A[i].W).V = x\n"
+            "\treturn (*p.A[i].W).Next.V\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # …and the same read without a store: the index deps come
+        # from evaluating the dereferenced chain, not a broadcast.
+        (
+            "type E2 struct { V int64; Next *E2 }\n"
+            "type Elem struct { W *E2 }\n"
+            "type S struct { A []*Elem }\n"
+            "func F(p *S, i int64, x int64) int64 {\n"
+            "\treturn (*p.A[i].W).Next.V\n}\n",
+            frozenset({0, 1}),
+        ),
+    ],
+)
+def test_named_struct_element_pointer_member_pointee_operand_eval(
+    go_types_helper, declarations, expected
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == expected
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        # Whole-pointee ops stay closed on a value-struct root.
+        "type E2 struct { V int64 }\n"
+        "type Elem struct { W *E2 }\n"
+        "type S struct { A []*Elem }\n"
+        "func F(o S, i int64, x int64) int64 {\n"
+        "\t*o.A[i].W = E2{V: x}\n"
+        "\treturn o.A[i].W.V\n}\n",
+        # …and a bare value-element field on `o`.
+        "type E2 struct { V int64 }\n"
+        "type Elem struct { W *E2 }\n"
+        "type S struct { B []Elem }\n"
+        "func F(o S, i int64, x int64) int64 {\n"
+        "\to.B[i].W.V = x\n"
+        "\treturn (*o.B[i].W).V\n}\n",
+        # A map element's member — `m[k]` is not addressable, so
+        # the whole-pointee shape stays closed like `(*m[k].W).V`.
+        "type E2 struct { V int64 }\n"
+        "type Elem struct { W *E2 }\n"
+        "func F(m map[int64]Elem, k int64, x int64) int64 {\n"
+        "\t(*m[k].W).V = x\n"
+        "\treturn m[k].W.V\n}\n",
+    ],
+)
+def test_named_struct_element_pointer_member_pointee_closed(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available or result.gaps
+
+
+@pytest.mark.parametrize(
+    "declarations, expected",
+    [
         # its `dst.V = x` writes into the pointee show up in a
         # later `p.A[i].W.V` read.
         (

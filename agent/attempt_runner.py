@@ -75,6 +75,15 @@ MAX_MEMORY_BOUND_MB = 1_048_576
 MAX_FEED_BYTES = 65_536
 
 
+def minimal_environment() -> dict[str, str]:
+    environment = {}
+    if "PATH" in os.environ:
+        environment["PATH"] = os.environ["PATH"]
+    if os.name == "nt" and "SYSTEMROOT" in os.environ:
+        environment["SYSTEMROOT"] = os.environ["SYSTEMROOT"]
+    return environment
+
+
 def _writable_poller(fd: int) -> "select.poll | None":
     """A writability waiter with no fd-number ceiling, or None.
 

@@ -8012,6 +8012,8 @@ class _Builder:
         operand: Any,
         locals_: dict[str, frozenset[int]],
         params: dict[str, int],
+        *,
+        via_deref: bool = False,
     ) -> tuple[tuple[PackageMember, ...], Any] | None:
         """Every member the operand's pointer chain traverses, and
         the root bound identifier's reference.
@@ -8053,10 +8055,32 @@ class _Builder:
                 )
             if operand is None:
                 return None
+            via_deref = True
         if operand.type == "selector_expression":
             inner = self._bound_field_read(
                 operand, locals_, params, intermediate=True
             )
+            if inner is None and via_deref:
+                # `(*p.A[i].W)` — one explicit dereference of an
+                # element's pointer member on a param pointer root
+                # (`*S`/`**S`/`q := p`/share-extract): the member
+                # acts like a stored pointer field (`t.W`), so its
+                # pointee's members resolve exactly as if `*t` named
+                # the struct. Only a dereferenced operand reaches
+                # here — a bare `p.A[i].W` chain keeps the
+                # element-member slot model.
+                elem = (
+                    self._opaque_container_struct_element_field_target(
+                        operand, params, for_pointer_leaf=True
+                    )
+                )
+                if (
+                    elem is not None
+                    and elem[6]
+                    and getattr(elem[6][-1].type, "kind", None)
+                    == "pointer"
+                ):
+                    inner = (elem[6], elem[6][-1], elem[0])
             if inner is None:
                 return None
             inner_pointees, inner_field, root_ref = inner
@@ -8149,6 +8173,79 @@ class _Builder:
                 ),
             ),
             ref,
+        )
+
+    def _deref_operand(self, operand: Any) -> Any | None:
+        """The dereferenced operand inside a `(*…)` chain.
+
+        A bound model resolves a `(*…)` deref's root and slot but
+        never evaluates the dereferenced operand's own expression —
+        the `p.A[i]` index and member slot of `(*p.A[i].W).V` carry
+        deps (and call side effects) the root slot lacks. Returns
+        the operand of the outermost `*` unary reached by walking
+        the chain through selectors and indexes — `p.A[i].W` for
+        `(*p.A[i].W).V`, and the same node for `(*p.A[i].W).Next.V`.
+        Evaluating the returned node (not the `*` unary itself)
+        keeps a nested pointer field like `(*t.W).N` working: `*t.W`
+        is a closed dereference read, while `t.W` is an ordinary
+        bound field read. None when the chain holds no dereference
+        or the dereference wraps a bare identifier (`(*t).V` needs
+        no extra evaluation — the root slot already names it).
+        """
+        cur = operand
+        while cur is not None and cur.type == "parenthesized_expression":
+            cur = next(
+                (c for c in cur.named_children if c.type != "comment"),
+                None,
+            )
+        while cur is not None and cur.type in {
+            "selector_expression",
+            "field_expression",
+            "index_expression",
+        }:
+            cur = cur.child_by_field_name("operand")
+            while (
+                cur is not None
+                and cur.type == "parenthesized_expression"
+            ):
+                cur = next(
+                    (c for c in cur.named_children if c.type != "comment"),
+                    None,
+                )
+        if cur is None or cur.type != "unary_expression":
+            return None
+        operator = cur.child_by_field_name("operator")
+        inner = cur.child_by_field_name("operand")
+        while inner is not None and inner.type == "parenthesized_expression":
+            inner = next(
+                (c for c in inner.named_children if c.type != "comment"),
+                None,
+            )
+        if (
+            operator is None
+            or operator.text != b"*"
+            or inner is None
+            or inner.type == "identifier"
+        ):
+            return None
+        # Only a chain carrying an index or a call has evaluation the
+        # bound models skip — a pure selector like `(*t.W).N` reads a
+        # member slot the write already attributes, and evaluating it
+        # again would record a second member transfer.
+        if not self._has_evaluable(inner):
+            return None
+        return inner
+
+    def _has_evaluable(self, node: Any) -> bool:
+        """Whether a node's subtree holds an index or a call."""
+        if node is None:
+            return False
+        if node.type in {"index_expression", "call_expression"}:
+            return True
+        return any(
+            self._has_evaluable(child)
+            for child in node.named_children
+            if child.type != "comment"
         )
 
     def _qualified_type_member(self, qualified_node: Any) -> PackageMember | None:
@@ -12039,17 +12136,37 @@ class _Builder:
                 deps = deps | (arg_slot or frozenset())
         return deps
 
+    def _is_tracked_literal_value(
+        self, binding_id: str, params: dict[str, int]
+    ) -> bool:
+        binding = self.bindings.get(binding_id)
+        return (
+            binding is not None
+            and binding.type is not None
+            and binding.type.kind == "function"
+            and binding_id in self.closure_captures
+            and binding_id not in self.opaque_callees
+            and binding_id not in params
+            and binding_id not in self.func_aliases
+            and binding_id not in self.bound_method_values
+            and binding_id not in self.bound_interface_methods
+        )
+
     def _captured_current_deps(
         self,
         captured: frozenset[str],
         params: dict[str, int],
         locals_: dict[str, frozenset[int]],
+        *,
+        _seen: set[str] | None = None,
     ) -> frozenset[int]:
         """Resolve each captured binding's deps NOW — reassignments
         between the literal and the read move what a bound closure
         actually observes (`p := &a; h := func(){*p}; p = &b; h()`
         reads `b`, not `a`). `locals_` wins over the parameter index:
         `x = y` stores the param's current value under its binding id."""
+        if _seen is None:
+            _seen = set()
         resolved: frozenset[int] = frozenset()
         for cbid in captured:
             # A captured channel name may have been reseated
@@ -12062,7 +12179,19 @@ class _Builder:
                 else cbid
             )
             if root in locals_:
-                resolved |= locals_[root]
+                if self._is_tracked_literal_value(root, params):
+                    if root not in _seen:
+                        _seen.add(root)
+                        resolved |= self._captured_current_deps(
+                            self.closure_captures.get(
+                                root, frozenset()
+                            ),
+                            params,
+                            locals_,
+                            _seen=_seen,
+                        )
+                else:
+                    resolved |= locals_[root]
                 binding = self.bindings.get(root)
                 if (
                     binding is not None
@@ -12422,6 +12551,57 @@ class _Builder:
                 and target.receiver.type.kind == "pointer"
             ):
                 star_or_external = True
+        if call is not None and call.kind == "direct_local":
+            arguments = node.child_by_field_name("arguments")
+            if arguments is not None:
+                for argument in _children(arguments):
+                    value = self._strip_parens(argument)
+                    if value is None:
+                        continue
+                    if value.type == "identifier":
+                        ref = self.references.get(
+                            self.node_key(value)
+                        )
+                        binding_id = (
+                            ref.binding_id if ref is not None else None
+                        )
+                        if (
+                            binding_id is None
+                            or not self._is_tracked_literal_value(
+                                binding_id, params
+                            )
+                        ):
+                            continue
+                        captured |= self.closure_captures.get(
+                            binding_id, frozenset()
+                        )
+                        writes |= self.closure_writes.get(
+                            binding_id, frozenset()
+                        )
+                        star_or_external |= (
+                            binding_id in self.closure_star_writes
+                            or binding_id in self.closure_inner_calls
+                            or binding_id in self.pointee_closures
+                        )
+                    elif value.type == "func_literal":
+                        try:
+                            (
+                                _,
+                                literal_captured,
+                                captures_pointer,
+                                literal_writes,
+                                star_write,
+                                has_call,
+                            ) = self._func_literal_capture(
+                                value, params, locals_
+                            )
+                        except _Unsupported:
+                            continue
+                        captured |= frozenset(literal_captured)
+                        writes |= frozenset(literal_writes)
+                        star_or_external |= (
+                            captures_pointer or star_write or has_call
+                        )
         arguments = node.child_by_field_name("arguments")
         if arguments is not None:
             for argument in _children(arguments):
@@ -12474,6 +12654,197 @@ class _Builder:
             roots = frozenset()
             star = captures_pointer or star_write or has_call
         local_param_ids = set(locals_) | set(params)
+
+        def fact_may_contain_channel(
+            fact: Any,
+            anchor: Any | None = None,
+            seen: frozenset[str] = frozenset(),
+        ) -> bool:
+            if fact is None:
+                return True
+            if fact.kind == "chan":
+                return True
+            if fact.kind in {"slice", "array", "pointer"}:
+                return fact_may_contain_channel(
+                    fact.elem, anchor, seen
+                )
+            if fact.kind == "map":
+                return fact_may_contain_channel(
+                    fact.key, anchor, seen
+                ) or fact_may_contain_channel(fact.elem, anchor, seen)
+            if self._scalar_value_fact(fact):
+                return False
+            struct_fact = self._struct_value_fact(fact)
+            if struct_fact is not None:
+                type_id = struct_fact.type_id
+                if type_id and type_id in seen:
+                    return False
+                fields = self._struct_fields_for_fact(
+                    struct_fact, anchor
+                )
+                if fields:
+                    next_seen = seen | {type_id} if type_id else seen
+                    return any(
+                        fact_may_contain_channel(
+                            field.type, field, next_seen
+                        )
+                        for field in fields
+                    )
+                if type_id:
+                    return type_id not in self.bindings
+                return anchor is None or getattr(anchor, "span", None) is None
+            return True
+
+        def direct_send_only_parameter_indexes() -> set[int]:
+            if call is None or call.kind != "direct_local":
+                return set()
+            target = self.functions.get(call.target)
+            if target is None or target.variadic:
+                return set()
+            call_arguments = (
+                _children(arguments) if arguments is not None else []
+            )
+            argument_offset = 1 if call.method_expr else 0
+            if (
+                len(call_arguments) - argument_offset
+                != len(target.parameters)
+            ):
+                return set()
+            target_binding = self.bindings.get(target.binding_id)
+            if target_binding is None or target_binding.span is None:
+                return set()
+            target_file = (
+                target_binding.span.file
+                if isinstance(target_binding.span, FileSpan)
+                else 0
+            )
+            raw = self.raws.get(target_file)
+            if raw is None:
+                return set()
+            syntax = _syntax(raw)
+            if syntax is None:
+                return set()
+            declaration = next(
+                (
+                    candidate
+                    for candidate in _children(syntax)
+                    if candidate.type
+                    in {"function_declaration", "method_declaration"}
+                    and (
+                        (name := candidate.child_by_field_name("name"))
+                        is not None
+                    )
+                    and name.start_byte == target_binding.span.start
+                    and name.end_byte == target_binding.span.end
+                ),
+                None,
+            )
+            if declaration is None:
+                return set()
+            parameter_list = declaration.child_by_field_name(
+                "parameters"
+            )
+            if parameter_list is None:
+                return set()
+            formal_types: list[Any | None] = []
+            for formal in _children(parameter_list):
+                if formal.type != "parameter_declaration":
+                    return set()
+                formal_type = formal.child_by_field_name("type")
+                names = [
+                    child
+                    for child in _children(formal)
+                    if child.type == "identifier"
+                ]
+                formal_types.extend(
+                    formal_type for _ in (names or [None])
+                )
+            if len(formal_types) != len(target.parameters):
+                return set()
+
+            body = declaration.child_by_field_name("body")
+
+            def references_only_send(binding_id: str) -> bool:
+                if not binding_id or body is None:
+                    return False
+                pending = [body]
+                while pending:
+                    current = pending.pop()
+                    pending.extend(_children(current))
+                    if current.type != "identifier":
+                        continue
+                    reference = self.references.get(
+                        (
+                            target_file,
+                            current.start_byte,
+                            current.end_byte,
+                        )
+                    )
+                    if (
+                        reference is None
+                        or reference.binding_id != binding_id
+                    ):
+                        continue
+                    parent = current.parent
+                    if (
+                        parent is None
+                        or parent.type != "send_statement"
+                        or (
+                            parent.child_by_field_name("channel") != current
+                            and parent.child_by_field_name("value") != current
+                        )
+                    ):
+                        return False
+                return True
+
+            send_only: set[int] = set()
+            for index, (parameter, formal_type) in enumerate(
+                zip(target.parameters, formal_types)
+            ):
+                if parameter.type.kind != "chan":
+                    continue
+                declared_send_only = (
+                    formal_type is not None
+                    and formal_type.type == "channel_type"
+                    and formal_type.child_count >= 2
+                    and formal_type.child(0).type == "chan"
+                    and formal_type.child(1).type == "<-"
+                )
+                if declared_send_only or references_only_send(
+                    parameter.binding_id
+                ):
+                    send_only.add(index)
+            return send_only
+
+        send_only_parameter_indexes = (
+            direct_send_only_parameter_indexes()
+        )
+        received_roots: set[str] = set()
+        if arguments is not None:
+            argument_offset = (
+                1 if call is not None and call.method_expr else 0
+            )
+            for argument_index, argument in enumerate(
+                _children(arguments)
+            ):
+                fact = self._deferred_expression_type(argument)
+                root_id = self._deferred_root_binding(
+                    argument, params, locals_
+                )
+                if root_id is None or root_id not in local_param_ids:
+                    continue
+                root_binding = self.bindings.get(root_id)
+                if not fact_may_contain_channel(fact, root_binding):
+                    continue
+                parameter_index = argument_index - argument_offset
+                if (
+                    fact is not None
+                    and fact.kind == "chan"
+                    and parameter_index in send_only_parameter_indexes
+                ):
+                    continue
+                received_roots.add(root_id)
+
         argument_roots: set[str] = set()
         if arguments is not None:
             for argument in _children(arguments):
@@ -12489,7 +12860,7 @@ class _Builder:
                         argument_roots.add(root_id)
         touched = (
             set(captured | writes | roots) & local_param_ids
-        )
+        ) | received_roots
         opaque_touched = touched | (argument_roots & local_param_ids)
         reference_involved = star or bool(roots)
         if arguments is not None:
@@ -14446,6 +14817,7 @@ class _Builder:
                 (c for c in base.named_children if c.type != "comment"),
                 None,
             )
+        via_deref = False
         if base is not None and base.type == "unary_expression":
             # `(*t).f` — one explicit dereference of the bound pointer
             # before the selection, the same auto-deref `t.f` spelled
@@ -14462,15 +14834,18 @@ class _Builder:
                     (c for c in base.named_children if c.type != "comment"),
                     None,
                 )
+            via_deref = True
         if base is not None and base.type == "selector_expression":
             # `t.W.f = v` — the store lands a level deeper into
             # caller state: the operand chain resolves through
             # pointer-typed field members, every traversed member
             # pins, and the deepest pointee's identity records the
             # mutation. The root identifier's reference still takes
-            # the stored value's dependencies.
+            # the stored value's dependencies. `(*p.A[i].W).f`
+            # reaches the same chain through an element's pointer
+            # member when `via_deref` is set.
             resolved = self._bound_selector_pointees(
-                base, locals_, params
+                base, locals_, params, via_deref=via_deref
             )
             if resolved is not None:
                 pointees, ref = resolved
@@ -15055,6 +15430,56 @@ class _Builder:
                             elif escaped_id in params:
                                 result |= {params[escaped_id]}
                         return result | self.indirect_writes
+                # `*p.A[i].W` — a dereference read through an
+                # element's pointer member on a param pointer root
+                # (`*S`/`**S`/`q := p`/share-extract): like `*p`,
+                # the pointee is caller-shared memory whose stores
+                # (`*p.A[i].W = s`, `p.A[i].W.V = x`) broadcast into
+                # `indirect_writes`; the pointer member's own slot is
+                # the operand's deps. Any pointer leaf admits —
+                # the fold is the same for every pointee shape.
+                elem_target = (
+                    self._opaque_container_struct_element_field_target(
+                        inner, params, for_pointer_leaf=True
+                    )
+                )
+                if (
+                    elem_target is not None
+                    and elem_target[6]
+                    and getattr(
+                        elem_target[6][-1].type, "kind", None
+                    )
+                    == "pointer"
+                ):
+                    leaf_member = elem_target[6][-1]
+                    pointee_fact = leaf_member.type.elem
+                    if pointee_fact is None:
+                        raise _Unsupported(
+                            "non_parameter_reference", _span(node)
+                        )
+                    self._pin_fact_identities(leaf_member.type)
+                    self._pin_fact_identities(pointee_fact)
+                    pointee_id = leaf_member.type.type_id or (
+                        f"{leaf_member.id}/pointee"
+                    )
+                    transfers.append(
+                        CallTransfer(
+                            FileSpan(
+                                self.current_file,
+                                node.start_byte,
+                                node.end_byte,
+                            ),
+                            pointee_id,
+                            (),
+                            frozenset(),
+                            imported=True,
+                        )
+                    )
+                    result = self.expression(
+                        operand, fn, params, locals_,
+                        transfers, count, depth + 1,
+                    )
+                    return result | self.indirect_writes
         elif inner is not None and inner.type == "identifier":
             # A dot-imported `*PV` classifies by the declared member
             # exactly like `*lib.PV` — a bare `import` reference whose
@@ -19730,6 +20155,25 @@ class _Builder:
                     # (`p.Next.V = v`) — computing the destination
                     # reads that field's contents too.
                     refs.append((ref, True, bool(type_id), nested))
+                    # `(*p.A[i].W).V = x` — computing the
+                    # destination evaluates the dereferenced
+                    # chain: the `p.A[i]` index (calls included)
+                    # and the member slot read carry deps the
+                    # root slot lacks, and the store lands in the
+                    # pointee reached through `i`, so the address
+                    # deps broadcast like the `*p.A[i].W = s`
+                    # store's do. A bare `(*t).V` wraps an
+                    # identifier — nothing extra evaluates.
+                    _lhs_deref = self._deref_operand(
+                        lhs.child_by_field_name("operand")
+                    )
+                    if _lhs_deref is not None:
+                        _lhs_deref_deps = self.expression(
+                            _lhs_deref, fn, params, locals_,
+                            transfers, count, 0,
+                        )
+                        self._record_read(_lhs_deref_deps)
+                        self.indirect_writes |= _lhs_deref_deps
                     field_root, field_member = (
                         self._scalar_container_field(lhs, params)
                     )
@@ -20007,6 +20451,102 @@ class _Builder:
                                 lhs.end_byte,
                             ),
                             pointee_id,
+                            (),
+                            frozenset(),
+                            imported=True,
+                        )
+                    )
+                    refs.append(_ALIAS_FOLD)
+                    continue
+                # `*p.A[i].W = s` — a whole-pointee store through an
+                # element's pointer member on a param pointer root:
+                # like `*p = s`, the stored value folds into every
+                # escaped binding plus `indirect_writes` (the
+                # `_ALIAS_FOLD` sentinel), the pointee's declared
+                # identity records the external mutation, and the
+                # pointer's own provenance — the `p.A[i].W` slot with
+                # its index — reads at pre-state. A bare `*t` operand
+                # already took `_bound_pointer_write`; a multi-level
+                # `**…` or non-member chain stays closed.
+                deref_elem_operand = lhs
+                while (
+                    deref_elem_operand is not None
+                    and deref_elem_operand.type
+                    == "parenthesized_expression"
+                ):
+                    deref_elem_operand = next(
+                        (
+                            c
+                            for c in deref_elem_operand.named_children
+                            if c.type != "comment"
+                        ),
+                        None,
+                    )
+                deref_elem_inner = None
+                if (
+                    deref_elem_operand is not None
+                    and deref_elem_operand.type == "unary_expression"
+                ):
+                    _deref_op = deref_elem_operand.child_by_field_name(
+                        "operator"
+                    )
+                    _deref_opnd = deref_elem_operand.child_by_field_name(
+                        "operand"
+                    )
+                    if (
+                        _deref_op is not None
+                        and _deref_op.text == b"*"
+                        and _deref_opnd is not None
+                        and _deref_opnd.type != "unary_expression"
+                    ):
+                        deref_elem_inner = _deref_opnd
+                deref_elem_target = (
+                    self._opaque_container_struct_element_field_target(
+                        deref_elem_inner, params,
+                        for_pointer_leaf=True,
+                    )
+                    if deref_elem_inner is not None
+                    else None
+                )
+                if (
+                    deref_elem_target is not None
+                    and deref_elem_target[6]
+                    and getattr(
+                        deref_elem_target[6][-1].type, "kind", None
+                    )
+                    == "pointer"
+                ):
+                    _leaf_member = deref_elem_target[6][-1]
+                    _pointee_fact = _leaf_member.type.elem
+                    if _pointee_fact is None:
+                        raise _Unsupported(
+                            "unsupported_statement", _span(lhs)
+                        )
+                    self._pin_fact_identities(_leaf_member.type)
+                    self._pin_fact_identities(_pointee_fact)
+                    _pointee_id = _leaf_member.type.type_id or (
+                        f"{_leaf_member.id}/pointee"
+                    )
+                    _lhs_read = self.expression(
+                        deref_elem_inner, fn, params, locals_,
+                        transfers, count, 0,
+                    )
+                    self._record_read(_lhs_read)
+                    # The destination's provenance — `p.A[i]`'s
+                    # index — decides which pointee the store
+                    # lands in; a read through a different index
+                    # (`p.A[0].W.V`) can still alias it, so the
+                    # address deps join the broadcast like the
+                    # `p.A[i].W.V = x` member store's do.
+                    self.indirect_writes |= _lhs_read
+                    transfers.append(
+                        CallTransfer(
+                            FileSpan(
+                                self.current_file,
+                                lhs.start_byte,
+                                lhs.end_byte,
+                            ),
+                            _pointee_id,
                             (),
                             frozenset(),
                             imported=True,
@@ -27717,6 +28257,27 @@ class _Builder:
                         chan_root, locals_
                     )
                 deps = locals_[ref.binding_id]
+                if self._is_tracked_literal_value(
+                    ref.binding_id, params
+                ):
+                    deps = (
+                        self._captured_current_deps(
+                            self.closure_captures.get(
+                                ref.binding_id, frozenset()
+                            ),
+                            params,
+                            locals_,
+                        )
+                        | self.indirect_writes
+                    )
+                    if ref.binding_id in self.pointee_closures:
+                        for escaped_id in self.escaped:
+                            if escaped_id in locals_:
+                                deps |= locals_[escaped_id]
+                            elif escaped_id in params:
+                                deps |= frozenset(
+                                    {params[escaped_id]}
+                                )
                 if ref.binding_id in self.external_chan_locals:
                     # `ch := g()` names a callee-produced queue —
                     # contents live in `indirect_writes`, like a
@@ -28097,6 +28658,19 @@ class _Builder:
                             else frozenset()
                         )
                     )
+                    # `(*p.A[i].W).V` — a dereferenced element
+                    # member's operand still evaluates: the `p.A[i]`
+                    # index and the member's own slot read carry deps
+                    # the root slot lacks. A bare `(*t)` operand is
+                    # an identifier, so nothing extra evaluates.
+                    _deref = self._deref_operand(
+                        node.child_by_field_name("operand")
+                    )
+                    if _deref is not None:
+                        deps |= self.expression(
+                            _deref, fn, params, locals_,
+                            transfers, count, depth + 1,
+                        )
                     return deps | self.indirect_writes
                 # `g(a).V` — a field of a call result: the call's
                 # conflated result dep set covers whichever field the
@@ -31444,6 +32018,22 @@ class _Builder:
                 # argument's own dep set.
                 actual_values[index] = (
                     actual_values[index] | self.indirect_writes
+                )
+        for index, argument in enumerate(arguments):
+            value = self._strip_parens(argument)
+            if value is None or value.type != "identifier":
+                continue
+            ref = self.references.get(self.node_key(value))
+            binding_id = ref.binding_id if ref is not None else None
+            if binding_id is not None and self._is_tracked_literal_value(
+                binding_id, params
+            ):
+                actual_values[index] |= self._captured_current_deps(
+                    self.closure_captures.get(
+                        binding_id, frozenset()
+                    ),
+                    params,
+                    locals_,
                 )
         if local_chan_chan_roots is not None:
             for index, argument in enumerate(arguments):

@@ -678,6 +678,44 @@ def _observation_host_match(value: object) -> bool:
     )
 
 
+def _producer_signature_match(value: object) -> bool:
+    """The `producer_signature` record `evidence accept` emits when
+    signature verification ran — every field is optional; the ones
+    present must have the right type."""
+    if type(value) is not dict:
+        return False
+    bool_fields = {
+        "envelope_match",
+        "signature_valid",
+        "subject_bound",
+        "key_pinned",
+        "key_not_revoked",
+        "key_authentic",
+        "envelope_fresh",
+        "registry_authentic",
+        "revocation_list_authentic",
+        "produced_at_signed",
+    }
+    digest_fields = {
+        "subject_digest",
+        "registry_digest",
+        "revocation_digest",
+    }
+    fields = frozenset(value)
+    return (
+        fields <= bool_fields | digest_fields | {"checks_not_performed"}
+        and all(type(value[key]) is bool for key in fields & bool_fields)
+        and all(
+            _is_fingerprint(value[key])
+            for key in fields & digest_fields
+        )
+        and (
+            "checks_not_performed" not in value
+            or _string_list(value["checks_not_performed"])
+        )
+    )
+
+
 # `mumei.native-evidence-acceptance/v1`-only extras. The observation
 # routes emit `invocation`/`host`/`pin_envelope` only when they
 # performed one of the runtime-observation checks — enforced by
@@ -700,6 +738,47 @@ _NATIVE_ACCEPTANCE_EXTRA_FIELDS = {
 _OBSERVATION_EXTRA_FIELDS = frozenset(
     {"invocation", "host", "pin_envelope"}
 )
+
+# `producer_signature` extras admitted per descriptor schema — only
+# when the route ran the `producer_signature_binding` check. The
+# single-record accept and accept-source descriptors may also carry
+# `produced_at_signed`; the list descriptors never do.
+_PRODUCER_SIGNATURE_EXTRA_VALIDATORS = {
+    "producer_signature": _producer_signature_match,
+    "produced_at_signed": lambda value: type(value) is bool,
+}
+_PRODUCER_SIGNATURE_EXTRA_FIELDS = frozenset(
+    _PRODUCER_SIGNATURE_EXTRA_VALIDATORS
+)
+_PRODUCER_SIGNATURE_DESCRIPTOR_EXTRAS = {
+    "mumei.source-evidence-acceptance/v1": _PRODUCER_SIGNATURE_EXTRA_FIELDS,
+}
+
+
+def _producer_signature_admitted(
+    descriptor: dict, admitted: frozenset
+) -> bool:
+    """True when every producer-signature extra on the descriptor is
+    admitted for its schema, shape-valid and gated on the binding
+    check."""
+    extras = (
+        frozenset(descriptor) & _PRODUCER_SIGNATURE_EXTRA_FIELDS
+    )
+    return (
+        extras <= admitted
+        and all(
+            _PRODUCER_SIGNATURE_EXTRA_VALIDATORS[name](descriptor[name])
+            for name in extras
+        )
+        and (
+            not extras
+            or (
+                type(descriptor.get("checks_performed")) is list
+                and "producer_signature_binding"
+                in descriptor["checks_performed"]
+            )
+        )
+    )
 # The single-invocation observations route reports
 # `runtime_observation_semantics`; the per-channel routes
 # (accept-exit-status/-stdout/-stderr) report only their own channel
@@ -868,10 +947,19 @@ def _consistency_conflict_match(value: object) -> bool:
 
 
 def _evidence_acceptance_match(descriptor: dict) -> bool:
-    """Closed-shape membership for `mumei.evidence-acceptance/v1` —
-    `evidence accept --requirement` over a single record."""
+    """Membership for `mumei.evidence-acceptance/v1` —
+    `evidence accept --requirement` over a single record. The producer-
+    signature extras are admitted when the descriptor ran the binding
+    check (`mumei#1315`)."""
+    fields = frozenset(descriptor)
     return (
-        frozenset(descriptor) == _EVIDENCE_ACCEPTANCE_REQUIRED_FIELDS
+        _EVIDENCE_ACCEPTANCE_REQUIRED_FIELDS <= fields
+        and fields
+        <= _EVIDENCE_ACCEPTANCE_REQUIRED_FIELDS
+        | _PRODUCER_SIGNATURE_EXTRA_FIELDS
+        and _producer_signature_admitted(
+            descriptor, _PRODUCER_SIGNATURE_EXTRA_FIELDS
+        )
         and descriptor["schema_version"] == EVIDENCE_ACCEPTANCE_SCHEMA
         and descriptor["acceptance"] == "evaluated"
         and _verdict(descriptor["verdict"])
@@ -892,10 +980,19 @@ def _evidence_acceptance_match(descriptor: dict) -> bool:
 
 
 def _evidence_list_acceptance_match(descriptor: dict) -> bool:
-    """Closed-shape membership for `mumei.evidence-list-acceptance/v1` —
-    `evidence accept-list --requirement` over a record-list envelope."""
+    """Membership for `mumei.evidence-list-acceptance/v1` —
+    `evidence accept-list --requirement` over a record-list envelope.
+    Only `producer_signature` is admitted as an extra — the list route
+    never emits `produced_at_signed`."""
+    fields = frozenset(descriptor)
     return (
-        frozenset(descriptor) == _EVIDENCE_LIST_ACCEPTANCE_REQUIRED_FIELDS
+        _EVIDENCE_LIST_ACCEPTANCE_REQUIRED_FIELDS <= fields
+        and fields
+        <= _EVIDENCE_LIST_ACCEPTANCE_REQUIRED_FIELDS
+        | frozenset({"producer_signature"})
+        and _producer_signature_admitted(
+            descriptor, frozenset({"producer_signature"})
+        )
         and descriptor["schema_version"] == EVIDENCE_LIST_ACCEPTANCE_SCHEMA
         and descriptor["acceptance"] == "evaluated"
         and _verdict(descriptor["verdict"])
@@ -938,7 +1035,11 @@ def _requirement_list_acceptance_match(descriptor: dict) -> bool:
         and fields
         <= _REQUIREMENT_LIST_ACCEPTANCE_REQUIRED_FIELDS
         | frozenset(_REQUIREMENT_LIST_ACCEPTANCE_PIN_SCHEMAS)
+        | frozenset({"producer_signature"})
         and len(pins) == 1
+        and _producer_signature_admitted(
+            descriptor, frozenset({"producer_signature"})
+        )
         and descriptor["schema_version"] == (
             REQUIREMENT_LIST_ACCEPTANCE_SCHEMA
         )
@@ -1060,28 +1161,48 @@ def evaluate_core_acceptance(
         match = verdict_matcher(descriptor)
     else:
         fields = frozenset(descriptor)
+        schema = descriptor.get("schema_version")
         allowed = _CORE_ACCEPTANCE_REQUIRED_FIELDS | _CORE_ACCEPTANCE_OPTIONAL_FIELDS
-        if descriptor.get("schema_version") == (
-            "mumei.native-evidence-acceptance/v1"
-        ):
+        if schema == "mumei.native-evidence-acceptance/v1":
             allowed |= frozenset(_NATIVE_ACCEPTANCE_EXTRA_FIELDS)
+        if type(schema) is str:
+            allowed |= _PRODUCER_SIGNATURE_DESCRIPTOR_EXTRAS.get(
+                schema, frozenset()
+            )
         extras = fields - _CORE_ACCEPTANCE_REQUIRED_FIELDS - _CORE_ACCEPTANCE_OPTIONAL_FIELDS
-        extra_valid = not extras or (
-            descriptor.get("schema_version")
-            == "mumei.native-evidence-acceptance/v1"
-            and all(
-                name in _NATIVE_ACCEPTANCE_EXTRA_FIELDS
-                and _NATIVE_ACCEPTANCE_EXTRA_FIELDS[name](descriptor[name])
-                for name in extras
+        producer_extras = extras & _PRODUCER_SIGNATURE_EXTRA_FIELDS
+        native_extras = extras - producer_extras
+        extra_valid = (
+            _producer_signature_admitted(
+                descriptor,
+                _PRODUCER_SIGNATURE_DESCRIPTOR_EXTRAS.get(
+                    schema, frozenset()
+                )
+                if type(schema) is str
+                else frozenset(),
             )
             and (
-                not extras & _OBSERVATION_EXTRA_FIELDS
+                not native_extras
                 or (
-                    type(descriptor.get("checks_performed")) is list
-                    and any(
-                        type(check) is str
-                        and check in _OBSERVATION_REQUIRED_CHECKS
-                        for check in descriptor["checks_performed"]
+                    schema == "mumei.native-evidence-acceptance/v1"
+                    and all(
+                        name in _NATIVE_ACCEPTANCE_EXTRA_FIELDS
+                        and _NATIVE_ACCEPTANCE_EXTRA_FIELDS[name](
+                            descriptor[name]
+                        )
+                        for name in native_extras
+                    )
+                    and (
+                        not native_extras & _OBSERVATION_EXTRA_FIELDS
+                        or (
+                            type(descriptor.get("checks_performed"))
+                            is list
+                            and any(
+                                type(check) is str
+                                and check in _OBSERVATION_REQUIRED_CHECKS
+                                for check in descriptor["checks_performed"]
+                            )
+                        )
                     )
                 )
             )

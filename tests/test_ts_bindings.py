@@ -2210,3 +2210,576 @@ const x: Missing.T = new C(); x.m();
         if source[c.span.start : c.span.end] == "x.m()"
     )
     assert call.target == member_m.id
+
+
+def test_member_alias_prefers_clause_block_for_identical_signatures():
+    # Overloads that the call cannot separate still prefer the clause
+    # block's own declaration.
+    source = """
+declare namespace N {
+  function f(): string { return "" }
+}
+declare namespace N {
+  function f(): number { return 0 }
+  export { f as g }
+}
+N.g();
+"""
+    report = build_ts_bindings(source)
+    clause_block_f = next(
+        b for b in report.bindings
+        if b.name == "f"
+        and b.span.start > source.index("export { f as g }") - 200
+        and "number" in source[b.span.start : b.span.start + 30]
+    )
+    call = next(
+        c for c in report.calls
+        if source[c.span.start : c.span.end] == "N.g()"
+    )
+    assert call.target == clause_block_f.id
+
+def test_member_overload_narrows_by_literal_arg_kind():
+    source = """
+class C { m(x: number): void; m(x: string): void; }
+const c = new C(); c.m(1); c.m("s");
+"""
+    report = build_ts_bindings(source)
+    overloads = _member_bindings(report, "m", "associated_function")
+    number_sig = next(
+        b for b in overloads if "number" in source[b.span.start : b.span.start + 12]
+    )
+    string_sig = next(
+        b for b in overloads if "string" in source[b.span.start : b.span.start + 12]
+    )
+    calls = {source[c.span.start : c.span.end]: c for c in _calls(report)}
+    assert calls["c.m(1)"].target == number_sig.id
+    assert calls['c.m("s")'].target == string_sig.id
+
+def test_member_overload_narrows_against_first_signature():
+    source = """
+class D { n(x: string): void; n(x: number): void; }
+const d = new D(); d.n(1);
+"""
+    report = build_ts_bindings(source)
+    overloads = _member_bindings(report, "n", "associated_function")
+    number_sig = next(
+        b for b in overloads if "number" in source[b.span.start : b.span.start + 12]
+    )
+    calls = {source[c.span.start : c.span.end]: c for c in _calls(report)}
+    assert calls["d.n(1)"].target == number_sig.id
+
+def test_member_overload_narrows_by_arity():
+    source = """
+class F { p(x: number, y: string): void; p(x: number): void; }
+const f = new F(); f.p(1); f.p(1, "s");
+"""
+    report = build_ts_bindings(source)
+    overloads = _member_bindings(report, "p", "associated_function")
+    two = next(b for b in overloads if ", y" in source[b.span.start : b.span.start + 20])
+    one = next(b for b in overloads if ", y" not in source[b.span.start : b.span.start + 20])
+    calls = {source[c.span.start : c.span.end]: c for c in _calls(report)}
+    assert calls["f.p(1)"].target == one.id
+    assert calls['f.p(1, "s")'].target == two.id
+
+def test_member_overload_spread_arg_leaves_order():
+    source = """
+class C { m(x: number): void; m(x: string): void; }
+const c = new C(); const args: string[] = []; c.m(...args);
+"""
+    report = build_ts_bindings(source)
+    overloads = _member_bindings(report, "m", "associated_function")
+    calls = {source[c.span.start : c.span.end]: c for c in _calls(report)}
+    assert calls["c.m(...args)"].target in {b.id for b in overloads}
+
+def test_member_overload_identifier_arg_narrows_by_declared_type():
+    source = """
+class A {}
+class B {}
+class C { m(x: A): void; m(x: B): void; }
+const c = new C(); const a: A = new A(); c.m(a);
+"""
+    report = build_ts_bindings(source)
+    overloads = _member_bindings(report, "m", "associated_function")
+    a_sig = next(
+        b for b in overloads if "x: A" in source[b.span.start : b.span.start + 6]
+    )
+    calls = {source[c.span.start : c.span.end]: c for c in _calls(report)}
+    assert calls["c.m(a)"].target == a_sig.id
+
+def test_top_level_function_overload_narrowed_by_argument_kind():
+    source = """
+function f(x: number): void {}
+function f(x: string): void {}
+f("hi"); f(3);
+"""
+    report = build_ts_bindings(source)
+    fs = sorted(
+        (b for b in report.bindings if b.kind == "function"),
+        key=lambda b: b.span.start,
+    )
+    number_f, string_f = fs
+    calls = {source[c.span.start : c.span.end]: c for c in _calls(report)}
+    assert calls['f("hi")'].target == string_f.id
+    assert calls["f(3)"].target == number_f.id
+
+def test_top_level_function_overload_no_match_keeps_last_signature():
+    # No signature accepts a boolean — tsc reports an error; the call
+    # still resolves to the last declared signature rather than
+    # collapsing to unresolved.
+    source = """
+function f(x: number): void {}
+function f(x: string): void {}
+f(true);
+"""
+    report = build_ts_bindings(source)
+    fs = sorted(
+        (b for b in report.bindings if b.kind == "function"),
+        key=lambda b: b.span.start,
+    )
+    string_f = fs[1]
+    call = _calls(report)[0]
+    assert call.target == string_f.id
+
+def test_top_level_function_single_signature_unaffected():
+    source = """
+function f(x: number): void {}
+f(3);
+"""
+    report = build_ts_bindings(source)
+    f = next(b for b in report.bindings if b.kind == "function")
+    assert _calls(report)[0].target == f.id
+
+
+def test_overload_narrowing_respects_scope_shadowing():
+    # The inner generic `f` shadows the outer `f`; `f(1)` inside the
+    # block must stay on the shadowing declaration even though its
+    # signature cannot be proven to fit.
+    source = """
+function f(x: number): number { return x }
+{ function f<T>(x: T): T { return x } const y = f(1); }
+"""
+    report = build_ts_bindings(source)
+    fs = _bindings(report, "f", "function")
+    inner = next(b for b in fs if "T" in source[b.span.start : b.span.start + 40])
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == "f(1)"
+    )
+    assert call.target == inner.id
+
+
+def test_member_property_override_not_crossed_by_base_overloads():
+    # A derived class's function-typed property overrides the base's
+    # same-named method overloads; the call must not bind past it.
+    source = """
+class B { m(x: number): void; m(x: string): void; }
+class D extends B { m: () => void = () => {} }
+const d = new D(); d.m();
+"""
+    report = build_ts_bindings(source)
+    prop = next(
+        b for b in report.bindings
+        if b.name == "m" and "=> void" in source[b.span.start : b.span.start + 30]
+    )
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == "d.m()"
+    )
+    assert call.target == prop.id or call.target == ""
+
+
+def test_overload_param_alias_counts_as_its_target_kind():
+    # `type Num = number` makes the first declaration fit a numeric
+    # argument — the alias must not be compared as a bare string.
+    source = """
+type Num = number
+function f(x: Num): void {}
+function f(x: any): void {}
+f(1);
+"""
+    report = build_ts_bindings(source)
+    fs = _bindings(report, "f", "function")
+    alias_sig = next(b for b in fs if "Num" in source[b.span.start : b.span.start + 30])
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == "f(1)"
+    )
+    assert call.target == alias_sig.id
+
+
+def test_overload_this_parameter_takes_no_argument():
+    # `m(this: C, x: number)` is a one-argument signature — `this` is
+    # not counted, so `c.m(1)` fits the number side.
+    source = """
+class C { m(this: C, x: number): void; m(x: string): void; }
+const c = new C(); c.m(1);
+"""
+    report = build_ts_bindings(source)
+    overloads = _member_bindings(report, "m", "associated_function")
+    number_sig = next(b for b in overloads if "x: number" in source[b.span.start : b.span.start + 60])
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == "c.m(1)"
+    )
+    assert call.target == number_sig.id
+
+
+def test_overload_rest_param_compares_element_type():
+    # `...x: Array<number>` accepts numeric arguments — the element
+    # type, not the array type, is compared.
+    source = """
+function f(...x: Array<number>): void {}
+function f(...x: any[]): void {}
+f(1);
+"""
+    report = build_ts_bindings(source)
+    fs = _bindings(report, "f", "function")
+    array_sig = next(b for b in fs if "Array<number>" in source[b.span.start : b.span.start + 60])
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == "f(1)"
+    )
+    assert call.target == array_sig.id
+
+
+def test_overload_split_interface_blocks_merge_signatures():
+    # Declaration merging puts `m` signatures on two `member_of`
+    # blocks; both are overloads of the same member, not overrides.
+    source = """
+interface I { m(x: number): void }
+interface I { m(x: string): void }
+declare const i: I;
+i.m("s");
+"""
+    report = build_ts_bindings(source)
+    string_m = next(
+        b for b in report.bindings
+        if b.kind == "associated_function"
+        and "string" in source[b.span.start : b.span.start + 30]
+    )
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == 'i.m("s")'
+    )
+    assert call.target == string_m.id
+
+
+def test_overload_generic_constraint_rejects_violating_argument():
+    # `T extends string` does not accept a numeric argument — the
+    # number overload wins even though the generic is declared first.
+    source = """
+function f<T extends string>(x: T): void {}
+function f(x: number): void {}
+f(1);
+"""
+    report = build_ts_bindings(source)
+    fs = sorted(
+        _bindings(report, "f", "function"), key=lambda b: b.span.start
+    )
+    call = _calls(report)[0]
+    assert call.target == fs[1].id
+
+
+def test_overload_generic_constraint_accepts_matching_argument():
+    source = """
+function f<T extends string>(x: T): void {}
+function f(x: number): void {}
+f("s");
+"""
+    report = build_ts_bindings(source)
+    fs = sorted(
+        _bindings(report, "f", "function"), key=lambda b: b.span.start
+    )
+    call = _calls(report)[0]
+    assert call.target == fs[0].id
+
+def test_overload_merged_interface_later_block_wins():
+    # Both signatures accept — tsc puts the later merged block's
+    # signatures first, so the `any` overload of block two wins.
+    source = """
+interface I { m(x: string): void }
+interface I { m(x: any): void }
+declare const i: I;
+i.m("s");
+"""
+    report = build_ts_bindings(source)
+    any_m = next(
+        b for b in report.bindings
+        if b.kind == "associated_function"
+        and "any" in source[b.span.start : b.span.start + 30]
+    )
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == 'i.m("s")'
+    )
+    assert call.target == any_m.id
+
+
+
+def test_overload_generic_constraint_accepts_derived_argument():
+    # `T extends Base` accepts `new Derived()` — a derived argument
+    # fits the constraint, so the later `unknown` overload must not win.
+    source = """
+class Base {}
+class Derived extends Base {}
+function f<T extends Base>(x: T): void {}
+function f(x: unknown): void {}
+f(new Derived());
+"""
+    report = build_ts_bindings(source)
+    fs = sorted(
+        _bindings(report, "f", "function"), key=lambda b: b.span.start
+    )
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == "f(new Derived())"
+    )
+    assert call.target == fs[0].id
+
+def test_overload_literal_signature_beats_wider_merged_signature():
+    # `m(x: "s")` is more specific than `m(x: string)` — the literal
+    # signature wins even though its block is declared earlier.
+    source = """
+interface I { m(x: "s"): void }
+interface I { m(x: string): void }
+declare const i: I;
+i.m("s");
+"""
+    report = build_ts_bindings(source)
+    literal_m = next(
+        b for b in report.bindings
+        if b.kind == "associated_function"
+        and '"s"' in source[b.span.start : b.span.start + 30]
+    )
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == 'i.m("s")'
+    )
+    assert call.target == literal_m.id
+
+
+def test_overload_namespaced_base_is_not_global_base():
+    # `D extends N.Base` is unrelated to the global `Base` — the
+    # `x: Base` overload must not accept `new D()`.
+    source = """
+class Base {}
+namespace N { export class Base {} }
+class D extends N.Base {}
+function f(x: Base): void {}
+function f(x: unknown): void {}
+f(new D());
+"""
+    report = build_ts_bindings(source)
+    fs = sorted(
+        _bindings(report, "f", "function"), key=lambda b: b.span.start
+    )
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == "f(new D())"
+    )
+    assert call.target == fs[1].id
+
+
+def test_overload_shadowed_arg_type_uses_call_site_scope():
+    # Inside `g` a local `D` shadows the outer `D extends Base` —
+    # `new D()` there does not fit `T extends Base`.
+    source = """
+class Base {}
+class D extends Base {}
+function f<T extends Base>(x: T): void {}
+function f(x: unknown): void {}
+function g() {
+  class D {}
+  f(new D());
+}
+"""
+    report = build_ts_bindings(source)
+    fs = sorted(
+        _bindings(report, "f", "function"), key=lambda b: b.span.start
+    )
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == "f(new D())"
+    )
+    assert call.target == fs[1].id
+
+def test_overload_literal_annotation_rejects_different_literal():
+    # `f("s", "bad")` does not fit `f("s", "t")` — the wider
+    # `f(string, string)` overload wins instead.
+    source = """
+function f(a: string, b: string): void {}
+function f(a: "s", b: "bad"): void {}
+f("s", "t");
+"""
+    report = build_ts_bindings(source)
+    fs = sorted(
+        _bindings(report, "f", "function"), key=lambda b: b.span.start
+    )
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == 'f("s", "t")'
+    )
+    assert call.target == fs[0].id
+
+
+def test_overload_literal_count_does_not_reorder_declarations():
+    # Both signatures fit `f("s", "t")`; tsc picks the first declared
+    # even though the second matches two literals.
+    source = """
+function f(a: "s", b: string): void {}
+function f(a: "s", b: "t"): void {}
+f("s", "t");
+"""
+    report = build_ts_bindings(source)
+    fs = sorted(
+        _bindings(report, "f", "function"), key=lambda b: b.span.start
+    )
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == 'f("s", "t")'
+    )
+    assert call.target == fs[0].id
+
+def test_overload_literal_quote_style_does_not_reject_match():
+    # `f('s')` fits `f(x: "s")` — quote style is not part of the
+    # literal's value.
+    source = """
+function f(a: "s"): void {}
+function f(a: string): void {}
+f('s');
+"""
+    report = build_ts_bindings(source)
+    fs = sorted(
+        _bindings(report, "f", "function"), key=lambda b: b.span.start
+    )
+    call = next(
+        c for c in _calls(report) if source[c.span.start:c.span.end] == "f('s')"
+    )
+    assert call.target == fs[0].id
+
+
+def test_overload_literal_number_radix_equivalent():
+    # `f(0x1)` fits `f(x: 1)`.
+    source = """
+function f(a: 1): void {}
+function f(a: number): void {}
+f(0x1);
+"""
+    report = build_ts_bindings(source)
+    fs = sorted(
+        _bindings(report, "f", "function"), key=lambda b: b.span.start
+    )
+    call = next(
+        c for c in _calls(report) if source[c.span.start:c.span.end] == "f(0x1)"
+    )
+    assert call.target == fs[0].id
+
+def test_overload_string_literal_does_not_match_bare_token():
+    # `f(true)` does not fit `f(x: "true")` — a quoted literal only
+    # matches a literal string argument, and `f(new Widget())` does
+    # not fit `f(x: "Widget")` either.
+    source = """
+class Widget {}
+function f(a: "true"): void {}
+function f(a: "Widget"): void {}
+function f(a: boolean): void {}
+function f(a: Widget): void {}
+f(true);
+f(new Widget());
+"""
+    report = build_ts_bindings(source)
+    fs = sorted(
+        _bindings(report, "f", "function"), key=lambda b: b.span.start
+    )
+    bool_fn, widget_fn = fs[2], fs[3]
+    true_call = next(
+        c for c in _calls(report)
+        if source[c.span.start:c.span.end] == "f(true)"
+    )
+    new_call = next(
+        c for c in _calls(report)
+        if source[c.span.start:c.span.end] == "f(new Widget())"
+    )
+    assert true_call.target == bool_fn.id
+    assert new_call.target == widget_fn.id
+
+
+def test_overload_interpolated_template_is_not_a_literal():
+    # `f(`value-${n}`)` is computed — it does not fit the same-value
+    # literal overload `f(x: "value-${n}")`, so `string` wins.
+    name = "n"
+    source = """
+function f(a: "value-${n}"): void {}
+function f(a: string): void {}
+declare const n: string;
+f(`value-${n}`);
+"""
+    report = build_ts_bindings(source)
+    string_fn = sorted(
+        _bindings(report, "f", "function"), key=lambda b: b.span.start
+    )[1]
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start:c.span.end] == "f(`value-${n}`)"
+    )
+    assert call.target == string_fn.id
+
+def test_overload_escaped_template_is_a_literal():
+    # `` `\${n}` `` evaluates to the literal `${n}` — the escape makes
+    # it constant, so it fits the `"${n}"` literal overload.
+    source = """
+function f(a: "${n}"): void {}
+function f(a: string): void {}
+declare const n: string;
+f(`\\${n}`);
+"""
+    report = build_ts_bindings(source)
+    literal_fn = sorted(
+        _bindings(report, "f", "function"), key=lambda b: b.span.start
+    )[0]
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start:c.span.end] == "f(`\\${n}`)"
+    )
+    assert call.target == literal_fn.id
+
+def test_overload_double_backslash_template_still_interpolates():
+    # `` `\\${n}` `` — the escaped backslash leaves `${` unescaped,
+    # so it interpolates and does not fit the `"${n}"` literal.
+    source = """
+function f(a: "${n}"): void {}
+function f(a: string): void {}
+declare const n: string;
+f(`\\\\${n}`);
+"""
+    report = build_ts_bindings(source)
+    string_fn = sorted(
+        _bindings(report, "f", "function"), key=lambda b: b.span.start
+    )[1]
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start:c.span.end] == "f(`\\\\${n}`)"
+    )
+    assert call.target == string_fn.id
+
+
+def test_overload_double_backslash_constant_regression_detected():
+    # `` `\\${n}` `` interpolates; a literal spelling the same two
+    # backslashes matches only if the escape scan wrongly treats the
+    # interpolation as constant text — this keeps that regression
+    # detectable.
+    source = """
+function f(a: "\\\\${n}"): void {}
+function f(a: string): void {}
+declare const n: string;
+f(`\\\\${n}`);
+"""
+    report = build_ts_bindings(source)
+    string_fn = sorted(
+        _bindings(report, "f", "function"), key=lambda b: b.span.start
+    )[1]
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start:c.span.end] == "f(`\\\\${n}`)"
+    )
+    assert call.target == string_fn.id

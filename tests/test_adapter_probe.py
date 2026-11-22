@@ -7,6 +7,7 @@ from dataclasses import replace
 
 import pytest
 
+from agent.attempt_runner import minimal_environment
 from agent.adapter_probe import (
     AdapterProbeHistory,
     AdapterProbeOutcome,
@@ -23,7 +24,7 @@ from agent.adapter_probe import (
     probe_retry_requests,
     run_probe,
 )
-from agent.verification_planner import RuntimeObservation
+from agent.verification_planner import PlannerPolicy, RuntimeObservation
 
 
 def _req(**kw):
@@ -447,7 +448,15 @@ class _ConcurrencyStubRunner:
         self.inflight = 0
         self.max_seen = 0
 
-    def run(self, execution_request, argv, cancel_event=None, memory_bound_mb=None):
+    def run(
+        self,
+        execution_request,
+        argv,
+        cancel_event=None,
+        memory_bound_mb=None,
+        environment=None,
+        isolate_network=False,
+    ):
         with self._lock:
             self.inflight += 1
             self.max_seen = max(self.max_seen, self.inflight)
@@ -457,6 +466,154 @@ class _ConcurrencyStubRunner:
             with self._lock:
                 self.inflight -= 1
         return self._Result()
+
+
+def test_probe_request_defaults_to_fail_closed_enforcement():
+    descriptor = AdapterDescriptor.from_manifest(_manifest())
+    request = probe_request_for(descriptor, stamp=1)
+
+    assert request.inherit_environment is False
+    assert request.isolate_network is True
+
+
+def test_probe_request_enforcement_requires_declared_and_allowed_permissions():
+    permissions = frozenset({"environment.read", "network.connect"})
+    descriptor = AdapterDescriptor.from_manifest(
+        _manifest(required_permissions=sorted(permissions))
+    )
+    request = probe_request_for(
+        descriptor,
+        stamp=1,
+        policy=PlannerPolicy(allowed_permissions=permissions),
+    )
+
+    assert request.inherit_environment is True
+    assert request.isolate_network is False
+
+
+@pytest.mark.parametrize(
+    ("required", "allowed"),
+    [
+        ({"environment.read"}, set()),
+        ({"network.connect"}, set()),
+        (set(), {"environment.read"}),
+        (set(), {"network.connect"}),
+        (None, {"environment.read", "network.connect"}),
+    ],
+)
+def test_probe_request_permission_mismatch_fails_closed(required, allowed):
+    manifest = _manifest()
+    if required is not None:
+        manifest["required_permissions"] = sorted(required)
+    descriptor = AdapterDescriptor.from_manifest(manifest)
+    request = probe_request_for(
+        descriptor,
+        stamp=1,
+        policy=PlannerPolicy(allowed_permissions=frozenset(allowed)),
+    )
+
+    assert request.inherit_environment is False
+    assert request.isolate_network is True
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("inherit_environment", 1),
+        ("isolate_network", 1),
+    ],
+)
+def test_probe_request_enforcement_fields_require_bools(field, value):
+    with pytest.raises(ValueError, match="enforcement"):
+        _req(**{field: value})
+
+
+def test_probe_request_rejects_non_policy():
+    descriptor = AdapterDescriptor.from_manifest(_manifest())
+
+    with pytest.raises(ValueError, match="policy"):
+        probe_request_for(descriptor, stamp=1, policy=object())
+
+
+def test_probe_command_fingerprint_ignores_enforcement_fields():
+    inherited = _req(inherit_environment=True, isolate_network=False)
+    fail_closed = _req(inherit_environment=False, isolate_network=True)
+
+    assert inherited.command_fingerprint() == fail_closed.command_fingerprint()
+
+
+def test_run_probe_passes_enforcement_to_runner(monkeypatch):
+    class RecordingRunner:
+        def __init__(self):
+            self.calls = []
+
+        def run(
+            self,
+            execution_request,
+            argv,
+            cancel_event=None,
+            memory_bound_mb=None,
+            environment=None,
+            isolate_network=False,
+        ):
+            self.calls.append((environment, isolate_network))
+            return _ConcurrencyStubRunner._Result()
+
+    runner = RecordingRunner()
+    monkeypatch.setattr(
+        "agent.adapter_probe.network_isolation_enforceable",
+        lambda: True,
+    )
+    run_probe(_req(), runner=runner)
+    assert runner.calls[-1] == (minimal_environment(), True)
+
+    monkeypatch.setattr(
+        "agent.adapter_probe.network_isolation_enforceable",
+        lambda: False,
+    )
+    run_probe(_req(), runner=runner)
+    assert runner.calls[-1] == (minimal_environment(), False)
+
+    run_probe(
+        _req(inherit_environment=True, isolate_network=False),
+        runner=runner,
+    )
+    assert runner.calls[-1] == (None, False)
+
+
+def test_real_probe_uses_minimal_environment_by_default(monkeypatch):
+    sentinel = "fake-sentinel-not-a-secret"
+    monkeypatch.setenv("MUMEI_TEST_FAKE_SECRET", sentinel)
+    argv = (
+        sys.executable,
+        "-c",
+        "import os, sys; "
+        "sys.exit(0 if 'MUMEI_TEST_FAKE_SECRET' not in os.environ else 3)",
+    )
+
+    fail_closed = run_probe(_req(argv=argv))
+    inherited = run_probe(
+        _req(argv=argv, inherit_environment=True, isolate_network=False)
+    )
+
+    assert fail_closed.result.outcome == "exited"
+    assert fail_closed.result.exit_code == 0
+    assert inherited.result.outcome == "exited"
+    assert inherited.result.exit_code == 3
+    assert sentinel not in repr(fail_closed)
+    assert sentinel not in repr(inherited)
+
+
+def test_probe_requests_thread_policy_into_probe_request():
+    registry = _registry(required_permissions=["environment.read"])
+    policy = PlannerPolicy(
+        allowed_permissions=frozenset({"environment.read"})
+    )
+
+    requests = probe_requests_for(registry, _route(), policy, stamp=1)
+
+    assert len(requests) == 1
+    assert requests[0].inherit_environment is True
 
 
 def test_observe_probes_memory_bound_batch_runs_sequentially(monkeypatch):

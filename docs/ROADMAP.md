@@ -219,6 +219,16 @@ lacks the network namespace boundary. `filesystem.*` and `process.spawn`
 are omitted because they are not enforced. This is not a sandbox or
 Evidence and does not change selection.
 
+### C04 permission enforcement for availability probes
+
+Manifest-declared `probe_argv` runs with only `PATH` (plus `SYSTEMROOT` on
+Windows) unless the adapter declares `environment.read` and policy allows it,
+and in a fresh network namespace unless `network.connect` is declared and
+allowed, where the host supports it; otherwise network remains unenforced.
+`probe_request_for` without policy fails closed. Command fingerprints and
+probe-history records are unchanged; `filesystem.*` and `process.spawn` remain
+declared-only. This is not a sandbox or Evidence.
+
 ### C11 declared memory bounds for attempted executions
 
 `AttemptRunner.run(request, argv, cancel_event=None, memory_bound_mb=None)`
@@ -2386,7 +2396,8 @@ the call folds normally while its result is discarded — a `defer`d
 call runs before the function returns and a goroutine's effects may
 happen, and the union model covers both orderings. A `go` call fails
 closed when later, enclosing-loop or deferred writes may race with its
-touched bindings; reference-involved calls also fail closed when later
+touched bindings; channel-containing arguments are touched, except direct
+local send-only parameters; reference-involved calls also fail closed when later
 operations use nonplain writes or reference-typed arguments. Other
 supported `go` calls retain the union model. For supported
 deferred calls, the registration-time fold remains a conservative
@@ -3136,7 +3147,11 @@ call `h(args)` admits with deps(captured) ∪ deps(args) ∪
 indirect writes, and a literal that captures a pointer-typed
 enclosing binding records an imported transfer on the bound
 name's identity (effects unknown — the captured pointer may aim
-at caller memory). A package-level `var Alias = Id` call
+at caller memory).
+Passing a tracked literal as a direct-call function value resolves its
+captures at invocation time (recursively for nested captures); `defer`
+and `go` shapes carry those captures into exit/race analysis.
+A package-level `var Alias = Id` call
 admits as an opaque external call — the callee is
 reassignable by any caller, so `Alias(args)` is dep-free
 for the callee, unions the args and indirect writes, and
