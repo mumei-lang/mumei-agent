@@ -709,7 +709,8 @@ def load_lexical_report(
                 target_function = functions_by_id.get(target_id)
                 _fail(
                     target_function is not None
-                    and binding_kinds[target_id] == "function"
+                    and binding_kinds[target_id]
+                    in {"function", "associated_function"}
                     and target_function.body is not None
                     and not target_function.is_async
                     and not target_function.generic

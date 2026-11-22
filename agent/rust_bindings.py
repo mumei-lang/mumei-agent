@@ -141,6 +141,18 @@ class _Record:
     struct_constructor: bool = False
     generic_kind: str = ""
     type_node: Any = None
+    # Binding id of the declaring struct/union/impl target this
+    # record is a member of; None for non-members.
+    member_of: str | None = None
+    # Normalized type arguments of a concrete specialization impl
+    # (`impl Wrap<i32>` → "i32"); None for plain impls.
+    member_impl_args: str | None = None
+    # The impl block itself is generic (`impl<T> Wrap<T>`) — its
+    # members apply to every instantiation.
+    member_impl_generic: bool = False
+    # The impl block's own `type` node — the declared type `self`
+    # parameters inside it refer to (keeps generic args).
+    self_type_node: Any = None
 
 
 class _RustBindings:
@@ -779,10 +791,33 @@ class _RustBindings:
             try:
                 self._generic_references(node.child_by_field_name("type_parameters"))
                 self._generic_references(self._where_clause(node))
+                member_of = None
+                member_args = None
+                member_generic = False
+                member_type_node = None
                 if node.type == "impl_item":
                     self._generic_references(node.child_by_field_name("type"))
+                    if node.child_by_field_name("trait") is None:
+                        member_type_node = node.child_by_field_name("type")
+                        member_of, member_args = self._annotation_type(
+                            member_type_node
+                        )
+                        member_generic = (
+                            node.child_by_field_name("type_parameters")
+                            is not None
+                        )
                 if body is not None:
-                    self._scan_associated_container(body, scope, self.span(node))
+                    self._scan_associated_container(
+                        body,
+                        scope,
+                        self.span(node),
+                        member_of,
+                        member_args,
+                        member_generic,
+                        member_type_node
+                        if node.type == "impl_item"
+                        else None,
+                    )
             finally:
                 self.in_extern = old_extern
                 self.current_function = old_function
@@ -801,6 +836,8 @@ class _RustBindings:
             return
         if node.type in {"struct_item", "enum_item", "union_item"}:
             self._generic_references(node)
+            if node.type in {"struct_item", "union_item"}:
+                self._link_fields(node, scope)
             return
         if node.type == "trait_item":
             return
@@ -821,14 +858,227 @@ class _RustBindings:
             None,
         )
 
+    def _type_args_key(self, args_node: Any | None) -> str | None:
+        """Normalized `Wrap<i32>`-style type-argument text."""
+        if args_node is None:
+            return None
+        return ",".join(
+            self.text(child).replace(" ", "")
+            for child in self._children(args_node)
+        )
+
+    def _annotation_type(
+        self, node: Any
+    ) -> tuple[str | None, str | None]:
+        """(binding id, generic-args key) a type annotation refers to.
+
+        Unwraps `&T`/`&mut T` references, `-> T` return types and
+        `Name<Args>` generics; names resolve at the annotation's own
+        position so a later same-named declaration cannot shadow them."""
+        args = None
+        while node is not None and node.type in {
+            "reference_type",
+            "generic_type",
+            "generic_type_with_turbofish",
+            "return_type",
+        }:
+            if node.type in {"generic_type", "generic_type_with_turbofish"}:
+                key = self._type_args_key(
+                    node.child_by_field_name("type_arguments")
+                )
+                if key is not None:
+                    args = key
+            node = node.child_by_field_name("type")
+        if node is None or node.type != "type_identifier":
+            return None, None
+        record = self._lookup(
+            self._normalize_identifier(self.text(node)),
+            node.start_byte,
+            "type",
+        )
+        return (None if record is None else record.binding.id), args
+
+    def _link_fields(self, node: Any, scope: _Scope) -> None:
+        """Attach named struct/union fields as member bindings."""
+        record = self._find_item_record(scope, node)
+        body = node.child_by_field_name("body")
+        if (
+            record is None
+            or body is None
+            or body.type != "field_declaration_list"
+        ):
+            return
+        for field_node in self._children(body):
+            if field_node.type != "field_declaration":
+                continue
+            name_node = field_node.child_by_field_name("name")
+            if name_node is None:
+                continue
+            annotation = field_node.child_by_field_name("type")
+            member = self._make_record(
+                name_node,
+                "struct_field",
+                self.span(node),
+                scope.function_id,
+                scope.module_depth,
+                item=True,
+                type_fact=(
+                    _UNKNOWN
+                    if annotation is None
+                    else self._type_fact(annotation)
+                ),
+                type_node=annotation,
+            )
+            member.member_of = record.binding.id
+
+    def _member_record(
+        self,
+        type_id: str | None,
+        name: str,
+        kinds: tuple[str, ...] = (),
+        impl_args: str | None = None,
+    ) -> _Record | None:
+        """Member `name` of the type `type_id`.
+
+        `kinds` prefers e.g. `struct_field` for field access or
+        `associated_function` for calls when both spellings exist.
+        Members of a concrete specialization impl (`impl Wrap<i32>`)
+        only apply to receivers annotated with the same arguments."""
+        if type_id is None:
+            return None
+
+        def matches(record: _Record) -> bool:
+            if (
+                record.member_impl_args is not None
+                and not record.member_impl_generic
+                and record.member_impl_args != impl_args
+            ):
+                return False
+            return True
+
+        pool = (
+            record
+            for record in self.records.values()
+            if record.member_of == type_id and record.binding.name == name
+        )
+        if kinds:
+            for record in pool:
+                if record.binding.kind in kinds and matches(record):
+                    return record
+        for record in self.records.values():
+            if (
+                record.member_of == type_id
+                and record.binding.name == name
+                and matches(record)
+            ):
+                return record
+        return None
+
+    def _field_member(
+        self, node: Any, kinds: tuple[str, ...] = ()
+    ) -> _Record | None:
+        """Resolve `expr.name` member access against the declared type."""
+        value = node.child_by_field_name("value")
+        field_node = node.child_by_field_name("field")
+        if field_node is None:
+            return None
+        name = self.text(field_node).strip()
+        if not name or name[0].isdigit():
+            # Tuple fields are positional; honest opaque.
+            return None
+        type_id, impl_args = self._receiver_type(value)
+        return self._member_record(type_id, name, kinds, impl_args)
+
+    def _record_type(
+        self, record: _Record, position: int
+    ) -> tuple[str | None, str | None]:
+        """(type id, generic-args key) declared for a binding."""
+        annotated = self._annotation_type(record.type_node)
+        if annotated[0] is not None:
+            return annotated
+        if record.binding.type is not None and record.binding.type.type_id:
+            return record.binding.type.type_id, None
+        return None, None
+
+    def _receiver_type(
+        self, node: Any
+    ) -> tuple[str | None, str | None]:
+        """(type id, generic-args key) of a member-access receiver."""
+        if node is None:
+            return None, None
+        if node.type in {"identifier", "self"}:
+            record = self._lookup(
+                self._normalize_identifier(self.text(node)),
+                node.start_byte,
+                "value",
+            )
+            if record is None:
+                return None, None
+            return self._record_type(record, node.start_byte)
+        if node.type == "field_expression":
+            member = self._field_member(
+                node, ("struct_field", "associated_const")
+            )
+            if member is None:
+                return None, None
+            return self._record_type(member, node.start_byte)
+        if node.type == "call_expression":
+            callee = node.child_by_field_name("function")
+            callee = None if callee is None else self._callee(callee)
+            if callee is not None and callee.type == "generic_function":
+                callee = callee.child_by_field_name("function")
+            if callee is None or callee.type != "field_expression":
+                return None, None
+            member = self._field_member(callee, ("associated_function",))
+            if member is None:
+                return None, None
+            function = next(
+                (
+                    entry
+                    for entry in self.functions
+                    if entry.binding_id == member.binding.id
+                ),
+                None,
+            )
+            if function is None or function.result is None:
+                return None, None
+            if function.is_async:
+                # `a.mk()` is a Future, not the output type — await is
+                # required before `B`'s members apply.
+                return None, None
+            if function.result.type_id:
+                return function.result.type_id, None
+            return self._annotation_type(member.type_node)
+        return None, None
+
+    @staticmethod
+    def _member_call_kind(record: _Record) -> str:
+        if record.extern or record.body_node is None:
+            return "opaque_bodyless"
+        if record.generic:
+            return "opaque_generic"
+        if record.is_async:
+            return "opaque_async"
+        return "direct_local"
+
     def _scan_associated_container(
-        self, body: Any, parent_scope: _Scope, generic_scope: ByteSpan
+        self,
+        body: Any,
+        parent_scope: _Scope,
+        generic_scope: ByteSpan,
+        member_of: str | None = None,
+        member_impl_args: str | None = None,
+        member_impl_generic: bool = False,
+        member_type_node: Any = None,
     ) -> None:
-        for node in self._children(body):
+        children = self._children(body)
+        # Predeclare members so a body earlier in the block can call a
+        # member declared later (`fn outer { self.inner() } fn inner`).
+        predeclared: dict[int, _Record] = {}
+        for node in children:
             if node.type in {"function_item", "function_signature_item"}:
                 name_node = self._item_name(node)
                 if name_node is None:
-                    self.gaps.append(Gap("unsupported_syntax", self.span(node)))
                     continue
                 body_node = node.child_by_field_name("body")
                 record = self._make_record(
@@ -844,8 +1094,37 @@ class _RustBindings:
                         self.text(node)[: self.text(node).find("fn")], "async"
                     ),
                     extern=self.in_extern or body_node is None,
+                    type_node=node.child_by_field_name("return_type"),
                 )
+                record.member_of = member_of
+                record.member_impl_args = member_impl_args
+                record.member_impl_generic = member_impl_generic
+                record.self_type_node = member_type_node
                 self._function_records[record.binding.id] = record
+                predeclared[node.id] = record
+            elif node.type == "const_item":
+                name_node = self._item_name(node)
+                if name_node is None:
+                    continue
+                annotation = node.child_by_field_name("type")
+                const_record = self._make_record(
+                    name_node, "associated_const", None,
+                    parent_scope.function_id,
+                    parent_scope.module_depth, item=True,
+                    type_fact=_UNKNOWN
+                    if annotation is None
+                    else self._type_fact(annotation),
+                    type_node=annotation,
+                )
+                const_record.member_of = member_of
+                const_record.member_impl_args = member_impl_args
+                const_record.member_impl_generic = member_impl_generic
+        for node in children:
+            if node.type in {"function_item", "function_signature_item"}:
+                record = predeclared.get(node.id)
+                if record is None:
+                    self.gaps.append(Gap("unsupported_syntax", self.span(node)))
+                    continue
                 self._add_generic_parameters(
                     node, parent_scope, owner_function=record.binding.id
                 )
@@ -854,14 +1133,6 @@ class _RustBindings:
                     node, record, inherited_generic_scopes=(generic_scope,)
                 )
             elif node.type == "const_item":
-                name_node = self._item_name(node)
-                if name_node is not None:
-                    annotation = node.child_by_field_name("type")
-                    self._make_record(
-                        name_node, "associated_const", None, parent_scope.function_id,
-                        parent_scope.module_depth, item=True,
-                        type_fact=_UNKNOWN if annotation is None else self._type_fact(annotation),
-                    )
                 value = node.child_by_field_name("value")
                 if value is not None:
                     self._expr(value)
@@ -996,9 +1267,23 @@ class _RustBindings:
             if self_node is None:
                 return []
             mutable = _has_keyword(self.text(node), "mut")
+            self_type = _UNKNOWN
+            owner = self.records.get(self.current_function)
+            if owner is not None and owner.member_of is not None:
+                type_record = self.records.get(owner.member_of)
+                if type_record is not None:
+                    self_type = TypeFact(
+                        "named",
+                        type_record.binding.name,
+                        0,
+                        None,
+                        owner.member_of,
+                    )
             record = self._make_record(
                 self_node, "self_parameter", body_span, self.current_function,
                 self.module_depth, item=False, mutable=mutable,
+                type_fact=self_type,
+                type_node=None if owner is None else owner.self_type_node,
             )
             self._add_to_scope(scope, record)
             return [record.binding.id]
@@ -1014,6 +1299,10 @@ class _RustBindings:
         pattern = node.child_by_field_name("pattern")
         annotation = node.child_by_field_name("type")
         self._generic_references(annotation)
+        # Only names bound to the whole matched value carry the
+        # annotation — destructured names (`P { inner }: P`) get
+        # `_UNKNOWN` so `inner.m()` does not bind `P`'s members.
+        whole_names = self._whole_pattern_names(pattern)
         fact = _UNKNOWN if annotation is None else self._type_fact(annotation)
         identifiers = []
         names = self._pattern_names(pattern, scope)
@@ -1022,6 +1311,7 @@ class _RustBindings:
         )
         names = self._apply_outer_mutability(names, pattern, mutable_specifier)
         for name_node, name_mutable in names:
+            whole = name_node.id in whole_names
             record = self._make_record(
                 name_node,
                 "parameter",
@@ -1029,8 +1319,9 @@ class _RustBindings:
                 self.current_function,
                 self.module_depth,
                 item=False,
-                type_fact=fact,
+                type_fact=fact if whole else _UNKNOWN,
                 mutable=name_mutable,
+                type_node=annotation if whole else None,
             )
             self._add_to_scope(scope, record)
             identifiers.append(record.binding.id)
@@ -1079,6 +1370,27 @@ class _RustBindings:
             if text[0] == "f" and text[1:].isdigit():
                 return TypeFact("float", text, int(text[1:]), None, "")
         return _UNKNOWN
+
+    def _whole_pattern_names(self, pattern: Any | None) -> set[int]:
+        """Name-node ids bound to the whole matched value.
+
+        `identifier`/`mut x`/`&x` bind the value under that name;
+        `x @ P { .. }` binds `x` to the whole value while nested
+        names only see their fields. `ref x` is excluded — it binds
+        `x` to a reference, so the written type is not `x`'s type."""
+        if pattern is None:
+            return set()
+        if pattern.type == "identifier":
+            return {pattern.id}
+        if pattern.type in {
+            "mutable_specifier",
+            "reference_pattern",
+            "captured_pattern",
+        }:
+            for child in self._children(pattern):
+                if child.type == "identifier":
+                    return {child.id}
+        return set()
 
     def _pattern_names(
         self, pattern: Any | None, scope: _Scope, mutable: bool = False
@@ -1410,6 +1722,7 @@ class _RustBindings:
         if value is not None:
             self._expr(value)
         self._generic_references(annotation)
+        whole_names = self._whole_pattern_names(pattern)
         fact = _UNKNOWN if annotation is None else self._type_fact(annotation)
         alternative = node.child_by_field_name("alternative")
         if alternative is not None:
@@ -1422,6 +1735,7 @@ class _RustBindings:
             names, pattern, mutable_specifier
         )
         for name_node, name_mutable in names:
+            whole = name_node.id in whole_names
             record = self._make_record(
                 name_node,
                 "local",
@@ -1429,8 +1743,9 @@ class _RustBindings:
                 self.current_function,
                 self.module_depth,
                 item=False,
-                type_fact=fact,
+                type_fact=fact if whole else _UNKNOWN,
                 mutable=name_mutable,
+                type_node=annotation if whole else None,
             )
             self._add_to_scope(scope, record)
 
@@ -1464,6 +1779,14 @@ class _RustBindings:
             base = node.child_by_field_name("value")
             if base is not None:
                 self._expr(base)
+            member = self._field_member(node, ("struct_field",))
+            field_node = node.child_by_field_name("field")
+            if member is not None and field_node is not None:
+                self.references.append(
+                    Reference(
+                        self.span(field_node), member.binding.id, "read"
+                    )
+                )
             return
         if kind == "struct_expression":
             name_node = node.child_by_field_name("name")
@@ -1620,6 +1943,14 @@ class _RustBindings:
         if node.type == "field_expression":
             root = self._place_root(node)
             self._visit_place_indices(node)
+            member = self._field_member(node, ("struct_field",))
+            field_node = node.child_by_field_name("field")
+            if member is not None and field_node is not None:
+                self.references.append(
+                    Reference(
+                        self.span(field_node), member.binding.id, "write"
+                    )
+                )
             if root is None:
                 return
             else:
@@ -1835,7 +2166,27 @@ class _RustBindings:
                 receiver = inner.child_by_field_name("value")
                 if receiver is not None:
                     self._expr(receiver)
-                kind = "opaque_method"
+                member = self._field_member(
+                    inner, ("associated_function", "associated_const")
+                )
+                field_node = inner.child_by_field_name("field")
+                if member is not None and member.binding.kind == "associated_function":
+                    self.references.append(
+                        Reference(
+                            self.span(field_node), member.binding.id, "call"
+                        )
+                    )
+                    target = member.binding.id
+                    kind = self._member_call_kind(member)
+                elif member is not None:
+                    self.references.append(
+                        Reference(
+                            self.span(field_node), member.binding.id, "read"
+                        )
+                    )
+                    kind = "opaque_method"
+                else:
+                    kind = "opaque_method"
             else:
                 self.unresolved.append(
                     Unresolved(self.span(callee), self.text(callee), "qualified_path")
@@ -1869,7 +2220,27 @@ class _RustBindings:
             value = callee.child_by_field_name("value")
             if value is not None:
                 self._expr(value)
-            kind = "opaque_method"
+            member = self._field_member(
+                callee, ("associated_function", "associated_const")
+            )
+            field_node = callee.child_by_field_name("field")
+            if member is not None and member.binding.kind == "associated_function":
+                self.references.append(
+                    Reference(
+                        self.span(field_node), member.binding.id, "call"
+                    )
+                )
+                target = member.binding.id
+                kind = self._member_call_kind(member)
+            elif member is not None:
+                self.references.append(
+                    Reference(
+                        self.span(field_node), member.binding.id, "read"
+                    )
+                )
+                kind = "opaque_method"
+            else:
+                kind = "opaque_method"
         elif callee is not None:
             self._expr(callee)
         if arguments_node is not None:
@@ -1885,12 +2256,49 @@ class _RustBindings:
             receiver = children[0] if children else None
         if receiver is not None:
             self._expr(receiver)
+        name_node = node.child_by_field_name("name")
+        if name_node is None:
+            name_node = next(
+                (
+                    child
+                    for child in self._children(node)
+                    if child.type == "field_identifier"
+                ),
+                None,
+            )
+        recv_type, recv_args = self._receiver_type(receiver)
+        member = (
+            None
+            if name_node is None
+            else self._member_record(
+                recv_type,
+                self._normalize_identifier(self.text(name_node)),
+                ("associated_function", "associated_const"),
+                recv_args,
+            )
+        )
         args_node = node.child_by_field_name("arguments")
         arguments = () if args_node is None else self._children(args_node)
         args = tuple(self.span(arg) for arg in arguments)
         if args_node is not None:
             for arg in arguments:
                 self._expr(arg)
+        if member is not None and member.binding.kind == "associated_function":
+            self.references.append(
+                Reference(
+                    self.span(name_node), member.binding.id, "call"
+                )
+            )
+            self.calls.append(
+                Call(
+                    self.span(node),
+                    args,
+                    self.call_owner,
+                    member.binding.id,
+                    self._member_call_kind(member),
+                )
+            )
+            return
         self.calls.append(Call(self.span(node), args, self.call_owner, "", "opaque_method"))
 
 
