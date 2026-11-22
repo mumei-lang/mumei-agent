@@ -3369,7 +3369,7 @@ class _Builder:
                 current = share_extract[0].child_by_field_name("operand")
         if (
             not fields
-            or len(indexes) != 1
+            or not indexes
             or current is None
             or current.type not in {
                 "selector_expression",
@@ -3377,6 +3377,7 @@ class _Builder:
             }
         ):
             return None
+        multi_index = len(indexes) > 1
         target = self._opaque_container_field_target(
             current,
             params,
@@ -3407,6 +3408,34 @@ class _Builder:
             and getattr(_mid_root_binding.type, "kind", None)
             == "pointer"
         )
+        if multi_index:
+            root_type = getattr(_mid_root_binding, "type", None)
+            if (
+                share_extract is not None
+                or mid_pointer_root
+                or getattr(root_type, "kind", None) != "struct"
+                or (
+                    root_ref.binding_id not in (params or {})
+                    and not self._is_local_composite(
+                        _mid_root_binding
+                    )
+                )
+                or self._scalar_container_field_pointer_crossing(
+                    node, params
+                )
+                or container_fact is None
+                or container_fact.kind not in {"slice", "map"}
+            ):
+                return None
+            for _ in range(len(indexes) - 1):
+                if (
+                    element_fact is None
+                    or element_fact.kind not in {"slice", "map"}
+                ):
+                    return None
+                element_fact = getattr(element_fact, "elem", None)
+            if not self._named_value_struct_supported(element_fact):
+                return None
 
         def _elem_struct_ok(fact):
             if self._named_value_struct_supported(fact):
@@ -3473,6 +3502,11 @@ class _Builder:
                 # `p.A[i].W` yields `*E` — a mid-chain field resolves
                 # on the member's pointee like the element pointer.
                 field_fact = field_fact.elem
+        if multi_index and any(
+            getattr(member.type, "kind", None) == "pointer"
+            for member in path_members
+        ):
+            return None
         if not self._scalar_value_fact(field_fact):
             # A pointer leaf (`p.A[i].W`) reads the member's slot
             # value — caller memory under a param pointer root —
