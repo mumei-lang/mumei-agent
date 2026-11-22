@@ -9640,11 +9640,11 @@ capture surface, route or claim.
 ### C06 lexical member access — contract-typed member resolution
 
 `agent/sol_bindings.py` `_resolve_member` resolves
-`object.property` when the object's declared type is a
-contract/interface/library or names one directly (`Lib.f`,
-`Token(token).transfer`-style handles resolve through `type_id` on the
-declared type, `this.` against the current contract and `super.` across
-declared bases). Member reads record `read`/`call` references against
+`object.property` when the object is an identifier whose declared type
+is a contract/interface/library or names one directly (`Lib.f`,
+`token.transfer` resolving through `type_id` on the declared type,
+`this.` against the current contract and `super.` across declared
+bases in linearization order). Member reads record `read`/`call` references against
 the resolved member binding and member calls classify with the same
 honest kinds as direct calls (`direct_local`, `opaque_bodyless`,
 `opaque_virtual`, `opaque_call_options`, `opaque_value`). Private

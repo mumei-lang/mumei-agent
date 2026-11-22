@@ -1255,3 +1255,76 @@ contract C {
         _text(source, ref.span) in {"length", "push"}
         for ref in report.references
     )
+
+
+def test_super_member_resolves_most_derived_base_first():
+    source = """
+contract A { function f() internal virtual {} }
+contract B { function f() internal virtual {} }
+contract C is A, B {
+    function f() internal override(A, B) {}
+    function g() public { super.f(); }
+}
+"""
+    report = build_sol_bindings(source)
+    fs = [
+        binding for binding in report.bindings if binding.name == "f"
+    ]
+    # Declaration order: A.f, B.f, C.f — `super` in C binds to the most
+    # derived base (B), not the first declared.
+    f_base_b = fs[1]
+    call = next(call for call in report.calls)
+    assert call.target == f_base_b.id
+    super_ref = next(
+        ref
+        for ref in report.references
+        if ref.binding_id == f_base_b.id and ref.kind == "call"
+    )
+    assert _text(source, super_ref.span) == "f"
+
+
+def test_qualified_declared_type_member_stays_opaque():
+    source = """
+library L {
+    struct S { uint256 x; }
+    uint256 internal x;
+}
+contract C {
+    L.S s;
+    function g() public {
+        uint256 y = s.x;
+        y = y + 1;
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    library_x = next(
+        binding
+        for binding in report.bindings
+        if binding.name == "x" and binding.kind == "state_variable"
+    )
+    assert not any(
+        ref.binding_id == library_x.id for ref in report.references
+    )
+    assert not any(
+        item.name == "x" for item in report.unresolved
+    )
+
+
+def test_overloaded_member_call_classifies_opaque_overload():
+    source = """
+contract T {
+    function f(uint256 a) external {}
+    function f(bool b) external {}
+}
+contract C {
+    T t;
+    function g() external { t.f(1); }
+}
+"""
+    report = build_sol_bindings(source)
+    assert _unresolved(report, "f", "ambiguous_overload")
+    assert any(
+        call.kind == "opaque_overload" and call.target == ""
+        for call in report.calls
+    )

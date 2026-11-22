@@ -1716,7 +1716,17 @@ class _SolBindings:
             if record is None:
                 self._add_unresolved(member, self.text(member), reason)
                 self.calls.append(
-                    Call(self.span(node), args, self.call_owner, "", "unresolved")
+                    Call(
+                        self.span(node),
+                        args,
+                        self.call_owner,
+                        "",
+                        (
+                            "opaque_overload"
+                            if reason == "ambiguous_overload"
+                            else "unresolved"
+                        ),
+                    )
                 )
                 return
             self._add_ref(member, record, "call")
