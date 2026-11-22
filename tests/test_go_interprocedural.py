@@ -53643,3 +53643,60 @@ def test_map_field_comma_ok_read(go_types_helper, declarations, expected):
 def test_map_field_comma_ok_read_closed(go_types_helper, declarations):
     result = named(*unit(go_types_helper, declarations))
     assert not result.available
+
+
+@pytest.mark.parametrize(
+    "declarations,expected",
+    [
+        # A callee in the key may write the field's container through
+        # the pointer argument before the lookup runs — the read must
+        # observe the store like the statement-call form does.
+        (
+            "type S struct { M map[int64]int64 }\n"
+            "func W(p *S, k, x int64) int64 { p.M[k] = x; return k }\n"
+            "func F(p *S, x int64) int64 {\n"
+            "\tv, ok := p.M[W(p, 1, x)]\n"
+            "\tif ok { return v }\n"
+            "\treturn 0\n}\n",
+            frozenset({0, 1}),
+        ),
+        (
+            "type S struct { M map[int64]int64 }\n"
+            "func W(p *S, k, x int64) int64 { p.M[k] = x; return k }\n"
+            "func F(p *S, x int64) int64 { return p.M[W(p, 1, x)] }\n",
+            frozenset({0, 1}),
+        ),
+        # Nested map — the write lands before either lookup.
+        (
+            "type S struct { M map[int64]map[int64]int64 }\n"
+            "func W(p *S, k, x int64) int64 {\n"
+            "\tp.M[k] = map[int64]int64{x: 1}\n"
+            "\treturn k\n}\n"
+            "func F(p *S, k2, x int64) int64 {\n"
+            "\tv, ok := p.M[W(p, 1, x)][k2]\n"
+            "\tif ok { return v }\n"
+            "\treturn 0\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # Slice field — same fold through a pointer argument.
+        (
+            "type S struct { A []int64 }\n"
+            "func W(p *S, i, x int64) int64 { p.A[i] = x; return i }\n"
+            "func F(p *S, x int64) int64 { return p.A[W(p, 0, x)] }\n",
+            frozenset({0, 1}),
+        ),
+        # No call in the index — reads stay exactly as tight as
+        # before (no indirect-write union when nothing was written).
+        (
+            "type S struct { M map[int64]int64 }\n"
+            "func F(p *S, k int64) int64 { return p.M[k] }\n",
+            frozenset({0, 1}),
+        ),
+    ],
+)
+def test_field_container_read_index_call_writes(
+    go_types_helper, declarations, expected
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == expected

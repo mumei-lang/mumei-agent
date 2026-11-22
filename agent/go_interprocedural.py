@@ -9583,6 +9583,33 @@ class _Builder:
                     idx, fn, params, locals_, transfers, count,
                     depth + 1,
                 )
+            # A call inside an index may write through a pointer
+            # argument into the container being read — `p.M[W(p,1,x)]`
+            # lets W store into p.M before the lookup runs. The store
+            # folds into `indirect_writes`; observe it when the
+            # container is external state — a pointer-rooted field or
+            # an externally shared backing — like the
+            # member/package-var element paths below already do.
+            external_container = False
+            if opaque_field is not None:
+                root_binding = self.bindings.get(
+                    opaque_field[4].binding_id
+                )
+                external_container = (
+                    self._opaque_container_external(opaque_field[0])
+                    or (
+                        root_binding is not None
+                        and root_binding.type is not None
+                        and root_binding.type.kind == "pointer"
+                    )
+                )
+            if (
+                opaque_composite is not None
+                and self._opaque_container_external(opaque_composite)
+            ):
+                external_container = True
+            if external_container:
+                deps |= self.indirect_writes
         else:
             deps |= struct_element_index_deps
             if opaque_composite is not None:
