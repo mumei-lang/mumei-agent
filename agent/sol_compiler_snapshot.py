@@ -225,6 +225,37 @@ def load_sol_compiler_snapshot(
             # still resolves atomically to one declaration; the lexical
             # report only records the base segment's reference, so the
             # whole-path span honestly compares as `lexical_missing`.
+            if node["nodeType"] == "MemberAccess":
+                # `memberLocation` is the member-name span;
+                # `referencedDeclaration` points at the member's
+                # declaration for contract members and is absent or
+                # negative for builtins (`.length`, `.push`,
+                # `msg.sender`), which record as builtin references.
+                name = node.get("memberName")
+                _require(type(name) is str and bool(name))
+                _require(
+                    node.get("memberLocation") is not None,
+                    "MemberAccess has no memberLocation",
+                )
+                span = _location_span(node.get("memberLocation"), source_bytes)
+                referenced = node.get("referencedDeclaration")
+                if not type(referenced) is int or referenced < 0:
+                    references.append(
+                        CompilerReference(span, name, None, True)
+                    )
+                    continue
+                declaration_node = declarations.get(referenced)
+                _require(
+                    declaration_node is not None,
+                    "compiler declaration reference is missing",
+                )
+                declaration = _location_span(
+                    declaration_node.get("nameLocation"), source_bytes
+                )
+                references.append(
+                    CompilerReference(span, name, declaration, False)
+                )
+                continue
             if node["nodeType"] not in {"Identifier", "IdentifierPath"}:
                 continue
             name = node.get("name")

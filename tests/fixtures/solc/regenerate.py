@@ -16,6 +16,7 @@ FIXTURE_NAMES = (
     "state_write",
     "state_write_operators",
     "block_scope_shadowing",
+    "member_access",
     "compile_error",
     "import_source",
 )
