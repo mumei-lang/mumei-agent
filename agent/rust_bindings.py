@@ -1091,6 +1091,16 @@ class _RustBindings:
             node.start_byte,
             "type",
         )
+        if (
+            record is None
+            and args is not None
+            and self._normalize_identifier(self.text(node))
+            in {"HashMap", "BTreeMap"}
+        ):
+            # An unresolved std map indexes to its value type —
+            # `m[k]` : V, not the key-value pair.
+            parts = self._type_arg_list(args)
+            args = parts[-1] if parts else None
         return (None if record is None else record.binding.id), args
 
     def _lookup_module(self, name: str, position: int) -> "_Record | None":

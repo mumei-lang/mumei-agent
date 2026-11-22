@@ -2662,3 +2662,19 @@ fn h(v: &[[P; 2]]) { v[0].m(); }
     assert calls[0].target == member_m.id
     assert calls[1].target == member_m.id
     assert calls[2].target == ""
+
+
+def test_index_receiver_std_map_indexes_to_value_type():
+    # `HashMap<K, V>`/`BTreeMap<K, V>` index to `V`; a value that is
+    # itself `Vec<P>` keeps chaining; a source-declared `HashMap` is
+    # untouched.
+    source = """
+struct P { }
+impl P { fn m(&self) {} }
+fn f(v: HashMap<u32, P>) { v[0].m(); }
+fn g(v: HashMap<u32, Vec<P>>) { v[0][0].m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    member_m = _bindings(report, "m", "associated_function")[0]
+    assert _call(report, source, "v[0].m()").target == member_m.id
+    assert _call(report, source, "v[0][0].m()").target == member_m.id
