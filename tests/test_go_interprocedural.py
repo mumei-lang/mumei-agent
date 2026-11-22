@@ -6953,6 +6953,110 @@ def test_interface_method_value_bindings_match_direct_dispatch(
 
 
 @pytest.mark.parametrize(
+    ("types", "binding", "direct_call"),
+    [
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "type S struct{ A []I }\n",
+            "f := p.A[i].M",
+            "return p.A[i].M(x)",
+        ),
+        # `q := p` — the method value reads the alias's target
+        # pointee like the direct dispatch does.
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "type S struct{ A []I }\n",
+            "q := p; f := q.A[i].M",
+            "q := p; return q.A[i].M(x)",
+        ),
+        # `[]I` element via a deeper index chain on a named
+        # intermediate struct member.
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "type Elem struct{ F []I }\n"
+            "type S struct{ A []Elem }\n",
+            "f := p.A[i].F[0].M",
+            "return p.A[i].F[0].M(x)",
+        ),
+        # `map[int64]I` — the element-read path admits the field,
+        # so the method value does too.
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "type S struct{ M map[int64]I }\n",
+            "f := p.M[i].M",
+            "return p.M[i].M(x)",
+        ),
+    ],
+)
+def test_interface_element_method_value_matches_direct_dispatch(
+    go_types_helper, types, binding, direct_call
+):
+    # `f := p.A[i].M` binds a method value whose receiver is an
+    # interface-typed collection element — calling it folds the
+    # same receiver set a direct `p.A[i].M(x)` dispatch does.
+    signature = "func F(p *S, i int64, x int64) int64"
+    value = named(
+        *unit(
+            go_types_helper,
+            types + f"{signature} {{ {binding}; return f(x) }}",
+        )
+    )
+    direct = named(
+        *unit(
+            go_types_helper,
+            types + f"{signature} {{ {direct_call} }}",
+        )
+    )
+    assert value.available, value.gaps
+    assert direct.available, direct.gaps
+    assert value.return_dependencies == direct.return_dependencies
+    assert value.return_dependencies == frozenset({0, 1, 2})
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        # `var x *S` — a bare local pointer root has no caller
+        # memory, so the element method value stays closed.
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "type S struct{ A []I }\n"
+            "func F(x *S, i int64) int64 {\n"
+            "\tvar y *S\n"
+            "\tf := y.A[i].M\n"
+            "\treturn f(0)\n"
+            "}\n"
+        ),
+        # `p.I.M` — an interface-typed *field* read stays closed
+        # consistently; binding its method value does too.
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "type S struct{ I I }\n"
+            "func F(p *S) int64 {\n"
+            "\tf := p.I.M\n"
+            "\treturn f(0)\n"
+            "}\n"
+        ),
+        # `[][]I` — the nested-collection element is unmodelled
+        # like its read and store.
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "type S struct{ A [][]I }\n"
+            "func F(p *S, i int64) int64 {\n"
+            "\tf := p.A[i][0].M\n"
+            "\treturn f(0)\n"
+            "}\n"
+        ),
+    ],
+)
+def test_interface_element_method_value_stays_closed(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available
+
+
+@pytest.mark.parametrize(
     "binding",
     [
         "var f, g = i.M, i.M",
