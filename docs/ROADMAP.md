@@ -3131,6 +3131,10 @@ at caller memory).
 Passing a tracked literal as a direct-call function value resolves its
 captures at invocation time (recursively for nested captures); `defer`
 and `go` shapes carry those captures into exit/race analysis.
+A tracked literal factory propagates a result only when every return
+is an immediate function literal; the result re-resolves captures at
+invocation time while retaining its bind-time dependency snapshot, and
+unsupported return shapes remain opaque.
 A package-level `var Alias = Id` call
 admits as an opaque external call — the callee is
 reassignable by any caller, so `Alias(args)` is dep-free
