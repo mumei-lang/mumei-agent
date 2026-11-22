@@ -2205,15 +2205,22 @@ class _RustBindings:
         key = (
             None
             if node is None
-            else (node.type, node.start_byte, node.end_byte)
+            else (
+                node.type,
+                node.start_byte,
+                node.end_byte,
+                len(self.bindings),
+                len(self.records),
+            )
         )
         if key is not None and key in self._receiver_memo:
             return self._receiver_memo[key]
         result = self._receiver_type_uncached(node)
-        if key is not None and result[0] is not None:
-            # Only resolved results are stable — an unresolved node may
-            # name a declaration that registers later in the walk, so
-            # caching (None, ...) would pin the stale miss.
+        if key is not None:
+            # The key carries the declaration epoch — a miss stays
+            # cached while the pool is unchanged (shared-subtree
+            # chains stay linear) but re-evaluates once a later
+            # declaration could name it.
             self._receiver_memo[key] = result
         return result
 
