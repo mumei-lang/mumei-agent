@@ -5462,3 +5462,81 @@ fn f(arg: Vec<P>, v: Vec<u8>) {
     # `arg`'s `P` was written in the signature — the inner block's
     # `struct P` must not shadow the spelled element.
     assert _call(report, source, "a.pm()").target == pm.id
+
+
+def test_index_receiver_element_through_import_and_scope() -> None:
+    source = """
+mod m {
+    pub struct P;
+    impl P { pub fn p(&self) {} }
+}
+use m::P;
+fn f(items: Vec<P>, v: Vec<m::P>, nested: Vec<Vec<P>>) {
+    items[0].p();
+    v[0].p();
+    nested[0][1].p();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    p = _bindings(report, "p", "associated_function")[0]
+    assert _call(report, source, "items[0].p()").target == p.id
+    assert _call(report, source, "v[0].p()").target == p.id
+    assert _call(report, source, "nested[0][1].p()").target == p.id
+
+
+def test_index_field_element_resolves_in_the_fields_module() -> None:
+    source = """
+mod m {
+    pub struct Fixed<T> { pub x: T }
+    impl<T> Fixed<T> { pub fn pm(&self) {} }
+    pub struct W<T> { pub items: Vec<Fixed<T>> }
+}
+struct Fixed;
+impl Fixed { fn wrong(&self) {} }
+use m::W;
+fn g(w: W<i32>) {
+    w.items[0].pm();
+    w.items[0].wrong();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    # `Fixed` was spelled in `mod m`'s scope — the use-site local
+    # `struct Fixed` must not shadow it.
+    assert _call(report, source, "w.items[0].pm()").target == pm.id
+    assert _call(report, source, "w.items[0].wrong()").target == ""
+
+
+def test_index_field_element_across_newline_args() -> None:
+    source = """
+mod m {
+    pub struct P;
+    impl P { pub fn wrong(&self) {} }
+    pub struct W<T> { pub items: Vec<
+T
+> }
+}
+struct P;
+impl P { fn pm(&self) {} }
+fn f(w: m::W<P>) {
+    w.items[0].pm();
+    w.items[0].wrong();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    assert _call(report, source, "w.items[0].pm()").target == pm.id
+    assert _call(report, source, "w.items[0].wrong()").target == ""
+
+
+def test_index_element_resolves_at_annotation_scope():
+    source = """
+mod m { pub struct P; impl P { pub fn p(&self) {} } }
+fn f(items: Vec<m::P>) {
+    mod m { pub struct P; impl P { pub fn other(&self) {} } }
+    items[0].p();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    p = _bindings(report, "p", "associated_function")[0]
+    assert _call(report, source, "items[0].p()").target == p.id

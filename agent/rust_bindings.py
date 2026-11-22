@@ -2314,9 +2314,21 @@ class _RustBindings:
                 # the next index can still unwrap. A call like
                 # `v[f(0..10)]` keeps its integer index.
                 return None, elem_args
-            return self._element_of(
-                container_id, elem_args, node.start_byte
+            args_position, home_scope = self._field_args_scope(
+                children[0]
             )
+            push = home_scope is not None and home_scope not in self.scopes
+            if push:
+                self.scopes.append(home_scope)
+            try:
+                return self._element_of(
+                    container_id,
+                    elem_args,
+                    args_position or node.start_byte,
+                )
+            finally:
+                if push:
+                    self.scopes.pop()
         if node.type == "field_expression":
             member, receiver_id, receiver_args = self._field_member_typed(
                 node, ("struct_field", "associated_const")
@@ -2528,15 +2540,9 @@ class _RustBindings:
             # The element is a reference or composite type — keep its
             # text so deeper indexing still reads args.
             return None, elem_args
-        elem = self._lookup(
-            self._normalize_identifier(match.group(1)),
-            position,
-            "type",
-        )
-        return (
-            None if elem is None else elem.binding.id,
-            match.group(2),
-        )
+        # `_spelled_type` follows `use m::P` imports and scoped
+        # `m::P` spellings — a bare `_lookup` would miss both.
+        return self._spelled_type(elem_args, position)
 
     def _is_map_container(
         self, container_id: str | None, node: Any | None
@@ -2900,6 +2906,70 @@ class _RustBindings:
                 return None, None
             return f"({left}, {right})", position
         return None, None
+
+    def _field_args_scope(
+        self, field_expr: Any | None
+    ) -> "tuple[int | None, _Scope | None]":
+        """(position, scope) resolving a field access's spelled
+        args — the receiver's annotation when the field type spells
+        the container's own params (substituted args were written at
+        the use site), else the field's declaration position plus
+        its home scope pushed (a fixed `Vec<Q>` keeps `Q` in the
+        field's scope — module members are not reachable from the
+        use-site stack)."""
+        if field_expr is None or field_expr.type != "field_expression":
+            return self._receiver_annotation_position(field_expr), None
+        member = self._field_member(
+            field_expr, ("struct_field", "associated_const")
+        )
+        if member is None or member.type_node is None:
+            return None, None
+        value = field_expr.child_by_field_name("value")
+        type_id, impl_args = (
+            (None, None) if value is None
+            else self._receiver_type(value)
+        )
+        container = (
+            None if type_id is None else self.records.get(type_id)
+        )
+        param_map = (
+            {}
+            if container is None
+            else self._pattern_param_map(container, impl_args)
+        )
+        if param_map:
+            member_text = self.text(member.type_node)
+            inner = re.search(r"<([\s\S]*)>", member_text)
+            elem_text = (
+                inner.group(1) if inner else member_text
+            ).strip()
+            elem_head = re.match(r"[A-Za-z_][\w:]*", elem_text)
+            if elem_head is not None and (
+                self._normalize_identifier(elem_head.group(0)).rsplit(
+                    "::", 1
+                )[-1]
+                not in param_map
+            ):
+                # `Vec<Fixed<T>>` — the element head `Fixed` was
+                # spelled in the field's scope; only the substituted
+                # args came from the receiver's annotation site, and
+                # they stay spelled for downstream consumers.
+                return (
+                    member.type_node.start_byte,
+                    None if container is None else container.home_scope,
+                )
+            if any(
+                re.search(rf"\b{re.escape(param)}\b", member_text)
+                for param in param_map
+            ):
+                return (
+                    self._receiver_annotation_position(value)
+                    or field_expr.start_byte
+                ), None
+        return (
+                    member.type_node.start_byte,
+                    None if container is None else container.home_scope,
+                )
 
     def _iterator_method_element(
         self, call: Any
