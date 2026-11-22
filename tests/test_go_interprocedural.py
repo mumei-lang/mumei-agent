@@ -54345,3 +54345,170 @@ def test_field_container_read_index_call_writes(
     result = named(*unit(go_types_helper, declarations))
     assert result.available, result.gaps
     assert result.return_dependencies == expected
+
+
+@pytest.mark.parametrize(
+    ("declarations", "expected"),
+    [
+        # `s.Run()` — the callee's `s.F()` reads the receiver's func
+        # field; the closure's captured deps (current, not bind-time)
+        # ride the receiver like a struct argument (#1212).
+        (
+            "type S struct { F func() int64; V int64 }\n"
+            "func (s S) Run() int64 { return s.F() }\n"
+            "func F(s S, x int64, y int64) int64 {\n"
+            "\tv := y\n"
+            "\ts.F = func() int64 { return v }\n"
+            "\tv = x\n"
+            "\treturn s.Run()\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # `*S` receiver — the pointer peels to the same S.F record.
+        (
+            "type S struct { F func() int64; V int64 }\n"
+            "func (s *S) Run() int64 { return s.F() }\n"
+            "func F(s *S, x int64, y int64) int64 {\n"
+            "\tv := y\n"
+            "\ts.F = func() int64 { return v }\n"
+            "\tv = x\n"
+            "\treturn s.Run()\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # `use(s *S)` — a pointer-typed argument carries the same
+        # field records as a value struct.
+        (
+            "type S struct { F func() int64 }\n"
+            "func use(s *S) int64 { return s.F() }\n"
+            "func F(s *S, x int64, y int64) int64 {\n"
+            "\tv := y\n"
+            "\ts.F = func() int64 { return v }\n"
+            "\tv = x\n"
+            "\treturn use(s)\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # The invoked field's writes fold at the call — `w` reads x.
+        (
+            "type S struct { F func(); V int64 }\n"
+            "func (s S) Run() { s.F() }\n"
+            "func F(x int64) int64 {\n"
+            "\tvar s S\n"
+            "\tvar w int64\n"
+            "\ts.F = func() { w = x }\n"
+            "\ts.Run()\n"
+            "\treturn w\n}\n",
+            frozenset({0}),
+        ),
+        # `defer s.Run()` folds the receiver's field writes too.
+        (
+            "type S struct { F func(); V int64 }\n"
+            "func (s S) Run() { s.F() }\n"
+            "func F(x int64) int64 {\n"
+            "\tvar s S\n"
+            "\tvar w int64\n"
+            "\ts.F = func() { w = x }\n"
+            "\tdefer s.Run()\n"
+            "\treturn w\n}\n",
+            frozenset({0}),
+        ),
+        # `go s.Run()` — same receiver treatment on the deferred path.
+        (
+            "type S struct { F func(); V int64 }\n"
+            "func (s S) Run() { s.F() }\n"
+            "func F(x int64) int64 {\n"
+            "\tvar s S\n"
+            "\tvar w int64\n"
+            "\ts.F = func() { w = x }\n"
+            "\tgo s.Run()\n"
+            "\treturn w\n}\n",
+            frozenset({0}),
+        ),
+        # Nested value field — `s.In.F`'s record rides the receiver.
+        (
+            "type I struct { F func() int64 }\n"
+            "type S struct { In I }\n"
+            "func (s S) Run() int64 { return s.In.F() }\n"
+            "func F(s S, x int64, y int64) int64 {\n"
+            "\tv := y\n"
+            "\ts.In.F = func() int64 { return v }\n"
+            "\tv = x\n"
+            "\treturn s.Run()\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # No func fields — the receiver's reads stay as tight as
+        # before (no capture union when nothing is recorded).
+        (
+            "type S struct { V int64 }\n"
+            "func (s S) Get() int64 { return s.V }\n"
+            "func F(s S, x int64) int64 { s.V = x; return s.Get() }\n",
+            frozenset({0, 1}),
+        ),
+    ],
+)
+def test_receiver_struct_field_closure_records(
+    go_types_helper, declarations, expected
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == expected
+
+
+def test_receiver_field_captures_see_post_argument_updates(go_types_helper):
+    # `s.Run(bump(&v, x))` — the closure reads `v` when the callee
+    # runs it, i.e. AFTER the argument evaluated, so the receiver's
+    # field captures resolve past the argument's write.
+    declarations = (
+        "func bump(p *int64, x int64) int64 { *p = x; return 0 }\n"
+        "type S struct { F func() int64 }\n"
+        "func (s S) Run(_ int64) int64 { return s.F() }\n"
+        "func F(s S, x int64, y int64) int64 {\n"
+        "\tv := y\n"
+        "\ts.F = func() int64 { return v }\n"
+        "\treturn s.Run(bump(&v, x))\n}\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1, 2})
+
+
+def test_deferred_method_named_result_observes_exit_writes(go_types_helper):
+    # `defer s.Run()` runs at exit, after `return` fixed the named
+    # result — the deferred field write still lands on `w`.
+    declarations = (
+        "type S struct { F func(); V int64 }\n"
+        "func (s S) Run() { s.F() }\n"
+        "func F(x int64, y int64) (w int64) {\n"
+        "\tvar s S\n"
+        "\tv := y\n"
+        "\ts.F = func() { w = v }\n"
+        "\tdefer s.Run()\n"
+        "\tv = x\n"
+        "\treturn\n}\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_receiver_field_records_reach_callback_invocations(go_types_helper):
+    # `s.Run` hands `s.F` to `g`, which invokes it and stores the
+    # result — the field's captured deps must ride the call-arg deps
+    # so `g`'s write to `out` observes `v`'s post-capture update.
+    files = {
+        "a.go": (
+            "package p\n"
+            "func g(f func() int64, store *int64) { *store = f() }\n"
+            "type S struct { F func() int64 }\n"
+            "func (s S) Run(out *int64) { g(s.F, out) }\n"
+            "func F(v int64, x int64) int64 {\n"
+            "\tvar out int64\n"
+            "\ts := S{F: func() int64 { return v }}\n"
+            "\tv = x\n"
+            "\ts.Run(&out)\n"
+            "\treturn out\n}\n"
+        ),
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
