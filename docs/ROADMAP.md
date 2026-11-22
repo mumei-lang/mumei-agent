@@ -2376,7 +2376,8 @@ the call folds normally while its result is discarded — a `defer`d
 call runs before the function returns and a goroutine's effects may
 happen, and the union model covers both orderings. A `go` call fails
 closed when later, enclosing-loop or deferred writes may race with its
-touched bindings; reference-involved calls also fail closed when later
+touched bindings; channel-containing arguments are touched, except direct
+local send-only parameters; reference-involved calls also fail closed when later
 operations use nonplain writes or reference-typed arguments. Other
 supported `go` calls retain the union model. For supported
 deferred calls, the registration-time fold remains a conservative
