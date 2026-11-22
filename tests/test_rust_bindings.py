@@ -5850,3 +5850,110 @@ fn f(o: Option<P>, v: Vec<P>) {
     assert _call(report, source, "p.pm()").target == pm.id
     assert _call(report, source, "a[0].pm()").target == pm.id
     assert _call(report, source, "b[0].pm()").target == pm.id
+
+
+def test_preserving_adaptors_keep_the_element_type():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(v: Vec<P>) {
+    for p in v.iter().peekable() { p.pm(); }
+    for p in v.iter().inspect(|x| ()) { p.pm(); }
+    for p in v.iter().fuse().by_ref() { p.pm(); }
+    for p in v.iter().skip_while(|x| true).take_while(|x| true) { p.pm(); }
+    for p in v.iter().cycle().take(3) { p.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    calls = [
+        call for call in report.calls
+        if raw[call.span.start:call.span.end].decode() == "p.pm()"
+    ]
+    assert len(calls) == 5
+    for call in calls:
+        assert call.target == pm.id
+
+
+def test_option_combinators_keep_the_payload():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct Q;
+impl Q { fn qm(&self) {} }
+fn f(o: Option<P>, u: Option<P>, v: Option<Q>) {
+    if let Some(p) = o.and(u) { p.pm(); }
+    if let Some(p) = o.and(v) { p.qm(); p.pm(); }
+    if let Some(p) = o.or(u) { p.pm(); }
+    if let Some(p) = o.xor(u) { p.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    qm = _bindings(report, "qm", "associated_function")[0]
+    raw = source.encode()
+    calls = [
+        (raw[call.span.start:call.span.end].decode(), call.target)
+        for call in report.calls
+    ]
+    # `and` yields the argument's payload — `o.and(v)` is Option<Q>.
+    assert next(t for k, t in calls if k == "p.qm()") == qm.id
+    targets = [t for k, t in calls if k == "p.pm()"]
+    # three `p.pm()` sites resolve to P::pm; the one under `and(v)`
+    # stays unbound (it would need P on a Q payload).
+    assert len(targets) == 4
+    assert targets.count(pm.id) == 3
+    assert sum(1 for t in targets if not t) == 1
+
+
+def test_option_and_keeps_the_option_head_when_scopes_differ():
+    source = """
+mod m { pub struct Q; impl Q { pub fn qm(&self) {} } }
+use m::Q;
+fn g() -> Option<Q> { None }
+fn f(o: Option<Q>) {
+    struct Q;
+    impl Q { fn is_some(&self) -> bool { true } }
+    let u = g();
+    o.and(u).is_some();
+    match o.and(u) { Some(q) => q.qm(), _ => () }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    qm = _bindings(report, "qm", "associated_function")[0]
+    local_is_some = next(
+        b
+        for b in _bindings(report, "is_some", "associated_function")
+        if b.span.start > source.index("struct Q;\n    impl Q { fn is_some")
+    )
+    raw = source.encode()
+    calls = {
+        raw[call.span.start:call.span.end].decode(): call.target
+        for call in report.calls
+    }
+    # Option::is_some is prelude — the local Q::is_some must not win.
+    assert calls["o.and(u).is_some()"] != local_is_some.id
+    # The payload still resolves in `u`'s scope — `q` is `m::Q`.
+    assert calls["q.qm()"] == qm.id
+
+
+def test_option_and_drops_an_unspellable_payload():
+    source = """
+fn g<Q>(x: Option<Q>) -> Option<Q> { x }
+fn f<T>(o: Option<T>) {
+    struct Q;
+    impl Q { fn qm(&self) {} }
+    let u = g(o);
+    match o.and(u) {
+        Some(q) => q.qm(),
+        _ => {}
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    # u's payload spells g's generic `Q` — re-resolving that bare
+    # name at the call site lands on f's unrelated local `Q`, so
+    # the payload stays opaque instead of misbinding q.qm().
+    qm = _bindings(report, "qm", "associated_function")[0]
+    assert _call(report, source, "q.qm()").target != qm.id
