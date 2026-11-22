@@ -4323,6 +4323,116 @@ class _Builder:
         fact = self._struct_value_fact(binding.type)
         return (fact, binding) if fact is not None else None
 
+    def _func_literal_struct_member(
+        self, literal: Any, node: Any
+    ) -> str | None:
+        body = literal.child_by_field_name("body")
+        if body is None:
+            return None
+        element = None
+        for candidate in _children(body):
+            if candidate.type == "keyed_element":
+                value = candidate.child_by_field_name("value")
+            elif candidate.type == "literal_element":
+                value = next(iter(candidate.named_children), None)
+            else:
+                continue
+            while value is not None and value.type == "literal_element":
+                value = next(iter(value.named_children), None)
+            if self._strip_parens(value) == node:
+                element = candidate
+                break
+        if element is None:
+            return None
+        type_node = literal.child_by_field_name("type")
+        type_id = self._struct_literal_type_id(type_node)
+        if type_id is None:
+            current_type = type_node
+            while (
+                current_type is not None
+                and current_type.type == "parenthesized_type"
+            ):
+                current_type = next(
+                    (
+                        child
+                        for child in current_type.named_children
+                        if child.type != "comment"
+                    ),
+                    None,
+                )
+            if current_type is not None and current_type.type == "struct_type":
+                raise _Unsupported(
+                    "unsupported_expression", _span(node)
+                )
+            named_type = (
+                current_type.child_by_field_name("type")
+                if current_type is not None
+                and current_type.type == "generic_type"
+                else current_type
+            )
+            if named_type is not None and named_type.type == "qualified_type":
+                identity = self._qualified_type_member(named_type)
+            elif named_type is not None and named_type.type == "type_identifier":
+                type_ref = self.references.get(self.node_key(named_type))
+                identity = (
+                    self.members.get(type_ref.binding_id)
+                    if type_ref is not None
+                    and type_ref.kind == "import"
+                    else self.bindings.get(type_ref.binding_id)
+                    if type_ref is not None and type_ref.binding_id
+                    else None
+                )
+            else:
+                identity = None
+            if (
+                identity is not None
+                and identity.kind == "type"
+                and identity.type is not None
+                and identity.type.kind == "struct"
+            ):
+                raise _Unsupported(
+                    "unsupported_expression", _span(node)
+                )
+            return None
+        if element.type == "keyed_element":
+            key = element.child_by_field_name("key")
+            while key is not None and key.type == "literal_element":
+                key = next(iter(key.named_children), None)
+            key_ref = (
+                self.references.get(self.node_key(key))
+                if key is not None and key.type == "identifier"
+                else None
+            )
+            member = self._field_identity(key_ref)
+            if (
+                member is not None
+                and member.type is not None
+                and member.type.kind == "function"
+            ):
+                return member.id
+            raise _Unsupported(
+                "unsupported_expression", _span(node)
+            )
+        struct_fact = self._local_struct_literal_fact(literal)
+        if struct_fact is not None:
+            fact, anchor = struct_fact
+            field_values = self._struct_literal_field_values(
+                literal, fact, anchor
+            )
+            if field_values is not None:
+                for member, value in field_values:
+                    if self._strip_parens(value) != node:
+                        continue
+                    if (
+                        member.type is not None
+                        and member.type.kind == "function"
+                    ):
+                        return member.id
+                    raise _Unsupported(
+                        "unsupported_expression", _span(node)
+                    )
+        raise _Unsupported("unsupported_expression", _span(node))
+
     def _struct_selector_container(
         self,
         node: Any,
@@ -34836,6 +34946,7 @@ class _Builder:
         # records must not reach the old backing's sharers.
         into_backing = False
         via_args = False
+        innermost_composite = None
         while parent is not None and parent.type in {
             "expression_list",
             "literal_value",
@@ -34847,6 +34958,8 @@ class _Builder:
         }:
             if parent.type == "composite_literal":
                 in_composite = True
+                if innermost_composite is None:
+                    innermost_composite = parent
             if parent.type == "argument_list":
                 via_args = True
             parent = parent.parent
@@ -35014,6 +35127,13 @@ class _Builder:
                         f"{self.current_file}:{node.start_byte}:"
                         f"{node.end_byte}/func_lit_arg"
                     )
+        struct_member_id = (
+            self._func_literal_struct_member(
+                innermost_composite, node
+            )
+            if innermost_composite is not None
+            else None
+        )
         if func_arg_id is not None:
             self.closure_captures[func_arg_id] = frozenset(captured)
             self.closure_writes[func_arg_id] = frozenset(writes)
@@ -35054,6 +35174,10 @@ class _Builder:
                     self._func_elem_groups.get(bound_id, set())
                     if into_backing
                     else set()
+                ) | (
+                    {struct_member_id}
+                    if struct_member_id is not None
+                    else set()
                 )
                 for target_id in composite_targets:
                     self.closure_captures[target_id] = (
@@ -35073,6 +35197,8 @@ class _Builder:
                     self.closure_star_writes.update(composite_targets)
                 if has_call:
                     self.closure_inner_calls.update(composite_targets)
+                if captures_pointer and struct_member_id is not None:
+                    self.pointee_closures.add(struct_member_id)
             elif may_skip and bound_id in self.func_aliases:
                 # A literal on a maybe-taken path over a
                 # function-name alias leaves the callee's value
@@ -35183,6 +35309,26 @@ class _Builder:
                 self.closure_factory_literals.pop(bound_id, None)
             if may_skip and was_factory_literal:
                 self.opaque_callees.add(bound_id)
+        elif struct_member_id is not None:
+            self.closure_captures[struct_member_id] = (
+                self.closure_captures.get(
+                    struct_member_id, frozenset()
+                )
+                | frozenset(captured)
+            )
+            self.closure_writes[struct_member_id] = (
+                self.closure_writes.get(
+                    struct_member_id, frozenset()
+                )
+                | frozenset(writes)
+            )
+            self.closure_factory_literals.pop(struct_member_id, None)
+            if star_write:
+                self.closure_star_writes.add(struct_member_id)
+            if has_call:
+                self.closure_inner_calls.add(struct_member_id)
+            if captures_pointer:
+                self.pointee_closures.add(struct_member_id)
         return deps
 
     def _bound_closure_call(
