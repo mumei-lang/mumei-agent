@@ -3882,3 +3882,25 @@ fn f() { let x: P = P::new(); }
     report = build_rust_bindings(source, pointer_width=64)
     new = next(b for b in report.bindings if b.name == "new")
     assert _call(report, source, "P::new()").target == new.id
+
+
+def test_parent_module_use_does_not_leak_into_child_module():
+    # `use x::Tr` in `mod outer` names `Tr` in outer only — `p.m()`
+    # inside `mod inner` cannot reach the trait's impl.
+    source = """
+mod x { pub trait Tr { fn m(&self) {} } }
+mod outer {
+    use x::Tr;
+    struct P;
+    impl Tr for P {}
+    mod inner {
+        fn f(p: super::P) { p.m(); }
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "p.m()"
+    )
+    assert call.target == ""

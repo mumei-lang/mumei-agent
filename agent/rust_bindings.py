@@ -1873,11 +1873,22 @@ class _RustBindings:
             return True
         if trait.binding.kind == "import":
             return False
+        # A `use` is name-visible only inside its own module — neither
+        # `use` nor `pub use` in a parent module brings the name into a
+        # nested `mod` (that needs `use super::Tr`). The span check keeps
+        # block-local `use` scoped to its block; the depth check drops a
+        # parent module's `use`, whose span encloses nested mods.
+        depth = (
+            self.scopes[-1].module_depth
+            if self.scopes
+            else self.module_depth
+        )
         for scope in self.scopes:
             for records in scope.bindings.values():
                 for candidate in records:
                     if (
                         candidate.binding.kind == "import"
+                        and candidate.module_depth == depth
                         and (
                             candidate.binding.scope is None
                             or candidate.binding.scope
