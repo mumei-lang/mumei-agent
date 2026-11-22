@@ -2823,18 +2823,12 @@ class _RustBindings:
             # std::iter::once(1)` reaches an unresolvable extern
             # call) — the element stays opaque.
             return None, None
-        literal_args = literal_args or container_id is not None
         if elem_args.startswith("&"):
             # `&P`/`&mut P`/`&[P]` spell a borrowed element — the
             # receiver of `x.m()`/`x[0]` is `P`.
             inner = elem_args.lstrip("&").strip()
             if inner.startswith("mut "):
                 inner = inner[4:].strip()
-            if literal_args and inner.startswith("["):
-                # A container's arg names the element type literally
-                # — `Vec<&[P]>` has `v[0]` typed `&[P]`, not `P`, so
-                # `v[0][0]` still reads the slice element.
-                return self._spelled_type(elem_args, position)
             return self._element_of(None, inner, position)
         # A slice or array element exposes its own element type —
         # `&[[P; 2]]` reads first to `[P; 2]`, then to `P`.
@@ -3243,76 +3237,17 @@ class _RustBindings:
             return spelled, self._receiver_annotation_position(
                 receiver
             )
-        if method == "split_at":
-            container_id, args = self._receiver_type(receiver)
-            if args is None:
-                return None, None
-            container_name = (
-                next(
-                    (
-                        b.name
-                        for b in self.bindings
-                        if b.id == container_id
-                    ),
-                    None,
-                )
-                if container_id is not None
-                else None
-            )
-            if (
-                container_id is not None
-                and container_name not in _INDEX_ELEMENT_CONTAINERS
-            ):
-                # A custom `W<P>` can `Deref` to a different
-                # element — `w.split_at(i)` yields `&[Q]` there.
-                return None, None
-            spelled = args.strip() or None
-            if spelled is None:
-                return None, None
-            # `v.split_at(i)` yields `(&[P], &[P])` — a pair of
-            # borrowed slices that feeds the tuple-pattern path.
-            # Re-splitting a `&[P]` keeps the same slice — the
-            # spelling is not wrapped a second time.
-            pair = (
-                spelled
-                if spelled.startswith("&[")
-                else f"&[{spelled}]"
-            )
-            return (
-                f"({pair}, {pair})",
-                self._receiver_annotation_position(receiver),
-            )
         if method in _ITER_CHUNK_METHODS:
             container_id, args = self._receiver_type(receiver)
             if args is None:
                 return None, None
-            container_name = (
-                next(
-                    (
-                        b.name
-                        for b in self.bindings
-                        if b.id == container_id
-                    ),
-                    None,
-                )
-                if container_id is not None
-                else None
-            )
-            if (
-                container_id is not None
-                and container_name not in _INDEX_ELEMENT_CONTAINERS
-            ):
-                # A custom `W<P>` can `Deref` to a different
-                # element — `w.chunks(n)` yields `&[Q]` there,
-                # not `&[P]`.
-                return None, None
             spelled = args.strip() or None
             if spelled is None:
                 return None, None
-            # The element is a borrowed slice — `&[P]` reads `P`
+            # The element is a borrowed slice — `&P` unwraps to `P`
             # at the index/iter sites that consume it.
             return (
-                f"&[{spelled}]",
+                "&" + spelled,
                 self._receiver_annotation_position(receiver),
             )
         if method in _ITER_PRESERVING_METHODS or method in _ITER_SLICE_METHODS:
@@ -3513,26 +3448,6 @@ class _RustBindings:
             # index/iter sites unwrap to `P`.
             container_id, args = self._receiver_type(receiver)
             if args is None:
-                return _UNKNOWN, None
-            container_name = (
-                next(
-                    (
-                        b.name
-                        for b in self.bindings
-                        if b.id == container_id
-                    ),
-                    None,
-                )
-                if container_id is not None
-                else None
-            )
-            if (
-                container_id is not None
-                and container_name not in _INDEX_ELEMENT_CONTAINERS
-            ):
-                # A custom `W<P>` can `Deref` to a different
-                # element — `w.chunks(n)` yields `&[Q]` there,
-                # not `&[P]`.
                 return _UNKNOWN, None
             spelled = args.strip() or None
             return _UNKNOWN, None if spelled is None else "&" + spelled
