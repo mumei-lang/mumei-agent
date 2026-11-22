@@ -12061,13 +12061,15 @@ class _Builder:
         params: dict[str, int],
         locals_: dict[str, frozenset[int]],
         *,
-        _visiting: frozenset[str] = frozenset(),
+        _seen: set[str] | None = None,
     ) -> frozenset[int]:
         """Resolve each captured binding's deps NOW — reassignments
         between the literal and the read move what a bound closure
         actually observes (`p := &a; h := func(){*p}; p = &b; h()`
         reads `b`, not `a`). `locals_` wins over the parameter index:
         `x = y` stores the param's current value under its binding id."""
+        if _seen is None:
+            _seen = set()
         resolved: frozenset[int] = frozenset()
         for cbid in captured:
             # A captured channel name may have been reseated
@@ -12081,16 +12083,15 @@ class _Builder:
             )
             if root in locals_:
                 if self._is_tracked_literal_value(root, params):
-                    if root in _visiting:
-                        resolved |= locals_[root]
-                    else:
+                    if root not in _seen:
+                        _seen.add(root)
                         resolved |= self._captured_current_deps(
                             self.closure_captures.get(
                                 root, frozenset()
                             ),
                             params,
                             locals_,
-                            _visiting=_visiting | {root},
+                            _seen=_seen,
                         )
                 else:
                     resolved |= locals_[root]

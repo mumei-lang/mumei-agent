@@ -20281,6 +20281,32 @@ def test_bound_closure_resolves_captures_at_call(go_types_helper):
     assert result.return_dependencies == frozenset({1})
 
 
+def test_chained_closure_values_resolve_shared_captures_once(
+    go_types_helper,
+):
+    declarations = [
+        "func ap(f func() int64) int64 { return f() }",
+        "func F(x, y int64) int64 {",
+        "v := y",
+        "g0 := func() int64 { return v }",
+    ]
+    for index in range(1, 30):
+        calls = " + ".join(
+            f"g{captured}()" for captured in range(index)
+        )
+        declarations.append(
+            f"g{index} := func() int64 {{ return {calls} }}"
+        )
+    declarations.extend(
+        ["v = x", "return ap(g29)", "}"]
+    )
+    result = named(
+        *unit(go_types_helper, "\n".join(declarations))
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+
 @pytest.mark.parametrize(
     ("source", "dependencies"),
     [
