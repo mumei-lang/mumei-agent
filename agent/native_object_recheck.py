@@ -29,8 +29,9 @@ or historical-execution claim. `machine_code_leaf_function_tv`,
 `object_translation_correspondence` stay unperformed. This recheck report is
 never a recovery performer.
 
-Core's `machine_code_composite_register_aggregate_tv` is consumed only when
-listed in `checks_performed`. It covers one- through sixteen-leaf struct
+Machine-TV recheck and object acceptance (not native-object-recheck) consume
+Core's `machine_code_composite_register_aggregate_tv` only when listed in
+`checks_performed`. It covers one- through sixteen-leaf struct
 parameters and direct-call struct arguments, and struct results of at most
 four leaves (at most three integer leaves in rax/rdx/rcx and at most two f64
 leaves in xmm0/xmm1), with integer and/or f64 leaves; an i128/u128 leaf
