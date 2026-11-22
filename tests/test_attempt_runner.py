@@ -1734,21 +1734,39 @@ def test_run_rejects_non_boolean_filesystem_write_isolation(
 def test_filesystem_write_detector_rejects_non_linux(monkeypatch):
     monkeypatch.setattr(attempt_runner.sys, "platform", "darwin")
     monkeypatch.setattr(
-        attempt_runner.shutil,
-        "which",
-        lambda _name: pytest.fail("non-Linux hosts do not probe unshare"),
+        attempt_runner.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail(
+            "non-Linux hosts do not probe filesystem isolation"
+        ),
     )
 
-    assert attempt_runner._detect_filesystem_write_unshare() is None
+    assert attempt_runner._detect_filesystem_write_isolation() is False
 
 
-def test_filesystem_write_detector_rejects_missing_unshare(monkeypatch):
+def test_filesystem_write_detector_does_not_require_unshare(monkeypatch):
     monkeypatch.setattr(attempt_runner.sys, "platform", "linux")
-    monkeypatch.setattr(attempt_runner.shutil, "which", lambda _name: None)
-    monkeypatch.setattr(attempt_runner, "_FILESYSTEM_WRITE_UNSHARE", None)
+    monkeypatch.setattr(
+        attempt_runner.shutil,
+        "which",
+        lambda _name: pytest.fail("filesystem isolation does not use unshare"),
+    )
+    calls = []
 
-    assert attempt_runner._detect_filesystem_write_unshare() is None
-    assert attempt_runner.filesystem_write_isolation_enforceable() is False
+    def successful_probe(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return attempt_runner.subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(attempt_runner.subprocess, "run", successful_probe)
+
+    assert attempt_runner._detect_filesystem_write_isolation() is True
+    assert calls[0][0] == [
+        attempt_runner.sys.executable,
+        "-I",
+        "-c",
+        attempt_runner._FILESYSTEM_WRITE_PROBE_SCRIPT,
+    ]
+    assert calls[0][1]["timeout"] == 10
 
 
 @pytest.mark.parametrize(
@@ -1756,15 +1774,12 @@ def test_filesystem_write_detector_rejects_missing_unshare(monkeypatch):
 )
 def test_filesystem_write_detector_rejects_probe_errors(monkeypatch, error):
     monkeypatch.setattr(attempt_runner.sys, "platform", "linux")
-    monkeypatch.setattr(
-        attempt_runner.shutil, "which", lambda _name: "/usr/bin/unshare"
-    )
 
     def fail_probe(*_args, **_kwargs):
         raise error
 
     monkeypatch.setattr(attempt_runner.subprocess, "run", fail_probe)
-    assert attempt_runner._detect_filesystem_write_unshare() is None
+    assert attempt_runner._detect_filesystem_write_isolation() is False
 
 
 def test_run_filesystem_write_isolation_requires_boundary_before_spawn(
@@ -1777,7 +1792,11 @@ def test_run_filesystem_write_isolation_requires_boundary_before_spawn(
         spawned = True
         pytest.fail("isolation validation must precede spawn")
 
-    monkeypatch.setattr(attempt_runner, "_FILESYSTEM_WRITE_UNSHARE", None)
+    monkeypatch.setattr(
+        attempt_runner,
+        "_FILESYSTEM_WRITE_ISOLATION_ENFORCEABLE",
+        False,
+    )
     monkeypatch.setattr(attempt_runner.subprocess, "Popen", fail_if_spawned)
     with pytest.raises(
         ValueError,
@@ -1796,8 +1815,9 @@ def test_run_filesystem_write_isolation_requires_boundary_before_spawn(
     reason="filesystem write isolation requires unprivileged mount namespaces",
 )
 def test_run_filesystem_write_isolation_blocks_writes_and_preserves_host(
-    tmp_path,
+    tmp_path, monkeypatch
 ):
+    monkeypatch.setattr(attempt_runner, "_UNSHARE", None)
     child_path = tmp_path / "child-write.txt"
     child_argv = (
         PY,
@@ -1885,14 +1905,14 @@ def test_run_filesystem_write_isolation_combines_with_memory_bound():
     assert int(result.stdout.strip()) == 256 * 1_048_576
 
 
-@pytest.mark.skipif(os.name != "posix", reason="fake unshare requires POSIX")
+@pytest.mark.skipif(os.name != "posix", reason="namespace marker requires POSIX")
 def test_run_filesystem_write_isolation_setup_failure_is_failed(
-    tmp_path, monkeypatch
+    monkeypatch,
 ):
     monkeypatch.setattr(
         attempt_runner,
-        "_FILESYSTEM_WRITE_UNSHARE",
-        _fake_passthrough_unshare(tmp_path),
+        "_FILESYSTEM_WRITE_ISOLATION_ENFORCEABLE",
+        True,
     )
     monkeypatch.setattr(
         attempt_runner,

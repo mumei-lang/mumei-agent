@@ -222,12 +222,12 @@ remain declared-only. This is not a sandbox or Evidence.
 ### C04 filesystem.write enforcement
 
 Scheduled attempts and availability probes run with a recursively read-only
-mount tree in a private mount namespace unless the adapter declares
-`filesystem.write` and policy allows it, where the host supports unprivileged
-user and mount namespaces plus `mount_setattr`; otherwise it remains
-unenforced as before. `/dev` character devices and stdout/stderr pipes still
-work. `filesystem.read` and `process.spawn` remain declared-only. This is not
-a sandbox or Evidence.
+mount tree in a private user+mount namespace created by the launcher, unless
+the adapter declares `filesystem.write` and policy allows it, where the host
+supports unprivileged user and mount namespaces plus `mount_setattr`;
+otherwise it remains unenforced as before. `/dev` character devices and
+stdout/stderr pipes still work. `filesystem.read` and `process.spawn` remain
+declared-only. This is not a sandbox or Evidence.
 
 ### C11 declared memory bounds for attempted executions
 

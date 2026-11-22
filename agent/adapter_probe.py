@@ -21,7 +21,8 @@ stamp)` binds it to the descriptor's declared `max_timeout_ms` /
 `max_memory_mb` budgets — a manifest pins how much room its own probe
 gets, and a descriptor without the declaration is a static error, never
 a wildcard probe. Probes use a minimal environment, isolated network, and a
-read-only mount namespace by default where the host can enforce them.
+private user+mount namespace with a read-only mount tree by default where
+the host can enforce them.
 Inherited environment, network access, and filesystem writes require the
 adapter to declare the corresponding permission and policy to allow it.
 

@@ -266,6 +266,7 @@ def test_summaries_plan_route_emits_report(capsys, tmp_path):
 def test_builtin_summary_probes_are_available_with_readonly_filesystem(
     descriptor,
 ):
+    assert filesystem_write_isolation_enforceable()
     assert descriptor.required_permissions is not None
     assert "filesystem.write" not in descriptor.required_permissions
     plan = plan_summary_route(
@@ -274,6 +275,7 @@ def test_builtin_summary_probes_are_available_with_readonly_filesystem(
             allowed_permissions=descriptor.required_permissions
         ),
         stamp=37,
+        tool_version="1.0.0",
     )
 
     assert plan.plan.selected is not None

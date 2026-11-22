@@ -229,7 +229,7 @@ def _detect_unshare() -> "str | None":
 
 
 _UNSHARE = _detect_unshare()
-_MOUNT_SETATTR_SETUP_SCRIPT = """import ctypes
+_FILESYSTEM_WRITE_ISOLATION_SETUP_SCRIPT = """import ctypes, os
 class _MountAttr(ctypes.Structure):
     _fields_ = [
         ("attr_set", ctypes.c_uint64),
@@ -239,7 +239,25 @@ class _MountAttr(ctypes.Structure):
     ]
 
 def _make_mounts_readonly():
+    uid = os.getuid()
+    gid = os.getgid()
     libc = ctypes.CDLL(None, use_errno=True)
+    libc.unshare.argtypes = [ctypes.c_int]
+    libc.unshare.restype = ctypes.c_int
+    ctypes.set_errno(0)
+    if libc.unshare(0x10000000 | 0x00020000) != 0:
+        return False
+    try:
+        for path, value in (
+            ("/proc/self/setgroups", "deny"),
+            ("/proc/self/uid_map", f"{uid} {uid} 1"),
+            ("/proc/self/gid_map", f"{gid} {gid} 1"),
+        ):
+            with open(path, "w", encoding="ascii") as mapping:
+                if mapping.write(value) != len(value):
+                    return False
+    except Exception:
+        return False
     libc.mount.argtypes = [
         ctypes.c_char_p,
         ctypes.c_char_p,
@@ -256,7 +274,7 @@ def _make_mounts_readonly():
         0x4000 | (1 << 18),
         None,
     )
-    if mounted != 0 or ctypes.get_errno() != 0:
+    if mounted != 0:
         return False
     attr = _MountAttr(1, 0, 0, 0)
     libc.syscall.restype = ctypes.c_long
@@ -269,42 +287,31 @@ def _make_mounts_readonly():
         ctypes.byref(attr),
         ctypes.c_size_t(ctypes.sizeof(attr)),
     )
-    return result == 0 and ctypes.get_errno() == 0
+    return result == 0
 """
 _FILESYSTEM_WRITE_PROBE_SCRIPT = (
-    f"exec({_MOUNT_SETATTR_SETUP_SCRIPT!r}, globals())\n"
+    f"exec({_FILESYSTEM_WRITE_ISOLATION_SETUP_SCRIPT!r}, globals())\n"
     "raise SystemExit(0 if _make_mounts_readonly() else 1)\n"
 )
 
 
-def _detect_filesystem_write_unshare() -> "str | None":
+def _detect_filesystem_write_isolation() -> bool:
     if not sys.platform.startswith("linux"):
-        return None
+        return False
     try:
-        unshare = shutil.which("unshare")
-        if unshare is None:
-            return None
-        supported = subprocess.run(
-            [
-                unshare,
-                "--mount",
-                "--map-current-user",
-                "--",
-                sys.executable,
-                "-I",
-                "-c",
-                _FILESYSTEM_WRITE_PROBE_SCRIPT,
-            ],
+        return subprocess.run(
+            [sys.executable, "-I", "-c", _FILESYSTEM_WRITE_PROBE_SCRIPT],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=10,
         ).returncode == 0
     except Exception:
-        return None
-    return unshare if supported else None
+        return False
 
 
-_FILESYSTEM_WRITE_UNSHARE = _detect_filesystem_write_unshare()
+_FILESYSTEM_WRITE_ISOLATION_ENFORCEABLE = (
+    _detect_filesystem_write_isolation()
+)
 _NAMESPACE_MARKER_SCRIPT = f"""import os, signal, sys
 fd = int(sys.argv[1])
 readonly = sys.argv[2] == "1"
@@ -317,7 +324,7 @@ for name in ("SIGPIPE", "SIGXFSZ"):
     if hasattr(signal, name):
         signal.signal(getattr(signal, name), signal.SIG_DFL)
 if readonly:
-    exec({_MOUNT_SETATTR_SETUP_SCRIPT!r}, globals())
+    exec({_FILESYSTEM_WRITE_ISOLATION_SETUP_SCRIPT!r}, globals())
     if not _make_mounts_readonly():
         os._exit(126)
 os.write(fd, b"x")
@@ -356,7 +363,7 @@ def network_isolation_enforceable() -> bool:
 
 def filesystem_write_isolation_enforceable() -> bool:
     """Whether this host can apply recursive read-only mount attributes."""
-    return _FILESYSTEM_WRITE_UNSHARE is not None
+    return _FILESYSTEM_WRITE_ISOLATION_ENFORCEABLE
 
 
 def _spawn_target_resolvable(
@@ -553,10 +560,10 @@ class AttemptRunner:
         with only a down loopback and the current uid mapped to the current
         user. This is not a sandbox and imposes no filesystem or process
         restriction.
-        `isolate_filesystem_write=True` runs the child in a private mount
-        namespace with a recursively read-only mount tree where supported.
-        This is not a sandbox; character devices and output pipes may remain
-        writable.
+        `isolate_filesystem_write=True` runs the child in a private user+mount
+        namespace created by the launcher, with a recursively read-only mount
+        tree where supported. This is not a sandbox; character devices and
+        output pipes may remain writable.
         """
         if type(request) is not AttemptExecutionRequest:
             raise ValueError("attempt run requires an execution request")
@@ -675,19 +682,7 @@ class AttemptRunner:
             lc_ctype_argument = (
                 "" if target_lc_ctype is None else f"={target_lc_ctype}"
             )
-            namespace_unshare = (
-                _UNSHARE if isolate_network else _FILESYSTEM_WRITE_UNSHARE
-            )
-            namespace_args = []
-            if isolate_network:
-                namespace_args.append("--net")
-            if isolate_filesystem_write:
-                namespace_args.append("--mount")
-            spawn_argv = [
-                namespace_unshare,
-                *namespace_args,
-                "--map-current-user",
-                "--",
+            namespace_argv = [
                 sys.executable,
                 "-I",
                 "-c",
@@ -697,6 +692,16 @@ class AttemptRunner:
                 lc_ctype_argument,
                 *spawn_argv,
             ]
+            if isolate_network:
+                spawn_argv = [
+                    _UNSHARE,
+                    "--net",
+                    "--map-current-user",
+                    "--",
+                    *namespace_argv,
+                ]
+            else:
+                spawn_argv = namespace_argv
         popen_options = (
             {} if marker_write_fd is None else {"pass_fds": (marker_write_fd,)}
         )
