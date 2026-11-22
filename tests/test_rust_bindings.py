@@ -2283,3 +2283,29 @@ fn f(w: W<&mut&u8, u8>, g: W<&'b[u8], i8>) { w.m(); g.m(); }
     member_m = _bindings(report, "m", "associated_function")[0]
     assert _call(report, source, "w.m()").target == member_m.id
     assert _call(report, source, "g.m()").target == member_m.id
+
+
+def test_member_generic_impl_mut_prefixed_type_name_not_mut_ref():
+    # `&mutable::Value` is a shared reference to a type named
+    # `mutable` — the leading `mut` must not be read as `&mut`, so a
+    # `&mut A` impl does not apply, while a shared `&A` impl does.
+    source = """
+struct W<A, B> { a: A, b: B }
+trait T { fn m(&self) {} }
+impl<A> T for W<&mut A, u8> {}
+mod mutable { pub struct Value {} }
+fn f(w: W<&mutable::Value, u8>) { w.m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    assert _call(report, source, "w.m()").target == ""
+
+    source = """
+struct W<A, B> { a: A, b: B }
+trait T { fn m(&self) {} }
+impl<A> T for W<&A, u8> {}
+mod mutable { pub struct Value {} }
+fn f(w: W<&mutable::Value, u8>) { w.m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    member_m = _bindings(report, "m", "associated_function")[0]
+    assert _call(report, source, "w.m()").target == member_m.id

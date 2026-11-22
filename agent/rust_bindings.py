@@ -971,8 +971,12 @@ class _RustBindings:
                 bindings[a] = normalized
                 return True
             return bound == normalized
-        ref_a = re.fullmatch(r"&\s*(?:'\w+\s*)?(mut\s*)?(.+)", a)
-        ref_b = re.fullmatch(r"&\s*(?:'\w+\s*)?(mut\s*)?(.+)", b)
+        ref_a = re.fullmatch(
+            r"&\s*(?:'\w+\s*)?(mut(?![\w']))?\s*(.+)", a
+        )
+        ref_b = re.fullmatch(
+            r"&\s*(?:'\w+\s*)?(mut(?![\w']))?\s*(.+)", b
+        )
         if (ref_a is None) != (ref_b is None):
             return False
         if ref_a is not None:
