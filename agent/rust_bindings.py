@@ -3111,6 +3111,18 @@ class _RustBindings:
                     else:
                         elements = self._type_arg_list(receiver[1])
                         index = option_head[2]
+                        if (
+                            self.text(field).strip() == "get"
+                            and self._container_head_name(
+                                callee.child_by_field_name("value")
+                            )
+                            in {"HashSet", "BTreeSet"}
+                        ):
+                            # `HashSet<P, S>`/`BTreeSet<P, A>`
+                            # carry a trailing hasher/allocator
+                            # arg — `get` reads the element `P`,
+                            # not the last arg.
+                            index = 0
                         element = (
                             elements[index].strip()
                             if -len(elements) <= index < len(elements)
@@ -3536,7 +3548,7 @@ class _RustBindings:
                         and self._container_head_name(
                             callee.child_by_field_name("value")
                         )
-                        in {"Vec", "VecDeque"}
+                        in {"Vec"}
                     ):
                         # `v.swap_remove(i)` yields `T` — the
                         # container's last type arg.

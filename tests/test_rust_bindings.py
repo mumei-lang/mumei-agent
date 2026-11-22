@@ -6896,7 +6896,9 @@ fn f(o: Option<P>, q: VecDeque<P>) {
     assert bound["old.pm()"] == pm.id
     assert bound["p1.pm()"] == pm.id
     assert bound["p2.pm()"] == pm.id
-    assert bound["t.pm()"] == pm.id
+    # `swap_remove` is a Vec-only method — `VecDeque` exposes
+    # `swap_remove_front`/`swap_remove_back`, so `t` stays untyped.
+    assert not bound["t.pm()"]
 
 
 def test_set_heap_list_option_heads_bind_payloads():
@@ -6954,3 +6956,65 @@ fn f(m: BTreeMap<K, V>, t: BTreeSet<K>) {
     assert bound["k.km()"] == km.id
     assert bound["v.vm()"] == vm.id
     assert bound["p.km()"] == km.id
+
+def test_set_get_ignores_the_hasher_type_arg():
+    source = """
+use std::collections::HashSet;
+struct P;
+impl P { fn pm(&self) {} }
+struct S;
+impl S { fn sm(&self) {} }
+fn f(s: HashSet<P, S>) {
+    match s.get(&0) { Some(p) => p.pm(), _ => {} }
+    match s.get(&0) { Some(x) => x.sm(), _ => {} }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = [
+        call for call in report.calls
+        if raw[call.span.start:call.span.end].decode() == "p.pm()"
+    ]
+    assert len(bound) == 1 and bound[0].target == pm.id
+    unbound = [
+        call for call in report.calls
+        if raw[call.span.start:call.span.end].decode() == "x.sm()"
+        and call.target
+    ]
+    assert not unbound
+
+def test_swap_remove_only_types_vec_receivers():
+    source = """
+use std::collections::VecDeque;
+struct P;
+impl P { fn pm(&self) {} }
+struct Q;
+impl Q { fn qm(&self) {} }
+impl Q { fn swap_remove(&self, n: usize) -> Q { self } }
+fn f(v: Vec<P>, q: VecDeque<P>, w: Q) {
+    v.swap_remove(0).pm();
+    q.swap_remove(0).pm();
+    w.swap_remove(0).qm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    qm_swap = [
+        b for b in _bindings(report, "swap_remove", "associated_function")
+    ]
+    raw = source.encode()
+    bound = {
+        raw[call.span.start:call.span.end].decode(): call.target
+        for call in report.calls
+        if "swap_remove" in raw[call.span.start:call.span.end].decode()
+    }
+    assert bound.get("v.swap_remove(0).pm()") == pm.id
+    assert not bound.get("q.swap_remove(0).pm()")
+    # A declared `Q::swap_remove` still resolves normally.
+    calls = [
+        call for call in report.calls
+        if raw[call.span.start:call.span.end].decode()
+        == "w.swap_remove(0).qm()"
+    ]
+    assert len(calls) == 1 and calls[0].target
