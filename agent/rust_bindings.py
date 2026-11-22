@@ -178,6 +178,8 @@ _OPTION_HEAD_METHODS = {
     "and": ("", {"Option"}, 0),
     "or": ("", {"Option"}, 0),
     "xor": ("", {"Option"}, 0),
+    # `o.inspect(f)` yields the receiver unchanged — `Option<P>`.
+    "inspect": ("", {"Option"}, 0),
     # `Vec`/slice `split_first`/`split_last` — payload is the
     # `(element, rest-slice)` pair; `_SPLIT_PAIR_METHODS` spells it.
     "split_first": ("", {"Vec"}, -1),
@@ -4029,6 +4031,7 @@ class _RustBindings:
                             "as_ref", "as_mut",
                             "as_deref", "as_deref_mut",
                             "as_deref_err", "as_deref_mut_err",
+                            "inspect", "inspect_err",
                         }
                         and receiver[1] is not None
                     ):
@@ -4117,6 +4120,17 @@ class _RustBindings:
                                     ),
                                 )
                             return None, None
+                        if (
+                            method_name in {"inspect", "inspect_err"}
+                            and head == "Result"
+                            and len(recv_args) == 2
+                        ):
+                            # `r.inspect(f)`/`r.inspect_err(f)` yield
+                            # the receiver unchanged — `Result<T, E>`.
+                            return (
+                                None,
+                                "Result<{}>".format(receiver[1]),
+                            )
                         if (
                             method_name
                             in {

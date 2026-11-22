@@ -7823,3 +7823,35 @@ fn f(r: Result<P, E>, rb: Result<Box<P>, E>, rm: Result<P, E>, re: Result<P, Box
     # both stay opaque.
     assert not bound.get("np.pm()")
     assert not bound.get("wp.pm()")
+def test_option_and_result_inspect_keep_the_payload():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct E;
+impl E { fn em(&self) {} }
+struct W<T> { x: T }
+fn f(o: Option<P>, r: Result<P, E>, w: W<P>) {
+    if let Some(x) = o.inspect(|s| {}) { x.pm(); }
+    if let Ok(y) = r.inspect(|s| {}) { y.pm(); }
+    if let Err(e1) = r.inspect_err(|s| {}) { e1.em(); }
+    if let Ok(z) = r.inspect(|s| {}) { z.pm(); }
+    let wi = w.inspect(|s| {});
+    if let Ok(wp) = wi { wp.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    em = _bindings(report, "em", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `inspect`/`inspect_err` yield the receiver unchanged.
+    assert bound.get("x.pm()") == pm.id
+    assert bound.get("y.pm()") == pm.id
+    assert bound.get("e1.em()") == em.id
+    # A direct `inspect` scrutinee heads `Result` too.
+    assert bound.get("z.pm()") == pm.id
+    # A custom `W` names its own `inspect` — stays opaque.
+    assert not bound.get("wp.pm()")
