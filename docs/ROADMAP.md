@@ -9747,9 +9747,28 @@ still win over directives, matching solc's lookup order. The aliased
 form `using {f as g} for T` fails parse at the grammar level, so the
 whole source stays fail-closed rather than resolving half of it.
 Nested arrays, mappings, member objects on non-contract types,
-function-typed returns (`returns (function() ...)`), member
-chains on inner members and overloaded library functions keep
-their opaque treatment.
+function-typed returns (`returns (function() ...)`), function-typed
+variables, array `new` expressions and overloaded library functions
+keep their opaque treatment. Struct fields and enum members are now
+first-class bindings (`struct_field`, `enum_member` kinds): the
+declaration's members attach to the struct/enum type record and
+member access resolves them on variables, member chains
+(`coin.t.transfer`), struct-array elements (`coins[0].v`), call
+returns (`getCoin().v`), struct-constructor values (`Coin(...).v`),
+qualified enum literals (`Status.Ready`, `Container.State.On`) and
+nested type names (`Container.State` resolves the enum declaration).
+Enum constants only bind through the type name: an enum-typed value
+member (`status.Ready()`) prefers a `using` extension, matching
+solc. A struct-typed public getter returns the exploded fields, not
+the struct, so its member position stays opaque. Writes through a
+member chain emit the member's own `write` reference (read+write for
+compound updates) matching the compiler's MemberAccess
+referencedDeclaration list; assigning a non-assignable member
+(enum constant, function) records `unsupported_syntax` + read like
+the identifier rule. A qualified type name in a declaration
+annotation (`Container.State cst`) still only emits the root
+identifier — the type-position member is recorded `lexical_missing`
+in the fixture comparison.
 
 **回帰ゲート**: `uv run pytest tests/test_sol_bindings.py tests/test_sol_compiler_snapshot.py -q`
 ### C06 second compiler-backed Solidity binding slice — MemberAccess
@@ -9764,8 +9783,13 @@ while builtins (`.length`, `.push`, `msg.sender`) carry no
 builtin members, reassignment, `this.`/`super.`/inherited member
 calls, a `using SafeMath for uint256` member call and a file-level
 `using Stamps for Coin global` call, contract-array element calls,
-call returns, `new Token()` and public-getter calls: 35 `agree` and
-6 `builtin` statuses against the lexical report's member resolution. Envelope shape, pinned-version allowlist
+call returns, `new Token()` and public-getter calls, struct-field
+reads/writes (`coin.v`, `coins[0].v`, `coin.v += 1`), member chains
+(`coin.t.transfer`), a struct-constructor member (`Coin(...).v`),
+an enum literal (`Status.Ready`) and a qualified enum literal
+(`Container.State.On`): 59 `agree`, 6 `builtin` and one
+`lexical_missing` (the qualified type name inside the declaration
+annotation) statuses against the lexical report's member resolution. Envelope shape, pinned-version allowlist
 and fail-closed boundary are unchanged. Metadata comparison only — no
 new capture surface, route or claim.
 
