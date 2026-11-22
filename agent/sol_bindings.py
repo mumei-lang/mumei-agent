@@ -702,13 +702,17 @@ class _SolBindings:
         if obj.type == "identifier" and text == "super":
             owner = self.current_contract
             if owner is not None:
-                # `super` binds the first contract after this one in
-                # the C3 linearization that defines the member; private
-                # members are invisible to derived contracts and simply
-                # skipped. The DFS layer walk would emit a base's
-                # ancestors before a sibling base under diamonds, so
-                # the merge has to be done explicitly.
+                # `super` resolves among every contract after this one
+                # in the C3 linearization: private members are invisible
+                # to derived contracts and skipped, overridden
+                # same-signature definitions drop out, a lone surviving
+                # signature binds to the most derived definition, and a
+                # mixed-signature overload set stays opaque. The DFS
+                # layer walk would emit a base's ancestors before a
+                # sibling base under diamonds, so the merge has to be
+                # done explicitly.
                 saw_private = False
+                functions: list[_Record] = []
                 for base in self._linearized_bases(owner):
                     records = self._matching_records(
                         base.scope.records.get(name, []),
@@ -723,8 +727,31 @@ class _SolBindings:
                     saw_private = saw_private or len(visible) < len(records)
                     if not visible:
                         continue
-                    record, reason = self._choose(visible)
-                    return member, record, reason
+                    if any(
+                        record.binding.kind != "function"
+                        for record in visible
+                    ):
+                        if functions:
+                            break
+                        record, reason = self._choose(visible)
+                        return member, record, reason
+                    functions.extend(visible)
+                functions = self._drop_overridden_functions(functions)
+                if len(functions) == 1:
+                    return member, functions[0], None
+                if functions:
+                    # Same signature in several unrelated bases resolves
+                    # to the most derived, the first in linearization
+                    # order; differing signatures form an overload set
+                    # the call resolves against, which stays opaque.
+                    if len(
+                        {
+                            record.parameter_signature
+                            for record in functions
+                        }
+                    ) == 1:
+                        return member, functions[0], None
+                    return member, None, "ambiguous_overload"
                 if saw_private:
                     return member, None, "private_base_member"
             return member, None, None

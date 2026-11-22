@@ -1305,6 +1305,25 @@ contract C is A, B {
     assert call.target == f_in_a.id
 
 
+def test_super_member_with_mixed_signatures_stays_opaque():
+    source = """
+contract A { function f(uint256 x) internal virtual {} }
+contract B is A { function f(bool x) internal virtual {} }
+contract C is B {
+    function g() public { super.f(1); }
+}
+"""
+    report = build_sol_bindings(source)
+    call = next(call for call in report.calls)
+    # super.f sees the overload set {B.f(bool), A.f(uint)}; without
+    # argument typing the call can't be bound to a single target.
+    assert call.kind == "opaque_overload"
+    assert not call.target
+    assert not any(
+        ref.kind == "call" for ref in report.references
+    )
+
+
 def test_qualified_declared_type_member_stays_opaque():
     source = """
 library L {
