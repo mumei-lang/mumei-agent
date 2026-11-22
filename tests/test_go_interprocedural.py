@@ -33135,6 +33135,30 @@ def test_named_struct_element_pointer_param_reseat_alias(
     assert result.return_dependencies == frozenset({1, 2})
 
 
+def test_named_struct_element_pointer_param_reseat_alias_in_init(
+    go_types_helper,
+):
+    # An alias reseat in an if/for/switch initializer takes effect
+    # before the condition evaluates — the condition reads q's
+    # entry pointee, not p's.
+    for body in (
+        "if p = q; p.A[i].V > 0 { return 1 }",
+        "for p = q; (*p).A[i].V > 0; { return 1 }",
+        "switch p = q; (*p).A[i].V { case 1: return 1 }",
+    ):
+        result = named(
+            *unit(
+                go_types_helper,
+                "type E struct { V int64 }\n"
+                "type S2 struct { A []E }\n"
+                "func F(p *S2, q *S2, i int64) int64 {\n"
+                f"\t{body}\n"
+                "\treturn 0\n}\n",
+            )
+        )
+        assert result.available, (body, result.gaps)
+
+
 def test_named_struct_element_pointer_param_reseat_alias_write(
     go_types_helper,
 ):
@@ -33198,11 +33222,54 @@ def test_named_struct_element_pointer_param_reseat_alias_write(
             "\tp = &s\n"
             "\treturn p.A[i].V\n}\n"
         ),
+        # An element-pointer deref — `(*p.A[i])` reads a pointee
+        # reached through the field chain, not p's root slot.
+        (
+            "type E struct { F []int64 }\n"
+            "type S struct { A []*E }\n"
+            "func F(p *S, i int64) int64 {\n"
+            "\treturn (*p.A[i]).F[0]\n}\n"
+        ),
+        # An opaque reseat inside an if/for/switch initializer
+        # takes effect before the condition reads — the condition
+        # must not see the pre-update pointee.
+        (
+            "type S struct { F []int64 }\n"
+            "func F(p *S, q *S) int64 {\n"
+            "\ts := S{}\n"
+            "\tif p = &s; p.F[0] > 0 {\n"
+            "\t\treturn 1\n"
+            "\t}\n"
+            "\treturn 0\n}\n"
+        ),
+        (
+            "type S struct { F []int64 }\n"
+            "func F(p *S, q *S) int64 {\n"
+            "\ts := S{}\n"
+            "\tfor p = &s; (*p).F[0] > 0; {\n"
+            "\t\treturn 1\n"
+            "\t}\n"
+            "\treturn 0\n}\n"
+        ),
+        (
+            "type S struct { F []int64 }\n"
+            "func F(p *S, q *S) int64 {\n"
+            "\ts := S{}\n"
+            "\tswitch p = &s; (*p).F[0] {\n"
+            "\tcase 1:\n"
+            "\t\treturn 1\n"
+            "\t}\n"
+            "\treturn 0\n}\n"
+        ),
     ],
     ids=[
         "may-alias-join",
         "opaque-reseat",
         "alias-then-opaque",
+        "element-pointer-deref",
+        "if-init-reseat",
+        "for-init-reseat",
+        "switch-init-reseat",
     ],
 )
 def test_named_struct_element_pointer_param_reseat_stay_closed(
