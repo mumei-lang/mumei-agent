@@ -7,8 +7,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
 from agent.core_evidence import RUNTIME_CHECK_VOCABULARY
 from agent.native_exit_status_recheck import (
     CHECK_VOCABULARY,
@@ -384,14 +382,10 @@ def test_cli_dispatch():
     assert "--expected-build-id" in proc.stdout
 
 
-@pytest.mark.skipif(
-    not os.path.exists("/home/ubuntu/repos/mumei/target/debug/mumei"),
-    reason="real Core binary not built",
-)
-def test_real_core_end_to_end(tmp_path, capsys):
+def test_real_core_end_to_end(tmp_path, capsys, mumei_executable):
     """Build a real bundle with the real Core, then replay the artifact
     recheck as a declared attempt — reproduced + discharged checks."""
-    core = Path("/home/ubuntu/repos/mumei/target/debug/mumei")
+    core = Path(mumei_executable)
     source = tmp_path / "main.mm"
     source.write_text(SOURCE)
     bundle = tmp_path / "bundle"

@@ -14,10 +14,24 @@ on:
     paths:
       - agent/native_*.py
       - agent/core_evidence*.py
+      - agent/context_files.py
+      - agent/evidence_check_*.py
+      - agent/harness_metrics.py
+      - agent/lean_bridge.py
+      - agent/metrics.py
+      - agent/observe_tests.py
+      - agent/proliferate*.py
+      - agent/strategies/**
+      - agent/test_harvest.py
       - agent/verify_recheck*.py
+      - agent/verify_schedule.py
       - agent/mumei_client.py
+      - tests/test_evidence_check_*.py
       - tests/test_native_*.py
+      - tests/test_observe_tests_cli.py
+      - tests/test_proliferate_sibling_lemmas.py
       - tests/test_verify_recheck.py
+      - tests/test_verify_schedule.py
       - tests/test_controls_gate.py
       - .github/workflows/native-real-core.yml
 
@@ -113,6 +127,30 @@ jobs:
               -m integration --run-integration \
               -v --tb=short --junitxml=real-core-junit.xml
 
+      - name: Run real-Core binary-gated unit tests
+        working-directory: mumei-agent
+        run: |
+          MUMEI_BIN="$GITHUB_WORKSPACE/mumei/target/release/mumei" \
+            uv run pytest \
+              tests/test_evidence_check_consistency.py::TestRealCore::test_real_check_consistency_reports_consistent \
+              tests/test_evidence_check_consistency.py::TestRealCore::test_real_check_consistency_rejected_envelope_claims_nothing \
+              tests/test_evidence_check_list.py::TestRealCore::test_real_check_list_reports_valid \
+              tests/test_evidence_check_list.py::TestRealCore::test_real_check_list_rejects_bogus_bytes \
+              tests/test_evidence_check_route.py::TestRealCore::test_real_check_reports_valid \
+              tests/test_evidence_check_route.py::TestRealCore::test_real_check_rejects_bogus_bytes \
+              tests/test_native_attempt.py::TestRealCore::test_real_build_selects_and_pins_build_id \
+              tests/test_native_attempt.py::TestRealCore::test_outside_profile_source_selects_nothing \
+              tests/test_native_check.py::test_real_core_end_to_end \
+              tests/test_native_artifact_recheck.py::test_real_core_end_to_end \
+              tests/test_native_source_recheck.py::test_real_core_end_to_end \
+              tests/test_native_exit_status_recheck.py::test_real_core_end_to_end \
+              tests/test_observe_tests_cli.py::test_observe_tests_real_mumei_integration \
+              tests/test_proliferate_sibling_lemmas.py::test_real_mumei_resolves_sibling_from_verify_dir \
+              tests/test_proliferate_sibling_lemmas.py::test_real_mumei_claims_exposes_g4_grade \
+              tests/test_verify_schedule.py::test_exported_triple_passes_the_real_claim_gate \
+              -m "not integration" \
+              -v --tb=short --junitxml=real-core-unmarked-junit.xml
+
       - name: Reject skipped or missing real-Core tests
         working-directory: mumei-agent
         run: |
@@ -122,29 +160,39 @@ jobs:
           import xml.etree.ElementTree as ET
           from pathlib import Path
 
-          report = ET.parse("real-core-junit.xml").getroot()
-          testcases = report.findall(".//testcase")
-          total = len(testcases)
-          skipped = sum(case.find("skipped") is not None for case in testcases)
-          failures = sum(case.find("failure") is not None for case in testcases)
-          errors = sum(case.find("error") is not None for case in testcases)
+          reports = [
+              ("Real-Core native integration", "real-core-junit.xml", 45),
+              ("Real-Core binary-gated unit tests", "real-core-unmarked-junit.xml", 16),
+          ]
           lines = [
-              "### Real-Core native integration results",
+              "### Real-Core test results",
               "",
-              "| Total | Skipped | Failures | Errors |",
-              "| ---: | ---: | ---: | ---: |",
-              f"| {total} | {skipped} | {failures} | {errors} |",
+              "| Suite | Total | Skipped | Failures | Errors |",
+              "|---|---:|---:|---:|---:|",
               "",
           ]
+          invalid = []
+          for name, path, floor in reports:
+              report = ET.parse(path).getroot()
+              testcases = report.findall(".//testcase")
+              total = len(testcases)
+              skipped = sum(case.find("skipped") is not None for case in testcases)
+              failures = sum(case.find("failure") is not None for case in testcases)
+              errors = sum(case.find("error") is not None for case in testcases)
+              lines.append(
+                  f"| {name} | {total} | {skipped} | {failures} | {errors} |"
+              )
+              if total < floor or skipped > 0 or failures + errors > 0:
+                  invalid.append(
+                      f"{name} must include at least {floor} tests with no skips, failures, or errors."
+                  )
           summary = "\n".join(lines)
           print(summary, end="")
           with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as stream:
               stream.write(summary)
-          if total < 45 or skipped > 0 or failures + errors > 0:
-              print(
-                  "Real-Core tests must include at least 45 tests with no skips, failures, or errors.",
-                  file=sys.stderr,
-              )
+          if invalid:
+              for message in invalid:
+                  print(message, file=sys.stderr)
               sys.exit(1)
           PY
 
@@ -153,4 +201,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: real-core-junit
-          path: mumei-agent/real-core-junit.xml
+          path: |
+            mumei-agent/real-core-junit.xml
+            mumei-agent/real-core-unmarked-junit.xml
