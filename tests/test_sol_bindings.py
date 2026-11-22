@@ -1906,6 +1906,74 @@ contract Vault {
     assert report.calls[-1].kind == "opaque_member"
 
 
+def test_using_on_array_getter_binds_element_type():
+    source = """
+library SafeMath {
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {}
+}
+contract Vault {
+    using SafeMath for uint256;
+    uint256[] public values;
+    function run() external { this.values(0).add(1); }
+}
+"""
+    # `this.values(0)` returns the element — the `uint256` extension
+    # applies.
+    report = build_sol_bindings(source)
+    add = next(b for b in report.bindings if b.name == "add")
+    assert any(
+        ref.binding_id == add.id and ref.kind == "call"
+        for ref in report.references
+    )
+
+
+def test_using_respects_qualified_ctor_name():
+    source = """
+struct Coin { uint256 v; }
+contract Container {
+    struct Coin { uint256 w; }
+}
+library Stamps {
+    function stamp(Container.Coin memory c) internal pure {}
+}
+contract Vault {
+    using Stamps for Container.Coin;
+    function run() external { Container.Coin(1).stamp(); }
+}
+"""
+    # `Container.Coin(1)` must not match `using ... for Coin` — the
+    # target spells the qualified name.
+    report = build_sol_bindings(source)
+    stamp = next(b for b in report.bindings if b.name == "stamp")
+    assert any(
+        ref.binding_id == stamp.id and ref.kind == "call"
+        for ref in report.references
+    )
+
+
+def test_using_chain_does_not_reexamine_prefixes():
+    depth = 40
+    chain = "".join(f".add({i})" for i in range(depth))
+    source = f"""
+library SafeMath {{
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {{}}
+}}
+contract Vault {{
+    using SafeMath for uint256;
+    uint256 total;
+    function run() external {{ total{chain}; }}
+}}
+"""
+    report = build_sol_bindings(source)
+    add = next(b for b in report.bindings if b.name == "add")
+    add_calls = [
+        ref
+        for ref in report.references
+        if ref.binding_id == add.id and ref.kind == "call"
+    ]
+    assert len(add_calls) == depth
+
+
 def test_using_on_nested_array_stays_opaque():
     source = """
 library SafeMath {

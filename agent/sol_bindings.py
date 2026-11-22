@@ -152,6 +152,12 @@ class _SolBindings:
         self.contracts: dict[str, _Contract] = {}
         self.type_records: dict[int, _Record] = {}
         self.current_contract: _Contract | None = None
+        # `_resolve_member` results keyed by node span: a member
+        # chain resolves its prefix once and shares it between the
+        # contract path and the `using` fallback.
+        self._member_resolution: dict[
+            tuple[int, int], tuple[Any, Any, Any]
+        ] = {}
         self.file_usings: list[_Using] = []
         self.call_owner = ""
         self.glob_imports: list[Any] = []
@@ -785,6 +791,20 @@ class _SolBindings:
     def _resolve_member(
         self, node: Any
     ) -> tuple[Any | None, _Record | None, str | None]:
+        cached = self._member_resolution.get(
+            (node.start_byte, node.end_byte)
+        )
+        if cached is not None:
+            return cached
+        result = self._resolve_member_uncached(node)
+        self._member_resolution[
+            (node.start_byte, node.end_byte)
+        ] = result
+        return result
+
+    def _resolve_member_uncached(
+        self, node: Any
+    ) -> tuple[Any | None, _Record | None, str | None]:
         """Resolve `object.property` when the object has a declared
         contract/interface/library type or names one directly.
 
@@ -1042,25 +1062,43 @@ class _SolBindings:
                 "enum",
             }:
                 # `Token(addr)` / `Coin(...)` — the value is typed by
-                # the declared type itself.
+                # the declared type itself. A qualified callee keeps
+                # its dotted name (`Container.Coin(1)`): using targets
+                # spell the type the same way.
+                if callee.type == "member_expression":
+                    return self.text(callee)
                 return record.binding.name
             if record.binding.kind != "function":
                 if record.type_node is None or re.match(
                     r"\s*function\b", self.text(record.type_node)
                 ):
                     return None
+                text = self.text(record.type_node)
+                if callee.type == "member_expression":
+                    # A public getter on an indexable member returns
+                    # the element: `this.values(0)` is a `uint256`,
+                    # `this.b(0)` on `bytes` a `bytes1`.
+                    text = re.sub(
+                        r"\[[^\]]*\]\s*$", "", text
+                    ).strip()
+                    if text == "bytes":
+                        text = "bytes1"
                 # A public getter on a struct/enum-typed member returns
                 # the exploded fields, not the type — no extension
                 # target exists for the tuple.
                 resolved = self._type_record_for_type_node(
                     record.type_node, record.owner
                 )
+                if resolved is None:
+                    resolved, _reason = self._lookup(
+                        text, record.node.start_byte, "type"
+                    )
                 if resolved is not None and resolved.binding.kind in {
                     "struct",
                     "enum",
                 }:
                     return None
-                return self.text(record.type_node)
+                return text
             function_node = record.node.parent
             if function_node is None:
                 return None
