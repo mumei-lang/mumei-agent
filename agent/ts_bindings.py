@@ -120,6 +120,24 @@ class _FunctionInfo:
     generator: bool
 
 
+# Which namespace facet a member binding publishes. Member records
+# leave `record.namespaces` empty (they are not top-level symbols), so
+# the lookup decides the type/value side from the binding kind.
+_MEMBER_KIND_NAMESPACES: dict[str, frozenset[str]] = {
+    "class": frozenset({"value", "type"}),
+    "interface": frozenset({"type"}),
+    "enum": frozenset({"value", "type"}),
+    "enum_member": frozenset({"value", "type"}),
+    "type_alias": frozenset({"type"}),
+    "namespace": frozenset({"value", "type"}),
+    "ambient": frozenset({"value", "type"}),
+    "function": frozenset({"value"}),
+    "associated_function": frozenset({"value"}),
+    "variable": frozenset({"value"}),
+    "parameter": frozenset({"value"}),
+}
+
+
 class _TypeScriptBindings:
     def __init__(self, source: str, raw: bytes, root: Any, *, tsx: bool):
         self.source = source
@@ -138,6 +156,13 @@ class _TypeScriptBindings:
         self._member_lookup_active: set[
             tuple[str, str, bool]
         ] = set()
+        # Exported-name collisions: when several members share the
+        # looked-up name under different declared names (duplicate
+        # `export {... as Public}` — a tsc error, but still indexed),
+        # the losers stay reachable as extras so path segments can
+        # keep descending (`N.Public.B` reaches the namespace's `B`
+        # even when the interface won the `Public` segment).
+        self._member_lookup_extras: dict[str, list[_Record]] = {}
         self.function_records: dict[int, _Record] = {}
         self._function_node_ids: set[int] = set()
         self._type_alias_cache: dict[str, TypeFact] = {}
@@ -1375,6 +1400,9 @@ class _TypeScriptBindings:
             if not static and sibling.binding.kind == "namespace":
                 continue
             queue.append(sibling)
+        queue.extend(
+            self._member_lookup_extras.get(type_record.binding.id, ())
+        )
         visited: set[str] = set()
         seed_ids = {record.binding.id for record in queue}
         matches: list[_Record] = []
@@ -1392,6 +1420,21 @@ class _TypeScriptBindings:
                     continue
                 value_names, type_names = self._member_name_sets(candidate)
                 if name not in (type_names if for_type else value_names):
+                    continue
+                member_ns = _MEMBER_KIND_NAMESPACES.get(
+                    candidate.binding.kind
+                )
+                if member_ns is None:
+                    member_ns = candidate.namespaces or frozenset(
+                        {"value", "type"}
+                    )
+                if (
+                    "type" if for_type else "value"
+                ) not in member_ns:
+                    # `export {I as Public}` on an interface publishes
+                    # the name on the type side only — a value-side
+                    # `N.Public.f()` must keep looking for a
+                    # value-carrying member (the namespace M).
                     continue
                 if (
                     not namespace_member
@@ -1456,7 +1499,13 @@ class _TypeScriptBindings:
         )
         for candidate in matches:
             if name in getattr(candidate, authored):
+                self._member_lookup_extras.setdefault(
+                    candidate.binding.id, []
+                ).extend(m for m in matches if m is not candidate)
                 return candidate
+        self._member_lookup_extras.setdefault(
+            matches[0].binding.id, []
+        ).extend(m for m in matches[1:])
         return matches[0]
 
     def _member_name_sets(
