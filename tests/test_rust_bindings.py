@@ -5183,3 +5183,155 @@ fn f(w: W, o: Option<[P; 2]>, r: Result<[P; 2], u8>) -> u8 {
     ]
     assert len(calls) == 5
     assert all(c.target == m.id for c in calls)
+
+
+def test_for_element_through_preserving_iter_adaptors() -> None:
+    source = """\
+struct P;
+impl P { fn m(&self) {} }
+fn f(v: Vec<P>) {
+    for p in v.iter().rev() { p.m(); }
+    for p in v.iter().skip(1).take(2) { p.m(); }
+    for p in v.iter().filter(|x| true) { p.m(); }
+    for p in v.as_slice() { p.m(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = next(b for b in report.bindings if b.name == "m")
+    calls = [
+        c
+        for c in report.calls
+        if source[c.span.start : c.span.end].endswith("m()")
+    ]
+    assert [c.target for c in calls] == [m.id] * 4
+
+
+def test_for_element_map_adaptor_stays_unpinned() -> None:
+    source = """\
+struct P;
+impl P { fn m(&self) {} }
+fn f(v: Vec<P>) {
+    for p in v.iter().map(|x| x) { p.m(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    call = next(
+        c
+        for c in report.calls
+        if source[c.span.start : c.span.end].endswith("m()")
+    )
+    assert call.target == ""
+
+
+def test_for_enumerate_binds_value_by_element_type() -> None:
+    source = """\
+struct P;
+impl P { fn m(&self) {} }
+fn f(v: Vec<P>) {
+    for (i, p) in v.iter().enumerate() {
+        p.m();
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = next(b for b in report.bindings if b.name == "m")
+    call = next(
+        c
+        for c in report.calls
+        if source[c.span.start : c.span.end].endswith("m()")
+    )
+    assert call.target == m.id
+
+
+def test_for_declared_adaptor_uses_its_own_return_type() -> None:
+    source = """\
+struct P;
+impl P { fn m(&self) {} }
+struct Q;
+impl Q { fn q(&self) {} }
+struct W<T>;
+impl<T> W<T> {
+    fn rev(&self) -> Vec<Q> { vec![] }
+    fn as_slice(&self) -> &[Q] { &[] }
+}
+fn f(w: W<P>) {
+    for q in w.rev() { q.q(); }
+    for q in w.as_slice() { q.q(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    q = next(b for b in report.bindings if b.name == "q")
+    calls = [
+        c
+        for c in report.calls
+        if source[c.span.start : c.span.end].endswith("q()")
+    ]
+    assert [c.target for c in calls] == [q.id, q.id]
+
+
+def test_for_custom_container_args_do_not_leak_as_tuple_elements() -> None:
+    source = """\
+struct P;
+impl P { fn m(&self) {} }
+struct Q;
+struct W<T>;
+fn f(w: W<(P, Q)>) {
+    for (a, b) in w.iter() { a.m(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    call = next(
+        c
+        for c in report.calls
+        if source[c.span.start : c.span.end].endswith("m()")
+    )
+    assert call.target == ""
+
+
+def test_for_enumerate_declared_inner_iter_stays_opaque() -> None:
+    source = """\
+struct P;
+impl P { fn m(&self) {} }
+struct Q;
+struct R;
+impl R { fn iter(&self) -> std::vec::IntoIter<Q> { todo!() } }
+fn f(r: R) {
+    for (i, p) in r.iter().enumerate() { p.m(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    call = next(
+        c
+        for c in report.calls
+        if source[c.span.start : c.span.end].endswith("m()")
+    )
+    assert call.target == ""
+
+
+def test_let_pattern_uses_inline_annotation() -> None:
+    source = """\
+struct P;
+impl P { fn m(&self) {} }
+struct Q;
+impl Q { fn q(&self) {} }
+struct W { x: P, y: Q }
+fn h() {
+    let (a, b): (P, P) = (P, P);
+    a.m();
+    b.m();
+    let Some(v): Option<P> = Some(P);
+    v.m();
+    let W { x, y }: W = W { x: P, y: Q };
+    x.m();
+    y.q();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = next(b for b in report.bindings if b.name == "m")
+    q = next(b for b in report.bindings if b.name == "q")
+    calls = [
+        c
+        for c in report.calls
+        if source[c.span.start : c.span.end].endswith(("m()", "q()"))
+    ]
+    assert [c.target for c in calls] == [m.id, m.id, m.id, m.id, q.id]
