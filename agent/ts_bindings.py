@@ -1828,17 +1828,27 @@ class _TypeScriptBindings:
     def _literal_equal(declared: str, actual: str) -> bool:
         """Literal spellings carrying the same value — `'s'` fits
         `x: "s"`, `0x1` fits `x: 1`, and an uninterpolated `` `s` ``
-        fits `x: "s"`."""
+        fits `x: "s"`. A quoted literal never equals a bare token
+        (`"true"` does not fit `x: true` arguments or a `Widget`
+        type), and a backtick string containing `${` is a computed
+        template, not a constant."""
         if declared == actual:
             return True
+        nonconstant = object()
 
-        def value(spelling: str) -> str | int | float:
-            if (
+        def quoted(spelling: str) -> bool:
+            return (
                 len(spelling) >= 2
                 and spelling[0] in "\"'`"
                 and spelling.endswith(spelling[0])
-            ):
-                return spelling[1:-1]
+            )
+
+        def value(spelling: str) -> object:
+            if quoted(spelling):
+                inner = spelling[1:-1]
+                if spelling[0] == "`" and "${" in inner:
+                    return nonconstant
+                return inner
             try:
                 return int(spelling.replace("_", ""), 0)
             except ValueError:
@@ -1848,7 +1858,11 @@ class _TypeScriptBindings:
             except ValueError:
                 return spelling
 
+        if quoted(declared) != quoted(actual):
+            return False
         declared_value, actual_value = value(declared), value(actual)
+        if declared_value is nonconstant or actual_value is nonconstant:
+            return False
         if isinstance(declared_value, str) or isinstance(
             actual_value, str
         ):

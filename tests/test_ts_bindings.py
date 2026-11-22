@@ -2674,3 +2674,53 @@ f(0x1);
         c for c in _calls(report) if source[c.span.start:c.span.end] == "f(0x1)"
     )
     assert call.target == fs[0].id
+
+def test_overload_string_literal_does_not_match_bare_token():
+    # `f(true)` does not fit `f(x: "true")` — a quoted literal only
+    # matches a literal string argument, and `f(new Widget())` does
+    # not fit `f(x: "Widget")` either.
+    source = """
+class Widget {}
+function f(a: "true"): void {}
+function f(a: "Widget"): void {}
+function f(a: boolean): void {}
+function f(a: Widget): void {}
+f(true);
+f(new Widget());
+"""
+    report = build_ts_bindings(source)
+    fs = sorted(
+        _bindings(report, "f", "function"), key=lambda b: b.span.start
+    )
+    bool_fn, widget_fn = fs[2], fs[3]
+    true_call = next(
+        c for c in _calls(report)
+        if source[c.span.start:c.span.end] == "f(true)"
+    )
+    new_call = next(
+        c for c in _calls(report)
+        if source[c.span.start:c.span.end] == "f(new Widget())"
+    )
+    assert true_call.target == bool_fn.id
+    assert new_call.target == widget_fn.id
+
+
+def test_overload_interpolated_template_is_not_a_literal():
+    # `f(`${name}`)` is computed — it does not fit a `f(x: "${name}")`
+    # literal overload, so the wider `string` signature wins.
+    name = "n"
+    source = """
+function f(a: "${name}"): void {}
+function f(a: string): void {}
+declare const n: string;
+f(`value-${n}`);
+"""
+    report = build_ts_bindings(source)
+    string_fn = sorted(
+        _bindings(report, "f", "function"), key=lambda b: b.span.start
+    )[1]
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start:c.span.end] == "f(`value-${n}`)"
+    )
+    assert call.target == string_fn.id
