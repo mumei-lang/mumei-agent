@@ -19196,6 +19196,111 @@ def test_function_values_read_from_struct_fields_keep_closure_records(
     assert non_function.effects == "none_in_supported_fragment"
 
 
+def test_struct_field_closures_keep_records_through_escapes(
+    go_types_helper,
+):
+    declarations = (
+        "type S struct{ F func() int64 }\n"
+        "type W struct{ F func() }\n"
+        "type N struct{ F int64 }\n"
+        "func apRead(cb func() int64) int64 { return cb() }\n"
+        "func apWrite(cb func()) { cb() }\n"
+        "func FieldArgument(x int64) int64 { v := int64(0); var s S; "
+        "s.F = func() int64 { return v }; v = x; return apRead(s.F) }\n"
+        "func TrackedArgument(x int64) int64 { v := int64(0); "
+        "g := func() int64 { return v }; v = x; return apRead(g) }\n"
+        "func ExtractedArgument(x int64) int64 { v := int64(0); var s S; "
+        "s.F = func() int64 { return v }; f := s.F; v = x; "
+        "return apRead(f) }\n"
+        "func FieldWriteArgument(x int64) int64 { w := int64(0); "
+        "g := func() { w = x }; var s W; s.F = g; "
+        "apWrite(s.F); return w }\n"
+        "func TrackedWriteArgument(x int64) int64 { w := int64(0); "
+        "g := func() { w = x }; apWrite(g); return w }\n"
+        "func DeferFieldWrite(x int64) (r int64) { "
+        "g := func() { r = x }; var s W; s.F = g; "
+        "defer s.F(); return 0 }\n"
+        "func DeferTrackedWrite(x int64) (r int64) { "
+        "g := func() { r = x }; defer g(); return 0 }\n"
+        "func DeferFieldCapture(x int64) (r int64) { "
+        "v := int64(0); g := func() { r = v }; var s W; s.F = g; "
+        "defer s.F(); v = x; return 0 }\n"
+        "func DeferTrackedCapture(x int64) (r int64) { "
+        "v := int64(0); g := func() { r = v }; "
+        "defer g(); v = x; return 0 }\n"
+        "func DeferApField(x int64) (r int64) { "
+        "v := int64(0); g := func() { r = v }; var s W; s.F = g; "
+        "defer apWrite(s.F); v = x; return 0 }\n"
+        "func DeferApTracked(x int64) (r int64) { "
+        "v := int64(0); g := func() { r = v }; "
+        "defer apWrite(g); v = x; return 0 }\n"
+        "func GoField(x int64) int64 { w := int64(0); "
+        "g := func() { w = x }; var s W; s.F = g; "
+        "go s.F(); return w }\n"
+        "func GoFieldRace(x int64) int64 { v := int64(0); "
+        "w := int64(0); g := func() { w = v }; var s W; s.F = g; "
+        "go s.F(); v = x; return w }\n"
+        "func NoRecordsControl(x int64) int64 { "
+        "var s S; return apRead(s.F) + x }\n"
+        "func ParamStructControl(s S, x int64) int64 { "
+        "return apRead(s.F) + x }\n"
+        "func ParamCallbackControl(cb func() int64, x int64) int64 { "
+        "return apRead(cb) + x }\n"
+        "func NonFuncFieldControl(x, y int64) int64 { "
+        "s := N{F: y}; return s.F + x }\n"
+    )
+    source, snapshot, summaries = unit(go_types_helper, declarations)
+
+    def assert_parity(field_function, tracked_function, dependencies):
+        field_result = named(source, snapshot, summaries, field_function)
+        tracked_result = named(source, snapshot, summaries, tracked_function)
+        assert field_result.available, (field_function, field_result.gaps)
+        assert tracked_result.available, (
+            tracked_function,
+            tracked_result.gaps,
+        )
+        assert (
+            field_result.return_dependencies
+            == tracked_result.return_dependencies
+            == frozenset(dependencies)
+        )
+        assert field_result.effects == tracked_result.effects == "unknown"
+
+    for field_function, tracked_function, dependencies in (
+        ("FieldArgument", "TrackedArgument", {0}),
+        ("ExtractedArgument", "TrackedArgument", {0}),
+        ("FieldWriteArgument", "TrackedWriteArgument", {0}),
+        ("DeferFieldWrite", "DeferTrackedWrite", {0}),
+        ("DeferFieldCapture", "DeferTrackedCapture", {0}),
+        ("DeferApField", "DeferApTracked", {0}),
+    ):
+        assert_parity(field_function, tracked_function, dependencies)
+
+    go_field = named(source, snapshot, summaries, "GoField")
+    assert go_field.available, go_field.gaps
+    assert go_field.return_dependencies == frozenset({0})
+    assert go_field.effects == "unknown"
+
+    go_race = named(source, snapshot, summaries, "GoFieldRace")
+    assert not go_race.available
+    assert any(gap.reason == "unsupported_statement" for gap in go_race.gaps)
+
+    for function_name, dependencies, effects in (
+        ("NoRecordsControl", {0}, "unknown"),
+        ("ParamStructControl", {0, 1}, "unknown"),
+        ("ParamCallbackControl", {0, 1}, "unknown"),
+        (
+            "NonFuncFieldControl",
+            {0, 1},
+            "none_in_supported_fragment",
+        ),
+    ):
+        result = named(source, snapshot, summaries, function_name)
+        assert result.available, (function_name, result.gaps)
+        assert result.return_dependencies == frozenset(dependencies)
+        assert result.effects == effects
+
+
 def test_struct_field_factory_results_fail_closed(
     go_types_helper,
 ):

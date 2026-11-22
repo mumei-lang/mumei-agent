@@ -12686,6 +12686,63 @@ class _Builder:
             and binding_id not in self.bound_interface_methods
         )
 
+    def _has_closure_records(self, binding_id: str) -> bool:
+        return (
+            binding_id in self.closure_captures
+            or binding_id in self.closure_writes
+            or binding_id in self.closure_star_writes
+            or binding_id in self.closure_inner_calls
+            or binding_id in self.pointee_closures
+        )
+
+    def _closure_argument_record_id(
+        self, node: Any, params: dict[str, int]
+    ) -> str | None:
+        value = self._strip_parens(node)
+        if value is None:
+            return None
+        if value.type == "identifier":
+            ref = self.references.get(self.node_key(value))
+            binding_id = ref.binding_id if ref is not None else None
+            binding = (
+                self.bindings.get(binding_id)
+                if binding_id is not None
+                else None
+            )
+            if (
+                binding_id is None
+                or binding is None
+                or binding.type is None
+                or binding.type.kind != "function"
+                or binding_id in params
+                or binding_id in self.func_aliases
+                or binding_id in self.bound_method_values
+                or binding_id in self.bound_interface_methods
+            ):
+                return None
+            if binding_id in self.opaque_callees:
+                return (
+                    binding_id
+                    if self._has_closure_records(binding_id)
+                    else None
+                )
+            return (
+                binding_id
+                if self._is_tracked_literal_value(binding_id, params)
+                else None
+            )
+        if value.type == "selector_expression":
+            member = self._field_member(value)
+            if (
+                member is not None
+                and member.kind in {"var", "variable"}
+                and member.type is not None
+                and member.type.kind == "function"
+                and self._has_closure_records(member.id)
+            ):
+                return member.id
+        return None
+
     def _captured_current_deps(
         self,
         captured: frozenset[str],
@@ -13018,6 +13075,22 @@ class _Builder:
         ):
             ref = self.references.get(self.node_key(function_node))
             callee_id = ref.binding_id if ref is not None else None
+        field_callee = False
+        if (
+            callee_id is None
+            and function_node is not None
+            and function_node.type == "selector_expression"
+        ):
+            member = self._field_member(function_node)
+            if (
+                member is not None
+                and member.kind in {"var", "variable"}
+                and member.type is not None
+                and member.type.kind == "function"
+                and self._has_closure_records(member.id)
+            ):
+                callee_id = member.id
+                field_callee = True
         captured = frozenset(
             self.closure_captures.get(callee_id, frozenset())
         )
@@ -13042,6 +13115,7 @@ class _Builder:
             or callee_id in self.pointee_closures
             or callee_id in self.opaque_callees
             or callee_id in params
+            or field_callee
         )
         target_id = None
         if callee_id_override is None:
@@ -13094,20 +13168,10 @@ class _Builder:
                     value = self._strip_parens(argument)
                     if value is None:
                         continue
-                    if value.type == "identifier":
-                        ref = self.references.get(
-                            self.node_key(value)
-                        )
-                        binding_id = (
-                            ref.binding_id if ref is not None else None
-                        )
-                        if (
-                            binding_id is None
-                            or not self._is_tracked_literal_value(
-                                binding_id, params
-                            )
-                        ):
-                            continue
+                    binding_id = self._closure_argument_record_id(
+                        value, params
+                    )
+                    if binding_id is not None:
                         captured |= self.closure_captures.get(
                             binding_id, frozenset()
                         )
@@ -13115,7 +13179,9 @@ class _Builder:
                             binding_id, frozenset()
                         )
                         star_or_external |= (
-                            binding_id in self.closure_star_writes
+                            value.type == "selector_expression"
+                            or binding_id in self.opaque_callees
+                            or binding_id in self.closure_star_writes
                             or binding_id in self.closure_inner_calls
                             or binding_id in self.pointee_closures
                         )
@@ -28826,6 +28892,7 @@ class _Builder:
             self.node_key(node), frozenset()
         )
         for arg_node, binding_id in pending:
+            field_value = arg_node.type == "selector_expression"
             callee = (
                 self.summarize(binding_id)
                 if binding_id in self.functions
@@ -28902,6 +28969,10 @@ class _Builder:
                         or not has_literal
                     )
                     external_chan = unbounded
+            if field_value:
+                unbounded = True
+                external = True
+                external_chan = True
             transfers.append(
                 CallTransfer(
                     FileSpan(
@@ -33005,24 +33076,24 @@ class _Builder:
                 )
         for index, argument in enumerate(arguments):
             value = self._strip_parens(argument)
-            if value is None or value.type != "identifier":
+            if value is None:
                 continue
-            ref = self.references.get(self.node_key(value))
-            binding_id = ref.binding_id if ref is not None else None
-            if binding_id is not None and self._is_tracked_literal_value(
-                binding_id, params
-            ):
-                actual_values[index] |= self._captured_current_deps(
-                    self.closure_captures.get(
-                        binding_id, frozenset()
-                    ),
-                    params,
-                    locals_,
+            binding_id = self._closure_argument_record_id(value, params)
+            if binding_id is None:
+                continue
+            actual_values[index] |= self._captured_current_deps(
+                self.closure_captures.get(
+                    binding_id, frozenset()
+                ),
+                params,
+                locals_,
+            )
+            if binding_id in self.closure_factory_results:
+                actual_values[index] |= locals_.get(
+                    binding_id, frozenset()
                 )
-                if binding_id in self.closure_factory_results:
-                    actual_values[index] |= locals_.get(
-                        binding_id, frozenset()
-                    )
+            if value.type == "selector_expression":
+                self._queue_func_arg_invocation(value, binding_id)
         if local_chan_chan_roots is not None:
             for index, argument in enumerate(arguments):
                 root_id = self._local_chan_chan_id(argument)
