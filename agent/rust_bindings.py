@@ -2318,6 +2318,8 @@ class _RustBindings:
             # — walk the declaration to recover one, or the spelled
             # args would resolve at the call site and hit shadows.
             _, spelled_pos, _ = self._scrutinee_shape(value, None)
+        decl_scope = None
+        ret = None
         if value.type == "call_expression":
             # `o.unwrap()` reads the args the method's return
             # annotation wrote (`fn get(&self) -> Option<Q>`) —
@@ -2331,11 +2333,98 @@ class _RustBindings:
                 else None
             )
             if member is not None and member.type_node is not None:
-                ret = member.type_node.child_by_field_name(
-                    "return_type"
+                ret = (
+                    member.type_node.child_by_field_name(
+                        "return_type"
+                    )
+                    or member.type_node
                 )
                 if ret is not None:
                     spelled_pos = ret.start_byte
+                    owner = (
+                        self.records.get(member.member_of)
+                        if member.member_of
+                        else None
+                    )
+                    decl_scope = (
+                        owner.home_scope
+                        if owner is not None
+                        else None
+                    )
+                    # The substitution map comes from the
+                    # receiver's declared container (`w: W<Q>`),
+                    # not the call's own return head (`Option`
+                    # has no declared record to map params
+                    # against).
+                    callee_value = callee.child_by_field_name(
+                        "value"
+                    )
+                    receiver_head, receiver_args = (
+                        self._receiver_type(callee_value)
+                    )
+                    container = (
+                        None
+                        if receiver_head is None
+                        else self.records.get(receiver_head)
+                    )
+                    param_map = (
+                        {}
+                        if container is None
+                        else self._pattern_param_map(
+                            container, receiver_args
+                        )
+                    )
+                    member_text = self.text(member.type_node)
+                    ret_args = []
+                    ret_generics = re.search(
+                        r"<([\s\S]*)>",
+                        self.text(ret),
+                    )
+                    if ret_generics is not None:
+                        ret_args = [
+                            a.strip()
+                            for a in self._type_arg_list(
+                                ret_generics.group(1)
+                            )
+                        ]
+                    arg_head = (
+                        None
+                        if index >= len(ret_args)
+                        else re.match(
+                            r"[A-Za-z_][\w:]*",
+                            re.sub(
+                                r"^(?:[\s&*()]+|(?:const|mut)\s+|'\w+\s*)+",
+                                "",
+                                ret_args[index],
+                            ),
+                        )
+                    )
+                    if (
+                        param_map
+                        and arg_head is not None
+                        and self._normalize_identifier(arg_head.group(0))
+                        in param_map
+                        and any(
+                            re.search(
+                                rf"\b{re.escape(param)}\b",
+                                member_text,
+                            )
+                            for param in param_map
+                        )
+                    ):
+                        # The payload arg spells the container's
+                        # own param — it was substituted from the
+                        # receiver's annotation, so resolve it
+                        # there. A fixed sibling arg (`E` in
+                        # `Result<T, E>`) stays in the method's
+                        # declaring scope.
+                        inner_pos = (
+                            self._receiver_annotation_position(
+                                callee.child_by_field_name("value")
+                            )
+                        )
+                        if inner_pos is not None:
+                            spelled_pos = inner_pos
         args = self._type_arg_list(value_args or "")
         if len(args) <= index:
             return None, None
@@ -2355,10 +2444,21 @@ class _RustBindings:
         # annotated — resolving at the call site picks up a same-named
         # shadow, and the import's record id must not gate on
         # index-element containers.
-        return self._spelled_type(
-            args[index].strip(),
-            position if spelled_pos is None else spelled_pos,
-        )
+        arg_pos = position if spelled_pos is None else spelled_pos
+        if (
+            decl_scope is not None
+            and ret is not None
+            and arg_pos == ret.start_byte
+        ):
+            # A fixed arg (`E` in `Result<T, E>`) resolves in the
+            # member's declaring scope — a call-site `struct E`
+            # must not shadow it.
+            self.scopes.append(decl_scope)
+            try:
+                return self._spelled_type(args[index].strip(), arg_pos)
+            finally:
+                self.scopes.pop()
+        return self._spelled_type(args[index].strip(), arg_pos)
 
     def _field_member(
         self, node: Any, kinds: tuple[str, ...] = ()
@@ -2484,9 +2584,21 @@ class _RustBindings:
                 # the next index can still unwrap. A call like
                 # `v[f(0..10)]` keeps its integer index.
                 return None, elem_args
-            return self._element_of(
-                container_id, elem_args, node.start_byte
+            args_position, home_scope = self._field_args_scope(
+                children[0]
             )
+            push = home_scope is not None and home_scope not in self.scopes
+            if push:
+                self.scopes.append(home_scope)
+            try:
+                return self._element_of(
+                    container_id,
+                    elem_args,
+                    args_position or node.start_byte,
+                )
+            finally:
+                if push:
+                    self.scopes.pop()
         if node.type == "field_expression":
             member, receiver_id, receiver_args = self._field_member_typed(
                 node, ("struct_field", "associated_const")
@@ -2836,10 +2948,9 @@ class _RustBindings:
             # The element is a reference or composite type — keep its
             # text so deeper indexing still reads args.
             return None, elem_args
-        # `m::P`/`use m::P`-imported heads resolve through the
-        # scoped path, not a bare name lookup.
-        elem_id, _inner = self._spelled_type(match.group(1), position)
-        return (elem_id, match.group(2))
+        # `_spelled_type` follows `use m::P` imports and scoped
+        # `m::P` spellings — a bare `_lookup` would miss both.
+        return self._spelled_type(elem_args, position)
 
     def _is_map_container(
         self, container_id: str | None, node: Any | None
@@ -3027,17 +3138,6 @@ class _RustBindings:
                 return self._receiver_annotation_position(
                     callee.child_by_field_name("value")
                 )
-            if callee is not None and callee.type == "identifier":
-                # `let l = make()` — `make()`'s spelled names were
-                # written in its declared return annotation, so they
-                # resolve in the declaration's scope, not the call.
-                fn = self._lookup(
-                    self._normalize_identifier(self.text(callee)),
-                    node.start_byte,
-                    "value",
-                )
-                if fn is not None and fn.type_node is not None:
-                    return fn.type_node.start_byte
             return None
         if node.type != "identifier":
             return None
@@ -3059,6 +3159,46 @@ class _RustBindings:
                 record.value_node
             )
         return None
+
+    def _field_args_position(
+        self, field_expr: Any | None
+    ) -> "int | None":
+        """Scope position resolving a field access's spelled args —
+        the receiver's annotation when the field type spells the
+        container's own params (substituted args were written at the
+        use site), else the field's declaration (a fixed `Vec<Q>`
+        keeps `Q` in the field's scope, not a same-named local)."""
+        if field_expr is None or field_expr.type != "field_expression":
+            return self._receiver_annotation_position(field_expr)
+        member = self._field_member(
+            field_expr, ("struct_field", "associated_const")
+        )
+        if member is None or member.type_node is None:
+            return None
+        value = field_expr.child_by_field_name("value")
+        type_id, impl_args = (
+            (None, None) if value is None
+            else self._receiver_type(value)
+        )
+        container = (
+            None if type_id is None else self.records.get(type_id)
+        )
+        param_map = (
+            {}
+            if container is None
+            else self._pattern_param_map(container, impl_args)
+        )
+        if param_map:
+            member_text = self.text(member.type_node)
+            if any(
+                re.search(rf"\b{re.escape(param)}\b", member_text)
+                for param in param_map
+            ):
+                return (
+                    self._receiver_annotation_position(value)
+                    or field_expr.start_byte
+                )
+        return member.type_node.start_byte
 
     def _spelling_scope_stable(
         self, spelled: str, pos_a: int | None, pos_b: int | None
@@ -3178,6 +3318,25 @@ class _RustBindings:
             container_id, args = self._receiver_type(receiver)
             if args is None:
                 return None, None
+            container_name = (
+                next(
+                    (
+                        b.name
+                        for b in self.bindings
+                        if b.id == container_id
+                    ),
+                    None,
+                )
+                if container_id is not None
+                else None
+            )
+            if (
+                container_id is not None
+                and container_name not in _INDEX_ELEMENT_CONTAINERS
+            ):
+                # A custom `W<P>` can `Deref` to a different
+                # element — `w.split_at(i)` yields `&[Q]` there.
+                return None, None
             spelled = args.strip() or None
             if spelled is None:
                 return None, None
@@ -3285,6 +3444,70 @@ class _RustBindings:
                 return None, None
             return f"({left}, {right})", position
         return None, None
+
+    def _field_args_scope(
+        self, field_expr: Any | None
+    ) -> "tuple[int | None, _Scope | None]":
+        """(position, scope) resolving a field access's spelled
+        args — the receiver's annotation when the field type spells
+        the container's own params (substituted args were written at
+        the use site), else the field's declaration position plus
+        its home scope pushed (a fixed `Vec<Q>` keeps `Q` in the
+        field's scope — module members are not reachable from the
+        use-site stack)."""
+        if field_expr is None or field_expr.type != "field_expression":
+            return self._receiver_annotation_position(field_expr), None
+        member = self._field_member(
+            field_expr, ("struct_field", "associated_const")
+        )
+        if member is None or member.type_node is None:
+            return None, None
+        value = field_expr.child_by_field_name("value")
+        type_id, impl_args = (
+            (None, None) if value is None
+            else self._receiver_type(value)
+        )
+        container = (
+            None if type_id is None else self.records.get(type_id)
+        )
+        param_map = (
+            {}
+            if container is None
+            else self._pattern_param_map(container, impl_args)
+        )
+        if param_map:
+            member_text = self.text(member.type_node)
+            inner = re.search(r"<([\s\S]*)>", member_text)
+            elem_text = (
+                inner.group(1) if inner else member_text
+            ).strip()
+            elem_head = re.match(r"[A-Za-z_][\w:]*", elem_text)
+            if elem_head is not None and (
+                self._normalize_identifier(elem_head.group(0)).rsplit(
+                    "::", 1
+                )[-1]
+                not in param_map
+            ):
+                # `Vec<Fixed<T>>` — the element head `Fixed` was
+                # spelled in the field's scope; only the substituted
+                # args came from the receiver's annotation site, and
+                # they stay spelled for downstream consumers.
+                return (
+                    member.type_node.start_byte,
+                    None if container is None else container.home_scope,
+                )
+            if any(
+                re.search(rf"\b{re.escape(param)}\b", member_text)
+                for param in param_map
+            ):
+                return (
+                    self._receiver_annotation_position(value)
+                    or field_expr.start_byte
+                ), None
+        return (
+                    member.type_node.start_byte,
+                    None if container is None else container.home_scope,
+                )
 
     def _iterator_method_element(
         self, call: Any
@@ -3478,8 +3701,9 @@ class _RustBindings:
                         return _UNKNOWN, None
                 return _UNKNOWN, args.strip()
             elif container_name == "Option":
-                # `Option<P>::iter` yields `&P`.
-                rest = "&" + args.strip()
+                # `Option<P>::iter` yields `&P` — a spelled
+                # borrow keeps the element opaque.
+                elem_id, rest = None, "&" + args.strip()
             else:
                 elem_id, rest = self._element_of(
                     container_id, args.strip(), position
@@ -3653,9 +3877,15 @@ class _RustBindings:
         # only the value type, so the pair's shape is unpinned here.
         if self._is_map_container(container_id, iterator):
             return _UNKNOWN, None
-        if elem_args.strip().startswith("&"):
+        if (
+            self._receiver_type_node(iterator) is None
+            and elem_args.strip().startswith("&")
+        ):
             # `let it = v.chunks(n)` — `it`'s spelled args ARE the
-            # element (`&[P]`), not a container's type args.
+            # element (`&[P]`), not a container's type args. A
+            # declared `Vec<&P>`/`[&P]` still names a container
+            # head — its `&` arg is the element's own reference
+            # type, unwrapped by `_element_of` below.
             return _UNKNOWN, elem_args.strip()
         # Spelled element names on `it` (`let it = v.iter()`) were
         # written in `it`'s annotation — resolve them there.
@@ -3663,10 +3893,9 @@ class _RustBindings:
         if iterator.type == "field_expression":
             # `for q in w.xs` — `xs: Vec<T>` substitutes the receiver
             # `w`'s args, so the element name is spelled at `w`'s
-            # annotation, not the field's declaring scope.
-            position = self._receiver_annotation_position(
-                iterator.child_by_field_name("value")
-            ) or position
+            # annotation, not the field's declaring scope; a fixed
+            # `xs: Vec<Q>` keeps `Q` in the field's own scope.
+            position = self._field_args_position(iterator) or position
         if position is None:
             position = iterator.start_byte
         elem_id, rest = self._element_of(
@@ -5212,6 +5441,22 @@ class _RustBindings:
                 re.search(rf"\b{re.escape(param)}\b", member_text)
                 for param in param_map
             ):
+                # A fixed sibling arg (`E` in `Result<T, E>`)
+                # still wants the declaring scope — hand it back
+                # when it shadows none of the substituted
+                # spellings.
+                decl = member.home_scope
+                if decl is None:
+                    owner = self.records.get(member.member_of)
+                    decl = None if owner is None else owner.home_scope
+                if decl is not None and decl not in self.scopes and not any(
+                    (m := re.match(r"[A-Za-z_][\w:]*", s.strip()))
+                    is not None
+                    and m.group(0).rsplit("::", 1)[-1]
+                    in decl.bindings
+                    for s in param_map.values()
+                ):
+                    return decl
                 return None
         if member.home_scope is not None:
             return member.home_scope
