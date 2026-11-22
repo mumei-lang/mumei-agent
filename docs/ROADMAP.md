@@ -4134,8 +4134,9 @@ of a package var with composite or non-scalar type (`G` for
 slice, array, and map operations on package vars and on container
 fields of package-level composite vars are external-state reads;
 field-rooted index, range, `len`, and `cap` operations transfer on
-the resolved field identity, while field chains with indexed extras
-remain closed. Scalar package `const`s were always dep-free. Package
+the resolved field identity, including indexed field chains that
+retain their root-index dependencies. Scalar package `const`s were
+always dep-free. Package
 vars shadowing universe names (`var iota int64`, `var true bool`)
 admit the same way: the compiler resolves the use to the
 declaration, so the read is package state like any other.

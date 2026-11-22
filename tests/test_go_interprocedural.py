@@ -15497,6 +15497,161 @@ def test_package_composite_container_field_writes_match_package_var_controls(
         ]
 
 
+def test_package_indexed_composite_container_field_reads_keep_index_deps(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "type Ez2 struct {\n"
+        "\tA []int64\n"
+        "\tR [2]int64\n"
+        "\tM map[int64]int64\n"
+        "\tV int64\n"
+        "}\n"
+        "var GE []Ez2\n"
+        "var GEM map[int64]Ez2\n"
+        "func ReadSlice(i, j int64) int64 { return GE[j].A[i] }\n"
+        "func ReadSliceParen(i, j int64) int64 { return (GE[j]).A[i] }\n"
+        "func ReadArray(i, j int64) int64 { return GE[j].R[i] }\n"
+        "func ReadMap(i, j int64) int64 { return GEM[j].M[i] }\n"
+        "func ReadScalar(i int64) int64 { return GE[i].V }\n"
+        "func Parameter(s []Ez2, i, j int64) int64 { return s[j].A[i] }\n"
+        "func ParameterAlias(s []Ez2, i, j int64) int64 {\n"
+        "\tt := s\n\treturn t[j].A[i]\n}\n"
+        "func Local(i, j int64) int64 {\n"
+        "\ts := []Ez2{{A: []int64{1}}}\n"
+        "\treturn s[j].A[i]\n}\n"
+        "func LocalAlias(i, j int64) int64 {\n"
+        "\ts := []Ez2{{A: []int64{1}}}\n"
+        "\tt := s\n\treturn t[j].A[i]\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    field_ids = {
+        binding.name: binding.id
+        for binding in snapshot.bindings
+        if binding.kind == "variable" and binding.scope is None
+    }
+    cases = (
+        ("ReadSlice", frozenset({0, 1}), "A"),
+        ("ReadSliceParen", frozenset({0, 1}), "A"),
+        ("ReadArray", frozenset({0, 1}), "R"),
+        ("ReadMap", frozenset({0, 1}), "M"),
+    )
+    for function_name, deps, field in cases:
+        result = named_package(files, snapshot, summaries, function_name)
+        assert result.available, result.gaps
+        assert result.return_dependencies == deps
+        assert result.effects == "unknown"
+        (read,) = [
+            call
+            for call in result.calls
+            if call.imported and call.target == field_ids[field]
+        ]
+        assert (read.arguments, read.result, read.imported) == (
+            (),
+            frozenset(),
+            True,
+        )
+
+    scalar = named_package(files, snapshot, summaries, "ReadScalar")
+    assert scalar.available and scalar.effects == "unknown"
+    assert scalar.return_dependencies == frozenset({0})
+    assert any(
+        call.imported and call.target == field_ids["V"]
+        for call in scalar.calls
+    )
+    for function_name, control_name in (
+        ("Parameter", "ParameterAlias"),
+        ("Local", "LocalAlias"),
+    ):
+        result = named_package(files, snapshot, summaries, function_name)
+        control = named_package(files, snapshot, summaries, control_name)
+        assert result.available == control.available
+        assert result.return_dependencies == control.return_dependencies
+        assert result.effects == control.effects
+
+
+def test_package_indexed_composite_container_field_len_cap_and_range(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "type Ez2 struct{ A []int64 }\n"
+        "var GE []Ez2\n"
+        "func Len(j int64) int { return len(GE[j].A) }\n"
+        "func Cap(j int64) int { return cap(GE[j].A) }\n"
+        "func Range(j int64) int64 {\n"
+        "\tvar s int64\n"
+        "\tfor _, v := range GE[j].A { s += v }\n"
+        "\treturn s\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    field_id = next(
+        binding.id
+        for binding in snapshot.bindings
+        if binding.kind == "variable"
+        and binding.scope is None
+        and binding.name == "A"
+    )
+    for function_name in ("Len", "Cap", "Range"):
+        result = named_package(files, snapshot, summaries, function_name)
+        assert result.available, result.gaps
+        assert result.return_dependencies == frozenset({0})
+        assert result.effects == "unknown"
+        assert any(
+            call.imported and call.target == field_id
+            for call in result.calls
+        )
+
+
+def test_package_indexed_composite_container_field_store_and_index_order(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "type Ez2 struct{ A []int64 }\n"
+        "type Sz struct{ A []int64 }\n"
+        "var GE []Ez2\n"
+        "var GS Sz\n"
+        "var IndexState int64\n"
+        "func SetIndex(i int64) int64 { IndexState = i; return 0 }\n"
+        "func GetIndex() int64 { return IndexState }\n"
+        "func WriteIndexed(x int64) int64 {\n"
+        "\tGE[0].A[0] = x\n\treturn GE[0].A[0]\n}\n"
+        "func WriteDirect(x int64) int64 {\n"
+        "\tGS.A[0] = x\n\treturn GS.A[0]\n}\n"
+        "func ReadIndexOrder(i int64) int64 {\n"
+        "\treturn GE[SetIndex(i)].A[GetIndex()]\n"
+        "}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    indexed = named_package(files, snapshot, summaries, "WriteIndexed")
+    direct = named_package(files, snapshot, summaries, "WriteDirect")
+    assert indexed.available and direct.available
+    assert indexed.return_dependencies == direct.return_dependencies
+    assert indexed.effects == direct.effects == "unknown"
+
+    order = named_package(files, snapshot, summaries, "ReadIndexOrder")
+    assert order.available, order.gaps
+    function_ids = {
+        snapshot.binding(function.binding_id).name: function.binding_id
+        for function in snapshot.functions
+    }
+    ordered_targets = [
+        call.target
+        for call in order.calls
+        if call.target
+        in {function_ids["SetIndex"], function_ids["GetIndex"]}
+    ]
+    assert ordered_targets == [
+        function_ids["SetIndex"],
+        function_ids["GetIndex"],
+    ]
+
+
 def test_package_container_field_fallback_leaves_local_and_param_roots_unchanged(
     go_types_helper,
 ):
@@ -38094,9 +38249,6 @@ def test_struct_field_parallel_assignment_field_rhs_preserves_alias(
         "type P struct { A []int64 }\n"
         "type Q struct { P *P }\n"
         "func F(q Q) int64 { return q.P.A[0] }\n",
-        "type E struct { A []int64 }\n"
-        "var GA []E\n"
-        "func F(i, j int64) int64 { return GA[j].A[i] }\n",
         "type Sz struct { B [][]int64 }\n"
         "var GS Sz\n"
         "func F(i int64) int64 { _ = GS.B[i]; return i }\n",
