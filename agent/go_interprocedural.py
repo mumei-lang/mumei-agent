@@ -38033,6 +38033,12 @@ class _Builder:
             self._queue_struct_field_invocation(
                 node, node, field_binding_id
             )
+        if field_records:
+            key = self.node_key(node)
+            self._call_arg_deps[key] = (
+                self._call_arg_deps.get(key, frozenset())
+                | recv_deps
+            )
         actual = (recv_deps, *argument_deps)
         callee = self.summarize(method_id)
         if not callee.available:

@@ -45432,6 +45432,44 @@ def test_bound_method_value_unsupported_field_record_consumers_stay_closed(
         )
 
 
+def test_bound_method_value_field_invocation_includes_receiver_deps(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "type W struct { F func(int64); V int64 }\n"
+        "func (s W) Run() { s.F(s.V) }\n"
+        "func FDirect(x int64) int64 {\n"
+        "\tw := int64(0); var s W; s.V = x\n"
+        "\ts.F = func(a int64) { w = a }; s.Run(); return w\n"
+        "}\n"
+        "func FBound(x int64) int64 {\n"
+        "\tw := int64(0); var s W; s.V = x\n"
+        "\ts.F = func(a int64) { w = a }; f := s.Run; f(); return w\n"
+        "}\n"
+        "func FBoundAfterRebind(x, y int64) int64 {\n"
+        "\tw := int64(0); var s W; s.V = x\n"
+        "\ts.F = func(a int64) { w = a }; f := s.Run; s.V = y\n"
+        "\tf(); return w\n"
+        "}\n"
+        "func FDirectAfterRebind(x, y int64) int64 {\n"
+        "\tw := int64(0); var s W; s.V = x\n"
+        "\ts.F = func(a int64) { w = a }; s.V = y\n"
+        "\ts.Run(); return w\n"
+        "}\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    for name in ("FDirect", "FBound", "FBoundAfterRebind"):
+        summary = named_package(files, snapshot, summaries, name)
+        assert summary.available
+        assert summary.return_dependencies == frozenset({0})
+    direct_after_rebind = named_package(
+        files, snapshot, summaries, "FDirectAfterRebind"
+    )
+    assert direct_after_rebind.available
+    assert direct_after_rebind.return_dependencies == frozenset({0, 1})
+
+
 def test_package_function_var_call_records_imported_transfer(
     go_types_helper,
 ):
