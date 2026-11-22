@@ -6405,3 +6405,36 @@ fn f(o: Option<P>, r: Result<Q, E>) {
     }
     assert bound.get("q2.qm()") == qm.id
     assert bound.get("q3.qm()") == qm.id
+
+def test_iter_consumers_bind_option_payloads():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct W<T> { items: Vec<T> }
+fn find_q(q: &Q) -> Option<P> { None }
+struct Q;
+fn f(v: Vec<P>, w: W<P>) {
+    match v.iter().find(|x| true) { Some(a) => a.pm(), _ => () }
+    match v.iter().nth(0) { Some(b) => b.pm(), _ => () }
+    match v.iter().min() { Some(c) => c.pm(), _ => () }
+    match v.iter().max() { Some(d) => d.pm(), _ => () }
+    match w.items.iter().find(|x| true) { Some(e) => e.pm(), _ => () }
+    match w.items.iter().find_map(find_q) { Some(g) => g.pm(), _ => () }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    for call in (
+        "a.pm()",
+        "b.pm()",
+        "c.pm()",
+        "d.pm()",
+        "e.pm()",
+        "g.pm()",
+    ):
+        assert bound.get(call) == pm.id, call

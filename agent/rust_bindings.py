@@ -7517,6 +7517,10 @@ class _RustBindings:
                     and self._fn_return_payload(node) is not None
                 ):
                     method = self.text(field).strip()
+                    if method == "find_map":
+                        # Iterator-only consumer — always yields
+                        # `Option<U>` whatever the receiver.
+                        return "Option", node.start_byte, None
                     if method in {"map_or", "map_or_else"}:
                         # `o.map_or(d, f)` yields `f`'s return `U`
                         # itself — a plain value, not a container.
