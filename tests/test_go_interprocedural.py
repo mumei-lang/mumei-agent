@@ -54943,6 +54943,7 @@ def test_named_collection_elided_struct_function_fields(go_types_helper):
         "type SS []S\n"
         "type SS2 SS\n"
         "type AS [1]S\n"
+        "type FS []func() int64\n"
         "type WS []W\n"
         "type AW [1]W\n"
         "type MS map[int]S\n"
@@ -54988,6 +54989,18 @@ def test_named_collection_elided_struct_function_fields(go_types_helper):
         "\tv := y; ss := SS2{{F: func() int64 { return v }}}\n"
         "\tv = x; return ss[0].F()\n"
         "}\n"
+        "func FNamedNestedCollectionElided(x, y int64) int64 {\n"
+        "\tv := y; ss := []SS{{{F: func() int64 { return v }}}}\n"
+        "\tv = x; return ss[0][0].F()\n"
+        "}\n"
+        "func nfs(x int64) int64 {\n"
+        "\tfs := []FS{{func() int64 { return x }}}\n"
+        "\treturn fs[0][0]()\n"
+        "}\n"
+        "func nfs4(x int64) int64 {\n"
+        "\tfs := []FS{{func() int64 { return x }}}\n"
+        "\t_ = fs; return x\n"
+        "}\n"
         "func FNamedMapExtract(x, y int64) int64 {\n"
         "\tv := y; m := MS{0: {F: func() int64 { return v }}}\n"
         "\tf := m[0].F; v = x; return f()\n"
@@ -55017,6 +55030,8 @@ def test_named_collection_elided_struct_function_fields(go_types_helper):
         "FNamedArrayCall": frozenset({0, 1}),
         "FNamedArrayExtract": frozenset({0, 1}),
         "FNamedAliasChain": frozenset({0, 1}),
+        "nfs": frozenset({0}),
+        "nfs4": frozenset({0}),
     }
     for function_name, dependencies in expected.items():
         result = named_package(
@@ -55024,13 +55039,19 @@ def test_named_collection_elided_struct_function_fields(go_types_helper):
         )
         assert result.available, (function_name, result.gaps)
         assert result.return_dependencies == dependencies, function_name
+    nested = named_package(
+        files, snapshot, summaries, "FNamedNestedCollectionElided"
+    )
+    if nested.available:
+        assert nested.return_dependencies == frozenset({0, 1})
+    else:
+        assert nested.return_dependencies is None
+        assert nested.gaps
     map_extract = named_package(
         files, snapshot, summaries, "FNamedMapExtract"
     )
-    if map_extract.available:
-        assert map_extract.return_dependencies == frozenset({0, 1})
-    else:
-        assert map_extract.gaps
+    assert map_extract.available, map_extract.gaps
+    assert map_extract.return_dependencies == frozenset({0, 1})
     map_call = named_package(
         files, snapshot, summaries, "FNamedMapCall"
     )

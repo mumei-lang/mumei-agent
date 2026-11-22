@@ -4731,16 +4731,16 @@ class _Builder:
             fail_if_unresolved()
             return None
         binding = self.bindings.get(ref.binding_id)
-        if (
-            binding is None
-            or binding.kind != "type"
-            or getattr(binding.type, "has_type_args", False)
-        ):
+        if binding is None:
+            fail_if_unresolved()
+            return None
+        if binding.kind != "type":
+            return None
+        if getattr(binding.type, "has_type_args", False):
             fail_if_unresolved()
             return None
         fact = self._struct_value_fact(binding.type)
         if fact is None:
-            fail_if_unresolved()
             return None
         self.pinned.add(binding.type.type_id or binding.id)
         return fact, binding
