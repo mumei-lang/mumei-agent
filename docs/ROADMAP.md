@@ -4287,8 +4287,12 @@ composite: `b := s[i].F` /
 share group — minted under the root container and joined to
 its group — so a store through one extraction reaches the
 others, and direct `s[i].F[j]` reads and writes now match that
-extraction model; pointer crossings and pure array fields remain
-closed.
+extraction model; pure array fields reached through an index stay
+closed. A *bare `*S` parameter root* is admitted the same way —
+`p.A[i].V`, `p.M[k].V`, `p.F[0]` slot on the parameter the way a
+slice shares its backing — while local pointer bindings (`q :=
+p`), reseats, `**S` roots, explicit `(*p)` derefs and pointer-typed
+fields remain closed.
 
 A *scalar-payload channel element* admits the same conflated way
 — `s := []chan int64{c}`, `var m map[K]chan int64 = {...}` bind

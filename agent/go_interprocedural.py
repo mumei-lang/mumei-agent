@@ -2434,7 +2434,7 @@ class _Builder:
         return field_key.rsplit("\x00", 1)[0], member
 
     def _scalar_container_field_pointer_crossing(
-        self, sel: Any
+        self, sel: Any, params: dict | None = None
     ) -> bool:
         current = sel
         while current is not None:
@@ -2485,11 +2485,27 @@ class _Builder:
                     if ref is not None and ref.binding_id is not None
                     else None
                 )
-                return (
+                if (
                     binding is not None
                     and binding.type is not None
                     and binding.type.kind == "pointer"
-                )
+                ):
+                    # A `*S` function parameter shares its pointee
+                    # with the caller the way a slice shares its
+                    # backing, so `p.A[i].V` slots on `(p, A)` and
+                    # carries `p`'s dep. Only the bare parameter is
+                    # admitted: local pointer bindings (`q := p`),
+                    # reseats, double pointers and explicit derefs
+                    # stay closed because their aliasing cannot be
+                    # resolved in this slot model.
+                    elem = getattr(binding.type, "elem", None)
+                    return not (
+                        params is not None
+                        and ref.binding_id in params
+                        and elem is not None
+                        and elem.kind == "struct"
+                    )
+                return False
             return False
         return False
 
@@ -2576,7 +2592,7 @@ class _Builder:
         root_id, member = self._scalar_container_field(sel)
         if root_id is None or member is None:
             return None
-        if self._scalar_container_field_pointer_crossing(sel):
+        if self._scalar_container_field_pointer_crossing(sel, params):
             raise _Unsupported(
                 "non_parameter_reference", _span(sel)
             )

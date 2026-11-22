@@ -32633,6 +32633,109 @@ def test_named_struct_element_unsupported_shapes_stay_closed(
     assert not result.available
 
 
+TYPES_E_S2 = (
+    "type E struct { F []int64; V int64 }\n"
+    "type S2 struct { A []E; M map[int64]E }\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("pointer", "control", "signature", "expected"),
+    [
+        (
+            "return p.A[i].V",
+            "return o.A[i].V",
+            "p *S2, i int64",
+            frozenset({0, 1}),
+        ),
+        (
+            "p.A[0].V = x; return p.A[0].V",
+            "o.A[0].V = x; return o.A[0].V",
+            "p *S2, x int64",
+            frozenset({0, 1}),
+        ),
+        (
+            "return p.M[k].V",
+            "return o.M[k].V",
+            "p *S2, k int64",
+            frozenset({0, 1}),
+        ),
+    ],
+)
+def test_named_struct_element_pointer_param_root_matches_value_control(
+    go_types_helper, pointer, control, signature, expected
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            TYPES_E_S2 + f"func F({signature}) int64 {{ {pointer} }}\n",
+        )
+    )
+    value_signature = signature.replace("p *S2", "o S2")
+    direct = named(
+        *unit(
+            go_types_helper,
+            TYPES_E_S2
+            + f"func F({value_signature}) int64 {{ {control} }}\n",
+        )
+    )
+    assert result.available == direct.available
+    assert result.available, result.gaps
+    assert result.return_dependencies == direct.return_dependencies
+    assert result.return_dependencies == expected
+
+
+def test_named_struct_element_pointer_param_root_scalar_collection_field(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type S3 struct { F []int64 }\n"
+            "func F(p *S3, x int64) int64 {"
+            " p.F[0] = x; return p.F[0] }\n",
+        )
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        (
+            "type E struct { V int64 }\n"
+            "type S2 struct { A []E }\n"
+            "func F(p *S2, i int64) int64 {\n"
+            "\tq := p\n"
+            "\treturn q.A[i].V\n}\n"
+        ),
+        (
+            "type E struct { V int64 }\n"
+            "type S2 struct { A []E }\n"
+            "func F(pp **S2, i int64) int64 {\n"
+            "\treturn (*pp).A[i].V\n}\n"
+        ),
+        (
+            "type E struct { V int64 }\n"
+            "type S2 struct { A []E }\n"
+            "func F(p *S2, i int64) int64 {\n"
+            "\treturn (*p).A[i].V\n}\n"
+        ),
+    ],
+    ids=[
+        "local-pointer-alias",
+        "double-pointer",
+        "explicit-deref",
+    ],
+)
+def test_named_struct_element_pointer_param_root_unsupported_shapes_stay_closed(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available
+
+
 @pytest.mark.parametrize(
     ("direct", "extracted"),
     [
