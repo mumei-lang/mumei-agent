@@ -4323,9 +4323,13 @@ the stored value plus the index's dependencies unioned into
 the root's set and `indirect_writes`. A value-struct element's
 pointer member resolves the same way once the field admits a
 named element type — `p.B[i].W.V` and `p.B[i].W = q` on
-`B []Elem` or `B map[int64]Elem` (and `ss[i].W` on a `[]Elem`
-parameter) fold into the collection's group like the `[]*Elem`
-forms. A pointer member read with no deeper field —
+`B []Elem` (and `ss[i].W` on a `[]Elem` parameter) fold into
+the collection's group like the `[]*Elem` forms; a
+`map[int64]Elem` field admits the *read* (`p.B[k].W.V`) — Go
+rejects field stores on map elements, so there is no store
+form to model. Handing the member to a call —
+`G(p.A[i].W, x)` — folds the callee's writes through the
+pointer into the pointee like `p.A[i].W = q`. A pointer member read with no deeper field —
 `p.A[i].W`, `p.B[i].W`, `p.A[i].W == nil` — reads the
 member's slot value, which names the same group deps as a
 scalar leaf. Whole-element stores admit the same way on every
