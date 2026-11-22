@@ -501,3 +501,207 @@ def test_real_core_conjunctive_descriptors_fold(tmp_path):
             )
         )
         assert evaluation["descriptor_match"] is True
+
+
+def _evidence_acceptance_descriptor(verdict: str = "accepted", **overrides):
+    """The shape Core `evidence accept --requirement` emits."""
+    value = {
+        "schema_version": "mumei.evidence-acceptance/v1",
+        "acceptance": "evaluated",
+        "verdict": verdict,
+        "requirement_schema_version": "mumei.evidence-requirement/v1",
+        "requirement_fingerprint": "a" * 64,
+        "evidence_schema_version": "mumei.verification-evidence/v1",
+        "evidence_fingerprint": "b" * 64,
+        "checks": [{"name": "subject_pin", "outcome": "passed"}],
+        "checks_performed": ["requirement_normalization"],
+        "checks_not_performed": ["claim_truth"],
+    }
+    value.update(overrides)
+    return value
+
+
+def _evidence_list_acceptance_descriptor(
+    verdict: str = "accepted", **overrides
+):
+    """The shape Core `evidence accept-list --requirement` emits."""
+    value = {
+        "schema_version": "mumei.evidence-list-acceptance/v1",
+        "acceptance": "evaluated",
+        "verdict": verdict,
+        "requirement_schema_version": "mumei.evidence-requirement/v1",
+        "requirement_fingerprint": "a" * 64,
+        "evidence_schema_version": "mumei.verification-evidence-list/v1",
+        "list_fingerprint": "2" * 64,
+        "consistent": True,
+        "conflict_count": 0,
+        "conflicts": [],
+        "records_evaluated": 1,
+        "records": [
+            {
+                "index": 0,
+                "verdict": "accepted",
+                "checks": [{"name": "subject_pin", "outcome": "passed"}],
+            }
+        ],
+        "checks_performed": ["requirement_normalization"],
+        "checks_not_performed": ["claim_truth"],
+    }
+    value.update(overrides)
+    return value
+
+
+def test_evidence_acceptance_descriptor_folds(tmp_path, capsys):
+    evaluation = evaluate_core_acceptance(
+        _evidence_acceptance_descriptor()
+    )
+    assert evaluation["descriptor_match"] is True
+    assert evaluation["accepted"] is True
+
+    for verdict in ("rejected", "inconclusive"):
+        evaluation = evaluate_core_acceptance(
+            _evidence_acceptance_descriptor(verdict=verdict)
+        )
+        assert evaluation["descriptor_match"] is True
+        assert evaluation["accepted"] is False
+
+    # Closed shape: foreign or missing fields never match.
+    cases = [
+        _evidence_acceptance_descriptor(verdict="maybe"),
+        _evidence_acceptance_descriptor(verdict=["accepted"]),
+        _evidence_acceptance_descriptor(acceptance="not_evaluated"),
+        _evidence_acceptance_descriptor(
+            requirement_schema_version="mumei.probe/v1"
+        ),
+        _evidence_acceptance_descriptor(requirement_fingerprint="x"),
+        _evidence_acceptance_descriptor(
+            evidence_schema_version="mumei.probe/v1"
+        ),
+        _evidence_acceptance_descriptor(evidence_fingerprint="B" * 64),
+        _evidence_acceptance_descriptor(checks="subject_pin"),
+        _evidence_acceptance_descriptor(
+            checks=[{"name": "c", "outcome": "passed", "x": 0}]
+        ),
+        _evidence_acceptance_descriptor(checks=[{"name": 1, "outcome": "p"}]),
+        _evidence_acceptance_descriptor(checks_performed="norm"),
+        {**_evidence_acceptance_descriptor(), "extra": None},
+        {
+            k: v
+            for k, v in _evidence_acceptance_descriptor().items()
+            if k != "checks"
+        },
+        # The record pin may not be swapped for a list pin.
+        _evidence_acceptance_descriptor(list_fingerprint="2" * 64),
+    ]
+    for value in cases:
+        evaluation = evaluate_core_acceptance(value)
+        assert evaluation["descriptor_match"] is False, value
+        assert evaluation["accepted"] is False
+
+
+def test_evidence_list_acceptance_descriptor_folds(tmp_path, capsys):
+    evaluation = evaluate_core_acceptance(
+        _evidence_list_acceptance_descriptor()
+    )
+    assert evaluation["descriptor_match"] is True
+    assert evaluation["accepted"] is True
+
+    for verdict in ("rejected", "inconclusive"):
+        evaluation = evaluate_core_acceptance(
+            _evidence_list_acceptance_descriptor(verdict=verdict)
+        )
+        assert evaluation["descriptor_match"] is True
+        assert evaluation["accepted"] is False
+
+    record = _evidence_list_acceptance_descriptor()["records"][0]
+    cases = [
+        _evidence_list_acceptance_descriptor(
+            evidence_schema_version="mumei.verification-evidence/v1"
+        ),
+        _evidence_list_acceptance_descriptor(list_fingerprint="x"),
+        _evidence_list_acceptance_descriptor(
+            evidence_fingerprint="b" * 64
+        ),
+        _evidence_list_acceptance_descriptor(consistent="yes"),
+        _evidence_list_acceptance_descriptor(conflict_count=-1),
+        _evidence_list_acceptance_descriptor(conflicts={"a": 1}),
+        _evidence_list_acceptance_descriptor(
+            conflicts=[{"index_a": 0, "index_b": 1}]
+        ),
+        _evidence_list_acceptance_descriptor(records_evaluated="1"),
+        _evidence_list_acceptance_descriptor(records={}),
+        _evidence_list_acceptance_descriptor(
+            records=[{**record, "extra": 0}]
+        ),
+        _evidence_list_acceptance_descriptor(
+            records=[{k: v for k, v in record.items() if k != "verdict"}]
+        ),
+        _evidence_list_acceptance_descriptor(
+            records=[{**record, "index": "0"}]
+        ),
+        _evidence_list_acceptance_descriptor(
+            records=[{**record, "verdict": "ok"}]
+        ),
+        _evidence_list_acceptance_descriptor(
+            records=[{**record, "checks": [{"name": "c"}]}]
+        ),
+        {**_evidence_list_acceptance_descriptor(), "extra": 1},
+        {
+            k: v
+            for k, v in _evidence_list_acceptance_descriptor().items()
+            if k != "list_fingerprint"
+        },
+    ]
+    for value in cases:
+        evaluation = evaluate_core_acceptance(value)
+        assert evaluation["descriptor_match"] is False, value
+        assert evaluation["accepted"] is False
+
+
+def test_verdict_shapes_attempt_binding(tmp_path):
+    fingerprint = "b" * 64
+    # The single-record verdict descriptor binds an attempt pin like
+    # the flat shapes do.
+    bound = evaluate_core_acceptance(
+        _evidence_acceptance_descriptor(), fingerprint
+    )
+    assert bound["descriptor_match"] is True
+    assert bound["attempt_bound"] is True
+    assert "attempt_binding" not in bound["checks_not_performed"]
+
+    other = evaluate_core_acceptance(
+        _evidence_acceptance_descriptor(), "c" * 64
+    )
+    assert other["attempt_bound"] is False
+
+    # The list descriptor pins list bytes — never a single record.
+    listed = evaluate_core_acceptance(
+        _evidence_list_acceptance_descriptor(), fingerprint
+    )
+    assert listed["descriptor_match"] is True
+    assert listed["attempt_bound"] is False
+
+
+def test_real_core_verdict_descriptors_fold(tmp_path, capsys):
+    # Golden descriptors emitted by real Core —
+    # `evidence accept --requirement --json` and
+    # `evidence accept-list --requirement --json` — regenerate with a
+    # built mumei when the descriptor shapes change.
+    fixtures = Path(__file__).parent / "fixtures"
+    for name in (
+        "evidence_acceptance_single_requirement.json",
+        "evidence_list_acceptance.json",
+    ):
+        descriptor = json.loads((fixtures / name).read_text())
+        evaluation = evaluate_core_acceptance(descriptor)
+        assert evaluation["descriptor_match"] is True, name
+        assert evaluation["accepted"] is True, name
+
+        evaluation = run_eval(
+            __import__("argparse").Namespace(
+                descriptor=str(fixtures / name),
+                expected_fingerprint=None,
+                output=None,
+            )
+        )
+        assert evaluation["descriptor_match"] is True

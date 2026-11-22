@@ -843,7 +843,7 @@ Evaluate a declared Core acceptance descriptor and emit the representation-level
 
 | Option | Value | Required | Default | Description |
 |---|---|---|---|---|
-| `--descriptor` | `<PATH>` | yes | — | Declared Core acceptance descriptor JSON (mumei.source-evidence-acceptance/v1, mumei.native-evidence-acceptance/v1 or mumei.evidence-requirement-list-acceptance/v1). |
+| `--descriptor` | `<PATH>` | yes | — | Declared Core acceptance descriptor JSON (mumei.source-evidence-acceptance/v1, mumei.native-evidence-acceptance/v1, mumei.evidence-acceptance/v1, mumei.evidence-list-acceptance/v1 or mumei.evidence-requirement-list-acceptance/v1). |
 | `--expected-fingerprint` | `<HEX>` | no | — | Declared record pin an attempt binds to (64-char lowercase SHA-256 hex of the record bytes, e.g. the evidence-check request's evidence.sha256). When supplied the evaluation emits attempt_bound comparing it to the descriptor's evidence_fingerprint. |
 | `--output` | `<PATH>` | no | — | Write the evaluation descriptor to PATH instead of stdout. |
 
