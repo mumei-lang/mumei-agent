@@ -38721,6 +38721,85 @@ def test_named_struct_element_pointer_member_pointee_operand_eval(
 
 
 @pytest.mark.parametrize(
+    "declarations, expected",
+    [
+        # A scalar pointee (`*int64` member) admits like a struct
+        # one: `*p.A[i].W = x` broadcasts the store and a
+        # whole-pointee read observes it.
+        (
+            "type Elem struct { W *int64 }\n"
+            "type S struct { A []Elem }\n"
+            "func F(p *S, i int64, x int64) int64 {\n"
+            "\t*p.A[i].W = x\n"
+            "\treturn *p.A[i].W\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # `v := *p.A[i].W` copies the pointee — the store still
+        # reaches the copy.
+        (
+            "type Elem struct { W *int64 }\n"
+            "type S struct { A []Elem }\n"
+            "func F(p *S, i int64, x int64) int64 {\n"
+            "\t*p.A[i].W = x\n"
+            "\tv := *p.A[i].W\n"
+            "\treturn v\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # A scalar-pointee read without a store carries the operand
+        # deps alone.
+        (
+            "type Elem struct { W *int64 }\n"
+            "type S struct { A []Elem }\n"
+            "func F(p *S, i int64) int64 {\n"
+            "\treturn *p.A[i].W\n}\n",
+            frozenset({0, 1}),
+        ),
+        # Reseating the pointer member itself (`p.A[i].W = q`)
+        # stores into the member slot — the pointee read observes
+        # the new pointer's provenance.
+        (
+            "type Elem struct { W *int64 }\n"
+            "type S struct { A []Elem }\n"
+            "func F(p *S, i int64, q *int64) int64 {\n"
+            "\tp.A[i].W = q\n"
+            "\treturn *p.A[i].W\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # `*p.A[i].W == 0` compares the scalar pointee — the
+        # operand's deps admit like `*p == 0` on a bare `*int64`.
+        (
+            "type Elem struct { W *int64 }\n"
+            "type S struct { A []Elem }\n"
+            "func F(p *S, i int64) int64 {\n"
+            "\tif *p.A[i].W == 0 {\n"
+            "\t\treturn 0\n"
+            "\t}\n"
+            "\treturn i\n}\n",
+            frozenset({1}),
+        ),
+        # `p.A[0].W = &x` reseats the member onto an escaped local —
+        # the pointee read observes `x`'s current value like `*p`
+        # after `p := &x` does.
+        (
+            "type Elem struct { W *int64 }\n"
+            "type S struct { A []Elem }\n"
+            "func F(p *S, x int64, y int64) int64 {\n"
+            "\tp.A[0].W = &x\n"
+            "\tx = y\n"
+            "\treturn *p.A[0].W\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+    ],
+)
+def test_named_struct_element_pointer_member_scalar_pointee(
+    go_types_helper, declarations, expected
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == expected
+
+
+@pytest.mark.parametrize(
     "declarations",
     [
         # Whole-pointee ops stay closed on a value-struct root.
@@ -38730,6 +38809,13 @@ def test_named_struct_element_pointer_member_pointee_operand_eval(
         "func F(o S, i int64, x int64) int64 {\n"
         "\t*o.A[i].W = E2{V: x}\n"
         "\treturn o.A[i].W.V\n}\n",
+        # A scalar pointee on a value root stays closed the same
+        # way.
+        "type Elem struct { W *int64 }\n"
+        "type S struct { A []Elem }\n"
+        "func F(o S, i int64, x int64) int64 {\n"
+        "\t*o.A[i].W = x\n"
+        "\treturn *o.A[i].W\n}\n",
         # …and a bare value-element field on `o`.
         "type E2 struct { V int64 }\n"
         "type Elem struct { W *E2 }\n"

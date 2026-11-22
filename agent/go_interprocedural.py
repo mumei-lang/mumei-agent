@@ -3553,6 +3553,16 @@ class _Builder:
                         _leaf_kind == "pointer"
                         and (
                             for_pointer_leaf
+                            or getattr(
+                                getattr(
+                                    path_members[-1].type,
+                                    "elem",
+                                    None,
+                                ),
+                                "kind",
+                                None,
+                            )
+                            in {"integer", "boolean", "pointer"}
                             or self._struct_value_fact(
                                 getattr(
                                     path_members[-1].type,
@@ -15453,12 +15463,9 @@ class _Builder:
                 ):
                     leaf_member = elem_target[6][-1]
                     pointee_fact = leaf_member.type.elem
-                    if pointee_fact is None:
-                        raise _Unsupported(
-                            "non_parameter_reference", _span(node)
-                        )
                     self._pin_fact_identities(leaf_member.type)
-                    self._pin_fact_identities(pointee_fact)
+                    if pointee_fact is not None:
+                        self._pin_fact_identities(pointee_fact)
                     pointee_id = leaf_member.type.type_id or (
                         f"{leaf_member.id}/pointee"
                     )
@@ -15479,6 +15486,11 @@ class _Builder:
                         operand, fn, params, locals_,
                         transfers, count, depth + 1,
                     )
+                    for escaped_id in self.escaped:
+                        if escaped_id in locals_:
+                            result |= locals_[escaped_id]
+                        elif escaped_id in params:
+                            result |= {params[escaped_id]}
                     return result | self.indirect_writes
         elif inner is not None and inner.type == "identifier":
             # A dot-imported `*PV` classifies by the declared member
@@ -20518,12 +20530,9 @@ class _Builder:
                 ):
                     _leaf_member = deref_elem_target[6][-1]
                     _pointee_fact = _leaf_member.type.elem
-                    if _pointee_fact is None:
-                        raise _Unsupported(
-                            "unsupported_statement", _span(lhs)
-                        )
                     self._pin_fact_identities(_leaf_member.type)
-                    self._pin_fact_identities(_pointee_fact)
+                    if _pointee_fact is not None:
+                        self._pin_fact_identities(_pointee_fact)
                     _pointee_id = _leaf_member.type.type_id or (
                         f"{_leaf_member.id}/pointee"
                     )
