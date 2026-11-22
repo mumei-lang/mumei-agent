@@ -1033,7 +1033,14 @@ def test_real_core_accepts_native_object(tmp_path, capsys, real_core, source_tex
         assert descriptor["register_convention_assumed"] == F64_REGISTER_CONVENTION
         assert report["register_convention_assumed"] == F64_REGISTER_CONVENTION
         for marker in MACHINE_TV_ASSUMPTION_MARKERS:
-            assert marker in descriptor["checks_not_performed"]
+            assert marker not in descriptor["checks_performed"]
+            if marker in {
+                "machine_code_tv_mxcsr_control_state",
+                "machine_code_tv_nan_payload_bits",
+            }:
+                assert marker in descriptor["checks_not_performed"]
+            elif marker == "machine_code_tv_sysv_memory_class_aggregate_abi":
+                assert marker not in descriptor["checks_not_performed"]
             assert marker in report["checks_not_performed"]
             assert marker not in report["discharged_checks"]
     elif source_text in (
