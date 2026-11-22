@@ -285,8 +285,8 @@ def test_range_pattern_path_bounds_resolve_or_remain_unresolved():
     ("source", "name", "reason"),
     [
         (
-            "mod m { const K:i32=0; } fn f(v:i32){ match v { m::K..=m::K => (), _ => () } }",
-            "m::K",
+            "mod m { const K:i32=0; } fn f(v:i32){ match v { m::J..=m::J => (), _ => () } }",
+            "m::J",
             "qualified_path",
         ),
         (
@@ -6051,3 +6051,70 @@ fn f() {
     ]
     assert len(calls) == 1
     assert calls[0].target == qm.id
+
+    def test_scoped_module_call_picks_its_own_function(self):
+        report = build_rust_bindings(
+            """
+            mod a {
+                pub struct P;
+                impl P { pub fn pm(&self) {} }
+                pub fn make() -> Box<P> { Box::new(P) }
+            }
+            mod b {
+                pub struct Q;
+                impl Q { pub fn qm(&self) {} }
+                pub fn make() -> Box<Q> { Box::new(Q) }
+            }
+            fn g() {
+                let x = b::make();
+                x.qm();
+            }
+            """,
+            pointer_width=64,
+        )
+        calls = {self._call_name(c) for c in report.calls}
+        self.assertIn("qm", calls)
+        self.assertNotIn("pm", calls)
+
+    def test_member_borrowing_a_container_keeps_the_container(self):
+        report = build_rust_bindings(
+            """
+            struct P;
+            impl P { fn pm(&self) {} }
+            struct W { v: Vec<P> }
+            impl W {
+                fn vref(&self) -> &Vec<P> { &self.v }
+                fn oref(&self) -> &Option<P> { &None }
+                fn sref(&self) -> &mut [P] { &mut [] }
+            }
+            fn f(w: &W) {
+                w.vref()[0].pm();
+                match w.oref() { Some(q) => q.pm(), _ => () }
+                match w.sref().first() { Some(r) => r.pm(), _ => () }
+            }
+            """,
+            pointer_width=64,
+        )
+        targets = [c.callee for c in report.calls]
+        self.assertEqual(targets.count("pm"), 3)
+
+    def test_pattern_field_args_resolve_in_the_declaring_module(self):
+        report = build_rust_bindings(
+            """
+            struct Q;
+            impl Q { fn stray(&self) {} }
+            mod m {
+                pub struct Q;
+                impl Q { pub fn qm(&self) {} }
+                pub struct W { pub opt: Option<Q> }
+            }
+            fn f(w: m::W) {
+                let m::W { opt } = w;
+                match opt { Some(q) => q.qm(), _ => () }
+            }
+            """,
+            pointer_width=64,
+        )
+        calls = {self._call_name(c) for c in report.calls}
+        self.assertIn("qm", calls)
+        self.assertNotIn("stray", calls)
