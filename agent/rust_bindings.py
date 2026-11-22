@@ -4050,7 +4050,13 @@ class _RustBindings:
                             # no method — stays opaque.
                             return None, None
                     if (
-                        method_name in {"and", "or", "transpose"}
+                        method_name
+                        in {
+                            "and", "or", "transpose",
+                            "as_ref", "as_mut",
+                            "as_deref", "as_deref_mut",
+                            "as_deref_err", "as_deref_mut_err",
+                        }
                         and receiver[1] is not None
                     ):
                         value_expr = callee.child_by_field_name(
@@ -4154,6 +4160,63 @@ class _RustBindings:
                                     ),
                                 )
                             return None, None
+                        if (
+                            method_name
+                            in {
+                                "as_ref", "as_mut",
+                                "as_deref", "as_deref_mut",
+                                "as_deref_err", "as_deref_mut_err",
+                            }
+                            and head == "Result"
+                            and len(recv_args) == 2
+                        ):
+                            # `r.as_ref()`/`r.as_mut()` borrow the
+                            # payload — `Result<&T, &E>`; `as_deref*`
+                            # peels one `Deref` layer off the named
+                            # side like `Option::as_deref`.
+                            ok_arg = recv_args[0].strip()
+                            err_arg = recv_args[1].strip()
+                            if method_name == "as_ref":
+                                return (
+                                    None,
+                                    "Result<&{}, &{}>".format(
+                                        ok_arg, err_arg
+                                    ),
+                                )
+                            if method_name == "as_mut":
+                                return (
+                                    None,
+                                    "Result<&mut {}, &mut {}>"
+                                    .format(ok_arg, err_arg),
+                                )
+                            err_side = method_name in {
+                                "as_deref_err", "as_deref_mut_err",
+                            }
+                            peeled = self._deref_layer(
+                                err_arg if err_side else ok_arg
+                            )
+                            if peeled is None:
+                                return None, None
+                            mut = (
+                                "mut " if "_mut" in method_name
+                                else ""
+                            )
+                            if err_side:
+                                derefed_args = (
+                                    "&{}, &{}{}".format(
+                                        ok_arg, mut, peeled
+                                    )
+                                )
+                            else:
+                                derefed_args = (
+                                    "&{}{}, &{}".format(
+                                        mut, peeled, err_arg
+                                    )
+                                )
+                            return (
+                                None,
+                                "Result<{}>".format(derefed_args),
+                            )
                         if method_name == "transpose" and (
                             head == "Result"
                             and len(recv_args) == 2
@@ -8451,6 +8514,27 @@ class _RustBindings:
                 if depth == 0:
                     return index == len(spelled) - 1
         return False
+
+    @staticmethod
+    def _deref_layer(spelled: str) -> "str | None":
+        """One `Deref` step on a spelled type — `Box<Q>`/`Rc<Q>`/
+        `Arc<Q>`/`Pin<Q>` give `Q`, `Vec<Q>` gives `[Q]`, and
+        `&Q`/`&mut Q` give `Q`; anything else returns None."""
+        spelled = spelled.strip()
+        wrapper = re.fullmatch(
+            r"(Box|Rc|Arc|Pin)\s*<(.+)>", spelled, re.DOTALL
+        )
+        if wrapper is not None:
+            return wrapper.group(2).strip()
+        vector = re.fullmatch(r"Vec\s*<(.+)>", spelled, re.DOTALL)
+        if vector is not None:
+            return "[" + vector.group(1).strip() + "]"
+        borrow = re.fullmatch(
+            r"&(?:mut\s+)?(.+)", spelled, re.DOTALL
+        )
+        if borrow is not None:
+            return borrow.group(1).strip()
+        return None
 
     @staticmethod
     def _bracket_wraps(spelled: str) -> bool:
