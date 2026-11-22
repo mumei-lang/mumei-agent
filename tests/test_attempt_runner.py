@@ -1794,6 +1794,60 @@ def test_filesystem_read_detector_rejects_unsupported_architecture(
     assert attempt_runner._detect_filesystem_read_isolation() is False
 
 
+def test_filesystem_read_detector_rejects_root_executable_directory(
+    monkeypatch,
+):
+    monkeypatch.setattr(attempt_runner.sys, "platform", "linux")
+    monkeypatch.setattr(
+        attempt_runner.platform, "machine", lambda: "x86_64"
+    )
+    monkeypatch.setattr(
+        attempt_runner,
+        "_resolved_spawn_target",
+        lambda _name: "/python",
+    )
+    monkeypatch.setattr(
+        attempt_runner.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail(
+            "the root directory cannot be an executable read root"
+        ),
+    )
+
+    assert attempt_runner._detect_filesystem_read_isolation() is False
+
+
+def test_filesystem_read_detector_probes_root_listing_without_tempfile(
+    monkeypatch,
+):
+    monkeypatch.setattr(attempt_runner.sys, "platform", "linux")
+    monkeypatch.setattr(
+        attempt_runner.platform, "machine", lambda: "x86_64"
+    )
+    monkeypatch.setattr(
+        attempt_runner,
+        "_resolved_spawn_target",
+        lambda _name: "/usr/bin/python3",
+    )
+
+    def fake_run(argv, **kwargs):
+        probe = argv[3]
+        assert "os.listdir('/')" in probe
+        assert "except PermissionError:" in probe
+        assert "os.listdir('/usr')" in probe
+        roots = attempt_runner._filesystem_read_allowed_roots(
+            "/usr/bin/python3"
+        )
+        assert argv[4:] == list(roots)
+        assert len(argv) == 4 + len(roots)
+        assert kwargs["timeout"] == 10
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(attempt_runner.subprocess, "run", fake_run)
+
+    assert attempt_runner._detect_filesystem_read_isolation() is True
+
+
 def test_filesystem_read_detector_treats_architecture_errors_as_unavailable(
     monkeypatch,
 ):

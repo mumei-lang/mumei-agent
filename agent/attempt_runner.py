@@ -17,7 +17,6 @@ import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from collections.abc import Mapping
@@ -289,25 +288,6 @@ def _path_is_under_roots(path: str, roots: tuple[str, ...]) -> bool:
         except ValueError:
             continue
     return False
-
-
-def _temporary_directory_outside_roots(
-    roots: tuple[str, ...],
-) -> tempfile.TemporaryDirectory:
-    parents = (
-        tempfile.gettempdir(),
-        os.path.expanduser("~"),
-        os.getcwd(),
-        "/var/tmp",
-    )
-    for parent in dict.fromkeys(parents):
-        if not os.path.isdir(parent) or _path_is_under_roots(parent, roots):
-            continue
-        try:
-            return tempfile.TemporaryDirectory(dir=parent)
-        except OSError:
-            continue
-    raise OSError("no temporary directory outside filesystem read roots")
 
 
 _FILESYSTEM_WRITE_ISOLATION_SETUP_SCRIPT = """import ctypes, os
@@ -664,9 +644,9 @@ _PROCESS_SPAWN_PROBE_SCRIPT = (
 )
 _FILESYSTEM_READ_PROBE_SCRIPT = (
     f"exec({_FILESYSTEM_READ_ISOLATION_SETUP_SCRIPT!r}, globals())\n"
-    "if not _install_filesystem_read_isolation(sys.argv[2:]): raise SystemExit(1)\n"
+    "if not _install_filesystem_read_isolation(sys.argv[1:]): raise SystemExit(1)\n"
     "try:\n"
-    "    with open(sys.argv[1], 'rb') as stream: stream.read(1)\n"
+    "    os.listdir('/')\n"
     "except PermissionError:\n"
     "    pass\n"
     "else:\n"
@@ -692,23 +672,20 @@ def _detect_filesystem_read_isolation() -> bool:
         if resolved_executable is None:
             return False
         roots = _filesystem_read_allowed_roots(resolved_executable)
-        with _temporary_directory_outside_roots(roots) as temp_dir:
-            marker_path = os.path.join(temp_dir, "landlock-read-probe")
-            with open(marker_path, "wb") as marker:
-                marker.write(b"x")
-            return subprocess.run(
-                [
-                    sys.executable,
-                    "-I",
-                    "-c",
-                    _FILESYSTEM_READ_PROBE_SCRIPT,
-                    marker_path,
-                    *roots,
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=10,
-            ).returncode == 0
+        if "/" in roots:
+            return False
+        return subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-c",
+                _FILESYSTEM_READ_PROBE_SCRIPT,
+                *roots,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        ).returncode == 0
     except Exception:
         return False
 
