@@ -10071,6 +10071,55 @@ class _Builder:
             and binding.type.elem.kind != "struct"
         )
 
+    def _comma_ok_container_field_map(
+        self, node: Any, width: int, params: dict | None = None
+    ) -> bool:
+        """`v, ok := p.M[k]` — the comma-ok pair on a param-root
+        struct's map field element.
+
+        Same two-name shape as the bound-map comma-ok: the element
+        read already flows through the single-name `e := p.M[k]`
+        index path, so the value carries the field slot's deps plus
+        the key's, and the flag conservatively takes them too.
+        `_scalar_container_field` does the member typing and the
+        param-root admission (pointer roots, aliases, reseat
+        accounting) — a member that is not a map, or a field the
+        slot model cannot name (reseated/dirty roots), stays closed."""
+        if width != 2 or node is None or node.type != "index_expression":
+            return False
+        operand = node.child_by_field_name("operand")
+        while (
+            operand is not None
+            and operand.type == "parenthesized_expression"
+        ):
+            operand = next(
+                (
+                    c
+                    for c in operand.named_children
+                    if c.type != "comment"
+                ),
+                None,
+            )
+        if operand is None or operand.type not in (
+            "selector_expression",
+            "field_expression",
+        ):
+            return False
+        _root_id, member = self._scalar_container_field(
+            operand, params, allow_struct_elements=True
+        )
+        return (
+            member is not None
+            and member.type is not None
+            and member.type.kind == "map"
+            and getattr(member.type, "elem", None) is not None
+            # An interface element binds the comma-ok value without
+            # the dispatch provenance the single-name `e := p.M[k]`
+            # read keeps, so `e.M()` would gap anyway — keep it
+            # closed rather than admit a half-supported read.
+            and member.type.elem.kind != "interface"
+        )
+
     def _call_result_fact(self, node: Any) -> tuple[Any | None, Any | None]:
         """(member, single-result fact) for a call operand.
 
@@ -16878,6 +16927,9 @@ class _Builder:
                     and not self._comma_ok_opaque_map(
                         rights[0], len(lefts)
                     )
+                    and not self._comma_ok_container_field_map(
+                        rights[0], len(lefts), params
+                    )
                     and not self._is_chan_recv(rights[0], len(lefts))
                 ):
                     raise _Unsupported("unsupported_statement", _span(node))
@@ -18115,6 +18167,9 @@ class _Builder:
                         is not None
                         or self._comma_ok_opaque_map(
                             value_nodes[0], len(names)
+                        )
+                        or self._comma_ok_container_field_map(
+                            value_nodes[0], len(names), params
                         )
                         or self._is_chan_recv(
                             value_nodes[0], len(names)
@@ -19424,6 +19479,9 @@ class _Builder:
                     or self._comma_ok_map_index(rights[0], len(lefts))
                     is not None
                     or self._comma_ok_opaque_map(rights[0], len(lefts))
+                    or self._comma_ok_container_field_map(
+                        rights[0], len(lefts), params
+                    )
                     or self._is_chan_recv(rights[0], len(lefts))
                 )
             )
