@@ -1842,3 +1842,61 @@ fn f(q @ P{inner}: P) { inner.n(); q.n(); }
     q_call = _call(report, source, "q.n()")
     assert inner_call.kind == "opaque_method"
     assert q_call.target == n.id
+
+
+def test_member_tuple_element_receiver_resolves_by_index():
+    source = """
+struct P { x: i32 }
+impl P { fn get(&self) -> i32 { self.x } }
+fn f(t: (i32, P)) { t.1.get(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    get = _bindings(report, "get", "associated_function")[0]
+    call = _call(report, source, "t.1.get()")
+    assert call.target == get.id
+    assert call.kind == "direct_local"
+
+
+def test_member_tuple_element_receiver_through_reference():
+    source = """
+struct P { x: i32 }
+impl P { fn get(&self) -> i32 { self.x } }
+fn f(u: &(i32, P)) { u.1.get(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    get = _bindings(report, "get", "associated_function")[0]
+    call = _call(report, source, "u.1.get()")
+    assert call.target == get.id
+
+
+def test_member_tuple_element_out_of_range_stays_opaque():
+    source = """
+struct P { x: i32 }
+impl P { fn get(&self) -> i32 { self.x } }
+fn f(t: (i32,)) { t.1.get(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    call = _call(report, source, "t.1.get()")
+    assert call.kind == "opaque_method"
+
+
+def test_member_tuple_element_let_annotation_receiver():
+    source = """
+struct P { x: i32 }
+impl P { fn get(&self) -> i32 { self.x } }
+fn f() { let t: (i32, P) = (0, P{x: 1}); t.1.get(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    get = _bindings(report, "get", "associated_function")[0]
+    call = _call(report, source, "t.1.get()")
+    assert call.target == get.id
+
+
+def test_member_tuple_element_non_tuple_receiver_stays_opaque():
+    source = """
+struct T(i32, i32);
+fn f(t: T) { t.0.get(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    call = _call(report, source, "t.0.get()")
+    assert call.kind == "opaque_method"
