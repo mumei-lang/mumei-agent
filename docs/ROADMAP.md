@@ -9637,3 +9637,29 @@ references compare `agree`. Fixture registered in
 capture surface, route or claim.
 
 **回帰ゲート**: `uv run pytest tests/test_sol_compiler_snapshot.py -q`
+### C06 lexical member access — contract-typed member resolution
+
+`agent/sol_bindings.py` `_resolve_member` resolves
+`object.property` when the object's declared type is a
+contract/interface/library or names one directly (`Lib.f`,
+`Token(token).transfer`-style handles resolve through `type_id` on the
+declared type, `this.` against the current contract and `super.` across
+declared bases). Member reads record `read`/`call` references against
+the resolved member binding and member calls classify with the same
+honest kinds as direct calls (`direct_local`, `opaque_bodyless`,
+`opaque_virtual`, `opaque_call_options`, `opaque_value`). Private
+members are visible only inside the declaring contract (`this.` and
+instances of the current contract); `super.` and other instances
+report `private_base_member`. Struct fields, enum members and builtin
+members (`.length`, `.balance`, `.push`) stay opaque by design — they
+are not bindings, so the position keeps its previous `opaque_member`
+call and silent-member treatment rather than inventing identities.
+`import`-bound module objects and unresolved bases are unchanged.
+
+The compiler snapshot intentionally still does not capture
+`MemberAccess` member names, so member references produced here have
+no compiler counterpart yet — the honest next slice captures
+`MemberAccess` spans in `agent/sol_compiler_snapshot.py` and compares
+the member declarations.
+
+**回帰ゲート**: `uv run pytest tests/test_sol_bindings.py tests/test_lexical_bindings.py -q`
