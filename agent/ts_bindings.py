@@ -521,7 +521,10 @@ class _TypeScriptBindings:
             direct = True
         generator = node.type in {
             "generator_function_declaration", "generator_function",
-        } or bool(re.search(r"\bfunction\s*\*", self.text(node)))
+        } or bool(
+            re.search(r"\bfunction\s*\*", self.text(node))
+            or (method and re.search(r"(?:^|\s)\*", self.text(node)))
+        )
         record = self.add_binding(
             name,
             kind,
@@ -716,7 +719,9 @@ class _TypeScriptBindings:
             and self._scope_contains(item.binding.scope, node.start_byte)
             and item.declaration_function == node.id
         ]
-        is_async = bool(re.search(r"^\s*async\b", self.text(node)))
+        is_async = bool(
+            re.search(r"(?:^|\s)async\s", self.text(node))
+        )
         generator = record.generator
         info = _FunctionInfo(
             record,
