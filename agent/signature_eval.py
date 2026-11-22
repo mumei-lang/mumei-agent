@@ -15,7 +15,7 @@ verification, no key lookup and no fresh check — `checks_not_performed`
 names what the fold leaves unassessed, including
 `signature_verification`, `key_authenticity` and `envelope_freshness`
 (`key_revocation` too, unless the caller supplies a declared
-`mumei.key-revocation-list/v1` document with `--revocation-list`, which
+`mumei.key-revocation-list/v1` (or /v2) document with `--revocation-list`, which
 performs it and emits `key_not_revoked`). A malformed or non-object
 document fails statically; a well-formed JSON object outside the
 envelope family reports `envelope_match: false` (both pins `false`, no
@@ -35,6 +35,7 @@ from agent.core_evidence import (
     evaluate_signature_envelope,
     producer_key_registry,
     revocation_key_set,
+    revocation_list_metadata,
 )
 
 MAX_ENVELOPE_BYTES = 1024 * 1024
@@ -68,9 +69,9 @@ def build_eval_parser(parser: argparse.ArgumentParser) -> None:
         "--revocation-list",
         metavar="PATH",
         help="Declared revocation list JSON "
-        "(mumei.key-revocation-list/v1) supplied over a separately "
-        "trusted channel. When supplied the evaluation emits "
-        "key_not_revoked checking the envelope's producer_key_id "
+        "(mumei.key-revocation-list/v1 or /v2) supplied over a "
+        "separately trusted channel. When supplied the evaluation "
+        "emits key_not_revoked checking the envelope's producer_key_id "
         "against the list's revoked_keys.",
     )
     parser.add_argument(
@@ -103,6 +104,16 @@ def build_eval_parser(parser: argparse.ArgumentParser) -> None:
         "revocation_signature_bound comparing the wrapper's declared "
         "subject_digest to the list's SHA-256 — representation-level "
         "only, no signature verification.",
+    )
+    parser.add_argument(
+        "--min-revocation-version",
+        metavar="N",
+        type=int,
+        help="Declared minimum list_version the revocation list must "
+        "clear. Requires --revocation-list naming a "
+        "mumei.key-revocation-list/v2 document and --reference-time. "
+        "When supplied the evaluation emits revocation_list_current "
+        "checking the list's declared window and version.",
     )
     parser.add_argument(
         "--reference-time",
@@ -207,10 +218,12 @@ def run_eval(args: argparse.Namespace) -> dict:
                 pass
     revoked_keys = None
     revocation_digest = None
+    revocation_list_meta = None
     revocation_path = getattr(args, "revocation_list", None)
     if revocation_path is not None:
         raw, declared = _load_declared(revocation_path)
         revoked_keys = revocation_key_set(declared)
+        revocation_list_meta = revocation_list_metadata(declared)
         revocation_digest = hashlib.sha256(raw).hexdigest()
     key_registry = None
     registry_digest = None
@@ -248,7 +261,9 @@ def run_eval(args: argparse.Namespace) -> dict:
         registry_signature,
         registry_digest,
         revocation_signature,
-        revocation_digest,
+                revocation_digest,
+        revocation_list_meta,
+        getattr(args, "min_revocation_version", None),
     )
 
 

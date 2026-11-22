@@ -1292,37 +1292,92 @@ SIGNATURE_ENVELOPE_EVALUATION_SCHEMA = (
 # A caller-supplied revocation list: a closed-shape declared document
 # naming the producer key ids the caller considers revoked — trusted as
 # declared, exactly like every other supporting document.
+#
+# v1 is a bare key set. v2 adds a version and a validity window so a
+# replayed older list can be told apart from a current one:
+# `list_version` (a positive integer the consumer pins a minimum for),
+# `issued_at` (when the producer cut the list) and the optional
+# `not_after` (the list's own expiry). v1 stays accepted — it just
+# cannot discharge `revocation_list_rollback`.
 KEY_REVOCATION_LIST_SCHEMA = "mumei.key-revocation-list/v1"
+KEY_REVOCATION_LIST_V2_SCHEMA = "mumei.key-revocation-list/v2"
 
 _KEY_REVOCATION_LIST_REQUIRED_FIELDS = frozenset(
     {"schema_version", "revoked_keys"}
 )
+_KEY_REVOCATION_LIST_V2_REQUIRED_FIELDS = frozenset(
+    {"schema_version", "list_version", "issued_at", "revoked_keys"}
+)
+_KEY_REVOCATION_LIST_V2_OPTIONAL_FIELDS = frozenset({"not_after"})
 
 
-def revocation_key_set(document: dict) -> frozenset:
-    """Fold a declared ``mumei.key-revocation-list/v1`` into a key set.
-
-    The list is a closed shape: `schema_version` names the schema and
-    `revoked_keys` is a list of non-empty strings — producer key ids in
-    the same label space `producer_key_id`/`--expected-producer-key`
-    pin. A malformed or foreign document raises ValueError rather than
-    silently revoking nothing or everything: the caller supplied it as
-    input, so a wrong shape is a caller error like a malformed
-    ``--record``.
-    """
-    if type(document) is not dict:
-        raise ValueError("invalid key-revocation list document")
+def _revoked_key_list(document: dict) -> frozenset:
     revoked = document.get("revoked_keys")
-    if (
-        frozenset(document) != _KEY_REVOCATION_LIST_REQUIRED_FIELDS
-        or document["schema_version"] != KEY_REVOCATION_LIST_SCHEMA
-        or type(revoked) is not list
-        or any(
-            type(key) is not str or key == "" for key in revoked
-        )
+    if type(revoked) is not list or any(
+        type(key) is not str or key == "" for key in revoked
     ):
         raise ValueError("invalid key-revocation list document")
     return frozenset(revoked)
+
+
+def _parse_revocation_list(
+    document: dict,
+) -> "tuple[frozenset, dict | None]":
+    """Parse a declared revocation list into its key set and — for v2
+    only — the metadata `revocation_list_current` pins: `list_version`
+    plus the RFC3339 `issued_at`/`not_after` windows as (low, high)
+    instant bounds. A malformed or foreign document raises ValueError:
+    the caller supplied it as input, so a wrong shape is a caller
+    error like a malformed ``--record``."""
+    if type(document) is not dict:
+        raise ValueError("invalid key-revocation list document")
+    fields = frozenset(document)
+    if document.get("schema_version") == KEY_REVOCATION_LIST_SCHEMA:
+        if fields != _KEY_REVOCATION_LIST_REQUIRED_FIELDS:
+            raise ValueError("invalid key-revocation list document")
+        return _revoked_key_list(document), None
+    if document.get("schema_version") == KEY_REVOCATION_LIST_V2_SCHEMA:
+        if not (
+            _KEY_REVOCATION_LIST_V2_REQUIRED_FIELDS <= fields
+            <= _KEY_REVOCATION_LIST_V2_REQUIRED_FIELDS
+            | _KEY_REVOCATION_LIST_V2_OPTIONAL_FIELDS
+        ):
+            raise ValueError("invalid key-revocation list document")
+        list_version = document["list_version"]
+        if type(list_version) is not int or list_version <= 0:
+            raise ValueError("invalid key-revocation list document")
+        issued_at = _parse_rfc3339(document["issued_at"])
+        not_after = None
+        if "not_after" in document:
+            not_after = _parse_rfc3339(document["not_after"])
+            if not_after is None:
+                raise ValueError("invalid key-revocation list document")
+        if issued_at is None or (
+            not_after is not None and issued_at[0] > not_after[1]
+        ):
+            raise ValueError("invalid key-revocation list document")
+        return _revoked_key_list(document), {
+            "list_version": list_version,
+            "issued_at": issued_at,
+            "not_after": not_after,
+        }
+    raise ValueError("invalid key-revocation list document")
+
+
+def revocation_key_set(document: dict) -> frozenset:
+    """Fold a declared ``mumei.key-revocation-list/v1`` (or ``/v2``)
+    into a key set — producer key ids in the same label space
+    `producer_key_id`/`--expected-producer-key` pin."""
+    keys, _meta = _parse_revocation_list(document)
+    return keys
+
+
+def revocation_list_metadata(document: dict) -> "dict | None":
+    """The v2 list's `list_version`/`issued_at`/`not_after` metadata —
+    `None` for a v1 list, which carries nothing a rollback check could
+    pin."""
+    _keys, meta = _parse_revocation_list(document)
+    return meta
 
 
 # A caller-supplied producer-key registry: a closed-shape declared
@@ -1478,6 +1533,8 @@ def evaluate_signature_envelope(
     registry_digest: str | None = None,
     revocation_signature: dict | None = None,
     revocation_digest: str | None = None,
+    revocation_list_meta: dict | None = None,
+    min_revocation_version: int | None = None,
 ) -> dict:
     """Fold a declared producer-signature envelope into an evaluation.
 
@@ -1536,7 +1593,11 @@ def evaluate_signature_envelope(
     if key_registry is not None:
         if reference is None:
             raise ValueError("key registry requires a reference time")
-    elif reference is not None and max_age_seconds is None:
+    elif (
+        reference is not None
+        and max_age_seconds is None
+        and min_revocation_version is None
+    ):
         raise ValueError(
             "reference time requires a key registry or max age"
         )
@@ -1554,6 +1615,24 @@ def evaluate_signature_envelope(
             )
         if not _is_fingerprint(revocation_digest or ""):
             raise ValueError("invalid revocation digest")
+    if min_revocation_version is not None:
+        if (
+            type(min_revocation_version) is not int
+            or min_revocation_version < 0
+        ):
+            raise ValueError("invalid min revocation version")
+        if revoked_keys is None:
+            raise ValueError(
+                "min revocation version requires a revocation list"
+            )
+        if revocation_list_meta is None:
+            raise ValueError(
+                "min revocation version requires a v2 revocation list"
+            )
+        if reference is None:
+            raise ValueError(
+                "min revocation version requires a reference time"
+            )
     match = _producer_signature_envelope_match(envelope)
     evaluation = {
         "schema_version": SIGNATURE_ENVELOPE_EVALUATION_SCHEMA,
@@ -1565,6 +1644,10 @@ def evaluate_signature_envelope(
             "key_authenticity",
             "envelope_freshness",
             "key_revocation",
+            # Without a versioned list (v2 + a declared minimum and
+            # reference time) a replayed old list cannot be told from
+            # a current one — the rollback check stays unperformed.
+            "revocation_list_rollback",
             # Declared trust anchors are trusted as declared unless a
             # signature pins them to the document's digest — the eval
             # fold can bind that signature but not verify it, so the
@@ -1605,6 +1688,28 @@ def evaluate_signature_envelope(
             match and envelope["producer_key_id"] not in revoked_keys
         )
         evaluation["checks_not_performed"].remove("key_revocation")
+    if (
+        revoked_keys is not None
+        and revocation_list_meta is not None
+        and min_revocation_version is not None
+        and reference is not None
+    ):
+        # The replay check: the v2 list must predate the declared
+        # reference, stay inside its optional `not_after` window and
+        # clear the caller's minimum version — the conservative
+        # bounds convention, same as registry windows.
+        evaluation["revocation_list_current"] = (
+            revocation_list_meta["issued_at"][1] <= reference[0]
+            and (
+                revocation_list_meta["not_after"] is None
+                or revocation_list_meta["not_after"][0] >= reference[1]
+            )
+            and revocation_list_meta["list_version"]
+            >= min_revocation_version
+        )
+        evaluation["checks_not_performed"].remove(
+            "revocation_list_rollback"
+        )
     if key_registry is not None:
         # A declared registry performs `key_authenticity` on the
         # matched envelope's key id: `key_authentic` is true only
@@ -1687,6 +1792,8 @@ def verify_signature_envelope(
     revocation_signature: dict | None = None,
     revocation_key: str | None = None,
     revocation_digest: str | None = None,
+    revocation_list_meta: dict | None = None,
+    min_revocation_version: int | None = None,
 ) -> dict:
     """Verify a declared producer-signature envelope's ed25519 signature.
 
@@ -1740,7 +1847,11 @@ def verify_signature_envelope(
     if key_registry is not None:
         if reference is None:
             raise ValueError("key registry requires a reference time")
-    elif reference is not None and max_age_seconds is None:
+    elif (
+        reference is not None
+        and max_age_seconds is None
+        and min_revocation_version is None
+    ):
         raise ValueError(
             "reference time requires a key registry or max age"
         )
@@ -1762,6 +1873,24 @@ def verify_signature_envelope(
             raise ValueError("invalid revocation key")
         if not _is_fingerprint(revocation_digest or ""):
             raise ValueError("invalid revocation digest")
+    if min_revocation_version is not None:
+        if (
+            type(min_revocation_version) is not int
+            or min_revocation_version < 0
+        ):
+            raise ValueError("invalid min revocation version")
+        if revoked_keys is None:
+            raise ValueError(
+                "min revocation version requires a revocation list"
+            )
+        if revocation_list_meta is None:
+            raise ValueError(
+                "min revocation version requires a v2 revocation list"
+            )
+        if reference is None:
+            raise ValueError(
+                "min revocation version requires a reference time"
+            )
     match = _producer_signature_envelope_match(envelope)
     signature_valid = False
     if match:
@@ -1791,6 +1920,10 @@ def verify_signature_envelope(
             "key_authenticity",
             "envelope_freshness",
             "key_revocation",
+            # Without a versioned list (v2 + a declared minimum and
+            # reference time) a replayed old list cannot be told from
+            # a current one — the rollback check stays unperformed.
+            "revocation_list_rollback",
             # The declared trust anchors are trusted as declared
             # unless the caller pins each to a
             # `mumei.producer-signature/v1` envelope over its bytes
@@ -1831,6 +1964,24 @@ def verify_signature_envelope(
             match and envelope["producer_key_id"] not in revoked_keys
         )
         verification["checks_not_performed"].remove("key_revocation")
+    if (
+        revoked_keys is not None
+        and revocation_list_meta is not None
+        and min_revocation_version is not None
+        and reference is not None
+    ):
+        verification["revocation_list_current"] = (
+            revocation_list_meta["issued_at"][1] <= reference[0]
+            and (
+                revocation_list_meta["not_after"] is None
+                or revocation_list_meta["not_after"][0] >= reference[1]
+            )
+            and revocation_list_meta["list_version"]
+            >= min_revocation_version
+        )
+        verification["checks_not_performed"].remove(
+            "revocation_list_rollback"
+        )
     if key_registry is not None:
         # Same declared registry as the evaluation fold:
         # `key_authentic` holds only when the envelope matched AND
