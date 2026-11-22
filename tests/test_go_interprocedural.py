@@ -6177,6 +6177,26 @@ def test_interface_field_bare_read(go_types_helper):
     assert result.return_dependencies == frozenset({0, 1})
 
 
+def test_interface_field_method_value(go_types_helper):
+    # `f := p.I.M` binds a method value whose receiver is the
+    # interface-typed field: the bound call folds the root's
+    # frozen deps plus every indirect store at the call site,
+    # so a `p.I = e` store between bind and call still reaches
+    # the result.
+    declarations = (
+        "type I interface{ M() int64 }\n"
+        "type S struct{ I I }\n"
+        "func F(p *S, e I) int64 {\n"
+        "\tf := p.I.M\n"
+        "\tp.I = e\n"
+        "\treturn f()\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+
+
 @pytest.mark.parametrize(
     ("declarations", "expected"),
     [
@@ -6840,15 +6860,15 @@ def test_interface_collection_bound_local_store(go_types_helper):
             "\treturn t\n"
             "}\n"
         ),
-        # `f := p.I.M` — a method value on the interface-typed
-        # field stays closed: the bound-method record needs the
-        # receiver as a binding, and `p.I` names a field slot
-        # (bare reads `v := p.I` and dispatch `p.I.M()` work).
+        # `f := s.I.M` — a method value on a local-composite
+        # root's interface field stays closed: `s` binds no
+        # pointer root for the receiver slot.
         (
             "type I interface{ M() int64 }\n"
             "type S struct{ I I }\n"
-            "func F(p *S) int64 {\n"
-            "\tf := p.I.M\n"
+            "func F() int64 {\n"
+            "\tvar s S\n"
+            "\tf := s.I.M\n"
             "\treturn f()\n"
             "}\n"
         ),
@@ -6970,12 +6990,9 @@ def test_interface_dispatch_local_struct_pointer_value(
 @pytest.mark.parametrize(
     "source",
     [
-        pytest.param(
-            "type I interface{ M(int64) int64 }\n"
-            "type W struct{ i I }\n"
-            "func F(w *W, x int64) int64 { f := w.i.M; return f(x) }\n",
-            id="pointer-root",
-        ),
+        # `f := w.i.M` on a pointer root binds like the
+        # `w.i.M(x)` dispatch — covered positively by
+        # `test_interface_field_method_value`.
         pytest.param(
             "type I interface{ M(int64) int64 }\n"
             "type T struct{}\n"
@@ -7007,7 +7024,7 @@ def test_interface_dispatch_local_struct_pointer_value(
         ),
     ],
 )
-def test_interface_field_method_values_stay_closed_outside_value_parameters(
+def test_interface_field_method_values_stay_closed_outside_pointer_roots(
     go_types_helper, source
 ):
     result = named(*unit(go_types_helper, source))
@@ -7402,16 +7419,6 @@ def test_interface_element_method_value_matches_direct_dispatch(
             "func F(x *S, i int64) int64 {\n"
             "\tvar y *S\n"
             "\tf := y.A[i].M\n"
-            "\treturn f(0)\n"
-            "}\n"
-        ),
-        # `p.I.M` — an interface-typed *field* read stays closed
-        # consistently; binding its method value does too.
-        (
-            "type I interface{ M(int64) int64 }\n"
-            "type S struct{ I I }\n"
-            "func F(p *S) int64 {\n"
-            "\tf := p.I.M\n"
             "\treturn f(0)\n"
             "}\n"
         ),

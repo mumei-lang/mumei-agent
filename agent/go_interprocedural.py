@@ -6366,6 +6366,23 @@ class _Builder:
                     field_receiver
                 )
                 self.pinned.update(struct_type_ids)
+            elif (
+                # `f := p.I.M` — a method value bound from an
+                # interface-typed field on a bound pointer root:
+                # the bound call's receiver is the root binding,
+                # whose frozen deps plus every indirect store at
+                # the call site match the dispatch path.
+                (
+                    _iface_leaf := self._bound_field_read(
+                        operand, locals_, params
+                    )
+                )
+                is not None
+                and _iface_leaf[1].type is not None
+                and _iface_leaf[1].type.kind == "interface"
+            ):
+                receiver_id = _iface_leaf[2].binding_id
+                interface_id = _iface_leaf[1].type.type_id or None
             else:
                 interface_member = self._package_member(operand)
                 if (
