@@ -2317,7 +2317,7 @@ class _RustBindings:
             return self._element_of(
                 container_id,
                 elem_args,
-                self._receiver_annotation_position(children[0])
+                self._field_args_position(children[0])
                 or node.start_byte,
             )
         if node.type == "field_expression":
@@ -2897,6 +2897,46 @@ class _RustBindings:
                 return None, None
             return f"({left}, {right})", position
         return None, None
+
+    def _field_args_position(
+        self, field_expr: Any | None
+    ) -> "int | None":
+        """Scope position resolving a field access's spelled args —
+        the receiver's annotation when the field type spells the
+        container's own params (substituted args were written at the
+        use site), else the field's declaration (a fixed `Vec<Q>`
+        keeps `Q` in the field's scope, not a same-named local)."""
+        if field_expr is None or field_expr.type != "field_expression":
+            return self._receiver_annotation_position(field_expr)
+        member = self._field_member(
+            field_expr, ("struct_field", "associated_const")
+        )
+        if member is None or member.type_node is None:
+            return None
+        value = field_expr.child_by_field_name("value")
+        type_id, impl_args = (
+            (None, None) if value is None
+            else self._receiver_type(value)
+        )
+        container = (
+            None if type_id is None else self.records.get(type_id)
+        )
+        param_map = (
+            {}
+            if container is None
+            else self._pattern_param_map(container, impl_args)
+        )
+        if param_map:
+            member_text = self.text(member.type_node)
+            if any(
+                re.search(rf"\b{re.escape(param)}\b", member_text)
+                for param in param_map
+            ):
+                return (
+                    self._receiver_annotation_position(value)
+                    or field_expr.start_byte
+                )
+        return member.type_node.start_byte
 
     def _iterator_method_element(
         self, call: Any
