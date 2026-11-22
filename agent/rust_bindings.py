@@ -2906,7 +2906,11 @@ class _RustBindings:
                 node, ("struct_field", "associated_const")
             )
             if member is None or member.type_node is None:
-                return None
+                element = self._tuple_element_node(
+                    node.child_by_field_name("value"),
+                    node.child_by_field_name("field"),
+                )
+                return None if element is None else element.start_byte
             return member.type_node.start_byte
         if node.type == "call_expression":
             # `v.iter()`/`v.first()` spelled names were written in
