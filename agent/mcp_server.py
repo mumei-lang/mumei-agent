@@ -4156,16 +4156,19 @@ def native_object_accept(
     without provably identical bits and f64 tail calls fail closed. This is
     not an IEEE-754 conformance, ABI, runtime, or full object-TV claim.
     Core's `machine_code_composite_register_aggregate_tv` is consumed only
-    when listed in `checks_performed`; it covers one- through four-leaf
-    struct parameters, results and direct-call struct values with integer
-    and/or f64 leaves. One- and two-leaf values use Core's existing assumed
-    SysV eightbyte convention; integer arguments use rdi–r9 and f64 arguments
-    xmm0–xmm7, with the whole aggregate fitting and never split or
-    stack-passed. Aggregate results are limited to three integer leaves in
-    rax/rdx/rcx and two f64 leaves in xmm0/xmm1. Aggregates wider than two
-    leaves assume LLVM first-class aggregate register lowering, not SysV
-    C-ABI classification, and
-    `machine_code_tv_sysv_memory_class_aggregate_abi` stays not performed.
+    when listed in `checks_performed`. It covers one- through sixteen-leaf
+    struct parameters and direct-call struct arguments, and struct results
+    of at most four leaves (at most three integer leaves in rax/rdx/rcx and
+    at most two f64 leaves in xmm0/xmm1), with integer and/or f64 leaves; an
+    i128/u128 leaf occupies two consecutive integer slots, low half first.
+    Integer leaves take the next register in rdi–r9 and f64 leaves the next
+    in xmm0–xmm7; leaves without a free register in their class are passed on
+    the argument stack in declaration order, as LLVM lowers scalar stack
+    arguments. Four-integer-leaf results (hidden sret) and three-f64-leaf
+    results (x87) fail closed. One- and two-leaf values use Core's existing
+    assumed SysV eightbyte convention; aggregates wider than two leaves
+    assume LLVM first-class aggregate lowering, not SysV C-ABI classification,
+    and `machine_code_tv_sysv_memory_class_aggregate_abi` stays not performed.
     This makes no ABI, runtime or full object-TV claim.
 
     Args:
@@ -4801,16 +4804,19 @@ def native_machine_tv_recheck(
     f64 tail calls fail closed. This makes no IEEE-754 conformance, ABI,
     runtime or full object-TV claim.
     Core's `machine_code_composite_register_aggregate_tv` is consumed only
-    when listed in `checks_performed`; it covers one- through four-leaf
-    struct parameters, results and direct-call struct values with integer
-    and/or f64 leaves. One- and two-leaf values use Core's existing assumed
-    SysV eightbyte convention; integer arguments use rdi–r9 and f64 arguments
-    xmm0–xmm7, with the whole aggregate fitting and never split or
-    stack-passed. Aggregate results are limited to three integer leaves in
-    rax/rdx/rcx and two f64 leaves in xmm0/xmm1. Aggregates wider than two
-    leaves assume LLVM first-class aggregate register lowering, not SysV
-    C-ABI classification, and
-    `machine_code_tv_sysv_memory_class_aggregate_abi` stays not performed.
+    when listed in `checks_performed`. It covers one- through sixteen-leaf
+    struct parameters and direct-call struct arguments, and struct results
+    of at most four leaves (at most three integer leaves in rax/rdx/rcx and
+    at most two f64 leaves in xmm0/xmm1), with integer and/or f64 leaves; an
+    i128/u128 leaf occupies two consecutive integer slots, low half first.
+    Integer leaves take the next register in rdi–r9 and f64 leaves the next
+    in xmm0–xmm7; leaves without a free register in their class are passed on
+    the argument stack in declaration order, as LLVM lowers scalar stack
+    arguments. Four-integer-leaf results (hidden sret) and three-f64-leaf
+    results (x87) fail closed. One- and two-leaf values use Core's existing
+    assumed SysV eightbyte convention; aggregates wider than two leaves
+    assume LLVM first-class aggregate lowering, not SysV C-ABI classification,
+    and `machine_code_tv_sysv_memory_class_aggregate_abi` stays not performed.
     This makes no ABI, runtime or full object-TV claim.
     `machine_tv_recheck` is claimed only for uniquely-mapped exit codes
     (0 `checked`, 3 `inconclusive`); mid-run drift reports `inputs_changed`

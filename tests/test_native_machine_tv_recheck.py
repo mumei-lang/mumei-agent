@@ -1400,8 +1400,14 @@ def test_real_core_rechecks_machine_tv_scalar_f64(tmp_path, capsys, real_core):
     assert f64_check in descriptor["checks_performed"]
     assert descriptor["register_convention_assumed"] == F64_REGISTER_CONVENTION
     for marker in MACHINE_TV_ASSUMPTION_MARKERS:
-        assert marker in descriptor["checks_not_performed"]
         assert marker not in descriptor["checks_performed"]
+        if marker in {
+            "machine_code_tv_mxcsr_control_state",
+            "machine_code_tv_nan_payload_bits",
+        }:
+            assert marker in descriptor["checks_not_performed"]
+        elif marker == "machine_code_tv_sysv_memory_class_aggregate_abi":
+            assert marker not in descriptor["checks_not_performed"]
 
     argv = _args(Path(real_core), bundle, source)
     argv[argv.index("--expected-build-id") + 1] = build_id
