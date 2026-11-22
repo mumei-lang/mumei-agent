@@ -285,8 +285,8 @@ def test_range_pattern_path_bounds_resolve_or_remain_unresolved():
     ("source", "name", "reason"),
     [
         (
-            "mod m { const K:i32=0; } fn f(v:i32){ match v { m::K..=m::K => (), _ => () } }",
-            "m::K",
+            "mod m { const K:i32=0; } fn f(v:i32){ match v { m::J..=m::J => (), _ => () } }",
+            "m::J",
             "qualified_path",
         ),
         (
@@ -5907,6 +5907,364 @@ fn f(o: Option<P>, u: Option<P>, v: Option<Q>) {
     assert sum(1 for t in targets if not t) == 1
 
 
+def test_smart_pointer_receivers_deref_to_the_payload():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct W<T> { _m: T }
+impl<T> W<T> { fn wm(&self) {} }
+fn f(b: Box<P>, r: std::rc::Rc<P>, w: W<P>, m: std::sync::Mutex<P>) {
+    b.pm();
+    r.pm();
+    w.pm();
+    m.pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    resolved = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    assert resolved["b.pm()"] == pm.id
+    assert resolved["r.pm()"] == pm.id
+    # A custom `W<P>` and a guard `Mutex<P>` stay opaque — they do
+    # not Deref straight to `P`.
+    assert not resolved["w.pm()"]
+    assert not resolved["m.pm()"]
+
+
+def test_slice_and_array_option_heads():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(s: &[P], a: [P; 4]) {
+    if let Some(p) = s.first() { p.pm(); }
+    if let Some(p) = a.last() { p.pm(); }
+    if let Some(p) = s.get(0) { p.pm(); }
+    match s.first() { Some(p) => p.pm(), None => {} }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    calls = [
+        call for call in report.calls
+        if raw[call.span.start:call.span.end].decode() == "p.pm()"
+    ]
+    assert len(calls) == 4
+    for call in calls:
+        assert call.target == pm.id
+
+
+def test_get_mut_and_option_filter_heads():
+    source = """
+use std::collections::HashMap;
+struct P;
+impl P { fn pm(&self) {} }
+fn f(v: Vec<P>, m: HashMap<i32, P>, o: Option<P>) {
+    if let Some(p) = v.get_mut(0) { p.pm(); }
+    if let Some(p) = m.get_mut(&1) { p.pm(); }
+    if let Some(p) = o.filter(|x| true) { p.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    calls = [
+        call for call in report.calls
+        if raw[call.span.start:call.span.end].decode() == "p.pm()"
+    ]
+    assert len(calls) == 3
+    for call in calls:
+        assert call.target == pm.id
+
+
+def test_split_first_and_last_pair_payloads():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(v: Vec<P>, s: &[P]) {
+    if let Some((h, rest)) = v.split_first() { h.pm(); rest[0].pm(); }
+    if let Some((l, rest)) = s.split_last() { l.pm(); rest[0].pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    calls = [
+        call for call in report.calls
+        if raw[call.span.start:call.span.end].decode()
+        in {"h.pm()", "l.pm()", "rest[0].pm()"}
+    ]
+    assert len(calls) == 4
+    for call in calls:
+        assert call.target == pm.id
+
+def test_scoped_callee_return_spelled_in_decl_scope():
+    # `n::make() -> Box<P>` spells `P` in `n`'s scope — a same-named
+    # root `P` must not win the payload resolution.
+    source = """
+mod n {
+    pub struct P;
+    impl P { fn pm(&self) {} }
+    pub fn make() -> Box<P> { Box::new(P) }
+}
+struct P;
+fn g() { let b = n::make(); b.pm(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    calls = [
+        call for call in report.calls
+        if raw[call.span.start:call.span.end].decode() == "b.pm()"
+    ]
+    assert len(calls) == 1
+    assert calls[0].target == pm.id
+
+
+def test_struct_pattern_field_keeps_declared_head():
+    # `let m::W { opt } = w` binds `opt` to the field's declared
+    # `Option<T>` — a later `if let Some(q) = opt` still reads the
+    # `Option` head and resolves `m::Q` in the module's scope.
+    source = """
+mod m {
+    pub struct W<T> { pub opt: Option<T> }
+    pub struct Q;
+    impl Q { fn qm(&self) {} }
+}
+struct Q;
+fn f() {
+    let w: m::W<m::Q> = todo!();
+    let m::W { opt } = w;
+    if let Some(q) = opt { q.qm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    qm = _bindings(report, "qm", "associated_function")[0]
+    raw = source.encode()
+    calls = [
+        call for call in report.calls
+        if raw[call.span.start:call.span.end].decode() == "q.qm()"
+    ]
+    assert len(calls) == 1
+    assert calls[0].target == qm.id
+
+    def test_scoped_module_call_picks_its_own_function(self):
+        report = build_rust_bindings(
+            """
+            mod a {
+                pub struct P;
+                impl P { pub fn pm(&self) {} }
+                pub fn make() -> Box<P> { Box::new(P) }
+            }
+            mod b {
+                pub struct Q;
+                impl Q { pub fn qm(&self) {} }
+                pub fn make() -> Box<Q> { Box::new(Q) }
+            }
+            fn g() {
+                let x = b::make();
+                x.qm();
+            }
+            """,
+            pointer_width=64,
+        )
+        calls = {self._call_name(c) for c in report.calls}
+        self.assertIn("qm", calls)
+        self.assertNotIn("pm", calls)
+
+    def test_member_borrowing_a_container_keeps_the_container(self):
+        report = build_rust_bindings(
+            """
+            struct P;
+            impl P { fn pm(&self) {} }
+            struct W { v: Vec<P> }
+            impl W {
+                fn vref(&self) -> &Vec<P> { &self.v }
+                fn oref(&self) -> &Option<P> { &None }
+                fn sref(&self) -> &mut [P] { &mut [] }
+            }
+            fn f(w: &W) {
+                w.vref()[0].pm();
+                match w.oref() { Some(q) => q.pm(), _ => () }
+                match w.sref().first() { Some(r) => r.pm(), _ => () }
+            }
+            """,
+            pointer_width=64,
+        )
+        targets = [c.callee for c in report.calls]
+        self.assertEqual(targets.count("pm"), 3)
+
+    def test_pattern_field_args_resolve_in_the_declaring_module(self):
+        report = build_rust_bindings(
+            """
+            struct Q;
+            impl Q { fn stray(&self) {} }
+            mod m {
+                pub struct Q;
+                impl Q { pub fn qm(&self) {} }
+                pub struct W { pub opt: Option<Q> }
+            }
+            fn f(w: m::W) {
+                let m::W { opt } = w;
+                match opt { Some(q) => q.qm(), _ => () }
+            }
+            """,
+            pointer_width=64,
+        )
+        calls = {self._call_name(c) for c in report.calls}
+        self.assertIn("qm", calls)
+        self.assertNotIn("stray", calls)
+
+def test_scoped_module_call_picks_its_own_function():
+    source = """
+mod a {
+    pub struct P;
+    impl P { pub fn pm(&self) {} }
+    pub fn make() -> Box<P> { Box::new(P) }
+}
+mod b {
+    pub struct Q;
+    impl Q { pub fn qm(&self) {} }
+    pub fn make() -> Box<Q> { Box::new(Q) }
+}
+fn g() {
+    let x = b::make();
+    x.qm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    qm = _bindings(report, "qm", "associated_function")[0]
+    bound = [
+        call
+        for call in report.calls
+        if raw[call.span.start:call.span.end].decode() == "x.qm()"
+    ]
+    assert len(bound) == 1
+    assert bound[0].target == qm.id
+    assert not any(
+        raw[call.span.start:call.span.end].decode() == "x.pm()"
+        for call in report.calls
+        if call.target
+    )
+
+
+def test_member_borrowing_a_container_keeps_the_container():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct W { v: Vec<P> }
+impl W {
+    fn vref(&self) -> &Vec<P> { &self.v }
+    fn oref(&self) -> &Option<P> { &None }
+    fn sref(&self) -> &mut [P] { &mut [] }
+}
+fn f(w: &W) {
+    w.vref()[0].pm();
+    match w.oref() { Some(q) => q.pm(), _ => () }
+    match w.sref().first() { Some(r) => r.pm(), _ => () }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    assert sum(1 for c in report.calls if c.target == pm.id) == 3
+
+
+def test_pattern_field_args_resolve_in_the_declaring_module():
+    source = """
+struct Q;
+impl Q { fn stray(&self) {} }
+mod m {
+    pub struct Q;
+    impl Q { pub fn qm(&self) {} }
+    pub struct W { pub opt: Option<Q> }
+}
+fn f(w: m::W) {
+    let m::W { opt } = w;
+    match opt { Some(q) => q.qm(), _ => () }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    qm = _bindings(report, "qm", "associated_function")[0]
+    stray = _bindings(report, "stray", "associated_function")[0]
+    targets = [c.target for c in report.calls]
+    assert qm.id in targets
+    assert stray.id not in targets
+
+
+def test_substituted_pattern_args_resolve_at_the_use_site():
+    source = """
+mod m {
+    pub struct Q;
+    impl Q { pub fn stray(&self) {} }
+    pub struct W<T> { pub opt: Option<T> }
+}
+struct Q;
+impl Q { fn qm(&self) {} }
+fn f(w: m::W<Q>) {
+    let m::W { opt } = w;
+    match opt { Some(q) => q.qm(), _ => () }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    qm = _bindings(report, "qm", "associated_function")[0]
+    stray = _bindings(report, "stray", "associated_function")[0]
+    targets = [c.target for c in report.calls]
+    assert qm.id in targets
+    assert stray.id not in targets
+
+
+def test_borrowed_smart_pointer_return_resolves_in_member_scope():
+    source = """
+struct P;
+impl P { fn stray(&self) {} }
+mod n {
+    pub struct P;
+    impl P { pub fn pm(&self) {} }
+    pub fn get() -> &'static Box<P> { &Box::new(P) }
+}
+fn g() {
+    n::get().pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    stray = _bindings(report, "stray", "associated_function")[0]
+    targets = [c.target for c in report.calls]
+    assert pm.id in targets
+    assert stray.id not in targets
+
+
+def test_module_reexport_and_same_named_alias():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+mod a {
+    pub struct P2;
+    impl P2 { pub fn p2m(&self) {} }
+    pub fn make() -> Box<P2> { Box::new(P2) }
+}
+mod m {
+    pub use a::make;
+    pub fn direct() -> Box<P> { Box::new(P) }
+    pub type alias = P;
+}
+fn g() {
+    let x = m::make();
+    x.p2m();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    p2m = _bindings(report, "p2m", "associated_function")[0]
+    targets = [c.target for c in report.calls]
+    assert p2m.id in targets
+
+
+
 def test_option_and_keeps_the_option_head_when_scopes_differ():
     source = """
 mod m { pub struct Q; impl Q { pub fn qm(&self) {} } }
@@ -5938,6 +6296,71 @@ fn f(o: Option<Q>) {
     assert calls["q.qm()"] == qm.id
 
 
+
+def test_borrowed_slice_return_keeps_the_substituted_element():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct W<T> { _m: T }
+impl<T> W<T> { fn sref(&self) -> &mut [T] { &mut [] } }
+fn f(w: W<P>) { w.sref()[0].pm(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    targets = [
+        call.target
+        for call in report.calls
+        if raw[call.span.start:call.span.end].decode() == "w.sref()[0].pm()"
+    ]
+    assert targets == [pm.id]
+
+
+def test_first_on_array_elements_keeps_the_array_shape():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(v: Vec<[P; 2]>) {
+    match v.first() { Some(a) => a[0].pm(), _ => () }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    targets = [
+        call.target
+        for call in report.calls
+        if raw[call.span.start:call.span.end].decode() == "a[0].pm()"
+    ]
+    assert targets == [pm.id]
+
+
+def test_fixed_field_args_stay_in_the_declaring_module():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct E;
+mod m {
+    pub struct E;
+    impl E { pub fn em(&self) {} }
+    pub struct W<T> { pub res: Result<T, E> }
+}
+fn f(w: m::W<P>) {
+    let m::W { res } = w;
+    match res { Err(e) => e.em(), _ => () }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    em = _bindings(report, "em", "associated_function")[0]
+    raw = source.encode()
+    targets = [
+        call.target
+        for call in report.calls
+        if raw[call.span.start:call.span.end].decode() == "e.em()"
+    ]
+    assert targets == [em.id]
+
+
 def test_option_and_drops_an_unspellable_payload():
     source = """
 fn g<Q>(x: Option<Q>) -> Option<Q> { x }
@@ -5957,3 +6380,155 @@ fn f<T>(o: Option<T>) {
     # the payload stays opaque instead of misbinding q.qm().
     qm = _bindings(report, "qm", "associated_function")[0]
     assert _call(report, source, "q.qm()").target != qm.id
+
+
+def test_specialized_impl_matches_crate_qualified_args():
+    source = """
+mod m {
+    pub struct P;
+}
+struct W<T>;
+impl W<m::P> {
+    fn pm(&self) {}
+}
+fn f(o: Option<W<m::P>>, u: Option<W<m::P>>) {
+    match o.and(u) {
+        Some(w) => w.pm(),
+        _ => {}
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    assert _call(report, source, "w.pm()").target == pm.id
+
+
+def test_crate_path_never_binds_a_generic_parameter():
+    # A module fn's `g<P>` parameter shadows the module's own
+    # `struct P` when `crate::m::P` walks the module's bindings —
+    # parameters are never path-addressable, so the struct must win.
+    source = """
+mod m {
+    pub struct P;
+    impl P {
+        pub fn pm(&self) {}
+    }
+    pub fn g<P>(x: P) {}
+}
+fn f(o: Option<m::P>, u: Option<m::P>) {
+    match o.and(u) {
+        Some(p) => p.pm(),
+        _ => {}
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    assert _call(report, source, "p.pm()").target == pm.id
+
+
+def test_impl_args_keep_relative_paths_distinct_from_bare_names():
+    # `W<m::P>` and `W<P>` are different specializations — a
+    # receiver spelled `W<P>` must not match the `W<m::P>` impl
+    # just because the final segments coincide.
+    source = """
+mod m {
+    pub struct P;
+}
+struct P;
+struct W<T>;
+impl W<m::P> {
+    fn other(&self) {}
+}
+impl W<P> {
+    fn pm(&self) {}
+}
+fn f(o: Option<W<P>>, u: Option<W<P>>) {
+    match o.and(u) {
+        Some(w) => w.pm(),
+        _ => {}
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    assert _call(report, source, "w.pm()").target == pm.id
+
+
+def test_specialized_impl_args_resolve_through_use_alias():
+    # `use m::P` makes `P` an alias — `impl W<P>` is the same
+    # specialization as `W<m::P>` and must answer for it.
+    source = """
+mod m {
+    pub struct P;
+}
+use m::P;
+struct W<T>;
+impl W<P> {
+    fn pm(&self) {}
+}
+fn f(w: W<m::P>) {
+    w.pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    assert _call(report, source, "w.pm()").target == pm.id
+
+
+def test_call_site_alias_does_not_rebind_impl_specialization():
+    source = """
+mod m {
+    pub struct P;
+    pub struct Q;
+}
+use m::P;
+struct W<T>;
+impl W<P> {
+    fn pm(&self) {}
+}
+impl W<m::Q> {
+    fn qm(&self) {}
+}
+fn f() {
+    use m::Q as P;
+    let w: W<P>;
+    w.qm();
+    w.pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    qm = _bindings(report, "qm", "associated_function")[0]
+    # The receiver's `P` is `m::Q` — `w.qm()` picks the W<m::Q>
+    # impl, and `w.pm()` must not resolve to the W<P> impl.
+    assert _call(report, source, "w.qm()").target == qm.id
+    assert _call(report, source, "w.pm()").target != pm.id
+
+
+def test_raw_pointer_args_distinguish_specializations():
+    source = """
+struct P;
+struct W<T>;
+impl W<*const P> {
+    fn cm(&self) {}
+}
+impl W<*mut P> {
+    fn mm(&self) {}
+}
+impl W<P> {
+    fn pm(&self) {}
+}
+fn f(w: W<*mut P>) {
+    w.mm();
+    w.cm();
+    w.pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    mm = _bindings(report, "mm", "associated_function")[0]
+    cm = _bindings(report, "cm", "associated_function")[0]
+    pm = _bindings(report, "pm", "associated_function")[0]
+    assert _call(report, source, "w.mm()").target == mm.id
+    assert _call(report, source, "w.cm()").target != cm.id
+    assert _call(report, source, "w.pm()").target != pm.id

@@ -67,6 +67,24 @@ _ITER_CHUNK_METHODS = frozenset(
 _MAP_ELEMENT_METHODS = {"keys": 0, "values": 1}
 _MAP_CONTAINER_NAMES = frozenset({"HashMap", "BTreeMap"})
 
+# Smart pointers that `Deref` straight to their payload — `b.pm()`
+# on `Box<P>`/`Rc<P>`/`Arc<P>` calls `P`'s members. `Mutex`/`Cell`/
+# `RefCell` guard their payload behind `lock()`/`get()` and stay
+# opaque.
+_DEREF_WRAPPER_NAMES = frozenset({"Box", "Rc", "Arc"})
+
+# `Option` heads slices and arrays share with `Vec` — `s.get(i)`,
+# `s.first()`, `s.last()` yield `Option<&T>` on `&[T]`/`[T; N]` too.
+# `pop`/`remove` stay Vec-only — slices cannot shrink.
+_SLICE_OPTION_METHODS = frozenset(
+    {"get", "first", "last", "split_first", "split_last"}
+)
+
+# `v.split_first()`/`v.split_last()` yield
+# `Option<(&T, &[T])>` — the payload is the pair (element,
+# rest-slice), spelled `(P, &P)` so tuple patterns bind `f`/`rest`.
+_SPLIT_PAIR_METHODS = frozenset({"split_first", "split_last"})
+
 # Prelude container methods that hand back `Option` — `v.get(i)`,
 # `v.first()` and `v.last()` yield `Option<&T>` while `v.pop()`
 # yields `Option<T>`. Each maps to its payload prefix and the
@@ -76,6 +94,7 @@ _MAP_CONTAINER_NAMES = frozenset({"HashMap", "BTreeMap"})
 # `Result<P, E>`, `err` reads E); -1 is the last arg.
 _OPTION_HEAD_METHODS = {
     "get": ("&", {"Vec", "VecDeque", "HashMap", "BTreeMap"}, -1),
+    "get_mut": ("&mut ", {"Vec", "VecDeque", "HashMap", "BTreeMap"}, -1),
     "first": ("&", {"Vec"}, -1),
     "last": ("&", {"Vec"}, -1),
     "pop": ("", {"Vec"}, -1),
@@ -97,9 +116,14 @@ _OPTION_HEAD_METHODS = {
     "as_mut": ("&mut ", {"Option"}, 0),
     # `o.and(o2)`/`o.or(o2)`/`o.xor(o2)` still yield `Option<P>` —
     # the payload index keeps the receiver's own first arg.
+    "filter": ("", {"Option"}, 0),
     "and": ("", {"Option"}, 0),
     "or": ("", {"Option"}, 0),
     "xor": ("", {"Option"}, 0),
+    # `Vec`/slice `split_first`/`split_last` — payload is the
+    # `(element, rest-slice)` pair; `_SPLIT_PAIR_METHODS` spells it.
+    "split_first": ("", {"Vec"}, -1),
+    "split_last": ("", {"Vec"}, -1),
 }
 
 _PRELUDE_NAMES = frozenset(
@@ -217,6 +241,11 @@ class _Scope:
     # `pub` (only re-exports carry names onward).
     glob_imports: list[tuple[str, int, bool]] = field(default_factory=list)
     ambiguous_names: dict[str, tuple[int, int]] = field(default_factory=dict)
+    # The scope that was on top when this one was pushed — the
+    # lexical ancestor chain a declaration resolves names in. Kept
+    # on the scope so a declaration's home scope can be resolved
+    # without the call-site stack leaking in.
+    parent: "_Scope | None" = None
 
 
 @dataclass
@@ -268,6 +297,14 @@ class _Record:
     # The scope the record was declared into — a type alias's body
     # resolves in its own scope, not the use-site scope stack.
     home_scope: Any = None
+    # A pattern-bound name's declaring annotation (`let W { opt } = w`
+    # keeps `opt`'s `Option<T>`) — heads prelude patterns on the name
+    # even though its resolved args were substituted at the site.
+    pattern_decl_node: Any = None
+    # The scope the declaring annotation was written in — `opt: Option<Q>`
+    # inside `mod m` resolves its bare `Q` to `m::Q`, not a same-named
+    # type in the binding scope.
+    pattern_decl_scope: Any = None
     # The item carries a `pub` visibility modifier — only `pub` items
     # come through a `use m::*` glob.
     public: bool = False
@@ -307,6 +344,14 @@ class _RustBindings:
         # flush the memo on every line.
         self._resolution_epoch = 0
 
+    def _push_scope(self, scope: "_Scope") -> None:
+        # The scope on top when a scope is first pushed is its
+        # lexical parent; later re-pushes (temporary resolution
+        # scopes) keep the original parent.
+        if scope.parent is None and self.scopes:
+            scope.parent = self.scopes[-1]
+        self.scopes.append(scope)
+
     def span(self, node: Any) -> ByteSpan:
         return ByteSpan(node.start_byte, node.end_byte)
 
@@ -324,7 +369,7 @@ class _RustBindings:
 
     def build(self) -> LexicalBindingReport:
         root_scope = _Scope(self.root, 0, "")
-        self.scopes.append(root_scope)
+        self._push_scope(root_scope)
         self._scan_attributes()
         self._predeclare(self.root, root_scope)
         self._scan_container(self.root, root_scope)
@@ -525,7 +570,7 @@ class _RustBindings:
                         body, scope.module_depth + 1, scope.function_id
                     )
                     record.module_scope = child_scope
-                    self.scopes.append(child_scope)
+                    self._push_scope(child_scope)
                     self._predeclare(body, child_scope)
                     self.scopes.pop()
                 self._add_generic_parameters(
@@ -1018,7 +1063,7 @@ class _RustBindings:
                 )
                 if record is not None:
                     record.module_scope = child_scope
-                self.scopes.append(child_scope)
+                self._push_scope(child_scope)
                 # Items inside were already predeclared with the
                 # module's own record — only expressions need the walk.
                 self._scan_container(body, child_scope)
@@ -1216,12 +1261,38 @@ class _RustBindings:
         parts.append("".join(current))
         return [part.strip() for part in parts]
 
+    def _resolve_spelled_in_scope(
+        self, spelled: str, scope: "_Scope | None", position: int
+    ) -> "str | None":
+        """Resolve a written type name inside `scope` (the impl's
+        declaring scope) — `use m::P` aliases and module members
+        resolve exactly as the impl side wrote them. Resolves on the
+        declaration's own ancestor chain so a call-site `use` alias
+        cannot shadow the impl's spelling."""
+        if scope is None:
+            type_id, _ = self._spelled_type(spelled, position)
+            return type_id
+        chain = []
+        cursor = scope
+        while cursor is not None and cursor not in chain:
+            chain.append(cursor)
+            cursor = cursor.parent
+        saved = self.scopes
+        self.scopes = list(reversed(chain))
+        try:
+            type_id, _ = self._spelled_type(spelled, position)
+        finally:
+            self.scopes = saved
+        return type_id
+
     def _type_arg_match(
         self,
         pattern: str,
         concrete: str,
         params: frozenset[str],
         bindings: dict[str, str],
+        pattern_scope: "_Scope | None" = None,
+        position: "int | None" = None,
     ) -> bool:
         """Does impl-side arg `pattern` cover receiver arg `concrete`?
 
@@ -1255,7 +1326,12 @@ class _RustBindings:
             if bool(ref_a.group(1)) != bool(ref_b.group(1)):
                 return False
             return self._type_arg_match(
-                ref_a.group(2), ref_b.group(2), params, bindings
+                ref_a.group(2),
+                ref_b.group(2),
+                params,
+                bindings,
+                pattern_scope,
+                position,
             )
         if a.startswith("(") and a.endswith(")"):
             if not (b.startswith("(") and b.endswith(")")):
@@ -1263,7 +1339,9 @@ class _RustBindings:
             sub_a = self._type_arg_list(a[1:-1])
             sub_b = self._type_arg_list(b[1:-1])
             return len(sub_a) == len(sub_b) and all(
-                self._type_arg_match(x, y, params, bindings)
+                self._type_arg_match(
+                    x, y, params, bindings, pattern_scope, position
+                )
                 for x, y in zip(sub_a, sub_b)
             )
         if a.startswith("[") and a.endswith("]"):
@@ -1276,7 +1354,9 @@ class _RustBindings:
             if len(parts_a) != len(parts_b):
                 return False
             return all(
-                self._type_arg_match(x, y, params, bindings)
+                self._type_arg_match(
+                    x, y, params, bindings, pattern_scope, position
+                )
                 for x, y in zip(parts_a, parts_b)
             )
         match_a = re.fullmatch(r"(.+?)\s*<(.+)>", a)
@@ -1284,17 +1364,71 @@ class _RustBindings:
         if (match_a is None) != (match_b is None):
             return False
         if match_a is not None:
-            if match_a.group(1).replace(" ", "") != match_b.group(
-                1
-            ).replace(" ", ""):
+            if self._path_name_equal(
+                match_a.group(1), match_b.group(1)
+            ) is False:
                 return False
             sub_a = self._type_arg_list(match_a.group(2))
             sub_b = self._type_arg_list(match_b.group(2))
             return len(sub_a) == len(sub_b) and all(
-                self._type_arg_match(x, y, params, bindings)
+                self._type_arg_match(
+                    x, y, params, bindings, pattern_scope, position
+                )
                 for x, y in zip(sub_a, sub_b)
             )
-        return a.replace(" ", "") == b.replace(" ", "")
+        path_re = r"[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*"
+        if self._path_name_equal(a, b):
+            if (
+                position is None
+                or pattern_scope is None
+                or re.fullmatch(path_re, a.strip()) is None
+            ):
+                return True
+            # The same spelling can name different types — a
+            # call-site `use m::Q as P` rebinds what the impl side
+            # wrote as `P`. Compare resolved identities; fall back
+            # to the spelling match when either side is unresolved.
+            pattern_id = self._resolve_spelled_in_scope(
+                a, pattern_scope, position
+            )
+            if pattern_id is None:
+                return True
+            concrete_id, _ = self._spelled_type(b, position)
+            if concrete_id is None:
+                return True
+            return concrete_id == pattern_id
+        if (
+            position is None
+            or re.fullmatch(path_re, a.strip()) is None
+            or re.fullmatch(path_re, b.strip()) is None
+        ):
+            # Only pure path spellings resolve to a type identity —
+            # `*const P`/`&P`/`dyn T` decorations would be lost.
+            return False
+        # `use m::P` makes the impl-side `P` and the receiver's
+        # `m::P` the same type — compare resolved identities when
+        # the spellings differ.
+        pattern_id = self._resolve_spelled_in_scope(
+            a, pattern_scope, position
+        )
+        if pattern_id is None:
+            return False
+        concrete_id, _ = self._spelled_type(b, position)
+        return concrete_id == pattern_id
+
+    @staticmethod
+    def _path_name_equal(a: str, b: str) -> bool:
+        """Structural equality of two written type names — a
+        scope-qualified `crate::m::P` spelled into concrete args is
+        the same type the impl side wrote as `m::P`; a relative
+        `m::P` and a bare `P` stay distinct (different types can
+        share a final segment)."""
+        norm = (
+            lambda s: re.sub(
+                r"^(?:crate|self|super)::", "", s.replace(" ", "")
+            )
+        )
+        return norm(a) == norm(b)
 
     def _type_args_match(
         self,
@@ -1302,12 +1436,16 @@ class _RustBindings:
         b: str | None,
         params: frozenset[str],
         bindings: dict[str, str] | None = None,
+        pattern_scope: "_Scope | None" = None,
+        position: "int | None" = None,
     ) -> bool:
         """Positional structural equality of two type-argument keys
         — `W<(u8,u16)>` and `W<(u8, u16)>` are the same type. The
         caller may pass a shared `bindings` map so parameter bindings
         established on one side (trait args) constrain the other
-        (impl type args)."""
+        (impl type args). `pattern_scope`/`position` let unequal
+        spellings compare by resolved identity (`use m::P` vs
+        `m::P`)."""
         if (a is None) != (b is None):
             return False
         if a is None:
@@ -1317,7 +1455,9 @@ class _RustBindings:
         if bindings is None:
             bindings = {}
         return len(parts_a) == len(parts_b) and all(
-            self._type_arg_match(x, y, params, bindings)
+            self._type_arg_match(
+                x, y, params, bindings, pattern_scope, position
+            )
             for x, y in zip(parts_a, parts_b)
         )
 
@@ -1719,6 +1859,63 @@ class _RustBindings:
         name = node.child_by_field_name("name")
         if path is None or name is None:
             return None, name
+        if path.type in {"identifier", "type_identifier"}:
+            head_record = self._through_import(
+                self._lookup(
+                    self._normalize_identifier(self.text(path)),
+                    path.start_byte,
+                    "type",
+                ),
+                path.start_byte,
+            )
+            if head_record is None:
+                head_record = next(
+                    (
+                        r
+                        for r in self.records.values()
+                        if r.binding.name
+                        == self._normalize_identifier(self.text(path))
+                        and r.binding.kind == "module"
+                    ),
+                    None,
+                )
+            if head_record is not None and (
+                head_record.binding.kind == "module"
+            ):
+                # `n::make` — the path names a module, so `make`
+                # is a free function (or item) declared inside it,
+                # not an impl member of a type. Only the module's
+                # own scope counts — `a::make` and `b::make` are
+                # different records.
+                member = next(
+                    (
+                        r
+                        for r in reversed(
+                            head_record.module_scope.bindings.get(
+                                self._normalize_identifier(
+                                    self.text(name)
+                                ),
+                                (),
+                            )
+                        )
+                        # A module may declare a `fn make` and a
+                        # `type make` side by side — the call wants
+                        # the value-namespace one.
+                        if self._in_namespace(r, "value")
+                    ),
+                    None,
+                ) if head_record.module_scope is not None else None
+                if member is not None:
+                    # `mod m { pub use a::make; }` — the scope holds
+                    # the import record; the call wants the target's
+                    # function record.
+                    member = (
+                        self._through_import(
+                            member, name.start_byte, "value"
+                        )
+                        or member
+                    )
+                    return member, name
         if path.type == "generic_type":
             type_id, args = self._annotation_type(path)
         elif path.type in {"identifier", "type_identifier"}:
@@ -1818,7 +2015,11 @@ class _RustBindings:
                 record.member_impl_args is not None
                 and not record.member_impl_generic
                 and not self._type_args_match(
-                    record.member_impl_args, impl_args, frozenset()
+                    record.member_impl_args,
+                    impl_args,
+                    frozenset(),
+                    pattern_scope=record.home_scope,
+                    position=position,
                 )
             ):
                 return False
@@ -1974,7 +2175,7 @@ class _RustBindings:
         scope = record.home_scope
         push = scope is not None and scope not in self.scopes
         if push:
-            self.scopes.append(scope)
+            self._push_scope(scope)
         try:
             return self._annotation_type(
                 record.alias_node, _seen | {record.binding.id}
@@ -2127,7 +2328,12 @@ class _RustBindings:
                     set(parts)
                 ) == len(parts)
             return self._type_args_match(
-                record.member_impl_args, impl_args, params, bindings
+                record.member_impl_args,
+                impl_args,
+                params,
+                bindings,
+                pattern_scope=record.home_scope,
+                position=position,
             )
 
         pool = [
@@ -2166,13 +2372,109 @@ class _RustBindings:
             # Tuple fields are positional; honest opaque.
             return None, None, None
         type_id, impl_args = self._receiver_type(value)
-        return (
-            self._member_record(
-                type_id, name, kinds, impl_args, node.start_byte
-            ),
-            type_id,
-            impl_args,
+        record = self._member_record(
+            type_id, name, kinds, impl_args, node.start_byte
         )
+        if record is None and impl_args is not None:
+            head, _hp, _hs = self._scrutinee_shape(value, type_id)
+            spelled_head = head
+            if (
+                head is None
+                and value is not None
+                and value.type == "identifier"
+            ):
+                # A scoped annotation (`r: std::rc::Rc<P>`) carries
+                # no unqualified head — read its last path segment.
+                rec = self._lookup(
+                    self._normalize_identifier(self.text(value)),
+                    value.start_byte,
+                    "value",
+                )
+                tn = rec.type_node if rec is not None else None
+                if (
+                    tn is None
+                    and rec is not None
+                    and rec.value_node is not None
+                    and rec.value_node.type == "call_expression"
+                ):
+                    # `let l = make()` — the head is spelled in
+                    # `make`'s declared return annotation.
+                    vcallee = rec.value_node.child_by_field_name(
+                        "function"
+                    )
+                    if (
+                        vcallee is not None
+                        and vcallee.type == "identifier"
+                    ):
+                        fn = self._lookup(
+                            self._normalize_identifier(
+                                self.text(vcallee)
+                            ),
+                            rec.value_node.start_byte,
+                            "value",
+                        )
+                        tn = (
+                            fn.type_node if fn is not None else None
+                        )
+                while tn is not None and tn.type in {
+                    "reference_type",
+                    "generic_type",
+                    "generic_type_with_turbofish",
+                    "return_type",
+                }:
+                    tn = tn.child_by_field_name("type")
+                if tn is not None and tn.type == "scoped_type_identifier":
+                    head = self.text(tn).strip().rsplit("::", 1)[-1]
+                    spelled_head = self.text(tn).strip()
+                elif tn is not None and tn.type == "type_identifier":
+                    head = self.text(tn).strip()
+                    spelled_head = head
+            if head is not None and head.rsplit("::", 1)[-1] in _DEREF_WRAPPER_NAMES:
+                # A scoped spelling (`std::rc::Rc<P>`) resolves its
+                # head through the module path — an unrelated local
+                # `struct Rc` must not shadow it.
+                declared_head = self._through_import(
+                    self._scoped_spelled_type(
+                        spelled_head, value.start_byte
+                    )
+                    if "::" in spelled_head
+                    else self._lookup(
+                        self._normalize_identifier(spelled_head),
+                        value.start_byte,
+                        "type",
+                    ),
+                    value.start_byte,
+                )
+            if (
+                head is not None
+                and head.rsplit("::", 1)[-1] in _DEREF_WRAPPER_NAMES
+                and (
+                    declared_head is None
+                    or declared_head.binding.kind
+                    not in {"struct", "enum"}
+                )
+            ):
+                # `b.pm()` on `b: Box<P>`/`Rc<P>`/`Arc<P>` — the
+                # wrapper derefs to `P`, so retry the member on the
+                # spelled element. Wrapper methods (`Rc::get_mut`)
+                # still resolve on the wrapper first. A declared
+                # struct/enum of the same name is a custom type —
+                # its own Deref target may differ, so stay opaque.
+                spelled_pos = (
+                    self._receiver_annotation_position(value)
+                    or node.start_byte
+                )
+                elem_id, elem_args = self._element_of(
+                    None, impl_args.strip(), spelled_pos
+                )
+                if elem_id is not None:
+                    inner = self._member_record(
+                        elem_id, name, kinds, elem_args,
+                        node.start_byte,
+                    )
+                    if inner is not None:
+                        return inner, elem_id, elem_args
+        return record, type_id, impl_args
 
     def _unwrapped(
         self,
@@ -2344,7 +2646,7 @@ class _RustBindings:
             # A fixed arg (`E` in `Result<T, E>`) resolves in the
             # member's declaring scope — a call-site `struct E`
             # must not shadow it.
-            self.scopes.append(decl_scope)
+            self._push_scope(decl_scope)
             try:
                 return self._spelled_type(args[index].strip(), arg_pos)
             finally:
@@ -2480,7 +2782,7 @@ class _RustBindings:
             )
             push = home_scope is not None and home_scope not in self.scopes
             if push:
-                self.scopes.append(home_scope)
+                self._push_scope(home_scope)
             try:
                 return self._element_of(
                     container_id,
@@ -2597,6 +2899,16 @@ class _RustBindings:
                     node.start_byte,
                     "value",
                 )
+            if member is None and (
+                callee is not None
+                and callee.type == "field_expression"
+            ):
+                # A trait-inherited `first()`/`get()` on a slice or
+                # array declares its own `Option<&Q>` — resolve the
+                # method before the prelude recipe guesses `P`.
+                member = self._field_member(
+                    callee, ("associated_function",)
+                )
             if member is None:
                 field = (
                     callee.child_by_field_name("field")
@@ -2617,6 +2929,16 @@ class _RustBindings:
                         or self._container_head_name(
                             callee.child_by_field_name("value")
                         ) in option_head[1]
+                        or (
+                            self.text(field).strip()
+                            in _SLICE_OPTION_METHODS
+                            and self._is_slice_receiver(
+                                callee.child_by_field_name("value")
+                            )
+                            and not self._slice_has_declared_method(
+                                self.text(field).strip()
+                            )
+                        )
                     )
                 ):
                     prefix = option_head[0]
@@ -2624,13 +2946,59 @@ class _RustBindings:
                     # `Option<&T>`/`Option<T>` — only the payload
                     # spelling is carried; the head stays for
                     # `_scrutinee_shape` to declare.
-                    elements = self._type_arg_list(receiver[1])
-                    index = option_head[2]
-                    element = (
-                        elements[index].strip()
-                        if -len(elements) <= index < len(elements)
-                        else None
+                    slice_args = re.fullmatch(
+                        r"&\s*(?:'\w+\s+)?(?:mut\s+)?\[(.+)\]",
+                        receiver[1].strip(),
                     )
+                    if slice_args is not None:
+                        # The receiver itself spelled a borrowed
+                        # slice (`s.as_ref()` → `&[P]`) — the element
+                        # is inside the brackets, not the whole arg.
+                        # Bare `[P; N]` args are an element spelling
+                        # (`Vec<[P; 2]>`), never peeled.
+                        element = slice_args.group(1).strip()
+                    else:
+                        elements = self._type_arg_list(receiver[1])
+                        index = option_head[2]
+                        element = (
+                            elements[index].strip()
+                            if -len(elements) <= index < len(elements)
+                            else None
+                        )
+                    if self.text(field).strip() == "get" and element:
+                        arg_list = node.child_by_field_name(
+                            "arguments"
+                        )
+                        first_arg = (
+                            None
+                            if arg_list is None
+                            else next(
+                                (
+                                    c
+                                    for c in arg_list.named_children
+                                    if "comment" not in c.type
+                                ),
+                                None,
+                            )
+                        )
+                        if (
+                            first_arg is not None
+                            and first_arg.type == "range_expression"
+                        ):
+                            # `s.get(0..1)` yields `Option<&[P]>`,
+                            # not `Option<&P>`.
+                            element = "[" + element + "]"
+                    if (
+                        element is not None
+                        and self.text(field).strip()
+                        in _SPLIT_PAIR_METHODS
+                    ):
+                        # `split_first()`/`split_last()` yield
+                        # `Option<(&T, &[T])>` — the tuple payload
+                        # spells `(P, &[P])` so `Some((f, rest))`
+                        # binds `f: P` and `rest: &[P]` (indexing
+                        # `rest` still reads the slice element).
+                        element = f"({element}, &[{element}])"
                     if self.text(field).strip() == "and":
                         # `Option::and<U>(self, optb: Option<U>)`
                         # yields the ARGUMENT's payload, not the
@@ -3956,6 +4324,7 @@ class _RustBindings:
                 record.member_trait_args = member_trait_args
                 record.member_impl_type_params = member_impl_type_params
                 record.self_type_node = member_type_node
+                record.home_scope = parent_scope
                 self._function_records[record.binding.id] = record
                 predeclared[node.id] = record
             elif node.type == "const_item":
@@ -3977,6 +4346,7 @@ class _RustBindings:
                 const_record.member_impl_generic = member_impl_generic
                 const_record.member_trait = member_trait
                 const_record.member_trait_args = member_trait_args
+                const_record.home_scope = parent_scope
                 const_record.member_impl_type_params = (
                     member_impl_type_params
                 )
@@ -4056,7 +4426,7 @@ class _RustBindings:
             self.module_depth,
             record.binding.id,
         )
-        self.scopes.append(fn_scope)
+        self._push_scope(fn_scope)
         inherited_generics: set[str] = set()
         for outer_scope in self.scopes[:-1]:
             for records in outer_scope.bindings.values():
@@ -4766,6 +5136,15 @@ class _RustBindings:
             )
             if pinned is not None:
                 record.type_args = pinned[1]
+                if len(pinned) > 2 and pinned[2] is not None:
+                    # A pattern-bound name keeps its declared
+                    # annotation — `let W { opt } = w` lets
+                    # `if let Some(q) = opt` read `Option`'s head.
+                    record.pattern_decl_node = pinned[2]
+                if len(pinned) > 3 and pinned[3] is not None:
+                    # And the scope that annotation was spelled in,
+                    # so a bare `Q` inside `mod m` binds `m::Q`.
+                    record.pattern_decl_scope = pinned[3]
             if whole:
                 record.value_node = value
             self._add_to_scope(scope, record)
@@ -5011,7 +5390,7 @@ class _RustBindings:
 
     def _block(self, node: Any) -> None:
         scope = _Scope(node, self.module_depth, self.current_function)
-        self.scopes.append(scope)
+        self._push_scope(scope)
         self._predeclare(node, scope)
         self._scan_container(node, scope)
         self.scopes.pop()
@@ -5054,7 +5433,7 @@ class _RustBindings:
         alternative = node.child_by_field_name("alternative")
         if consequence is not None:
             scope = _Scope(consequence, self.module_depth, self.current_function)
-            self.scopes.append(scope)
+            self._push_scope(scope)
             names, type_map = (
                 ([], {})
                 if condition is None
@@ -5075,7 +5454,7 @@ class _RustBindings:
         body = node.child_by_field_name("body")
         if body is not None:
             scope = _Scope(body, self.module_depth, self.current_function)
-            self.scopes.append(scope)
+            self._push_scope(scope)
             names, type_map = (
                 ([], {})
                 if condition is None
@@ -5097,7 +5476,7 @@ class _RustBindings:
             self._expr(iterator)
         if body is not None:
             scope = _Scope(body, self.module_depth, self.current_function)
-            self.scopes.append(scope)
+            self._push_scope(scope)
             names = self._pattern_names(pattern, scope)
             single = pattern
             # `for mut p in v` still binds one identifier — `mut` only
@@ -5226,7 +5605,7 @@ class _RustBindings:
                 self.gaps.append(Gap("unsupported_syntax", self.span(arm)))
                 continue
             arm_scope = _Scope(arm, self.module_depth, self.current_function)
-            self.scopes.append(arm_scope)
+            self._push_scope(arm_scope)
             match_pattern = arm.child_by_field_name("pattern")
             guard = (
                 None
@@ -5344,6 +5723,23 @@ class _RustBindings:
             # impl's own parameters — map those positions to the
             # receiver's args, not the struct's.
             param_map = self._impl_param_map(member, impl_args)
+        if param_map:
+            # Spell each substituted arg `crate::`-qualified — it
+            # was written at the receiver's annotation site, so the
+            # member's own scope must not steal a same-named type.
+            param_map = {
+                param: self._qualified_spelling(spelled, pos)
+                for param, spelled in param_map.items()
+            }
+        if (
+            not param_map
+            and member.type_node is not None
+            and value_node is None
+        ):
+            # Nothing substitutes — `n::make() -> Box<P>` spells the
+            # `P` written in the member's own declaration scope, not
+            # a same-named type at the call site.
+            pos = member.type_node.start_byte
         type_id, args = self._field_annotation(
             member.type_node if annotation is None else annotation,
             param_map,
@@ -5352,6 +5748,85 @@ class _RustBindings:
         )
         if type_id is None and args is None:
             return None
+        if type_id is None and args is not None:
+            ann = member.type_node if annotation is None else annotation
+            ret = (
+                ann.child_by_field_name("return_type") if ann is not None else None
+            )
+            ret_text = self.text(ann if ret is None else ret)
+            borrow = re.match(
+                r"\s*&\s*(?:'\w+\s+)?(?:mut\s+)?(.+)", ret_text
+            )
+            wrap = None
+            if borrow is None:
+                wrap = re.match(r"\s*([A-Za-z_]\w*)\s*<", ret_text)
+            spelled = None
+            if borrow is not None:
+                borrowed = borrow.group(1).strip()
+                if param_map:
+                    # `W<P>::sref() -> &mut [T]` — substitute the
+                    # declared param with the receiver's own
+                    # (already `crate::`-qualified) arg.
+                    borrowed = re.sub(
+                        r"\b("
+                        + "|".join(re.escape(n) for n in param_map)
+                        + r")\b",
+                        lambda match: param_map[match.group(1)],
+                        borrowed,
+                    )
+                if borrowed.startswith("[") and borrowed.endswith("]"):
+                    # `&mut [P]` — the receiver stays a borrowed
+                    # slice so `first`/`get` still apply.
+                    return None, "&" + borrowed
+                if re.fullmatch(r"[A-Za-z_][\w:]*", borrowed):
+                    # `&P`/`&'a mut m::P` — a borrowed payload
+                    # spelled in the member's scope. `&Vec<P>`/
+                    # `&mut [P]` borrow a container instead, so
+                    # the receiver is the container itself and
+                    # nothing is re-resolved.
+                    spelled = borrowed
+                else:
+                    borrow_wrap = re.fullmatch(
+                        r"([A-Za-z_]\w*)\s*<(.+)>", borrowed
+                    )
+                    if borrow_wrap is not None and borrow_wrap.group(
+                        1
+                    ) in {"Box", "Rc", "Arc", "Pin"}:
+                        # `&'static Box<P>` — a borrow of a
+                        # deref-transparent wrapper: the payload
+                        # is still the receiver type, spelled in
+                        # the member's scope.
+                        spelled = next(
+                            iter(
+                                self._type_arg_list(
+                                    borrow_wrap.group(2)
+                                )
+                            ),
+                            borrow_wrap.group(2),
+                        ).strip()
+            elif wrap is not None and wrap.group(1) in {
+                "Box",
+                "Rc",
+                "Arc",
+                "Pin",
+            }:
+                # `fn make() -> Box<P>` — a deref-transparent wrapper
+                # whose head never resolves, so the payload name
+                # (spelled in the member's scope) is the effective
+                # receiver type.
+                spelled = next(
+                    iter(self._type_arg_list(args)), args
+                ).strip()
+            if spelled is not None:
+                home = member.home_scope
+                pushed = home is not None and home not in self.scopes
+                if pushed:
+                    self._push_scope(home)
+                resolved = self._spelled_type(spelled, pos)
+                if pushed:
+                    self.scopes.pop()
+                if resolved[0] is not None:
+                    return resolved
         return type_id, args
 
     def _member_scope_for_args(
@@ -5478,7 +5953,7 @@ class _RustBindings:
         scope = None if container is None else container.home_scope
         push = scope is not None and scope not in self.scopes
         if push:
-            self.scopes.append(scope)
+            self._push_scope(scope)
         try:
             type_id, args = self._annotation_type(type_node)
         finally:
@@ -5605,6 +6080,25 @@ class _RustBindings:
                     candidate
                     for candidate in reversed(scope.bindings.get(head, ()))
                     if self._in_namespace(candidate, "type")
+                    # Generic params are never path-addressable —
+                    # `crate::T` means the root item, not an
+                    # item's `<T>` parameter.
+                    and candidate.binding.kind != "generic_parameter"
+                    and (
+                        # Generic params live in the root scope's
+                        # bindings but are only visible in their
+                        # item's body; module members reached through
+                        # a path are position-independent.
+                        not self.scopes
+                        or scope is not self.scopes[0]
+                        or candidate.binding.scope is None
+                        or candidate.binding.scope == ByteSpan(0, 0)
+                        or (
+                            candidate.binding.scope.start
+                            <= position
+                            < candidate.binding.scope.end
+                        )
+                    )
                 ),
                 None,
             )
@@ -5621,6 +6115,7 @@ class _RustBindings:
                     module.module_scope.bindings.get(head, ())
                 )
                 if self._in_namespace(candidate, "type")
+                and candidate.binding.kind != "generic_parameter"
             ),
             None,
         )
@@ -5681,7 +6176,11 @@ class _RustBindings:
         return re.sub(r"[A-Za-z_][\w:]*", replace, spelled)
 
     def _pattern_head_fields(
-        self, head: Any | None, scrut_id: str, scrut_args: str | None
+        self,
+        head: Any | None,
+        scrut_id: str,
+        scrut_args: str | None,
+        scrut_position: int | None = None,
     ) -> "dict[str, tuple[str | None, str | None]] | None":
         """{field name: (type id, args)} for `W { .. }` / `E::V { .. }`
         heads — None when the head does not name the scrutinee's
@@ -5698,6 +6197,21 @@ class _RustBindings:
         if body is None or body.type != "field_declaration_list":
             return None
         param_map = self._pattern_param_map(container, scrut_args)
+        if param_map:
+            site = (
+                head.start_byte
+                if scrut_position is None
+                else scrut_position
+            )
+            # Substituted args were spelled at the call site —
+            # `crate::`-qualify them so a field like `Result<T, E>`
+            # keeps BOTH scopes: the substituted `T` lands on the
+            # call-site record while a fixed `E` still resolves in
+            # the declaring module.
+            param_map = {
+                param: self._qualified_spelling(spelled, site)
+                for param, spelled in param_map.items()
+            }
         fields: dict[str, tuple[str | None, str | None]] = {}
         for decl in self._children(body):
             if decl.type != "field_declaration":
@@ -5708,8 +6222,12 @@ class _RustBindings:
                 continue
             fields[
                 self._normalize_identifier(self.text(name_node))
-            ] = self._field_annotation(
-                type_node, param_map, head.start_byte, container
+            ] = (
+                *self._field_annotation(
+                    type_node, param_map, head.start_byte, container
+                ),
+                type_node,
+                None if container is None else container.home_scope,
             )
         return fields
 
@@ -5751,6 +6269,16 @@ class _RustBindings:
         ):
             return None
         param_map = self._pattern_param_map(container, scrut_args)
+        if param_map:
+            site = (
+                head.start_byte
+                if scrut_position is None
+                else scrut_position
+            )
+            param_map = {
+                param: self._qualified_spelling(spelled, site)
+                for param, spelled in param_map.items()
+            }
         return [
             self._field_annotation(
                 child, param_map, head.start_byte, container
@@ -5842,6 +6370,80 @@ class _RustBindings:
         if head is None:
             return None
         return head.group(0).split("::")[-1]
+
+    def _slice_has_declared_method(self, name: str) -> bool:
+        """True when an impl block declares `name` on a slice/array
+        target — `impl T for [P]` means `s.first()` uses the trait's
+        `Option<&Q>`, not the std recipe's `Option<&P>`."""
+        for impl in self._descendants(self.root):
+            if impl.type != "impl_item":
+                continue
+            tn = impl.child_by_field_name("type")
+            while tn is not None and tn.type == "reference_type":
+                tn = next(
+                    (
+                        c
+                        for c in tn.named_children
+                        if c.type
+                        not in {"lifetime", "mutable_specifier"}
+                    ),
+                    None,
+                )
+            if tn is None or tn.type != "array_type":
+                continue
+            body = next(
+                (
+                    c
+                    for c in impl.named_children
+                    if c.type == "declaration_list"
+                ),
+                None,
+            )
+            for item in [] if body is None else body.named_children:
+                if item.type in {
+                    "function_item",
+                    "function_signature_item",
+                }:
+                    name_node = self._item_name(item)
+                    if (
+                        name_node is not None
+                        and self.text(name_node).strip() == name
+                    ):
+                        return True
+        return False
+
+    def _is_slice_receiver(self, node: Any | None) -> bool:
+        """True when `node` is annotated `&[T]`/`[T]`/`[T; N]` —
+        slices and arrays share `first`/`last`/`get`/`chunks` with
+        `Vec` but carry no named container head."""
+        inner = node
+        while inner is not None and inner.type == "reference_expression":
+            inner = next(iter(inner.named_children), None)
+        if inner is None:
+            return False
+        if inner.type != "identifier":
+            # `s.as_ref()`/`w.sref()` — the call result itself can
+            # be a slice; its spelled args keep the `[` shape.
+            _call_id, call_args = self._receiver_type(inner)
+            return call_args is not None and "[" in call_args
+        record = self._lookup(
+            self._normalize_identifier(self.text(inner)),
+            inner.start_byte,
+            "value",
+        )
+        tn = record.type_node if record is not None else None
+        while tn is not None and tn.type == "reference_type":
+            # `&'a [P]`/`&'a mut [P]` lead their named children with
+            # the lifetime — the type is the non-lifetime child.
+            tn = next(
+                (
+                    c
+                    for c in tn.named_children
+                    if c.type not in {"lifetime", "mutable_specifier"}
+                ),
+                None,
+            )
+        return tn is not None and tn.type == "array_type"
 
     def _scrutinee_shape(
         self, value: Any | None, scrut_id: str | None
@@ -5993,6 +6595,16 @@ class _RustBindings:
                         or self._container_head_name(
                             callee.child_by_field_name("value")
                         ) in option_head[1]
+                        or (
+                            self.text(field).strip()
+                            in _SLICE_OPTION_METHODS
+                            and self._is_slice_receiver(
+                                callee.child_by_field_name("value")
+                            )
+                            and not self._slice_has_declared_method(
+                                self.text(field).strip()
+                            )
+                        )
                     )
                 ):
                     # `v.get(i)`/`v.pop()` return `Option<_>` — the
@@ -6028,15 +6640,28 @@ class _RustBindings:
         )
         if record is None:
             return None, None, None
+        # A pattern-bound name's declaring annotation heads the
+        # scrutinee — `let W { opt } = w` reads `opt: Option<T>`'s
+        # head and position even though its args were substituted.
+        decl_node = (
+            record.pattern_decl_node
+            if record.pattern_decl_node is not None
+            else record.type_node
+        )
         position = (
             None
-            if record.type_node is None
-            else record.type_node.start_byte
+            if decl_node is None
+            else decl_node.start_byte
+        )
+        args_scope = (
+            record.pattern_decl_scope
+            if record.pattern_decl_scope is not None
+            else record.home_scope
         )
         return (
-            self._alias_head_name(record.type_node, position),
+            self._alias_head_name(decl_node, position),
             position,
-            record.home_scope,
+            args_scope,
         )
 
     def _prelude_pattern_payload(
@@ -6084,7 +6709,7 @@ class _RustBindings:
         a name the shape cannot pin is simply absent."""
         push = scrut_scope is not None and scrut_scope not in self.scopes
         if push:
-            self.scopes.append(scrut_scope)
+            self._push_scope(scrut_scope)
         try:
             return self._pattern_type_map_body(
                 pattern, scrut_id, scrut_args,
@@ -6269,7 +6894,7 @@ class _RustBindings:
         if kind == "struct_pattern":
             head = pattern.child_by_field_name("type")
             fields = self._pattern_head_fields(
-                head, scrut_id, scrut_args
+                head, scrut_id, scrut_args, scrut_position
             )
             if fields is None:
                 return {}
@@ -6289,7 +6914,7 @@ class _RustBindings:
                 field_type = fields.get(fname) if fname else None
                 if bound is not None:
                     tid, fargs = (
-                        field_type
+                        field_type[:2]
                         if field_type is not None
                         else (None, None)
                     )
@@ -6300,15 +6925,34 @@ class _RustBindings:
                             scrut_position,
                         )
                     )
+                    if (
+                        field_type is not None
+                        and bound.type == "identifier"
+                    ):
+                        # `W { opt }` shorthand — the bound name's
+                        # declared field annotation heads later
+                        # prelude patterns (`if let Some(q) = opt`).
+                        got = mapping.get(bound.start_byte)
+                        if got is not None and len(got) == 2:
+                            mapping[bound.start_byte] = (
+                                *got,
+                                field_type[2],
+                                field_type[3],
+                            )
                     continue
                 if fname_node is not None and field_type is not None:
-                    tid, fargs = field_type
+                    tid, fargs = field_type[:2]
                     if tid is not None or fargs is not None:
+                        # The field's own annotation rides along so
+                        # `if let Some(q) = opt` still reads `opt`'s
+                        # declared `Option` head in its scope.
                         mapping[fname_node.start_byte] = (
                             TypeFact(
                                 "named", fname or "", 0, None, tid or ""
                             ),
                             fargs,
+                            field_type[2],
+                            field_type[3],
                         )
             return mapping
         if kind == "slice_pattern":
@@ -6399,14 +7043,21 @@ class _RustBindings:
         type_map: dict | None = None,
     ) -> None:
         for name_node, mutable in names:
-            fact, args = (type_map or {}).get(
+            entry = (type_map or {}).get(
                 name_node.start_byte, (type_fact, type_args)
             )
+            fact, args = entry[0], entry[1]
+            decl_node = entry[2] if len(entry) > 2 else None
+            decl_scope = entry[3] if len(entry) > 3 else None
             record = self._make_record(
                 name_node, "local", binding_scope, self.current_function,
                 self.module_depth, item=False, type_fact=fact, mutable=mutable,
             )
             record.type_args = args
+            if decl_node is not None:
+                record.pattern_decl_node = decl_node
+            if decl_scope is not None:
+                record.pattern_decl_scope = decl_scope
             self._add_to_scope(scope, record)
 
     def _bind_pattern(
@@ -6431,7 +7082,7 @@ class _RustBindings:
         if body is None:
             return
         closure_scope = _Scope(body, self.module_depth, self.current_function)
-        self.scopes.append(closure_scope)
+        self._push_scope(closure_scope)
         old_owner = self.call_owner
         self.call_owner = ""
         if params is not None:
