@@ -1677,10 +1677,16 @@ class _TypeScriptBindings:
         ]
         if any(arg.type == "spread_element" for arg in args):
             return matches
+        if matches and matches[0].function_node is None:
+            # A same-named property/const member overrides everything
+            # behind it — narrowing must not cross the nearest
+            # declaration to reach a base type's method.
+            return matches
         signatures = [
             candidate
             for candidate in matches
             if candidate.function_node is not None
+            and candidate.member_of == matches[0].member_of
         ]
         if len(signatures) < 2:
             return matches
@@ -1692,6 +1698,7 @@ class _TypeScriptBindings:
         ]
         if not remaining:
             return matches
+        proven = len(remaining) < len(signatures)
         for index, arg in enumerate(args):
             kind = self._arg_kind(arg)
             if kind is None:
@@ -1703,11 +1710,14 @@ class _TypeScriptBindings:
             ]
             if filtered:
                 remaining = filtered
-        if not remaining:
+                proven = True
+        if not remaining or not proven:
             return matches
-        # Non-signature matches (properties, clause aliases) lose to a
-        # signature the call actually fits — the call shape itself
-        # selects the overload view.
+        # tsc's first-matching-signature rule: the earliest declaration
+        # that fits the arguments wins, not the lookup's latest-first
+        # order. Non-signature matches (properties, clause aliases)
+        # lose to a signature the call actually fits.
+        remaining.sort(key=lambda candidate: candidate.binding.span.start)
         return remaining
 
     def _arity_accepts(self, candidate: _Record, arg_count: int) -> bool:
@@ -1721,21 +1731,32 @@ class _TypeScriptBindings:
         required = 0
         total = 0
         variadic = False
-        for item in self.children(params):
+        for item in self._param_items(params):
+            pattern = item.child_by_field_name("pattern")
+            if pattern is not None and self.text(
+                pattern
+            ).lstrip().startswith("..."):
+                variadic = True
+                continue
+            total += 1
             if item.type == "required_parameter":
-                pattern = item.child_by_field_name("pattern")
-                if pattern is not None and self.text(
-                    pattern
-                ).lstrip().startswith("..."):
-                    variadic = True
-                    continue
                 required += 1
-                total += 1
-            elif item.type == "optional_parameter":
-                total += 1
         if arg_count < required:
             return False
         return variadic or arg_count <= total
+
+    def _param_items(self, params: Any) -> list[Any]:
+        """Parameter nodes that consume real arguments — `this:`
+        parameters type the receiver only and take no argument."""
+        items = []
+        for item in self.children(params):
+            if item.type not in {"required_parameter", "optional_parameter"}:
+                continue
+            pattern = item.child_by_field_name("pattern")
+            if pattern is not None and self.text(pattern).strip() == "this":
+                continue
+            items.append(item)
+        return items
 
     def _arg_kind(self, arg: Any) -> str | None:
         """Primitive kind of a literal, or the declared name for
@@ -1775,11 +1796,7 @@ class _TypeScriptBindings:
         )
         if params is None:
             return False
-        items = [
-            item
-            for item in self.children(params)
-            if item.type in {"required_parameter", "optional_parameter"}
-        ]
+        items = self._param_items(params)
         if index >= len(items):
             # Past the declared list: only a rest tail accepts more.
             tail = items[-1] if items else None
@@ -1788,16 +1805,46 @@ class _TypeScriptBindings:
                 if tail is not None
                 else None
             )
-            return bool(
+            if not (
                 pattern is not None
                 and self.text(pattern).lstrip().startswith("...")
+            ):
+                return False
+            annotation = tail.child_by_field_name("type")
+            if annotation is None:
+                return True
+            return self._annotation_accepts(
+                self._rest_element_node(
+                    next(iter(self.children(annotation)), None)
+                ),
+                kind,
             )
-        annotation = items[index].child_by_field_name("type")
+        item = items[index]
+        pattern = item.child_by_field_name("pattern")
+        variadic = (
+            pattern is not None
+            and self.text(pattern).lstrip().startswith("...")
+        )
+        annotation = item.child_by_field_name("type")
         if annotation is None:
             return True
-        return self._annotation_accepts(
-            next(iter(self.children(annotation)), None), kind
-        )
+        inner = next(iter(self.children(annotation)), None)
+        if variadic:
+            inner = self._rest_element_node(inner)
+        return self._annotation_accepts(inner, kind)
+
+    def _rest_element_node(self, node: Any | None) -> Any | None:
+        """Element annotation of a rest parameter — `...x: T[]` and
+        `...x: Array<T>` are compared against `T`, not the array."""
+        if node is None:
+            return None
+        if node.type == "array_type":
+            return next(iter(self.children(node)), node)
+        if node.type == "generic_type":
+            args = node.child_by_field_name("type_arguments")
+            if args is not None:
+                return next(iter(self.children(args)), node)
+        return node
 
 
     def _annotation_accepts(self, node: Any | None, kind: str) -> bool:
@@ -1835,7 +1882,23 @@ class _TypeScriptBindings:
             return True
         if text in {"number", "string", "boolean", "bigint", "symbol"}:
             return kind == text
-        if node.type == "type_identifier" or node.type == "generic_type":
+        if node.type == "type_identifier":
+            record = self._lookup(text, node.start_byte, "type")
+            if record is not None and record.binding.kind == "type_alias":
+                inner = (
+                    next(iter(self.children(record.alias_node)), None)
+                    if record.alias_node is not None
+                    else None
+                )
+                return self._annotation_accepts(inner, kind)
+            if (
+                record is not None
+                and record.binding.kind == "generic_parameter"
+            ):
+                # `T` accepts whatever the caller binds to it.
+                return True
+            return text == kind
+        if node.type == "generic_type":
             return text == kind
         return True
 
@@ -2471,6 +2534,25 @@ class _TypeScriptBindings:
                 )
                 if candidate.function_node is not None
             ]
+            if signatures:
+                # A nearer scope's `f` shadows outer declarations — only
+                # overloads in that innermost scope may be picked.
+                scope = signatures[0].binding.scope
+                key = (
+                    None if scope is None else (scope.start, scope.end)
+                )
+                signatures = [
+                    candidate
+                    for candidate in signatures
+                    if (
+                        None
+                        if candidate.binding.scope is None
+                        else (
+                            candidate.binding.scope.start,
+                            candidate.binding.scope.end,
+                        )
+                    ) == key
+                ]
             narrowed = self._narrow_overloads(signatures, args_node)
             if narrowed:
                 record = narrowed[0]

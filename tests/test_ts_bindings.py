@@ -2349,3 +2349,95 @@ f(3);
     report = build_ts_bindings(source)
     f = next(b for b in report.bindings if b.kind == "function")
     assert _calls(report)[0].target == f.id
+
+
+def test_overload_narrowing_respects_scope_shadowing():
+    # The inner generic `f` shadows the outer `f`; `f(1)` inside the
+    # block must stay on the shadowing declaration even though its
+    # signature cannot be proven to fit.
+    source = """
+function f(x: number): number { return x }
+{ function f<T>(x: T): T { return x } const y = f(1); }
+"""
+    report = build_ts_bindings(source)
+    fs = _bindings(report, "f", "function")
+    inner = next(b for b in fs if "T" in source[b.span.start : b.span.start + 40])
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == "f(1)"
+    )
+    assert call.target == inner.id
+
+
+def test_member_property_override_not_crossed_by_base_overloads():
+    # A derived class's function-typed property overrides the base's
+    # same-named method overloads; the call must not bind past it.
+    source = """
+class B { m(x: number): void; m(x: string): void; }
+class D extends B { m: () => void = () => {} }
+const d = new D(); d.m();
+"""
+    report = build_ts_bindings(source)
+    prop = next(
+        b for b in report.bindings
+        if b.name == "m" and "=> void" in source[b.span.start : b.span.start + 30]
+    )
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == "d.m()"
+    )
+    assert call.target == prop.id or call.target == ""
+
+
+def test_overload_param_alias_counts_as_its_target_kind():
+    # `type Num = number` makes the first declaration fit a numeric
+    # argument — the alias must not be compared as a bare string.
+    source = """
+type Num = number
+function f(x: Num): void {}
+function f(x: any): void {}
+f(1);
+"""
+    report = build_ts_bindings(source)
+    fs = _bindings(report, "f", "function")
+    alias_sig = next(b for b in fs if "Num" in source[b.span.start : b.span.start + 30])
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == "f(1)"
+    )
+    assert call.target == alias_sig.id
+
+
+def test_overload_this_parameter_takes_no_argument():
+    # `m(this: C, x: number)` is a one-argument signature — `this` is
+    # not counted, so `c.m(1)` fits the number side.
+    source = """
+class C { m(this: C, x: number): void; m(x: string): void; }
+const c = new C(); c.m(1);
+"""
+    report = build_ts_bindings(source)
+    overloads = _member_bindings(report, "m", "associated_function")
+    number_sig = next(b for b in overloads if "x: number" in source[b.span.start : b.span.start + 60])
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == "c.m(1)"
+    )
+    assert call.target == number_sig.id
+
+
+def test_overload_rest_param_compares_element_type():
+    # `...x: Array<number>` accepts numeric arguments — the element
+    # type, not the array type, is compared.
+    source = """
+function f(...x: Array<number>): void {}
+function f(...x: any[]): void {}
+f(1);
+"""
+    report = build_ts_bindings(source)
+    fs = _bindings(report, "f", "function")
+    array_sig = next(b for b in fs if "Array<number>" in source[b.span.start : b.span.start + 60])
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == "f(1)"
+    )
+    assert call.target == array_sig.id
