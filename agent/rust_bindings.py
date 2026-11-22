@@ -67,6 +67,12 @@ _ITER_CHUNK_METHODS = frozenset(
 _MAP_ELEMENT_METHODS = {"keys": 0, "values": 1}
 _MAP_CONTAINER_NAMES = frozenset({"HashMap", "BTreeMap"})
 
+# Smart pointers that `Deref` straight to their payload — `b.pm()`
+# on `Box<P>`/`Rc<P>`/`Arc<P>` calls `P`'s members. `Mutex`/`Cell`/
+# `RefCell` guard their payload behind `lock()`/`get()` and stay
+# opaque.
+_DEREF_WRAPPER_NAMES = frozenset({"Box", "Rc", "Arc"})
+
 # Prelude container methods that hand back `Option` — `v.get(i)`,
 # `v.first()` and `v.last()` yield `Option<&T>` while `v.pop()`
 # yields `Option<T>`. Each maps to its payload prefix and the
@@ -2166,13 +2172,53 @@ class _RustBindings:
             # Tuple fields are positional; honest opaque.
             return None, None, None
         type_id, impl_args = self._receiver_type(value)
-        return (
-            self._member_record(
-                type_id, name, kinds, impl_args, node.start_byte
-            ),
-            type_id,
-            impl_args,
+        record = self._member_record(
+            type_id, name, kinds, impl_args, node.start_byte
         )
+        if record is None and impl_args is not None:
+            head, _hp, _hs = self._scrutinee_shape(value, type_id)
+            if (
+                head is None
+                and value is not None
+                and value.type == "identifier"
+            ):
+                # A scoped annotation (`r: std::rc::Rc<P>`) carries
+                # no unqualified head — read its last path segment.
+                rec = self._lookup(
+                    self._normalize_identifier(self.text(value)),
+                    value.start_byte,
+                    "value",
+                )
+                tn = rec.type_node if rec is not None else None
+                while tn is not None and tn.type in {
+                    "reference_type",
+                    "generic_type",
+                    "generic_type_with_turbofish",
+                    "return_type",
+                }:
+                    tn = tn.child_by_field_name("type")
+                if tn is not None and tn.type == "scoped_type_identifier":
+                    head = self.text(tn).strip().rsplit("::", 1)[-1]
+            if head is not None and head.rsplit("::", 1)[-1] in _DEREF_WRAPPER_NAMES:
+                # `b.pm()` on `b: Box<P>`/`Rc<P>`/`Arc<P>` — the
+                # wrapper derefs to `P`, so retry the member on the
+                # spelled element. Wrapper methods (`Rc::get_mut`)
+                # still resolve on the wrapper first.
+                spelled_pos = (
+                    self._receiver_annotation_position(value)
+                    or node.start_byte
+                )
+                elem_id, elem_args = self._element_of(
+                    None, impl_args.strip(), spelled_pos
+                )
+                if elem_id is not None:
+                    inner = self._member_record(
+                        elem_id, name, kinds, elem_args,
+                        node.start_byte,
+                    )
+                    if inner is not None:
+                        return inner, elem_id, elem_args
+        return record, type_id, impl_args
 
     def _unwrapped(
         self,
