@@ -33225,6 +33225,45 @@ def test_named_struct_element_pointer_param_reseat_alias_write(
     }
 
 
+def test_named_pointer_param_alias_dirty_target_write(
+    go_types_helper,
+):
+    # `p = q; q = r; p.F[0] = x` still lands in q's ENTRY pointee —
+    # the caller-backing keys on q — while the addressing read
+    # through the alias keeps p's own slot ({1}, p's stored value
+    # is q's entry) instead of mis-attributing to r ({2}).
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "type S3 struct { F []int64 }\n"
+        "func F(p *S3, q *S3, r *S3, x int64) {"
+        " p = q; q = r; p.F[0] = x }\n",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available, result.gaps
+    imported = {c.target for c in result.calls if c.imported}
+    q_id = next(
+        b.id for b in snapshot.bindings if b.name == "q"
+    )
+    p_id = next(
+        b.id for b in snapshot.bindings if b.name == "p"
+    )
+    r_id = next(
+        b.id for b in snapshot.bindings if b.name == "r"
+    )
+    # The store lands in what the caller passed as q.
+    assert f"{q_id}/caller-backing" in imported
+    # r never gets a backing transfer — it is not the store's
+    # target — though the addressing union may over-approx it.
+    assert f"{r_id}/caller-backing" not in imported
+    # The write statement's recorded reads keep the alias source's
+    # dep (p==1 is the addressing read), not just the dirty
+    # target's slot. x==3 pins the write's own read set.
+    write_read = next(
+        r for r in result.statement_reads if 3 in r.deps
+    )
+    assert 1 in write_read.deps
+
+
 @pytest.mark.parametrize(
     "declarations",
     [
