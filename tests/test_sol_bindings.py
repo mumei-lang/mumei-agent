@@ -2869,3 +2869,88 @@ contract C {
         ref.binding_id == take.id and ref.kind == "call"
         for ref in report.references
     )
+
+
+def test_using_extension_binds_on_elementary_conversion_receiver():
+    # `uint(1).f()` types the value by the cast's primitive type, so a
+    # `using L for uint` extension still owns the call; `bytes("x")`
+    # works the same; without the directive the member stays opaque.
+    source = """
+library L { function f(uint x) public {} function h(bytes memory x) public {} }
+contract C {
+    using L for uint;
+    using L for bytes;
+    function g() public {
+        uint(1).f();
+        bytes("x").h();
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    f = next(b for b in report.bindings if b.name == "f" and b.kind == "function")
+    h = next(b for b in report.bindings if b.name == "h" and b.kind == "function")
+    calls = {source[c.span.start : c.span.end]: c for c in report.calls}
+    assert calls["uint(1).f()"].target == f.id
+    assert calls['bytes("x").h()'].target == h.id
+
+    source = """
+library L { function f(uint x) public {} }
+contract C { function g() public { uint(1).f(); } }
+"""
+    report = build_sol_bindings(source)
+    (call,) = [
+        c
+        for c in _calls(report, source)
+        if source[c.span.start : c.span.end] == "uint(1).f()"
+    ]
+    assert call.kind == "opaque_member"
+    assert call.target == ""
+
+
+def test_elementary_conversion_argument_types_overload_resolution():
+    # The same declared-type extraction feeds argument inference:
+    # `this.take(uint(1))` sees an actual `uint`, so it binds the
+    # `uint256` overload rather than staying ambiguous.
+    source = """
+contract C {
+    function take(uint256 x) public {}
+    function take(address x) public {}
+    function g() public { this.take(uint(1)); }
+}
+"""
+    report = build_sol_bindings(source)
+    takes = [
+        b for b in report.bindings if b.name == "take" and b.kind == "function"
+    ]
+    call = next(
+        c
+        for c in _calls(report, source)
+        if source[c.span.start : c.span.end] == "this.take(uint(1))"
+    )
+    uint_take = next(
+        b for b in takes if "uint256 x" in source[b.span.start : b.span.start + 40]
+    )
+    assert call.target == uint_take.id
+
+
+def test_elementary_conversion_argument_binds_call_reference():
+    # `this.take(uint(1))` infers the argument's type from the cast,
+    # so the uint256 overload wins over address.
+    source = """
+contract C {
+    function take(address a) external {}
+    function take(uint256 x) external {}
+    function run() external { this.take(uint(1)); }
+}
+"""
+    report = build_sol_bindings(source)
+    take_overloads = sorted(
+        (b for b in report.bindings if b.name == "take"),
+        key=lambda b: b.span.start,
+    )
+    assert len(take_overloads) == 2
+    uint_take = take_overloads[1]
+    assert any(
+        ref.binding_id == uint_take.id and ref.kind == "call"
+        for ref in report.references
+    )
