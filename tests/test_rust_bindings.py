@@ -5936,3 +5936,24 @@ fn f(o: Option<Q>) {
     assert calls["o.and(u).is_some()"] != local_is_some.id
     # The payload still resolves in `u`'s scope — `q` is `m::Q`.
     assert calls["q.qm()"] == qm.id
+
+
+def test_option_and_drops_an_unspellable_payload():
+    source = """
+fn g<Q>(x: Option<Q>) -> Option<Q> { x }
+fn f<T>(o: Option<T>) {
+    struct Q;
+    impl Q { fn qm(&self) {} }
+    let u = g(o);
+    match o.and(u) {
+        Some(q) => q.qm(),
+        _ => {}
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    # u's payload spells g's generic `Q` — re-resolving that bare
+    # name at the call site lands on f's unrelated local `Q`, so
+    # the payload stays opaque instead of misbinding q.qm().
+    qm = _bindings(report, "qm", "associated_function")[0]
+    assert _call(report, source, "q.qm()").target != qm.id
