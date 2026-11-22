@@ -636,3 +636,19 @@ def test_member_access_without_analysis_output_is_rejected():
             node["typeDescriptions"] = {}
     with pytest.raises(SolCompilerSnapshotError):
         load_sol_compiler_snapshot(_payload(envelope), source)
+
+
+def test_member_access_loads_without_contract_outputs():
+    # Contract outputs (`output.contracts`) are optional for the member
+    # slice: an analyzed AST produced without them carries the same
+    # member references.
+    source = _source("member_access")
+    envelope = _envelope("member_access")
+    envelope["output"].pop("contracts")
+    snapshot = load_sol_compiler_snapshot(_payload(envelope), source)
+    assert [ref.name for ref in snapshot.references] == [
+        ref.name
+        for ref in load_sol_compiler_snapshot(
+            _payload(_envelope("member_access")), source
+        ).references
+    ]
