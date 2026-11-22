@@ -982,6 +982,17 @@ class _SolBindings:
             base = self._unwrap(obj.child_by_field_name("base"))
             base_record = self._object_record(base)
             type_record = self._array_element_type_record(base_record)
+            if type_record is None:
+                # `nested[k1][k2]` — the base indexes into a mapping's
+                # mapping value, so no binding record exists; its type
+                # still peels through declared-type text, in the scope
+                # that spelled it.
+                declared = self._object_declared_type(base)
+                if declared is not None:
+                    element = self._index_value_type_text(declared[0])
+                    type_record = self._user_type_record(
+                        element, declared[1], member.start_byte
+                    )
         elif obj.type == "call_expression":
             type_record = self._call_return_type_record(obj)
         if contract is None and type_record is not None and (
@@ -1097,17 +1108,26 @@ class _SolBindings:
         if obj.type == "array_access":
             base = self._unwrap(obj.child_by_field_name("base"))
             base_record = self._object_record(base)
-            if base_record is None or base_record.type_node is None:
+            if base_record is not None and base_record.type_node is not None:
+                owner = base_record.owner
+                text = re.sub(
+                    r"\b(memory|calldata|storage)\b",
+                    "",
+                    self.text(base_record.type_node),
+                )
+            else:
+                # `nested[k1]` carries no binding record, but its type
+                # text still comes from the same peel — a nested
+                # mapping value indexes to its own value type.
+                declared = self._object_declared_type(base)
+                if declared is None:
+                    return None
+                text, owner = declared
+            # `mapping(K => V)` indexes to V and `bytes` to `bytes1`.
+            element = self._index_value_type_text(text)
+            if element is None:
                 return None
-            text = re.sub(
-                r"\b(memory|calldata|storage)\b",
-                "",
-                self.text(base_record.type_node),
-            )
-            element = re.sub(r"\[[^\]]*\]\s*$", "", text).strip()
-            if element == text.strip() or "[" in element:
-                return None
-            return element, base_record.owner
+            return element, owner
         if obj.type == "call_expression":
             callee = self._unwrap(obj.child_by_field_name("function"))
             record = self._object_record(callee)
@@ -1147,29 +1167,21 @@ class _SolBindings:
                         if child.type == "call_argument"
                     )
                     for _ in range(args):
-                        stripped = re.sub(
-                            r"\[[^\]]*\]\s*$", "", text
-                        ).strip()
-                        if stripped == text:
-                            if text == "bytes":
-                                stripped = "bytes1"
-                            else:
-                                break
-                        text = stripped
-                # A public getter on a struct/enum-typed member returns
-                # the exploded fields, not the type — no extension
-                # target exists for the tuple.
-                resolved = self._type_record_for_type_node(
-                    record.type_node, record.owner
+                        peeled = self._index_value_type_text(text)
+                        if peeled is None:
+                            break
+                        text = peeled
+                # A public getter on a struct-typed member — directly or
+                # as a mapping's value — returns the exploded fields as
+                # a tuple, not the type, so no extension target exists.
+                # An enum value comes back as the enum type itself.
+                resolved = self._user_type_record(
+                    text, record.owner, record.node.start_byte
                 )
-                if resolved is None:
-                    resolved, _reason = self._lookup(
-                        text, record.node.start_byte, "type"
-                    )
-                if resolved is not None and resolved.binding.kind in {
-                    "struct",
-                    "enum",
-                }:
+                if (
+                    resolved is not None
+                    and resolved.binding.kind == "struct"
+                ):
                     return None
                 return text, record.owner
             function_node = record.node.parent
@@ -1195,8 +1207,8 @@ class _SolBindings:
         """`using Lib for T` candidates for `obj.name`: the object's
         declared type text must equal the directive's `for` target, or
         the directive must be `for *`. Objects whose type cannot be
-        named statically (mappings, nested arrays, function-typed
-        returns) keep their opaque treatment.
+        named statically (nested mappings, nested arrays,
+        function-typed returns) keep their opaque treatment.
         """
         declared = self._object_declared_type(obj)
         if declared is None:
@@ -1483,13 +1495,40 @@ class _SolBindings:
         arg_record = self._user_type_record(
             arg_text, arg_owner, position
         )
-        if (
-            param_record is not None
-            and arg_record is not None
-            and param_record.binding.id == arg_record.binding.id
-        ):
-            return "match"
+        if param_record is not None and arg_record is not None:
+            if param_record.binding.id == arg_record.binding.id:
+                return "match"
+            if (
+                arg_record.binding.kind in {"contract", "interface"}
+                and param_record.binding.kind
+                in {"contract", "interface"}
+                and self._contract_subtype(arg_record, param_record)
+            ):
+                # A derived contract value implicitly converts to any
+                # contract it inherits from (`m[i]` yields `Derived`;
+                # `f(Base)` still takes it).
+                return "convert"
         return "nomatch"
+
+    def _contract_subtype(self, arg: _Record, param: _Record) -> bool:
+        """Whether the argument contract's declared base chain reaches
+        the parameter contract."""
+        start = self.contracts.get(arg.binding.name)
+        seen: set[str] = set()
+        stack = [start] if start is not None else []
+        while stack:
+            contract = stack.pop()
+            if contract.record.binding.id in seen:
+                continue
+            seen.add(contract.record.binding.id)
+            for base_name, _node in contract.bases:
+                base = self.contracts.get(base_name)
+                if base is None:
+                    continue
+                if base.record.binding.id == param.binding.id:
+                    return True
+                stack.append(base)
+        return False
 
     def _resolve_overload(
         self, pool: list[tuple[_Record, int]], member_node: Any
@@ -1616,16 +1655,100 @@ class _SolBindings:
                 return self._lookup_type_record(root, obj.start_byte, None)
         return None
 
+    @staticmethod
+    def _mapping_value_type_text(text: str) -> str | None:
+        """`mapping(K => V)` → `V`; the `=>` separator is found at
+        paren depth one. Anything else returns None.
+        """
+        text = text.strip()
+        if not text.startswith("mapping"):
+            return None
+        depth = 0
+        for index, char in enumerate(text):
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+            elif (
+                char == "="
+                and depth == 1
+                and text[index : index + 2] == "=>"
+            ):
+                value = text[index + 2 :].strip()
+                if value.endswith(")"):
+                    value = value[:-1].strip()
+                # `address\npayable` and other loose spacing is one
+                # spelling to solc — collapse it before the guards.
+                value = re.sub(r"\s+", " ", value)
+                if re.fullmatch(
+                    r"u?int[0-9]*|bytes[0-9]*|byte|address payable|address|bool|string",
+                    value,
+                ) is None:
+                    named = re.fullmatch(
+                        r"(.+?)\s+[A-Za-z_$][A-Za-z0-9_$]*",
+                        value,
+                        re.S,
+                    )
+                    if named is not None:
+                        # `mapping(K => U slot)` names the value slot —
+                        # the name is not part of the type. Builtin
+                        # multi-word spellings (`address payable`) were
+                        # kept whole by the guard above.
+                        value = named.group(1).strip()
+                return value
+        return None
+
+    def _index_value_type_text(self, text: str) -> str | None:
+        """One index level peeled off a declared-type text: the mapping
+        value, the array element type or `bytes1` for dynamic `bytes`.
+        None when the text is not indexable (a nested array peels one
+        dimension but stays unnamed downstream)."""
+        mapping_value = self._mapping_value_type_text(text)
+        if mapping_value is not None:
+            return mapping_value
+        if text.strip() == "bytes":
+            return "bytes1"
+        element = re.sub(r"\[[^\]]*\]\s*$", "", text).strip()
+        if element == text.strip():
+            return None
+        return element
+
     def _array_element_type_record(
         self, record: _Record | None
     ) -> _Record | None:
         if record is None or record.type_node is None:
             return None
+        if self.text(record.type_node).lstrip().startswith("mapping"):
+            # `m[k]` on `mapping(K => V)` is V-typed; the value type is
+            # the `type_name` child after `=>`. A nested mapping value
+            # has no member surface.
+            value_node = next(
+                (
+                    child
+                    for child in self.children(record.type_node)
+                    if child.type == "type_name"
+                ),
+                None,
+            )
+            if value_node is None:
+                return None
+            resolved = self._type_record_for_type_node(
+                value_node, record.owner
+            )
+            if resolved is not None and resolved.binding.kind in {
+                "contract",
+                "interface",
+                "library",
+                "struct",
+                "enum",
+            }:
+                return resolved
+            return None
         text = re.sub(
             r"\b(memory|calldata|storage)\b", "", self.text(record.type_node)
         )
         # Strip one array dimension; anything left that still indexes
-        # (nested arrays, mappings) has no member surface.
+        # (nested arrays) has no member surface.
         element = re.sub(r"\[[^\]]*\]\s*$", "", text).strip()
         if element == text.strip() or "[" in element:
             return None
@@ -1663,15 +1786,43 @@ class _SolBindings:
                 # declared type. Function-typed variables (`cb(t)`)
                 # would root at the signature's first identifier. A
                 # struct-typed public getter returns the exploded
-                # fields, not the struct, and an enum-typed value is
-                # not callable, so neither carries a member surface.
+                # fields as a tuple, so it carries no member surface;
+                # an enum value comes back as the enum type itself.
+                text = self.text(record.type_node)
+                if callee.type == "member_expression":
+                    # An indexable member's getter peels one level per
+                    # index argument (`this.tokens(k)` on
+                    # `mapping(uint => Token)` returns `Token`), the
+                    # same peel `_object_declared_type_text` applies.
+                    args = sum(
+                        1
+                        for child in self.children(call)
+                        if child.type == "call_argument"
+                    )
+                    peeled = False
+                    for _ in range(args):
+                        value = self._index_value_type_text(text)
+                        if value is None:
+                            break
+                        text = value
+                        peeled = True
+                    if peeled:
+                        resolved = self._user_type_record(
+                            text, record.owner, call.start_byte
+                        )
+                        if (
+                            resolved is not None
+                            and resolved.binding.kind == "struct"
+                        ):
+                            return None
+                        return resolved
                 resolved = self._type_record_for_type_node(
                     record.type_node, record.owner
                 )
-                if resolved is not None and resolved.binding.kind in {
-                    "struct",
-                    "enum",
-                }:
+                if (
+                    resolved is not None
+                    and resolved.binding.kind == "struct"
+                ):
                     return None
                 return resolved
             return None
@@ -1692,16 +1843,22 @@ class _SolBindings:
         return self._type_record_for_type_node(type_node, record.owner)
 
     def _canonical_type_text(self, text: str) -> str:
-        # Whitespace (`uint256 [ ]`) and the bare `uint`/`int`/`byte`
-        # spellings map to their canonical widths (`uint` is exactly
-        # `uint256`, `byte` is `bytes1` to solc); dynamic `bytes` is a
-        # distinct type and stays as written.
-        canonical = re.sub(r"\s+", "", text)
-        match = re.fullmatch(r"(u?int)([0-9]*)", canonical)
-        if match is not None:
-            return f"{match.group(1)}{match.group(2) or '256'}"
-        if canonical == "byte":
-            return "bytes1"
+        # Whitespace is canonicalized (`uint256 [ ]`, `address
+        # payable`) and the bare `uint`/`int`/`byte`/`fixed`/`ufixed`
+        # spellings map to their canonical widths at every position —
+        # `uint` is exactly `uint256` to solc even inside a composite
+        # (`uint[]` is `uint256[]`). Dynamic `bytes` is a distinct
+        # type and stays as written.
+        canonical = re.sub(r"\s+", " ", text).strip()
+        # Only identifier characters keep surrounding whitespace —
+        # `uint => uint`, `uint=>uint` and `uint256[2 + 3]` are each
+        # one spelling, while `address payable` stays two words.
+        canonical = re.sub(r"\s*([^A-Za-z0-9_$ ])\s*", r"\1", canonical)
+        canonical = re.sub(r"\buint\b", "uint256", canonical)
+        canonical = re.sub(r"\bint\b", "int256", canonical)
+        canonical = re.sub(r"\bbyte\b", "bytes1", canonical)
+        canonical = re.sub(r"\bufixed\b", "ufixed128x18", canonical)
+        canonical = re.sub(r"\bfixed\b", "fixed128x18", canonical)
         return canonical
 
     def _lookup(

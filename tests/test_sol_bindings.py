@@ -2023,7 +2023,7 @@ contract Vault {
     assert _text(source, sub_calls[0].span) == "sub"
 
 
-def test_using_on_mapping_index_stays_opaque():
+def test_using_on_mapping_index_value_binds():
     source = """
 library SafeMath {
     function add(uint256 a, uint256 b) internal pure returns (uint256) {}
@@ -2035,12 +2035,77 @@ contract Vault {
 }
 """
     report = build_sol_bindings(source)
+    # `balances[k]` is uint256-typed, so the `using` extension applies
+    # — solc binds `add` to SafeMath.add.
     add = next(b for b in report.bindings if b.name == "add")
-    assert not any(
+    assert any(
         ref.binding_id == add.id and ref.kind == "call"
         for ref in report.references
     )
-    assert report.calls[0].kind == "opaque_member"
+    assert report.calls[0].kind == "direct_local"
+
+
+def test_using_on_nested_mapping_value_binds():
+    source = """
+library SafeMath {
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {}
+}
+contract Vault {
+    using SafeMath for uint256;
+    mapping(address => mapping(uint256 => uint256)) nested;
+    function run() external { nested[msg.sender][0].add(1); }
+}
+"""
+    report = build_sol_bindings(source)
+    # `nested[k1][k2]` peels twice: the inner index yields `uint256`,
+    # so the extension binds as solc does.
+    add = next(b for b in report.bindings if b.name == "add")
+    assert any(
+        ref.binding_id == add.id and ref.kind == "call"
+        for ref in report.references
+    )
+
+
+def test_using_on_named_mapping_value_binds():
+    source = """
+library SafeMath {
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {}
+}
+contract Vault {
+    using SafeMath for uint256;
+    mapping(address => uint256 total) balances;
+    function run() external { balances[msg.sender].add(1); }
+}
+"""
+    report = build_sol_bindings(source)
+    # `mapping(K => U slot)` — the trailing `slot` names the value
+    # slot; the index still yields `uint256`.
+    add = next(b for b in report.bindings if b.name == "add")
+    assert any(
+        ref.binding_id == add.id and ref.kind == "call"
+        for ref in report.references
+    )
+
+
+def test_using_on_public_mapping_getter_binds_value_type():
+    source = """
+library SafeMath {
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {}
+}
+contract Vault {
+    using SafeMath for uint256;
+    mapping(address => uint256) public balances;
+    function run() external { this.balances(msg.sender).add(1); }
+}
+"""
+    # `this.balances(k)` returns the mapping's value type — the
+    # `uint256` extension applies.
+    report = build_sol_bindings(source)
+    add = next(b for b in report.bindings if b.name == "add")
+    assert any(
+        ref.binding_id == add.id and ref.kind == "call"
+        for ref in report.references
+    )
 
 
 def test_using_not_applied_to_struct_getter_tuple():
@@ -2221,7 +2286,7 @@ contract Vault {{
     assert len(add_calls) == depth
 
 
-def test_using_on_nested_array_stays_opaque():
+def test_using_on_nested_array_binds():
     source = """
 library SafeMath {
     function add(uint256 a, uint256 b) internal pure returns (uint256) {}
@@ -2233,12 +2298,14 @@ contract Vault {
 }
 """
     report = build_sol_bindings(source)
+    # `grid[0][0]` peels twice to `uint256` — the extension binds as
+    # solc resolves it; `grid[0]` alone is `uint256[]` and only a
+    # `for uint256[]`/`*` extension could apply.
     add = next(b for b in report.bindings if b.name == "add")
-    assert not any(
+    assert any(
         ref.binding_id == add.id and ref.kind == "call"
         for ref in report.references
     )
-    assert report.calls[0].kind == "opaque_member"
 
 
 def test_member_call_on_array_element_resolves():
@@ -2517,7 +2584,7 @@ contract Vault {
     )
 
 
-def test_member_call_on_mapping_index_stays_opaque():
+def test_member_call_on_mapping_index_value_binds():
     source = """
 contract Token {
     function transfer(address to, uint256 amount) external {}
@@ -2530,13 +2597,42 @@ contract Vault {
 }
 """
     report = build_sol_bindings(source)
+    # `byId[k]` is Token-typed — the member call binds like an array
+    # element's.
     transfer = next(
         binding
         for binding in report.bindings
         if binding.name == "transfer"
     )
-    assert not any(
-        ref.binding_id == transfer.id for ref in report.references
+    assert any(
+        ref.binding_id == transfer.id and ref.kind == "call"
+        for ref in report.references
+    )
+    assert any(
+        call.kind == "direct_local" and call.target == transfer.id
+        for call in report.calls
+    )
+
+
+def test_member_call_on_mapping_struct_field_binds():
+    source = """
+struct Coin { uint256 v; }
+contract Vault {
+    mapping(uint256 => Coin) coins;
+    function run() external returns (uint256) {
+        return coins[0].v;
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    field = next(
+        binding
+        for binding in report.bindings
+        if binding.name == "v"
+    )
+    assert any(
+        ref.binding_id == field.id and ref.kind == "read"
+        for ref in report.references
     )
 
 
@@ -2627,3 +2723,149 @@ contract B {
     assert len(call_refs) == 1
     bound = next(b for b in f_overloads if b.id == call_refs[0].binding_id)
     assert bound is f_overloads[0]
+
+
+def test_member_call_on_mapping_getter_contract_value_binds():
+    source = """
+contract Token { function transfer(uint256 a) external {} }
+contract Vault {
+    mapping(uint256 => Token) public byId;
+    function run() external { this.byId(0).transfer(1); }
+}
+"""
+    report = build_sol_bindings(source)
+    # The getter's peeled value type is `Token` — its member call
+    # binds as solc resolves it.
+    transfer = next(b for b in report.bindings if b.name == "transfer")
+    assert any(
+        ref.binding_id == transfer.id and ref.kind == "call"
+        for ref in report.references
+    )
+
+
+def test_using_on_mapping_getter_enum_value_binds():
+    source = """
+enum Status { Ready, Done }
+library L {
+    function f(Status s, uint256 x) internal pure returns (uint256) {}
+}
+contract Vault {
+    using L for Status;
+    mapping(uint256 => Status) public states;
+    function run() external { this.states(0).f(1); }
+}
+"""
+    report = build_sol_bindings(source)
+    # `this.states(k)` returns `Status` — the enum-typed extension
+    # applies (a getter explodes only struct values into tuples).
+    f = next(b for b in report.bindings if b.name == "f")
+    assert any(
+        ref.binding_id == f.id and ref.kind == "call"
+        for ref in report.references
+    )
+
+
+def test_mapping_derived_contract_value_converts_to_base_parameter():
+    source = """
+contract Base {}
+contract Derived is Base {}
+contract C {
+    mapping(uint256 => Derived) byId;
+    function take(Base b) external {}
+    function take(uint256 x) external {}
+    function run() external { this.take(byId[0]); }
+}
+"""
+    report = build_sol_bindings(source)
+    # `byId[0]` is `Derived`-typed; it implicitly converts to `Base`.
+    # The member overload set only survives on that conversion —
+    # `take(uint256)` cannot take a contract value.
+    take_overloads = sorted(
+        (b for b in report.bindings if b.name == "take"),
+        key=lambda b: b.span.start,
+    )
+    assert len(take_overloads) == 2
+    call_refs = [
+        r
+        for r in report.references
+        if r.kind == "call" and r.binding_id == take_overloads[0].id
+    ]
+    assert len(call_refs) == 1
+
+
+def test_library_element_type_resolves_in_declaring_scope():
+    source = """
+library L {
+    struct S { uint256 x; }
+    function get() internal pure returns (S[] memory) {}
+}
+contract B {
+    struct S { uint256 y; }
+    function run() external returns (uint256) { return L.get()[0].x; }
+}
+"""
+    report = build_sol_bindings(source)
+    # `L.get()[0]` peels to `S` spelled inside L — `L.S.x` binds,
+    # not B.S (whose field is `y`).
+    x = next(b for b in report.bindings if b.name == "x")
+    assert any(ref.binding_id == x.id for ref in report.references)
+    y = next(b for b in report.bindings if b.name == "y")
+    assert not any(ref.binding_id == y.id for ref in report.references)
+
+
+def test_member_call_on_array_row_type_alias_binds():
+    source = """
+contract C {
+    uint[][] grid;
+    function take(uint256[] row) external {}
+    function run() external { this.take(grid[0]); }
+}
+"""
+    report = build_sol_bindings(source)
+    # `grid[0]` is `uint[]` — the same type solc spells `uint256[]`.
+    take = next(b for b in report.bindings if b.name == "take")
+    assert any(
+        ref.binding_id == take.id and ref.kind == "call"
+        for ref in report.references
+    )
+
+
+def test_using_on_loosely_spaced_payable_mapping_value_binds():
+    source = """
+library L {
+    function f(address payable a, uint256 x) internal pure returns (uint256) {}
+}
+contract Vault {
+    using L for address payable;
+    mapping(uint256 => address   payable) targets;
+    function run() external { targets[0].f(1); }
+}
+"""
+    report = build_sol_bindings(source)
+    # `address   payable` is one spelling — the value slot guard must
+    # not strip `payable` as if it were the value's name.
+    f = next(b for b in report.bindings if b.name == "f")
+    assert any(
+        ref.binding_id == f.id and ref.kind == "call"
+        for ref in report.references
+    )
+
+
+def test_member_call_on_loosely_spaced_composite_types_binds():
+    source = """
+library L {
+    function take(mapping(uint   =>   uint) storage m, uint256 x)
+        internal returns (uint256) { return m[x]; }
+}
+contract C {
+    mapping(uint => uint) m;
+    function run() external returns (uint256) { return L.take(m, 0); }
+}
+"""
+    report = build_sol_bindings(source)
+    # `=>` written with and without spaces is one spelling.
+    take = next(b for b in report.bindings if b.name == "take")
+    assert any(
+        ref.binding_id == take.id and ref.kind == "call"
+        for ref in report.references
+    )
