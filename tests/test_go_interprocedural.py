@@ -32356,6 +32356,186 @@ def test_struct_parameter_argument_carries_deps(go_types_helper):
     assert result.return_dependencies == frozenset({0})
 
 
+def test_struct_argument_field_closures_match_field_callback_arguments(
+    go_types_helper,
+):
+    data = unit(
+        go_types_helper,
+        "type R struct { F func() int64 }\n"
+        "type W struct { F func() }\n"
+        "func ap(f func() int64) int64 { return f() }\n"
+        "func apw(f func()) { f() }\n"
+        "func use(s R) int64 { return s.F() }\n"
+        "func usew(s W) { s.F() }\n"
+        "func ReadViaUse(x, y int64) int64 {\n"
+        "\tv := y\n"
+        "\tvar s R\n"
+        "\ts.F = func() int64 { return v }\n"
+        "\tv = x\n"
+        "\treturn use(s)\n"
+        "}\n"
+        "func ReadViaField(x, y int64) int64 {\n"
+        "\tv := y\n"
+        "\tvar s R\n"
+        "\ts.F = func() int64 { return v }\n"
+        "\tv = x\n"
+        "\treturn ap(s.F)\n"
+        "}\n"
+        "func WriteViaUse(x int64) int64 {\n"
+        "\tvar w int64\n"
+        "\tvar s W\n"
+        "\ts.F = func() { w = x }\n"
+        "\tusew(s)\n"
+        "\treturn w\n"
+        "}\n"
+        "func WriteViaField(x int64) int64 {\n"
+        "\tvar w int64\n"
+        "\tvar s W\n"
+        "\ts.F = func() { w = x }\n"
+        "\tapw(s.F)\n"
+        "\treturn w\n"
+        "}\n",
+    )
+    for use_name, field_name, expected in (
+        ("ReadViaUse", "ReadViaField", frozenset({0, 1})),
+        ("WriteViaUse", "WriteViaField", frozenset({0})),
+    ):
+        use_result = named(*data, name=use_name)
+        field_result = named(*data, name=field_name)
+        assert use_result.available and field_result.available
+        assert use_result.return_dependencies == expected
+        assert use_result.return_dependencies == (
+            field_result.return_dependencies
+        )
+        assert use_result.effects == field_result.effects
+
+
+def test_nested_struct_arguments_propagate_field_closures(go_types_helper):
+    data = unit(
+        go_types_helper,
+        "type S struct { F func() int64 }\n"
+        "type O struct { S S }\n"
+        "type E struct { S }\n"
+        "func useO(o O) int64 { return o.S.F() }\n"
+        "func useS(s S) int64 { return s.F() }\n"
+        "func useE(e E) int64 { return e.S.F() }\n"
+        "func UseOuter(x, y int64) int64 {\n"
+        "\tv := y\n"
+        "\tvar o O\n"
+        "\to.S.F = func() int64 { return v }\n"
+        "\tv = x\n"
+        "\treturn useO(o)\n"
+        "}\n"
+        "func UseInner(x, y int64) int64 {\n"
+        "\tv := y\n"
+        "\tvar o O\n"
+        "\to.S.F = func() int64 { return v }\n"
+        "\tv = x\n"
+        "\treturn useS(o.S)\n"
+        "}\n"
+        "func UseEmbedded(x, y int64) int64 {\n"
+        "\tv := y\n"
+        "\tvar e E\n"
+        "\te.S.F = func() int64 { return v }\n"
+        "\tv = x\n"
+        "\treturn useE(e)\n"
+        "}\n",
+    )
+    for name in ("UseOuter", "UseInner", "UseEmbedded"):
+        result = named(*data, name=name)
+        assert result.available
+        assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_deferred_struct_argument_folds_recorded_field_writes(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type W struct { F func() }\n"
+            "func use(s W) { s.F() }\n"
+            "func F(x int64) (w int64) {\n"
+            "\ts := W{F: func() { w = x }}\n"
+            "\tdefer use(s)\n"
+            "\treturn\n"
+            "}\n",
+        )
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_go_struct_argument_keeps_racy_field_closure_closed(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type S struct { F func() }\n"
+            "func use(s S) { s.F() }\n"
+            "func F(x int64) int64 {\n"
+            "\tvar s S\n"
+            "\ts.F = func() { _ = x }\n"
+            "\tgo use(s)\n"
+            "\tx = 1\n"
+            "\treturn x\n"
+            "}\n",
+        )
+    )
+    assert not result.available
+
+
+def test_struct_composite_argument_with_recorded_field_fails_closed(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type S struct { F func() int64 }\n"
+            "func use(s S) int64 { return s.F() }\n"
+            "func F(x int64) int64 {\n"
+            "\treturn use(S{F: func() int64 { return x }})\n"
+            "}\n",
+        )
+    )
+    assert not result.available
+    assert {gap.reason for gap in result.gaps} == {
+        "unsupported_expression"
+    }
+
+
+def test_struct_arguments_without_recorded_func_fields_keep_behavior(
+    go_types_helper,
+):
+    data = unit(
+        go_types_helper,
+        "type S struct { F func() int64; V int64 }\n"
+        "type Plain struct { V int64 }\n"
+        "func use(s S) int64 { return s.V }\n"
+        "func usePlain(s Plain) int64 { return s.V }\n"
+        "func Param(s S) int64 { return use(s) }\n"
+        "func Local(x int64) int64 {\n"
+        "\tvar s S\n"
+        "\ts.V = x\n"
+        "\treturn use(s)\n"
+        "}\n"
+        "func WithoutFuncField(x int64) int64 {\n"
+        "\ts := Plain{V: x}\n"
+        "\treturn usePlain(s)\n"
+        "}\n",
+    )
+    param = named(*data, name="Param")
+    local = named(*data, name="Local")
+    plain = named(*data, name="WithoutFuncField")
+    assert param.available
+    assert param.return_dependencies == frozenset({0})
+    assert local.available
+    assert local.return_dependencies == frozenset({0})
+    assert plain.available
+    assert plain.return_dependencies == frozenset({0})
+
+
 def test_struct_parameter_boundaries_stay_closed(go_types_helper):
     # Pointer-intermediate traversal and embedded-pointer promotion
     # stay closed.

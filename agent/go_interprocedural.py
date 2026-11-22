@@ -1042,7 +1042,7 @@ class _Builder:
         # the enclosing call node; drained by `expression` once the
         # call finishes evaluating every argument.
         self._func_arg_invocations: dict[
-            tuple[str, int, int], list[tuple[Any, str]]
+            tuple[str, int, int], list[tuple[Any, str, bool]]
         ] = {}
         # Each call's evaluated-argument deps, accumulated as every
         # argument returns through `expression` — the set a passed
@@ -12743,6 +12743,120 @@ class _Builder:
                 return member.id
         return None
 
+    def _struct_argument_field_record_ids(
+        self, node: Any
+    ) -> tuple[str, ...]:
+        value = self._strip_parens(node)
+        if value is None:
+            return ()
+        anchor = None
+        if value.type == "composite_literal":
+            literal_fact = self._local_struct_literal_fact(value)
+            if literal_fact is not None:
+                fact, anchor = literal_fact
+            else:
+                fact = None
+        else:
+            fact = self._deferred_expression_type(value)
+            if value.type == "identifier":
+                ref = self.references.get(self.node_key(value))
+                if ref is not None:
+                    anchor = (
+                        self.bindings.get(ref.binding_id)
+                        or self.members.get(ref.binding_id)
+                    )
+            elif value.type == "selector_expression":
+                anchor = self._field_member(value) or self._package_member(
+                    value
+                )
+            elif value.type == "call_expression":
+                call = self.calls.get(self.node_key(value))
+                target = (
+                    self.functions.get(call.target)
+                    if call is not None
+                    else None
+                )
+                if target is not None and len(target.results) == 1:
+                    anchor = self.bindings.get(
+                        target.results[0].binding_id
+                    )
+            elif value.type == "index_expression":
+                container = self._strip_parens(
+                    value.child_by_field_name("operand")
+                )
+                while (
+                    container is not None
+                    and container.type == "index_expression"
+                ):
+                    container = self._strip_parens(
+                        container.child_by_field_name("operand")
+                    )
+                if container is not None:
+                    if container.type == "identifier":
+                        ref = self.references.get(
+                            self.node_key(container)
+                        )
+                        if ref is not None:
+                            anchor = self.bindings.get(ref.binding_id)
+                    elif container.type == "selector_expression":
+                        anchor = self._field_member(container)
+        struct_fact = self._struct_value_fact(fact)
+        if struct_fact is None:
+            return ()
+        record_ids = self._struct_field_closure_record_ids(
+            struct_fact, anchor
+        )
+        if not record_ids:
+            return ()
+        is_reference = value.type == "identifier"
+        if value.type == "selector_expression":
+            base = value
+            while base is not None and base.type == "selector_expression":
+                base = self._strip_parens(
+                    base.child_by_field_name("operand")
+                )
+            is_reference = (
+                base is not None and base.type == "identifier"
+            )
+        if not is_reference:
+            raise _Unsupported("unsupported_expression", _span(node))
+        return record_ids
+
+    def _struct_field_closure_record_ids(
+        self,
+        fact: Any,
+        anchor: Any | None = None,
+        seen: frozenset[str] = frozenset(),
+    ) -> tuple[str, ...]:
+        struct_fact = self._struct_value_fact(fact)
+        if struct_fact is None:
+            return ()
+        marker = struct_fact.type_id or (
+            getattr(anchor, "id", "") if anchor is not None else ""
+        )
+        if marker and marker in seen:
+            return ()
+        if marker:
+            seen = seen | {marker}
+        record_ids: list[str] = []
+        for member in self._struct_fields_for_fact(struct_fact, anchor):
+            member_type = getattr(member, "type", None)
+            if (
+                member.kind in {"var", "variable"}
+                and member_type is not None
+                and member_type.kind == "function"
+                and self._has_closure_records(member.id)
+            ):
+                record_ids.append(member.id)
+            nested = self._struct_value_fact(member_type)
+            if nested is not None:
+                record_ids.extend(
+                    self._struct_field_closure_record_ids(
+                        nested, member, seen
+                    )
+                )
+        return tuple(dict.fromkeys(record_ids))
+
     def _captured_current_deps(
         self,
         captured: frozenset[str],
@@ -13204,6 +13318,16 @@ class _Builder:
                         star_or_external |= (
                             captures_pointer or star_write or has_call
                         )
+                    for field_binding_id in (
+                        self._struct_argument_field_record_ids(argument)
+                    ):
+                        captured |= self.closure_captures.get(
+                            field_binding_id, frozenset()
+                        )
+                        writes |= self.closure_writes.get(
+                            field_binding_id, frozenset()
+                        )
+                        star_or_external = True
         arguments = node.child_by_field_name("arguments")
         if arguments is not None:
             for argument in _children(arguments):
@@ -28860,7 +28984,17 @@ class _Builder:
         if call_target is not None:
             self._func_arg_invocations.setdefault(
                 self.node_key(call_target), []
-            ).append((node, binding_id))
+            ).append((node, binding_id, False))
+
+    def _queue_struct_field_invocation(
+        self,
+        call_node: Any,
+        argument: Any,
+        binding_id: str,
+    ) -> None:
+        self._func_arg_invocations.setdefault(
+            self.node_key(call_node), []
+        ).append((argument, binding_id, True))
 
     def _fold_func_arg_invocations(
         self,
@@ -28891,8 +29025,11 @@ class _Builder:
         arg_deps = self._call_arg_deps.pop(
             self.node_key(node), frozenset()
         )
-        for arg_node, binding_id in pending:
-            field_value = arg_node.type == "selector_expression"
+        for arg_node, binding_id, force_external in pending:
+            field_value = (
+                force_external
+                or arg_node.type == "selector_expression"
+            )
             callee = (
                 self.summarize(binding_id)
                 if binding_id in self.functions
@@ -33079,21 +33216,33 @@ class _Builder:
             if value is None:
                 continue
             binding_id = self._closure_argument_record_id(value, params)
-            if binding_id is None:
-                continue
-            actual_values[index] |= self._captured_current_deps(
-                self.closure_captures.get(
-                    binding_id, frozenset()
-                ),
-                params,
-                locals_,
-            )
-            if binding_id in self.closure_factory_results:
-                actual_values[index] |= locals_.get(
-                    binding_id, frozenset()
+            if binding_id is not None:
+                actual_values[index] |= self._captured_current_deps(
+                    self.closure_captures.get(
+                        binding_id, frozenset()
+                    ),
+                    params,
+                    locals_,
                 )
-            if value.type == "selector_expression":
-                self._queue_func_arg_invocation(value, binding_id)
+                if binding_id in self.closure_factory_results:
+                    actual_values[index] |= locals_.get(
+                        binding_id, frozenset()
+                    )
+                if value.type == "selector_expression":
+                    self._queue_func_arg_invocation(value, binding_id)
+            for field_binding_id in self._struct_argument_field_record_ids(
+                argument
+            ):
+                actual_values[index] |= self._captured_current_deps(
+                    self.closure_captures.get(
+                        field_binding_id, frozenset()
+                    ),
+                    params,
+                    locals_,
+                )
+                self._queue_struct_field_invocation(
+                    node, argument, field_binding_id
+                )
         if local_chan_chan_roots is not None:
             for index, argument in enumerate(arguments):
                 root_id = self._local_chan_chan_id(argument)
@@ -33562,7 +33711,7 @@ class _Builder:
             self.pinned.update(binding.signature_type_ids)
             self._func_arg_invocations.setdefault(
                 self.node_key(call_node), []
-            ).append((node, binding.id))
+            ).append((node, binding.id, False))
         return frozenset()
 
     @staticmethod
@@ -35672,7 +35821,7 @@ class _Builder:
                 self.pointee_closures.discard(func_arg_id)
             self._func_arg_invocations.setdefault(
                 self.node_key(parent), []
-            ).append((node, func_arg_id))
+            ).append((node, func_arg_id, False))
         if bound_id is not None:
             may_skip = self._conditional or self._may_skip > 0
             was_factory_literal = (
