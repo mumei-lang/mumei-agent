@@ -6380,3 +6380,48 @@ fn f<T>(o: Option<T>) {
     # the payload stays opaque instead of misbinding q.qm().
     qm = _bindings(report, "qm", "associated_function")[0]
     assert _call(report, source, "q.qm()").target != qm.id
+
+
+def test_specialized_impl_matches_crate_qualified_args():
+    source = """
+mod m {
+    pub struct P;
+}
+struct W<T>;
+impl W<m::P> {
+    fn pm(&self) {}
+}
+fn f(o: Option<W<m::P>>, u: Option<W<m::P>>) {
+    match o.and(u) {
+        Some(w) => w.pm(),
+        _ => {}
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    assert _call(report, source, "w.pm()").target == pm.id
+
+
+def test_crate_path_never_binds_a_generic_parameter():
+    # A module fn's `g<P>` parameter shadows the module's own
+    # `struct P` when `crate::m::P` walks the module's bindings —
+    # parameters are never path-addressable, so the struct must win.
+    source = """
+mod m {
+    pub struct P;
+    impl P {
+        pub fn pm(&self) {}
+    }
+    pub fn g<P>(x: P) {}
+}
+fn f(o: Option<m::P>, u: Option<m::P>) {
+    match o.and(u) {
+        Some(p) => p.pm(),
+        _ => {}
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    assert _call(report, source, "p.pm()").target == pm.id
