@@ -16989,7 +16989,7 @@ class _Builder:
                         binding,
                         params,
                         locals_pre,
-                        conditional=conditional or self._may_skip > 0,
+                        conditional=conditional,
                         statement=node,
                         captures_before=factory_captures_pre,
                         writes_before=factory_writes_pre,
@@ -18223,9 +18223,7 @@ class _Builder:
                                 binding,
                                 params,
                                 locals_pre,
-                                conditional=(
-                                    conditional or self._may_skip > 0
-                                ),
+                                conditional=conditional,
                                 statement=node,
                                 captures_before=factory_captures_pre,
                                 writes_before=factory_writes_pre,
