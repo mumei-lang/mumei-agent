@@ -3124,3 +3124,39 @@ fn f() { <W<{1 << 2}, 4> as T>::m(&W::<{1 << 2}, 4>); }
     )
     call = _call(report, source, "<W<{1 << 2}, 4> as T>::m(&W::<{1 << 2}, 4>)")
     assert call.target == impl_m.id
+
+def test_type_alias_receiver_resolves_concrete_members():
+    source = """
+struct P;
+type A = P;
+impl P { fn m(&self) {} }
+fn f(a: A) { a.m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = _bindings(report, "m", "associated_function")[0]
+    call = _call(report, source, "a.m()")
+    assert call.target == m.id
+
+
+def test_type_alias_chain_resolves_through_intermediate_aliases():
+    source = """
+struct P;
+type A = B;
+type B = P;
+impl P { fn m(&self) {} }
+fn f(a: A) { a.m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = _bindings(report, "m", "associated_function")[0]
+    call = _call(report, source, "a.m()")
+    assert call.target == m.id
+
+
+def test_cyclic_type_aliases_do_not_recurse():
+    source = """
+type A = B;
+type B = A;
+fn f(a: A) { }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    assert report is not None
