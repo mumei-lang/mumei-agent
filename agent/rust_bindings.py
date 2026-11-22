@@ -2525,25 +2525,47 @@ class _RustBindings:
                         arg_list = node.child_by_field_name(
                             "arguments"
                         )
-                        named = (
-                            []
+                        first_arg = (
+                            None
                             if arg_list is None
-                            else [
-                                c
-                                for c in arg_list.named_children
-                            ]
+                            else next(
+                                (
+                                    c
+                                    for c in arg_list.named_children
+                                    if "comment" not in c.type
+                                ),
+                                None,
+                            )
                         )
-                        if not named:
+                        if first_arg is None:
                             element = None
                         else:
                             _, arg_args = self._receiver_type(
-                                named[0]
+                                first_arg
                             )
                             element = (
                                 None
                                 if arg_args is None
                                 else arg_args.strip()
                             )
+                            arg_pos = (
+                                self._receiver_annotation_position(
+                                    first_arg
+                                )
+                            )
+                            if (
+                                element is not None
+                                and arg_pos is not None
+                                and not self._spelling_scope_stable(
+                                    element, arg_pos, node.start_byte
+                                )
+                            ):
+                                # The argument's names were spelled
+                                # where different bindings are
+                                # visible — spelling the payload
+                                # would bind the wrong same-named
+                                # type.
+                                element = None
                     if element:
                         return None, prefix + element
                 if (
