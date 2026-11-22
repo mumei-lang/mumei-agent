@@ -1677,6 +1677,9 @@ class _SolBindings:
                 value = text[index + 2 :].strip()
                 if value.endswith(")"):
                     value = value[:-1].strip()
+                # `address\npayable` and other loose spacing is one
+                # spelling to solc — collapse it before the guards.
+                value = re.sub(r"\s+", " ", value)
                 if re.fullmatch(
                     r"u?int[0-9]*|bytes[0-9]*|byte|address payable|address|bool|string",
                     value,

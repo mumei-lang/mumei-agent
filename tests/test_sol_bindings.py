@@ -2821,3 +2821,24 @@ contract C {
         ref.binding_id == take.id and ref.kind == "call"
         for ref in report.references
     )
+
+
+def test_using_on_loosely_spaced_payable_mapping_value_binds():
+    source = """
+library L {
+    function f(address payable a, uint256 x) internal pure returns (uint256) {}
+}
+contract Vault {
+    using L for address payable;
+    mapping(uint256 => address   payable) targets;
+    function run() external { targets[0].f(1); }
+}
+"""
+    report = build_sol_bindings(source)
+    # `address   payable` is one spelling — the value slot guard must
+    # not strip `payable` as if it were the value's name.
+    f = next(b for b in report.bindings if b.name == "f")
+    assert any(
+        ref.binding_id == f.id and ref.kind == "call"
+        for ref in report.references
+    )
