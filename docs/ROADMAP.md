@@ -4342,10 +4342,15 @@ tokens (an over-report on divergence is sound, matching the value
 copy). One level deeper, `(*pp)` on an unreseated `**S` parameter
 is the same caller-shared root one pointer level down — `(*pp).V`,
 `(*pp).A[i]`, `(*pp).M[k]`, `(*pp).W.f` and stores through them
-resolve like the `*S` versions, and `pp = qq` reseats through the
-same alias path — while a store into the middle pointer
+resolve like the `*S` versions — `(*pp).A[0] = x` emits the same
+caller-backing mutation — and `pp = qq` reseats through the
+same alias path (a store through `(*pp)` lands in `qq`'s backing,
+so `(*qq).A[0]` observes it). A store into the middle pointer
 (`*pp = r`) reseats the `*S` value the caller sees, so the binding
-is marked dirty and every later `(*pp)` root stays closed.
+is marked dirty and every later `(*pp)` root stays closed — the
+mark lands with the store, so `*pp, x = r, (*pp).V` still reads
+the old pointee — while a deeper `**pp = s` writes the struct
+pointee itself and leaves the root live.
 
 A *scalar-payload channel element* admits the same conflated way
 — `s := []chan int64{c}`, `var m map[K]chan int64 = {...}` bind
