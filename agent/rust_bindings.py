@@ -184,6 +184,9 @@ class _Record:
     value_node: Any = None
     # A `mod` item's body scope — lets `m::T` annotations resolve.
     module_scope: Any = None
+    # The scope the record was declared into — a type alias's body
+    # resolves in its own scope, not the use-site scope stack.
+    home_scope: Any = None
 
 
 class _RustBindings:
@@ -339,6 +342,7 @@ class _RustBindings:
         return record
 
     def _add_to_scope(self, scope: _Scope, record: _Record) -> None:
+        record.home_scope = scope
         scope.bindings.setdefault(record.binding.name, []).append(record)
 
     def _item_name(self, node: Any) -> Any | None:
@@ -1207,8 +1211,8 @@ class _RustBindings:
                 and record.binding.id not in _seen
                 and record.alias_node is not None
             ):
-                resolved, resolved_args = self._annotation_type(
-                    record.alias_node, _seen | {record.binding.id}
+                resolved, resolved_args = (
+                    self._annotation_type_in_record_scope(record, _seen)
                 )
                 if resolved_args is not None and args is not None:
                     params_node = record.alias_node.parent
@@ -1255,8 +1259,8 @@ class _RustBindings:
         ):
             # `type A = B` — the alias spells the same type, so a
             # receiver typed by `A` resolves `B`'s members.
-            resolved, resolved_args = self._annotation_type(
-                record.alias_node, _seen | {record.binding.id}
+            resolved, resolved_args = self._annotation_type_in_record_scope(
+                record, _seen
             )
             if resolved_args is not None and args is not None:
                 # `type Alias<B> = W<B>` at `Alias<u8>` reads
@@ -1419,10 +1423,18 @@ class _RustBindings:
                 path.start_byte,
                 "type",
             )
-            type_id, args = (None if record is None else record.binding.id), None
+            type_id, args = (
+                None
+                if record is None
+                else self._concrete_type_id(record.binding.id)
+            ), None
         elif path.type in {"scoped_identifier", "scoped_type_identifier"}:
             record = self._scoped_type(path)
-            type_id, args = (None if record is None else record.binding.id), None
+            type_id, args = (
+                None
+                if record is None
+                else self._concrete_type_id(record.binding.id)
+            ), None
         elif path.type == "bracketed_type":
             qualified = next(
                 (
@@ -1619,8 +1631,8 @@ class _RustBindings:
                 or record.alias_node is None
             ):
                 break
-            resolved, resolved_args = self._annotation_type(
-                record.alias_node
+            resolved, resolved_args = (
+                self._annotation_type_in_record_scope(record)
             )
             if resolved is None or resolved == type_id:
                 break
@@ -1651,6 +1663,25 @@ class _RustBindings:
                 args = resolved_args
         return type_id, args
 
+    def _annotation_type_in_record_scope(
+        self, record: "_Record", _seen: frozenset = frozenset()
+    ) -> tuple[str | None, str | None]:
+        """`_annotation_type` on a record's alias body, evaluated in
+        the scope the alias was declared into — module members are
+        visible only inside their module scope, not from the
+        use-site scope stack."""
+        scope = record.home_scope
+        push = scope is not None and scope not in self.scopes
+        if push:
+            self.scopes.append(scope)
+        try:
+            return self._annotation_type(
+                record.alias_node, _seen | {record.binding.id}
+            )
+        finally:
+            if push:
+                self.scopes.pop()
+
     def _concrete_type_id(self, type_id: str | None) -> str | None:
         """Unwrap `type A = B` aliases to the aliased type's id."""
         seen = set()
@@ -1663,7 +1694,7 @@ class _RustBindings:
                 or record.alias_node is None
             ):
                 return type_id
-            resolved, _ = self._annotation_type(record.alias_node)
+            resolved, _ = self._annotation_type_in_record_scope(record)
             if resolved is None or resolved == type_id:
                 return type_id
             type_id = resolved
