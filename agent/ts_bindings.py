@@ -1820,7 +1820,42 @@ class _TypeScriptBindings:
             ),
             None,
         )
-        return inner is not None and self.text(inner) == self.text(arg)
+        return inner is not None and self._literal_equal(
+            self.text(inner), self.text(arg)
+        )
+
+    @staticmethod
+    def _literal_equal(declared: str, actual: str) -> bool:
+        """Literal spellings carrying the same value — `'s'` fits
+        `x: "s"`, `0x1` fits `x: 1`, and an uninterpolated `` `s` ``
+        fits `x: "s"`."""
+        if declared == actual:
+            return True
+
+        def value(spelling: str) -> str | int | float:
+            if (
+                len(spelling) >= 2
+                and spelling[0] in "\"'`"
+                and spelling.endswith(spelling[0])
+            ):
+                return spelling[1:-1]
+            try:
+                return int(spelling.replace("_", ""), 0)
+            except ValueError:
+                pass
+            try:
+                return float(spelling.replace("_", ""))
+            except ValueError:
+                return spelling
+
+        declared_value, actual_value = value(declared), value(actual)
+        if isinstance(declared_value, str) or isinstance(
+            actual_value, str
+        ):
+            return isinstance(declared_value, str) and isinstance(
+                actual_value, str
+            ) and declared_value == actual_value
+        return declared_value == actual_value
 
     def _arity_accepts(self, candidate: _Record, arg_count: int) -> bool:
         params = (
@@ -1994,8 +2029,8 @@ class _TypeScriptBindings:
                 "true",
                 "false",
             }:
-                return self.text(arg) == literal_text
-            return kind == literal_text
+                return self._literal_equal(literal_text, self.text(arg))
+            return self._literal_equal(literal_text, kind)
         text = self.text(node).strip()
         if text in {"any", "unknown", "object"}:
             return True

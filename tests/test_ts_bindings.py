@@ -2640,3 +2640,37 @@ f("s", "t");
         if source[c.span.start : c.span.end] == 'f("s", "t")'
     )
     assert call.target == fs[0].id
+
+def test_overload_literal_quote_style_does_not_reject_match():
+    # `f('s')` fits `f(x: "s")` — quote style is not part of the
+    # literal's value.
+    source = """
+function f(a: "s"): void {}
+function f(a: string): void {}
+f('s');
+"""
+    report = build_ts_bindings(source)
+    fs = sorted(
+        _bindings(report, "f", "function"), key=lambda b: b.span.start
+    )
+    call = next(
+        c for c in _calls(report) if source[c.span.start:c.span.end] == "f('s')"
+    )
+    assert call.target == fs[0].id
+
+
+def test_overload_literal_number_radix_equivalent():
+    # `f(0x1)` fits `f(x: 1)`.
+    source = """
+function f(a: 1): void {}
+function f(a: number): void {}
+f(0x1);
+"""
+    report = build_ts_bindings(source)
+    fs = sorted(
+        _bindings(report, "f", "function"), key=lambda b: b.span.start
+    )
+    call = next(
+        c for c in _calls(report) if source[c.span.start:c.span.end] == "f(0x1)"
+    )
+    assert call.target == fs[0].id
