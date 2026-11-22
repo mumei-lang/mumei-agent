@@ -211,13 +211,15 @@ function createEnvelope(source, extension) {
     if (ts.isExportAssignment(parent)) {
       return parent.expression === identifier;
     }
+    if (ts.isPropertyAccessExpression(parent) && parent.name === identifier) {
+      // Member access is a use: getNameOfDeclaration also answers the name
+      // of a property access (e.g. `a.b = f`), so this precedes that check.
+      return true;
+    }
     if (ts.getNameOfDeclaration(parent) === identifier) {
       return false;
     }
-    if (
-      (ts.isPropertyAccessExpression(parent) || ts.isQualifiedName(parent)) &&
-      parent.name === identifier
-    ) {
+    if (ts.isQualifiedName(parent) && parent.name === identifier) {
       return false;
     }
     if (

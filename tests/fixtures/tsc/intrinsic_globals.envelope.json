@@ -40,6 +40,15 @@
         "end": 94,
         "start": 85
       }
+    },
+    {
+      "declarations": [],
+      "library": true,
+      "name": "length",
+      "span": {
+        "end": 101,
+        "start": 95
+      }
     }
   ],
   "source": "let u: number | undefined = undefined;\nconst g = globalThis;\nfunction h() {\n  return arguments.length;\n}\n",

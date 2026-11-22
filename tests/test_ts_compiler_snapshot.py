@@ -29,6 +29,7 @@ FIXTURE_NAMES = (
     "import_source",
     "intrinsic_globals",
     "mapped_property",
+    "member_access",
     "state_write_operators",
     "tsx_fragment",
     "type_error",
@@ -39,10 +40,11 @@ POSITIVE_FIXTURES = (
     ("block_scope_shadowing", ["agree", "agree"]),
     ("function_overloads", ["agree", "agree"]),
     ("class_closure", ["agree", "agree"]),
-    ("builtin_math", ["builtin"]),
-    ("intrinsic_globals", ["builtin", "builtin", "builtin"]),
+    ("builtin_math", ["builtin", "builtin"]),
+    ("intrinsic_globals", ["builtin", "builtin", "builtin", "builtin"]),
     ("tsx_fragment", ["agree"]),
     ("state_write_operators", ["agree", "agree"]),
+    ("member_access", ["agree"] * 29 + ["builtin", "agree", "agree", "builtin"]),
 )
 _STATUSES = (
     "builtin",
@@ -119,12 +121,15 @@ def test_math_is_reported_as_a_library_builtin():
         build_ts_bindings(source),
     )
 
-    assert len(comparison["references"]) == 1
-    reference = comparison["references"][0]
-    assert reference["name"] == "Math"
-    assert reference["status"] == "builtin"
-    assert reference["library"] is True
-    assert reference["declarations"] == []
+    assert len(comparison["references"]) == 2
+    assert [item["name"] for item in comparison["references"]] == [
+        "Math",
+        "max",
+    ]
+    for reference in comparison["references"]:
+        assert reference["status"] == "builtin"
+        assert reference["library"] is True
+        assert reference["declarations"] == []
 
 
 def test_bom_source_is_loaded_with_byte_offsets_including_the_bom():
@@ -177,6 +182,7 @@ def test_declaration_free_intrinsics_are_reported_as_library_builtins():
         "undefined",
         "globalThis",
         "arguments",
+        "length",
     ]
     assert all(item["library"] is True for item in comparison["references"])
     assert all(item["declarations"] == [] for item in comparison["references"])

@@ -1,0 +1,473 @@
+{
+  "compiler_options": {
+    "jsx": "preserve",
+    "lib": [
+      "lib.es2022.d.ts"
+    ],
+    "noEmit": true,
+    "noResolve": true,
+    "strict": true,
+    "target": "ES2022",
+    "types": []
+  },
+  "diagnostics": [],
+  "file_name": "input.ts",
+  "profile": "mumei.tsc-symbol-envelope/v1",
+  "references": [
+    {
+      "declarations": [
+        {
+          "end": 15,
+          "start": 10
+        }
+      ],
+      "library": false,
+      "name": "Shape",
+      "span": {
+        "end": 95,
+        "start": 90
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 47,
+          "start": 41
+        }
+      ],
+      "library": false,
+      "name": "Engine",
+      "span": {
+        "end": 116,
+        "start": 110
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 47,
+          "start": 41
+        }
+      ],
+      "library": false,
+      "name": "Engine",
+      "span": {
+        "end": 129,
+        "start": 123
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 78,
+          "start": 75
+        }
+      ],
+      "library": false,
+      "name": "Car",
+      "span": {
+        "end": 203,
+        "start": 200
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 108,
+          "start": 102
+        }
+      ],
+      "library": false,
+      "name": "engine",
+      "span": {
+        "end": 232,
+        "start": 226
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 55,
+          "start": 50
+        }
+      ],
+      "library": false,
+      "name": "start",
+      "span": {
+        "end": 238,
+        "start": 233
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 198,
+          "start": 193
+        }
+      ],
+      "library": false,
+      "name": "other",
+      "span": {
+        "end": 255,
+        "start": 250
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 108,
+          "start": 102
+        }
+      ],
+      "library": false,
+      "name": "engine",
+      "span": {
+        "end": 262,
+        "start": 256
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 55,
+          "start": 50
+        }
+      ],
+      "library": false,
+      "name": "start",
+      "span": {
+        "end": 268,
+        "start": 263
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 141,
+          "start": 137
+        }
+      ],
+      "library": false,
+      "name": "base",
+      "span": {
+        "end": 289,
+        "start": 285
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 198,
+          "start": 193
+        }
+      ],
+      "library": false,
+      "name": "other",
+      "span": {
+        "end": 306,
+        "start": 301
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 161,
+          "start": 157
+        }
+      ],
+      "library": false,
+      "name": "area",
+      "span": {
+        "end": 311,
+        "start": 307
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 432,
+          "start": 423
+        }
+      ],
+      "library": false,
+      "name": "Direction",
+      "span": {
+        "end": 471,
+        "start": 462
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 437,
+          "start": 435
+        }
+      ],
+      "library": false,
+      "name": "Up",
+      "span": {
+        "end": 474,
+        "start": 472
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 334,
+          "start": 333
+        }
+      ],
+      "library": false,
+      "name": "N",
+      "span": {
+        "end": 477,
+        "start": 476
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 361,
+          "start": 357
+        }
+      ],
+      "library": false,
+      "name": "help",
+      "span": {
+        "end": 482,
+        "start": 478
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 334,
+          "start": 333
+        }
+      ],
+      "library": false,
+      "name": "N",
+      "span": {
+        "end": 505,
+        "start": 504
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 395,
+          "start": 390
+        }
+      ],
+      "library": false,
+      "name": "Inner",
+      "span": {
+        "end": 511,
+        "start": 506
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 497,
+          "start": 492
+        }
+      ],
+      "library": false,
+      "name": "inner",
+      "span": {
+        "end": 520,
+        "start": 515
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 402,
+          "start": 398
+        }
+      ],
+      "library": false,
+      "name": "ping",
+      "span": {
+        "end": 525,
+        "start": 521
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 15,
+          "start": 10
+        }
+      ],
+      "library": false,
+      "name": "Shape",
+      "span": {
+        "end": 543,
+        "start": 538
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 78,
+          "start": 75
+        }
+      ],
+      "library": false,
+      "name": "Car",
+      "span": {
+        "end": 553,
+        "start": 550
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 536,
+          "start": 535
+        }
+      ],
+      "library": false,
+      "name": "s",
+      "span": {
+        "end": 558,
+        "start": 557
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 22,
+          "start": 18
+        }
+      ],
+      "library": false,
+      "name": "area",
+      "span": {
+        "end": 563,
+        "start": 559
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 78,
+          "start": 75
+        }
+      ],
+      "library": false,
+      "name": "Car",
+      "span": {
+        "end": 582,
+        "start": 579
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 78,
+          "start": 75
+        }
+      ],
+      "library": false,
+      "name": "Car",
+      "span": {
+        "end": 595,
+        "start": 592
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 577,
+          "start": 573
+        }
+      ],
+      "library": false,
+      "name": "cars",
+      "span": {
+        "end": 604,
+        "start": 600
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 141,
+          "start": 137
+        }
+      ],
+      "library": false,
+      "name": "base",
+      "span": {
+        "end": 612,
+        "start": 608
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 577,
+          "start": 573
+        }
+      ],
+      "library": false,
+      "name": "cars",
+      "span": {
+        "end": 620,
+        "start": 616
+      }
+    },
+    {
+      "declarations": [],
+      "library": true,
+      "name": "push",
+      "span": {
+        "end": 625,
+        "start": 621
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 78,
+          "start": 75
+        }
+      ],
+      "library": false,
+      "name": "Car",
+      "span": {
+        "end": 633,
+        "start": 630
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 577,
+          "start": 573
+        }
+      ],
+      "library": false,
+      "name": "cars",
+      "span": {
+        "end": 642,
+        "start": 638
+      }
+    },
+    {
+      "declarations": [],
+      "library": true,
+      "name": "length",
+      "span": {
+        "end": 649,
+        "start": 643
+      }
+    }
+  ],
+  "source": "interface Shape { area(): number }\nclass Engine { start(): void {} }\nclass Car implements Shape {\n    engine: Engine = new Engine();\n    base(): void {}\n    area(): number { return 0 }\n    run(other: Car): void {\n        this.engine.start();\n        other.engine.start();\n        this.base();\n        other.area();\n    }\n}\nnamespace N {\n    export function help(): void {}\n    export class Inner { ping(): void {} }\n}\nenum Direction { Up, Down }\nconst heading = Direction.Up;\nN.help();\nconst inner = new N.Inner();\ninner.ping();\nconst s: Shape = new Car();\ns.area();\nconst cars: Car[] = [new Car()];\ncars[0].base();\ncars.push(new Car());\ncars.length;\n",
+  "typescript_version": "5.9.3",
+  "unsupported": []
+}
