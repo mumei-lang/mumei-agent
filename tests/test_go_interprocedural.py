@@ -53532,6 +53532,64 @@ def test_reslice_bind_negative_controls(go_types_helper, declarations, expected)
             "\treturn p.M[k].A[0]\n}\n",
             frozenset({0, 1, 2}),
         ),
+        # Nested maps — every intermediate element crossed by the
+        # index chain is itself a map, so the pair is a lookup on
+        # the innermost map.
+        (
+            "type S struct { M map[int64]map[int64]int64 }\n"
+            "func F(p *S, k1, k2 int64) int64 {\n"
+            "\tv, ok := p.M[k1][k2]\n"
+            "\tif ok { return v }\n"
+            "\treturn 0\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        (
+            "type E struct { V int64 }\n"
+            "type S struct { M map[int64]map[int64]E }\n"
+            "func F(p *S, k1, k2 int64) int64 {\n"
+            "\te, ok := p.M[k1][k2]\n"
+            "\tif ok { return e.V }\n"
+            "\treturn 0\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # A store into the nested slot is observed by the read.
+        (
+            "type S struct { M map[int64]map[int64]int64 }\n"
+            "func F(p *S, k1, k2, x int64) int64 {\n"
+            "\tp.M[k1][k2] = x\n"
+            "\tv, ok := p.M[k1][k2]\n"
+            "\tif ok { return v }\n"
+            "\treturn 0\n}\n",
+            frozenset({0, 1, 2, 3}),
+        ),
+        # Three levels.
+        (
+            "type S struct { M map[int64]map[int64]map[int64]int64 }\n"
+            "func F(p *S, k1, k2, k3 int64) int64 {\n"
+            "\tv, ok := p.M[k1][k2][k3]\n"
+            "\tif ok { return v }\n"
+            "\treturn 0\n}\n",
+            frozenset({0, 1, 2, 3}),
+        ),
+        # The `var` and assignment forms admit the same nested
+        # lookup — value and flag carry the field slot plus every
+        # key's deps.
+        (
+            "type S struct { M map[int64]map[int64]int64 }\n"
+            "func F(p *S, k1, k2 int64) int64 {\n"
+            "\tvar v, ok = p.M[k1][k2]\n"
+            "\tif ok { return v }\n"
+            "\treturn 0\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        (
+            "type S struct { M map[int64]map[int64]int64 }\n"
+            "func F(p *S, k1, k2 int64) int64 {\n"
+            "\tv := int64(0)\n"
+            "\tv, _ = p.M[k1][k2]\n"
+            "\treturn v\n}\n",
+            frozenset({0, 1, 2}),
+        ),
     ],
 )
 def test_map_field_comma_ok_read(go_types_helper, declarations, expected):
@@ -53561,6 +53619,25 @@ def test_map_field_comma_ok_read(go_types_helper, declarations, expected):
         "\te, ok := i.(I)\n"
         "\tif ok { return e.M() }\n"
         "\treturn 0\n}\n",
+        # An interface INNER element stays closed even when every
+        # outer level is a map — the bound value loses the dispatch
+        # provenance the single-name read keeps.
+        "type I interface { M() int64 }\n"
+        "type S struct { M map[int64]map[int64]I }\n"
+        "func F(p *S, k1, k2 int64) int64 {\n"
+        "\te, ok := p.M[k1][k2]\n"
+        "\tif ok { return e.M() }\n"
+        "\treturn 0\n}\n",
+        # A nested element whose struct type carries a collection
+        # member stays closed — the element-share machinery resolves
+        # only a single-level `p.M[k]` extraction, so the bound
+        # element's collection paths cannot be named.
+        "type E struct { V int64; A []int64 }\n"
+        "type S struct { M map[int64]map[int64]E }\n"
+        "func F(p *S, k1, k2, x int64) int64 {\n"
+        "\te, _ := p.M[k1][k2]\n"
+        "\tp.M[k1][k2].A[0] = x\n"
+        "\treturn e.A[0]\n}\n",
     ],
 )
 def test_map_field_comma_ok_read_closed(go_types_helper, declarations):
