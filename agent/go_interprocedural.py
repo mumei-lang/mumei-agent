@@ -12392,6 +12392,287 @@ class _Builder:
                         roots.add(root_id)
         return captured, writes, frozenset(roots), star_or_external
 
+    def _go_statement_races_later_stores(
+        self,
+        statement: Any,
+        call_node: Any,
+        fn: Function,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+    ) -> bool:
+        call = self.calls.get(self.node_key(call_node))
+        captured, writes, roots, star = self._deferred_exit_shape(
+            call_node, call, params, locals_
+        )
+        local_param_ids = set(locals_) | set(params)
+        touched = (
+            set(captured | writes | roots) & local_param_ids
+        )
+        reference_involved = star or bool(roots)
+        arguments = call_node.child_by_field_name("arguments")
+        if arguments is not None:
+            reference_involved |= any(
+                self._deferred_argument_is_pointer(argument)
+                for argument in _children(arguments)
+            )
+        for binding_id in touched:
+            binding = self.bindings.get(binding_id)
+            if binding is None or not self._scalar_value_fact(binding.type):
+                reference_involved = True
+
+        function_binding = self.bindings.get(fn.binding_id)
+        block = (
+            self.blocks.get(_key3(function_binding.span))
+            if function_binding is not None
+            else None
+        )
+        if block is None:
+            return True
+        nodes = []
+        pending = [block]
+        while pending:
+            current = pending.pop()
+            nodes.append(current)
+            pending.extend(_children(current))
+
+        region: dict[tuple[int, int, str], Any] = {}
+
+        def add_subtree(root: Any) -> None:
+            stack = [root]
+            while stack:
+                current = stack.pop()
+                region[
+                    (current.start_byte, current.end_byte, current.type)
+                ] = current
+                stack.extend(_children(current))
+
+        for current in nodes:
+            if current.start_byte >= statement.end_byte:
+                region[
+                    (current.start_byte, current.end_byte, current.type)
+                ] = current
+            if current.type == "defer_statement":
+                add_subtree(current)
+
+        body_key = (block.start_byte, block.end_byte, block.type)
+        ancestor = statement.parent
+        while ancestor is not None and (
+            ancestor.start_byte, ancestor.end_byte, ancestor.type
+        ) != body_key:
+            if ancestor.type == "for_statement":
+                add_subtree(ancestor)
+            ancestor = ancestor.parent
+
+        def expression_items(expression: Any) -> list[Any]:
+            if expression is None:
+                return []
+            if expression.type == "expression_list":
+                return _children(expression)
+            return [expression]
+
+        def root_identifier(
+            expression: Any, *, strip_address: bool = False
+        ) -> Any | None:
+            current = expression
+            while current is not None:
+                if current.type == "identifier":
+                    return current
+                if current.type == "parenthesized_expression":
+                    children = _children(current)
+                    current = children[0] if len(children) == 1 else None
+                    continue
+                if current.type in {
+                    "index_expression",
+                    "selector_expression",
+                }:
+                    current = current.child_by_field_name("operand")
+                    continue
+                if current.type == "unary_expression":
+                    operator = current.child_by_field_name("operator")
+                    if (
+                        operator is not None
+                        and (
+                            operator.text == b"*"
+                            or (
+                                strip_address
+                                and operator.text == b"&"
+                            )
+                        )
+                    ):
+                        current = current.child_by_field_name("operand")
+                        continue
+                return None
+            return None
+
+        def identifier_binding_id(identifier: Any) -> str | None:
+            ref = self.references.get(self.node_key(identifier))
+            if ref is not None and ref.binding_id:
+                return ref.binding_id
+            binding = self.bindings_by_span.get(
+                self.node_key(identifier)
+            )
+            return binding.id if binding is not None else None
+
+        def lhs_items(current: Any) -> list[Any]:
+            if current.type in {
+                "assignment_statement",
+                "short_var_declaration",
+                "range_clause",
+            }:
+                return expression_items(
+                    current.child_by_field_name("left")
+                )
+            if current.type in {"inc_statement", "dec_statement"}:
+                return _children(current)
+            return []
+
+        written: set[str] = set()
+        nonplain = False
+        for current in region.values():
+            for lhs in lhs_items(current):
+                root = root_identifier(lhs)
+                if root is not None:
+                    binding_id = identifier_binding_id(root)
+                    if binding_id is not None:
+                        written.add(binding_id)
+                if lhs.type != "identifier":
+                    nonplain = True
+            if current.type == "call_expression":
+                arguments = current.child_by_field_name("arguments")
+                if arguments is None:
+                    continue
+                for argument in _children(arguments):
+                    fact = self._deferred_expression_type(argument)
+                    reference_argument = (
+                        self._deferred_argument_is_pointer(argument)
+                        or (
+                            fact is not None
+                            and not self._scalar_value_fact(fact)
+                        )
+                    )
+                    if not reference_argument:
+                        continue
+                    nonplain = True
+                    root = root_identifier(
+                        argument, strip_address=True
+                    )
+                    if root is not None:
+                        binding_id = identifier_binding_id(root)
+                        if binding_id is not None:
+                            written.add(binding_id)
+            if current.type == "defer_statement":
+                deferred = _children(current)
+                if len(deferred) != 1 or deferred[0].type != "call_expression":
+                    continue
+                deferred_call = deferred[0]
+                deferred_shape = self._deferred_exit_shape(
+                    deferred_call,
+                    self.calls.get(self.node_key(deferred_call)),
+                    params,
+                    locals_,
+                )
+                written.update(deferred_shape[1] | deferred_shape[2])
+
+        address_taken: set[str] = set()
+        pointer_assignments: list[tuple[str, Any]] = []
+
+        def address_roots(expression: Any) -> set[str]:
+            roots_found: set[str] = set()
+            stack = [expression]
+            while stack:
+                current = stack.pop()
+                if current.type == "unary_expression":
+                    operator = current.child_by_field_name("operator")
+                    if operator is not None and operator.text == b"&":
+                        root = root_identifier(
+                            current.child_by_field_name("operand")
+                        )
+                        if root is not None:
+                            binding_id = identifier_binding_id(root)
+                            if binding_id is not None:
+                                roots_found.add(binding_id)
+                stack.extend(_children(current))
+            return roots_found
+
+        for current in nodes:
+            if current.type == "unary_expression":
+                operator = current.child_by_field_name("operator")
+                if operator is not None and operator.text == b"&":
+                    root = root_identifier(
+                        current.child_by_field_name("operand")
+                    )
+                    binding_id = (
+                        identifier_binding_id(root)
+                        if root is not None
+                        else None
+                    )
+                    binding = (
+                        self.bindings.get(binding_id)
+                        if binding_id is not None
+                        else None
+                    )
+                    if (
+                        binding is not None
+                        and binding_id not in params
+                        and binding.scope is not None
+                    ):
+                        address_taken.add(binding_id)
+            if current.type not in {
+                "assignment_statement",
+                "short_var_declaration",
+            }:
+                continue
+            lefts = expression_items(
+                current.child_by_field_name("left")
+            )
+            rights = expression_items(
+                current.child_by_field_name("right")
+            )
+            if len(lefts) != len(rights):
+                continue
+            for lhs, rhs in zip(lefts, rights):
+                if lhs.type != "identifier":
+                    continue
+                binding_id = identifier_binding_id(lhs)
+                binding = (
+                    self.bindings.get(binding_id)
+                    if binding_id is not None
+                    else None
+                )
+                if (
+                    binding is not None
+                    and binding.type.kind == "pointer"
+                ):
+                    pointer_assignments.append(
+                        (binding_id, rhs)
+                    )
+
+        address_targets: dict[str, set[str]] = {}
+        for _ in range(len(pointer_assignments) + 1):
+            changed = False
+            for pointer_id, rhs in pointer_assignments:
+                targets = address_roots(rhs)
+                rhs_name = self._strip_parens(rhs)
+                if rhs_name is not None and rhs_name.type == "identifier":
+                    rhs_id = identifier_binding_id(rhs_name)
+                    if rhs_id is not None:
+                        targets.update(
+                            address_targets.get(rhs_id, set())
+                        )
+                existing = address_targets.setdefault(pointer_id, set())
+                if not targets <= existing:
+                    existing.update(targets)
+                    changed = True
+            if not changed:
+                break
+        for binding_id in tuple(written):
+            written.update(address_targets.get(binding_id, set()))
+
+        return bool(touched & written) or (
+            reference_involved
+            and (nonplain or bool(written & address_taken))
+        )
+
     def _record_deferred_exit(self, record: _DeferredExit) -> None:
         for index, existing in enumerate(self._deferred_exits):
             if existing.span != record.span:
@@ -25535,6 +25816,12 @@ class _Builder:
             # the callee's writes landed — the union covers both.
             inner = _children(node)
             if len(inner) != 1:
+                raise _Unsupported("unsupported_statement", _span(node))
+            if kind == "go_statement" and (
+                self._go_statement_races_later_stores(
+                    node, inner[0], fn, params, locals_
+                )
+            ):
                 raise _Unsupported("unsupported_statement", _span(node))
             defer_call = (
                 self.calls.get(self.node_key(inner[0]))

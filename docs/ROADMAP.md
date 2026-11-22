@@ -2366,7 +2366,11 @@ A `go`/`defer` statement now admits like an expression-statement call:
 Go evaluates the callee and its arguments at the statement itself, so
 the call folds normally while its result is discarded — a `defer`d
 call runs before the function returns and a goroutine's effects may
-happen, and the union model covers both orderings. For supported
+happen, and the union model covers both orderings. A `go` call fails
+closed when later, enclosing-loop or deferred writes may race with its
+touched bindings; reference-involved calls also fail closed when later
+operations use nonplain writes or reference-typed arguments. Other
+supported `go` calls retain the union model. For supported
 deferred calls, the registration-time fold remains a conservative
 over-approximation, with an additional exit-time fixed-point fold over
 captured bindings and escaped writes; records are joined by defer site
