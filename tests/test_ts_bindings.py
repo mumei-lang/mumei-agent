@@ -2210,7 +2210,6 @@ const x: Missing.T = new C(); x.m();
         if source[c.span.start : c.span.end] == "x.m()"
     )
     assert call.target == member_m.id
-||||||| parent of 244514bd (C06: narrow top-level function overloads by call arguments)
 
 
 def test_member_alias_prefers_clause_block_for_identical_signatures():
