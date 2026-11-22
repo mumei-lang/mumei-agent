@@ -4554,10 +4554,17 @@ class _RustBindings:
                         "type",
                     )
                     if head_record is not None:
+                        resolved_record = (
+                            self._through_import(
+                                head_record, ret.start_byte
+                            )
+                            or head_record
+                        )
                         imported = (
-                            head_record.binding.kind == "import"
-                            and head_record.import_path is not None
-                            and head_record.import_path.split(
+                            resolved_record.binding.kind == "import"
+                            and resolved_record.import_path
+                            is not None
+                            and resolved_record.import_path.split(
                                 "::"
                             )[0].strip()
                             in {"std", "core", "alloc"}
