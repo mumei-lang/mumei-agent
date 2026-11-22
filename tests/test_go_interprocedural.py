@@ -54993,6 +54993,22 @@ def test_named_collection_elided_struct_function_fields(go_types_helper):
         "\tv := y; ss := []SS{{{F: func() int64 { return v }}}}\n"
         "\tv = x; return ss[0][0].F()\n"
         "}\n"
+        "func FNamedNestedExtract(x, y int64) int64 {\n"
+        "\tv := y; ss := []SS{{{F: func() int64 { return v }}}}\n"
+        "\tf := ss[0][0].F; v = x; return f()\n"
+        "}\n"
+        "func FNestedExtract(x, y int64) int64 {\n"
+        "\tv := y; ss := [][]S{{{F: func() int64 { return v }}}}\n"
+        "\tf := ss[0][0].F; v = x; return f()\n"
+        "}\n"
+        "func FNestedWriteExtract(x int64) int64 {\n"
+        "\tw := int64(0); ws := [][]W{{{F: func() { w = x }}}}\n"
+        "\tf := ws[0][0].F; f(); return w\n"
+        "}\n"
+        "func FNestedMapExtract(x, y int64) int64 {\n"
+        "\tv := y; m := map[int][]S{0: {{F: func() int64 { return v }}}}\n"
+        "\tf := m[0][0].F; v = x; return f()\n"
+        "}\n"
         "func nfs(x int64) int64 {\n"
         "\tfs := []FS{{func() int64 { return x }}}\n"
         "\treturn fs[0][0]()\n"
@@ -55016,6 +55032,9 @@ def test_named_collection_elided_struct_function_fields(go_types_helper):
         "func FNamedNoFuncField(x int64) int64 {\n"
         "\tns := NS{{V: x}}; return ns[0].V\n"
         "}\n"
+        "func FNestedNoFuncField(x int64) int64 {\n"
+        "\tns := [][]N{{{V: x}}}; return ns[0][0].V\n"
+        "}\n"
     )
     files = {"a.go": "package p\n" + declarations}
     snapshot = _snapshot_for(go_types_helper, files)
@@ -55030,6 +55049,10 @@ def test_named_collection_elided_struct_function_fields(go_types_helper):
         "FNamedArrayCall": frozenset({0, 1}),
         "FNamedArrayExtract": frozenset({0, 1}),
         "FNamedAliasChain": frozenset({0, 1}),
+        "FNamedNestedExtract": frozenset({0, 1}),
+        "FNestedExtract": frozenset({0, 1}),
+        "FNestedWriteExtract": frozenset({0}),
+        "FNestedMapExtract": frozenset({0, 1}),
         "nfs": frozenset({0}),
         "nfs4": frozenset({0}),
     }
@@ -55068,6 +55091,11 @@ def test_named_collection_elided_struct_function_fields(go_types_helper):
     )
     assert plain.available, plain.gaps
     assert plain.return_dependencies == frozenset({0})
+    nested_plain = named_package(
+        files, snapshot, summaries, "FNestedNoFuncField"
+    )
+    assert nested_plain.available, nested_plain.gaps
+    assert nested_plain.return_dependencies == frozenset({0})
 
 
 def test_imported_named_collection_elided_closure_fails_closed(

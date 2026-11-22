@@ -4751,6 +4751,38 @@ class _Builder:
         body = literal.child_by_field_name("body")
         if body is None:
             return None
+
+        def nested_member(value: Any) -> Any | None:
+            value = self._strip_parens(value)
+            if value is None or value.type != "literal_value":
+                return None
+            inferred = self._local_struct_literal_fact(value)
+            if inferred is not None:
+                fact, anchor = inferred
+                field_values = self._struct_literal_field_values(
+                    value, fact, anchor
+                )
+                if field_values is not None:
+                    for member, field_value in field_values:
+                        if self._strip_parens(field_value) == node:
+                            return member
+            for child in _children(value):
+                if child.type == "keyed_element":
+                    nested = child.child_by_field_name("value")
+                elif child.type == "literal_element":
+                    nested = next(iter(child.named_children), None)
+                else:
+                    continue
+                while (
+                    nested is not None
+                    and nested.type == "literal_element"
+                ):
+                    nested = next(iter(nested.named_children), None)
+                member = nested_member(nested)
+                if member is not None:
+                    return member
+            return None
+
         element = None
         for candidate in _children(body):
             if candidate.type == "keyed_element":
@@ -4761,16 +4793,17 @@ class _Builder:
                 continue
             while value is not None and value.type == "literal_element":
                 value = next(iter(value.named_children), None)
-            nested_struct = (
-                self._local_struct_literal_fact(value)
-                if value is not None and value.type == "literal_value"
-                else None
-            )
-            if self._strip_parens(value) == node or (
-                nested_struct is not None
-                and value.start_byte <= node.start_byte
-                and node.end_byte <= value.end_byte
-            ):
+            nested = nested_member(value)
+            if nested is not None:
+                if (
+                    nested.type is not None
+                    and nested.type.kind == "function"
+                ):
+                    return nested.id
+                raise _Unsupported(
+                    "unsupported_expression", _span(node)
+                )
+            if self._strip_parens(value) == node:
                 element = candidate
                 break
         if element is None:
