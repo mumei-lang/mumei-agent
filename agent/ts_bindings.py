@@ -1445,6 +1445,7 @@ class _TypeScriptBindings:
         extra_seed: tuple[_Record, ...] = (),
         collect_extras: list[_Record] | None = None,
         args_node: Any | None = None,
+        arg_nodes: list | None = None,
     ) -> _Record | None:
         """BFS over the declaring type and its bases for member `name`.
 
@@ -1472,6 +1473,7 @@ class _TypeScriptBindings:
                 extra_seed=extra_seed,
                 collect_extras=collect_extras,
                 args_node=args_node,
+                arg_nodes=arg_nodes,
             )
         finally:
             self._member_lookup_active.discard(active_key)
@@ -1488,6 +1490,7 @@ class _TypeScriptBindings:
         extra_seed: tuple[_Record, ...] = (),
         collect_extras: list[_Record] | None = None,
         args_node: Any | None = None,
+        arg_nodes: list | None = None,
     ) -> _Record | None:
         queue: list[tuple[Any, bool]] = [(type_record, False)]
         # Declaration merging: a namespace may merge with a class,
@@ -1603,7 +1606,9 @@ class _TypeScriptBindings:
                 else 1
             )
         if args_node is not None:
-            narrowed = self._narrow_overloads(matches, args_node)
+            narrowed = self._narrow_overloads(
+                matches, args_node, arg_nodes
+            )
             # A clause-authored name (`export {f as g}` in one sibling
             # block) pins the referent to that block's declaration —
             # keep it ahead of overload narrowing, which would drop it
@@ -1661,7 +1666,7 @@ class _TypeScriptBindings:
         return matches[0]
 
     def _narrow_overloads(
-        self, matches: list[_Record], args_node: Any
+        self, matches: list[_Record], args_node: Any, arg_nodes: list | None = None
     ) -> list[_Record]:
         """Pick the first overload whose signature the arguments fit.
 
@@ -1670,11 +1675,15 @@ class _TypeScriptBindings:
         than two signature-shaped candidates leaves the list untouched;
         when nothing fits, the original match order is kept so the
         reference still lands on a same-named member."""
-        args = [
-            child
-            for child in self.children(args_node)
-            if child.type != "comment"
-        ]
+        args = (
+            arg_nodes
+            if arg_nodes is not None
+            else [
+                child
+                for child in self.children(args_node)
+                if child.type != "comment"
+            ]
+        )
         if any(arg.type == "spread_element" for arg in args):
             return matches
         if matches and matches[0].function_node is None:
@@ -2216,14 +2225,57 @@ class _TypeScriptBindings:
         the signature the arguments narrow to, so `make(1).method()`
         reads `make`'s chosen overload's return type."""
         callee = node.child_by_field_name("function")
+        while callee is not None and callee.type in {
+            "parenthesized_expression", "instantiation_expression",
+        }:
+            callee = next(
+                (
+                    child
+                    for child in self.children(callee)
+                    if child.type not in {"type_arguments"}
+                ),
+                None,
+            )
         args_node = node.child_by_field_name("arguments")
+        arg_nodes: list | None = None
+        if args_node is not None and args_node.type == "template_string":
+            # A tag is called `(strings, ...values)` — the template
+            # itself plus one argument per interpolation. The first
+            # argument is a strings array, not the template's literal
+            # text, so it is represented by an unpinned node.
+            arg_nodes = [node] + [
+                child
+                for child in self.children(args_node)
+                if child.type == "template_substitution"
+            ]
         record: _Record | None = None
         if callee is not None and callee.type == "identifier":
             candidates = self._lookup_candidates(
                 self.text(callee), node.start_byte, "value"
             )
             if candidates:
-                narrowed = self._narrow_overloads(candidates, args_node)
+                # A nearer scope's declaration shadows outer ones —
+                # only the innermost scope's overloads may be picked,
+                # matching the call-site rule in `_reference`.
+                scope = candidates[0].binding.scope
+                key = (
+                    None if scope is None else (scope.start, scope.end)
+                )
+                candidates = [
+                    candidate
+                    for candidate in candidates
+                    if (
+                        None
+                        if candidate.binding.scope is None
+                        else (
+                            candidate.binding.scope.start,
+                            candidate.binding.scope.end,
+                        )
+                    ) == key
+                ]
+                narrowed = self._narrow_overloads(
+                    candidates, args_node, arg_nodes
+                )
                 record = narrowed[0] if narrowed else candidates[0]
         elif callee is not None and callee.type == "member_expression":
             property_node = callee.child_by_field_name("property")
@@ -2236,6 +2288,7 @@ class _TypeScriptBindings:
                     self.text(property_node),
                     node.start_byte,
                     args_node=args_node,
+                    arg_nodes=arg_nodes,
                 )
         if record is None or record.function_node is None:
             return None
@@ -2721,6 +2774,7 @@ class _TypeScriptBindings:
         *,
         collect_extras: list[_Record] | None = None,
         args_node: Any | None = None,
+        arg_nodes: list | None = None,
     ) -> _Record | None:
         # Exported-name collisions on the object segment: the losing
         # members stay reachable for this one lookup step, so a value
@@ -2744,6 +2798,7 @@ class _TypeScriptBindings:
             extra_seed=tuple(inner_extras),
             collect_extras=collect_extras,
             args_node=args_node,
+            arg_nodes=arg_nodes,
         )
 
     def _resolve(
