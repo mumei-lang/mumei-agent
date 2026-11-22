@@ -154,6 +154,10 @@ def read_plan_history(
 ) -> tuple[dict, ...]:
     """Read and validate a canonical plan-history digest chain."""
     history_path = _as_path(path)
+    try:
+        history_path = history_path.resolve()
+    except (OSError, RuntimeError):
+        raise ValueError(_IO_FAILURE) from None
     entries, _, _ = _read_entries(history_path, expected_head)
     return tuple(entry["plan"] for entry in entries)
 

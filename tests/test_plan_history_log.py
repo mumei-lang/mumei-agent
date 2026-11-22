@@ -104,6 +104,15 @@ def test_missing_file_is_empty_but_cannot_match_an_expected_head(tmp_path):
         read_plan_history(str(path), expected_head="0" * 64)
 
 
+def test_read_and_append_resolve_dot_dot_paths_consistently(tmp_path):
+    path = tmp_path / "missing" / ".." / "history.jsonl"
+    plan = _plan("adapter-normalized-path")
+
+    append_plan_history(str(path), plan)
+
+    assert read_plan_history(str(path)) == (_json_plan(plan),)
+
+
 def test_expected_head_shape_is_validated(tmp_path):
     path = tmp_path / "history.jsonl"
     with pytest.raises(ValueError, match="invalid expected"):
