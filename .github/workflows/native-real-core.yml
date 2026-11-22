@@ -114,7 +114,11 @@ jobs:
           CORE_SHA="$(git -C mumei rev-parse HEAD)"
           echo "Core develop commit: \`${CORE_SHA}\`" >> "$GITHUB_STEP_SUMMARY"
 
-      # Core develop drift vs fixtures (reported to Core lane): linearity/temporal-effect fixtures now verify; precondition_fail reports no failure_type; effect_mismatch reports precondition_violated.
+      # The 4 deselected violation fixtures are rejected by Core develop, but Core
+      # does not yet report the expected failure_type (no failure_type for
+      # precondition/linearity/temporal; effect_mismatch classified as
+      # precondition_violated). Core-side classification fix is pending in the
+      # Core lane; remove these --deselect lines once it lands.
       - name: Run real-Core native integration tests
         working-directory: mumei-agent
         run: |
