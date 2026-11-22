@@ -140,8 +140,11 @@ class _Scope:
     bindings: dict[str, list["_Record"]] = field(default_factory=dict)
     glob_import: bool = False
     # Module paths pulled in by `use m::*` — names not bound directly
-    # resolve against the modules' declared items.
-    glob_imports: list[str] = field(default_factory=list)
+    # resolve against the modules' declared items. Each entry is the
+    # path, the use declaration's position (the import resolves in its
+    # own scope, not at the reference site) and whether the use is
+    # `pub` (only re-exports carry names onward).
+    glob_imports: list[tuple[str, int, bool]] = field(default_factory=list)
     ambiguous_names: dict[str, tuple[int, int]] = field(default_factory=dict)
 
 
@@ -190,6 +193,9 @@ class _Record:
     # The scope the record was declared into — a type alias's body
     # resolves in its own scope, not the use-site scope stack.
     home_scope: Any = None
+    # The item carries a `pub` visibility modifier — only `pub` items
+    # come through a `use m::*` glob.
+    public: bool = False
 
 
 class _RustBindings:
@@ -403,6 +409,10 @@ class _RustBindings:
                         else None
                     ),
                 )
+                record.public = any(
+                    child.type == "visibility_modifier"
+                    for child in node.named_children
+                )
                 self._add_to_scope(scope, record)
                 if kind == "function":
                     self._function_records[record.binding.id] = record
@@ -525,11 +535,17 @@ class _RustBindings:
         )
 
     def _predeclare_use(self, node: Any, scope: _Scope) -> None:
+        is_pub = any(
+            child.type == "visibility_modifier"
+            for child in node.named_children
+        )
         for name_node, is_glob, bound_name in self._use_names(node):
             if is_glob:
                 scope.glob_import = True
                 if bound_name:
-                    scope.glob_imports.append(bound_name)
+                    scope.glob_imports.append(
+                        (bound_name, node.start_byte, is_pub)
+                    )
                 self.gaps.append(Gap("glob_import", self.span(node)))
                 continue
             record = self._make_record(
@@ -541,6 +557,7 @@ class _RustBindings:
                 item=True,
                 name_override=bound_name,
             )
+            record.public = is_pub
             self._add_to_scope(scope, record)
 
     def _add_generic_parameters(
@@ -2697,16 +2714,14 @@ class _RustBindings:
                 found = None
                 ambiguous_glob = False
                 unresolvable = False
-                for path in scope.glob_imports:
-                    module = self._lookup_module_path(path, position)
-                    if module is None or module.module_scope is None:
+                for path, decl_position, _is_pub in scope.glob_imports:
+                    members, resolved = self._glob_members(
+                        path, name, decl_position, namespace, set()
+                    )
+                    if not resolved:
                         unresolvable = True
                         continue
-                    for record in reversed(
-                        module.module_scope.bindings.get(name, ())
-                    ):
-                        if not self._in_namespace(record, namespace):
-                            continue
+                    for record in members:
                         if found is not None and found is not record:
                             ambiguous_glob = True
                             break
@@ -2718,6 +2733,43 @@ class _RustBindings:
                 if found is not None:
                     return found, None
         return None, blocked
+
+    def _glob_members(
+        self,
+        path: str,
+        name: str,
+        decl_position: int,
+        namespace: str,
+        seen: set[str],
+    ) -> tuple[list["_Record"], bool]:
+        """`pub` members `name` gains through `use path::*`, including
+        names the module itself re-exports with `pub use` — resolved
+        in the use declaration's scope, not the reference site's."""
+        module = self._lookup_module_path(path, decl_position)
+        if module is None or module.module_scope is None:
+            return [], False
+        if module.binding.id in seen:
+            return [], True
+        seen.add(module.binding.id)
+        members = [
+            record
+            for record in reversed(
+                module.module_scope.bindings.get(name, ())
+            )
+            if self._in_namespace(record, namespace) and record.public
+        ]
+        resolved = True
+        for inner_path, inner_position, inner_pub in (
+            module.module_scope.glob_imports
+        ):
+            if not inner_pub:
+                continue
+            inner, ok = self._glob_members(
+                inner_path, name, inner_position, namespace, seen
+            )
+            resolved = resolved and ok
+            members.extend(inner)
+        return members, resolved
 
     def _lookup(self, name: str, position: int, namespace: str) -> _Record | None:
         return self._lookup_with_boundary(name, position, namespace)[0]

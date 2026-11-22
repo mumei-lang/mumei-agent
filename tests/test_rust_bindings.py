@@ -3262,3 +3262,83 @@ fn f() { let v: P = P; }
     )
     refs = _refs(report, source, "P")
     assert any(ref.binding_id == local_p.id for ref in refs)
+
+
+def test_glob_import_resolves_at_declaration_scope_not_use_site():
+    # `use m::*` binds to the `m` visible where the import is
+    # declared — a same-named inner `mod m` at the call site does
+    # not redirect the call.
+    source = """
+mod m { pub fn f() {} }
+use m::*;
+fn main() {
+    mod m { pub fn wrong() {} }
+    f();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    outer_f = next(
+        b for b in report.bindings
+        if b.name == "f" and b.kind == "function"
+    )
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "f()"
+    )
+    assert call.target == outer_f.id
+
+
+def test_glob_import_skips_private_items():
+    source = """
+mod m { fn priv_() {} pub fn f() {} }
+use m::*;
+fn main() { priv_(); f(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    calls = {
+        source[c.span.start:c.span.end]: c for c in report.calls
+    }
+    assert calls["priv_()"].target == ""
+    public_f = next(
+        b for b in report.bindings
+        if b.name == "f" and b.kind == "function"
+    )
+    assert calls["f()"].target == public_f.id
+
+
+def test_glob_import_follows_pub_use_reexports():
+    source = """
+mod n { pub fn g() {} }
+mod m { pub use n::*; }
+use m::*;
+fn main() { g(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    g = next(
+        b for b in report.bindings
+        if b.name == "g" and b.kind == "function"
+    )
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "g()"
+    )
+    assert call.target == g.id
+
+
+def test_glob_import_does_not_follow_private_reexports():
+    source = """
+mod n { pub fn g() {} }
+mod m { use n::*; pub fn h() {} }
+use m::*;
+fn main() { g(); h(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    calls = {
+        source[c.span.start:c.span.end]: c for c in report.calls
+    }
+    assert calls["g()"].target == ""
+    h = next(
+        b for b in report.bindings
+        if b.name == "h" and b.kind == "function"
+    )
+    assert calls["h()"].target == h.id
