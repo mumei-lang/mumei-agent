@@ -9707,11 +9707,12 @@ names from the pinned solc 0.8.39 AST: `memberLocation` is the
 member-name span and `referencedDeclaration` points at the member's
 declaration for contract members (`token.transfer`, `token.supply`),
 while builtins (`.length`, `.push`, `msg.sender`) carry no
-`referencedDeclaration` and record as builtin references. New fixture
-`member_access.sol` exercises member calls, a public getter, builtin
-members and reassignment: 10 `agree` and 2 `builtin` statuses against
-the lexical report's member resolution. Envelope shape, pinned-version
-allowlist and fail-closed boundary are unchanged. Metadata comparison
-only — no new capture surface, route or claim.
+`referencedDeclaration` and record as builtin references. The
+`member_access.sol` fixture exercises member calls, a public getter,
+builtin members, reassignment, and `this.`/`super.`/inherited member
+calls: 15 `agree` and 5 `builtin` statuses against the lexical
+report's member resolution. Envelope shape, pinned-version allowlist
+and fail-closed boundary are unchanged. Metadata comparison only — no
+new capture surface, route or claim.
 
 **回帰ゲート**: `uv run pytest tests/test_sol_compiler_snapshot.py -q`
