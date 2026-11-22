@@ -43686,6 +43686,24 @@ def test_defer_statement_admitted(go_types_helper):
             "g := func() { r = x }; defer g(); return 0 }",
             frozenset({0}),
         ),
+        (
+            "func Literal(x int64) (r int64) { "
+            "y := int64(0); defer func() { r = y }(); "
+            "return set(&y, x) }",
+            "func Bound(x int64) (r int64) { "
+            "y := int64(0); g := func() { r = y }; defer g(); "
+            "return set(&y, x) }",
+            frozenset({0}),
+        ),
+        (
+            "func Literal(x int64) (r int64) { "
+            "y := int64(0); h := func() int64 { y = x; return 0 }; "
+            "defer func() { r = y }(); return h() }",
+            "func Bound(x int64) (r int64) { "
+            "y := int64(0); g := func() { r = y }; defer g(); "
+            "h := func() int64 { y = x; return 0 }; return h() }",
+            frozenset({0}),
+        ),
     ],
     ids=[
         "named-result",
@@ -43698,13 +43716,17 @@ def test_defer_statement_admitted(go_types_helper):
         "if",
         "loop",
         "parenthesized",
+        "return-call-write",
+        "return-closure-write",
     ],
 )
 def test_deferred_func_literal_matches_bound_closure(
     go_types_helper, literal, bound, expected
 ):
     source, snapshot, summaries = unit(
-        go_types_helper, f"{literal}\n{bound}"
+        go_types_helper,
+        "func set(p *int64, v int64) int64 { *p = v; return 0 }\n"
+        f"{literal}\n{bound}",
     )
     immediate = named(source, snapshot, summaries, "Literal")
     bound_result = named(source, snapshot, summaries, "Bound")

@@ -15659,11 +15659,6 @@ class _Builder:
                 # expressions evaluate — a deferred may-write call
                 # can still change them, bounded by its arguments.
                 deps[0] |= self._defer_result_deps
-            deferred_deps = self._fold_deferred_exits(
-                fn, params, locals_
-            )
-            if deferred_deps and any(r.binding_id for r in fn.results):
-                deps[0] |= deferred_deps
             expressions = _children(node)
             if len(expressions) == 1 and expressions[0].type == "expression_list":
                 expressions = _children(expressions[0])
@@ -15688,6 +15683,9 @@ class _Builder:
                     # nothing — the same implicit return a
                     # fall-off-the-end body gets.
                     saw_return[0] = True
+                    self._fold_deferred_exits(
+                        fn, params, locals_
+                    )
                     return
                 # A bare `return` is only legal with a named result — it
                 # yields the result binding's current dependencies. With
@@ -15760,6 +15758,11 @@ class _Builder:
                     )
             else:
                 raise _Unsupported("unsupported_return", _span(node))
+            deferred_deps = self._fold_deferred_exits(
+                fn, params, locals_
+            )
+            if deferred_deps and any(r.binding_id for r in fn.results):
+                deps[0] |= deferred_deps
             saw_return[0] = True
             return
         if kind == "short_var_declaration":
