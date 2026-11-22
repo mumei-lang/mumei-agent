@@ -12565,6 +12565,96 @@ class _Builder:
                     if binding_id is not None:
                         written.add(binding_id)
             if current.type == "call_expression":
+                callee = self._strip_parens(
+                    current.child_by_field_name("function")
+                )
+                callee_ref = (
+                    self.references.get(self.node_key(callee))
+                    if callee is not None
+                    and callee.type == "identifier"
+                    else None
+                )
+                callee_id = (
+                    callee_ref.binding_id
+                    if callee_ref is not None
+                    else None
+                )
+                callee_binding = (
+                    self.bindings.get(callee_id)
+                    if callee_id is not None
+                    else None
+                )
+                if (
+                    self.node_key(current) != self.node_key(call_node)
+                    and callee_id in local_param_ids
+                    and callee_binding is not None
+                    and callee_binding.type is not None
+                    and callee_binding.type.kind == "function"
+                ):
+                    deferred_shape = self._deferred_exit_shape(
+                        current,
+                        self.calls.get(self.node_key(current)),
+                        params,
+                        locals_,
+                    )
+                    resolved_literal = any(
+                        callee_id in records
+                        for records in (
+                            self.closure_captures,
+                            self.closure_writes,
+                            self.closure_star_writes,
+                            self.closure_inner_calls,
+                            self.pointee_closures,
+                        )
+                    )
+                    if not resolved_literal:
+                        if (
+                            star
+                            or reference_involved
+                            or any(
+                                (
+                                    binding := self.bindings.get(binding_id)
+                                )
+                                is None
+                                or not self._scalar_value_fact(
+                                    binding.type
+                                )
+                                for binding_id in touched
+                            )
+                        ):
+                            return True
+                    else:
+                        added = set(
+                            deferred_shape[1] | deferred_shape[2]
+                        )
+                        for binding_id in deferred_shape[0]:
+                            binding = self.bindings.get(binding_id)
+                            if (
+                                binding is None
+                                or not self._scalar_value_fact(
+                                    binding.type
+                                )
+                            ):
+                                added.add(binding_id)
+                        written.update(added)
+                        if (
+                            added & touched
+                            or deferred_shape[2]
+                            or deferred_shape[3]
+                            or any(
+                                (
+                                    binding := self.bindings.get(
+                                        binding_id
+                                    )
+                                )
+                                is None
+                                or not self._scalar_value_fact(
+                                    binding.type
+                                )
+                                for binding_id in added
+                            )
+                        ):
+                            nonplain = True
                 arguments = current.child_by_field_name("arguments")
                 if arguments is None:
                     continue

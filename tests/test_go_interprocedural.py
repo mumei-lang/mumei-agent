@@ -18639,6 +18639,59 @@ def test_go_literal_later_captured_stores_stay_closed(
 
 
 @pytest.mark.parametrize(
+    "later_call",
+    ["s();", "go s();"],
+    ids=["synchronous-call", "goroutine-call"],
+)
+def test_later_bound_literal_channel_send_closes_go_race(
+    go_types_helper, later_call
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64) int64 { "
+            "ch := make(chan int64, 1); out := make(chan int64, 1); "
+            "s := func() { ch <- x }; g := func() { out <- <-ch }; "
+            f"go g(); {later_call} return <-out }}",
+        )
+    )
+    assert not result.available
+    assert any(gap.reason == "unsupported_statement" for gap in result.gaps)
+
+
+def test_bound_literal_channel_send_before_go_stays_available(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64) int64 { "
+            "ch := make(chan int64, 1); out := make(chan int64, 1); "
+            "s := func() { ch <- x }; s(); "
+            "g := func() { out <- <-ch }; go g(); return <-out }",
+        )
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_later_bound_literal_unrelated_scalar_write_stays_available(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64) int64 { "
+            "y := int64(0); out := make(chan int64, 1); "
+            "s := func() { y = 1 }; g := func() { out <- x }; "
+            "go g(); s(); _ = y; return <-out }",
+        )
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+
+@pytest.mark.parametrize(
     "body",
     [
         "g := func() { ch <- x }; g(); return <-ch",
