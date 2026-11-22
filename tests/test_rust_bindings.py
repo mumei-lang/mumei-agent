@@ -4082,3 +4082,63 @@ fn f(o: Option<P>) {
     )
     assert call.target == outer.id
     assert call.target != inner.id
+
+
+def test_imported_enum_variant_binds_match_payload() -> None:
+    source = """
+    enum E { V(P), W }
+    struct P;
+    impl P { fn m(&self) {} }
+    use E::V;
+    fn f(e: E) {
+        match e { V(p) => p.m(), _ => {} }
+    }
+    """
+    report = build_rust_bindings(source, pointer_width=64)
+    method = _bindings(report, "m", "associated_function")[0]
+    assert _call(report, source, "p.m()").target == method.id
+
+
+def test_imported_enum_variant_through_module_chain() -> None:
+    source = """
+    mod m { pub enum E { V(P), W } }
+    struct P;
+    impl P { fn m(&self) {} }
+    use m::E::V;
+    fn f(e: m::E) {
+        match e { V(p) => p.m(), _ => {} }
+    }
+    """
+    report = build_rust_bindings(source, pointer_width=64)
+    method = _bindings(report, "m", "associated_function")[0]
+    assert _call(report, source, "p.m()").target == method.id
+
+
+def test_imported_variant_stays_opaque_on_other_type() -> None:
+    source = """
+    enum E { V(P), W }
+    struct P;
+    struct Other;
+    impl P { fn m(&self) {} }
+    use E::V;
+    fn f(o: Other) {
+        match o { V(p) => p.m(), _ => {} }
+    }
+    """
+    report = build_rust_bindings(source, pointer_width=64)
+    assert _call(report, source, "p.m()").target == ""
+
+
+def test_imported_tuple_struct_still_binds_pattern_payload() -> None:
+    source = """
+    mod m { pub struct S(pub P); }
+    struct P;
+    impl P { fn m(&self) {} }
+    use m::S;
+    fn f(s: m::S) {
+        match s { S(p) => p.m() }
+    }
+    """
+    report = build_rust_bindings(source, pointer_width=64)
+    method = _bindings(report, "m", "associated_function")[0]
+    assert _call(report, source, "p.m()").target == method.id

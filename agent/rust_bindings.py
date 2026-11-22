@@ -1400,12 +1400,51 @@ class _RustBindings:
         module = self._lookup_module_path(
             "::".join(segments[:-1]), position
         )
+        if module is not None and module.module_scope is not None:
+            for record in reversed(
+                module.module_scope.bindings.get(segments[-1], ())
+            ):
+                if self._in_namespace(record, namespace):
+                    return record
+            return None
+        # The container is not a module — `use E::V` names a member
+        # of a type (enum variant, associated item), `use m::E::V`
+        # the same through a module chain.
+        container = self._use_path_container(segments[:-1], position)
+        if container is None:
+            return None
+        for record in self.records.values():
+            if (
+                record.member_of == container.binding.id
+                and record.binding.name == segments[-1]
+                and self._in_namespace(record, namespace)
+            ):
+                return record
+        return None
+
+    def _use_path_container(
+        self, segments: list, position: int
+    ) -> "_Record | None":
+        """Type record a `use` path's non-module container names —
+        `E` itself or `m::E` inside module `m`."""
+        if len(segments) == 1:
+            return self._through_import(
+                self._lookup(
+                    self._normalize_identifier(segments[0]),
+                    position,
+                    "type",
+                ),
+                position,
+            )
+        module = self._lookup_module_path(
+            "::".join(segments[:-1]), position
+        )
         if module is None or module.module_scope is None:
             return None
         for record in reversed(
             module.module_scope.bindings.get(segments[-1], ())
         ):
-            if self._in_namespace(record, namespace):
+            if self._in_namespace(record, "type"):
                 return record
         return None
 
@@ -3596,12 +3635,26 @@ class _RustBindings:
                 head.start_byte,
                 "type",
             )
+            if record is not None and record.binding.kind == "import":
+                resolved = self._through_import(
+                    record, head.start_byte, "type"
+                )
+                if resolved is None or resolved.binding.kind == "import":
+                    # `use E::V` names a member — a value-namespace
+                    # target, unlike `use m::P`.
+                    resolved = self._through_import(
+                        record, head.start_byte, "value"
+                    )
+                record = resolved
+            else:
+                record = self._through_import(record, head.start_byte)
         elif head.type in {"scoped_identifier", "scoped_type_identifier"}:
             member, _ = self._scoped_member(head)
-            record = (
+            record = self._through_import(
                 member
                 if member is not None
-                else self._scoped_type(head)
+                else self._scoped_type(head),
+                head.start_byte,
             )
         if record is None:
             return None
