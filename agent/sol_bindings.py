@@ -1652,7 +1652,25 @@ class _SolBindings:
                 and depth == 1
                 and text[index : index + 2] == "=>"
             ):
-                return text[index + 2 :].rstrip(")").strip()
+                value = text[index + 2 :].strip()
+                if value.endswith(")"):
+                    value = value[:-1].strip()
+                if re.fullmatch(
+                    r"u?int[0-9]*|bytes[0-9]*|byte|address payable|address|bool|string",
+                    value,
+                ) is None:
+                    named = re.fullmatch(
+                        r"(.+?)\s+[A-Za-z_$][A-Za-z0-9_$]*",
+                        value,
+                        re.S,
+                    )
+                    if named is not None:
+                        # `mapping(K => U slot)` names the value slot —
+                        # the name is not part of the type. Builtin
+                        # multi-word spellings (`address payable`) were
+                        # kept whole by the guard above.
+                        value = named.group(1).strip()
+                return value
         return None
 
     def _array_element_type_record(

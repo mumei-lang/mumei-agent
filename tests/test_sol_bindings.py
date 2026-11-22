@@ -2067,6 +2067,27 @@ contract Vault {
     assert report.calls[0].kind == "opaque_member"
 
 
+def test_using_on_named_mapping_value_binds():
+    source = """
+library SafeMath {
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {}
+}
+contract Vault {
+    using SafeMath for uint256;
+    mapping(address => uint256 total) balances;
+    function run() external { balances[msg.sender].add(1); }
+}
+"""
+    report = build_sol_bindings(source)
+    # `mapping(K => U slot)` — the trailing `slot` names the value
+    # slot; the index still yields `uint256`.
+    add = next(b for b in report.bindings if b.name == "add")
+    assert any(
+        ref.binding_id == add.id and ref.kind == "call"
+        for ref in report.references
+    )
+
+
 def test_using_on_public_mapping_getter_binds_value_type():
     source = """
 library SafeMath {
