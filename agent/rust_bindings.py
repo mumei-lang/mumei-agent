@@ -3637,6 +3637,81 @@ class _RustBindings:
                                 or node.start_byte,
                             )
                     if (
+                        method_name
+                        in {
+                            "or_insert",
+                            "or_insert_with",
+                            "or_insert_with_key",
+                            "or_default",
+                        }
+                    ):
+                        # `m.entry(k).or_insert(d)`/`and_modify`
+                        # chains yield `&mut V` of the map's args.
+                        entry_recv = callee.child_by_field_name(
+                            "value"
+                        )
+                        while (
+                            entry_recv is not None
+                            and entry_recv.type == "call_expression"
+                            and (
+                                entry_fn := entry_recv.child_by_field_name(
+                                    "function"
+                                )
+                            )
+                            is not None
+                            and entry_fn.type == "field_expression"
+                            and self._normalize_identifier(
+                                self.text(
+                                    entry_fn.child_by_field_name(
+                                        "field"
+                                    )
+                                )
+                            )
+                            == "and_modify"
+                        ):
+                            entry_recv = entry_fn.child_by_field_name(
+                                "value"
+                            )
+                        if (
+                            entry_recv is not None
+                            and entry_recv.type == "call_expression"
+                            and (
+                                entry_fn := entry_recv.child_by_field_name(
+                                    "function"
+                                )
+                            )
+                            is not None
+                            and entry_fn.type == "field_expression"
+                            and self._normalize_identifier(
+                                self.text(
+                                    entry_fn.child_by_field_name(
+                                        "field"
+                                    )
+                                )
+                            )
+                            == "entry"
+                        ):
+                            map_recv = entry_fn.child_by_field_name(
+                                "value"
+                            )
+                            if self._container_head_name(
+                                map_recv
+                            ) in _MAP_CONTAINER_NAMES:
+                                map_args = self._map_spelled_args(
+                                    map_recv
+                                )
+                                parts = self._type_arg_list(
+                                    map_args or ""
+                                )
+                                if len(parts) >= 2:
+                                    return self._spelled_type(
+                                        "&mut " + parts[1].strip(),
+                                        self._receiver_annotation_position(
+                                            map_recv
+                                        )
+                                        or node.start_byte,
+                                    )
+                    if (
                         method_name in _SWAP_REMOVE_METHODS
                         and receiver[1] is not None
                         and self._container_head_name(

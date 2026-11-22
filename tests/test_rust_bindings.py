@@ -7303,3 +7303,37 @@ fn f(o: Option<u8>, e: m::E, e2: E) {
     assert bound.get("x.em()") is not None
     assert bound.get("x2.em()") is not None
     assert bound["x.em()"] != bound["x2.em()"]
+||||||| parent of 1ae575d1 (C06: spell map entry().or_insert*/or_default payloads)
+=======
+
+def test_map_entry_or_insert_binds_mut_value_payload():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn def() -> P { P }
+fn f(m: HashMap<K, P>, b: BTreeMap<K, P>, v: Vec<P>) {
+    let e = m.entry(K).or_insert_with(def);
+    e.pm();
+    let e2 = m.entry(K).or_insert(def());
+    e2.pm();
+    let e3 = m.entry(K).and_modify(|x| ()).or_insert(def());
+    e3.pm();
+    let e4 = b.entry(K).or_default();
+    e4.pm();
+    let e5 = b.entry(K).or_insert_with_key(|k| def());
+    e5.pm();
+    let e6 = v.entry(0).or_insert(def());
+    e6.pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    for call in ("e.pm()", "e2.pm()", "e3.pm()", "e4.pm()", "e5.pm()"):
+        assert bound.get(call) == pm.id, call
+    # `Vec` has no `entry` API.
+    assert not bound.get("e6.pm()")
