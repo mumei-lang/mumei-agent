@@ -2568,3 +2568,30 @@ contract Vault {
     # only fills members the type itself does not declare.
     targets = {call.target for call in report.calls}
     assert {flag.id, noop.id} <= targets
+
+
+def test_using_on_library_struct_resolves_qualified_receiver():
+    source = """
+library Lib {
+    struct S { uint256 v; }
+    function f(S memory self, uint256 x) internal pure returns (uint256) { return self.v + x; }
+}
+contract C {
+    using Lib for Lib.S;
+    function go(Lib.S memory s) external pure returns (uint256) {
+        return s.f(1);
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    # `s` is declared `Lib.S`; the extension's receiver parameter is
+    # `S` — the same struct, spelled unqualified inside the library.
+    f_binding = next(
+        binding
+        for binding in report.bindings
+        if binding.name == "f"
+    )
+    assert any(
+        ref.binding_id == f_binding.id and ref.kind == "call"
+        for ref in report.references
+    )

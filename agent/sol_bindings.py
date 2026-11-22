@@ -1194,10 +1194,22 @@ class _SolBindings:
         candidates: list[_Record] = []
         first_reason: str | None = None
         for directive in directives:
-            if directive.target and self._canonical_type_text(
-                directive.target
-            ) != type_text:
-                continue
+            if directive.target:
+                target_text = self._canonical_type_text(directive.target)
+                if target_text != type_text:
+                    target_record = self._user_type_record(
+                        target_text, self.current_contract, position
+                    )
+                    receiver_record = self._user_type_record(
+                        type_text, self.current_contract, position
+                    )
+                    if (
+                        target_record is None
+                        or receiver_record is None
+                        or target_record.binding.id
+                        != receiver_record.binding.id
+                    ):
+                        continue
             library = self.contracts.get(directive.library)
             if library is None or library.kind != "library":
                 continue
@@ -1220,7 +1232,11 @@ class _SolBindings:
                 if (
                     signature
                     and self._param_accepts(
-                        signature[0], "typed", type_text
+                        signature[0],
+                        "typed",
+                        type_text,
+                        param_owner=item.owner,
+                        position=position,
                     )
                     == "nomatch"
                 ):
@@ -1365,8 +1381,37 @@ class _SolBindings:
             return True
         return False
 
+    def _user_type_record(
+        self, text: str | None, owner: "_Contract | None", position: int
+    ) -> "_Record | None":
+        """Resolve a canonical user-type spelling to its declaration
+        record, so a qualified spelling (`L.S`) and the scope-local
+        spelling the declaring scope uses (`S` inside `L`) compare by
+        identity rather than by text.
+        """
+        if not text:
+            return None
+        parts = text.split(".")
+        if len(parts) == 1:
+            return self._lookup_type_record(parts[0], position, owner)
+        if len(parts) != 2:
+            return None
+        container = self.contracts.get(parts[0])
+        if container is None:
+            return None
+        record, _reason, _candidates = self._lookup_contract(
+            parts[1], container, position, "type"
+        )
+        return record
+
     def _param_accepts(
-        self, param_text: str, arg_kind: str, arg_text: str | None
+        self,
+        param_text: str,
+        arg_kind: str,
+        arg_text: str | None,
+        *,
+        param_owner: "_Contract | None" = None,
+        position: int = 0,
     ) -> str:
         """`match` / `convert` / `nomatch` for one parameter against one
         call argument. Literals carry only a kind (a numeric literal's
@@ -1411,6 +1456,18 @@ class _SolBindings:
             arg_text, param
         ):
             return "convert"
+        param_record = self._user_type_record(
+            param, param_owner, position
+        )
+        arg_record = self._user_type_record(
+            arg_text, self.current_contract, position
+        )
+        if (
+            param_record is not None
+            and arg_record is not None
+            and param_record.binding.id == arg_record.binding.id
+        ):
+            return "match"
         return "nomatch"
 
     def _resolve_overload(
@@ -1443,7 +1500,13 @@ class _SolBindings:
             viable = True
             for param, arg in zip(params, args):
                 kind, arg_text = self._argument_kind(arg)
-                verdict = self._param_accepts(param, kind, arg_text)
+                verdict = self._param_accepts(
+                    param,
+                    kind,
+                    arg_text,
+                    param_owner=record.owner,
+                    position=member_node.start_byte,
+                )
                 if verdict == "nomatch":
                     viable = False
                     break
