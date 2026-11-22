@@ -2805,12 +2805,13 @@ make(1).methodA();
 
 
 def test_return_type_ignores_shadowed_outer_overloads():
-    # The inner block's `make` shadows the outer one — `make("s")`
-    # must type by the inner `string -> A` signature only.
+    # Both `make`s accept the argument, so only the inner scope's
+    # shadowing picks `string -> A` — scope, not arg types, excludes
+    # the outer declaration.
     source = """
 class A { methodA(): void {} }
 class B { methodB(): void {} }
-function make(x: number): B { return null as any; }
+function make(x: string): B { return null as any; }
 {
     function make(x: string): A { return null as any; }
     make("s").methodA();
@@ -2881,5 +2882,43 @@ factory.make(1).methodA();
     call = next(
         c for c in report.calls
         if source[c.span.start:c.span.end] == "factory.make(1).methodA()"
+    )
+    assert call.target == method_a.id
+
+
+def test_tagged_template_narrows_by_interpolation_types():
+    # Each `${...}` substitution narrows overloads by its
+    # expression's type — `tag`x${1}`` picks the number overload.
+    source = """
+class A { methodA(): void {} }
+class B { methodB(): void {} }
+declare function tag(s: TemplateStringsArray, n: number): A;
+declare function tag(s: TemplateStringsArray, n: string): B;
+tag`x${1}`.methodA();
+"""
+    report = build_ts_bindings(source)
+    method_a = _bindings(report, "methodA", "associated_function")[0]
+    call = next(
+        c for c in report.calls
+        if "methodA()" in source[c.span.start:c.span.end]
+    )
+    assert call.target == method_a.id
+
+
+def test_return_type_narrows_by_explicit_type_argument_count():
+    # `(make<number, string>)(1)` cannot name a single-parameter
+    # overload — the declared type-parameter count pins the signature.
+    source = """
+class A { methodA(): void {} }
+class B { methodB(): void {} }
+declare function make<T, U>(x: T): A;
+declare function make<T>(x: T): B;
+(make<number, string>)(1).methodA();
+"""
+    report = build_ts_bindings(source)
+    method_a = _bindings(report, "methodA", "associated_function")[0]
+    call = next(
+        c for c in report.calls
+        if "methodA()" in source[c.span.start:c.span.end]
     )
     assert call.target == method_a.id
