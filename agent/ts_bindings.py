@@ -91,6 +91,10 @@ class _Record:
     # its declared name (`export {A as B}` → {B}, `export {A as B, A}`
     # → {A, B}). Empty means the declared name applies as usual.
     member_public_names: frozenset[str] = frozenset()
+    # Names under which the member is reachable on the type side
+    # through `export type {…}` alone (value exports union in at
+    # lookup). Empty = not type-clause exported.
+    member_type_public_names: frozenset[str] = frozenset()
     # Reachable on the type side only (`export type {A}` /
     # `export {type A}`) — no value-side export.
     member_type_exported: bool = False
@@ -129,7 +133,7 @@ class _TypeScriptBindings:
         self._type_alias_cache: dict[str, TypeFact] = {}
         self._loop_binding_ids: dict[int, frozenset[str]] = {}
         self._tdz_binding_ids: frozenset[str] = frozenset()
-        self._type_bases: dict[int, list[str]] = {}
+        self._type_bases: dict[int, list[tuple[str, bool]]] = {}
         self._initializer_active: set[str] = set()
 
     def span(self, node: Any) -> ByteSpan:
@@ -952,7 +956,12 @@ class _TypeScriptBindings:
                             )
                             if match:
                                 bases.append(
-                                    re.sub(r"\s+", "", match.group(0))
+                                    (
+                                        re.sub(
+                                            r"\s+", "", match.group(0)
+                                        ),
+                                        clause.type == "extends_clause",
+                                    )
                                 )
                 self._type_bases[decl.id] = bases
                 for member in self.children(body):
@@ -1161,6 +1170,17 @@ class _TypeScriptBindings:
                             other.member_public_names = frozenset(
                                 public_names
                             )
+                        type_names = {
+                            exported
+                            for exported, local in exported_type_aliases.items()
+                            if local == member_name
+                        }
+                        if member_name in exported_type_names:
+                            type_names.add(member_name)
+                        if type_names and type_names != {member_name}:
+                            other.member_type_public_names = frozenset(
+                                type_names
+                            )
                         other.member_type_exported = (
                             member_name in exported_type_names
                             or member_name in type_alias_targets
@@ -1168,6 +1188,60 @@ class _TypeScriptBindings:
                         other.member_container = (
                             self._decl_qualified_name(decl)
                         )
+                # Declaration merging: this block's `export` clause
+                # re-exports members declared in sibling same-named
+                # blocks — `namespace N { function f() {} }
+                # namespace N { export {f as g} }` publishes `g`.
+                sibling_decl_ids = {
+                    sibling.node.parent.id
+                    for sibling in self._merge_siblings(record)
+                    if sibling.binding.kind == "namespace"
+                    and sibling.node.parent is not None
+                }
+                if sibling_decl_ids:
+                    for member in self.records:
+                        if member.member_of not in sibling_decl_ids:
+                            continue
+                        member_name = self.text(member.node)
+                        added = {
+                            exported
+                            for exported, local in exported_aliases.items()
+                            if local == member_name
+                        }
+                        if member_name in exported_names:
+                            added.add(member_name)
+                        if added:
+                            names = set(member.member_public_names)
+                            if (
+                                not names
+                                and member.member_visibility == "public"
+                            ):
+                                names = {member_name}
+                            names |= added
+                            member.member_visibility = "public"
+                            if names != {member_name}:
+                                member.member_public_names = frozenset(
+                                    names
+                                )
+                        added_types = {
+                            exported
+                            for exported, local in exported_type_aliases.items()
+                            if local == member_name
+                        }
+                        if member_name in exported_type_names:
+                            added_types.add(member_name)
+                        if added_types:
+                            type_names = set(
+                                member.member_type_public_names
+                            )
+                            if member.member_type_exported and not type_names:
+                                type_names = {member_name}
+                            type_names |= added_types
+                            member.member_type_exported = True
+                            if type_names != {member_name}:
+                                member.member_type_public_names = (
+                                    frozenset(type_names)
+                                )
 
     def _type_record_by_id(self, binding_id_value: str) -> _Record | None:
         for record in self.records:
@@ -1216,8 +1290,9 @@ class _TypeScriptBindings:
     ) -> _Record | None:
         """BFS over the declaring type and its bases for member `name`.
 
-        `for_type` resolves on the type side (extends/implements
-        spellings), where `export type`-only members are reachable."""
+        `for_type` resolves on the type side (implements and interface
+        `extends` spellings), where `export type`-only members are
+        reachable; class `extends` is a value position."""
         queue = [type_record]
         # Declaration merging: a namespace may merge with a class,
         # interface or enum of the same name in the same container, so
@@ -1240,15 +1315,20 @@ class _TypeScriptBindings:
             decl_id = None if decl is None else decl.id
             namespace_member = current.binding.kind == "namespace"
             for candidate in self.records:
-                if (
-                    decl_id is None
-                    or candidate.member_of != decl_id
-                    or name
-                    not in (
-                        candidate.member_public_names
-                        or frozenset({candidate.binding.name})
+                if decl_id is None or candidate.member_of != decl_id:
+                    continue
+                # Explicit export lists publish a member only under the
+                # listed names — `export type {A as B}` removes `N.A`
+                # entirely. With no explicit list the declared name is
+                # reachable (and the private filter decides).
+                if candidate.member_public_names or candidate.member_type_public_names:
+                    value_names = candidate.member_public_names
+                    type_names = value_names | candidate.member_type_public_names
+                else:
+                    value_names = type_names = frozenset(
+                        {candidate.binding.name}
                     )
-                ):
+                if name not in (type_names if for_type else value_names):
                     continue
                 if (
                     not namespace_member
@@ -1260,7 +1340,14 @@ class _TypeScriptBindings:
                     candidate.member_visibility == "private"
                     and (not via_this or not first)
                     and not (
-                        for_type and candidate.member_type_exported
+                        for_type
+                        and (
+                            name in candidate.member_type_public_names
+                            or (
+                                not candidate.member_type_public_names
+                                and candidate.member_type_exported
+                            )
+                        )
                     )
                 ):
                     continue
@@ -1268,21 +1355,28 @@ class _TypeScriptBindings:
                     continue
                 return candidate
             if decl_id is not None and decl is not None:
-                for base in self._type_bases.get(decl_id, ()):
+                for base, base_value in self._type_bases.get(
+                    decl_id, ()
+                ):
                     # Bases are resolved where the `extends`/`implements`
                     # clause is spelled — a use-site scope may shadow the
                     # base name with an unrelated declaration.
                     base_record = self._base_type_record(
-                        base, decl.start_byte
+                        base,
+                        decl.start_byte,
+                        for_type=not base_value,
                     )
                     if base_record is not None:
                         queue.append(base_record)
         return None
 
     def _base_type_record(
-        self, base: str, position: int
+        self, base: str, position: int, *, for_type: bool = True
     ) -> _Record | None:
-        """Resolve an extends/implements spelling, incl. `N.Base` chains."""
+        """Resolve an extends/implements spelling, incl. `N.Base` chains.
+
+        `for_type` is False for class `extends` — a value position
+        where type-only exports do not apply."""
         segments = [segment.strip() for segment in base.split(".")]
         record = self._lookup(segments[0], position, "type")
         if record is None:
@@ -1296,7 +1390,7 @@ class _TypeScriptBindings:
                 position,
                 static=True,
                 via_this=False,
-                for_type=True,
+                for_type=for_type,
             )
         return record
 
@@ -1521,11 +1615,13 @@ class _TypeScriptBindings:
             if (
                 sibling is record
                 or sibling.binding.name != record.binding.name
-                or sibling.member_public_names != record.member_public_names
                 or (
                     sibling.member_of is not None
                     and sibling.member_of != record.member_of
-                    and sibling.member_visibility == "private"
+                    and (
+                        sibling.member_visibility == "private"
+                        or record.member_visibility == "private"
+                    )
                 )
             ):
                 continue
@@ -1667,11 +1763,11 @@ class _TypeScriptBindings:
             if current is None:
                 return None, False, True
             decl = current.node.parent
-            for base in self._type_bases.get(
+            for base, base_value in self._type_bases.get(
                 None if decl is None else decl.id, ()
             )[:1]:
                 base_record = self._base_type_record(
-                    base, decl.start_byte
+                    base, decl.start_byte, for_type=not base_value
                 )
                 if base_record is not None:
                     return base_record, False, True
