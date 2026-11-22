@@ -3019,7 +3019,10 @@ class _RustBindings:
                             if -len(elements) <= index < len(elements)
                             else None
                         )
-                    if self.text(field).strip() == "get" and element:
+                    if (
+                        self.text(field).strip() in {"get", "get_mut"}
+                        and element
+                    ):
                         arg_list = node.child_by_field_name(
                             "arguments"
                         )
@@ -7497,8 +7500,17 @@ class _RustBindings:
                     ):
                         # `it.find(..)`/`it.nth(i)` yield
                         # `Option<Item>` — head the scrutinee so
-                        # `Some(p)` binds the upstream element.
-                        return "Option", node.start_byte, None
+                        # `Some(p)` binds the upstream element,
+                        # resolved where the receiver's `P` was
+                        # written, not at the call.
+                        return (
+                            "Option",
+                            self._receiver_annotation_position(
+                                upstream
+                            )
+                            or node.start_byte,
+                            None,
+                        )
                 if (
                     field is not None
                     and self.text(field).strip() in _FN_PAYLOAD_METHODS
