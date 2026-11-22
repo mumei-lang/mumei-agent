@@ -1087,3 +1087,108 @@ def test_producer_signature_malformed_checks_never_raise(tmp_path):
             )
         )
         assert evaluation["descriptor_match"] is False
+
+
+def _sidecar_descriptor(accepted: bool = True, **overrides) -> dict:
+    value = {
+        "schema_version": "mumei.semantic-contract-sidecar-acceptance/v1",
+        "sidecar_schema_version": "mumei.semantic-contract-sidecar/v1",
+        "sidecar_fingerprint": "b" * 64,
+        "artifact_sha256": "c" * 64,
+        "atoms": ["alpha.requires", "beta.ensures"],
+        "acceptance": "evaluated",
+        "accepted": accepted,
+        "scope": "semantic_contract_sidecar_hash_binding_and_fresh_source_obligations",
+        "checks_performed": [
+            "sidecar_shape",
+            "artifact_hash_binding",
+            "contract_fresh_extraction",
+            "module_obligations_unsat",
+        ],
+        "checks_not_performed": ["producer_authenticity", "record_freshness"],
+    }
+    value.update(overrides)
+    return value
+
+
+def test_sidecar_acceptance_descriptor_folds():
+    evaluation = evaluate_core_acceptance(_sidecar_descriptor())
+    assert evaluation["descriptor_match"] is True
+    assert evaluation["accepted"] is True
+    declined = evaluate_core_acceptance(
+        _sidecar_descriptor(accepted=False)
+    )
+    assert declined["descriptor_match"] is True
+    assert declined["accepted"] is False
+
+
+def test_sidecar_acceptance_rejects_foreign_or_malformed():
+    cases = [
+        _sidecar_descriptor(
+            sidecar_schema_version="mumei.verification-evidence/v1"
+        ),
+        _sidecar_descriptor(sidecar_fingerprint="not-hex"),
+        _sidecar_descriptor(artifact_sha256="Z" * 64),
+        _sidecar_descriptor(atoms="alpha.requires"),
+        _sidecar_descriptor(atoms=[1, 2]),
+        _sidecar_descriptor(acceptance="not_evaluated"),
+        _sidecar_descriptor(accepted="true"),
+        _sidecar_descriptor(scope=""),
+        {**_sidecar_descriptor(), "extra": None},
+        {k: v for k, v in _sidecar_descriptor().items() if k != "atoms"},
+        {k: v for k, v in _sidecar_descriptor().items() if k != "scope"},
+    ]
+    for value in cases:
+        evaluation = evaluate_core_acceptance(value)
+        assert evaluation["descriptor_match"] is False, value
+
+
+def test_sidecar_acceptance_producer_signature():
+    # Signature pins fold on the binding check, like the other routes.
+    signed = _sidecar_descriptor(
+        checks_performed=[
+            "sidecar_shape",
+            "artifact_hash_binding",
+            "contract_fresh_extraction",
+            "module_obligations_unsat",
+            "producer_signature_binding",
+        ],
+        producer_signature=dict(_PRODUCER_SIGNATURE),
+    )
+    evaluation = evaluate_core_acceptance(signed)
+    assert evaluation["descriptor_match"] is True
+    # produced_at_signed is never admitted — a sidecar declares no
+    # produced_at.
+    for bad in (
+        _sidecar_descriptor(
+            checks_performed=["producer_signature_binding"],
+            produced_at_signed=True,
+        ),
+        _sidecar_descriptor(
+            checks_performed=["producer_signature_binding"],
+            producer_signature=dict(_PRODUCER_SIGNATURE),
+            produced_at_signed=True,
+        ),
+        # The binding check is required for the signature pin.
+        _sidecar_descriptor(
+            producer_signature=dict(_PRODUCER_SIGNATURE),
+        ),
+    ):
+        evaluation = evaluate_core_acceptance(bad)
+        assert evaluation["descriptor_match"] is False
+
+
+def test_sidecar_acceptance_binds_attempt_on_sidecar_fingerprint():
+    # The sidecar is the evaluated subject: expected_fingerprint
+    # compares to sidecar_fingerprint, not artifact_sha256.
+    descriptor = _sidecar_descriptor()
+    bound = evaluate_core_acceptance(
+        descriptor, expected_fingerprint="b" * 64
+    )
+    assert bound["descriptor_match"] is True
+    assert bound["attempt_bound"] is True
+    unbound = evaluate_core_acceptance(
+        descriptor, expected_fingerprint="c" * 64
+    )
+    assert unbound["descriptor_match"] is True
+    assert unbound["attempt_bound"] is False
