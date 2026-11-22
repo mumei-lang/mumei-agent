@@ -1708,8 +1708,13 @@ new M.A(); new M.B(); new M.C();
 """
     report = build_ts_bindings(source)
     a_rec = _member_bindings(report, "A", "ambient")[0]
-    call_targets = {c.target for c in report.calls if c.target}
-    assert call_targets == {a_rec.id}
+    for spelling in ("new M.A()", "new M.B()", "new M.C()"):
+        call = next(
+            c
+            for c in report.calls
+            if source[c.span.start : c.span.end] == spelling
+        )
+        assert call.target == a_rec.id, spelling
 
 
 def test_member_quoted_export_alias_resolves():
@@ -1721,3 +1726,90 @@ new M.Q();
     report = build_ts_bindings(source)
     a_rec = _member_bindings(report, "A", "ambient")[0]
     assert any(c.target == a_rec.id for c in report.calls)
+
+
+def test_member_type_only_alias_export_resolves_on_type_side():
+    # `export type {A as Public}` publishes A's type under Public.
+    source = """
+declare namespace N {
+  interface A { f(): void }
+  export type { A as Public }
+}
+interface D extends N.Public {}
+declare const d: D;
+d.f();
+"""
+    report = build_ts_bindings(source)
+    f_rec = _member_bindings(report, "f", "associated_function")[0]
+    call = next(
+        c for c in report.calls
+        if source[c.span.start : c.span.end] == "d.f()"
+    )
+    assert call.target == f_rec.id
+
+
+def test_member_type_only_alias_hides_declared_name_on_type_side():
+    # `export type {A as Public}` removes N.A — only Public is public.
+    source = """
+declare namespace N {
+  interface A { f(): void }
+  export type { A as Public }
+}
+interface D extends N.A {}
+declare const d: D;
+d.f();
+"""
+    report = build_ts_bindings(source)
+    call = next(
+        c for c in report.calls
+        if source[c.span.start : c.span.end] == "d.f()"
+    )
+    assert not call.target
+
+
+def test_member_split_block_reexport_alias_resolves():
+    # A later same-named block's `export {f as g}` re-exports the
+    # merged symbol — both spellings resolve.
+    source = """
+declare namespace N {
+  export function f() {}
+}
+declare namespace N {
+  export { f as g, f }
+}
+N.f();
+N.g();
+"""
+    report = build_ts_bindings(source)
+    f_rec = _member_bindings(report, "f", "function")[0]
+    for spelling in ("N.f()", "N.g()"):
+        call = next(
+            c for c in report.calls
+            if source[c.span.start : c.span.end] == spelling
+        )
+        assert call.target == f_rec.id, spelling
+
+
+def test_member_class_extends_prefers_value_over_type_only_export():
+    # `class D extends N.A` is a value position — the type-only
+    # `export type {T as A}` export is not a valid base.
+    source = """
+declare namespace N {
+  class A { m() {} }
+  interface T { n(): void }
+}
+declare namespace N {
+  export { A }
+  export type { T as A }
+}
+class D extends N.A { }
+const d = new D();
+d.m();
+"""
+    report = build_ts_bindings(source)
+    m_rec = _member_bindings(report, "m", "associated_function")[0]
+    call = next(
+        c for c in report.calls
+        if source[c.span.start : c.span.end] == "d.m()"
+    )
+    assert call.target == m_rec.id
