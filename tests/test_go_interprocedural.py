@@ -38040,7 +38040,119 @@ def test_named_struct_element_pointer_member_store_read_back(
 @pytest.mark.parametrize(
     "declarations, expected",
     [
-        # `G(p.A[i].W, x)` hands the callee the member's pointer —
+        # `*p.A[i].W = W{V:x}` — a whole-pointee store through the
+        # element's pointer member broadcasts like `*p = s`; the
+        # later `p.A[i].W.V` field read observes it.
+        (
+            "type E2 struct { V int64 }\n"
+            "type Elem struct { W *E2 }\n"
+            "type S struct { A []*Elem }\n"
+            "func F(p *S, i int64, x int64) int64 {\n"
+            "\t*p.A[i].W = E2{V: x}\n"
+            "\treturn p.A[i].W.V\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # `p.A[i].W.V = x` broadcasts into `indirect_writes` — the
+        # `(*p.A[i].W).V` pointee-field read observes it.
+        (
+            "type E2 struct { V int64 }\n"
+            "type Elem struct { W *E2 }\n"
+            "type S struct { A []*Elem }\n"
+            "func F(p *S, i int64, x int64) int64 {\n"
+            "\tp.A[i].W.V = x\n"
+            "\treturn (*p.A[i].W).V\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # `(*p.A[i].W).V = x` — the paren-deref store reaches the
+        # same caller-shared pointee.
+        (
+            "type E2 struct { V int64 }\n"
+            "type Elem struct { W *E2 }\n"
+            "type S struct { A []*Elem }\n"
+            "func F(p *S, i int64, x int64) int64 {\n"
+            "\t(*p.A[i].W).V = x\n"
+            "\treturn p.A[i].W.V\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # `e := *p.A[i].W` — a whole-pointee copy binds the read's
+        # deps, including prior broadcast stores.
+        (
+            "type E2 struct { V int64 }\n"
+            "type Elem struct { W *E2 }\n"
+            "type S struct { A []*Elem }\n"
+            "func F(p *S, i int64, x int64) int64 {\n"
+            "\t*p.A[i].W = E2{V: x}\n"
+            "\te := *p.A[i].W\n"
+            "\treturn e.V\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # Value-element collection through a `**S` root.
+        (
+            "type E2 struct { V int64 }\n"
+            "type Elem struct { W *E2 }\n"
+            "type S struct { B []Elem }\n"
+            "func F(pp **S, i int64, x int64) int64 {\n"
+            "\t(*pp).B[i].W.V = x\n"
+            "\treturn (*(*pp).B[i].W).V\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # A `q := p` alias root names the same pointee.
+        (
+            "type E2 struct { V int64 }\n"
+            "type Elem struct { W *E2 }\n"
+            "type S struct { A []*Elem }\n"
+            "func F(p *S, i int64, x int64) int64 {\n"
+            "\tq := p\n"
+            "\t*q.A[i].W = E2{V: x}\n"
+            "\treturn q.A[i].W.V\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+    ],
+)
+def test_named_struct_element_pointer_member_pointee_ops(
+    go_types_helper, declarations, expected
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == expected
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        # Whole-pointee ops stay closed on a value-struct root.
+        "type E2 struct { V int64 }\n"
+        "type Elem struct { W *E2 }\n"
+        "type S struct { A []*Elem }\n"
+        "func F(o S, i int64, x int64) int64 {\n"
+        "\t*o.A[i].W = E2{V: x}\n"
+        "\treturn o.A[i].W.V\n}\n",
+        # …and a bare value-element field on `o`.
+        "type E2 struct { V int64 }\n"
+        "type Elem struct { W *E2 }\n"
+        "type S struct { B []Elem }\n"
+        "func F(o S, i int64, x int64) int64 {\n"
+        "\to.B[i].W.V = x\n"
+        "\treturn (*o.B[i].W).V\n}\n",
+        # A map element's member — `m[k]` is not addressable, so
+        # the whole-pointee shape stays closed like `(*m[k].W).V`.
+        "type E2 struct { V int64 }\n"
+        "type Elem struct { W *E2 }\n"
+        "func F(m map[int64]Elem, k int64, x int64) int64 {\n"
+        "\t(*m[k].W).V = x\n"
+        "\treturn m[k].W.V\n}\n",
+    ],
+)
+def test_named_struct_element_pointer_member_pointee_closed(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available or result.gaps
+
+
+@pytest.mark.parametrize(
+    "declarations, expected",
+    [
         # its `dst.V = x` writes into the pointee show up in a
         # later `p.A[i].W.V` read.
         (

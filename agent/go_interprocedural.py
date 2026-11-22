@@ -8012,6 +8012,8 @@ class _Builder:
         operand: Any,
         locals_: dict[str, frozenset[int]],
         params: dict[str, int],
+        *,
+        via_deref: bool = False,
     ) -> tuple[tuple[PackageMember, ...], Any] | None:
         """Every member the operand's pointer chain traverses, and
         the root bound identifier's reference.
@@ -8053,10 +8055,32 @@ class _Builder:
                 )
             if operand is None:
                 return None
+            via_deref = True
         if operand.type == "selector_expression":
             inner = self._bound_field_read(
                 operand, locals_, params, intermediate=True
             )
+            if inner is None and via_deref:
+                # `(*p.A[i].W)` — one explicit dereference of an
+                # element's pointer member on a param pointer root
+                # (`*S`/`**S`/`q := p`/share-extract): the member
+                # acts like a stored pointer field (`t.W`), so its
+                # pointee's members resolve exactly as if `*t` named
+                # the struct. Only a dereferenced operand reaches
+                # here — a bare `p.A[i].W` chain keeps the
+                # element-member slot model.
+                elem = (
+                    self._opaque_container_struct_element_field_target(
+                        operand, params, for_pointer_leaf=True
+                    )
+                )
+                if (
+                    elem is not None
+                    and elem[6]
+                    and getattr(elem[6][-1].type, "kind", None)
+                    == "pointer"
+                ):
+                    inner = (elem[6], elem[6][-1], elem[0])
             if inner is None:
                 return None
             inner_pointees, inner_field, root_ref = inner
@@ -14446,6 +14470,7 @@ class _Builder:
                 (c for c in base.named_children if c.type != "comment"),
                 None,
             )
+        via_deref = False
         if base is not None and base.type == "unary_expression":
             # `(*t).f` — one explicit dereference of the bound pointer
             # before the selection, the same auto-deref `t.f` spelled
@@ -14462,15 +14487,18 @@ class _Builder:
                     (c for c in base.named_children if c.type != "comment"),
                     None,
                 )
+            via_deref = True
         if base is not None and base.type == "selector_expression":
             # `t.W.f = v` — the store lands a level deeper into
             # caller state: the operand chain resolves through
             # pointer-typed field members, every traversed member
             # pins, and the deepest pointee's identity records the
             # mutation. The root identifier's reference still takes
-            # the stored value's dependencies.
+            # the stored value's dependencies. `(*p.A[i].W).f`
+            # reaches the same chain through an element's pointer
+            # member when `via_deref` is set.
             resolved = self._bound_selector_pointees(
-                base, locals_, params
+                base, locals_, params, via_deref=via_deref
             )
             if resolved is not None:
                 pointees, ref = resolved
@@ -15055,6 +15083,56 @@ class _Builder:
                             elif escaped_id in params:
                                 result |= {params[escaped_id]}
                         return result | self.indirect_writes
+                # `*p.A[i].W` — a dereference read through an
+                # element's pointer member on a param pointer root
+                # (`*S`/`**S`/`q := p`/share-extract): like `*p`,
+                # the pointee is caller-shared memory whose stores
+                # (`*p.A[i].W = s`, `p.A[i].W.V = x`) broadcast into
+                # `indirect_writes`; the pointer member's own slot is
+                # the operand's deps. Any pointer leaf admits —
+                # the fold is the same for every pointee shape.
+                elem_target = (
+                    self._opaque_container_struct_element_field_target(
+                        inner, params, for_pointer_leaf=True
+                    )
+                )
+                if (
+                    elem_target is not None
+                    and elem_target[6]
+                    and getattr(
+                        elem_target[6][-1].type, "kind", None
+                    )
+                    == "pointer"
+                ):
+                    leaf_member = elem_target[6][-1]
+                    pointee_fact = leaf_member.type.elem
+                    if pointee_fact is None:
+                        raise _Unsupported(
+                            "non_parameter_reference", _span(node)
+                        )
+                    self._pin_fact_identities(leaf_member.type)
+                    self._pin_fact_identities(pointee_fact)
+                    pointee_id = leaf_member.type.type_id or (
+                        f"{leaf_member.id}/pointee"
+                    )
+                    transfers.append(
+                        CallTransfer(
+                            FileSpan(
+                                self.current_file,
+                                node.start_byte,
+                                node.end_byte,
+                            ),
+                            pointee_id,
+                            (),
+                            frozenset(),
+                            imported=True,
+                        )
+                    )
+                    result = self.expression(
+                        operand, fn, params, locals_,
+                        transfers, count, depth + 1,
+                    )
+                    return result | self.indirect_writes
         elif inner is not None and inner.type == "identifier":
             # A dot-imported `*PV` classifies by the declared member
             # exactly like `*lib.PV` — a bare `import` reference whose
@@ -20007,6 +20085,96 @@ class _Builder:
                                 lhs.end_byte,
                             ),
                             pointee_id,
+                            (),
+                            frozenset(),
+                            imported=True,
+                        )
+                    )
+                    refs.append(_ALIAS_FOLD)
+                    continue
+                # `*p.A[i].W = s` — a whole-pointee store through an
+                # element's pointer member on a param pointer root:
+                # like `*p = s`, the stored value folds into every
+                # escaped binding plus `indirect_writes` (the
+                # `_ALIAS_FOLD` sentinel), the pointee's declared
+                # identity records the external mutation, and the
+                # pointer's own provenance — the `p.A[i].W` slot with
+                # its index — reads at pre-state. A bare `*t` operand
+                # already took `_bound_pointer_write`; a multi-level
+                # `**…` or non-member chain stays closed.
+                deref_elem_operand = lhs
+                while (
+                    deref_elem_operand is not None
+                    and deref_elem_operand.type
+                    == "parenthesized_expression"
+                ):
+                    deref_elem_operand = next(
+                        (
+                            c
+                            for c in deref_elem_operand.named_children
+                            if c.type != "comment"
+                        ),
+                        None,
+                    )
+                deref_elem_inner = None
+                if (
+                    deref_elem_operand is not None
+                    and deref_elem_operand.type == "unary_expression"
+                ):
+                    _deref_op = deref_elem_operand.child_by_field_name(
+                        "operator"
+                    )
+                    _deref_opnd = deref_elem_operand.child_by_field_name(
+                        "operand"
+                    )
+                    if (
+                        _deref_op is not None
+                        and _deref_op.text == b"*"
+                        and _deref_opnd is not None
+                        and _deref_opnd.type != "unary_expression"
+                    ):
+                        deref_elem_inner = _deref_opnd
+                deref_elem_target = (
+                    self._opaque_container_struct_element_field_target(
+                        deref_elem_inner, params,
+                        for_pointer_leaf=True,
+                    )
+                    if deref_elem_inner is not None
+                    else None
+                )
+                if (
+                    deref_elem_target is not None
+                    and deref_elem_target[6]
+                    and getattr(
+                        deref_elem_target[6][-1].type, "kind", None
+                    )
+                    == "pointer"
+                ):
+                    _leaf_member = deref_elem_target[6][-1]
+                    _pointee_fact = _leaf_member.type.elem
+                    if _pointee_fact is None:
+                        raise _Unsupported(
+                            "unsupported_statement", _span(lhs)
+                        )
+                    self._pin_fact_identities(_leaf_member.type)
+                    self._pin_fact_identities(_pointee_fact)
+                    _pointee_id = _leaf_member.type.type_id or (
+                        f"{_leaf_member.id}/pointee"
+                    )
+                    self._record_read(
+                        self.expression(
+                            deref_elem_inner, fn, params, locals_,
+                            transfers, count, 0,
+                        )
+                    )
+                    transfers.append(
+                        CallTransfer(
+                            FileSpan(
+                                self.current_file,
+                                lhs.start_byte,
+                                lhs.end_byte,
+                            ),
+                            _pointee_id,
                             (),
                             frozenset(),
                             imported=True,
@@ -28097,6 +28265,52 @@ class _Builder:
                             else frozenset()
                         )
                     )
+                    # `(*p.A[i].W).V` — a dereferenced element
+                    # member's operand still evaluates: the `p.A[i]`
+                    # index and the member's own slot read carry deps
+                    # the root slot lacks. A bare `(*t)` operand is
+                    # an identifier, so nothing extra evaluates.
+                    _opnd = node.child_by_field_name("operand")
+                    while (
+                        _opnd is not None
+                        and _opnd.type == "parenthesized_expression"
+                    ):
+                        _opnd = next(
+                            (
+                                c
+                                for c in _opnd.named_children
+                                if c.type != "comment"
+                            ),
+                            None,
+                        )
+                    if (
+                        _opnd is not None
+                        and _opnd.type == "unary_expression"
+                    ):
+                        _op = _opnd.child_by_field_name("operator")
+                        _inn = _opnd.child_by_field_name("operand")
+                        while (
+                            _inn is not None
+                            and _inn.type == "parenthesized_expression"
+                        ):
+                            _inn = next(
+                                (
+                                    c
+                                    for c in _inn.named_children
+                                    if c.type != "comment"
+                                ),
+                                None,
+                            )
+                        if (
+                            _op is not None
+                            and _op.text == b"*"
+                            and _inn is not None
+                            and _inn.type != "identifier"
+                        ):
+                            deps |= self.expression(
+                                _opnd, fn, params, locals_,
+                                transfers, count, depth + 1,
+                            )
                     return deps | self.indirect_writes
                 # `g(a).V` — a field of a call result: the call's
                 # conflated result dep set covers whichever field the
