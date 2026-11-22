@@ -1321,12 +1321,15 @@ class _TypeScriptBindings:
                 or sibling.binding.name != record.binding.name
             ):
                 continue
-            # `class C` + `class C` (and `enum`/`enum`) in one container
-            # is a duplicate-identifier error, not a merge — keep them
+            # TS declaration-merging rules for same-named pairs:
+            # `class C` + `class C` in one container is a
+            # duplicate-identifier error, not a merge — keep them
             # distinct so a sibling's methods don't shadow the base's.
-            if (
-                record.binding.kind in {"class", "enum"}
-                and sibling.binding.kind == record.binding.kind
+            # `enum` only merges with `namespace` or another `enum`
+            # (split `enum E` blocks merge their members).
+            kinds = {record.binding.kind, sibling.binding.kind}
+            if kinds == {"class"} or (
+                "enum" in kinds and kinds - {"enum", "namespace"}
             ):
                 continue
             if (
@@ -1489,6 +1492,7 @@ class _TypeScriptBindings:
         *,
         tdz_function: Any | None = None,
         check_tdz: bool = True,
+        constructible: bool = False,
     ) -> tuple[_Record | None, str | None]:
         name = self.text(node)
         if name == "arguments" and namespace == "value":
@@ -1498,6 +1502,10 @@ class _TypeScriptBindings:
             self.add_unresolved(node, name, "with_scope")
             return None, "with_scope"
         record = self._lookup(name, node.start_byte, namespace)
+        if record is not None and constructible:
+            # `new N()` on a merged declaration must name the class, so
+            # the reference lands on the class before it is emitted.
+            record = self._merged_constructible(record)
         if record is not None:
             if record.binding.span == self.span(node):
                 return record, None
@@ -2050,7 +2058,7 @@ class _TypeScriptBindings:
             self._append_call(Call(self.span(node), args, owner, "", "builtin"))
             return
         record, reason = self._resolve(
-            callee, "value", "call", with_scopes
+            callee, "value", "call", with_scopes, constructible=new
         )
         if name == "eval" and not new:
             self.add_gap("dynamic_eval", node)
@@ -2064,7 +2072,6 @@ class _TypeScriptBindings:
             )
             return
         if new:
-            record = self._merged_constructible(record)
             if record.binding.kind == "import":
                 kind = "opaque_import"
             elif record.binding.kind == "ambient":

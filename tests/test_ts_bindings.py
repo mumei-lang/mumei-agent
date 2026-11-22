@@ -1259,3 +1259,65 @@ C.f();
         c.kind == "opaque_bodyless" and c.target == m.id
         for c in report.calls
     )
+
+
+def test_member_split_block_enums_merge():
+    # Split `enum E` declarations merge (only one may omit the first
+    # initializer) — a member from either block must resolve.
+    source = """
+enum E { A = 0 }
+enum E { B }
+const x: E = E.B;
+const y: E = E.A;
+namespace Lib { export enum Inner { P = 0 } }
+namespace Lib { export enum Inner { Q } }
+const z = Lib.Inner.Q;
+"""
+    report = build_ts_bindings(source)
+    members = {
+        b.name: b.id
+        for b in report.bindings
+        if b.kind == "enum_member"
+    }
+    read_targets = {
+        ref.binding_id for ref in report.references if ref.kind == "read"
+    }
+    assert members["A"] in read_targets
+    assert members["B"] in read_targets
+    assert members["Q"] in read_targets
+
+
+def test_member_enum_does_not_merge_with_class():
+    # `enum` can only merge with `namespace` or another `enum` —
+    # `class E` + `enum E` is a duplicate-identifier error, so the
+    # enum's members must not leak into the class's member lookup.
+    source = """
+class E { b(): void {} }
+enum E { B }
+const x = E.B;
+"""
+    report = build_ts_bindings(source)
+    member_b = _member_bindings(report, "B", "enum_member")[0]
+    read_targets = {
+        ref.binding_id for ref in report.references if ref.kind == "read"
+    }
+    assert member_b.id in read_targets
+
+
+def test_member_new_reference_lands_on_merged_class():
+    # `class C` + `namespace C` merge: the `new C()` call target and the
+    # constructor identifier's reference must both name the class.
+    source = """
+class C { m(): void {} }
+namespace C { export const z = 1 }
+const c = new C();
+"""
+    report = build_ts_bindings(source)
+    cls = [
+        b for b in report.bindings
+        if b.name == "C" and b.kind == "class"
+    ][0]
+    new_calls = [c for c in report.calls if c.kind == "opaque_new"]
+    assert any(c.target == cls.id for c in new_calls)
+    call_refs = [r for r in report.references if r.kind == "call"]
+    assert any(r.binding_id == cls.id for r in call_refs)
