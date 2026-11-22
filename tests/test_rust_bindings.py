@@ -5905,3 +5905,34 @@ fn f(o: Option<P>, u: Option<P>, v: Option<Q>) {
     assert len(targets) == 4
     assert targets.count(pm.id) == 3
     assert sum(1 for t in targets if not t) == 1
+    assert len(calls) == 3
+    for call in calls:
+        assert call.target == pm.id
+
+
+def test_smart_pointer_receivers_deref_to_the_payload():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct W<T> { _m: T }
+impl<T> W<T> { fn wm(&self) {} }
+fn f(b: Box<P>, r: std::rc::Rc<P>, w: W<P>, m: std::sync::Mutex<P>) {
+    b.pm();
+    r.pm();
+    w.pm();
+    m.pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    resolved = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    assert resolved["b.pm()"] == pm.id
+    assert resolved["r.pm()"] == pm.id
+    # A custom `W<P>` and a guard `Mutex<P>` stay opaque — they do
+    # not Deref straight to `P`.
+    assert not resolved["w.pm()"]
+    assert not resolved["m.pm()"]
