@@ -230,6 +230,66 @@ def _detect_unshare() -> "str | None":
 
 
 _UNSHARE = _detect_unshare()
+
+_FILESYSTEM_READ_BASE_ROOTS = (
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/lib",
+    "/lib32",
+    "/lib64",
+    "/libx32",
+    "/etc",
+    "/proc",
+    "/sys",
+    "/dev",
+    "/opt",
+    "/snap",
+    "/nix/store",
+    "/run/systemd/resolve",
+)
+
+
+def _resolved_spawn_target(
+    name: str, environment: dict[str, str] | None = None
+) -> str | None:
+    if environment is None:
+        resolved = shutil.which(name)
+        if resolved is not None:
+            return resolved
+        path = os.environ.get("PATH")
+        return shutil.which(name, path=".") if path == "" else None
+    path = environment.get("PATH", os.defpath)
+    resolved = shutil.which(name, path=path)
+    if resolved is not None:
+        return resolved
+    return shutil.which(name, path=".") if path == "" else None
+
+
+def _filesystem_read_allowed_roots(
+    resolved_executable: str,
+) -> tuple[str, ...]:
+    resolved = resolved_executable
+    roots = [
+        *_FILESYSTEM_READ_BASE_ROOTS,
+        os.path.realpath(os.path.dirname(resolved) or os.curdir),
+        os.path.dirname(os.path.realpath(resolved)),
+    ]
+    return tuple(dict.fromkeys(roots))
+
+
+def _path_is_under_roots(path: str, roots: tuple[str, ...]) -> bool:
+    candidate = os.path.realpath(path)
+    for root in roots:
+        resolved_root = os.path.realpath(root)
+        try:
+            if os.path.commonpath((candidate, resolved_root)) == resolved_root:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
 _FILESYSTEM_WRITE_ISOLATION_SETUP_SCRIPT = """import ctypes, os
 class _MountAttr(ctypes.Structure):
     _fields_ = [
@@ -459,6 +519,112 @@ def _install_process_spawn_filter():
     except Exception:
         return False
 """
+_FILESYSTEM_READ_ISOLATION_SETUP_SCRIPT = """import ctypes, os, platform, sys
+
+def _install_filesystem_read_isolation(roots):
+    try:
+        if (
+            not sys.platform.startswith("linux")
+            or sys.byteorder != "little"
+            or platform.machine().lower() not in {"x86_64", "aarch64"}
+            or not hasattr(os, "O_PATH")
+        ):
+            return False
+
+        class _RulesetAttr(ctypes.Structure):
+            _fields_ = [("handled_access_fs", ctypes.c_uint64)]
+
+        class _PathBeneathAttr(ctypes.Structure):
+            _pack_ = 1
+            _fields_ = [
+                ("allowed_access", ctypes.c_uint64),
+                ("parent_fd", ctypes.c_int32),
+            ]
+
+        if ctypes.sizeof(_RulesetAttr) != 8:
+            return False
+        if ctypes.sizeof(_PathBeneathAttr) != 12:
+            return False
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.prctl.argtypes = [
+            ctypes.c_int,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+        ]
+        libc.prctl.restype = ctypes.c_int
+        libc.syscall.restype = ctypes.c_long
+
+        ctypes.set_errno(0)
+        if libc.prctl(38, 1, 0, 0, 0) != 0:
+            return False
+
+        ctypes.set_errno(0)
+        abi = libc.syscall(
+            ctypes.c_long(444),
+            ctypes.c_void_p(),
+            ctypes.c_size_t(0),
+            ctypes.c_uint(1),
+        )
+        if abi < 1:
+            return False
+
+        ruleset_attr = _RulesetAttr((1 << 2) | (1 << 3))
+        ctypes.set_errno(0)
+        ruleset_fd = libc.syscall(
+            ctypes.c_long(444),
+            ctypes.byref(ruleset_attr),
+            ctypes.c_size_t(ctypes.sizeof(ruleset_attr)),
+            ctypes.c_uint(0),
+        )
+        if ruleset_fd < 0:
+            return False
+
+        try:
+            seen_roots = set()
+            for root in roots:
+                if type(root) is not str or not root:
+                    return False
+                if not os.path.exists(root):
+                    continue
+                parent_fd = os.open(root, os.O_PATH | os.O_CLOEXEC)
+                try:
+                    root_stat = os.fstat(parent_fd)
+                    identity = (root_stat.st_dev, root_stat.st_ino)
+                    if identity in seen_roots:
+                        continue
+                    path_attr = _PathBeneathAttr(
+                        (1 << 2) | (1 << 3), parent_fd
+                    )
+                    ctypes.set_errno(0)
+                    if libc.syscall(
+                        ctypes.c_long(445),
+                        ctypes.c_int(ruleset_fd),
+                        ctypes.c_int(1),
+                        ctypes.byref(path_attr),
+                        ctypes.c_uint(0),
+                    ) != 0:
+                        return False
+                    seen_roots.add(identity)
+                finally:
+                    os.close(parent_fd)
+
+            ctypes.set_errno(0)
+            return (
+                libc.syscall(
+                    ctypes.c_long(446),
+                    ctypes.c_int(ruleset_fd),
+                    ctypes.c_uint(0),
+                )
+                == 0
+            )
+        finally:
+            os.close(ruleset_fd)
+    except Exception:
+        return False
+"""
 _PROCESS_SPAWN_PROBE_SCRIPT = (
     f"exec({_PROCESS_SPAWN_ISOLATION_SETUP_SCRIPT!r}, globals())\n"
     "if not _install_process_spawn_filter(): raise SystemExit(1)\n"
@@ -475,6 +641,57 @@ _PROCESS_SPAWN_PROBE_SCRIPT = (
     "thread.start()\n"
     "thread.join(timeout=3)\n"
     "if thread.is_alive() or ran != [True]: raise SystemExit(3)\n"
+)
+_FILESYSTEM_READ_PROBE_SCRIPT = (
+    f"exec({_FILESYSTEM_READ_ISOLATION_SETUP_SCRIPT!r}, globals())\n"
+    "if not _install_filesystem_read_isolation(sys.argv[1:]): raise SystemExit(1)\n"
+    "try:\n"
+    "    os.listdir('/')\n"
+    "except PermissionError:\n"
+    "    pass\n"
+    "else:\n"
+    "    raise SystemExit(2)\n"
+    "try:\n"
+    "    os.listdir('/usr')\n"
+    "    with open(os.path.realpath(sys.executable), 'rb') as stream: stream.read(1)\n"
+    "except Exception:\n"
+    "    raise SystemExit(3)\n"
+)
+
+
+def _detect_filesystem_read_isolation() -> bool:
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        if (
+            sys.byteorder != "little"
+            or platform.machine().lower() not in {"x86_64", "aarch64"}
+        ):
+            return False
+        resolved_executable = _resolved_spawn_target(sys.executable)
+        if resolved_executable is None:
+            return False
+        roots = _filesystem_read_allowed_roots(resolved_executable)
+        if "/" in roots:
+            return False
+        return subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-c",
+                _FILESYSTEM_READ_PROBE_SCRIPT,
+                *roots,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        ).returncode == 0
+    except Exception:
+        return False
+
+
+_FILESYSTEM_READ_ISOLATION_ENFORCEABLE = (
+    _detect_filesystem_read_isolation()
 )
 
 
@@ -504,7 +721,11 @@ _NAMESPACE_MARKER_SCRIPT = f"""import os, signal, sys
 fd = int(sys.argv[1])
 readonly = sys.argv[2] == "1"
 process_spawn = sys.argv[3] == "1"
-lc_ctype = sys.argv[4]
+filesystem_read = sys.argv[4] == "1"
+lc_ctype = sys.argv[5]
+filesystem_read_root_count = int(sys.argv[6])
+filesystem_read_roots = sys.argv[7:7 + filesystem_read_root_count]
+target_start = 7 + filesystem_read_root_count
 if lc_ctype:
     os.environ["LC_CTYPE"] = lc_ctype[1:]
 else:
@@ -524,10 +745,18 @@ if process_spawn:
         os._exit(126)
     if not installed:
         os._exit(126)
+if filesystem_read:
+    try:
+        exec({_FILESYSTEM_READ_ISOLATION_SETUP_SCRIPT!r}, globals())
+        installed = _install_filesystem_read_isolation(filesystem_read_roots)
+    except BaseException:
+        os._exit(126)
+    if not installed:
+        os._exit(126)
 os.write(fd, b"x")
 os.set_inheritable(fd, False)
 try:
-    os.execvp(sys.argv[5], sys.argv[5:])
+    os.execvp(sys.argv[target_start], sys.argv[target_start:])
 except OSError:
     os.write(fd, b"e")
     os._exit(127)
@@ -568,6 +797,11 @@ def process_spawn_isolation_enforceable() -> bool:
     return _PROCESS_SPAWN_ISOLATION_ENFORCEABLE
 
 
+def filesystem_read_isolation_enforceable() -> bool:
+    """Whether this host can enforce the Landlock filesystem read scope."""
+    return _FILESYSTEM_READ_ISOLATION_ENFORCEABLE
+
+
 def _spawn_target_resolvable(
     name: str, environment: dict[str, str] | None = None
 ) -> bool:
@@ -576,19 +810,7 @@ def _spawn_target_resolvable(
     `shutil.which` treats an empty PATH as no directories, while
     execvp searches the working directory for it — mirror that one
     case so resolution agrees with the spawn the runner performs."""
-    if environment is None:
-        if shutil.which(name) is not None:
-            return True
-        path = os.environ.get("PATH")
-        if path == "":
-            return shutil.which(name, path=".") is not None
-        return False
-    path = environment.get("PATH", os.defpath)
-    if shutil.which(name, path=path) is not None:
-        return True
-    if path == "":
-        return shutil.which(name, path=".") is not None
-    return False
+    return _resolved_spawn_target(name, environment) is not None
 
 
 class _BoundedCollector:
@@ -738,6 +960,7 @@ class AttemptRunner:
         isolate_network: bool = False,
         isolate_filesystem_write: bool = False,
         isolate_process_spawn: bool = False,
+        isolate_filesystem_read: bool = False,
     ) -> AttemptRunResult:
         """Spawn `argv`, observe one attempt and return a terminal record.
 
@@ -770,6 +993,9 @@ class AttemptRunner:
         `isolate_process_spawn=True` uses seccomp to deny fork, vfork and
         non-thread clone operations, returns ENOSYS for clone3, and leaves
         exec and thread creation available where the host supports it.
+        `isolate_filesystem_read=True` uses Landlock to limit file and
+        directory reads to system roots and the target executable's
+        directories where the host supports it; it does not restrict exec.
         """
         if type(request) is not AttemptExecutionRequest:
             raise ValueError("attempt run requires an execution request")
@@ -804,6 +1030,15 @@ class AttemptRunner:
         ):
             raise ValueError(
                 "attempt run process spawn isolation requires a seccomp filter boundary"
+            )
+        if type(isolate_filesystem_read) is not bool:
+            raise ValueError("invalid attempt run filesystem read isolation")
+        if (
+            isolate_filesystem_read
+            and not filesystem_read_isolation_enforceable()
+        ):
+            raise ValueError(
+                "attempt run filesystem read isolation requires a Landlock boundary"
             )
         if memory_bound_mb is not None and (
             type(memory_bound_mb) is not int
@@ -847,11 +1082,23 @@ class AttemptRunner:
             isolate_network
             or isolate_filesystem_write
             or isolate_process_spawn
+            or isolate_filesystem_read
         )
-        if namespaced and not _spawn_target_resolvable(
-            argv[0], child_environment
-        ):
+        resolved_target = (
+            _resolved_spawn_target(argv[0], child_environment)
+            if namespaced
+            else None
+        )
+        if namespaced and resolved_target is None:
             return _spawn_failure_result(record)
+        if isolate_filesystem_read:
+            if resolved_target is None:
+                return _spawn_failure_result(record)
+            filesystem_read_roots = _filesystem_read_allowed_roots(
+                resolved_target
+            )
+        else:
+            filesystem_read_roots = ()
         marker_read_fd = None
         marker_write_fd = None
         if namespaced:
@@ -909,7 +1156,10 @@ class AttemptRunner:
                 str(marker_write_fd),
                 "1" if isolate_filesystem_write else "0",
                 "1" if isolate_process_spawn else "0",
+                "1" if isolate_filesystem_read else "0",
                 lc_ctype_argument,
+                str(len(filesystem_read_roots)),
+                *filesystem_read_roots,
                 *spawn_argv,
             ]
             if isolate_network:
@@ -1116,6 +1366,7 @@ def dispatch_attempt(
     isolate_network: bool = False,
     isolate_filesystem_write: bool = False,
     isolate_process_spawn: bool = False,
+    isolate_filesystem_read: bool = False,
 ) -> AttemptDispatch:
     """Run the sequence's outstanding dispatch and reconcile the observation.
 
@@ -1155,6 +1406,7 @@ def dispatch_attempt(
         isolate_network=isolate_network,
         isolate_filesystem_write=isolate_filesystem_write,
         isolate_process_spawn=isolate_process_spawn,
+        isolate_filesystem_read=isolate_filesystem_read,
     )
     return AttemptDispatch(
         sequence.reconcile_report(run.record, report_stamp), run

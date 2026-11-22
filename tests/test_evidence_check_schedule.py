@@ -425,7 +425,7 @@ def _write_agent_schedule(tmp_path: Path) -> Path:
                 "methods": ["deductive_proof"],
                 "result_contracts": [contract],
                 "input_formats": ["mumei.source-text/v1"],
-                "required_permissions": [],
+                "required_permissions": ["filesystem.read"],
             }
         ],
     )
@@ -441,7 +441,7 @@ def _write_agent_schedule(tmp_path: Path) -> Path:
     policy = write(
         "policy",
         {
-            "allowed_permissions": ["process.spawn"],
+            "allowed_permissions": ["filesystem.read", "process.spawn"],
             "allow_fallback": False,
             "timeout_ms": 10_000,
         },

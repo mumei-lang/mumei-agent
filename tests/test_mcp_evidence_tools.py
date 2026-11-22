@@ -12,6 +12,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -40,6 +41,7 @@ from agent.verification_attempt import (
     AttemptSequence,
 )
 
+ATTEMPT_PY = shutil.which("python3", path="/usr/bin:/bin") or sys.executable
 FINGERPRINT = "a" * 64
 FOREIGN_FINGERPRINT = "b" * 64
 
@@ -818,7 +820,7 @@ def _schedule_inputs(tmp_path):
     source.write_bytes(_SCHEDULE_SOURCE)
     import sys
 
-    py = sys.executable
+    py = ATTEMPT_PY
     return {
         "request": write(
             "request",
@@ -886,7 +888,7 @@ class TestVerifyScheduleTool:
         expected_sha = hashlib.sha256(expected.encode()).hexdigest()
         argv_doc = json.loads(Path(inputs["argv_map"]).read_text())
         argv_doc["beta"] = [
-            sys.executable, "-c",
+            ATTEMPT_PY, "-c",
             f"import sys; sys.stdout.write({expected!r}); sys.exit(0)",
         ]
         Path(inputs["argv_map"]).write_text(json.dumps(argv_doc))

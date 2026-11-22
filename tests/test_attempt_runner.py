@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import signal
+import shutil
 import socket
 import subprocess
 import sys
@@ -35,6 +36,7 @@ from agent.verification_attempt import (
 
 FINGERPRINT = "a" * 64
 PY = sys.executable
+SYSTEM_PY = shutil.which("python3", path="/usr/bin:/bin")
 
 
 def request(number=1, timeout_ms=10_000, fingerprint=FINGERPRINT):
@@ -1746,6 +1748,133 @@ def test_run_rejects_non_boolean_process_spawn_isolation(
         )
 
 
+@pytest.mark.parametrize("isolate_filesystem_read", [1, "true", None])
+def test_run_rejects_non_boolean_filesystem_read_isolation(
+    isolate_filesystem_read,
+):
+    with pytest.raises(
+        ValueError,
+        match="^invalid attempt run filesystem read isolation$",
+    ):
+        AttemptRunner().run(
+            request(),
+            argv("pass"),
+            isolate_filesystem_read=isolate_filesystem_read,
+        )
+
+
+def test_filesystem_read_detector_rejects_non_linux(monkeypatch):
+    monkeypatch.setattr(attempt_runner.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        attempt_runner.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail(
+            "non-Linux hosts do not probe filesystem read isolation"
+        ),
+    )
+
+    assert attempt_runner._detect_filesystem_read_isolation() is False
+
+
+def test_filesystem_read_detector_rejects_unsupported_architecture(
+    monkeypatch,
+):
+    monkeypatch.setattr(attempt_runner.sys, "platform", "linux")
+    monkeypatch.setattr(
+        attempt_runner.platform, "machine", lambda: "riscv64"
+    )
+    monkeypatch.setattr(
+        attempt_runner.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail(
+            "unsupported architectures do not probe Landlock"
+        ),
+    )
+
+    assert attempt_runner._detect_filesystem_read_isolation() is False
+
+
+def test_filesystem_read_detector_rejects_root_executable_directory(
+    monkeypatch,
+):
+    monkeypatch.setattr(attempt_runner.sys, "platform", "linux")
+    monkeypatch.setattr(
+        attempt_runner.platform, "machine", lambda: "x86_64"
+    )
+    monkeypatch.setattr(
+        attempt_runner,
+        "_resolved_spawn_target",
+        lambda _name: "/python",
+    )
+    monkeypatch.setattr(
+        attempt_runner.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail(
+            "the root directory cannot be an executable read root"
+        ),
+    )
+
+    assert attempt_runner._detect_filesystem_read_isolation() is False
+
+
+def test_filesystem_read_detector_probes_root_listing_without_tempfile(
+    monkeypatch,
+):
+    monkeypatch.setattr(attempt_runner.sys, "platform", "linux")
+    monkeypatch.setattr(
+        attempt_runner.platform, "machine", lambda: "x86_64"
+    )
+    monkeypatch.setattr(
+        attempt_runner,
+        "_resolved_spawn_target",
+        lambda _name: "/usr/bin/python3",
+    )
+
+    def fake_run(argv, **kwargs):
+        probe = argv[3]
+        assert "os.listdir('/')" in probe
+        assert "except PermissionError:" in probe
+        assert "os.listdir('/usr')" in probe
+        roots = attempt_runner._filesystem_read_allowed_roots(
+            "/usr/bin/python3"
+        )
+        assert argv[4:] == list(roots)
+        assert len(argv) == 4 + len(roots)
+        assert kwargs["timeout"] == 10
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(attempt_runner.subprocess, "run", fake_run)
+
+    assert attempt_runner._detect_filesystem_read_isolation() is True
+
+
+def test_filesystem_read_detector_treats_architecture_errors_as_unavailable(
+    monkeypatch,
+):
+    monkeypatch.setattr(attempt_runner.sys, "platform", "linux")
+
+    def fail_machine():
+        raise RuntimeError("architecture probe failed")
+
+    monkeypatch.setattr(attempt_runner.platform, "machine", fail_machine)
+    assert attempt_runner._detect_filesystem_read_isolation() is False
+
+
+def test_filesystem_read_detector_treats_probe_errors_as_unavailable(
+    monkeypatch,
+):
+    monkeypatch.setattr(attempt_runner.sys, "platform", "linux")
+    monkeypatch.setattr(
+        attempt_runner.platform, "machine", lambda: "x86_64"
+    )
+
+    def fail_probe(*_args, **_kwargs):
+        raise RuntimeError("Landlock probe failed")
+
+    monkeypatch.setattr(attempt_runner.subprocess, "run", fail_probe)
+    assert attempt_runner._detect_filesystem_read_isolation() is False
+
+
 def test_process_spawn_detector_rejects_non_linux(monkeypatch):
     monkeypatch.setattr(attempt_runner.sys, "platform", "darwin")
     monkeypatch.setattr(
@@ -2230,23 +2359,227 @@ def test_run_without_process_spawn_isolation_can_spawn_children():
 
 
 @pytest.mark.skipif(
+    not attempt_runner.filesystem_read_isolation_enforceable()
+    or SYSTEM_PY is None,
+    reason="filesystem read isolation requires Landlock support",
+)
+def test_run_filesystem_read_isolation_denies_tmp_and_allows_usr(tmp_path):
+    private_file = tmp_path / "private"
+    private_file.write_text("private")
+    result = AttemptRunner().run(
+        request(),
+        (
+            SYSTEM_PY,
+            "-c",
+            "import os\n"
+            "try:\n"
+            f" open({str(private_file)!r}, 'rb').read()\n"
+            "except PermissionError:\n"
+            " print('tmp=denied')\n"
+            "else:\n"
+            " raise SystemExit('temporary file was readable')\n"
+            "os.listdir('/usr')\n"
+            "print('usr=readable')",
+        ),
+        isolate_filesystem_read=True,
+    )
+
+    assert result.record.state == "exited"
+    assert result.record.events[-1].exit_code == 0
+    assert result.stdout == b"tmp=denied\nusr=readable\n"
+
+
+def test_filesystem_read_allowed_roots_use_real_executable_entry_directory(
+    tmp_path,
+):
+    real_root = tmp_path / "srv"
+    (real_root / "x").mkdir(parents=True)
+    real_entry_dir = real_root / "bin"
+    real_entry_dir.mkdir()
+    (real_entry_dir / "tool").write_text("#!/bin/sh\n")
+    lexical_parent = tmp_path / "a"
+    (lexical_parent / "bin").mkdir(parents=True)
+    (lexical_parent / "link").symlink_to(real_root / "x", target_is_directory=True)
+    resolved_executable = os.path.join(
+        str(lexical_parent), "link", "..", "bin", "tool"
+    )
+
+    roots = attempt_runner._filesystem_read_allowed_roots(
+        resolved_executable
+    )
+
+    assert str(real_entry_dir) in roots
+    assert str(lexical_parent / "bin") not in roots
+
+
+def test_run_without_filesystem_read_isolation_can_read_tmp(tmp_path):
+    private_file = tmp_path / "private"
+    private_file.write_text("readable")
+    result = AttemptRunner().run(
+        request(),
+        argv(
+            "import sys\n"
+            f"print(open({str(private_file)!r}, 'rb').read().decode())"
+        ),
+    )
+
+    assert result.record.state == "exited"
+    assert result.record.events[-1].exit_code == 0
+    assert result.stdout == b"readable\n"
+
+
+@pytest.mark.skipif(
+    not attempt_runner.filesystem_read_isolation_enforceable()
+    or SYSTEM_PY is None,
+    reason="filesystem read isolation requires Landlock support",
+)
+def test_filesystem_read_isolation_allows_target_executable_directory(
+    tmp_path,
+):
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    script = target_dir / "read-self"
+    script.write_text(
+        f"#!{SYSTEM_PY}\n"
+        "# SELF_MARKER\n"
+        "import os\n"
+        "with open(os.path.realpath(__file__), 'rb') as stream:\n"
+        " print('self=readable' if b'SELF_MARKER' in stream.read() "
+        "else 'self=missing')\n"
+    )
+    script.chmod(0o755)
+    (bin_dir / "read-self").symlink_to(script)
+
+    result = AttemptRunner().run(
+        request(),
+        ("read-self",),
+        environment={"PATH": str(bin_dir)},
+        isolate_filesystem_read=True,
+    )
+
+    assert result.record.state == "exited"
+    assert result.record.events[-1].exit_code == 0
+    assert result.stdout == b"self=readable\n"
+
+
+@pytest.mark.skipif(
+    os.name != "posix",
+    reason="namespace marker requires POSIX",
+)
+def test_run_filesystem_read_setup_failure_is_failed(monkeypatch):
+    marker_script = attempt_runner._NAMESPACE_MARKER_SCRIPT
+    setup_script = attempt_runner._FILESYSTEM_READ_ISOLATION_SETUP_SCRIPT
+    setup = (
+        f"        exec({setup_script!r}, globals())\n"
+        "        installed = _install_filesystem_read_isolation(filesystem_read_roots)"
+    )
+    assert setup in marker_script
+    monkeypatch.setattr(
+        attempt_runner,
+        "_FILESYSTEM_READ_ISOLATION_ENFORCEABLE",
+        True,
+    )
+    monkeypatch.setattr(
+        attempt_runner,
+        "_NAMESPACE_MARKER_SCRIPT",
+        marker_script.replace(setup, "        installed = False"),
+    )
+    result = AttemptRunner().run(
+        request(),
+        argv("print('unreached')"),
+        isolate_filesystem_read=True,
+    )
+
+    assert result.record.state == "failed"
+    assert [event.kind for event in result.record.events] == [
+        "started",
+        "failed",
+    ]
+    assert result.record.events[-1].exit_code is None
+    assert result.stdout == b""
+
+
+def test_run_filesystem_read_isolation_requires_boundary_before_spawn(
+    monkeypatch,
+):
+    spawned = False
+
+    def fail_if_spawned(*args, **kwargs):
+        nonlocal spawned
+        spawned = True
+        pytest.fail("isolation validation must precede spawn")
+
+    monkeypatch.setattr(
+        attempt_runner,
+        "_FILESYSTEM_READ_ISOLATION_ENFORCEABLE",
+        False,
+    )
+    monkeypatch.setattr(attempt_runner.subprocess, "Popen", fail_if_spawned)
+    with pytest.raises(
+        ValueError,
+        match="^attempt run filesystem read isolation requires a Landlock boundary$",
+    ):
+        AttemptRunner().run(
+            request(),
+            argv("pass"),
+            isolate_filesystem_read=True,
+        )
+    assert spawned is False
+
+
+@pytest.mark.skipif(
     not attempt_runner.process_spawn_isolation_enforceable()
     or not attempt_runner.filesystem_write_isolation_enforceable()
     or not attempt_runner.network_isolation_enforceable()
-    or not attempt_runner.memory_bound_enforceable(),
+    or not attempt_runner.memory_bound_enforceable()
+    or SYSTEM_PY is None,
     reason="requires seccomp, mount/network namespaces, and memory bounds",
 )
 def test_process_spawn_isolation_combines_with_network_filesystem_and_memory():
     result = AttemptRunner().run(
         request(),
-        argv(
+        (
+            SYSTEM_PY,
+            "-c",
             "import resource\n"
-            "print(resource.getrlimit(resource.RLIMIT_AS)[0])"
+            "print(resource.getrlimit(resource.RLIMIT_AS)[0])",
         ),
         memory_bound_mb=256,
         isolate_network=True,
         isolate_filesystem_write=True,
         isolate_process_spawn=True,
+    )
+
+    assert result.record.state == "exited"
+    assert result.record.events[-1].exit_code == 0
+    assert int(result.stdout.strip()) == 256 * 1_048_576
+
+
+@pytest.mark.skipif(
+    not attempt_runner.process_spawn_isolation_enforceable()
+    or not attempt_runner.filesystem_write_isolation_enforceable()
+    or not attempt_runner.filesystem_read_isolation_enforceable()
+    or not attempt_runner.network_isolation_enforceable()
+    or not attempt_runner.memory_bound_enforceable()
+    or SYSTEM_PY is None,
+    reason="requires seccomp, Landlock, mount/network namespaces, and memory bounds",
+)
+def test_process_spawn_isolation_combines_with_network_filesystem_read_and_memory():
+    result = AttemptRunner().run(
+        request(),
+        (
+            SYSTEM_PY,
+            "-c",
+            "import resource\n"
+            "print(resource.getrlimit(resource.RLIMIT_AS)[0])",
+        ),
+        memory_bound_mb=256,
+        isolate_network=True,
+        isolate_filesystem_write=True,
+        isolate_process_spawn=True,
+        isolate_filesystem_read=True,
     )
 
     assert result.record.state == "exited"
@@ -2304,6 +2637,33 @@ def test_dispatch_attempt_forwards_process_spawn_isolation(monkeypatch):
         sequence,
         argv("pass"),
         isolate_process_spawn=True,
+    )
+
+    assert calls == [True]
+    assert dispatch.run.record.state == "exited"
+    assert dispatch.run.record.events[-1].exit_code == 0
+
+
+def test_dispatch_attempt_forwards_filesystem_read_isolation(monkeypatch):
+    calls = []
+    real_run = AttemptRunner.run
+
+    def record_run(self, execution_request, child_argv, **kwargs):
+        calls.append(kwargs["isolate_filesystem_read"])
+        kwargs["isolate_filesystem_read"] = False
+        return real_run(self, execution_request, child_argv, **kwargs)
+
+    monkeypatch.setattr(
+        attempt_runner,
+        "_FILESYSTEM_READ_ISOLATION_ENFORCEABLE",
+        True,
+    )
+    monkeypatch.setattr(AttemptRunner, "run", record_run)
+    sequence = AttemptSequence(FINGERPRINT, 10_000).begin_attempt()
+    dispatch = dispatch_attempt(
+        sequence,
+        argv("pass"),
+        isolate_filesystem_read=True,
     )
 
     assert calls == [True]
