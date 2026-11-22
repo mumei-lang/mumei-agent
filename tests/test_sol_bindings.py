@@ -1369,3 +1369,195 @@ contract C {
         call.kind == "opaque_overload" and call.target == ""
         for call in report.calls
     )
+
+
+def test_member_call_through_using_for_type_resolves():
+    source = """
+library SafeMath {
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {}
+}
+contract Vault {
+    using SafeMath for uint256;
+    uint256 total;
+    uint128 small;
+    function run() external {
+        total.add(1);
+        small.add(1);
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    add = next(
+        binding for binding in report.bindings if binding.name == "add"
+    )
+    add_refs = [
+        ref
+        for ref in report.references
+        if ref.binding_id == add.id and ref.kind == "call"
+    ]
+    assert len(add_refs) == 1
+    assert _text(source, add_refs[0].span) == "add"
+    calls = [call for call in report.calls]
+    assert calls[0].kind == "direct_local" and calls[0].target == add.id
+    assert calls[1].kind == "opaque_member" and calls[1].target == ""
+
+
+def test_member_call_through_using_star_and_global_resolves():
+    source = """
+library SafeMath {
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {}
+}
+struct Coin { uint256 v; }
+library Stamps {
+    function stamp(Coin memory c) internal pure {}
+}
+using Stamps for Coin global;
+contract Vault {
+    using SafeMath for *;
+    uint256 total;
+    Coin coin;
+    function run() external {
+        total.add(1);
+        coin.stamp();
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    stamp = next(
+        binding for binding in report.bindings if binding.name == "stamp"
+    )
+    add = next(
+        binding for binding in report.bindings if binding.name == "add"
+    )
+    assert any(
+        ref.binding_id == add.id and ref.kind == "call"
+        for ref in report.references
+    )
+    assert any(
+        ref.binding_id == stamp.id and ref.kind == "call"
+        for ref in report.references
+    )
+
+
+def test_using_uint_alias_matches_declared_uint256():
+    source = """
+library L {
+    function mark(uint256 a) internal pure {}
+}
+contract Vault {
+    using L for uint;
+    uint u;
+    function run() external { u.mark(); }
+}
+"""
+    report = build_sol_bindings(source)
+    mark = next(
+        binding for binding in report.bindings if binding.name == "mark"
+    )
+    assert any(
+        ref.binding_id == mark.id and ref.kind == "call"
+        for ref in report.references
+    )
+
+
+def test_using_for_dynamic_bytes_is_not_bytes1():
+    source = """
+library L {
+    function mark(bytes memory b) internal pure {}
+    function markByte(bytes1 b) internal pure {}
+}
+contract Vault {
+    using L for bytes;
+    bytes payload;
+    bytes1 tag;
+    function run() external {
+        payload.mark();
+        tag.markByte();
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    mark = next(
+        binding for binding in report.bindings if binding.name == "mark"
+    )
+    mark_byte = next(
+        binding
+        for binding in report.bindings
+        if binding.name == "markByte"
+    )
+    assert any(
+        ref.binding_id == mark.id and ref.kind == "call"
+        for ref in report.references
+    )
+    # `bytes` is dynamic, not `bytes1`: the directive does not cover
+    # `tag`, so its call stays opaque.
+    assert not any(
+        ref.binding_id == mark_byte.id and ref.kind == "call"
+        for ref in report.references
+    )
+
+
+def test_using_ambiguous_across_libraries_stays_opaque():
+    source = """
+library A { function f(uint256 a, bool b) internal pure {} }
+library B { function f(uint256 a, uint256 b) internal pure {} }
+contract Vault {
+    using A for uint256;
+    using B for uint256;
+    uint256 total;
+    function run() external { total.f(1); }
+}
+"""
+    report = build_sol_bindings(source)
+    assert _unresolved(report, "f", "ambiguous_overload")
+    assert not any(
+        ref.kind == "call" for ref in report.references
+    )
+
+
+def test_using_member_private_stays_fail_closed():
+    source = """
+library SafeMath {
+    function hidden(uint256 a) private pure {}
+}
+contract Vault {
+    using SafeMath for uint256;
+    uint256 total;
+    function run() external { total.hidden(); }
+}
+"""
+    report = build_sol_bindings(source)
+    assert _unresolved(report, "hidden", "private_base_member")
+    assert not any(
+        ref.kind == "call" for ref in report.references
+    )
+
+
+def test_using_member_binds_before_opaque_fallback():
+    source = """
+contract Owned {
+    function flag() external {}
+}
+library Lib {
+    function noop(Owned o) internal {}
+}
+contract Vault {
+    using Lib for Owned;
+    Owned owned;
+    function run() external {
+        owned.flag();
+        owned.noop();
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    flag = next(
+        binding for binding in report.bindings if binding.name == "flag"
+    )
+    noop = next(
+        binding for binding in report.bindings if binding.name == "noop"
+    )
+    # The declared member wins over the using directive; the directive
+    # only fills members the type itself does not declare.
+    targets = {call.target for call in report.calls}
+    assert {flag.id, noop.id} <= targets

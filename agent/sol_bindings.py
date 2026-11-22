@@ -109,6 +109,13 @@ class _Scope:
 
 
 @dataclass(eq=False)
+class _Using:
+    library: str
+    target: str  # "" means `for *`
+    node: Any
+
+
+@dataclass(eq=False)
 class _Contract:
     record: _Record
     node: Any
@@ -116,8 +123,13 @@ class _Contract:
     kind: str
     scope: _Scope
     bases: list[tuple[str, Any]]
+    usings: list[_Using] | None = None
     external_base: bool = False
     base_gap_added: bool = False
+
+    def __post_init__(self) -> None:
+        if self.usings is None:
+            self.usings = []
 
 
 class _SolBindings:
@@ -137,6 +149,7 @@ class _SolBindings:
         self.gaps: list[Gap] = []
         self.contracts: dict[str, _Contract] = {}
         self.current_contract: _Contract | None = None
+        self.file_usings: list[_Using] = []
         self.call_owner = ""
         self.glob_imports: list[Any] = []
 
@@ -241,6 +254,10 @@ class _SolBindings:
         for node in self.children(self.root):
             if node.type == "import_directive":
                 self._predeclare_import(node)
+            elif node.type == "using_directive":
+                using = self._parse_using(node)
+                if using is not None:
+                    self.file_usings.append(using)
             elif node.type in {
                 "contract_declaration",
                 "interface_declaration",
@@ -298,6 +315,10 @@ class _SolBindings:
                     self._predeclare_constructor(child, contract)
                 elif child.type == "fallback_receive_definition":
                     continue
+                elif child.type == "using_directive":
+                    using = self._parse_using(child)
+                    if using is not None:
+                        contract.usings.append(using)
                 elif child.type in {
                     "modifier_definition",
                     "struct_declaration",
@@ -322,6 +343,24 @@ class _SolBindings:
                     "interface",
                 }:
                     contract.external_base = True
+
+    def _parse_using(self, node: Any) -> _Using | None:
+        # `using Lib for T` / `using Lib for *` parse cleanly; the
+        # aliased set form `using {f as g} for T` produces an ERROR node
+        # in this grammar version, so such directives are skipped
+        # rather than mis-modeled.
+        library = None
+        target = ""
+        for child in self.children(node):
+            if child.type == "ERROR" or child.type == "using_alias":
+                return None
+            if child.type in {"type_alias", "user_defined_type"} and library is None:
+                library = self.text(child)
+            elif child.type == "type_name":
+                target = self.text(child)
+        if not library:
+            return None
+        return _Using(library, target, node)
 
     def _predeclare_import(self, node: Any) -> None:
         imported_names: list[Any] = []
@@ -787,20 +826,92 @@ class _SolBindings:
                             ),
                             None,
                         )
-        if contract is None:
-            return member, None, None
-        inside_owner = inside_owner or (
-            self.current_contract is not None
-            and contract is self.current_contract
-        )
-        record, reason = self._lookup_contract(
-            name,
-            contract,
-            member.start_byte,
-            "value",
-            allow_private_own=inside_owner,
-        )
+        if contract is not None:
+            inside_owner = inside_owner or (
+                self.current_contract is not None
+                and contract is self.current_contract
+            )
+            record, reason = self._lookup_contract(
+                name,
+                contract,
+                member.start_byte,
+                "value",
+                allow_private_own=inside_owner,
+            )
+            if record is not None or reason is not None:
+                return member, record, reason
+        record, reason = self._lookup_using(name, obj, member.start_byte)
         return member, record, reason
+
+    def _lookup_using(
+        self, name: str, obj: Any, position: int
+    ) -> tuple[_Record | None, str | None]:
+        """Resolve `x.f` through `using Lib for T` directives when the
+        contract-type path found no member: the object's declared type
+        text must equal the directive's `for` target, or the directive
+        must be `for *`. Identifier objects only — a member call on an
+        expression (`arr[i].f()`) keeps its opaque treatment.
+        """
+        if obj.type != "identifier" or self.text(obj) in {"this", "super"}:
+            return None, None
+        record, _reason = self._lookup(self.text(obj), obj.start_byte, "value")
+        if (
+            record is None
+            or record.type_node is None
+            or record.binding.kind in {"contract", "interface", "library"}
+        ):
+            return None, None
+        type_text = self._canonical_type_text(self.text(record.type_node))
+        directives = list(self.file_usings)
+        if self.current_contract is not None:
+            directives.extend(self.current_contract.usings)
+        candidates: list[_Record] = []
+        first_reason: str | None = None
+        for directive in directives:
+            if directive.target and self._canonical_type_text(
+                directive.target
+            ) != type_text:
+                continue
+            library = self.contracts.get(directive.library)
+            if library is None or library.kind != "library":
+                continue
+            member_record, member_reason = self._lookup_contract(
+                name,
+                library,
+                position,
+                "value",
+                allow_private_own=False,
+            )
+            if member_record is not None:
+                if all(
+                    candidate.binding.id != member_record.binding.id
+                    for candidate in candidates
+                ):
+                    candidates.append(member_record)
+            elif member_reason is not None and first_reason is None:
+                first_reason = member_reason
+        # solc picks the binding by implicit argument types; without
+        # argument typing a name declared by more than one applicable
+        # directive is an overload set the call resolves against, which
+        # stays opaque rather than binding to the first directive.
+        if len(candidates) > 1:
+            return None, "ambiguous_overload"
+        if candidates:
+            return candidates[0], None
+        return None, first_reason
+
+    def _canonical_type_text(self, text: str) -> str:
+        # Whitespace (`uint256 [ ]`) and the bare `uint`/`int`/`byte`
+        # spellings map to their canonical widths (`uint` is exactly
+        # `uint256`, `byte` is `bytes1` to solc); dynamic `bytes` is a
+        # distinct type and stays as written.
+        canonical = re.sub(r"\s+", "", text)
+        match = re.fullmatch(r"(u?int)([0-9]*)", canonical)
+        if match is not None:
+            return f"{match.group(1)}{match.group(2) or '256'}"
+        if canonical == "byte":
+            return "bytes1"
+        return canonical
 
     def _lookup(
         self, name: str, position: int, namespace: str = "value"
@@ -1109,10 +1220,53 @@ class _SolBindings:
                 "error_declaration",
             }:
                 self._scan_declaration_types(node, contract)
+            elif node.type == "using_directive":
+                self._scan_using_refs(node)
             elif node.type != "inheritance_specifier":
                 self._add_gap("unsupported_syntax", node)
         self.scopes.pop()
         self.current_contract = old_contract
+
+    def _scan_using_refs(self, node: Any) -> None:
+        # The library name in `using Lib for T` is a real reference to
+        # the library declaration, and a `for` target naming a
+        # user-defined type (`for Coin`) references its declaration;
+        # primitive targets carry no compiler reference.
+        for child in self.children(node):
+            if child.type in {"type_alias", "user_defined_type"}:
+                identifier = next(
+                    (
+                        item
+                        for item in child.named_children
+                        if item.type == "identifier"
+                    ),
+                    None,
+                )
+                if identifier is not None:
+                    self._resolve_name(
+                        identifier, namespace="type", reference_kind="read"
+                    )
+            elif child.type == "type_name":
+                # The `for` target binds to its declaration only when
+                # it names a user-defined type (`for Coin`); primitive
+                # targets carry no compiler reference.
+                for descendant in self._walk(child):
+                    if descendant.type != "user_defined_type":
+                        continue
+                    identifier = next(
+                        (
+                            item
+                            for item in descendant.named_children
+                            if item.type == "identifier"
+                        ),
+                        None,
+                    )
+                    if identifier is not None:
+                        self._resolve_name(
+                            identifier,
+                            namespace="type",
+                            reference_kind="read",
+                        )
 
     def _record_for_declaration(self, node: Any) -> _Record | None:
         for record in self.records:
@@ -1218,6 +1372,8 @@ class _SolBindings:
                 "event_definition",
             }:
                 self._scan_declaration_types(node, None)
+            elif node.type == "using_directive":
+                self._scan_using_refs(node)
             elif node.type not in {"pragma_directive", "import_directive"}:
                 self._add_gap("unsupported_syntax", node)
 
