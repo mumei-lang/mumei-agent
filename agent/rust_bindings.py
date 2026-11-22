@@ -156,6 +156,9 @@ _OPTION_HEAD_METHODS = {
     "next": ("&", None, -1),
     # `it.next_back()` — the `DoubleEndedIterator` twin of `next`.
     "next_back": ("&", None, -1),
+    # `o.flatten()` peels one `Option` layer — the arg index is
+    # read again inside so `Option<Option<P>>` spells `Option<P>`.
+    "flatten": ("", {"Option"}, 0),
     # `Option` exposes no `ok()` — only `Result::ok()` narrows to
     # `Option<T>`; an unresolved extension method on `Option` stays
     # opaque rather than pinning a payload.
@@ -3201,6 +3204,23 @@ class _RustBindings:
                             else None
                         )
                         if (
+                            element is not None
+                            and self.text(field).strip() == "flatten"
+                        ):
+                            # `o.flatten()` yields `Option<P>` on
+                            # `Option<Option<P>>` — peel the inner
+                            # wrapper's args.
+                            inner = re.fullmatch(
+                                r"Option\s*<(.+)>", element
+                            )
+                            element = (
+                                self._type_arg_list(inner.group(1))[
+                                    0
+                                ].strip()
+                                if inner is not None
+                                else None
+                            )
+                        if (
                             self.text(field).strip()
                             in _MAP_PAIR_METHODS
                             | _MAP_BORROWED_PAIR_METHODS
@@ -3866,6 +3886,30 @@ class _RustBindings:
                                             "&mut " + parts[1].strip(),
                                             entry_pos,
                                         )
+                    if (
+                        method_name in {"as_slices", "as_mut_slices"}
+                        and receiver[1] is not None
+                        and self._container_head_name(
+                            callee.child_by_field_name("value")
+                        )
+                        in {"VecDeque", "LinkedList"}
+                    ):
+                        # `vd.as_slices()` yields
+                        # `(&[P], &[P])` — the pair feeds the
+                        # tuple-pattern/tuple-index path.
+                        slice_prefix = (
+                            "&mut "
+                            if method_name == "as_mut_slices"
+                            else "&"
+                        )
+                        slice_elem = self._type_arg_list(
+                            receiver[1]
+                        )[0].strip()
+                        pair = slice_prefix + "[" + slice_elem + "]"
+                        return (
+                            None,
+                            f"({pair}, {pair})",
+                        )
                     if (
                         method_name in _SWAP_REMOVE_METHODS
                         and receiver[1] is not None
@@ -6003,7 +6047,38 @@ class _RustBindings:
                 and vcall.type == "field_expression"
                 else None
             )
-            if vmethod != "flatten":
+            if vmethod == "flatten":
+                pass
+            elif vmethod is None:
+                # A pattern-bound slice (`let (a, _) =
+                # v.split_at(i)`/`vd.as_slices()`) keeps `&[P]` as
+                # its own args — `a` IS the borrowed slice, so the
+                # iterated element is `P`, not the slice.
+                inner_slice = re.fullmatch(
+                    r"&\s*(?:'\w+\s+)?(?:mut\s+)?\[(.+)\]",
+                    elem_args.strip(),
+                )
+                if inner_slice is not None:
+                    tid, _ = self._spelled_type(
+                        inner_slice.group(1).strip(),
+                        iterator.start_byte,
+                    )
+                    if tid is not None:
+                        name = next(
+                            (
+                                b.name
+                                for b in self.bindings
+                                if b.id == tid
+                            ),
+                            "",
+                        )
+                        return (
+                            TypeFact("named", name, 0, None, tid),
+                            None,
+                        )
+                    return _UNKNOWN, inner_slice.group(1).strip()
+                return _UNKNOWN, elem_args.strip()
+            else:
                 return _UNKNOWN, elem_args.strip()
         # Spelled element names on `it` (`let it = v.iter()`) were
         # written in `it`'s annotation — resolve them there.

@@ -7557,3 +7557,39 @@ fn f(m: HashMap<K, P>, b: BTreeMap<K, P>, v: Vec<P>) {
     assert not bound.get("x2.pm()")
     assert bound.get("x3.km()") == km.id
     assert bound.get("p.qm()") == qm.id
+
+def test_option_flatten_and_deque_as_slices_bind_elements():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct W<T> { x: T }
+fn f(vd: VecDeque<P>, o: Option<Option<P>>, w: W<P>) {
+    let (a, b) = vd.as_slices();
+    for p in a { p.pm(); }
+    let s0 = vd.as_slices().0;
+    for q in s0 { q.pm(); }
+    let m1 = vd.as_mut_slices().1;
+    for r in m1 { r.pm(); }
+    let f1 = o.flatten();
+    if let Some(u) = f1 { u.pm(); }
+    let f2 = o.flatten().flatten();
+    if let Some(v) = f2 { v.pm(); }
+    let z = w.as_slices().0;
+    for s in z { s.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    assert bound.get("p.pm()") == pm.id
+    assert bound.get("q.pm()") == pm.id
+    assert bound.get("r.pm()") == pm.id
+    assert bound.get("u.pm()") == pm.id
+    # `o.flatten().flatten()` — `Option<P>` has no second layer.
+    assert not bound.get("v.pm()")
+    # A custom `W` can name any `as_slices` — stays opaque.
+    assert not bound.get("s.pm()")
