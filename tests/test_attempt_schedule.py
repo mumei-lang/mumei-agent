@@ -5,6 +5,7 @@ import threading
 
 import pytest
 
+from agent.attempt_runner import memory_bound_enforceable
 from agent.attempt_schedule import (
     MAX_SCHEDULE_ATTEMPTS,
     SCHEDULE_SCHEMA_VERSION,
@@ -576,19 +577,59 @@ def test_no_feed_closes_stdin_instead_of_inheriting():
     assert result.outcome == "selected"
 
 
-def test_manifest_memory_bound_caps_the_attempt():
-    # With no host ``memory_bound_mb`` the adapter's declared
-    # ``max_memory_mb`` is the child's ceiling: a probe that allocates
-    # past it fails instead of running unbounded.
+@pytest.mark.skipif(
+    not memory_bound_enforceable(),
+    reason="memory bounds require a POSIX resource boundary",
+)
+def test_policy_memory_budget_caps_below_manifest_max():
+    registry = AdapterRegistry()
+    registry.register(descriptor("alpha", max_memory_mb=1024))
+    probe = (
+        PY,
+        "-c",
+        "x = bytearray(256 * 1024 * 1024); import sys; sys.exit(0)",
+    )
+
+    result = schedule(
+        registry,
+        ("alpha",),
+        {"alpha": probe},
+        policy=policy(memory_mb=64),
+    )
+
+    assert result.outcome != "selected"
+    assert result.entries[0].terminal_state in {
+        "exited",
+        "failed",
+        "timed_out",
+    }
+
+
+@pytest.mark.skipif(
+    not memory_bound_enforceable(),
+    reason="memory bounds require a POSIX resource boundary",
+)
+def test_manifest_memory_bound_caps_the_attempt_and_host_bound_overrides():
+    # With a 1024 MiB policy budget, the plan's effective memory_mb is
+    # capped by the manifest's max_memory_mb of 64 MiB.
     registry = AdapterRegistry()
     registry.register(descriptor("alpha", max_memory_mb=64))
     probe = (PY, "-c", "x = bytearray(256 * 1024 * 1024); import sys; sys.exit(0)")
-    result = schedule(registry, ("alpha",), {"alpha": probe})
+    result = schedule(
+        registry,
+        ("alpha",),
+        {"alpha": probe},
+        policy=policy(memory_mb=1024),
+    )
     assert result.outcome != "selected"
     assert result.entries[0].terminal_state in {"exited", "failed", "timed_out"}
-    # The host's declared bound wins over the manifest's.
+    # An explicit host bound wins over the effective plan budget.
     result2 = schedule(
-        registry, ("alpha",), {"alpha": probe}, memory_bound_mb=1024
+        registry,
+        ("alpha",),
+        {"alpha": probe},
+        memory_bound_mb=1024,
+        policy=policy(memory_mb=1024),
     )
     assert result2.outcome == "selected"
 
