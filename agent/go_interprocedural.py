@@ -14735,6 +14735,12 @@ class _Builder:
             self, "_param_pointer_aliases", {}
         )
         saved_element_share = getattr(self, "_element_share", {})
+        saved_frozen_index_deps = getattr(
+            self, "_frozen_index_deps", {}
+        )
+        saved_pending_lhs_pops = getattr(
+            self, "_pending_lhs_pops", []
+        )
         self._pending_labels = []
         self._goto_seen = False
         self._seen_labels = set()
@@ -14742,6 +14748,8 @@ class _Builder:
         self._pending_param_reseats = []
         self._param_pointer_aliases = {}
         self._element_share = {}
+        self._frozen_index_deps = {}
+        self._pending_lhs_pops = []
         self.frames = []
         self.pinned = set()
         self.escaped = set()
@@ -14875,6 +14883,8 @@ class _Builder:
             self._pending_param_reseats = saved_pending_param_reseats
             self._param_pointer_aliases = saved_pointer_param_aliases
             self._element_share = saved_element_share
+            self._frozen_index_deps = saved_frozen_index_deps
+            self._pending_lhs_pops = saved_pending_lhs_pops
             self._defer_result_deps = saved_defer_result_deps
             self._deferred_exits = saved_deferred_exits
             self._func_arg_invocations = saved_func_args
@@ -15153,6 +15163,22 @@ class _Builder:
                 self._param_pointer_aliases[pending_id] = alias_ref
                 self._pointer_param_reseats.discard(pending_id)
         self._pending_param_reseats = []
+        # `x = e`/`x.W = q` on a name an earlier `x := p.B[i]`
+        # marked, or a bare local `q = e` clearing its `q := p`
+        # alias — the marks land AFTER this statement's right-hand
+        # sides read the pre-state (`x, r = e, x.W.V` still names
+        # the element). A mark from a possibly-skipped statement
+        # applies unconditionally: a maybe-reseat is the
+        # conservative direction.
+        for pending_id in self._pending_lhs_pops:
+            self._param_pointer_aliases.pop(pending_id, None)
+            self._drop_element_share(pending_id)
+        self._pending_lhs_pops = []
+
+    def _drop_element_share(self, binding_id: str) -> None:
+        share = self._element_share.pop(binding_id, None)
+        if share is not None and isinstance(share, tuple):
+            self._frozen_index_deps.pop(share[1], None)
 
     def _statement(
         self,
@@ -17798,20 +17824,16 @@ class _Builder:
                     # A bare `q = …` on a LOCAL previously handed a
                     # param's pointee (`q := p`) reseats it away —
                     # the alias no longer names the caller's slot.
+                    # The same holds for a name an earlier
+                    # `x := p.B[i]` marked — the element share no
+                    # longer describes what x holds. Both land
+                    # AFTER this statement's right-hand sides read
+                    # the pre-state (`x, r = e, x.W.V` still names
+                    # the element), so they queue like the
+                    # parameter reseats above.
                     if lhs_ref is not None:
-                        if (
+                        self._pending_lhs_pops.append(
                             lhs_ref.binding_id
-                            in self._param_pointer_aliases
-                        ):
-                            self._param_pointer_aliases.pop(
-                                lhs_ref.binding_id, None
-                            )
-                        # `x = e` reseats a name an earlier
-                        # `x := p.B[i]` marked — the element
-                        # share no longer describes what x
-                        # holds.
-                        self._element_share.pop(
-                            lhs_ref.binding_id, None
                         )
                     continue
                 # `p = q` reseats the `*S` param onto `q`'s pointee.
