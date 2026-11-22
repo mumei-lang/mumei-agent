@@ -1,9 +1,12 @@
 // Fixture: linearity (ownership) violation.
-// Variable x is consumed by the first use and then used again.
+// Token is a move type (scalars like i64 are Copy); t is moved into a
+// and then used again.
 
-atom use_twice(x: i64) -> i64
+struct Token { id: i64 }
+
+atom use_twice(t: Token) -> i64
     body: {
-        let a = x;
-        let b = x;
-        a + b
+        let a = t;
+        let b = t;
+        a.id + b.id
     };
