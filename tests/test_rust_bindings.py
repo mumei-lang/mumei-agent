@@ -5750,3 +5750,25 @@ fn f(v: Vec<P>, w: W<P>) {
     # `Vec<Vec<Q>>` return types the element as `Q`.
     assert _call(report, source, "w.chunks(2)").target == chunks.id
     assert _call(report, source, "c[0].qm()").target == qm.id
+
+
+def test_option_iter_as_ref_and_split_at():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(o: Option<P>, v: Vec<P>) {
+    for x in o.iter() { x.pm(); }
+    if let Some(p) = o.as_ref() { p.pm(); }
+    let (a, b) = v.split_at(1);
+    a[0].pm();
+    b[0].pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    calls = [call for call in report.calls if call.target == pm.id]
+    assert len(calls) == 4
+    assert _call(report, source, "x.pm()").target == pm.id
+    assert _call(report, source, "p.pm()").target == pm.id
+    assert _call(report, source, "a[0].pm()").target == pm.id
+    assert _call(report, source, "b[0].pm()").target == pm.id

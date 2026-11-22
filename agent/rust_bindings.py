@@ -90,6 +90,10 @@ _OPTION_HEAD_METHODS = {
     "ok": ("", {"Result"}, 0),
     "err": ("", {"Result"}, -1),
     "take": ("", {"Option"}, 0),
+    # `o.as_ref()`/`o.as_mut()` keep `Option` with a borrowed
+    # payload — spelled `&P`/`&mut P`.
+    "as_ref": ("&", {"Option"}, 0),
+    "as_mut": ("&mut ", {"Option"}, 0),
 }
 
 _PRELUDE_NAMES = frozenset(
@@ -2927,8 +2931,8 @@ class _RustBindings:
                         self._receiver_annotation_position(receiver),
                     )
                 )
-            if container_id is not None:
-                container_name = next(
+            container_name = (
+                next(
                     (
                         b.name
                         for b in self.bindings
@@ -2936,6 +2940,10 @@ class _RustBindings:
                     ),
                     None,
                 )
+                if container_id is not None
+                else None
+            )
+            if container_id is not None:
                 if container_name not in _INDEX_ELEMENT_CONTAINERS:
                     # A custom `W<P>` can `Deref` to a different
                     # element — its args are not the iterated
@@ -2944,8 +2952,28 @@ class _RustBindings:
             spelled = args.strip() or None
             if spelled is None:
                 return None, None
+            if container_name == "Option":
+                # `Option<P>::iter` yields `&P` — the borrow stays
+                # part of the spelled element.
+                return (
+                    "&" + spelled,
+                    self._receiver_annotation_position(receiver),
+                )
             return spelled, self._receiver_annotation_position(
                 receiver
+            )
+        if method == "split_at":
+            container_id, args = self._receiver_type(receiver)
+            if args is None:
+                return None, None
+            spelled = args.strip() or None
+            if spelled is None:
+                return None, None
+            # `v.split_at(i)` yields `(&[P], &[P])` — a pair of
+            # borrowed slices that feeds the tuple-pattern path.
+            return (
+                f"(&{spelled}, &{spelled})",
+                self._receiver_annotation_position(receiver),
             )
         if method in _ITER_CHUNK_METHODS:
             container_id, args = self._receiver_type(receiver)
@@ -3203,6 +3231,14 @@ class _RustBindings:
         container_id, args = self._receiver_type(receiver)
         if args is None:
             return _UNKNOWN, None
+        container_name = (
+            next(
+                (b.name for b in self.bindings if b.id == container_id),
+                None,
+            )
+            if container_id is not None
+            else None
+        )
         # Spelled element names refer to the types the receiver's
         # annotation wrote — resolve them there, not at the call.
         position = self._receiver_annotation_position(receiver)
@@ -3229,9 +3265,13 @@ class _RustBindings:
                     if container_name not in _INDEX_ELEMENT_CONTAINERS:
                         return _UNKNOWN, None
                 return _UNKNOWN, args.strip()
-            elem_id, rest = self._element_of(
-                container_id, args.strip(), position
-            )
+            elif container_name == "Option":
+                # `Option<P>::iter` yields `&P`.
+                rest = "&" + args.strip()
+            else:
+                elem_id, rest = self._element_of(
+                    container_id, args.strip(), position
+                )
         elif (index := _MAP_ELEMENT_METHODS.get(method)) is not None:
             if not self._is_map_container(container_id, receiver):
                 return _UNKNOWN, None
@@ -5632,14 +5672,29 @@ class _RustBindings:
                     position = index
                 if position < 0 or position >= len(elements):
                     continue
+                element = elements[position]
+                borrowed = element.strip().startswith("&")
+                spelled_lookup = element
+                if borrowed:
+                    spelled_lookup = (
+                        element.strip().lstrip("&").strip()
+                    )
+                    if spelled_lookup.startswith("mut "):
+                        spelled_lookup = spelled_lookup[4:].strip()
                 tid, fargs = self._spelled_type(
-                    elements[position],
+                    spelled_lookup,
                     (
                         scrut_position
                         if scrut_position is not None
                         else pattern.start_byte
                     ),
                 )
+                if borrowed:
+                    # `&P` is a spelled borrow, not the payload
+                    # itself — keep it as the bound name's args so
+                    # `a[0]`/`a.iter()` read through the borrow.
+                    tid = None
+                    fargs = element.strip()
                 # The container head is the element's own spelling —
                 # `_type_head_name(None, "P")` would read the first
                 # arg `P` instead of `Option`, so `(Some(p), _)` on
