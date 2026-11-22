@@ -2603,3 +2603,40 @@ function g() {
         if source[c.span.start : c.span.end] == "f(new D())"
     )
     assert call.target == fs[1].id
+
+def test_overload_literal_annotation_rejects_different_literal():
+    # `f("s", "bad")` does not fit `f("s", "t")` — the wider
+    # `f(string, string)` overload wins instead.
+    source = """
+function f(a: string, b: string): void {}
+function f(a: "s", b: "bad"): void {}
+f("s", "t");
+"""
+    report = build_ts_bindings(source)
+    fs = sorted(
+        _bindings(report, "f", "function"), key=lambda b: b.span.start
+    )
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == 'f("s", "t")'
+    )
+    assert call.target == fs[0].id
+
+
+def test_overload_literal_count_does_not_reorder_declarations():
+    # Both signatures fit `f("s", "t")`; tsc picks the first declared
+    # even though the second matches two literals.
+    source = """
+function f(a: "s", b: string): void {}
+function f(a: "s", b: "t"): void {}
+f("s", "t");
+"""
+    report = build_ts_bindings(source)
+    fs = sorted(
+        _bindings(report, "f", "function"), key=lambda b: b.span.start
+    )
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == 'f("s", "t")'
+    )
+    assert call.target == fs[0].id

@@ -1735,7 +1735,7 @@ class _TypeScriptBindings:
                 candidate
                 for candidate in remaining
                 if self._param_accepts(
-                    candidate, index, kind, arg.start_byte
+                    candidate, index, arg, kind, arg.start_byte
                 )
             ]
             if filtered:
@@ -1752,17 +1752,16 @@ class _TypeScriptBindings:
         # signatures; inside one block they keep declaration order.
         # Non-signature matches (properties, clause aliases) lose to a
         # signature the call actually fits.
-        literal_score = {
-            candidate.binding.id: sum(
-                1
+        literal_match = {
+            candidate.binding.id: any(
+                self._param_literal_match(candidate, index, arg)
                 for index, arg in enumerate(args)
-                if self._param_literal_match(candidate, index, arg)
             )
             for candidate in remaining
         }
         remaining.sort(
             key=lambda candidate: (
-                -literal_score[candidate.binding.id],
+                not literal_match[candidate.binding.id],
                 -owner_pos.get(candidate.member_of, 0),
                 candidate.binding.span.start,
             )
@@ -1890,7 +1889,12 @@ class _TypeScriptBindings:
         return None
 
     def _param_accepts(
-        self, candidate: _Record, index: int, kind: str, position: int
+        self,
+        candidate: _Record,
+        index: int,
+        arg: Any,
+        kind: str,
+        position: int,
     ) -> bool:
         params = (
             candidate.function_node.child_by_field_name("parameters")
@@ -1920,6 +1924,7 @@ class _TypeScriptBindings:
                 self._rest_element_node(
                     next(iter(self.children(annotation)), None)
                 ),
+                arg,
                 kind,
                 position,
             )
@@ -1935,7 +1940,7 @@ class _TypeScriptBindings:
         inner = next(iter(self.children(annotation)), None)
         if variadic:
             inner = self._rest_element_node(inner)
-        return self._annotation_accepts(inner, kind, position)
+        return self._annotation_accepts(inner, arg, kind, position)
 
     def _rest_element_node(self, node: Any | None) -> Any | None:
         """Element annotation of a rest parameter — `...x: T[]` and
@@ -1952,7 +1957,7 @@ class _TypeScriptBindings:
 
 
     def _annotation_accepts(
-        self, node: Any | None, kind: str, position: int
+        self, node: Any | None, arg: Any | None, kind: str, position: int
     ) -> bool:
         """Whether the parameter annotation can hold `kind`.
 
@@ -1963,7 +1968,7 @@ class _TypeScriptBindings:
             return True
         if node.type == "union_type":
             return any(
-                self._annotation_accepts(child, kind, position)
+                self._annotation_accepts(child, arg, kind, position)
                 for child in self.children(node)
                 if child.type != "|"
             )
@@ -1978,11 +1983,19 @@ class _TypeScriptBindings:
             )
             if inner is None:
                 return True
-            if inner.type == "number":
-                return kind == "number"
-            if inner.type == "string":
-                return kind == "string"
-            return True
+            # A literal annotation accepts only the same literal —
+            # `m(x: "s")` rejects `"t"` and `v: string`. Identifiers
+            # accept when their declared type spells the literal.
+            literal_text = self.text(inner)
+            if arg is not None and arg.type in {
+                "string",
+                "number",
+                "template_string",
+                "true",
+                "false",
+            }:
+                return self.text(arg) == literal_text
+            return kind == literal_text
         text = self.text(node).strip()
         if text in {"any", "unknown", "object"}:
             return True
@@ -1996,7 +2009,7 @@ class _TypeScriptBindings:
                     if record.alias_node is not None
                     else None
                 )
-                return self._annotation_accepts(inner, kind, position)
+                return self._annotation_accepts(inner, arg, kind, position)
             if (
                 record is not None
                 and record.binding.kind == "generic_parameter"
@@ -2020,7 +2033,7 @@ class _TypeScriptBindings:
                     ),
                     None,
                 )
-                return self._annotation_accepts(inner, kind, position)
+                return self._annotation_accepts(inner, arg, kind, position)
             return text == kind or self._type_derives_from(
                 kind, text, position, node.start_byte
             )
