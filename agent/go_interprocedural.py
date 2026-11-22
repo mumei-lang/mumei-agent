@@ -12208,14 +12208,20 @@ class _Builder:
         call: Any | None,
         params: dict[str, int],
         locals_: dict[str, frozenset[int]],
+        *,
+        callee_id_override: str | None = None,
     ) -> tuple[
         frozenset[str], frozenset[str], frozenset[str], bool
     ]:
         function_node = self._strip_parens(
             node.child_by_field_name("function")
         )
-        callee_id = None
-        if function_node is not None and function_node.type == "identifier":
+        callee_id = callee_id_override
+        if (
+            callee_id is None
+            and function_node is not None
+            and function_node.type == "identifier"
+        ):
             ref = self.references.get(self.node_key(function_node))
             callee_id = ref.binding_id if ref is not None else None
         captured = frozenset(
@@ -12244,27 +12250,28 @@ class _Builder:
             or callee_id in params
         )
         target_id = None
-        if call is None:
-            star_or_external = True
-        elif call.kind == "direct_local":
-            target_id = call.target
-        elif call.kind == "indirect_or_selector":
-            if callee_id in self.bound_interface_methods:
+        if callee_id_override is None:
+            if call is None:
                 star_or_external = True
-            elif callee_id in self.bound_method_values:
-                target_id = self.bound_method_values[callee_id][0]
-            elif callee_id in self.func_aliases:
-                target_id = self.func_aliases[callee_id]
-            elif callee_id not in self.closure_captures:
+            elif call.kind == "direct_local":
+                target_id = call.target
+            elif call.kind == "indirect_or_selector":
+                if callee_id in self.bound_interface_methods:
+                    star_or_external = True
+                elif callee_id in self.bound_method_values:
+                    target_id = self.bound_method_values[callee_id][0]
+                elif callee_id in self.func_aliases:
+                    target_id = self.func_aliases[callee_id]
+                elif callee_id not in self.closure_captures:
+                    star_or_external = True
+            elif call.kind in {
+                "direct_import",
+                "interface_dispatch",
+                "external_or_bodyless",
+            }:
                 star_or_external = True
-        elif call.kind in {
-            "direct_import",
-            "interface_dispatch",
-            "external_or_bodyless",
-        }:
-            star_or_external = True
-        elif call.kind != "builtin":
-            star_or_external = True
+            elif call.kind != "builtin":
+                star_or_external = True
         if target_id is not None:
             callee = (
                 self.summarize(target_id)
@@ -14933,15 +14940,47 @@ class _Builder:
         self.current_file = body_key[0]
         pending = [(block, 0)]
         visited = 0
+        unsupported_switch = False
         while pending:
             node, depth = pending.pop()
             visited += 1
             if depth >= MAX_DEPTH or visited > MAX_EXPRESSION_NODES:
                 raise _Unsupported("analysis_limit", fn.body)
+            if node.type in {
+                "expression_switch_statement",
+                "type_switch_statement",
+                "select_statement",
+            }:
+                unsupported_switch = True
             pending.extend((child, depth + 1) for child in _children(node))
         cfg = self.cfg_fn(fn.binding_id)
         if cfg.graph is None:
-            raise _Unsupported("cfg_unavailable", fn.body)
+            raw_body = self.raws.get(body_key[0])
+            body_source = (
+                raw_body[body_key[1] : body_key[2]].decode(
+                    "utf-8", "replace"
+                )
+                if raw_body is not None
+                else ""
+            )
+            deferred_closures_only = (
+                not unsupported_switch
+                and bool(cfg.gaps)
+                and all(
+                    gap.reason == "unsupported_closure"
+                    and gap.span is not None
+                    and 0
+                    <= gap.span.start
+                    <= gap.span.end
+                    <= len(body_source)
+                    and body_source[gap.span.start : gap.span.end]
+                    .lstrip()
+                    .startswith("defer")
+                    for gap in cfg.gaps
+                )
+            )
+            if not deferred_closures_only:
+                raise _Unsupported("cfg_unavailable", fn.body)
         statements = _children(block)
         if len(statements) == 1 and statements[0].type == "statement_list":
             statements = _children(statements[0])
@@ -15620,11 +15659,6 @@ class _Builder:
                 # expressions evaluate — a deferred may-write call
                 # can still change them, bounded by its arguments.
                 deps[0] |= self._defer_result_deps
-            deferred_deps = self._fold_deferred_exits(
-                fn, params, locals_
-            )
-            if deferred_deps and any(r.binding_id for r in fn.results):
-                deps[0] |= deferred_deps
             expressions = _children(node)
             if len(expressions) == 1 and expressions[0].type == "expression_list":
                 expressions = _children(expressions[0])
@@ -15649,6 +15683,9 @@ class _Builder:
                     # nothing — the same implicit return a
                     # fall-off-the-end body gets.
                     saw_return[0] = True
+                    self._fold_deferred_exits(
+                        fn, params, locals_
+                    )
                     return
                 # A bare `return` is only legal with a named result — it
                 # yields the result binding's current dependencies. With
@@ -15721,6 +15758,11 @@ class _Builder:
                     )
             else:
                 raise _Unsupported("unsupported_return", _span(node))
+            deferred_deps = self._fold_deferred_exits(
+                fn, params, locals_
+            )
+            if deferred_deps and any(r.binding_id for r in fn.results):
+                deps[0] |= deferred_deps
             saw_return[0] = True
             return
         if kind == "short_var_declaration":
@@ -25236,9 +25278,6 @@ class _Builder:
             # call runs before the function returns and a goroutine
             # races with it, so a later read cannot tell whether
             # the callee's writes landed — the union covers both.
-            # The inner node must evaluate as a supported call on
-            # its own; a literal callee is rejected upstream by the
-            # extractor's `closure` kind.
             inner = _children(node)
             if len(inner) != 1:
                 raise _Unsupported("unsupported_statement", _span(node))
@@ -25247,9 +25286,65 @@ class _Builder:
                 if kind == "defer_statement"
                 else None
             )
+            deferred_function = (
+                self._strip_parens(
+                    inner[0].child_by_field_name("function")
+                )
+                if inner[0].type == "call_expression"
+                else None
+            )
+            deferred_literal_id = None
+            if (
+                kind == "defer_statement"
+                and deferred_function is not None
+                and deferred_function.type == "func_literal"
+            ):
+                (
+                    _,
+                    captured,
+                    captures_pointer,
+                    writes,
+                    star_write,
+                    has_call,
+                ) = self._func_literal_capture(
+                    deferred_function, params, locals_
+                )
+                deferred_literal_id = (
+                    f"{self.current_file}:"
+                    f"{deferred_function.start_byte}:"
+                    f"{deferred_function.end_byte}/deferred_lit"
+                )
+                self.closure_captures[deferred_literal_id] = (
+                    frozenset(captured)
+                )
+                self.closure_writes[deferred_literal_id] = (
+                    frozenset(writes)
+                )
+                if star_write:
+                    self.closure_star_writes.add(deferred_literal_id)
+                else:
+                    self.closure_star_writes.discard(
+                        deferred_literal_id
+                    )
+                if has_call:
+                    self.closure_inner_calls.add(deferred_literal_id)
+                else:
+                    self.closure_inner_calls.discard(
+                        deferred_literal_id
+                    )
+                if captures_pointer:
+                    self.pointee_closures.add(deferred_literal_id)
+                else:
+                    self.pointee_closures.discard(
+                        deferred_literal_id
+                    )
             deferred_shape = (
                 self._deferred_exit_shape(
-                    inner[0], defer_call, params, locals_
+                    inner[0],
+                    defer_call,
+                    params,
+                    locals_,
+                    callee_id_override=deferred_literal_id,
                 )
                 if kind == "defer_statement"
                 else None
@@ -25288,13 +25383,6 @@ class _Builder:
                     )
                     if arg_list is not None and _children(arg_list):
                         defer_arg_deps = ret
-                deferred_function = (
-                    self._strip_parens(
-                        inner[0].child_by_field_name("function")
-                    )
-                    if inner[0].type == "call_expression"
-                    else None
-                )
                 if (
                     deferred_function is not None
                     and deferred_function.type == "identifier"

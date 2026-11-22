@@ -2378,6 +2378,11 @@ graph. Parse/parser unavailability also produces a gap. More language/type
 coverage, fixed-point CFG dataflow and full source provenance remain open
 C02/C05/C06 work.
 
+A deferred immediate function literal (`defer func(...) { ... }(args)`)
+uses the same capture and exit-state fold as a bound literal. Immediate
+`go` function literals and nested `go`/`defer` inside a literal remain
+unsupported.
+
 The existing Go walker still owns must/may facts and resource findings.
 `FunctionDataflow.cfg` and `cfg_gaps` expose the structural boundary;
 `facts_for_return(node_id)` connects a reachable CFG return site to the existing
