@@ -736,7 +736,15 @@ class _SolBindings:
                     fact = self._type_fact(
                         record.type_node, record.owner, set()
                     )
-                    if fact.type_id is not None:
+                    # A qualified declared type `Lib.S` still roots at
+                    # `Lib`, so `fact.type_id` names the library, not the
+                    # struct — leave such member positions opaque rather
+                    # than binding fields to library-level declarations.
+                    if (
+                        fact.type_id is not None
+                        and record.type_node is not None
+                        and "." not in self.text(record.type_node)
+                    ):
                         contract = next(
                             (
                                 candidate
