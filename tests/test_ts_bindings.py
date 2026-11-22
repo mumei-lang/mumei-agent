@@ -2537,6 +2537,28 @@ f(new Derived());
     )
     assert call.target == fs[0].id
 
+def test_overload_literal_signature_beats_wider_merged_signature():
+    # `m(x: "s")` is more specific than `m(x: string)` — the literal
+    # signature wins even though its block is declared earlier.
+    source = """
+interface I { m(x: "s"): void }
+interface I { m(x: string): void }
+declare const i: I;
+i.m("s");
+"""
+    report = build_ts_bindings(source)
+    literal_m = next(
+        b for b in report.bindings
+        if b.kind == "associated_function"
+        and '"s"' in source[b.span.start : b.span.start + 30]
+    )
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == 'i.m("s")'
+    )
+    assert call.target == literal_m.id
+
+
 def test_overload_namespaced_base_is_not_global_base():
     # `D extends N.Base` is unrelated to the global `Base` — the
     # `x: Base` overload must not accept `new D()`.

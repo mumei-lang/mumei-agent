@@ -1745,17 +1745,83 @@ class _TypeScriptBindings:
             return matches
         # tsc's first-matching-signature rule: the earliest declaration
         # that fits the arguments wins, not the lookup's latest-first
-        # order. For merged declarations, signatures of a LATER block
-        # precede earlier blocks' signatures; inside one block they
-        # keep declaration order. Non-signature matches (properties,
-        # clause aliases) lose to a signature the call actually fits.
+        # order. Literal-typed parameters matching the argument's
+        # literal outrank wider annotations (`m(x: "s")` beats
+        # `m(x: string)` for `m("s")`). For merged declarations,
+        # signatures of a LATER block precede earlier blocks'
+        # signatures; inside one block they keep declaration order.
+        # Non-signature matches (properties, clause aliases) lose to a
+        # signature the call actually fits.
+        literal_score = {
+            candidate.binding.id: sum(
+                1
+                for index, arg in enumerate(args)
+                if self._param_literal_match(candidate, index, arg)
+            )
+            for candidate in remaining
+        }
         remaining.sort(
             key=lambda candidate: (
+                -literal_score[candidate.binding.id],
                 -owner_pos.get(candidate.member_of, 0),
                 candidate.binding.span.start,
             )
         )
         return remaining
+
+    def _param_annotation_node(
+        self, candidate: _Record, index: int
+    ) -> Any | None:
+        """Inner annotation node of the candidate's parameter at
+        `index`, unwrapping the element type of a rest parameter."""
+        params = (
+            candidate.function_node.child_by_field_name("parameters")
+            if candidate.function_node is not None
+            else None
+        )
+        if params is None:
+            return None
+        items = self._param_items(params)
+        if index >= len(items):
+            tail = items[-1] if items else None
+            annotation = (
+                tail.child_by_field_name("type") if tail is not None else None
+            )
+            if annotation is None:
+                return None
+            return self._rest_element_node(
+                next(iter(self.children(annotation)), None)
+            )
+        item = items[index]
+        annotation = item.child_by_field_name("type")
+        if annotation is None:
+            return None
+        inner = next(iter(self.children(annotation)), None)
+        pattern = item.child_by_field_name("pattern")
+        if (
+            pattern is not None
+            and self.text(pattern).lstrip().startswith("...")
+        ):
+            inner = self._rest_element_node(inner)
+        return inner
+
+    def _param_literal_match(
+        self, candidate: _Record, index: int, arg: Any
+    ) -> bool:
+        """The parameter's annotation is a literal type spelled exactly
+        like the argument — `m(x: "s")` vs argument `"s"`."""
+        annotation = self._param_annotation_node(candidate, index)
+        if annotation is None or annotation.type != "literal_type":
+            return False
+        inner = next(
+            (
+                child
+                for child in self.children(annotation)
+                if child.type != "comment"
+            ),
+            None,
+        )
+        return inner is not None and self.text(inner) == self.text(arg)
 
     def _arity_accepts(self, candidate: _Record, arg_count: int) -> bool:
         params = (
