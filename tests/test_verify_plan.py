@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -236,6 +237,20 @@ def test_output_file_written_and_input_overwrite_refused(inputs, tmp_path):
     assert refused.stderr.startswith("verify-plan:")
 
 
+def test_output_hard_link_to_request_is_refused(inputs, tmp_path):
+    request = Path(inputs["request"])
+    original = request.read_bytes()
+    output = tmp_path / "request-link.json"
+    os.link(request, output)
+
+    refused = cli(inputs, "--output", str(output))
+
+    assert refused.returncode == 1
+    assert "--output must not overwrite a declared input" in refused.stderr
+    assert request.read_bytes() == original
+    assert output.read_bytes() == original
+
+
 def test_no_secret_in_document_or_stderr(inputs, tmp_path):
     out_path = tmp_path / "plan.json"
     out = cli(inputs, "--output", str(out_path), env_secret=True)
@@ -363,3 +378,28 @@ def test_history_log_cannot_overwrite_request_or_output(inputs, tmp_path):
     assert not output.exists()
     assert str(tmp_path) not in request_collision.stderr
     assert str(tmp_path) not in output_collision.stderr
+
+
+def test_history_log_hard_link_as_output_is_refused(inputs, tmp_path):
+    history = tmp_path / "history.jsonl"
+    first = cli(inputs, "--history-log", str(history))
+    assert first.returncode == 0, first.stderr
+    original = history.read_bytes()
+    output = tmp_path / "out.json"
+    os.link(history, output)
+
+    refused = cli(
+        inputs,
+        "--history-log",
+        str(history),
+        "--output",
+        str(output),
+    )
+
+    assert refused.returncode == 1
+    assert (
+        "--history-log must not overwrite a declared input or output"
+        in refused.stderr
+    )
+    assert history.read_bytes() == original
+    assert output.read_bytes() == original

@@ -525,6 +525,12 @@ def _plan_declared_paths(args: argparse.Namespace) -> list[str]:
     return paths
 
 
+def _same_file(a: str, b: str) -> bool:
+    return os.path.realpath(a) == os.path.realpath(b) or (
+        os.path.exists(a) and os.path.exists(b) and os.path.samefile(a, b)
+    )
+
+
 def main_plan(args: argparse.Namespace | None = None) -> int:
     if args is None:
         args = build_plan_parser().parse_args()
@@ -535,22 +541,20 @@ def main_plan(args: argparse.Namespace | None = None) -> int:
         if expected_history_head is not None and history_log is None:
             raise ValueError("--expected-history-head requires --history-log")
         if args.output is not None:
-            target = os.path.realpath(args.output)
             inputs = [args.request, args.adapters, args.policy]
             if args.observations is not None:
                 inputs.append(args.observations)
-            if any(os.path.realpath(p) == target for p in inputs):
+            if any(_same_file(path, args.output) for path in inputs):
                 raise ValueError(
                     "--output must not overwrite a declared input"
                 )
         if history_log is not None:
-            target = os.path.realpath(history_log)
             declared_inputs = [args.request, args.adapters, args.policy]
             if args.observations is not None:
                 declared_inputs.append(args.observations)
             if args.output is not None:
                 declared_inputs.append(args.output)
-            if any(os.path.realpath(path) == target for path in declared_inputs):
+            if any(_same_file(path, history_log) for path in declared_inputs):
                 raise ValueError(
                     "--history-log must not overwrite a declared input or output"
                 )
