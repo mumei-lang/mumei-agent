@@ -8671,8 +8671,7 @@ class _Builder:
                         _, field_ident, extras = candidate
                         field_type = getattr(field_ident, "type", None)
                         if (
-                            not extras
-                            and field_type is not None
+                            field_type is not None
                             and field_type.kind in {"slice", "array", "map"}
                         ):
                             package_field = candidate
@@ -8997,6 +8996,7 @@ class _Builder:
             )
         ):
             raise _Unsupported("non_parameter_reference", _span(node))
+        package_field_index_deps = frozenset()
         if member is not None:
             self._pin_member_type(member)
         elif package_var is not None:
@@ -9006,6 +9006,13 @@ class _Builder:
             self.pinned.add(package_binding.id)
             self._pin_fact_identities(package_binding.type)
             self._pin_fact_identities(field_ident.type)
+            for extra in reversed(package_field[2]):
+                if extra.type in _INDEX_LITERALS:
+                    continue
+                package_field_index_deps |= self.expression(
+                    extra, fn, params, locals_, transfers, count,
+                    depth + 1,
+                )
         elif bound_pointer is not None:
             # `(*p)[i]` — the pointee's container fact pins its
             # declared identities; the synthetic `{binding}/pointee`
@@ -9067,6 +9074,7 @@ class _Builder:
                 )
             )
         deps = frozenset()
+        deps |= package_field_index_deps
         if call_operand is not None and call_member is not None:
             # `lib.G(a)[i]` — the composite result keeps the call
             # `external_or_bodyless`: the minimal opaque fold a
@@ -22470,6 +22478,7 @@ class _Builder:
                     else None
                 )
                 container_field = None
+                container_field_index_deps = frozenset()
                 if (
                     right is not None
                     and member is None
@@ -22480,11 +22489,19 @@ class _Builder:
                         _, field_ident, extras = candidate
                         field_type = getattr(field_ident, "type", None)
                         if (
-                            not extras
-                            and field_type is not None
+                            field_type is not None
                             and field_type.kind in {"slice", "array", "map"}
                         ):
                             container_field = candidate
+                            for extra in reversed(extras):
+                                if extra.type in _INDEX_LITERALS:
+                                    continue
+                                container_field_index_deps |= (
+                                    self.expression(
+                                        extra, fn, params, scope,
+                                        transfers, count, 0,
+                                    )
+                                )
                 bound = None
                 package_pointee = None
                 range_ident = None
@@ -23201,7 +23218,7 @@ class _Builder:
                                     imported=True,
                                 )
                             )
-                    value_deps = frozenset()
+                    value_deps = container_field_index_deps
                     if opaque_range_field is not None:
                         value_deps = self.expression(
                             range_field_operand, fn, params, scope, transfers,
@@ -29858,8 +29875,7 @@ class _Builder:
                                     field_ident, "type", None
                                 )
                                 if (
-                                    not extras
-                                    and field_type is not None
+                                    field_type is not None
                                     and field_type.kind
                                     in {"slice", "array", "map"}
                                 ):
@@ -29868,6 +29884,14 @@ class _Builder:
                                         package_binding.type
                                     )
                                     self._pin_fact_identities(field_type)
+                                    deps = frozenset()
+                                    for extra in reversed(extras):
+                                        if extra.type in _INDEX_LITERALS:
+                                            continue
+                                        deps |= self.expression(
+                                            extra, fn, params, locals_,
+                                            transfers, count, depth + 1,
+                                        )
                                     transfers.append(
                                         CallTransfer(
                                             FileSpan(
@@ -29881,7 +29905,7 @@ class _Builder:
                                             imported=True,
                                         )
                                     )
-                                    return frozenset()
+                                    return deps
                         if (
                             operand is not None
                             and operand.type == "call_expression"
