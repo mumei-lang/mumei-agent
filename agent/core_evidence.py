@@ -678,6 +678,43 @@ def _observation_host_match(value: object) -> bool:
     )
 
 
+def _producer_signature_match(value: object) -> bool:
+    """The `producer_signature` record `evidence accept` emits when
+    signature verification ran — every field is optional; the ones
+    present must have the right type."""
+    if type(value) is not dict:
+        return False
+    bool_fields = {
+        "envelope_match",
+        "signature_valid",
+        "subject_bound",
+        "key_pinned",
+        "key_not_revoked",
+        "key_authentic",
+        "envelope_fresh",
+        "registry_authentic",
+        "revocation_list_authentic",
+    }
+    digest_fields = {
+        "subject_digest",
+        "registry_digest",
+        "revocation_digest",
+    }
+    fields = frozenset(value)
+    return (
+        fields <= bool_fields | digest_fields | {"checks_not_performed"}
+        and all(type(value[key]) is bool for key in fields & bool_fields)
+        and all(
+            _is_fingerprint(value[key])
+            for key in fields & digest_fields
+        )
+        and (
+            "checks_not_performed" not in value
+            or _string_list(value["checks_not_performed"])
+        )
+    )
+
+
 # `mumei.native-evidence-acceptance/v1`-only extras. The observation
 # routes emit `invocation`/`host`/`pin_envelope` only when they
 # performed one of the runtime-observation checks — enforced by
@@ -689,6 +726,10 @@ _NATIVE_ACCEPTANCE_EXTRA_FIELDS = {
     "pin_envelope": lambda value: (
         type(value) is str and value in {"recorded", "unrecorded"}
     ),
+    "producer_signature": _producer_signature_match,
+    # Whether the signed evidence's own `produced_at` matches the
+    # envelope's — emitted beside `producer_signature`.
+    "produced_at_signed": lambda value: type(value) is bool,
     "build_id": lambda value: type(value) is str and value != "",
     "llvm_sha256": lambda value: _is_fingerprint(value),
     "object_sha256": lambda value: _is_fingerprint(value),
@@ -699,6 +740,11 @@ _NATIVE_ACCEPTANCE_EXTRA_FIELDS = {
 
 _OBSERVATION_EXTRA_FIELDS = frozenset(
     {"invocation", "host", "pin_envelope"}
+)
+# `producer_signature` and `produced_at_signed` are pinned only when
+# the route ran the producer-signature binding check.
+_PRODUCER_SIGNATURE_EXTRA_FIELDS = frozenset(
+    {"producer_signature", "produced_at_signed"}
 )
 # The single-invocation observations route reports
 # `runtime_observation_semantics`; the per-channel routes
@@ -1083,6 +1129,14 @@ def evaluate_core_acceptance(
                         and check in _OBSERVATION_REQUIRED_CHECKS
                         for check in descriptor["checks_performed"]
                     )
+                )
+            )
+            and (
+                not extras & _PRODUCER_SIGNATURE_EXTRA_FIELDS
+                or (
+                    type(descriptor.get("checks_performed")) is list
+                    and "producer_signature_binding"
+                    in descriptor["checks_performed"]
                 )
             )
         )

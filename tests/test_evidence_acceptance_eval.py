@@ -921,3 +921,100 @@ def test_eval_doc_binds_to_descriptor_bytes():
     assert (
         evaluate_evidence_binding(eval_bytes, eval_doc)["bound"] is False
     )
+
+
+_PRODUCER_SIGNATURE = {
+    "envelope_match": True,
+    "signature_valid": True,
+    "subject_digest": "a" * 64,
+    "subject_bound": True,
+    "key_pinned": True,
+    "key_not_revoked": True,
+    "key_authentic": True,
+    "envelope_fresh": True,
+    "registry_digest": "b" * 64,
+    "registry_authentic": True,
+    "revocation_digest": "c" * 64,
+    "revocation_list_authentic": True,
+    "checks_not_performed": [],
+}
+
+
+def test_native_producer_signature_extra_fields(tmp_path):
+    # `evidence accept --verify-signature` pins the verification
+    # outcome as `producer_signature` (+ `produced_at_signed`) and
+    # reports `producer_signature_binding` — both extras fold.
+    descriptor = _descriptor(
+        schema_version=_NATIVE,
+        checks_performed=["producer_signature_binding"],
+        producer_signature=dict(_PRODUCER_SIGNATURE),
+        produced_at_signed=True,
+    )
+    evaluation = evaluate_core_acceptance(descriptor)
+    assert evaluation["descriptor_match"] is True
+    assert evaluation["accepted"] is True
+
+
+def test_native_producer_signature_requires_binding_check(tmp_path):
+    # Without `producer_signature_binding` in checks_performed the
+    # signature pins are foreign fields.
+    for key, value in (
+        ("producer_signature", dict(_PRODUCER_SIGNATURE)),
+        ("produced_at_signed", True),
+    ):
+        evaluation = evaluate_core_acceptance(
+            _descriptor(
+                schema_version=_NATIVE,
+                checks_performed=["fresh_source_recheck"],
+                **{key: value},
+            )
+        )
+        assert evaluation["descriptor_match"] is False, key
+        evaluation = evaluate_core_acceptance(
+            _descriptor(
+                checks_performed=["producer_signature_binding"],
+                **{key: value},
+            )
+        )
+        assert evaluation["descriptor_match"] is False, key
+
+
+def test_native_producer_signature_validates_shapes(tmp_path):
+    # Malformed signature fields break the match exactly like foreign
+    # fields — optional presence, strict types.
+    bad_cases = [
+        {"producer_signature": "valid"},
+        {"producer_signature": {**_PRODUCER_SIGNATURE, "signature_valid": "yes"}},
+        {"producer_signature": {**_PRODUCER_SIGNATURE, "subject_digest": "zz"}},
+        {"producer_signature": {**_PRODUCER_SIGNATURE, "surprise": True}},
+        {
+            "producer_signature": {
+                **_PRODUCER_SIGNATURE,
+                "checks_not_performed": "registry_lookup",
+            }
+        },
+        {"produced_at_signed": "true"},
+    ]
+    for extra in bad_cases:
+        evaluation = evaluate_core_acceptance(
+            _descriptor(
+                schema_version=_NATIVE,
+                checks_performed=["producer_signature_binding"],
+                **extra,
+            )
+        )
+        assert evaluation["descriptor_match"] is False, extra
+
+
+def test_native_producer_signature_malformed_checks_never_raise(tmp_path):
+    # A signature pin beside a malformed checks_performed folds to
+    # descriptor_match=False, never raises.
+    for bad in (None, 3, "producer_signature_binding", {"x": 1}):
+        evaluation = evaluate_core_acceptance(
+            _descriptor(
+                schema_version=_NATIVE,
+                checks_performed=bad,
+                producer_signature=dict(_PRODUCER_SIGNATURE),
+            )
+        )
+        assert evaluation["descriptor_match"] is False
