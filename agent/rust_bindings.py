@@ -4006,6 +4006,27 @@ class _RustBindings:
                 # `for (k, v) in m` still reads the map's pair.
                 element_fact, element_args = _UNKNOWN, None
             type_map = self._for_pair_type_map(pattern, iterator)
+            if (
+                not type_map
+                and pattern is not None
+                and pattern.type == "tuple_pattern"
+                and iterator is not None
+            ):
+                # `for (a, b) in v` over `Vec<(P, Q)>` binds the
+                # element's slots by position — same as the `let`
+                # destructure once the element is spelled.
+                container_id, container_args = self._receiver_type(
+                    iterator
+                )
+                if container_args is not None:
+                    elem_id, elem_args = self._element_of(
+                        container_id,
+                        container_args.strip(),
+                        iterator.start_byte,
+                    )
+                    type_map = self._pattern_type_map(
+                        pattern, elem_id, elem_args
+                    )
             self._bind_pattern_names(
                 names,
                 scope,

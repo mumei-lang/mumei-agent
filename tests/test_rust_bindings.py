@@ -4849,3 +4849,27 @@ fn f(t: (P, P, P)) {
     report = build_rust_bindings(source, pointer_width=64)
     calls = [c for c in report.calls if source[c.span.start:c.span.end].endswith("m()")]
     assert calls and all(c.target in {"", None} for c in calls)
+
+
+def test_for_tuple_pattern_binds_vec_of_tuples() -> None:
+    source = """\
+struct P;
+impl P { fn m(&self) {} }
+struct Q;
+impl Q { fn q(&self) {} }
+fn f(v: Vec<(P, Q)>) {
+    for (a, b) in &v {
+        a.m();
+        b.q();
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = next(b for b in report.bindings if b.name == "m")
+    q = next(b for b in report.bindings if b.name == "q")
+    calls = [
+        c
+        for c in report.calls
+        if source[c.span.start : c.span.end].endswith(("m()", "q()"))
+    ]
+    assert [c.target for c in calls] == [m.id, q.id]
