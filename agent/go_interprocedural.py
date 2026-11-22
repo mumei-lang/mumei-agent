@@ -2574,6 +2574,7 @@ class _Builder:
                             ) is not None
                             and bool(_elem_struct.type_id)
                         )
+                        or member.type.elem.kind == "interface"
                     )
                 )
             )
@@ -3056,6 +3057,7 @@ class _Builder:
                     ) is not None
                     and bool(_elem_struct.type_id)
                 )
+                or fact.elem.kind == "interface"
             )
         )
         if (
@@ -8857,6 +8859,10 @@ class _Builder:
                             )
                         )
                     )
+                    or (
+                        opaque_field is not None
+                        and elem.kind == "interface"
+                    )
                 )
             )
         ):
@@ -9019,10 +9025,30 @@ class _Builder:
                 if struct_element_operand_deps is not None:
                     deps |= struct_element_operand_deps
             else:
-                deps |= self.expression(
-                    inner, fn, params, locals_, transfers, count,
-                    depth + 1,
+                root_binding = self.bindings.get(
+                    opaque_field[4].binding_id
                 )
+                if (
+                    elem is not None
+                    and elem.kind == "interface"
+                    and root_binding is not None
+                    and root_binding.type is not None
+                    and root_binding.type.kind == "pointer"
+                ):
+                    # `p.A[i]` on a `*S` root — the bare field
+                    # read `p.A` stays closed for `[]I` (like every
+                    # container-typed field through a pointer), so
+                    # the element's provenance is the root's own
+                    # deps plus the field slot's, the same shape a
+                    # representable `o.A[i]` read yields.
+                    deps |= self._pointer_deps(
+                        opaque_field[1], params, locals_
+                    )
+                else:
+                    deps |= self.expression(
+                        inner, fn, params, locals_, transfers, count,
+                        depth + 1,
+                    )
                 deps |= self._opaque_container_deps(field_key, locals_)
         if struct_element_index_deps is None:
             for idx in reversed(indexes):
@@ -15978,6 +16004,16 @@ class _Builder:
                         locals_,
                     )
                     is None
+                    and not (
+                        # `v := p.A[i]` — an interface-typed
+                        # element reached through a supported
+                        # container field binds like `v := i`.
+                        len(lefts) == len(rights)
+                        and self._interface_element_receiver(
+                            rights[i], params
+                        )
+                        is not None
+                    )
                 ):
                     raise _Unsupported("binding_unavailable", _span(node))
                 if binding.type.kind == "interface":
@@ -26287,6 +26323,12 @@ class _Builder:
             if cur is not None and cur.type == "selector_expression":
                 cur = cur.child_by_field_name("operand")
                 continue
+            if cur is not None and cur.type == "index_expression":
+                # `p.A[i].M` — the receiver element shares the field
+                # container's root, so the dispatch's effect records
+                # on `p` like the field receiver's does on `w`.
+                cur = cur.child_by_field_name("operand")
+                continue
             break
         if cur is None or cur.type != "identifier":
             return None
@@ -33131,6 +33173,68 @@ class _Builder:
             struct_type_ids.add(struct_fact.type_id)
         return None
 
+    def _pin_method_binding(self, function_node: Any) -> None:
+        """Pin the selected method's signature identities on an
+        interface dispatch — redeclaring the method flags the
+        summary through `stale_dependents`."""
+        method_field = function_node.child_by_field_name("field")
+        method_ref = (
+            self.references.get(self.node_key(method_field))
+            if method_field is not None
+            else None
+        )
+        method_binding = (
+            self.members.get(method_ref.binding_id)
+            if method_ref is not None and method_ref.kind == "import"
+            else (
+                self.bindings.get(method_ref.binding_id)
+                if method_ref is not None
+                else None
+            )
+        )
+        if method_binding is not None:
+            self.pinned.update(
+                getattr(method_binding, "signature_type_ids", ())
+            )
+
+    def _interface_element_receiver(
+        self, node: Any, params: dict[str, int]
+    ) -> tuple[Any, str, list[Any], str] | None:
+        """`p.A[i]` (or deeper index chains like `p.A[i][j]`) whose
+        final element is interface-typed — the container field must
+        resolve through the same roots the element-read path admits,
+        then one `elem` descent per index level must end in an
+        interface fact. Returns `(member, root_id, index_nodes,
+        field_key)` — the field member, the chain root's binding id
+        (post-alias), every index node outermost-first, and the
+        field's slot key, or None."""
+        current = self._strip_parens(node)
+        if current is None or current.type != "index_expression":
+            return None
+        index_nodes: list[Any] = []
+        operand = current
+        while operand is not None and operand.type == "index_expression":
+            index_nodes.append(operand.child_by_field_name("index"))
+            operand = self._strip_parens(
+                operand.child_by_field_name("operand")
+            )
+        if operand is None or operand.type != "selector_expression":
+            return None
+        target = self._opaque_container_field_target(
+            operand, params, allow_struct_elements=True
+        )
+        if target is None:
+            return None
+        member = target[2]
+        fact = member.type
+        for _ in index_nodes:
+            if fact is None or fact.kind not in {"slice", "array", "map"}:
+                return None
+            fact = fact.elem
+        if fact is None or fact.kind != "interface":
+            return None
+        return member, target[1], index_nodes, target[0]
+
     def _interface_dispatch_call(
         self,
         node: Any,
@@ -33161,6 +33265,7 @@ class _Builder:
         value-struct parameter field chain, or a direct imported call
         result whose expression is representable."""
         receiver_node = None
+        element_receiver = None
         if call.method:
             function_node = node.child_by_field_name("function")
             if (
@@ -33208,30 +33313,26 @@ class _Builder:
                             self.pinned.update(
                                 interface_member.signature_type_ids
                             )
-                    method_field = function_node.child_by_field_name(
-                        "field"
+                    self._pin_method_binding(function_node)
+                    admitted = True
+            elif (
+                receiver_id is not None
+                and receiver_id.type == "index_expression"
+            ):
+                # `p.A[i].M(args)` — the element reached through a
+                # slice/map field on a supported root is interface-
+                # typed: dispatch is opaque like the field receiver,
+                # the element read's own pins (the field's fact chain
+                # and the interface's identity) cover its shape, and
+                # the method's signature pins for the same reason.
+                element_receiver = self._interface_element_receiver(
+                    receiver_id, params
+                )
+                if element_receiver is not None:
+                    self._pin_method_binding(function_node)
+                    self._pin_fact_identities(
+                        element_receiver[0].type
                     )
-                    method_ref = (
-                        self.references.get(self.node_key(method_field))
-                        if method_field is not None
-                        else None
-                    )
-                    method_binding = (
-                        self.members.get(method_ref.binding_id)
-                        if method_ref is not None
-                        and method_ref.kind == "import"
-                        else (
-                            self.bindings.get(method_ref.binding_id)
-                            if method_ref is not None
-                            else None
-                        )
-                    )
-                    if method_binding is not None:
-                        self.pinned.update(
-                            getattr(
-                                method_binding, "signature_type_ids", ()
-                            )
-                        )
                     admitted = True
             elif (
                 receiver_id is not None
@@ -33261,15 +33362,39 @@ class _Builder:
                 _span(node),
                 call.target,
             )
-        receiver_deps = self.expression(
-            receiver_node,
-            fn,
-            params,
-            locals_,
-            transfers,
-            count,
-            depth + 1,
-        )
+        if element_receiver is not None:
+            member, root_id, index_nodes, field_key = element_receiver
+            # The bare field read `p.A` stays closed for `[]I` —
+            # the element read's deps are the root's own provenance
+            # plus every index's, which is what a representable
+            # `o.A[i]` read yields for the value-struct root too.
+            receiver_deps = self._pointer_deps(
+                root_id, params, locals_
+            ) | self._opaque_container_deps(field_key, locals_)
+            for index_node in index_nodes:
+                if (
+                    index_node is not None
+                    and index_node.type not in _INDEX_LITERALS
+                ):
+                    receiver_deps |= self.expression(
+                        index_node,
+                        fn,
+                        params,
+                        locals_,
+                        transfers,
+                        count,
+                        depth + 1,
+                    )
+        else:
+            receiver_deps = self.expression(
+                receiver_node,
+                fn,
+                params,
+                locals_,
+                transfers,
+                count,
+                depth + 1,
+            )
         return self._interface_dispatch_resolved(
             node,
             receiver_node,
@@ -33384,6 +33509,23 @@ class _Builder:
                 root_ref is not None
                 and root_ref.binding_id
             ):
+                # `q := p; q.A[i].M` — the receiver element lives
+                # in `p`'s entry pointee, so the effect records on
+                # the alias's target like a store through `q` does.
+                aliased_ref = self._param_pointer_aliases.get(
+                    root_ref.binding_id
+                )
+                if (
+                    aliased_ref is not None
+                    and aliased_ref.binding_id in params
+                    and aliased_ref.binding_id
+                    not in self._pointer_param_reseats
+                    and aliased_ref.binding_id
+                    not in self._param_pointer_aliases
+                    and aliased_ref.binding_id
+                    not in self._double_pointer_dirty
+                ):
+                    root_ref = aliased_ref
                 target_id = root_ref.binding_id
         if not target_id:
             raise _Unsupported(
