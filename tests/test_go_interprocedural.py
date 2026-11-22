@@ -33698,6 +33698,10 @@ def test_named_double_pointer_deep_store_keeps_root(
         "type E struct { V int64 }\n"
         "type S struct { M map[int]*E }\n"
         "func F(o S, k int) int64 { return o.M[k].V }\n",
+        # `ss[i].V` — a scalar field read directly on the `*E`
+        # element pointer of a bare `[]*E` parameter.
+        "type E struct { V int64 }\n"
+        "func F(ss []*E, i int) int64 { return ss[i].V }\n",
     ],
 )
 def test_named_pointer_element_field_reads(
@@ -33769,6 +33773,21 @@ def test_named_pointer_element_read_observes_late_pointee_store(
     result = named(*unit(go_types_helper, declarations))
     assert result.available, result.gaps
     assert result.return_dependencies == frozenset({0})
+
+
+def test_named_pointer_element_param_observes_late_pointee_store(
+    go_types_helper,
+):
+    # `ss = []*E{e}` — the same late-store rule on a bare `[]*E`
+    # parameter root: `ss[i].V` observes `e.V = x`.
+    declarations = (
+        "type E struct { V int64 }\n"
+        "func F(ss []*E, x int64) int64 { "
+        "e := &E{}; ss = []*E{e}; e.V = x; return ss[0].V }\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({1})
 
 
 def test_named_pointer_element_field_write_emit_caller_backing(

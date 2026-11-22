@@ -26482,6 +26482,18 @@ class _Builder:
                     extracted = getattr(cbound, "type", None)
                     for _ in range(1 + len(container_idx[2] or ())):
                         extracted = getattr(extracted, "elem", None)
+                    # `ss[i]` on `[]*E` descends the element pointer
+                    # — the leaf lives in the element's pointee
+                    # memory like `p.A[i].V` does.
+                    elem_pointer = (
+                        extracted is not None
+                        and extracted.kind == "pointer"
+                        and getattr(extracted, "elem", None)
+                        is not None
+                        and extracted.elem.kind == "struct"
+                    )
+                    if elem_pointer:
+                        extracted = extracted.elem
                     if extracted is not None and extracted.kind == "struct":
                         deps = field_index_deps
                         # Innermost index first (Go's order) —
@@ -26543,8 +26555,19 @@ class _Builder:
                         deps |= self._opaque_container_deps(
                             cref.binding_id, locals_
                         )
-                        if pointee:
+                        if pointee or elem_pointer:
                             deps |= self.indirect_writes
+                        if elem_pointer:
+                            # The `*E` element may aim at any
+                            # escaped binding — union their live
+                            # slots like a bare `*p` deref does.
+                            for escaped_id in self.escaped:
+                                if escaped_id in locals_:
+                                    deps |= locals_[escaped_id]
+                                elif escaped_id in params:
+                                    deps |= {
+                                        params[escaped_id]
+                                    }
                         return deps
             if (
                 member is None
