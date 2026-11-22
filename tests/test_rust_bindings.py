@@ -1562,3 +1562,101 @@ def test_cli_preserves_crlf_bytes_for_report_hash_and_spans(tmp_path):
     assert restored.source_sha256 == build_rust_bindings(
         source, pointer_width=64
     ).source_sha256
+
+
+def test_member_access_resolves_declared_type_fields_and_methods():
+    source = """
+struct Point { x: i32, y: i32 }
+impl Point {
+    fn get(&self) -> i32 { self.x }
+    fn dist(&self, other: &Point) -> f64 {
+        let dx = self.x - other.x;
+        self.y as f64 + other.y as f64
+    }
+}
+fn use_it(p: Point, q: Point) {
+    p.get();
+    q.dist(p);
+    p.x;
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    get_rec = _bindings(report, "get", "associated_function")[0]
+    dist_rec = _bindings(report, "dist", "associated_function")[0]
+    x_rec = _bindings(report, "x", "struct_field")[0]
+    y_rec = _bindings(report, "y", "struct_field")[0]
+    assert _call(report, source, "p.get()").kind == "direct_local"
+    assert _call(report, source, "p.get()").target == get_rec.id
+    assert _call(report, source, "q.dist(p)").target == dist_rec.id
+    member_refs = [
+        ref
+        for ref in _refs(report, source, "x")
+        if ref.binding_id == x_rec.id
+    ]
+    # self.x (twice) + other.x + p.x member reads
+    assert len(member_refs) == 4
+    y_refs = [ref for ref in _refs(report, source, "y") if ref.binding_id == y_rec.id]
+    assert len(y_refs) == 2
+
+
+def test_member_write_emits_write_reference_on_field():
+    source = """
+struct P { v: i32 }
+fn f(p: &mut P, w: i32) { p.v = w; }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    v_rec = _bindings(report, "v", "struct_field")[0]
+    writes = [
+        ref
+        for ref in _refs(report, source, "v")
+        if ref.kind == "write" and ref.binding_id == v_rec.id
+    ]
+    assert len(writes) == 1
+
+
+def test_member_call_on_trait_impl_stays_opaque():
+    source = """
+struct P {}
+trait T { fn t(&self) -> i32; }
+impl T for P { fn t(&self) -> i32 { 1 } }
+fn f(p: P) { p.t(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    assert _call(report, source, "p.t()").kind == "opaque_method"
+    assert _call(report, source, "p.t()").target == ""
+
+
+def test_member_tuple_positional_field_stays_unresolved():
+    source = """
+struct T(i32, i32);
+fn f(t: T) { t.0; }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    assert not _bindings(report, "0")
+
+
+def test_member_call_through_method_return_type_chains():
+    source = """
+struct A {}
+struct B {}
+impl A { fn mk(&self) -> B { B {} } }
+impl B { fn hit(&self) -> i32 { 1 } }
+fn f(a: A) { a.mk().hit(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    hit = _bindings(report, "hit", "associated_function")[0]
+    call = _call(report, source, "a.mk().hit()")
+    assert call.target == hit.id
+
+
+def test_member_generic_impl_method_resolves_through_generic_impl():
+    source = """
+struct Wrap<T> { inner: T }
+impl<T> Wrap<T> { fn get(&self) -> i32 { 0 } }
+fn f(w: Wrap<i32>) { w.get(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    call = _call(report, source, "w.get()")
+    get = _bindings(report, "get", "associated_function")[0]
+    assert call.target == get.id
+    assert call.kind == "direct_local"
