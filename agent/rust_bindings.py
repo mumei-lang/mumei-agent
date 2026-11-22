@@ -2474,7 +2474,13 @@ class _RustBindings:
             "value",
         )
         tnode = None if record is None else record.type_node
-        pair = self._generic_head_args(tnode, node.start_byte)
+        # The annotation's `M` is resolved where it was written — a
+        # same-named alias declared inside the loop's scope must not
+        # steal the expansion (`type M = HashMap<A, B>` then an inner
+        # `type M = HashMap<B, A>` would swap key and value types).
+        pair = self._generic_head_args(
+            tnode, None if tnode is None else tnode.start_byte
+        )
         if pair is None:
             return None
         key, head, _ = pair
@@ -2489,7 +2495,7 @@ class _RustBindings:
         ):
             seen.add(head.binding.id)
             body_pair = self._generic_head_args(
-                head.alias_node, node.start_byte
+                head.alias_node, head.alias_node.start_byte
             )
             if body_pair is None or body_pair[0] is None:
                 break
