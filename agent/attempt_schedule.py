@@ -74,7 +74,8 @@ def _adapter_environment(plan: VerificationPlan) -> dict[str, str] | None:
     if (
         required is not None
         and "environment.read" in required
-        and (allowed is None or "environment.read" in allowed)
+        and allowed is not None
+        and "environment.read" in allowed
     ):
         return None
     return _minimal_environment()

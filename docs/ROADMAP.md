@@ -168,9 +168,9 @@ document. MCP `verify_plan` and `verify-schedule` do not write this log.
 ### C04 environment.read enforcement at dispatch
 
 Scheduled adapter attempts run with only `PATH` (and `SYSTEMROOT` on
-Windows) unless the selected adapter declares `environment.read` and
-policy permits it. Undeclared permissions fail closed. This enforces only
-the environment category; `filesystem.*`, `network.connect`, and
+Windows) unless the selected adapter declares `environment.read` and the
+explicit policy permits it. Undeclared permissions fail closed. This
+enforces only the environment category; `filesystem.*`, `network.connect`, and
 `process.spawn` remain declared-only. Environment scrubbing is not a
 sandbox and is not Evidence.
 
