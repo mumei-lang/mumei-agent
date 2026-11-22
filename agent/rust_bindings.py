@@ -1646,6 +1646,8 @@ class _RustBindings:
                 return None, None
             elem_args = elem_args.strip()
             index = children[1] if len(children) > 1 else None
+            while index is not None and index.type == "parenthesized_expression":
+                index = next(iter(self._children(index)), None)
             if index is not None and index.type in {
                 "range_expression",
                 "range_pattern",
