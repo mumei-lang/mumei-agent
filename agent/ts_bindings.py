@@ -932,9 +932,9 @@ class _TypeScriptBindings:
             return _UNKNOWN
         return _UNKNOWN
 
-    def _lookup(
+    def _lookup_candidates(
         self, name: str, position: int, namespace: str
-    ) -> _Record | None:
+    ) -> list[_Record]:
         candidates: list[tuple[int, _Record]] = []
         for record in self.records:
             if namespace not in record.namespaces or record.binding.name != name:
@@ -947,8 +947,6 @@ class _TypeScriptBindings:
                 self_scope = record.self_scope
                 assert self_scope is not None
                 candidates.append((self_scope.end - self_scope.start, record))
-        if not candidates:
-            return None
         candidates.sort(
             key=lambda item: (
                 item[0],
@@ -956,7 +954,13 @@ class _TypeScriptBindings:
                 -item[1].binding.span.start,
             )
         )
-        return candidates[0][1]
+        return [record for _, record in candidates]
+
+    def _lookup(
+        self, name: str, position: int, namespace: str
+    ) -> _Record | None:
+        candidates = self._lookup_candidates(name, position, namespace)
+        return candidates[0] if candidates else None
 
     _MEMBER_DECLARATIONS = {
         "function_declaration", "generator_function_declaration",
@@ -1440,6 +1444,7 @@ class _TypeScriptBindings:
         for_type: bool = False,
         extra_seed: tuple[_Record, ...] = (),
         collect_extras: list[_Record] | None = None,
+        args_node: Any | None = None,
     ) -> _Record | None:
         """BFS over the declaring type and its bases for member `name`.
 
@@ -1466,6 +1471,7 @@ class _TypeScriptBindings:
                 for_type=for_type,
                 extra_seed=extra_seed,
                 collect_extras=collect_extras,
+                args_node=args_node,
             )
         finally:
             self._member_lookup_active.discard(active_key)
@@ -1481,6 +1487,7 @@ class _TypeScriptBindings:
         for_type: bool = False,
         extra_seed: tuple[_Record, ...] = (),
         collect_extras: list[_Record] | None = None,
+        args_node: Any | None = None,
     ) -> _Record | None:
         queue: list[tuple[Any, bool]] = [(type_record, False)]
         # Declaration merging: a namespace may merge with a class,
@@ -1595,6 +1602,33 @@ class _TypeScriptBindings:
                 in {"class", "interface", "enum", "type_alias"}
                 else 1
             )
+        if args_node is not None:
+            narrowed = self._narrow_overloads(matches, args_node)
+            # A clause-authored name (`export {f as g}` in one sibling
+            # block) pins the referent to that block's declaration —
+            # keep it ahead of overload narrowing, which would drop it
+            # when its signature does not fit the arguments.
+            authored_pre = (
+                "member_authored_type_names" if for_type
+                else "member_authored_names"
+            )
+            narrowed_authored = [
+                candidate
+                for candidate in narrowed
+                if name in getattr(candidate, authored_pre)
+            ]
+            if narrowed_authored:
+                matches = narrowed_authored
+            else:
+                original_authored = [
+                    candidate
+                    for candidate in matches
+                    if name in getattr(candidate, authored_pre)
+                ]
+                if original_authored:
+                    matches = original_authored
+                else:
+                    matches = narrowed
         # When sibling `namespace` blocks re-export each other's members
         # (`namespace N { export {f as g} }` publishes the merged `f`),
         # prefer the member whose own block authored the looked-up name —
@@ -1625,6 +1659,487 @@ class _TypeScriptBindings:
             if not fallback:
                 collect_extras.extend(seeded_matches)
         return matches[0]
+
+    def _narrow_overloads(
+        self, matches: list[_Record], args_node: Any
+    ) -> list[_Record]:
+        """Pick the first overload whose signature the arguments fit.
+
+        Mirrors tsc's first-matching-signature rule over arity and
+        literal/identifier argument kinds. A `...arg` spread or fewer
+        than two signature-shaped candidates leaves the list untouched;
+        when nothing fits, the original match order is kept so the
+        reference still lands on a same-named member."""
+        args = [
+            child
+            for child in self.children(args_node)
+            if child.type != "comment"
+        ]
+        if any(arg.type == "spread_element" for arg in args):
+            return matches
+        if matches and matches[0].function_node is None:
+            # A same-named property/const member overrides everything
+            # behind it — narrowing must not cross the nearest
+            # declaration to reach a base type's method.
+            return matches
+        owner_ids = {matches[0].member_of}
+        owner_pos = {}
+        # Declaration merging splits one entity's members across
+        # several blocks; signatures on merge siblings of the nearest
+        # declaring block are overloads of the same member, not
+        # overrides hidden behind it.
+        owner_record = next(
+            (
+                record
+                for record in self.records
+                if record.node is not None
+                and record.node.parent is not None
+                and record.node.parent.id == matches[0].member_of
+            ),
+            None,
+        )
+        if owner_record is not None:
+            owner_pos[owner_record.node.parent.id] = (
+                owner_record.node.parent.start_byte
+            )
+            for sibling in self._merge_siblings(owner_record):
+                if (
+                    sibling.node is not None
+                    and sibling.node.parent is not None
+                ):
+                    decl = sibling.node.parent
+                    owner_ids.add(decl.id)
+                    owner_pos[decl.id] = decl.start_byte
+        signatures = [
+            candidate
+            for candidate in matches
+            if candidate.function_node is not None
+            and candidate.member_of in owner_ids
+        ]
+        if len(signatures) < 2:
+            return matches
+
+        remaining = [
+            candidate
+            for candidate in signatures
+            if self._arity_accepts(candidate, len(args))
+        ]
+        if not remaining:
+            return matches
+        proven = len(remaining) < len(signatures)
+        for index, arg in enumerate(args):
+            kind = self._arg_kind(arg)
+            if kind is None:
+                continue
+            filtered = [
+                candidate
+                for candidate in remaining
+                if self._param_accepts(
+                    candidate, index, arg, kind, arg.start_byte
+                )
+            ]
+            if filtered:
+                remaining = filtered
+                proven = True
+        if not remaining or not proven:
+            return matches
+        # tsc's first-matching-signature rule: the earliest declaration
+        # that fits the arguments wins, not the lookup's latest-first
+        # order. Literal-typed parameters matching the argument's
+        # literal outrank wider annotations (`m(x: "s")` beats
+        # `m(x: string)` for `m("s")`). For merged declarations,
+        # signatures of a LATER block precede earlier blocks'
+        # signatures; inside one block they keep declaration order.
+        # Non-signature matches (properties, clause aliases) lose to a
+        # signature the call actually fits.
+        literal_match = {
+            candidate.binding.id: any(
+                self._param_literal_match(candidate, index, arg)
+                for index, arg in enumerate(args)
+            )
+            for candidate in remaining
+        }
+        remaining.sort(
+            key=lambda candidate: (
+                not literal_match[candidate.binding.id],
+                -owner_pos.get(candidate.member_of, 0),
+                candidate.binding.span.start,
+            )
+        )
+        return remaining
+
+    def _param_annotation_node(
+        self, candidate: _Record, index: int
+    ) -> Any | None:
+        """Inner annotation node of the candidate's parameter at
+        `index`, unwrapping the element type of a rest parameter."""
+        params = (
+            candidate.function_node.child_by_field_name("parameters")
+            if candidate.function_node is not None
+            else None
+        )
+        if params is None:
+            return None
+        items = self._param_items(params)
+        if index >= len(items):
+            tail = items[-1] if items else None
+            annotation = (
+                tail.child_by_field_name("type") if tail is not None else None
+            )
+            if annotation is None:
+                return None
+            return self._rest_element_node(
+                next(iter(self.children(annotation)), None)
+            )
+        item = items[index]
+        annotation = item.child_by_field_name("type")
+        if annotation is None:
+            return None
+        inner = next(iter(self.children(annotation)), None)
+        pattern = item.child_by_field_name("pattern")
+        if (
+            pattern is not None
+            and self.text(pattern).lstrip().startswith("...")
+        ):
+            inner = self._rest_element_node(inner)
+        return inner
+
+    def _param_literal_match(
+        self, candidate: _Record, index: int, arg: Any
+    ) -> bool:
+        """The parameter's annotation is a literal type spelled exactly
+        like the argument — `m(x: "s")` vs argument `"s"`."""
+        annotation = self._param_annotation_node(candidate, index)
+        if annotation is None or annotation.type != "literal_type":
+            return False
+        inner = next(
+            (
+                child
+                for child in self.children(annotation)
+                if child.type != "comment"
+            ),
+            None,
+        )
+        return inner is not None and self._literal_equal(
+            self.text(inner), self.text(arg)
+        )
+
+    @staticmethod
+    def _literal_equal(declared: str, actual: str) -> bool:
+        """Literal spellings carrying the same value — `'s'` fits
+        `x: "s"`, `0x1` fits `x: 1`, and an uninterpolated `` `s` ``
+        fits `x: "s"`. A quoted literal never equals a bare token
+        (`"true"` does not fit `x: true` arguments or a `Widget`
+        type), and a backtick string containing `${` is a computed
+        template, not a constant."""
+        if declared == actual:
+            return True
+        nonconstant = object()
+
+        def quoted(spelling: str) -> bool:
+            return (
+                len(spelling) >= 2
+                and spelling[0] in "\"'`"
+                and spelling.endswith(spelling[0])
+            )
+
+        def value(spelling: str) -> object:
+            if quoted(spelling):
+                inner = spelling[1:-1]
+                # `${` starts interpolation unless an odd run of
+                # backslashes precedes it — `\${` is literal text but
+                # `\\${` (escaped backslash) still interpolates.
+                if spelling[0] == "`":
+                    pos = 0
+                    while True:
+                        idx = inner.find("${", pos)
+                        if idx == -1:
+                            break
+                        backslashes = 0
+                        j = idx - 1
+                        while j >= 0 and inner[j] == "\\":
+                            backslashes += 1
+                            j -= 1
+                        if backslashes % 2 == 0:
+                            return nonconstant
+                        pos = idx + 2
+                return inner.replace("\\$", "$")
+            try:
+                return int(spelling.replace("_", ""), 0)
+            except ValueError:
+                pass
+            try:
+                return float(spelling.replace("_", ""))
+            except ValueError:
+                return spelling
+
+        if quoted(declared) != quoted(actual):
+            return False
+        declared_value, actual_value = value(declared), value(actual)
+        if declared_value is nonconstant or actual_value is nonconstant:
+            return False
+        if isinstance(declared_value, str) or isinstance(
+            actual_value, str
+        ):
+            return isinstance(declared_value, str) and isinstance(
+                actual_value, str
+            ) and declared_value == actual_value
+        return declared_value == actual_value
+
+    def _arity_accepts(self, candidate: _Record, arg_count: int) -> bool:
+        params = (
+            candidate.function_node.child_by_field_name("parameters")
+            if candidate.function_node is not None
+            else None
+        )
+        if params is None:
+            return arg_count == 0
+        required = 0
+        total = 0
+        variadic = False
+        for item in self._param_items(params):
+            pattern = item.child_by_field_name("pattern")
+            if pattern is not None and self.text(
+                pattern
+            ).lstrip().startswith("..."):
+                variadic = True
+                continue
+            total += 1
+            if item.type == "required_parameter":
+                required += 1
+        if arg_count < required:
+            return False
+        return variadic or arg_count <= total
+
+    def _param_items(self, params: Any) -> list[Any]:
+        """Parameter nodes that consume real arguments — `this:`
+        parameters type the receiver only and take no argument."""
+        items = []
+        for item in self.children(params):
+            if item.type not in {"required_parameter", "optional_parameter"}:
+                continue
+            pattern = item.child_by_field_name("pattern")
+            if pattern is not None and self.text(pattern).strip() == "this":
+                continue
+            items.append(item)
+        return items
+
+    def _arg_kind(self, arg: Any) -> str | None:
+        """Primitive kind of a literal, or the declared name for
+        identifiers — `None` when the argument type is not pinned."""
+        if arg.type == "number":
+            return "number"
+        if arg.type in {"string", "template_string"}:
+            return "string"
+        if arg.type in {"true", "false"}:
+            return "boolean"
+        if arg.type == "identifier":
+            record = self._lookup(
+                self.text(arg), arg.start_byte, "value"
+            )
+            if record is None or record.type_node is None:
+                return None
+            fact = self._type_fact(
+                next(iter(self.children(record.type_node)), None)
+            )
+            if fact.kind != "named":
+                return None
+            type_record = self._type_record_by_id(fact.type_id)
+            return None if type_record is None else type_record.binding.name
+        if arg.type == "new_expression":
+            constructor = arg.child_by_field_name("constructor")
+            if constructor is not None and constructor.type == "identifier":
+                return self.text(constructor)
+        return None
+
+    def _param_accepts(
+        self,
+        candidate: _Record,
+        index: int,
+        arg: Any,
+        kind: str,
+        position: int,
+    ) -> bool:
+        params = (
+            candidate.function_node.child_by_field_name("parameters")
+            if candidate.function_node is not None
+            else None
+        )
+        if params is None:
+            return False
+        items = self._param_items(params)
+        if index >= len(items):
+            # Past the declared list: only a rest tail accepts more.
+            tail = items[-1] if items else None
+            pattern = (
+                tail.child_by_field_name("pattern")
+                if tail is not None
+                else None
+            )
+            if not (
+                pattern is not None
+                and self.text(pattern).lstrip().startswith("...")
+            ):
+                return False
+            annotation = tail.child_by_field_name("type")
+            if annotation is None:
+                return True
+            return self._annotation_accepts(
+                self._rest_element_node(
+                    next(iter(self.children(annotation)), None)
+                ),
+                arg,
+                kind,
+                position,
+            )
+        item = items[index]
+        pattern = item.child_by_field_name("pattern")
+        variadic = (
+            pattern is not None
+            and self.text(pattern).lstrip().startswith("...")
+        )
+        annotation = item.child_by_field_name("type")
+        if annotation is None:
+            return True
+        inner = next(iter(self.children(annotation)), None)
+        if variadic:
+            inner = self._rest_element_node(inner)
+        return self._annotation_accepts(inner, arg, kind, position)
+
+    def _rest_element_node(self, node: Any | None) -> Any | None:
+        """Element annotation of a rest parameter — `...x: T[]` and
+        `...x: Array<T>` are compared against `T`, not the array."""
+        if node is None:
+            return None
+        if node.type == "array_type":
+            return next(iter(self.children(node)), node)
+        if node.type == "generic_type":
+            args = node.child_by_field_name("type_arguments")
+            if args is not None:
+                return next(iter(self.children(args)), node)
+        return node
+
+
+    def _annotation_accepts(
+        self, node: Any | None, arg: Any | None, kind: str, position: int
+    ) -> bool:
+        """Whether the parameter annotation can hold `kind`.
+
+        `kind` is a primitive name or a named type's spelling. Missing
+        or unknown annotations accept — only spelled contradictions
+        eliminate a candidate."""
+        if node is None:
+            return True
+        if node.type == "union_type":
+            return any(
+                self._annotation_accepts(child, arg, kind, position)
+                for child in self.children(node)
+                if child.type != "|"
+            )
+        if node.type == "literal_type":
+            inner = next(
+                (
+                    child
+                    for child in self.children(node)
+                    if child.type != "comment"
+                ),
+                None,
+            )
+            if inner is None:
+                return True
+            # A literal annotation accepts only the same literal —
+            # `m(x: "s")` rejects `"t"` and `v: string`. Identifiers
+            # accept when their declared type spells the literal.
+            literal_text = self.text(inner)
+            if arg is not None and arg.type in {
+                "string",
+                "number",
+                "template_string",
+                "true",
+                "false",
+            }:
+                return self._literal_equal(literal_text, self.text(arg))
+            return self._literal_equal(literal_text, kind)
+        text = self.text(node).strip()
+        if text in {"any", "unknown", "object"}:
+            return True
+        if text in {"number", "string", "boolean", "bigint", "symbol"}:
+            return kind == text
+        if node.type == "type_identifier":
+            record = self._lookup(text, node.start_byte, "type")
+            if record is not None and record.binding.kind == "type_alias":
+                inner = (
+                    next(iter(self.children(record.alias_node)), None)
+                    if record.alias_node is not None
+                    else None
+                )
+                return self._annotation_accepts(inner, arg, kind, position)
+            if (
+                record is not None
+                and record.binding.kind == "generic_parameter"
+            ):
+                # `T` accepts whatever its `extends` constraint
+                # accepts; an unconstrained parameter accepts
+                # anything the caller binds to it.
+                owner = record.node.parent if record.node is not None else None
+                constraint = (
+                    owner.child_by_field_name("constraint")
+                    if owner is not None and owner.type == "type_parameter"
+                    else None
+                )
+                if constraint is None:
+                    return True
+                inner = next(
+                    (
+                        child
+                        for child in self.children(constraint)
+                        if child.type != "extends"
+                    ),
+                    None,
+                )
+                return self._annotation_accepts(inner, arg, kind, position)
+            return text == kind or self._type_derives_from(
+                kind, text, position, node.start_byte
+            )
+        if node.type == "generic_type":
+            return text == kind or self._type_derives_from(
+                kind, text, position, node.start_byte
+            )
+        return True
+
+    def _type_derives_from(
+        self, name: str, ancestor: str, arg_position: int, decl_position: int
+    ) -> bool:
+        """True when type `name` transitively extends/implements
+        `ancestor` — `new Derived()` fits a `Base` parameter when
+        `class Derived extends Base`. The argument's type resolves where
+        the argument is spelled; the annotation's name resolves at its
+        own site so `D extends N.Base` is not confused with a global
+        `Base`."""
+        first = self._lookup(name, arg_position, "type")
+        ancestor_record = self._base_type_record(ancestor, decl_position)
+        if first is None or ancestor_record is None:
+            return False
+        seen: set[int] = set()
+        queue = [first]
+        while queue:
+            record = queue.pop()
+            if record.binding.id == ancestor_record.binding.id:
+                return True
+            decl = record.node.parent if record.node is not None else None
+            if decl is None or decl.id in seen:
+                continue
+            seen.add(decl.id)
+            for base, base_value in self._type_bases.get(decl.id, ()):
+                base_record = self._base_type_record(
+                    base,
+                    decl.start_byte,
+                    for_type=not base_value,
+                )
+                if base_record is not None:
+                    queue.append(base_record)
+        return False
+
 
     def _member_name_sets(
         self, candidate: _Record
@@ -2198,6 +2713,7 @@ class _TypeScriptBindings:
         position: int,
         *,
         collect_extras: list[_Record] | None = None,
+        args_node: Any | None = None,
     ) -> _Record | None:
         # Exported-name collisions on the object segment: the losing
         # members stay reachable for this one lookup step, so a value
@@ -2220,6 +2736,7 @@ class _TypeScriptBindings:
             via_this=via_this,
             extra_seed=tuple(inner_extras),
             collect_extras=collect_extras,
+            args_node=args_node,
         )
 
     def _resolve(
@@ -2232,6 +2749,7 @@ class _TypeScriptBindings:
         tdz_function: Any | None = None,
         check_tdz: bool = True,
         constructible: bool = False,
+        args_node: Any | None = None,
     ) -> tuple[_Record | None, str | None]:
         name = self.text(node)
         if name == "arguments" and namespace == "value":
@@ -2241,6 +2759,41 @@ class _TypeScriptBindings:
             self.add_unresolved(node, name, "with_scope")
             return None, "with_scope"
         record = self._lookup(name, node.start_byte, namespace)
+        if (
+            record is not None
+            and args_node is not None
+            and namespace == "value"
+            and record.function_node is not None
+        ):
+            signatures = [
+                candidate
+                for candidate in self._lookup_candidates(
+                    name, node.start_byte, namespace
+                )
+                if candidate.function_node is not None
+            ]
+            if signatures:
+                # A nearer scope's `f` shadows outer declarations — only
+                # overloads in that innermost scope may be picked.
+                scope = signatures[0].binding.scope
+                key = (
+                    None if scope is None else (scope.start, scope.end)
+                )
+                signatures = [
+                    candidate
+                    for candidate in signatures
+                    if (
+                        None
+                        if candidate.binding.scope is None
+                        else (
+                            candidate.binding.scope.start,
+                            candidate.binding.scope.end,
+                        )
+                    ) == key
+                ]
+            narrowed = self._narrow_overloads(signatures, args_node)
+            if narrowed:
+                record = narrowed[0]
         if record is not None and constructible:
             # `new N()` on a merged declaration must name the class, so
             # the reference lands on the class before it is emitted.
@@ -2734,6 +3287,7 @@ class _TypeScriptBindings:
                     receiver,
                     self.text(property_node),
                     node.start_byte,
+                    args_node=node.child_by_field_name("arguments"),
                 )
                 if new and member is not None:
                     member = self._merged_constructible(
@@ -2818,7 +3372,12 @@ class _TypeScriptBindings:
             self._append_call(Call(self.span(node), args, owner, "", "builtin"))
             return
         record, reason = self._resolve(
-            callee, "value", "call", with_scopes, constructible=new
+            callee,
+            "value",
+            "call",
+            with_scopes,
+            constructible=new,
+            args_node=node.child_by_field_name("arguments"),
         )
         if name == "eval" and not new:
             self.add_gap("dynamic_eval", node)
