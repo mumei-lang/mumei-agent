@@ -14665,11 +14665,33 @@ class _Builder:
         # pointee, None a reseat onto opaque memory (closes), and
         # RESTORE the return to the param's own entry pointee.
         for pending_id, alias_ref in self._pending_param_reseats:
-            if getattr(self, "_conditional", False) and alias_ref is not None:
+            if (
+                getattr(self, "_conditional", False)
+                and alias_ref is not None
+            ):
                 # The producing statement may not have run (a goto or
                 # break skipped it) — the reseat is a maybe, and a
                 # maybe-reseated pointee is ambiguous: close it like
                 # a may-alias join. A pending `None` already closes.
+                # A pending that is already a no-op (`p = p`, or an
+                # alias/restore the state already holds) stays one —
+                # the skipped path agrees with the applied path.
+                if alias_ref is _PARAM_POINTER_RESTORE:
+                    if (
+                        pending_id not in self._pointer_param_reseats
+                        and pending_id
+                        not in self._param_pointer_aliases
+                    ):
+                        continue
+                elif (
+                    self._param_pointer_aliases.get(pending_id)
+                    is not None
+                    and self._param_pointer_aliases[
+                        pending_id
+                    ].binding_id
+                    == alias_ref.binding_id
+                ):
+                    continue
                 alias_ref = None
             if alias_ref is _PARAM_POINTER_RESTORE:
                 self._pointer_param_reseats.discard(pending_id)
