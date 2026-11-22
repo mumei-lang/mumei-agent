@@ -15,6 +15,7 @@ on:
       - agent/native_*.py
       - agent/body_port.py
       - agent/core_evidence*.py
+      - agent/evidence_accept*.py
       - agent/context_files.py
       - agent/evidence_check_*.py
       - agent/harness_metrics.py
@@ -24,14 +25,25 @@ on:
       - agent/proliferate*.py
       - agent/strategies/**
       - agent/test_harvest.py
+      - agent/publish.py
+      - agent/verify_accept*.py
+      - agent/verify_attempt*.py
       - agent/verify_recheck*.py
       - agent/verify_schedule.py
       - agent/mumei_client.py
       - tests/test_evidence_check_*.py
+      - tests/test_core_evidence.py
+      - tests/test_evidence_accept_list.py
       - tests/test_native_*.py
       - tests/test_body_port.py
+      - tests/test_binary_integration.py
+      - tests/test_audit.py
+      - tests/test_integration_e2e.py
       - tests/test_observe_tests_cli.py
+      - tests/test_publish_e2e.py
       - tests/test_proliferate_sibling_lemmas.py
+      - tests/test_verify_accept.py
+      - tests/test_verify_attempt.py
       - tests/test_verify_recheck.py
       - tests/test_verify_schedule.py
       - tests/test_controls_gate.py
@@ -105,6 +117,7 @@ jobs:
           CORE_SHA="$(git -C mumei rev-parse HEAD)"
           echo "Core develop commit: \`${CORE_SHA}\`" >> "$GITHUB_STEP_SUMMARY"
 
+      # Core develop drift vs fixtures (reported to Core lane): linearity/temporal-effect fixtures now verify; precondition_fail reports no failure_type; effect_mismatch reports precondition_violated.
       - name: Run real-Core native integration tests
         working-directory: mumei-agent
         run: |
@@ -126,6 +139,21 @@ jobs:
               tests/test_native_stdout_recheck.py \
               tests/test_verify_recheck.py \
               tests/test_controls_gate.py \
+              tests/test_core_evidence.py \
+              tests/test_evidence_accept_list.py \
+              tests/test_evidence_check_adapter.py \
+              tests/test_evidence_check_attempt_acceptance.py \
+              tests/test_evidence_check_schedule.py \
+              tests/test_verify_accept.py \
+              tests/test_verify_attempt.py \
+              tests/test_binary_integration.py \
+              tests/test_audit.py \
+              tests/test_publish_e2e.py \
+              tests/test_integration_e2e.py \
+              --deselect 'tests/test_binary_integration.py::TestVerifyViolationFixtures::test_verify_detects_violation[precondition_fail]' \
+              --deselect 'tests/test_binary_integration.py::TestVerifyViolationFixtures::test_verify_detects_violation[linearity_fail]' \
+              --deselect 'tests/test_binary_integration.py::TestVerifyViolationFixtures::test_verify_detects_violation[temporal_effect_fail]' \
+              --deselect 'tests/test_binary_integration.py::TestVerifyViolationFixtures::test_verify_detects_violation[effect_mismatch]' \
               -m integration --run-integration \
               -v --tb=short --junitxml=real-core-junit.xml
 
@@ -164,7 +192,7 @@ jobs:
           from pathlib import Path
 
           reports = [
-              ("Real-Core native integration", "real-core-junit.xml", 45),
+              ("Real-Core native integration", "real-core-junit.xml", 133),
               ("Real-Core binary-gated unit tests", "real-core-unmarked-junit.xml", 20),
           ]
           lines = [
