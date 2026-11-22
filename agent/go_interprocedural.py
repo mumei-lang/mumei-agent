@@ -6451,6 +6451,29 @@ class _Builder:
             ):
                 receiver_id = _iface_leaf[2].binding_id
                 interface_id = _iface_leaf[1].type.type_id or None
+            elif (
+                # `f := p.B[i].J.M` — a method value bound from an
+                # interface member inside a struct element: the
+                # receiver is the member slot, folded through the
+                # operand's own read path at the call site.
+                (
+                    _iface_elem := (
+                        self._opaque_container_struct_element_field_target(
+                            operand, params
+                        )
+                    )
+                )
+                is not None
+                and _iface_elem[6]
+                and getattr(
+                    _iface_elem[6][-1].type, "kind", None
+                )
+                == "interface"
+            ):
+                receiver_id = _iface_elem[0].binding_id
+                interface_id = (
+                    _iface_elem[6][-1].type.type_id or None
+                )
             else:
                 interface_member = self._package_member(operand)
                 if (

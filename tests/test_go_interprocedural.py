@@ -6594,6 +6594,56 @@ def test_interface_member_read_inside_element(
     assert not result.available
 
 
+def test_interface_member_method_value_inside_element(
+    go_types_helper,
+):
+    # `f := p.B[i].J.M` — a method value bound from an interface
+    # member inside a struct element freezes the member slot's
+    # deps; `f()` dispatches on them like `p.B[i].J.M()` does.
+    declarations = (
+        "type I interface{ M() int64 }\n"
+        "type E struct{ J I; V int64 }\n"
+        "type S struct{ B []E }\n"
+        "func F(p *S, e I) int64 {\n"
+        "\tp.B[0].J = e\n"
+        "\tf := p.B[1].J.M\n"
+        "\treturn f()\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+    for body, fn in (
+        ("f := (*pp).B[0].J.M", "func F(pp **S) int64 {\n"),
+        ("q := p; f := q.B[0].J.M", "func F(p *S) int64 {\n"),
+    ):
+        declarations = (
+            "type I interface{ M() int64 }\n"
+            "type E struct{ J I; V int64 }\n"
+            "type S struct{ B []E }\n"
+            + fn
+            + f"\t{body}\n"
+            + "\treturn f()\n"
+            + "}\n"
+        )
+        result = named(*unit(go_types_helper, declarations))
+        assert result.available, (body, result.gaps)
+        assert result.return_dependencies == frozenset({0})
+    # A value-struct root stays closed.
+    declarations = (
+        "type I interface{ M() int64 }\n"
+        "type E struct{ J I; V int64 }\n"
+        "type S struct{ B []E }\n"
+        "func F(o S) int64 {\n"
+        "\tf := o.B[0].J.M\n"
+        "\treturn f()\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available
+
+
 def test_interface_member_store_inside_element(
     go_types_helper,
 ):
