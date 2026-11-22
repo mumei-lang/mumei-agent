@@ -9517,7 +9517,13 @@ class _Builder:
                     # dispatch through `_interface_value_binding`.
                     scope[binding.id] = deps
                     continue
-                if pos == 1 and binding.type.kind == "struct":
+                if (
+                    pos == 1
+                    and binding.type.kind == "struct"
+                    and not self._struct_collection_members(
+                        binding.type
+                    )
+                ):
                     # `for _, e := range p.B` — a struct element
                     # whose type has no collection-member snapshot
                     # (a pointer, interface, or other unsupported
@@ -9526,7 +9532,10 @@ class _Builder:
                     # `e.J.M()` folds the copy's deps through the
                     # interface dispatch, and writes through pointer
                     # members stay closed like on a local struct
-                    # literal.
+                    # literal. An element that also carries a slice
+                    # or map member stays closed — that member's
+                    # backing is shared with the element's memory
+                    # and a plain binding cannot name it.
                     scope[binding.id] = deps
                     continue
                 if binding.type.kind not in {

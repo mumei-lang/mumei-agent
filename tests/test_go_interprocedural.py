@@ -6652,6 +6652,23 @@ def test_range_struct_element_unsupported_members(
     )
     result = named(*unit(go_types_helper, declarations))
     assert not result.available
+    # An element that also carries a collection member stays
+    # closed entirely — `e.A`'s backing is shared with the
+    # element's memory and a plain binding cannot name it.
+    declarations = (
+        "type I interface{ M() int64 }\n"
+        "type E struct{ J I; A []int64; V int64 }\n"
+        "type S struct{ B []E }\n"
+        "func F(p *S) int64 {\n"
+        "\tn := int64(0)\n"
+        "\tfor _, e := range p.B {\n"
+        "\t\tn += e.V\n"
+        "\t}\n"
+        "\treturn n\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available
 
 
 def test_interface_member_method_value_inside_element(
