@@ -4082,3 +4082,61 @@ fn f(o: Option<P>) {
     )
     assert call.target == outer.id
     assert call.target != inner.id
+
+
+def test_prelude_pattern_on_field_scrutinee() -> None:
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+struct W { opt: Option<P> }
+fn f(w: W) {
+    match w.opt { Some(p) => p.m(), _ => {} }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = _bindings(report, "m", "associated_function")[0]
+    assert _call(report, source, "p.m()").target == method.id
+
+
+def test_prelude_pattern_on_self_field_scrutinee() -> None:
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+struct W { opt: Option<P> }
+impl W {
+    fn f(&self) {
+        if let Some(p) = self.opt { p.m(); }
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = _bindings(report, "m", "associated_function")[0]
+    assert _call(report, source, "p.m()").target == method.id
+
+
+def test_prelude_pattern_on_nested_field_chain() -> None:
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+struct W { opt: Option<P> }
+struct G { w: W }
+fn f(g: G) {
+    match g.w.opt { Some(p) => p.m(), _ => {} }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = _bindings(report, "m", "associated_function")[0]
+    assert _call(report, source, "p.m()").target == method.id
+
+
+def test_prelude_pattern_on_wrong_field_container_stays_opaque() -> None:
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+struct W { v: Vec<P> }
+fn f(w: W) {
+    match w.v { Some(p) => p.m(), _ => {} }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    assert _call(report, source, "p.m()").target == ""

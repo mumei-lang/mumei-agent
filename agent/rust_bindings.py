@@ -3827,7 +3827,21 @@ class _RustBindings:
         node = value
         while node is not None and node.type == "reference_expression":
             node = next(iter(node.named_children), None)
-        if node is None or node.type != "identifier":
+        if node is None:
+            return None, None
+        if node.type == "field_expression":
+            # `match w.opt` / `if let Some(p) = self.opt` — the
+            # scrutinee's spelled head is the field's annotation.
+            field = self._field_member(
+                node, ("struct_field", "associated_const")
+            )
+            if field is None or field.type_node is None:
+                return None, None
+            return (
+                self._annotation_head_name(field.type_node),
+                field.type_node.start_byte,
+            )
+        if node.type != "identifier":
             return None, None
         record = self._lookup(
             self._normalize_identifier(self.text(node)),
