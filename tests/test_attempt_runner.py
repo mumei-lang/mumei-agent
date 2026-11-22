@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -49,6 +50,17 @@ def _fake_unshare(tmp_path, script):
     executable.write_text(f"#!/bin/sh\n{script}\n")
     executable.chmod(0o755)
     return str(executable)
+
+
+def _fake_passthrough_unshare(tmp_path):
+    script = (
+        "while [ \"$#\" -gt 0 ]; do\n"
+        "  if [ \"$1\" = \"--\" ]; then shift; break; fi\n"
+        "  shift\n"
+        "done\n"
+        "exec \"$@\""
+    )
+    return _fake_unshare(tmp_path, script)
 
 
 @pytest.mark.parametrize(
@@ -293,17 +305,10 @@ def test_run_network_isolation_rejects_unshare_failure(
 def test_run_network_isolation_marker_preserves_target_exit(
     tmp_path, monkeypatch, exit_code
 ):
-    script = (
-        "while [ \"$#\" -gt 0 ]; do\n"
-        "  if [ \"$1\" = \"--\" ]; then shift; break; fi\n"
-        "  shift\n"
-        "done\n"
-        "exec \"$@\""
-    )
     monkeypatch.setattr(
         attempt_runner,
         "_UNSHARE",
-        _fake_unshare(tmp_path, script),
+        _fake_passthrough_unshare(tmp_path),
     )
     result = AttemptRunner().run(
         request(),
@@ -317,6 +322,66 @@ def test_run_network_isolation_marker_preserves_target_exit(
         "exited",
     ]
     assert result.record.events[-1].exit_code == exit_code
+
+
+@pytest.mark.parametrize(
+    ("locale", "expected"),
+    [(None, b"unset"), ("POSIX", b"POSIX")],
+    ids=["absent-lc-ctype", "explicit-lc-ctype"],
+)
+@pytest.mark.skipif(os.name != "posix", reason="fake unshare requires POSIX")
+def test_run_network_isolation_restores_target_lc_ctype(
+    tmp_path, monkeypatch, locale, expected
+):
+    monkeypatch.setattr(
+        attempt_runner,
+        "_UNSHARE",
+        _fake_passthrough_unshare(tmp_path),
+    )
+    environment = {"PATH": os.environ["PATH"]}
+    if locale is not None:
+        environment["LC_CTYPE"] = locale
+    result = AttemptRunner().run(
+        request(),
+        ("/bin/sh", "-c", 'printf %s "${LC_CTYPE-unset}"'),
+        environment=environment,
+        isolate_network=True,
+    )
+
+    assert result.record.state == "exited"
+    assert result.record.events[-1].exit_code == 0
+    assert result.stdout == expected
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux")
+    or not os.path.exists("/proc/self/status"),
+    reason="requires Linux /proc/self/status",
+)
+def test_run_network_isolation_restores_default_ignored_signals(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        attempt_runner,
+        "_UNSHARE",
+        _fake_passthrough_unshare(tmp_path),
+    )
+    result = AttemptRunner().run(
+        request(),
+        ("/bin/sh", "-c", "grep SigIgn /proc/self/status"),
+        isolate_network=True,
+    )
+
+    assert result.record.state == "exited"
+    assert result.record.events[-1].exit_code == 0
+    sigign_line = next(
+        line for line in result.stdout.splitlines() if line.startswith(b"SigIgn:")
+    )
+    ignored_signals = int(sigign_line.split()[1], 16)
+    for name in ("SIGPIPE", "SIGXFSZ"):
+        if hasattr(signal, name):
+            signal_bit = 1 << (getattr(signal, name) - 1)
+            assert ignored_signals & signal_bit == 0
 
 
 @pytest.mark.skipif(

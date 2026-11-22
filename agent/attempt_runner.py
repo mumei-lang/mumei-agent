@@ -220,12 +220,20 @@ def _detect_unshare() -> "str | None":
 
 
 _UNSHARE = _detect_unshare()
-_NETNS_MARKER_SCRIPT = """import os, sys
+_NETNS_MARKER_SCRIPT = """import os, signal, sys
 fd = int(sys.argv[1])
+lc_ctype = sys.argv[2]
+if lc_ctype:
+    os.environ["LC_CTYPE"] = lc_ctype[1:]
+else:
+    os.environ.pop("LC_CTYPE", None)
+for name in ("SIGPIPE", "SIGXFSZ"):
+    if hasattr(signal, name):
+        signal.signal(getattr(signal, name), signal.SIG_DFL)
 os.write(fd, b"x")
 os.set_inheritable(fd, False)
 try:
-    os.execvp(sys.argv[2], sys.argv[2:])
+    os.execvp(sys.argv[3], sys.argv[3:])
 except OSError:
     os.write(fd, b"e")
     os._exit(127)
@@ -550,15 +558,24 @@ class AttemptRunner:
                 preexec = _memory_bound_preexec(memory_bound_mb)
         if isolate_network:
             # The close-on-exec marker distinguishes target exits from setup failures.
+            target_environment = (
+                os.environ if child_environment is None else child_environment
+            )
+            target_lc_ctype = target_environment.get("LC_CTYPE")
+            lc_ctype_argument = (
+                "" if target_lc_ctype is None else f"={target_lc_ctype}"
+            )
             spawn_argv = [
                 _UNSHARE,
                 "--net",
                 "--map-current-user",
                 "--",
                 sys.executable,
+                "-I",
                 "-c",
                 _NETNS_MARKER_SCRIPT,
                 str(marker_write_fd),
+                lc_ctype_argument,
                 *spawn_argv,
             ]
         popen_options = (
