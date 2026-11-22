@@ -7,7 +7,7 @@ import importlib
 import re
 import sys
 import warnings
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -91,6 +91,7 @@ class _Record:
     location: str = ""
     underlying: Any | None = None
     parameter_signature: tuple[str, ...] | None = None
+    members: dict[str, "_Record"] = field(default_factory=dict)
 
 
 @dataclass(eq=False)
@@ -148,6 +149,7 @@ class _SolBindings:
         self.calls: list[Call] = []
         self.gaps: list[Gap] = []
         self.contracts: dict[str, _Contract] = {}
+        self.type_records: dict[int, _Record] = {}
         self.current_contract: _Contract | None = None
         self.file_usings: list[_Using] = []
         self.call_owner = ""
@@ -510,7 +512,7 @@ class _SolBindings:
                 None,
             )
             type_node = underlying
-        return self._add(
+        record = self._add(
             scope,
             name,
             kind,
@@ -519,6 +521,62 @@ class _SolBindings:
             owner=owner,
             underlying=underlying,
         )
+        if kind in {"struct", "enum"}:
+            self.type_records[record.binding.id] = record
+            self._populate_type_members(record, node, owner)
+        return record
+
+    def _populate_type_members(
+        self, record: _Record, node: Any, owner: _Contract | None
+    ) -> None:
+        member_scope = _Scope("type_members", node, owner, {})
+        span = ByteSpan(node.start_byte, node.end_byte)
+        if record.binding.kind == "struct":
+            body = next(
+                (child for child in self.children(node) if child.type == "struct_body"),
+                None,
+            )
+            if body is None:
+                return
+            for member in self.children(body):
+                if member.type != "struct_member":
+                    continue
+                field_name = member.child_by_field_name("name") or next(
+                    (c for c in self.children(member) if c.type == "identifier"),
+                    None,
+                )
+                if field_name is None:
+                    continue
+                record.members[self.text(field_name)] = self._add(
+                    member_scope,
+                    field_name,
+                    "struct_field",
+                    binding_scope=span,
+                    type_node=member.child_by_field_name("type")
+                    or next(
+                        (c for c in self.children(member) if c.type == "type_name"),
+                        None,
+                    ),
+                    owner=owner,
+                    mutable=True,
+                )
+        elif record.binding.kind == "enum":
+            body = next(
+                (child for child in self.children(node) if child.type == "enum_body"),
+                None,
+            )
+            if body is None:
+                return
+            for member in self.children(body):
+                if member.type != "enum_value":
+                    continue
+                record.members[self.text(member)] = self._add(
+                    member_scope,
+                    member,
+                    "enum_member",
+                    binding_scope=span,
+                    owner=owner,
+                )
 
     def _visibility(self, node: Any) -> str:
         value = node.child_by_field_name("visibility")
@@ -794,6 +852,7 @@ class _SolBindings:
                     return member, None, "private_base_member"
             return member, None, None
         contract = None
+        type_record = None
         inside_owner = False
         if obj.type == "identifier" and text == "this":
             contract = self.current_contract
@@ -805,6 +864,8 @@ class _SolBindings:
             if record is not None:
                 if record.binding.kind in {"contract", "interface", "library"}:
                     contract = self.contracts.get(record.binding.name)
+                elif record.binding.kind == "enum":
+                    type_record = record
                 else:
                     fact = self._type_fact(
                         record.type_node, record.owner, set()
@@ -818,22 +879,36 @@ class _SolBindings:
                         and record.type_node is not None
                         and "." not in self.text(record.type_node)
                     ):
-                        contract = next(
-                            (
-                                candidate
-                                for candidate in self.contracts.values()
-                                if candidate.record.binding.id == fact.type_id
-                            ),
-                            None,
-                        )
+                        type_record = self.type_records.get(fact.type_id)
+                        if type_record is None:
+                            contract = next(
+                                (
+                                    candidate
+                                    for candidate in self.contracts.values()
+                                    if candidate.record.binding.id == fact.type_id
+                                ),
+                                None,
+                            )
+        elif obj.type == "member_expression":
+            # Member chains (`vault.coin.v`): resolve the inner member
+            # first, then use its declared type.
+            _inner_member, inner, _inner_reason = self._resolve_member(obj)
+            if inner is not None:
+                type_record = self._type_record_for_type_node(
+                    inner.type_node, inner.owner
+                )
         elif obj.type == "array_access":
             # `tokens[0].transfer()`: the element type of a contract
             # array is contract-typed.
             base = self._unwrap(obj.child_by_field_name("base"))
             base_record = self._object_record(base)
-            contract = self._array_element_contract(base_record)
+            type_record = self._array_element_type_record(base_record)
         elif obj.type == "call_expression":
-            contract = self._call_return_contract(obj)
+            type_record = self._call_return_type_record(obj)
+        if contract is None and type_record is not None and (
+            type_record.binding.kind in {"contract", "interface", "library"}
+        ):
+            contract = self.contracts.get(type_record.binding.name)
         if contract is not None:
             inside_owner = inside_owner or (
                 self.current_contract is not None
@@ -848,6 +923,10 @@ class _SolBindings:
             )
             if record is not None or reason is not None:
                 return member, record, reason
+        if type_record is not None:
+            found = type_record.members.get(name)
+            if found is not None:
+                return member, found, None
         record, reason = self._lookup_using(name, obj, member.start_byte)
         return member, record, reason
 
@@ -908,17 +987,20 @@ class _SolBindings:
             return candidates[0], None
         return None, first_reason
 
-    def _contract_for_type_node(
+    def _type_record_for_type_node(
         self, type_node: Any | None, owner: _Contract | None
-    ) -> _Contract | None:
+    ) -> _Record | None:
         if type_node is None or "." in self.text(type_node):
             return None
         fact = self._type_fact(type_node, owner, set())
         if fact.type_id is None:
             return None
+        record = self.type_records.get(fact.type_id)
+        if record is not None:
+            return record
         return next(
             (
-                candidate
+                candidate.record
                 for candidate in self.contracts.values()
                 if candidate.record.binding.id == fact.type_id
             ),
@@ -957,16 +1039,16 @@ class _SolBindings:
                 return self._lookup_type_record(root, obj.start_byte, None)
         return None
 
-    def _array_element_contract(
+    def _array_element_type_record(
         self, record: _Record | None
-    ) -> _Contract | None:
+    ) -> _Record | None:
         if record is None or record.type_node is None:
             return None
         text = re.sub(
             r"\b(memory|calldata|storage)\b", "", self.text(record.type_node)
         )
         # Strip one array dimension; anything left that still indexes
-        # (nested arrays, mappings) has no contract member surface.
+        # (nested arrays, mappings) has no member surface.
         element = re.sub(r"\[[^\]]*\]\s*$", "", text).strip()
         if element == text.strip() or "[" in element:
             return None
@@ -975,11 +1057,12 @@ class _SolBindings:
             "contract",
             "interface",
             "library",
+            "struct",
         }:
             return None
-        return self.contracts.get(base.binding.name)
+        return base
 
-    def _call_return_contract(self, call: Any) -> _Contract | None:
+    def _call_return_type_record(self, call: Any) -> _Record | None:
         callee = self._unwrap(call.child_by_field_name("function"))
         record = self._object_record(callee)
         if record is None:
@@ -987,7 +1070,7 @@ class _SolBindings:
         if record.binding.kind in {"contract", "interface", "library"}:
             # `new Token()` / `Token(addr)` — the value is typed by the
             # contract itself.
-            return self.contracts.get(record.binding.name)
+            return record
         if record.binding.kind != "function":
             if record.type_node is not None and not re.match(
                 r"\s*function\b", self.text(record.type_node)
@@ -996,7 +1079,7 @@ class _SolBindings:
                 # `this.token().f()` — the value has the variable's
                 # declared type. Function-typed variables (`cb(t)`)
                 # would root at the signature's first identifier.
-                return self._contract_for_type_node(
+                return self._type_record_for_type_node(
                     record.type_node, record.owner
                 )
             return None
@@ -1014,7 +1097,7 @@ class _SolBindings:
             # no contract member surface; `_type_fact` would root at the
             # first identifier inside the signature.
             return None
-        return self._contract_for_type_node(type_node, record.owner)
+        return self._type_record_for_type_node(type_node, record.owner)
 
     def _canonical_type_text(self, text: str) -> str:
         # Whitespace (`uint256 [ ]`) and the bare `uint`/`int`/`byte`
@@ -1818,8 +1901,7 @@ class _SolBindings:
                 root = self._unwrap(root)
             if root is not None and root.type == "array_access":
                 self._place(root, mode, assignment_node=assignment_node)
-                return
-            if root is not None and root.type == "identifier":
+            elif root is not None and root.type == "identifier":
                 record = self._lookup(root.text.decode(), root.start_byte, "value")[0]
                 if record is not None and record.location == "storage":
                     self._add_ref(root, record, "read")
@@ -1827,6 +1909,27 @@ class _SolBindings:
                     self._place(root, mode, assignment_node=assignment_node)
             else:
                 self._expr(root)
+            # Member names in the chain keep their own references:
+            # inner members are reads, the outermost takes `mode`.
+            current = node
+            while current.type == "member_expression":
+                member, member_record, member_reason = self._resolve_member(
+                    current
+                )
+                if member is not None and member_record is not None:
+                    self._add_ref(
+                        member,
+                        member_record,
+                        mode if current is node and mode != "read_write" else "read",
+                    )
+                elif member is not None and member_reason is not None:
+                    self._add_unresolved(
+                        member, self.text(member), member_reason
+                    )
+                obj = self._unwrap(current.child_by_field_name("object"))
+                if obj is current:
+                    break
+                current = obj
             return
         if node.type == "array_access":
             base = self._unwrap(node.child_by_field_name("base"))

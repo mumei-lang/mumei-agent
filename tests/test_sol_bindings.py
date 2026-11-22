@@ -831,8 +831,15 @@ contract C {
     pointer = _bindings(report, "pointer", "parameter")[0]
     assert [ref.kind for ref in report.references if ref.binding_id == pointer.id] == ["read"]
     stored = _bindings(report, "stored", "state_variable")[0]
+    # `this.stored = stored` now emits the member's own write
+    # reference alongside the right-hand read.
     stored_refs = [ref for ref in report.references if ref.binding_id == stored.id]
-    assert all(ref.kind == "read" for ref in stored_refs)
+    assert sorted(ref.kind for ref in stored_refs) == ["read", "write"]
+    value = _bindings(report, "value", "struct_field")[0]
+    assert any(
+        ref.binding_id == value.id and ref.kind == "write"
+        for ref in report.references
+    )
 
 
 @pytest.mark.parametrize("qualifier", ["constant", "immutable"])
@@ -1699,6 +1706,113 @@ contract Vault {
     )
     assert not any(
         ref.binding_id == length.id for ref in report.references
+    )
+
+
+def test_enum_member_access_resolves():
+    source = """
+enum Status { Ready, Done }
+contract Vault {
+    Status status;
+    function run() external {
+        status = Status.Ready;
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    ready = next(
+        binding for binding in report.bindings if binding.name == "Ready"
+    )
+    assert ready.kind == "enum_member"
+    assert any(
+        ref.binding_id == ready.id and ref.kind == "read"
+        for ref in report.references
+    )
+
+
+def test_struct_field_read_and_write_resolve():
+    source = """
+struct Coin { uint256 v; }
+contract Vault {
+    Coin coin;
+    function run() external {
+        coin.v = 1;
+        uint256 x = coin.v;
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    v = next(binding for binding in report.bindings if binding.name == "v")
+    assert v.kind == "struct_field"
+    kinds = sorted(
+        ref.kind for ref in report.references if ref.binding_id == v.id
+    )
+    assert kinds == ["read", "write"]
+
+
+def test_member_chain_through_struct_field_resolves():
+    source = """
+struct Coin { Token t; }
+contract Token {
+    function transfer(address to, uint256 a) external {}
+}
+contract Vault {
+    Coin coin;
+    function run() external {
+        coin.t.transfer(address(0), 1);
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    t = next(binding for binding in report.bindings if binding.name == "t")
+    transfer = next(
+        binding
+        for binding in report.bindings
+        if binding.name == "transfer"
+    )
+    assert any(
+        ref.binding_id == t.id and ref.kind == "read"
+        for ref in report.references
+    )
+    assert any(
+        ref.binding_id == transfer.id and ref.kind == "call"
+        for ref in report.references
+    )
+
+
+def test_struct_array_element_field_resolves():
+    source = """
+struct Coin { uint256 v; }
+contract Vault {
+    Coin[] coins;
+    function run() external {
+        coins[0].v = 1;
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    v = next(binding for binding in report.bindings if binding.name == "v")
+    assert any(
+        ref.binding_id == v.id and ref.kind == "write"
+        for ref in report.references
+    )
+
+
+def test_struct_return_field_resolves():
+    source = """
+struct Coin { uint256 v; }
+contract Vault {
+    function getCoin() internal returns (Coin memory c) {}
+    function run() external {
+        uint256 x = getCoin().v;
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    v = next(binding for binding in report.bindings if binding.name == "v")
+    assert any(
+        ref.binding_id == v.id and ref.kind == "read"
+        for ref in report.references
     )
 
 
