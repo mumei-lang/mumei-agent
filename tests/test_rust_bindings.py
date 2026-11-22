@@ -2818,3 +2818,79 @@ fn f() { <A as T>::m(&P); }
     )
     call = _call(report, source, "<A as T>::m(&P)")
     assert call.target == impl_member.id
+
+
+def test_ufcs_generic_trait_picks_matching_impl():
+    # `<P as T<u32>>::m` resolves to the `u32` impl, not the first
+    # registered `T` impl for `P`.
+    source = """
+trait T<A> { fn m(&self) -> i32; }
+struct P;
+impl T<i32> for P { fn m(&self) -> i32 { 1 } }
+impl T<u32> for P { fn m(&self) -> i32 { 2 } }
+fn f(p: P) { <P as T<u32>>::m(&p); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    u32_impl = next(
+        b
+        for b in report.bindings
+        if b.name == "m" and b.span.start == source.rindex("fn m") + 3
+    )
+    call = _call(report, source, "<P as T<u32>>::m(&p)")
+    assert call.target == u32_impl.id
+
+
+def test_index_range_then_index_resolves_element():
+    # `v[1..][0]` is a `P` — the slice's anonymous element type.
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn f(v: &[P]) { v[1..][0].m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    member = next(
+        b for b in report.bindings
+        if b.name == "m" and b.kind == "associated_function"
+    )
+    call = _call(report, source, "v[1..][0].m()")
+    assert call.target == member.id
+
+
+def test_index_call_arg_with_range_stays_element():
+    # `v[find_index(0..10)]` is an integer index — the `..` inside the
+    # call's argument does not make the receiver a slice.
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn find_index(_r: core::ops::Range<i32>) -> usize { 0 }
+fn f(v: &[P]) { v[find_index(0..10)].m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    member = next(
+        b for b in report.bindings
+        if b.name == "m" and b.kind == "associated_function"
+    )
+    call = _call(report, source, "v[find_index(0..10)].m()")
+    assert call.target == member.id
+
+
+def test_module_const_generic_type_annotation_resolves():
+    # `const N: Count` inside `mod m` finds the module-local alias.
+    source = """
+fn f(s: &m::S<3>) {}
+mod m {
+    pub type Count = usize;
+    pub struct S<const N: Count> { _a: [u8; N] }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    count = next(
+        b for b in report.bindings
+        if b.name == "Count" and b.kind == "type_alias"
+    )
+    param = next(
+        b for b in report.bindings
+        if b.name == "N" and b.kind == "generic_parameter"
+    )
+    assert param.type is not None
+    assert param.type.type_id == count.id
