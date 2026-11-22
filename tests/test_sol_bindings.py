@@ -2905,3 +2905,29 @@ contract C { function g() public { uint(1).f(); } }
     ]
     assert call.kind == "opaque_member"
     assert call.target == ""
+
+
+def test_elementary_conversion_argument_types_overload_resolution():
+    # The same declared-type extraction feeds argument inference:
+    # `this.take(uint(1))` sees an actual `uint`, so it binds the
+    # `uint256` overload rather than staying ambiguous.
+    source = """
+contract C {
+    function take(uint256 x) public {}
+    function take(address x) public {}
+    function g() public { this.take(uint(1)); }
+}
+"""
+    report = build_sol_bindings(source)
+    takes = [
+        b for b in report.bindings if b.name == "take" and b.kind == "function"
+    ]
+    call = next(
+        c
+        for c in _calls(report, source)
+        if source[c.span.start : c.span.end] == "this.take(uint(1))"
+    )
+    uint_take = next(
+        b for b in takes if "uint256 x" in source[b.span.start : b.span.start + 40]
+    )
+    assert call.target == uint_take.id
