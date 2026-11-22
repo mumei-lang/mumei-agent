@@ -20,7 +20,9 @@ from the `probe_argv` manifest key, and `probe_request_for(descriptor,
 stamp)` binds it to the descriptor's declared `max_timeout_ms` /
 `max_memory_mb` budgets — a manifest pins how much room its own probe
 gets, and a descriptor without the declaration is a static error, never
-a wildcard probe.
+a wildcard probe. Probes use a minimal environment and isolated network
+by default where the host can enforce them; inheritance or network access
+requires the adapter to declare the permission and policy to allow it.
 
 For scheduling, `probe_requests_for(registry, request, policy,
 observations, stamp=...)` runs `plan()` and emits a request for each
@@ -68,7 +70,9 @@ from dataclasses import dataclass, replace
 from agent.attempt_runner import (
     MAX_MEMORY_BOUND_MB,
     AttemptRunner,
+    minimal_environment,
     memory_bound_spawn_thread_safe,
+    network_isolation_enforceable,
 )
 from agent.verification_attempt import (
     AttemptCancelRequest,
@@ -155,6 +159,8 @@ class AdapterProbeRequest:
     attempt_number: int = 1
     memory_bound_mb: int | None = None
     tool_version: str | None = None
+    inherit_environment: bool = False
+    isolate_network: bool = True
 
     def __post_init__(self) -> None:
         _label(self.adapter_id)
@@ -186,6 +192,11 @@ class AdapterProbeRequest:
             raise ValueError("invalid adapter probe memory bound")
         if self.tool_version is not None:
             _version(self.tool_version)
+        if (
+            type(self.inherit_environment) is not bool
+            or type(self.isolate_network) is not bool
+        ):
+            raise ValueError("invalid adapter probe enforcement")
 
     def command_fingerprint(self) -> str:
         """The probe command identity: adapter, argv and declared
@@ -287,6 +298,12 @@ def run_probe(
         request.argv,
         cancel_event=cancel_event,
         memory_bound_mb=request.memory_bound_mb,
+        environment=(
+            None if request.inherit_environment else minimal_environment()
+        ),
+        isolate_network=(
+            request.isolate_network and network_isolation_enforceable()
+        ),
     ).normalized()
     observation = RuntimeObservation(
         request.adapter_id,
@@ -303,6 +320,7 @@ def probe_request_for(
     *,
     attempt_number: int = 1,
     tool_version: str | None = None,
+    policy: PlannerPolicy | None = None,
 ) -> AdapterProbeRequest:
     """Bind a manifest-declared probe command to its declared budgets.
 
@@ -315,8 +333,24 @@ def probe_request_for(
     """
     if not isinstance(descriptor, AdapterDescriptor):
         raise ValueError("probe binding requires an adapter descriptor")
+    if policy is not None and not isinstance(policy, PlannerPolicy):
+        raise ValueError("probe binding requires a policy")
     if descriptor.probe_argv is None:
         raise ValueError("probe command not declared")
+    required = descriptor.required_permissions
+    allowed = policy.allowed_permissions if policy is not None else None
+    inherit_environment = (
+        required is not None
+        and "environment.read" in required
+        and allowed is not None
+        and "environment.read" in allowed
+    )
+    isolate_network = not (
+        required is not None
+        and "network.connect" in required
+        and allowed is not None
+        and "network.connect" in allowed
+    )
     return AdapterProbeRequest(
         descriptor.adapter_id,
         descriptor.probe_argv,
@@ -325,6 +359,8 @@ def probe_request_for(
         attempt_number=attempt_number,
         memory_bound_mb=descriptor.max_memory_mb,
         tool_version=tool_version,
+        inherit_environment=inherit_environment,
+        isolate_network=isolate_network,
     )
 
 
@@ -384,6 +420,7 @@ def probe_requests_for(
                 stamp,
                 attempt_number=attempt_number,
                 tool_version=tool_version,
+                policy=policy,
             )
         )
     return tuple(out)

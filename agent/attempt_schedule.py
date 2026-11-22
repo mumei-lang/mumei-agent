@@ -27,6 +27,7 @@ from agent.attempt_runner import (
     AttemptRunner,
     dispatch_attempt,
     memory_bound_enforceable,
+    minimal_environment,
     network_isolation_enforceable,
 )
 from agent.core_evidence import (
@@ -63,15 +64,6 @@ _NON_SUCCESS_REPORTS = frozenset({"failed", "inconclusive"})
 _MAX_LABEL = 128
 
 
-def _minimal_environment() -> dict[str, str]:
-    environment = {}
-    if "PATH" in os.environ:
-        environment["PATH"] = os.environ["PATH"]
-    if os.name == "nt" and "SYSTEMROOT" in os.environ:
-        environment["SYSTEMROOT"] = os.environ["SYSTEMROOT"]
-    return environment
-
-
 def _adapter_environment(plan: VerificationPlan) -> dict[str, str] | None:
     required = plan.selected.required_permissions
     allowed = plan.policy.allowed_permissions
@@ -82,7 +74,7 @@ def _adapter_environment(plan: VerificationPlan) -> dict[str, str] | None:
         and "environment.read" in allowed
     ):
         return None
-    return _minimal_environment()
+    return minimal_environment()
 
 
 def _network_isolated(plan: VerificationPlan) -> bool:
