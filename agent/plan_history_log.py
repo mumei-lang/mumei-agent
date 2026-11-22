@@ -41,8 +41,16 @@ _path_locks_guard = threading.Lock()
 
 def _canonical_json(value: object) -> bytes:
     return json.dumps(
-        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
     ).encode("ascii")
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(_INVALID_LOG)
 
 
 def _is_digest(value: object) -> bool:
@@ -92,8 +100,10 @@ def _read_entries(
         if not line.endswith(b"\n") or line == b"\n":
             raise ValueError(_INVALID_LOG)
         try:
-            entry = json.loads(line[:-1].decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+            entry = json.loads(
+                line[:-1].decode("utf-8"), parse_constant=_reject_json_constant
+            )
+        except (UnicodeDecodeError, ValueError, RecursionError):
             raise ValueError(_INVALID_LOG) from None
         if type(entry) is not dict or set(entry) != _ENTRY_KEYS:
             raise ValueError(_INVALID_ENTRY)

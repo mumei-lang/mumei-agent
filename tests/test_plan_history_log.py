@@ -290,6 +290,26 @@ def test_extremely_nested_plan_is_rejected_with_value_error(tmp_path):
         read_plan_history(str(path))
 
 
+def test_non_finite_json_constant_is_rejected_even_with_matching_digest(tmp_path):
+    path = tmp_path / "history.jsonl"
+    plan = _json_plan(_plan("adapter-nan"))
+    plan["nonfinite"] = float("nan")
+    unsigned = {
+        "schema_version": plan_history_log.ENTRY_SCHEMA,
+        "index": 0,
+        "prev_digest": None,
+        "plan": plan,
+    }
+    entry = {
+        **unsigned,
+        "digest": hashlib.sha256(_canonical(unsigned)).hexdigest(),
+    }
+    path.write_bytes(_canonical(entry) + b"\n")
+
+    with pytest.raises(ValueError, match="invalid plan history log"):
+        read_plan_history(str(path))
+
+
 def test_corrupted_log_refuses_append_without_changing_file_bytes(tmp_path):
     path = tmp_path / "history.jsonl"
     path.write_bytes(b'{"sentinel-plan-history-content":')
