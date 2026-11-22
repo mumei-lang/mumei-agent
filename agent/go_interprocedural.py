@@ -2393,6 +2393,7 @@ class _Builder:
             "field_expression",
             "index_expression",
             "dereference_expression",
+            "unary_expression",
         }:
             if root.type == "parenthesized_expression":
                 root = next(
@@ -2403,6 +2404,13 @@ class _Builder:
                     ),
                     None,
                 )
+            elif root.type == "unary_expression":
+                # `(*p)` — only a dereference unwraps; `&x`, `!b`,
+                # `-n` keep their computed operand closed.
+                unary_op = root.child_by_field_name("operator")
+                if unary_op is None or unary_op.text != b"*":
+                    break
+                root = root.child_by_field_name("operand")
             else:
                 root = root.child_by_field_name("operand")
         root_ref = (
@@ -2492,6 +2500,25 @@ class _Builder:
                     or operator is not None
                     and operator.text == b"*"
                 ):
+                    # `(*p)` on a `*S` parameter names the same
+                    # caller-shared pointee as `p` — keep walking
+                    # into it so `(*p).A[i].V` slots like `p.A[i].V`.
+                    inner = current.child_by_field_name("operand")
+                    while (
+                        inner is not None
+                        and inner.type == "parenthesized_expression"
+                    ):
+                        inner = next(
+                            (
+                                child
+                                for child in inner.named_children
+                                if child.type != "comment"
+                            ),
+                            None,
+                        )
+                    if self._param_pointer_struct_root(inner, params):
+                        current = inner
+                        continue
                     return True
                 current = current.child_by_field_name("operand")
                 continue
@@ -2662,7 +2689,14 @@ class _Builder:
                 "selector_expression",
                 "field_expression",
                 "index_expression",
+                "dereference_expression",
             }:
+                root = root.child_by_field_name("operand")
+                continue
+            if root.type == "unary_expression":
+                unary_op = root.child_by_field_name("operator")
+                if unary_op is None or unary_op.text != b"*":
+                    break
                 root = root.child_by_field_name("operand")
                 continue
             break
@@ -25425,12 +25459,27 @@ class _Builder:
                                 )
                             )
                         elif field_operand.type == "dereference_expression":
-                            pointer_crossed = True
-                            field_operand = (
-                                field_operand.child_by_field_name(
-                                    "operand"
-                                )
+                            inner = field_operand.child_by_field_name(
+                                "operand"
                             )
+                            while (
+                                inner is not None
+                                and inner.type
+                                == "parenthesized_expression"
+                            ):
+                                inner = next(
+                                    (
+                                        child
+                                        for child in inner.named_children
+                                        if child.type != "comment"
+                                    ),
+                                    None,
+                                )
+                            if not self._param_pointer_struct_root(
+                                inner, params
+                            ):
+                                pointer_crossed = True
+                            field_operand = inner
                         elif field_operand.type == "field_expression":
                             field_operand = (
                                 field_operand.child_by_field_name(

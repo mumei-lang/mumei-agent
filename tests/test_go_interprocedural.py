@@ -33137,17 +33137,10 @@ def test_named_struct_element_pointer_param_root_scalar_collection_field(
             "func F(pp **S2, i int64) int64 {\n"
             "\treturn (*pp).A[i].V\n}\n"
         ),
-        (
-            "type E struct { V int64 }\n"
-            "type S2 struct { A []E }\n"
-            "func F(p *S2, i int64) int64 {\n"
-            "\treturn (*p).A[i].V\n}\n"
-        ),
     ],
     ids=[
         "local-pointer-alias",
         "double-pointer",
-        "explicit-deref",
     ],
 )
 def test_named_struct_element_pointer_param_root_unsupported_shapes_stay_closed(
@@ -33711,8 +33704,6 @@ def test_struct_field_parallel_assignment_field_rhs_preserves_alias(
         "type P struct { A []int64 }\n"
         "type Q struct { P *P }\n"
         "func F(q Q) int64 { return q.P.A[0] }\n",
-        "type S struct { A []int64 }\n"
-        "func F(p *S) int64 { return (*p).A[0] }\n",
         "type S struct { A [2]int64 }\n"
         "func F(s S, x int64) int64 { s.A[0] = x; return s.A[0] }\n",
         "type S struct { A []int64 }\n"
