@@ -169,6 +169,9 @@ class _Record:
     # Binding id of the trait an `impl Tr for T` member belongs to;
     # None for inherent impl members.
     member_trait: str | None = None
+    # Normalized trait type arguments (`impl Tr<u32> for T` → "u32");
+    # None for a non-generic trait impl.
+    member_trait_args: str | None = None
     # The impl block's own `type` node — the declared type `self`
     # parameters inside it refer to (keeps generic args).
     self_type_node: Any = None
@@ -850,6 +853,7 @@ class _RustBindings:
                 member_args = None
                 member_generic = False
                 member_trait = None
+                member_trait_args = None
                 member_type_node = None
                 if node.type == "trait_item":
                     # Key a trait's own members to the trait so impls
@@ -871,7 +875,9 @@ class _RustBindings:
                         is not None
                     )
                     if trait_node is not None:
-                        member_trait, _ = self._annotation_type(trait_node)
+                        member_trait, member_trait_args = (
+                            self._annotation_type(trait_node)
+                        )
                         if member_trait is None:
                             # `impl path::Tr for T` — the scoped trait is
                             # not resolvable here; its members attach to
@@ -931,6 +937,7 @@ class _RustBindings:
                         member_args,
                         member_generic,
                         member_trait,
+                        member_trait_args,
                         member_type_node,
                     )
             finally:
@@ -1542,12 +1549,19 @@ class _RustBindings:
         trait = self._resolve_trait_node(trait_node)
         if trait is None:
             return None
+        # `<P as T<u32>>::m` names a specific impl — `impl T<i32> for
+        # P` must not answer for it.
+        _, trait_args = self._annotation_type(trait_node)
         pool = [
             record
             for record in self.records.values()
             if record.member_of == type_id
             and record.binding.name == name
             and record.member_trait == trait.binding.id
+            and (
+                trait_args is None
+                or record.member_trait_args == trait_args
+            )
             and (
                 record.member_impl_args is None
                 or record.member_impl_generic
@@ -1805,6 +1819,7 @@ class _RustBindings:
         member_impl_args: str | None = None,
         member_impl_generic: bool = False,
         member_trait: str | None = None,
+        member_trait_args: str | None = None,
         member_type_node: Any = None,
     ) -> None:
         children = self._children(body)
@@ -1836,6 +1851,7 @@ class _RustBindings:
                 record.member_impl_args = member_impl_args
                 record.member_impl_generic = member_impl_generic
                 record.member_trait = member_trait
+                record.member_trait_args = member_trait_args
                 record.self_type_node = member_type_node
                 self._function_records[record.binding.id] = record
                 predeclared[node.id] = record
