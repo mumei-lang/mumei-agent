@@ -2930,3 +2930,40 @@ fn f(v: &[P]) { v[(..)].m(); }
     )
     call = _call(report, source, "v[(..)].m()")
     assert call.target != member.id
+
+
+def test_ufcs_generic_impl_trait_args_match_concrete_call():
+    # `impl<A> T<A> for P` — `A` is an impl parameter, a wildcard:
+    # `<P as T<u32>>::m` reaches the impl's `m`, not the trait's.
+    source = """
+trait T<A> { fn m(&self) {} }
+struct P;
+impl<A> T<A> for P { fn m(&self) {} }
+fn f() { <P as T<u32>>::m(&P); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    impl_m = next(
+        b for b in report.bindings
+        if b.name == "m" and b.span.start == source.rindex("fn m") + 3
+    )
+    call = _call(report, source, "<P as T<u32>>::m(&P)")
+    assert call.target == impl_m.id
+
+
+def test_ufcs_generic_impl_concrete_trait_arg_still_filters():
+    # `impl<A> T<i32> for W<A>` is generic over the impl type but its
+    # trait args are concrete — `T<u32>` must not reach it.
+    source = """
+trait T<A> { fn m(&self) {} }
+struct W<A>(A);
+struct P;
+impl<A> T<i32> for P { fn m(&self) {} }
+fn f() { <P as T<u32>>::m(&P); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    impl_m = next(
+        b for b in report.bindings
+        if b.name == "m" and b.span.start == source.rindex("fn m") + 3
+    )
+    call = _call(report, source, "<P as T<u32>>::m(&P)")
+    assert call.target != impl_m.id

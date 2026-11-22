@@ -166,6 +166,10 @@ class _Record:
     # The impl block itself is generic (`impl<T> Wrap<T>`) — its
     # members apply to every instantiation.
     member_impl_generic: bool = False
+    # Type/const/lifetime parameter names the impl block declares
+    # (`impl<A> Tr<A> for P` → {"A"}); wildcard positions when a
+    # UFCS `<P as Tr<u32>>` call names concrete trait arguments.
+    member_impl_type_params: frozenset = frozenset()
     # Binding id of the trait an `impl Tr for T` member belongs to;
     # None for inherent impl members.
     member_trait: str | None = None
@@ -857,6 +861,7 @@ class _RustBindings:
                 member_of = None
                 member_args = None
                 member_generic = False
+                impl_type_params: frozenset = frozenset()
                 member_trait = None
                 member_trait_args = None
                 member_type_node = None
@@ -875,9 +880,26 @@ class _RustBindings:
                     member_of, member_args = self._annotation_type(
                         member_type_node
                     )
-                    member_generic = (
-                        node.child_by_field_name("type_parameters")
-                        is not None
+                    type_params = node.child_by_field_name(
+                        "type_parameters"
+                    )
+                    member_generic = type_params is not None
+                    impl_type_params = frozenset(
+                        self._normalize_identifier(
+                            self.text(child.child_by_field_name("name"))
+                        )
+                        for child in (
+                            ()
+                            if type_params is None
+                            else type_params.named_children
+                        )
+                        if child.type
+                        in {
+                            "type_parameter",
+                            "const_parameter",
+                            "lifetime_parameter",
+                        }
+                        and child.child_by_field_name("name") is not None
                     )
                     if trait_node is not None:
                         member_trait, member_trait_args = (
@@ -897,9 +919,6 @@ class _RustBindings:
                             # and a generic `impl<A> T for W<A, i32>`
                             # only covers receivers whose concrete args
                             # match every non-parameter position.
-                            type_params = node.child_by_field_name(
-                                "type_parameters"
-                            )
                             self._type_impl_traits.setdefault(
                                 member_of, []
                             ).append(
@@ -907,30 +926,7 @@ class _RustBindings:
                                     member_trait,
                                     member_args,
                                     member_generic,
-                                    frozenset(
-                                        self._normalize_identifier(
-                                            self.text(
-                                                child.child_by_field_name(
-                                                    "name"
-                                                )
-                                            )
-                                        )
-                                        for child in (
-                                            ()
-                                            if type_params is None
-                                            else type_params.named_children
-                                        )
-                                        if child.type
-                                        in {
-                                            "type_parameter",
-                                            "const_parameter",
-                                            "lifetime_parameter",
-                                        }
-                                        and child.child_by_field_name(
-                                            "name"
-                                        )
-                                        is not None
-                                    ),
+                                    impl_type_params,
                                 )
                             )
                 if body is not None:
@@ -944,6 +940,7 @@ class _RustBindings:
                         member_trait,
                         member_trait_args,
                         member_type_node,
+                        impl_type_params,
                     )
             finally:
                 self.in_extern = old_extern
@@ -1565,7 +1562,11 @@ class _RustBindings:
             and record.member_trait == trait.binding.id
             and (
                 trait_args is None
-                or record.member_trait_args == trait_args
+                or self._type_args_match(
+                    record.member_trait_args,
+                    trait_args,
+                    record.member_impl_type_params,
+                )
             )
             and (
                 record.member_impl_args is None
@@ -1828,6 +1829,7 @@ class _RustBindings:
         member_trait: str | None = None,
         member_trait_args: str | None = None,
         member_type_node: Any = None,
+        member_impl_type_params: frozenset = frozenset(),
     ) -> None:
         children = self._children(body)
         # Predeclare members so a body earlier in the block can call a
@@ -1859,6 +1861,7 @@ class _RustBindings:
                 record.member_impl_generic = member_impl_generic
                 record.member_trait = member_trait
                 record.member_trait_args = member_trait_args
+                record.member_impl_type_params = member_impl_type_params
                 record.self_type_node = member_type_node
                 self._function_records[record.binding.id] = record
                 predeclared[node.id] = record
@@ -1881,6 +1884,9 @@ class _RustBindings:
                 const_record.member_impl_generic = member_impl_generic
                 const_record.member_trait = member_trait
                 const_record.member_trait_args = member_trait_args
+                const_record.member_impl_type_params = (
+                    member_impl_type_params
+                )
         for node in children:
             if node.type in {"function_item", "function_signature_item"}:
                 record = predeclared.get(node.id)
