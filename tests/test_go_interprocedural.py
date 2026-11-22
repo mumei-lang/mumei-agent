@@ -14761,15 +14761,15 @@ def test_package_composite_container_field_range_len_and_cap_transfers(
         "\tfor k, v := range GM { n += k + v }\n"
         "\treturn n\n}\n"
         "func LenSlice() int { return len(GS.A) }\n"
-        "func LenSliceControl() int { return len(GA) }\n"
+        "func LenSliceControl() int { return len(GSL) }\n"
         "func CapSlice() int { return cap(GS.A) }\n"
-        "func CapSliceControl() int { return cap(GA) }\n"
+        "func CapSliceControl() int { return cap(GSL) }\n"
         "func LenArray() int { return len(GS.R) }\n"
         "func LenArrayControl() int { return len(GA) }\n"
         "func CapArray() int { return cap(GS.R) }\n"
         "func CapArrayControl() int { return cap(GA) }\n"
         "func LenMap() int { return len(GS.M) }\n"
-        "func LenMapControl() int { return len(GA) }\n"
+        "func LenMapControl() int { return len(GM) }\n"
     }
     snapshot = _snapshot_for(go_types_helper, files)
     summaries = ip.summarize_go_package(files, snapshot)
@@ -14790,11 +14790,11 @@ def test_package_composite_container_field_range_len_and_cap_transfers(
         ("RangeArrayValue", "RangeArrayValueControl", "R", "GA"),
         ("RangeMapIndex", "RangeMapIndexControl", "M", "GM"),
         ("RangeMapValue", "RangeMapValueControl", "M", "GM"),
-        ("LenSlice", "LenSliceControl", "A", "GA"),
-        ("CapSlice", "CapSliceControl", "A", "GA"),
+        ("LenSlice", "LenSliceControl", "A", "GSL"),
+        ("CapSlice", "CapSliceControl", "A", "GSL"),
         ("LenArray", "LenArrayControl", "R", "GA"),
         ("CapArray", "CapArrayControl", "R", "GA"),
-        ("LenMap", "LenMapControl", "M", "GA"),
+        ("LenMap", "LenMapControl", "M", "GM"),
     )
     for function_name, control_name, field, control_var in cases:
         result = named_package(files, snapshot, summaries, function_name)
