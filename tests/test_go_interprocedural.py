@@ -33473,19 +33473,137 @@ def test_named_struct_element_pointer_param_root_scalar_collection_field(
             "\tq := p\n"
             "\treturn q.A[i].V\n}\n"
         ),
-        (
-            "type E struct { V int64 }\n"
-            "type S2 struct { A []E }\n"
-            "func F(pp **S2, i int64) int64 {\n"
-            "\treturn (*pp).A[i].V\n}\n"
-        ),
     ],
     ids=[
         "local-pointer-alias",
-        "double-pointer",
     ],
 )
 def test_named_struct_element_pointer_param_root_unsupported_shapes_stay_closed(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available
+
+
+def test_named_struct_element_double_pointer_param_root(go_types_helper):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type E struct { V int64 }\n"
+            "type S2 struct { A []E }\n"
+            "func F(pp **S2, i int64) int64 {\n"
+            "\treturn (*pp).A[i].V\n}\n",
+        )
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_named_struct_element_double_pointer_param_root_collection(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type S struct { A []int64 }\n"
+            "func F(pp **S, i int64) int64 {\n"
+            "\treturn (*pp).A[i]\n}\n",
+        )
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_named_struct_element_double_pointer_param_root_scalar(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type S struct { V int64 }\n"
+            "func F(pp **S) int64 {\n"
+            "\treturn (*pp).V\n}\n",
+        )
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_named_struct_element_double_pointer_param_root_map(go_types_helper):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type S struct { M map[string]int64 }\n"
+            "func F(pp **S) int64 {\n"
+            '\treturn (*pp).M["k"]\n}\n',
+        )
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_named_struct_element_double_pointer_param_root_reseat(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type S struct { A []int64 }\n"
+            "func F(pp **S, qq **S, i int64) int64 {\n"
+            "\tpp = qq\n"
+            "\treturn (*pp).A[i]\n}\n",
+        )
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({1, 2})
+
+
+def test_named_struct_element_double_pointer_root_elem_write(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "type S struct { A []int64 }\n"
+            "func F(pp **S) int64 {\n"
+            "\t(*pp).A[0] = 1\n"
+            "\treturn (*pp).A[0]\n}\n",
+        )
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        (
+            "type S struct { V int64 }\n"
+            "func F(pp **S, r *S) int64 {\n"
+            "\t*pp = r\n"
+            "\treturn (*pp).V\n}\n"
+        ),
+        (
+            "type S struct { V int64 }\n"
+            "func F(pp **S, r *S) int64 {\n"
+            "\t*pp = r\n"
+            "\t(*pp).V = 1\n"
+            "\treturn 0\n}\n"
+        ),
+        (
+            "type S struct { A []int64 }\n"
+            "func F(pp **S, r *S) int64 {\n"
+            "\t*pp = r\n"
+            "\treturn (*pp).A[0]\n}\n"
+        ),
+    ],
+    ids=[
+        "middle-pointer-store-read",
+        "middle-pointer-store-write",
+        "middle-pointer-store-collection",
+    ],
+)
+def test_named_struct_element_double_pointer_root_store_closes(
     go_types_helper, declarations
 ):
     result = named(*unit(go_types_helper, declarations))
