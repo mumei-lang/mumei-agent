@@ -5979,3 +5979,25 @@ fn f(v: Vec<P>, m: HashMap<i32, P>, o: Option<P>) {
     assert len(calls) == 3
     for call in calls:
         assert call.target == pm.id
+
+
+def test_split_first_and_last_pair_payloads():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(v: Vec<P>, s: &[P]) {
+    if let Some((h, rest)) = v.split_first() { h.pm(); rest[0].pm(); }
+    if let Some((l, rest)) = s.split_last() { l.pm(); rest[0].pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    calls = [
+        call for call in report.calls
+        if raw[call.span.start:call.span.end].decode()
+        in {"h.pm()", "l.pm()", "rest[0].pm()"}
+    ]
+    assert len(calls) == 4
+    for call in calls:
+        assert call.target == pm.id

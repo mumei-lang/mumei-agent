@@ -76,7 +76,14 @@ _DEREF_WRAPPER_NAMES = frozenset({"Box", "Rc", "Arc"})
 # `Option` heads slices and arrays share with `Vec` — `s.get(i)`,
 # `s.first()`, `s.last()` yield `Option<&T>` on `&[T]`/`[T; N]` too.
 # `pop`/`remove` stay Vec-only — slices cannot shrink.
-_SLICE_OPTION_METHODS = frozenset({"get", "first", "last"})
+_SLICE_OPTION_METHODS = frozenset(
+    {"get", "first", "last", "split_first", "split_last"}
+)
+
+# `v.split_first()`/`v.split_last()` yield
+# `Option<(&T, &[T])>` — the payload is the pair (element,
+# rest-slice), spelled `(P, &P)` so tuple patterns bind `f`/`rest`.
+_SPLIT_PAIR_METHODS = frozenset({"split_first", "split_last"})
 
 # Prelude container methods that hand back `Option` — `v.get(i)`,
 # `v.first()` and `v.last()` yield `Option<&T>` while `v.pop()`
@@ -113,6 +120,10 @@ _OPTION_HEAD_METHODS = {
     "and": ("", {"Option"}, 0),
     "or": ("", {"Option"}, 0),
     "xor": ("", {"Option"}, 0),
+    # `Vec`/slice `split_first`/`split_last` — payload is the
+    # `(element, rest-slice)` pair; `_SPLIT_PAIR_METHODS` spells it.
+    "split_first": ("", {"Vec"}, -1),
+    "split_last": ("", {"Vec"}, -1),
 }
 
 _PRELUDE_NAMES = frozenset(
@@ -2759,6 +2770,7 @@ class _RustBindings:
                         if -len(elements) <= index < len(elements)
                         else None
                     )
+<<<<<<< HEAD
                     if self.text(field).strip() == "get" and element:
                         arg_list = node.child_by_field_name(
                             "arguments"
@@ -2782,6 +2794,19 @@ class _RustBindings:
                             # `s.get(0..1)` yields `Option<&[P]>`,
                             # not `Option<&P>`.
                             element = "[" + element + "]"
+||||||| parent of b7e37997 (C06: spell split_first/split_last Option<(elem, rest-slice)> payloads)
+=======
+                    if (
+                        element is not None
+                        and self.text(field).strip()
+                        in _SPLIT_PAIR_METHODS
+                    ):
+                        # `split_first()`/`split_last()` yield
+                        # `Option<(&T, &[T])>` — the tuple payload
+                        # spells `(P, &P)` so `Some((f, rest))`
+                        # binds `f: P` and `rest: &[P]`.
+                        element = f"({element}, &{element})"
+>>>>>>> b7e37997 (C06: spell split_first/split_last Option<(elem, rest-slice)> payloads)
                     if self.text(field).strip() == "and":
                         # `Option::and<U>(self, optb: Option<U>)`
                         # yields the ARGUMENT's payload, not the
