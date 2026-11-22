@@ -7802,3 +7802,56 @@ fn f(r: Result<G<u8>, u8>) {
     # args like the direct `r.iter()` loop does.
     assert bound.get("x.um()") == um.id
     assert bound.get("y.um()") == um.id
+def test_result_and_or_and_transpose_bind_payloads():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct Q;
+impl Q { fn qm(&self) {} }
+struct E;
+impl E { fn em(&self) {} }
+struct W<T> { x: T }
+fn f(r1: Result<P, E>, r2: Result<Q, E>, o: Option<Result<P, E>>, ro: Result<Option<P>, E>, w: W<P>, wo: W<Result<P,E>>) {
+    let a = r1.and(r2);
+    if let Ok(u) = a { u.qm(); }
+    let b = r1.or(r2);
+    if let Ok(v) = b { v.pm(); }
+    if let Err(e1) = b { e1.em(); }
+    let t1 = o.transpose();
+    if let Ok(x) = t1 {
+        if let Some(inner) = x { inner.pm(); }
+    }
+    let t2 = ro.transpose();
+    if let Some(y) = t2 {
+        if let Ok(p) = y { p.pm(); }
+    }
+    if let Ok(d) = r1.and(r2) { d.qm(); }
+    let z = w.and(r2);
+    if let Ok(k) = z { k.qm(); }
+    let wt = wo.transpose();
+    if let Ok(wt2) = wt { wt2.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    qm = _bindings(report, "qm", "associated_function")[0]
+    em = _bindings(report, "em", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `r1.and(r2)` yields `Result<Q, E>` — `Ok` reads r2's payload.
+    assert bound.get("u.qm()") == qm.id
+    # `r1.or(r2)` yields `Result<P, F>` — `Ok` reads r1's, `Err` r2's.
+    assert bound.get("v.pm()") == pm.id
+    assert bound.get("e1.em()") == em.id
+    # `Option<Result<P, E>>::transpose` yields `Result<Option<P>, E>`.
+    assert bound.get("inner.pm()") == pm.id
+    # `Result<Option<P>, E>::transpose` yields `Option<Result<P, E>>`.
+    assert bound.get("p.pm()") == pm.id
+    # A direct `and` scrutinee heads `Result` too.
+    assert bound.get("d.qm()") == qm.id
+    # A custom `W` can name any `and`/`transpose` — stays opaque.
+    assert not bound.get("k.qm()")
+    assert not bound.get("wt2.pm()")
