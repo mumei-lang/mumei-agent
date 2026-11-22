@@ -2770,7 +2770,6 @@ class _RustBindings:
                         if -len(elements) <= index < len(elements)
                         else None
                     )
-<<<<<<< HEAD
                     if self.text(field).strip() == "get" and element:
                         arg_list = node.child_by_field_name(
                             "arguments"
@@ -2794,8 +2793,6 @@ class _RustBindings:
                             # `s.get(0..1)` yields `Option<&[P]>`,
                             # not `Option<&P>`.
                             element = "[" + element + "]"
-||||||| parent of b7e37997 (C06: spell split_first/split_last Option<(elem, rest-slice)> payloads)
-=======
                     if (
                         element is not None
                         and self.text(field).strip()
@@ -2806,7 +2803,6 @@ class _RustBindings:
                         # spells `(P, &P)` so `Some((f, rest))`
                         # binds `f: P` and `rest: &[P]`.
                         element = f"({element}, &{element})"
->>>>>>> b7e37997 (C06: spell split_first/split_last Option<(elem, rest-slice)> payloads)
                     if self.text(field).strip() == "and":
                         # `Option::and<U>(self, optb: Option<U>)`
                         # yields the ARGUMENT's payload, not the
