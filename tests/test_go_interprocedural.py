@@ -40814,7 +40814,9 @@ def test_struct_expression_call_write_negative_controls(go_types_helper):
         "unsupported_operator"
     }
 
-    slice_expression = named(
+    # `G(WA{A: a[1:]}, x)` — the reslice hands the callee `a`'s
+    # backing from element 1 on, so `w.A[0] = x` lands on `a[1]`.
+    reslice = named(
         *unit(
             go_types_helper,
             declarations
@@ -40824,10 +40826,8 @@ def test_struct_expression_call_write_negative_controls(go_types_helper):
             "\treturn a[1]\n}\n",
         )
     )
-    assert not slice_expression.available
-    assert {gap.reason for gap in slice_expression.gaps} == {
-        "unsupported_expression"
-    }
+    assert reslice.available
+    assert reslice.return_dependencies == frozenset({0})
 
 
 def test_struct_field_argument_writes_reach_field_holders(go_types_helper):
@@ -52561,3 +52561,107 @@ def test_declared_bounded_call_does_not_fold_address_write(go_types_helper):
     assert result.available, result.gaps
     assert result.return_dependencies == frozenset({0})
     assert result.calls[0].imported is False
+
+
+@pytest.mark.parametrize(
+    "declarations, expected",
+    [
+        # `s := p.A[:]` re-heads the field's backing — an element
+        # store through `s` lands on the memory a `p.A[i]` read
+        # sees, like `s := p.A`.
+        (
+            "type E struct { V int64 }\n"
+            "type S struct { A []E }\n"
+            "func F(p *S, i int64, x int64) int64 {\n"
+            "\ts := p.A[:]\n"
+            "\ts[0].V = x\n"
+            "\treturn p.A[0].V\n}\n",
+            frozenset({0, 2}),
+        ),
+        # Bounds carry their own deps into the binding.
+        (
+            "type E struct { V int64 }\n"
+            "type S struct { A []E }\n"
+            "func F(p *S, i int64, x int64) int64 {\n"
+            "\ts := p.A[0:i]\n"
+            "\ts[0].V = x\n"
+            "\treturn p.A[0].V\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # A reslice of a reslice stays on the same share group.
+        (
+            "type E struct { V int64 }\n"
+            "type S struct { A []E }\n"
+            "func F(p *S, x int64) int64 {\n"
+            "\ts := p.A[:]\n"
+            "\tt := s[:]\n"
+            "\tt[0].V = x\n"
+            "\treturn p.A[0].V\n}\n",
+            frozenset({0, 1}),
+        ),
+        # A param slice reslice aliases the caller's backing.
+        (
+            "type E struct { V int64 }\n"
+            "func F(a []E, x int64) int64 {\n"
+            "\ts := a[1:]\n"
+            "\ts[0].V = x\n"
+            "\treturn a[1].V\n}\n",
+            frozenset({0, 1}),
+        ),
+        # A `s = p.A[1:]` reseat re-heads the bound slice.
+        (
+            "type E struct { V int64 }\n"
+            "type S struct { A []E }\n"
+            "func F(p *S, x int64) int64 {\n"
+            "\ts := p.A\n"
+            "\ts = p.A[1:]\n"
+            "\ts[0].V = x\n"
+            "\treturn p.A[1].V\n}\n",
+            frozenset({0, 1}),
+        ),
+        # Three-index bounds evaluate the capacity bound too.
+        (
+            "type E struct { V int64 }\n"
+            "type S struct { A []E }\n"
+            "func F(p *S, i int64, x int64) int64 {\n"
+            "\ts := p.A[0:i:i+1]\n"
+            "\ts[0].V = x\n"
+            "\treturn p.A[0].V\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # A value-struct root's reslice shares the local copy's
+        # backing — `o.A[i]` reads and `s[j]` stores stay inside
+        # the same conflated group.
+        (
+            "type E struct { V int64 }\n"
+            "type S struct { A []E }\n"
+            "func F(o S, x int64) int64 {\n"
+            "\ts := o.A[:]\n"
+            "\ts[0].V = x\n"
+            "\treturn o.A[0].V\n}\n",
+            frozenset({0, 1}),
+        ),
+    ],
+)
+def test_collection_field_reslice_bind(go_types_helper, declarations, expected):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == expected
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        # A map element's collection member is not addressable —
+        # reslicing it stays closed like `p.M[k]` reads do.
+        "type E struct { V int64 }\n"
+        "type S struct { M map[int64][]E }\n"
+        "func F(p *S, k int64, x int64) int64 {\n"
+        "\ts := p.M[k][:]\n"
+        "\ts[0].V = x\n"
+        "\treturn p.M[k][0].V\n}\n",
+    ],
+)
+def test_collection_field_reslice_bind_closed(go_types_helper, declarations):
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available or result.gaps

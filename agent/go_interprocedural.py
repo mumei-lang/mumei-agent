@@ -5658,6 +5658,12 @@ class _Builder:
             # unbound/deeper/scalar-element operand has no group.
             sharer = self._opaque_container_index_sharer_toks(rhs)
             return frozenset(sharer) if sharer else None
+        if rhs.type == "slice_expression":
+            # `t = s[lo:hi]` — a reslice re-heads the operand's
+            # backing: element writes through `t` land on `s`'s
+            # memory, so the binding shares the operand's group.
+            operand = rhs.named_children[0] if rhs.named_children else None
+            return self._opaque_container_bind(operand, params)
         if rhs.type in {"selector_expression", "field_expression"}:
             imported = self._opaque_container_imported_var_bind(rhs)
             if imported is not None:
@@ -30094,6 +30100,20 @@ class _Builder:
             return self._imported_index_read(
                 node, fn, params, locals_, transfers, count, depth
             )
+        if kind == "slice_expression":
+            # `s[lo:hi]` — the reslice header carries the operand's
+            # deps plus whatever the bounds name. A string operand
+            # yields a substring (scalar deps stay honest); array
+            # and container operands share the backing.
+            deps = frozenset()
+            for child in node.named_children:
+                if child.type == "comment":
+                    continue
+                deps |= self._expression(
+                    child, fn, params, locals_, transfers, count,
+                    depth,
+                )
+            return deps
         if kind == "call_expression":
             call = self.calls.get(self.node_key(node))
             if (
