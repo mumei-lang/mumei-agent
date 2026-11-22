@@ -95,6 +95,11 @@ _OPTION_HEAD_METHODS = {
     # payload — spelled `&P`/`&mut P`.
     "as_ref": ("&", {"Option"}, 0),
     "as_mut": ("&mut ", {"Option"}, 0),
+    # `o.and(o2)`/`o.or(o2)`/`o.xor(o2)` still yield `Option<P>` —
+    # the payload index keeps the receiver's own first arg.
+    "and": ("", {"Option"}, 0),
+    "or": ("", {"Option"}, 0),
+    "xor": ("", {"Option"}, 0),
 }
 
 _PRELUDE_NAMES = frozenset(
@@ -2625,6 +2630,54 @@ class _RustBindings:
                         if -len(elements) <= index < len(elements)
                         else None
                     )
+                    if self.text(field).strip() == "and":
+                        # `Option::and<U>(self, optb: Option<U>)`
+                        # yields the ARGUMENT's payload, not the
+                        # receiver's — spell `u`'s args instead.
+                        arg_list = node.child_by_field_name(
+                            "arguments"
+                        )
+                        first_arg = (
+                            None
+                            if arg_list is None
+                            else next(
+                                (
+                                    c
+                                    for c in arg_list.named_children
+                                    if "comment" not in c.type
+                                ),
+                                None,
+                            )
+                        )
+                        if first_arg is None:
+                            element = None
+                        else:
+                            _, arg_args = self._receiver_type(
+                                first_arg
+                            )
+                            element = (
+                                None
+                                if arg_args is None
+                                else arg_args.strip()
+                            )
+                            arg_pos = (
+                                self._receiver_annotation_position(
+                                    first_arg
+                                )
+                            )
+                            if (
+                                element is not None
+                                and arg_pos is not None
+                                and not self._spelling_scope_stable(
+                                    element, arg_pos, node.start_byte
+                                )
+                            ):
+                                # The argument's names were spelled
+                                # where different bindings are
+                                # visible — spelling the payload
+                                # would bind the wrong same-named
+                                # type.
+                                element = None
                     if element:
                         return None, prefix + element
                 if (

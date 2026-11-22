@@ -5874,3 +5874,34 @@ fn f(v: Vec<P>) {
     assert len(calls) == 5
     for call in calls:
         assert call.target == pm.id
+
+
+def test_option_combinators_keep_the_payload():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct Q;
+impl Q { fn qm(&self) {} }
+fn f(o: Option<P>, u: Option<P>, v: Option<Q>) {
+    if let Some(p) = o.and(u) { p.pm(); }
+    if let Some(p) = o.and(v) { p.qm(); p.pm(); }
+    if let Some(p) = o.or(u) { p.pm(); }
+    if let Some(p) = o.xor(u) { p.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    qm = _bindings(report, "qm", "associated_function")[0]
+    raw = source.encode()
+    calls = [
+        (raw[call.span.start:call.span.end].decode(), call.target)
+        for call in report.calls
+    ]
+    # `and` yields the argument's payload — `o.and(v)` is Option<Q>.
+    assert next(t for k, t in calls if k == "p.qm()") == qm.id
+    targets = [t for k, t in calls if k == "p.pm()"]
+    # three `p.pm()` sites resolve to P::pm; the one under `and(v)`
+    # stays unbound (it would need P on a Q payload).
+    assert len(targets) == 4
+    assert targets.count(pm.id) == 3
+    assert sum(1 for t in targets if not t) == 1
