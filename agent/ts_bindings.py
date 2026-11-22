@@ -1933,6 +1933,40 @@ class _TypeScriptBindings:
             items.append(item)
         return items
 
+    def _call_type_args_count(self, node: Any) -> int | None:
+        """Explicit type-argument count on a call — `f<T, U>(...)`.
+        Type arguments nested in parentheses or an instantiation
+        expression (`(f<T, U>)(...)`) count too; None when the call
+        supplies none."""
+        count: int | None = None
+        call_type_args = node.child_by_field_name("type_arguments")
+        if call_type_args is not None:
+            count = len(self.children(call_type_args))
+        callee = node.child_by_field_name("function")
+        while callee is not None and callee.type in {
+            "parenthesized_expression",
+            "instantiation_expression",
+        }:
+            inner = next(
+                (
+                    child
+                    for child in self.children(callee)
+                    if child.type == "type_arguments"
+                ),
+                None,
+            )
+            if inner is not None:
+                count = len(self.children(inner))
+            callee = next(
+                (
+                    child
+                    for child in self.children(callee)
+                    if child.type != "type_arguments"
+                ),
+                None,
+            )
+        return count
+
     def _type_param_count(self, record: _Record) -> int:
         """Type parameters a signature declares — `f<T, U>` is 2,
         a non-generic signature 0."""
@@ -1950,11 +1984,39 @@ class _TypeScriptBindings:
             if child.type in {"type_parameter", "required_type_parameter"}
         )
 
+    def _required_type_param_count(self, record: _Record) -> int:
+        """Type parameters without defaults — explicit type arguments
+        must supply at least this many, so `f<T, U = string>` accepts
+        `f<A>(...)` while `f<T, U>` does not."""
+        function_node = record.function_node
+        if function_node is None:
+            return 0
+        parameters = function_node.child_by_field_name(
+            "type_parameters"
+        )
+        if parameters is None:
+            return 0
+        return sum(
+            1
+            for child in self.children(parameters)
+            if child.type == "required_type_parameter"
+            or (
+                child.type == "type_parameter"
+                and child.child_by_field_name("value") is None
+            )
+        )
+
     def _arg_kind(self, arg: Any) -> str | None:
         """Primitive kind of a literal, or the declared name for
         identifiers — `None` when the argument type is not pinned."""
         if arg.type == "number":
-            return "number"
+            # `1n`/`0xfn` literals are bigint — a hex digit is never
+            # `n`, so the suffix is unambiguous.
+            return (
+                "bigint"
+                if self.text(arg).strip().endswith("n")
+                else "number"
+            )
         if arg.type in {"string", "template_string"}:
             return "string"
         if arg.type in {"true", "false"}:
@@ -2243,25 +2305,13 @@ class _TypeScriptBindings:
         reads `make`'s chosen overload's return type."""
         callee = node.child_by_field_name("function")
         # Explicit type arguments on the call (`make<T, U>(...)`,
-        # `(make<T, U>)(...)`) pin the signature's declared count —
-        # an overload with a different arity cannot be the callee.
-        type_args_count: int | None = None
-        call_type_args = node.child_by_field_name("type_arguments")
-        if call_type_args is not None:
-            type_args_count = len(self.children(call_type_args))
+        # `(make<T, U>)(...)`) pin the signature's declared arity —
+        # an overload whose required/total range excludes it cannot
+        # be the callee.
+        type_args_count = self._call_type_args_count(node)
         while callee is not None and callee.type in {
             "parenthesized_expression", "instantiation_expression",
         }:
-            inner_type_args = next(
-                (
-                    child
-                    for child in self.children(callee)
-                    if child.type == "type_arguments"
-                ),
-                None,
-            )
-            if inner_type_args is not None:
-                type_args_count = len(self.children(inner_type_args))
             callee = next(
                 (
                     child
@@ -2311,18 +2361,33 @@ class _TypeScriptBindings:
                     ) == key
                 ]
                 if type_args_count is not None:
+                    # Defaults keep an overload eligible — `f<T, U = V>`
+                    # accepts `f<A>(...)`.
                     matching = [
                         candidate
                         for candidate in candidates
-                        if self._type_param_count(candidate)
-                        == type_args_count
+                        if self._required_type_param_count(candidate)
+                        <= type_args_count
+                        <= self._type_param_count(candidate)
                     ]
                     if matching:
                         candidates = matching
                 narrowed = self._narrow_overloads(
                     candidates, args_node, arg_nodes
                 )
-                record = narrowed[0] if narrowed else candidates[0]
+                if (
+                    narrowed is candidates
+                    and type_args_count is not None
+                    and narrowed
+                ):
+                    # Explicit type args, indiscriminate value args —
+                    # tsc picks the earliest declared signature that
+                    # fits, not the lookup's latest-first head.
+                    record = min(
+                        narrowed, key=lambda c: c.binding.span.start
+                    )
+                else:
+                    record = narrowed[0] if narrowed else candidates[0]
         elif callee is not None and callee.type == "member_expression":
             property_node = callee.child_by_field_name("property")
             if (
@@ -2858,6 +2923,7 @@ class _TypeScriptBindings:
         check_tdz: bool = True,
         constructible: bool = False,
         args_node: Any | None = None,
+        type_args_count: int | None = None,
     ) -> tuple[_Record | None, str | None]:
         name = self.text(node)
         if name == "arguments" and namespace == "value":
@@ -2899,8 +2965,31 @@ class _TypeScriptBindings:
                         )
                     ) == key
                 ]
+            if type_args_count is not None:
+                # The call target narrows by the same explicit type
+                # arguments the return-type side uses — `make<A, B>(x)`
+                # cannot bind an overload that lacks that arity.
+                matching = [
+                    candidate
+                    for candidate in signatures
+                    if self._required_type_param_count(candidate)
+                    <= type_args_count
+                    <= self._type_param_count(candidate)
+                ]
+                if matching:
+                    signatures = matching
             narrowed = self._narrow_overloads(signatures, args_node)
-            if narrowed:
+            if (
+                narrowed is signatures
+                and type_args_count is not None
+                and narrowed
+            ):
+                # Same tsc rule as the return-type side: explicit type
+                # args, indiscriminate value args — earliest declared.
+                record = min(
+                    narrowed, key=lambda c: c.binding.span.start
+                )
+            elif narrowed:
                 record = narrowed[0]
         if record is not None and constructible:
             # `new N()` on a merged declaration must name the class, so
@@ -3486,6 +3575,7 @@ class _TypeScriptBindings:
             with_scopes,
             constructible=new,
             args_node=node.child_by_field_name("arguments"),
+            type_args_count=self._call_type_args_count(node),
         )
         if name == "eval" and not new:
             self.add_gap("dynamic_eval", node)

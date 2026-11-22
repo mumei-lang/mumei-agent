@@ -2922,3 +2922,88 @@ declare function make<T>(x: T): B;
         if "methodA()" in source[c.span.start:c.span.end]
     )
     assert call.target == method_a.id
+
+
+def test_type_argument_defaults_keep_the_overload_eligible():
+    # `make<number, string>` fits `make<T, U, V = string>` — a
+    # defaulted type parameter need not be spelled.
+    source = """
+class A { methodA(): void {} }
+class B { methodB(): void {} }
+declare function make<T, U = string>(x: T): A;
+declare function make<T>(x: T): B;
+make<number>(1).methodA();
+"""
+    report = build_ts_bindings(source)
+    method_a = _bindings(report, "methodA", "associated_function")[0]
+    call = next(
+        c for c in report.calls
+        if "methodA()" in source[c.span.start:c.span.end]
+    )
+    assert call.target == method_a.id
+
+
+def test_interpolation_bigint_narrows_overloads():
+    # `${1n}` is a bigint literal — it fits `n: bigint`, not
+    # `n: number`.
+    source = """
+class A { methodA(): void {} }
+class B { methodB(): void {} }
+declare function tag(s: TemplateStringsArray, n: bigint): A;
+declare function tag(s: TemplateStringsArray, n: number): B;
+tag`x${1n}`.methodA();
+"""
+    report = build_ts_bindings(source)
+    method_a = _bindings(report, "methodA", "associated_function")[0]
+    call = next(
+        c for c in report.calls
+        if "methodA()" in source[c.span.start:c.span.end]
+    )
+    assert call.target == method_a.id
+
+
+def test_type_argument_pick_is_the_earliest_fitting_overload():
+    # Both signatures fit the explicit count and the arguments cannot
+    # discriminate — tsc binds the earliest declared overload.
+    source = """
+class A { methodA(): void {} }
+class B { methodB(): void {} }
+declare function make<T, U>(x: any): A;
+declare function make<T, U>(x: any): B;
+make<number, string>({}).methodA();
+"""
+    report = build_ts_bindings(source)
+    method_a = _bindings(report, "methodA", "associated_function")[0]
+    call = next(
+        c for c in report.calls
+        if "methodA()" in source[c.span.start:c.span.end]
+    )
+    assert call.target == method_a.id
+
+
+def test_call_target_narrows_by_the_same_type_arguments():
+    # `make<number, string>(1)` binds the `<T, U>` overload — the
+    # reference and the return-type receiver must pick the same
+    # signature.
+    source = """
+class A { methodA(): void {} }
+class B { methodB(): void {} }
+declare function make<T, U>(x: T): A;
+declare function make<T>(x: T): B;
+make<number, string>(1).methodA();
+"""
+    report = build_ts_bindings(source)
+    overloads = _bindings(report, "make", "ambient")
+    two_param = min(overloads, key=lambda b: b.span.start)
+    ref = next(
+        r for r in report.references
+        if source[r.span.start:r.span.end] == "make"
+        and r.span.start > source.index("): B")
+    )
+    assert ref.binding_id == two_param.id
+    method_a = _bindings(report, "methodA", "associated_function")[0]
+    call = next(
+        c for c in report.calls
+        if "methodA()" in source[c.span.start:c.span.end]
+    )
+    assert call.target == method_a.id
