@@ -275,6 +275,16 @@ def test_schedule_records_and_dispatches_effective_enforcement(
     registry.register(
         descriptor("alpha", required_permissions=required_permissions)
     )
+    requested_isolation = []
+    real_dispatch = attempt_schedule.dispatch_attempt
+
+    def record_dispatch(sequence, child_argv, **kwargs):
+        requested_isolation.append(kwargs["isolate_network"])
+        kwargs["isolate_network"] = False
+        kwargs["isolate_filesystem_write"] = False
+        return real_dispatch(sequence, child_argv, **kwargs)
+
+    monkeypatch.setattr(attempt_schedule, "dispatch_attempt", record_dispatch)
     monkeypatch.setattr(
         attempt_schedule,
         "network_isolation_enforceable",
@@ -354,6 +364,68 @@ def test_schedule_records_and_dispatches_memory_bound(
     assert runner_calls[0]["memory_bound_mb"] == enforcement["memory_bound_mb"]
 
 
+@pytest.mark.parametrize(
+    (
+        "required_permissions",
+        "allowed_permissions",
+        "enforceable",
+        "expected_isolation",
+    ),
+    [
+        (
+            frozenset({"filesystem.write"}),
+            frozenset({"filesystem.write"}),
+            True,
+            False,
+        ),
+        (frozenset(), frozenset({"filesystem.write"}), True, True),
+        (frozenset(), frozenset(), True, True),
+        (frozenset(), frozenset(), False, False),
+    ],
+    ids=[
+        "declared-and-allowed",
+        "allowed-not-declared",
+        "no-permissions",
+        "boundary-unavailable",
+    ],
+)
+def test_schedule_computes_filesystem_write_isolation_from_permissions(
+    monkeypatch,
+    required_permissions,
+    allowed_permissions,
+    enforceable,
+    expected_isolation,
+):
+    registry = AdapterRegistry()
+    registry.register(
+        descriptor("alpha", required_permissions=required_permissions)
+    )
+    requested_isolation = []
+    real_dispatch = attempt_schedule.dispatch_attempt
+
+    def record_dispatch(sequence, child_argv, **kwargs):
+        requested_isolation.append(kwargs["isolate_filesystem_write"])
+        kwargs["isolate_filesystem_write"] = False
+        kwargs["isolate_network"] = False
+        return real_dispatch(sequence, child_argv, **kwargs)
+
+    monkeypatch.setattr(attempt_schedule, "dispatch_attempt", record_dispatch)
+    monkeypatch.setattr(
+        attempt_schedule,
+        "filesystem_write_isolation_enforceable",
+        lambda: enforceable,
+    )
+    result = schedule(
+        registry,
+        ("alpha",),
+        {"alpha": argv(0)},
+        policy=policy(allowed_permissions=allowed_permissions),
+    )
+
+    assert result.outcome == "selected"
+    assert requested_isolation == [expected_isolation]
+
+
 def test_network_isolation_predicate_treats_unspecified_policy_as_denied():
     registry = AdapterRegistry()
     registry.register(
@@ -371,6 +443,42 @@ def test_network_isolation_predicate_treats_unspecified_policy_as_denied():
     assert plan.selected is not None
     assert plan.selected.required_permissions is None
     assert attempt_schedule._network_isolated(plan) is True
+
+
+def test_filesystem_write_isolation_predicate_rejects_disallowed_permission():
+    registry = AdapterRegistry()
+    registry.register(
+        descriptor("alpha", required_permissions=frozenset())
+    )
+    plan = registry.plan(
+        request(),
+        policy(allowed_permissions=frozenset()),
+        observations("alpha"),
+    )
+    assert plan.selected is not None
+    plan = replace(
+        plan,
+        selected=replace(
+            plan.selected,
+            required_permissions=frozenset({"filesystem.write"}),
+        ),
+    )
+
+    assert attempt_schedule._filesystem_write_isolated(plan) is True
+
+
+def test_filesystem_write_isolation_fails_closed_for_unspecified_permissions():
+    registry = AdapterRegistry()
+    registry.register(descriptor("alpha", required_permissions=None))
+    plan = registry.plan(
+        request(),
+        policy(allowed_permissions=None),
+        observations("alpha"),
+    )
+
+    assert plan.selected is not None
+    assert plan.selected.required_permissions is None
+    assert attempt_schedule._filesystem_write_isolated(plan) is True
 
 
 def test_network_isolation_predicate_rejects_disallowed_permission():

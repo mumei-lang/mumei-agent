@@ -38721,6 +38721,85 @@ def test_named_struct_element_pointer_member_pointee_operand_eval(
 
 
 @pytest.mark.parametrize(
+    "declarations, expected",
+    [
+        # A scalar pointee (`*int64` member) admits like a struct
+        # one: `*p.A[i].W = x` broadcasts the store and a
+        # whole-pointee read observes it.
+        (
+            "type Elem struct { W *int64 }\n"
+            "type S struct { A []Elem }\n"
+            "func F(p *S, i int64, x int64) int64 {\n"
+            "\t*p.A[i].W = x\n"
+            "\treturn *p.A[i].W\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # `v := *p.A[i].W` copies the pointee — the store still
+        # reaches the copy.
+        (
+            "type Elem struct { W *int64 }\n"
+            "type S struct { A []Elem }\n"
+            "func F(p *S, i int64, x int64) int64 {\n"
+            "\t*p.A[i].W = x\n"
+            "\tv := *p.A[i].W\n"
+            "\treturn v\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # A scalar-pointee read without a store carries the operand
+        # deps alone.
+        (
+            "type Elem struct { W *int64 }\n"
+            "type S struct { A []Elem }\n"
+            "func F(p *S, i int64) int64 {\n"
+            "\treturn *p.A[i].W\n}\n",
+            frozenset({0, 1}),
+        ),
+        # Reseating the pointer member itself (`p.A[i].W = q`)
+        # stores into the member slot — the pointee read observes
+        # the new pointer's provenance.
+        (
+            "type Elem struct { W *int64 }\n"
+            "type S struct { A []Elem }\n"
+            "func F(p *S, i int64, q *int64) int64 {\n"
+            "\tp.A[i].W = q\n"
+            "\treturn *p.A[i].W\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # `*p.A[i].W == 0` compares the scalar pointee — the
+        # operand's deps admit like `*p == 0` on a bare `*int64`.
+        (
+            "type Elem struct { W *int64 }\n"
+            "type S struct { A []Elem }\n"
+            "func F(p *S, i int64) int64 {\n"
+            "\tif *p.A[i].W == 0 {\n"
+            "\t\treturn 0\n"
+            "\t}\n"
+            "\treturn i\n}\n",
+            frozenset({1}),
+        ),
+        # `p.A[0].W = &x` reseats the member onto an escaped local —
+        # the pointee read observes `x`'s current value like `*p`
+        # after `p := &x` does.
+        (
+            "type Elem struct { W *int64 }\n"
+            "type S struct { A []Elem }\n"
+            "func F(p *S, x int64, y int64) int64 {\n"
+            "\tp.A[0].W = &x\n"
+            "\tx = y\n"
+            "\treturn *p.A[0].W\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+    ],
+)
+def test_named_struct_element_pointer_member_scalar_pointee(
+    go_types_helper, declarations, expected
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == expected
+
+
+@pytest.mark.parametrize(
     "declarations",
     [
         # Whole-pointee ops stay closed on a value-struct root.
@@ -38730,6 +38809,13 @@ def test_named_struct_element_pointer_member_pointee_operand_eval(
         "func F(o S, i int64, x int64) int64 {\n"
         "\t*o.A[i].W = E2{V: x}\n"
         "\treturn o.A[i].W.V\n}\n",
+        # A scalar pointee on a value root stays closed the same
+        # way.
+        "type Elem struct { W *int64 }\n"
+        "type S struct { A []Elem }\n"
+        "func F(o S, i int64, x int64) int64 {\n"
+        "\t*o.A[i].W = x\n"
+        "\treturn *o.A[i].W\n}\n",
         # …and a bare value-element field on `o`.
         "type E2 struct { V int64 }\n"
         "type Elem struct { W *E2 }\n"
@@ -40728,7 +40814,9 @@ def test_struct_expression_call_write_negative_controls(go_types_helper):
         "unsupported_operator"
     }
 
-    slice_expression = named(
+    # `G(WA{A: a[1:]}, x)` — the reslice hands the callee `a`'s
+    # backing from element 1 on, so `w.A[0] = x` lands on `a[1]`.
+    reslice = named(
         *unit(
             go_types_helper,
             declarations
@@ -40738,10 +40826,8 @@ def test_struct_expression_call_write_negative_controls(go_types_helper):
             "\treturn a[1]\n}\n",
         )
     )
-    assert not slice_expression.available
-    assert {gap.reason for gap in slice_expression.gaps} == {
-        "unsupported_expression"
-    }
+    assert reslice.available
+    assert reslice.return_dependencies == frozenset({0})
 
 
 def test_struct_field_argument_writes_reach_field_holders(go_types_helper):
@@ -52475,3 +52561,158 @@ def test_declared_bounded_call_does_not_fold_address_write(go_types_helper):
     assert result.available, result.gaps
     assert result.return_dependencies == frozenset({0})
     assert result.calls[0].imported is False
+
+
+@pytest.mark.parametrize(
+    "declarations, expected",
+    [
+        # `s := p.A[:]` re-heads the field's backing — an element
+        # store through `s` lands on the memory a `p.A[i]` read
+        # sees, like `s := p.A`.
+        (
+            "type E struct { V int64 }\n"
+            "type S struct { A []E }\n"
+            "func F(p *S, i int64, x int64) int64 {\n"
+            "\ts := p.A[:]\n"
+            "\ts[0].V = x\n"
+            "\treturn p.A[0].V\n}\n",
+            frozenset({0, 2}),
+        ),
+        # Bounds carry their own deps into the binding.
+        (
+            "type E struct { V int64 }\n"
+            "type S struct { A []E }\n"
+            "func F(p *S, i int64, x int64) int64 {\n"
+            "\ts := p.A[0:i]\n"
+            "\ts[0].V = x\n"
+            "\treturn p.A[0].V\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # A reslice of a reslice stays on the same share group.
+        (
+            "type E struct { V int64 }\n"
+            "type S struct { A []E }\n"
+            "func F(p *S, x int64) int64 {\n"
+            "\ts := p.A[:]\n"
+            "\tt := s[:]\n"
+            "\tt[0].V = x\n"
+            "\treturn p.A[0].V\n}\n",
+            frozenset({0, 1}),
+        ),
+        # A param slice reslice aliases the caller's backing.
+        (
+            "type E struct { V int64 }\n"
+            "func F(a []E, x int64) int64 {\n"
+            "\ts := a[1:]\n"
+            "\ts[0].V = x\n"
+            "\treturn a[1].V\n}\n",
+            frozenset({0, 1}),
+        ),
+        # A `s = p.A[1:]` reseat re-heads the bound slice.
+        (
+            "type E struct { V int64 }\n"
+            "type S struct { A []E }\n"
+            "func F(p *S, x int64) int64 {\n"
+            "\ts := p.A\n"
+            "\ts = p.A[1:]\n"
+            "\ts[0].V = x\n"
+            "\treturn p.A[1].V\n}\n",
+            frozenset({0, 1}),
+        ),
+        # Three-index bounds evaluate the capacity bound too.
+        (
+            "type E struct { V int64 }\n"
+            "type S struct { A []E }\n"
+            "func F(p *S, i int64, x int64) int64 {\n"
+            "\ts := p.A[0:i:i+1]\n"
+            "\ts[0].V = x\n"
+            "\treturn p.A[0].V\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # A value-struct root's reslice shares the local copy's
+        # backing — `o.A[i]` reads and `s[j]` stores stay inside
+        # the same conflated group.
+        (
+            "type E struct { V int64 }\n"
+            "type S struct { A []E }\n"
+            "func F(o S, x int64) int64 {\n"
+            "\ts := o.A[:]\n"
+            "\ts[0].V = x\n"
+            "\treturn o.A[0].V\n}\n",
+            frozenset({0, 1}),
+        ),
+    ],
+)
+def test_collection_field_reslice_bind(go_types_helper, declarations, expected):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == expected
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        # A map element's collection member is not addressable —
+        # reslicing it stays closed like `p.M[k]` reads do.
+        "type E struct { V int64 }\n"
+        "type S struct { M map[int64][]E }\n"
+        "func F(p *S, k int64, x int64) int64 {\n"
+        "\ts := p.M[k][:]\n"
+        "\ts[0].V = x\n"
+        "\treturn p.M[k][0].V\n}\n",
+    ],
+)
+def test_collection_field_reslice_bind_closed(go_types_helper, declarations):
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available or result.gaps
+
+
+@pytest.mark.parametrize(
+    "declarations, expected",
+    [
+        # `a, c := b, a[:]` — the reslice binds `a`'s group as it
+        # was BEFORE `b` reseats `a` in the same statement: a store
+        # through the reseated `a` never reaches `c`'s read, while a
+        # store through `u` (the backing `a` named before the reseat)
+        # still does — proving `c` shares the OLD group, not an
+        # independent copy.
+        (
+            "type E struct { V int64 }\n"
+            "func F(x, y int64) int64 {\n"
+            "\tu := []E{{V:1}}\n"
+            "\ta := u\n"
+            "\tb := []E{{V:2}}\n"
+            "\ta, c := b, a[:]\n"
+            "\ta[0].V = x\n"
+            "\tu[0].V = y\n"
+            "\treturn c[0].V\n}\n",
+            frozenset({1}),
+        ),
+        # `s := a[:]` on an array VIEWS the backing — `s[j]`
+        # writes land on `a`'s elements, unlike the `s = a` copy.
+        (
+            "type E struct { V int64 }\n"
+            "func F(a [4]E, x int64) int64 {\n"
+            "\ts := a[:]\n"
+            "\ts[0].V = x\n"
+            "\treturn a[0].V\n}\n",
+            frozenset({0, 1}),
+        ),
+        # A bound's callback writes fold like the operand's.
+        (
+            "type E struct { V int64 }\n"
+            "type S struct { A []E }\n"
+            "func H(f func()) int64 { f(); return 1 }\n"
+            "func F(p *S, x int64, w int64) int64 {\n"
+            "\ty := x\n"
+            "\ts := p.A[:H(func() { y = w })]\n"
+            "\t_ = s\n"
+            "\treturn y\n}\n",
+            frozenset({1, 2}),
+        ),
+    ],
+)
+def test_reslice_bind_negative_controls(go_types_helper, declarations, expected):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == expected

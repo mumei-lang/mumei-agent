@@ -3124,3 +3124,81 @@ fn f() { <W<{1 << 2}, 4> as T>::m(&W::<{1 << 2}, 4>); }
     )
     call = _call(report, source, "<W<{1 << 2}, 4> as T>::m(&W::<{1 << 2}, 4>)")
     assert call.target == impl_m.id
+
+def test_type_alias_receiver_resolves_concrete_members():
+    source = """
+struct P;
+type A = P;
+impl P { fn m(&self) {} }
+fn f(a: A) { a.m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = _bindings(report, "m", "associated_function")[0]
+    call = _call(report, source, "a.m()")
+    assert call.target == m.id
+
+
+def test_type_alias_chain_resolves_through_intermediate_aliases():
+    source = """
+struct P;
+type A = B;
+type B = P;
+impl P { fn m(&self) {} }
+fn f(a: A) { a.m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = _bindings(report, "m", "associated_function")[0]
+    call = _call(report, source, "a.m()")
+    assert call.target == m.id
+
+
+def test_cyclic_type_aliases_do_not_recurse():
+    source = """
+type A = B;
+type B = A;
+fn f(a: A) { }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    assert report is not None
+
+
+def test_module_scoped_alias_body_resolves_in_its_own_scope():
+    # `inner::A` where `inner::A = inner::P` must type the receiver as
+    # the module's P, not the outer struct of the same name.
+    source = """
+struct P { x: i32 }
+impl P { fn outer_m(&self) {} }
+mod inner {
+    struct P { y: i32 }
+    impl P { fn inner_m(&self) {} }
+    type A = P;
+}
+fn f(a: inner::A) { a.inner_m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    inner_m = next(b for b in report.bindings if b.name == "inner_m")
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "a.inner_m()"
+    )
+    assert call.target == inner_m.id
+
+
+def test_associated_call_through_alias_spelling_resolves():
+    # `impl A` writes members against the alias's target, so `A::m()`
+    # must look them up through the same unwrap.
+    source = """
+struct P { x: i32 }
+type A = P;
+impl A { fn m(&self) {} }
+fn f(a: A) { a.m(); }
+fn g() { A::m(&a); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = next(b for b in report.bindings if b.name == "m")
+    for text in ("a.m()", "A::m(&a)"):
+        call = next(
+            c for c in report.calls
+            if source[c.span.start:c.span.end] == text
+        )
+        assert call.target == method.id

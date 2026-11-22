@@ -456,6 +456,7 @@ class _ConcurrencyStubRunner:
         memory_bound_mb=None,
         environment=None,
         isolate_network=False,
+        isolate_filesystem_write=False,
     ):
         with self._lock:
             self.inflight += 1
@@ -474,10 +475,13 @@ def test_probe_request_defaults_to_fail_closed_enforcement():
 
     assert request.inherit_environment is False
     assert request.isolate_network is True
+    assert request.isolate_filesystem_write is True
 
 
 def test_probe_request_enforcement_requires_declared_and_allowed_permissions():
-    permissions = frozenset({"environment.read", "network.connect"})
+    permissions = frozenset(
+        {"environment.read", "network.connect", "filesystem.write"}
+    )
     descriptor = AdapterDescriptor.from_manifest(
         _manifest(required_permissions=sorted(permissions))
     )
@@ -489,6 +493,7 @@ def test_probe_request_enforcement_requires_declared_and_allowed_permissions():
 
     assert request.inherit_environment is True
     assert request.isolate_network is False
+    assert request.isolate_filesystem_write is False
 
 
 @pytest.mark.parametrize(
@@ -496,9 +501,18 @@ def test_probe_request_enforcement_requires_declared_and_allowed_permissions():
     [
         ({"environment.read"}, set()),
         ({"network.connect"}, set()),
+        ({"filesystem.write"}, set()),
         (set(), {"environment.read"}),
         (set(), {"network.connect"}),
-        (None, {"environment.read", "network.connect"}),
+        (set(), {"filesystem.write"}),
+        (
+            None,
+            {
+                "environment.read",
+                "network.connect",
+                "filesystem.write",
+            },
+        ),
     ],
 )
 def test_probe_request_permission_mismatch_fails_closed(required, allowed):
@@ -514,6 +528,7 @@ def test_probe_request_permission_mismatch_fails_closed(required, allowed):
 
     assert request.inherit_environment is False
     assert request.isolate_network is True
+    assert request.isolate_filesystem_write is True
 
 
 @pytest.mark.parametrize(
@@ -521,6 +536,7 @@ def test_probe_request_permission_mismatch_fails_closed(required, allowed):
     [
         ("inherit_environment", 1),
         ("isolate_network", 1),
+        ("isolate_filesystem_write", 1),
     ],
 )
 def test_probe_request_enforcement_fields_require_bools(field, value):
@@ -536,10 +552,22 @@ def test_probe_request_rejects_non_policy():
 
 
 def test_probe_command_fingerprint_ignores_enforcement_fields():
-    inherited = _req(inherit_environment=True, isolate_network=False)
-    fail_closed = _req(inherit_environment=False, isolate_network=True)
+    inherited = _req(
+        inherit_environment=True,
+        isolate_network=False,
+        isolate_filesystem_write=False,
+    )
+    fail_closed = _req(
+        inherit_environment=False,
+        isolate_network=True,
+        isolate_filesystem_write=True,
+    )
 
     assert inherited.command_fingerprint() == fail_closed.command_fingerprint()
+    assert (
+        "isolate_filesystem_write"
+        not in AdapterProbeHistory.start(inherited).to_dict()
+    )
 
 
 def test_run_probe_passes_enforcement_to_runner(monkeypatch):
@@ -555,8 +583,11 @@ def test_run_probe_passes_enforcement_to_runner(monkeypatch):
             memory_bound_mb=None,
             environment=None,
             isolate_network=False,
+            isolate_filesystem_write=False,
         ):
-            self.calls.append((environment, isolate_network))
+            self.calls.append(
+                (environment, isolate_network, isolate_filesystem_write)
+            )
             return _ConcurrencyStubRunner._Result()
 
     runner = RecordingRunner()
@@ -564,21 +595,40 @@ def test_run_probe_passes_enforcement_to_runner(monkeypatch):
         "agent.adapter_probe.network_isolation_enforceable",
         lambda: True,
     )
+    monkeypatch.setattr(
+        "agent.adapter_probe.filesystem_write_isolation_enforceable",
+        lambda: True,
+    )
     run_probe(_req(), runner=runner)
-    assert runner.calls[-1] == (minimal_environment(), True)
+    assert runner.calls[-1] == (minimal_environment(), True, True)
 
     monkeypatch.setattr(
         "agent.adapter_probe.network_isolation_enforceable",
         lambda: False,
     )
     run_probe(_req(), runner=runner)
-    assert runner.calls[-1] == (minimal_environment(), False)
+    assert runner.calls[-1] == (minimal_environment(), False, True)
+
+    monkeypatch.setattr(
+        "agent.adapter_probe.network_isolation_enforceable",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "agent.adapter_probe.filesystem_write_isolation_enforceable",
+        lambda: False,
+    )
+    run_probe(_req(), runner=runner)
+    assert runner.calls[-1] == (minimal_environment(), True, False)
 
     run_probe(
-        _req(inherit_environment=True, isolate_network=False),
+        _req(
+            inherit_environment=True,
+            isolate_network=False,
+            isolate_filesystem_write=False,
+        ),
         runner=runner,
     )
-    assert runner.calls[-1] == (None, False)
+    assert runner.calls[-1] == (None, False, False)
 
 
 def test_real_probe_uses_minimal_environment_by_default(monkeypatch):
@@ -614,6 +664,18 @@ def test_probe_requests_thread_policy_into_probe_request():
 
     assert len(requests) == 1
     assert requests[0].inherit_environment is True
+
+
+def test_probe_requests_thread_filesystem_write_policy_into_request():
+    registry = _registry(required_permissions=["filesystem.write"])
+    policy = PlannerPolicy(
+        allowed_permissions=frozenset({"filesystem.write"})
+    )
+
+    requests = probe_requests_for(registry, _route(), policy, stamp=1)
+
+    assert len(requests) == 1
+    assert requests[0].isolate_filesystem_write is False
 
 
 def test_observe_probes_memory_bound_batch_runs_sequentially(monkeypatch):
@@ -1051,9 +1113,15 @@ def test_probe_retry_replaces_observation_in_plan(tmp_path):
         "-c",
         f"import os,sys;sys.exit(0 if os.path.exists({str(flag)!r}) else 1)",
     )
-    registry = _registry(probe_argv=list(argv))
-    policy = PlannerPolicy()
+    registry = _registry(
+        probe_argv=list(argv),
+        required_permissions=["filesystem.write"],
+    )
+    policy = PlannerPolicy(
+        allowed_permissions=frozenset({"filesystem.write"})
+    )
     req = probe_requests_for(registry, _route(), policy, stamp=1)[0]
+    assert req.isolate_filesystem_write is False
     miss = run_probe(req)
     assert miss.observation.availability == "missing"
     hist = AdapterProbeHistory.start(req).record(req, miss)
@@ -1067,6 +1135,7 @@ def test_probe_retry_replaces_observation_in_plan(tmp_path):
         tool_version="4.0.0",
     )
     assert [r.attempt_number for r in retries] == [2]
+    assert retries[0].isolate_filesystem_write is False
     flag.touch()
     ok = run_probe(retries[0])
     assert ok.observation.availability == "available"

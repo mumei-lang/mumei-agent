@@ -1821,3 +1821,39 @@ def test_anchor_authenticity_binds_the_anchor_digest_not_the_record():
             record, [doc],
         )
         assert evaluation["checks"][check] == "evidence_failed"
+
+
+def test_revocation_list_rollback_recovers_through_shared_digest():
+    """A fold doc that pinned a v2 revocation list current against a
+    minimum version performs `revocation_list_rollback` on a
+    descriptor that declared the same `revocation_digest`."""
+    anchor = "e" * 64
+    record = {
+        "schema_version": "mumei.signature-envelope-evaluation/v1",
+        "checks_not_performed": ["revocation_list_rollback"],
+        "revocation_digest": anchor,
+    }
+    current_doc = _doc(
+        "mumei.signature-verification/v1",
+        revocation_list_current=True,
+        revocation_digest=anchor,
+    )
+    evaluation = evaluate_unperformed_check_recovery(
+        record, [current_doc],
+    )
+    assert evaluation["checks"] == {
+        "revocation_list_rollback": "recovered",
+    }
+
+    # A different anchor digest never counts.
+    evaluation = evaluate_unperformed_check_recovery(
+        record,
+        [_doc(
+            "mumei.signature-verification/v1",
+            revocation_list_current=True,
+            revocation_digest="f" * 64,
+        )],
+    )
+    assert evaluation["checks"] == {
+        "revocation_list_rollback": "evidence_failed",
+    }

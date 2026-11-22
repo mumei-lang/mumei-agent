@@ -20,9 +20,11 @@ from the `probe_argv` manifest key, and `probe_request_for(descriptor,
 stamp)` binds it to the descriptor's declared `max_timeout_ms` /
 `max_memory_mb` budgets — a manifest pins how much room its own probe
 gets, and a descriptor without the declaration is a static error, never
-a wildcard probe. Probes use a minimal environment and isolated network
-by default where the host can enforce them; inheritance or network access
-requires the adapter to declare the permission and policy to allow it.
+a wildcard probe. Probes use a minimal environment, isolated network, and a
+private user+mount namespace with a read-only mount tree by default where
+the host can enforce them.
+Inherited environment, network access, and filesystem writes require the
+adapter to declare the corresponding permission and policy to allow it.
 
 For scheduling, `probe_requests_for(registry, request, policy,
 observations, stamp=...)` runs `plan()` and emits a request for each
@@ -70,6 +72,7 @@ from dataclasses import dataclass, replace
 from agent.attempt_runner import (
     MAX_MEMORY_BOUND_MB,
     AttemptRunner,
+    filesystem_write_isolation_enforceable,
     minimal_environment,
     memory_bound_spawn_thread_safe,
     network_isolation_enforceable,
@@ -161,6 +164,7 @@ class AdapterProbeRequest:
     tool_version: str | None = None
     inherit_environment: bool = False
     isolate_network: bool = True
+    isolate_filesystem_write: bool = True
 
     def __post_init__(self) -> None:
         _label(self.adapter_id)
@@ -195,6 +199,7 @@ class AdapterProbeRequest:
         if (
             type(self.inherit_environment) is not bool
             or type(self.isolate_network) is not bool
+            or type(self.isolate_filesystem_write) is not bool
         ):
             raise ValueError("invalid adapter probe enforcement")
 
@@ -304,6 +309,10 @@ def run_probe(
         isolate_network=(
             request.isolate_network and network_isolation_enforceable()
         ),
+        isolate_filesystem_write=(
+            request.isolate_filesystem_write
+            and filesystem_write_isolation_enforceable()
+        ),
     ).normalized()
     observation = RuntimeObservation(
         request.adapter_id,
@@ -351,6 +360,12 @@ def probe_request_for(
         and allowed is not None
         and "network.connect" in allowed
     )
+    isolate_filesystem_write = not (
+        required is not None
+        and "filesystem.write" in required
+        and allowed is not None
+        and "filesystem.write" in allowed
+    )
     return AdapterProbeRequest(
         descriptor.adapter_id,
         descriptor.probe_argv,
@@ -361,6 +376,7 @@ def probe_request_for(
         tool_version=tool_version,
         inherit_environment=inherit_environment,
         isolate_network=isolate_network,
+        isolate_filesystem_write=isolate_filesystem_write,
     )
 
 

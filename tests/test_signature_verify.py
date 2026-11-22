@@ -92,6 +92,7 @@ def test_valid_signature_verifies():
         "key_authenticity",
         "envelope_freshness",
         "key_revocation",
+        "revocation_list_rollback",
         "registry_authenticity",
         "revocation_list_authenticity",
         "producer_time_authenticity",

@@ -229,9 +229,149 @@ def _detect_unshare() -> "str | None":
 
 
 _UNSHARE = _detect_unshare()
-_NETNS_MARKER_SCRIPT = """import os, signal, sys
+_FILESYSTEM_WRITE_ISOLATION_SETUP_SCRIPT = """import ctypes, os
+class _MountAttr(ctypes.Structure):
+    _fields_ = [
+        ("attr_set", ctypes.c_uint64),
+        ("attr_clr", ctypes.c_uint64),
+        ("propagation", ctypes.c_uint64),
+        ("userns_fd", ctypes.c_uint64),
+    ]
+
+def _make_mounts_readonly():
+    uid = os.getuid()
+    gid = os.getgid()
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.unshare.argtypes = [ctypes.c_int]
+    libc.unshare.restype = ctypes.c_int
+    ctypes.set_errno(0)
+    if libc.unshare(0x10000000 | 0x00020000) != 0:
+        return False
+    try:
+        for path, value in (
+            ("/proc/self/setgroups", "deny"),
+            ("/proc/self/uid_map", f"{uid} {uid} 1"),
+            ("/proc/self/gid_map", f"{gid} {gid} 1"),
+        ):
+            with open(path, "w", encoding="ascii") as mapping:
+                if mapping.write(value) != len(value):
+                    return False
+    except Exception:
+        return False
+    libc.mount.argtypes = [
+        ctypes.c_char_p,
+        ctypes.c_char_p,
+        ctypes.c_char_p,
+        ctypes.c_ulong,
+        ctypes.c_void_p,
+    ]
+    libc.mount.restype = ctypes.c_int
+    ctypes.set_errno(0)
+    mounted = libc.mount(
+        None,
+        b"/",
+        None,
+        0x4000 | (1 << 18),
+        None,
+    )
+    if mounted != 0:
+        return False
+    attr = _MountAttr(1, 0, 0, 0)
+    libc.syscall.restype = ctypes.c_long
+    ctypes.set_errno(0)
+    result = libc.syscall(
+        ctypes.c_long(442),
+        ctypes.c_long(-100),
+        ctypes.c_char_p(b"/"),
+        ctypes.c_long(0x8000),
+        ctypes.byref(attr),
+        ctypes.c_size_t(ctypes.sizeof(attr)),
+    )
+    if result != 0:
+        return False
+    libc.prctl.argtypes = [
+        ctypes.c_int,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+    ]
+    libc.prctl.restype = ctypes.c_int
+    ctypes.set_errno(0)
+    if libc.prctl(28, 0xEF, 0, 0, 0) != 0:
+        return False
+    ctypes.set_errno(0)
+    if libc.prctl(47, 4, 0, 0, 0) != 0:
+        return False
+    try:
+        with open(
+            "/proc/sys/kernel/cap_last_cap", "r", encoding="ascii"
+        ) as cap_last_file:
+            cap_last = int(cap_last_file.read())
+    except Exception:
+        return False
+    if cap_last < 0:
+        return False
+    for capability in range(cap_last + 1):
+        ctypes.set_errno(0)
+        if libc.prctl(24, capability, 0, 0, 0) != 0:
+            return False
+
+    class _CapHeader(ctypes.Structure):
+        _fields_ = [
+            ("version", ctypes.c_uint32),
+            ("pid", ctypes.c_int),
+        ]
+
+    class _CapData(ctypes.Structure):
+        _fields_ = [
+            ("effective", ctypes.c_uint32),
+            ("permitted", ctypes.c_uint32),
+            ("inheritable", ctypes.c_uint32),
+        ]
+
+    header = _CapHeader(0x20080522, 0)
+    data = (_CapData * 2)()
+    libc.capset.argtypes = [
+        ctypes.POINTER(_CapHeader),
+        ctypes.POINTER(_CapData),
+    ]
+    libc.capset.restype = ctypes.c_int
+    ctypes.set_errno(0)
+    if libc.capset(ctypes.byref(header), data) != 0:
+        return False
+    ctypes.set_errno(0)
+    if libc.prctl(38, 1, 0, 0, 0) != 0:
+        return False
+    return True
+"""
+_FILESYSTEM_WRITE_PROBE_SCRIPT = (
+    f"exec({_FILESYSTEM_WRITE_ISOLATION_SETUP_SCRIPT!r}, globals())\n"
+    "raise SystemExit(0 if _make_mounts_readonly() else 1)\n"
+)
+
+
+def _detect_filesystem_write_isolation() -> bool:
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        return subprocess.run(
+            [sys.executable, "-I", "-c", _FILESYSTEM_WRITE_PROBE_SCRIPT],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        ).returncode == 0
+    except Exception:
+        return False
+
+
+_FILESYSTEM_WRITE_ISOLATION_ENFORCEABLE = (
+    _detect_filesystem_write_isolation()
+)
+_NAMESPACE_MARKER_SCRIPT = f"""import os, signal, sys
 fd = int(sys.argv[1])
-lc_ctype = sys.argv[2]
+readonly = sys.argv[2] == "1"
+lc_ctype = sys.argv[3]
 if lc_ctype:
     os.environ["LC_CTYPE"] = lc_ctype[1:]
 else:
@@ -239,10 +379,14 @@ else:
 for name in ("SIGPIPE", "SIGXFSZ"):
     if hasattr(signal, name):
         signal.signal(getattr(signal, name), signal.SIG_DFL)
+if readonly:
+    exec({_FILESYSTEM_WRITE_ISOLATION_SETUP_SCRIPT!r}, globals())
+    if not _make_mounts_readonly():
+        os._exit(126)
 os.write(fd, b"x")
 os.set_inheritable(fd, False)
 try:
-    os.execvp(sys.argv[3], sys.argv[3:])
+    os.execvp(sys.argv[4], sys.argv[4:])
 except OSError:
     os.write(fd, b"e")
     os._exit(127)
@@ -271,6 +415,11 @@ def memory_bound_spawn_thread_safe() -> bool:
 def network_isolation_enforceable() -> bool:
     """Whether this host can place a child in a network namespace."""
     return _UNSHARE is not None
+
+
+def filesystem_write_isolation_enforceable() -> bool:
+    """Whether this host can apply recursive read-only mount attributes."""
+    return _FILESYSTEM_WRITE_ISOLATION_ENFORCEABLE
 
 
 def _spawn_target_resolvable(
@@ -403,7 +552,7 @@ def _spawn_failure_result(record: AttemptRecord) -> AttemptRunResult:
     )
 
 
-def _read_network_marker(fd: int) -> bytes | None:
+def _read_namespace_marker(fd: int) -> bytes | None:
     marker = bytearray()
     eof = False
     try:
@@ -441,6 +590,7 @@ class AttemptRunner:
         feed_bytes: bytes | None = None,
         environment: Mapping[str, str] | None = None,
         isolate_network: bool = False,
+        isolate_filesystem_write: bool = False,
     ) -> AttemptRunResult:
         """Spawn `argv`, observe one attempt and return a terminal record.
 
@@ -466,6 +616,10 @@ class AttemptRunner:
         with only a down loopback and the current uid mapped to the current
         user. This is not a sandbox and imposes no filesystem or process
         restriction.
+        `isolate_filesystem_write=True` runs the child in a private user+mount
+        namespace created by the launcher, with a recursively read-only mount
+        tree where supported. This is not a sandbox; character devices and
+        output pipes may remain writable.
         """
         if type(request) is not AttemptExecutionRequest:
             raise ValueError("attempt run requires an execution request")
@@ -482,6 +636,15 @@ class AttemptRunner:
         if isolate_network and _UNSHARE is None:
             raise ValueError(
                 "attempt run network isolation requires a network namespace boundary"
+            )
+        if type(isolate_filesystem_write) is not bool:
+            raise ValueError("invalid attempt run filesystem write isolation")
+        if (
+            isolate_filesystem_write
+            and not filesystem_write_isolation_enforceable()
+        ):
+            raise ValueError(
+                "attempt run filesystem write isolation requires a read-only mount namespace boundary"
             )
         if memory_bound_mb is not None and (
             type(memory_bound_mb) is not int
@@ -521,13 +684,14 @@ class AttemptRunner:
             request.attempt_number,
             request.timeout_ms,
         )
-        if isolate_network and not _spawn_target_resolvable(
+        namespaced = isolate_network or isolate_filesystem_write
+        if namespaced and not _spawn_target_resolvable(
             argv[0], child_environment
         ):
             return _spawn_failure_result(record)
         marker_read_fd = None
         marker_write_fd = None
-        if isolate_network:
+        if namespaced:
             try:
                 marker_read_fd, marker_write_fd = os.pipe()
             except OSError:
@@ -565,7 +729,7 @@ class AttemptRunner:
                     ]
             else:
                 preexec = _memory_bound_preexec(memory_bound_mb)
-        if isolate_network:
+        if namespaced:
             # The close-on-exec marker distinguishes target exits from setup failures.
             target_environment = (
                 os.environ if child_environment is None else child_environment
@@ -574,19 +738,26 @@ class AttemptRunner:
             lc_ctype_argument = (
                 "" if target_lc_ctype is None else f"={target_lc_ctype}"
             )
-            spawn_argv = [
-                _UNSHARE,
-                "--net",
-                "--map-current-user",
-                "--",
+            namespace_argv = [
                 sys.executable,
                 "-I",
                 "-c",
-                _NETNS_MARKER_SCRIPT,
+                _NAMESPACE_MARKER_SCRIPT,
                 str(marker_write_fd),
+                "1" if isolate_filesystem_write else "0",
                 lc_ctype_argument,
                 *spawn_argv,
             ]
+            if isolate_network:
+                spawn_argv = [
+                    _UNSHARE,
+                    "--net",
+                    "--map-current-user",
+                    "--",
+                    *namespace_argv,
+                ]
+            else:
+                spawn_argv = namespace_argv
         popen_options = (
             {} if marker_write_fd is None else {"pass_fds": (marker_write_fd,)}
         )
@@ -676,10 +847,10 @@ class AttemptRunner:
         marker = (
             None
             if marker_read_fd is None
-            else _read_network_marker(marker_read_fd)
+            else _read_namespace_marker(marker_read_fd)
         )
         if (
-            isolate_network
+            namespaced
             and marker != b"x"
             and events[-1].kind == "exited"
         ):
@@ -779,6 +950,7 @@ def dispatch_attempt(
     report_stamp: int | None = None,
     environment: Mapping[str, str] | None = None,
     isolate_network: bool = False,
+    isolate_filesystem_write: bool = False,
 ) -> AttemptDispatch:
     """Run the sequence's outstanding dispatch and reconcile the observation.
 
@@ -816,6 +988,7 @@ def dispatch_attempt(
         feed_bytes=feed_bytes,
         environment=environment,
         isolate_network=isolate_network,
+        isolate_filesystem_write=isolate_filesystem_write,
     )
     return AttemptDispatch(
         sequence.reconcile_report(run.record, report_stamp), run
