@@ -45470,6 +45470,26 @@ def test_bound_method_value_field_invocation_includes_receiver_deps(
     assert direct_after_rebind.return_dependencies == frozenset({0, 1})
 
 
+def test_bound_method_value_method_expression_callback_parameter_offset(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "type S struct { F func() int64 }\n"
+        "func (s S) Run() int64 { return s.F() }\n"
+        "type T struct{}\n"
+        "func (T) Apply(cb func() int64) int64 { return cb() }\n"
+        "func F(x, y int64) int64 {\n"
+        "\tv := y; var s S; s.F = func() int64 { return v }; v = x\n"
+        "\tt := T{}; return T.Apply(t, s.Run)\n"
+        "}\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    summary = named_package(files, snapshot, summaries, "F")
+    assert summary.available
+    assert summary.return_dependencies == frozenset({0, 1})
+
+
 def test_package_function_var_call_records_imported_transfer(
     go_types_helper,
 ):

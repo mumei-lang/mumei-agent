@@ -12835,10 +12835,15 @@ class _Builder:
                 ),
                 None,
             )
+            argument_offset = 1 if call.method_expr else 0
+            parameter_index = (
+                index - argument_offset if index is not None else None
+            )
             return (
-                index is not None
-                and index < len(target.parameters)
-                and target.parameters[index].type.kind == "function"
+                parameter_index is not None
+                and 0 <= parameter_index < len(target.parameters)
+                and target.parameters[parameter_index].type.kind
+                == "function"
             )
         if parent.type != "expression_list":
             return False
