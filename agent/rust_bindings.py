@@ -47,7 +47,9 @@ _INDEX_ELEMENT_CONTAINERS = frozenset(
 # `for p in v.iter()` binds like `for p in v`. Maps are excluded
 # here (they iterate (K, V) pairs) and handled by their own
 # `keys`/`values` entry points below.
-_ITER_ELEMENT_METHODS = frozenset({"iter", "iter_mut", "into_iter", "drain"})
+_ITER_ELEMENT_METHODS = frozenset(
+    {"iter", "iter_mut", "into_iter", "drain", "split_off"}
+)
 # Iterator adaptors that keep the same element type — `map`/`flat_map`
 # change it through a closure and stay opaque.
 _ITER_PRESERVING_METHODS = frozenset(
@@ -310,7 +312,9 @@ _ITER_OPTION_METHODS = frozenset(
 # `it.flat_map(f)` peels one iterable layer (`Vec<U>`/`Option<U>`/
 # `&[U]`/`[U; N]` → `U`). Closures stay opaque — their param and
 # return types are unwritten.
-_ITER_FN_ELEMENT_METHODS = frozenset({"map", "flat_map", "filter_map"})
+_ITER_FN_ELEMENT_METHODS = frozenset(
+    {"map", "flat_map", "filter_map", "map_while", "scan"}
+)
 _UNWRAP_ERR_METHODS = frozenset({"unwrap_err", "expect_err"})
 _TRY_HEADS = frozenset({"Option", "Result"})
 # Prelude constructors whose tuple payload position is fixed by the
@@ -3719,10 +3723,14 @@ class _RustBindings:
                             "or_insert_with",
                             "or_insert_with_key",
                             "or_default",
+                            "into_mut",
+                            "key",
                         }
                     ):
                         # `m.entry(k).or_insert(d)`/`and_modify`
-                        # chains yield `&mut V` of the map's args.
+                        # chains yield `&mut V` of the map's args;
+                        # `key()` reads `&K`, and `into_mut()`
+                        # (`BTreeMap::Entry` only) reads `&mut V`.
                         entry_recv = callee.child_by_field_name(
                             "value"
                         )
@@ -3790,13 +3798,36 @@ class _RustBindings:
                                     map_args or ""
                                 )
                                 if len(parts) >= 2:
-                                    return self._spelled_type(
-                                        "&mut " + parts[1].strip(),
+                                    entry_pos = (
                                         self._receiver_annotation_position(
                                             map_recv
                                         )
-                                        or node.start_byte,
+                                        or node.start_byte
                                     )
+                                    if method_name == "key":
+                                        # `e.key()` yields `&K`.
+                                        return self._spelled_type(
+                                            "&"
+                                            + parts[0].strip(),
+                                            entry_pos,
+                                        )
+                                    if (
+                                        method_name == "into_mut"
+                                        and self._container_head_name(
+                                            map_recv
+                                        )
+                                        != "BTreeMap"
+                                    ):
+                                        # `Entry::into_mut` is
+                                        # `BTreeMap`-only — a
+                                        # `HashMap` entry names no
+                                        # such method.
+                                        pass
+                                    else:
+                                        return self._spelled_type(
+                                            "&mut " + parts[1].strip(),
+                                            entry_pos,
+                                        )
                     if (
                         method_name in _SWAP_REMOVE_METHODS
                         and receiver[1] is not None
@@ -5155,7 +5186,9 @@ class _RustBindings:
             # it there or a same-named root type steals the name.
             self._push_scope(home)
         try:
-            if method == "filter_map":
+            if method in {"filter_map", "map_while", "scan"}:
+                # `f() -> Option<U>`/`Result<U, _>` — the unwrap
+                # shape `filter_map` already uses.
                 wrap = re.fullmatch(r"(?:Option|Result)\s*<(.+)>", text)
                 if wrap is None:
                     return None, None

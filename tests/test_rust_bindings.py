@@ -7524,3 +7524,36 @@ fn g(o: Option<P>, h: N) {
     # `N -> M -> HashMap` alias chain to the outer `P` too.
     assert bound.get("p.pm()") == pm.id
     assert bound.get("v.pm()") == pm.id
+
+def test_entry_key_into_mut_and_fn_adaptors_bind():
+    source = """
+struct K;
+impl K { fn km(&self) {} }
+struct P;
+impl P { fn pm(&self) {} }
+struct Q;
+impl Q { fn qm(&self) {} }
+fn mk() -> Option<Q> { None }
+fn f(m: HashMap<K, P>, b: BTreeMap<K, P>, v: Vec<P>) {
+    let x1 = b.entry(K).into_mut(); x1.pm();
+    let x2 = m.entry(K).into_mut(); x2.pm();
+    let x3 = m.entry(K).key(); x3.km();
+    let x9 = v.iter().map_while(mk); for p in x9 { p.qm(); }
+    let x10 = v.iter().scan(mk); for p in x10 { p.qm(); }
+    let x13 = v.split_off(1); for p in x13 { p.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    km = _bindings(report, "km", "associated_function")[0]
+    qm = _bindings(report, "qm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    assert bound.get("x1.pm()") == pm.id
+    # `Entry::into_mut` is `BTreeMap`-only.
+    assert not bound.get("x2.pm()")
+    assert bound.get("x3.km()") == km.id
+    assert bound.get("p.qm()") == qm.id
