@@ -171,8 +171,8 @@ Scheduled adapter attempts run with only `PATH` (and `SYSTEMROOT` on
 Windows) unless the selected adapter declares `environment.read` and the
 explicit policy permits it. Undeclared permissions fail closed. This
 enforces the environment category and, where available, `network.connect`;
-`filesystem.read` and `process.spawn` remain declared-only. Environment
-scrubbing is not a sandbox and is not Evidence.
+`filesystem.read` remains declared-only. Environment scrubbing is not a
+sandbox and is not Evidence.
 
 ### C04 declarative adapter overlay
 
@@ -198,7 +198,7 @@ Scheduled attempts whose adapter does not declare `network.connect` or whose
 policy does not permit it run in a fresh network namespace via
 `unshare --net --map-current-user` where the host supports unprivileged user
 namespaces; otherwise it remains unenforced as before. This is not a sandbox
-or Evidence; `filesystem.read` and `process.spawn` remain declared-only.
+or Evidence; `filesystem.read` remains declared-only.
 
 ### C04 self-reported failure is not a scheduling success
 
@@ -214,11 +214,12 @@ acceptance is unchanged.
 Each dispatched schedule entry has an additive `enforcement` object with
 `environment` (`inherited` or `minimal`), `network` (`permitted`,
 `isolated` or `unenforced`), `filesystem` (`permitted`, `isolated` or
-`unenforced`) and `memory_bound_mb` (an integer or `null`). It reports what
-the runner was asked to apply; `unenforced` means the host lacks the
-corresponding network namespace or read-only mount boundary.
-`filesystem.read` and `process.spawn` are omitted because they are not
-enforced. This is not a sandbox or Evidence and does not change selection.
+`unenforced`), `process_spawn` (`permitted`, `isolated` or `unenforced`) and
+`memory_bound_mb` (an integer or `null`). It reports what the runner was
+asked to apply; `unenforced` means the host lacks the corresponding network
+namespace, read-only mount or seccomp boundary. `filesystem.read` remains
+declared-only. This is not a sandbox or Evidence and does not change
+selection.
 
 ### C04 permission enforcement for availability probes
 
@@ -227,8 +228,8 @@ Windows) unless the adapter declares `environment.read` and policy allows it,
 and in a fresh network namespace unless `network.connect` is declared and
 allowed, where the host supports it; otherwise network remains unenforced.
 `probe_request_for` without policy fails closed. Command fingerprints and
-probe-history records are unchanged; `filesystem.read` and `process.spawn`
-remain declared-only. This is not a sandbox or Evidence.
+probe-history records are unchanged; `filesystem.read` remains
+declared-only. This is not a sandbox or Evidence.
 
 ### C04 filesystem.write enforcement
 
@@ -237,10 +238,20 @@ mount tree in a private user+mount namespace created by the launcher, unless
 the adapter declares `filesystem.write` and policy allows it, where the host
 supports unprivileged user and mount namespaces plus `mount_setattr`;
 otherwise it remains unenforced as before. `/dev` character devices and
-stdout/stderr pipes still work. `filesystem.read` and `process.spawn` remain
-declared-only. The launcher drops all capabilities and locks securebits before
-running the adapter, so even a root host cannot undo the read-only tree. This
-is not a sandbox or Evidence.
+stdout/stderr pipes still work. `filesystem.read` remains declared-only. The
+launcher drops all capabilities and locks securebits before running the
+adapter, so even a root host cannot undo the read-only tree. This is not a
+sandbox or Evidence.
+
+### C04 process.spawn enforcement
+
+Scheduled attempts and availability probes deny process creation unless the
+adapter declares `process.spawn` and policy allows it, where the host supports
+the seccomp-BPF filter. The filter denies `fork`, `vfork`, and non-thread
+`clone` with `EPERM`, returns `ENOSYS` for `clone3`, and allows `execve` and
+thread creation. It is host-dependent, currently supported on Linux
+x86_64/aarch64, and is not a sandbox or Evidence; `filesystem.read` remains
+declared-only.
 
 ### C11 declared memory bounds for attempted executions
 
@@ -3164,6 +3175,10 @@ at caller memory).
 Passing a tracked literal as a direct-call function value resolves its
 captures at invocation time (recursively for nested captures); `defer`
 and `go` shapes carry those captures into exit/race analysis.
+A tracked literal factory propagates a result only when every return
+is an immediate function literal; the result re-resolves captures at
+invocation time while retaining its bind-time dependency snapshot, and
+unsupported return shapes remain opaque.
 A package-level `var Alias = Id` call
 admits as an opaque external call — the callee is
 reassignable by any caller, so `Alias(args)` is dep-free

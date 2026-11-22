@@ -11,6 +11,7 @@ truncation happened, not that the producer stopped writing.
 
 import hashlib
 import os
+import platform
 import select
 import shutil
 import signal
@@ -368,10 +369,142 @@ def _detect_filesystem_write_isolation() -> bool:
 _FILESYSTEM_WRITE_ISOLATION_ENFORCEABLE = (
     _detect_filesystem_write_isolation()
 )
+_PROCESS_SPAWN_ISOLATION_SETUP_SCRIPT = """import ctypes, errno, os, platform, sys, threading
+
+def _install_process_spawn_filter():
+    try:
+        machine = platform.machine().lower()
+        if sys.byteorder != "little":
+            return False
+        if machine == "x86_64":
+            audit_arch = 0xC000003E
+            fork_vfork = (57, 58)
+            clone = 56
+        elif machine == "aarch64":
+            audit_arch = 0xC00000B7
+            fork_vfork = ()
+            clone = 220
+        else:
+            return False
+
+        class _SockFilter(ctypes.Structure):
+            _fields_ = [
+                ("code", ctypes.c_ushort),
+                ("jt", ctypes.c_ubyte),
+                ("jf", ctypes.c_ubyte),
+                ("k", ctypes.c_uint),
+            ]
+
+        class _SockFprog(ctypes.Structure):
+            _fields_ = [
+                ("length", ctypes.c_ushort),
+                ("filters", ctypes.POINTER(_SockFilter)),
+            ]
+
+        instructions = []
+
+        def statement(code, value):
+            instructions.append(_SockFilter(code, 0, 0, value))
+
+        def jump(code, value, true_skip=0, false_skip=0):
+            instructions.append(
+                _SockFilter(code, true_skip, false_skip, value)
+            )
+
+        def deny(error):
+            statement(0x06, 0x00050000 | (error & 0xFFFF))
+
+        statement(0x20, 4)
+        jump(0x15, audit_arch, 1, 0)
+        deny(errno.EPERM)
+        if machine == "x86_64":
+            statement(0x20, 0)
+            statement(0x54, 0x40000000)
+            jump(0x15, 0, 1, 0)
+            deny(errno.EPERM)
+        statement(0x20, 0)
+        for number in fork_vfork:
+            jump(0x15, number, 0, 1)
+            deny(errno.EPERM)
+        jump(0x15, 435, 0, 1)
+        deny(errno.ENOSYS)
+        jump(0x15, clone, 0, 4)
+        statement(0x20, 16)
+        jump(0x45, 0x00010000, 1, 0)
+        deny(errno.EPERM)
+        statement(0x06, 0x7FFF0000)
+        statement(0x06, 0x7FFF0000)
+        program_filters = (_SockFilter * len(instructions))(
+            *instructions
+        )
+        program = _SockFprog(len(instructions), program_filters)
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.prctl.argtypes = [
+            ctypes.c_int,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+        ]
+        libc.prctl.restype = ctypes.c_int
+        ctypes.set_errno(0)
+        if libc.prctl(38, 1, 0, 0, 0) != 0:
+            return False
+        ctypes.set_errno(0)
+        if libc.prctl(
+            22, 2, ctypes.addressof(program), 0, 0
+        ) != 0:
+            return False
+        return True
+    except Exception:
+        return False
+"""
+_PROCESS_SPAWN_PROBE_SCRIPT = (
+    f"exec({_PROCESS_SPAWN_ISOLATION_SETUP_SCRIPT!r}, globals())\n"
+    "if not _install_process_spawn_filter(): raise SystemExit(1)\n"
+    "try:\n"
+    "    child = os.fork()\n"
+    "except PermissionError:\n"
+    "    pass\n"
+    "else:\n"
+    "    if child == 0: os._exit(1)\n"
+    "    os.waitpid(child, 0)\n"
+    "    raise SystemExit(2)\n"
+    "ran = []\n"
+    "thread = threading.Thread(target=lambda: ran.append(True))\n"
+    "thread.start()\n"
+    "thread.join(timeout=3)\n"
+    "if thread.is_alive() or ran != [True]: raise SystemExit(3)\n"
+)
+
+
+def _detect_process_spawn_isolation() -> bool:
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        if (
+            sys.byteorder != "little"
+            or platform.machine().lower() not in {"x86_64", "aarch64"}
+        ):
+            return False
+        return subprocess.run(
+            [sys.executable, "-I", "-c", _PROCESS_SPAWN_PROBE_SCRIPT],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        ).returncode == 0
+    except Exception:
+        return False
+
+
+_PROCESS_SPAWN_ISOLATION_ENFORCEABLE = (
+    _detect_process_spawn_isolation()
+)
 _NAMESPACE_MARKER_SCRIPT = f"""import os, signal, sys
 fd = int(sys.argv[1])
 readonly = sys.argv[2] == "1"
-lc_ctype = sys.argv[3]
+process_spawn = sys.argv[3] == "1"
+lc_ctype = sys.argv[4]
 if lc_ctype:
     os.environ["LC_CTYPE"] = lc_ctype[1:]
 else:
@@ -383,10 +516,18 @@ if readonly:
     exec({_FILESYSTEM_WRITE_ISOLATION_SETUP_SCRIPT!r}, globals())
     if not _make_mounts_readonly():
         os._exit(126)
+if process_spawn:
+    try:
+        exec({_PROCESS_SPAWN_ISOLATION_SETUP_SCRIPT!r}, globals())
+        installed = _install_process_spawn_filter()
+    except BaseException:
+        os._exit(126)
+    if not installed:
+        os._exit(126)
 os.write(fd, b"x")
 os.set_inheritable(fd, False)
 try:
-    os.execvp(sys.argv[4], sys.argv[4:])
+    os.execvp(sys.argv[5], sys.argv[5:])
 except OSError:
     os.write(fd, b"e")
     os._exit(127)
@@ -420,6 +561,11 @@ def network_isolation_enforceable() -> bool:
 def filesystem_write_isolation_enforceable() -> bool:
     """Whether this host can apply recursive read-only mount attributes."""
     return _FILESYSTEM_WRITE_ISOLATION_ENFORCEABLE
+
+
+def process_spawn_isolation_enforceable() -> bool:
+    """Whether this host can deny child creation while preserving threads."""
+    return _PROCESS_SPAWN_ISOLATION_ENFORCEABLE
 
 
 def _spawn_target_resolvable(
@@ -591,6 +737,7 @@ class AttemptRunner:
         environment: Mapping[str, str] | None = None,
         isolate_network: bool = False,
         isolate_filesystem_write: bool = False,
+        isolate_process_spawn: bool = False,
     ) -> AttemptRunResult:
         """Spawn `argv`, observe one attempt and return a terminal record.
 
@@ -620,6 +767,9 @@ class AttemptRunner:
         namespace created by the launcher, with a recursively read-only mount
         tree where supported. This is not a sandbox; character devices and
         output pipes may remain writable.
+        `isolate_process_spawn=True` uses seccomp to deny fork, vfork and
+        non-thread clone operations, returns ENOSYS for clone3, and leaves
+        exec and thread creation available where the host supports it.
         """
         if type(request) is not AttemptExecutionRequest:
             raise ValueError("attempt run requires an execution request")
@@ -645,6 +795,15 @@ class AttemptRunner:
         ):
             raise ValueError(
                 "attempt run filesystem write isolation requires a read-only mount namespace boundary"
+            )
+        if type(isolate_process_spawn) is not bool:
+            raise ValueError("invalid attempt run process spawn isolation")
+        if (
+            isolate_process_spawn
+            and not process_spawn_isolation_enforceable()
+        ):
+            raise ValueError(
+                "attempt run process spawn isolation requires a seccomp filter boundary"
             )
         if memory_bound_mb is not None and (
             type(memory_bound_mb) is not int
@@ -684,7 +843,11 @@ class AttemptRunner:
             request.attempt_number,
             request.timeout_ms,
         )
-        namespaced = isolate_network or isolate_filesystem_write
+        namespaced = (
+            isolate_network
+            or isolate_filesystem_write
+            or isolate_process_spawn
+        )
         if namespaced and not _spawn_target_resolvable(
             argv[0], child_environment
         ):
@@ -745,6 +908,7 @@ class AttemptRunner:
                 _NAMESPACE_MARKER_SCRIPT,
                 str(marker_write_fd),
                 "1" if isolate_filesystem_write else "0",
+                "1" if isolate_process_spawn else "0",
                 lc_ctype_argument,
                 *spawn_argv,
             ]
@@ -951,6 +1115,7 @@ def dispatch_attempt(
     environment: Mapping[str, str] | None = None,
     isolate_network: bool = False,
     isolate_filesystem_write: bool = False,
+    isolate_process_spawn: bool = False,
 ) -> AttemptDispatch:
     """Run the sequence's outstanding dispatch and reconcile the observation.
 
@@ -989,6 +1154,7 @@ def dispatch_attempt(
         environment=environment,
         isolate_network=isolate_network,
         isolate_filesystem_write=isolate_filesystem_write,
+        isolate_process_spawn=isolate_process_spawn,
     )
     return AttemptDispatch(
         sequence.reconcile_report(run.record, report_stamp), run

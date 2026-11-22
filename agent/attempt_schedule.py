@@ -30,6 +30,7 @@ from agent.attempt_runner import (
     memory_bound_enforceable,
     minimal_environment,
     network_isolation_enforceable,
+    process_spawn_isolation_enforceable,
 )
 from agent.core_evidence import (
     MAX_ACCEPTANCE_DESCRIPTOR_BYTES,
@@ -100,6 +101,17 @@ def _filesystem_write_isolated(plan: VerificationPlan) -> bool:
     )
 
 
+def _process_spawn_isolated(plan: VerificationPlan) -> bool:
+    required = plan.selected.required_permissions
+    allowed = plan.policy.allowed_permissions
+    return not (
+        required is not None
+        and "process.spawn" in required
+        and allowed is not None
+        and "process.spawn" in allowed
+    )
+
+
 def _label(value: str) -> None:
     if (
         type(value) is not str
@@ -122,6 +134,7 @@ class DispatchEnforcement:
     environment: str
     network: str
     filesystem: str
+    process_spawn: str
     memory_bound_mb: int | None
 
     def __post_init__(self) -> None:
@@ -132,6 +145,8 @@ class DispatchEnforcement:
             or self.network not in {"permitted", "isolated", "unenforced"}
             or type(self.filesystem) is not str
             or self.filesystem not in {"permitted", "isolated", "unenforced"}
+            or type(self.process_spawn) is not str
+            or self.process_spawn not in {"permitted", "isolated", "unenforced"}
             or (
                 self.memory_bound_mb is not None
                 and (
@@ -147,6 +162,7 @@ class DispatchEnforcement:
             "environment": self.environment,
             "network": self.network,
             "filesystem": self.filesystem,
+            "process_spawn": self.process_spawn,
             "memory_bound_mb": self.memory_bound_mb,
         }
 
@@ -584,6 +600,11 @@ def run_attempt_schedule(
                 filesystem_write_isolation_required
                 and filesystem_write_isolation_enforceable()
             )
+            process_spawn_isolation_required = _process_spawn_isolated(plan)
+            isolate_process_spawn = (
+                process_spawn_isolation_required
+                and process_spawn_isolation_enforceable()
+            )
             enforcement = DispatchEnforcement(
                 environment=(
                     "inherited" if environment_arg is None else "minimal"
@@ -600,6 +621,13 @@ def run_attempt_schedule(
                     if not filesystem_write_isolation_required
                     else "isolated"
                     if isolate_filesystem_write
+                    else "unenforced"
+                ),
+                process_spawn=(
+                    "permitted"
+                    if not process_spawn_isolation_required
+                    else "isolated"
+                    if isolate_process_spawn
                     else "unenforced"
                 ),
                 memory_bound_mb=memory_arg,
@@ -619,6 +647,7 @@ def run_attempt_schedule(
                 # unenforced, like the memory-budget fallback.
                 isolate_network=isolate,
                 isolate_filesystem_write=isolate_filesystem_write,
+                isolate_process_spawn=isolate_process_spawn,
                 # No declared feed means a closed pipe — a scheduled child
                 # must never inherit the parent's stdin and block on it.
                 feed_bytes=feed if feed is not None else b"",

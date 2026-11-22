@@ -1731,6 +1731,122 @@ def test_run_rejects_non_boolean_filesystem_write_isolation(
         )
 
 
+@pytest.mark.parametrize("isolate_process_spawn", [1, "true", None])
+def test_run_rejects_non_boolean_process_spawn_isolation(
+    isolate_process_spawn,
+):
+    with pytest.raises(
+        ValueError,
+        match="^invalid attempt run process spawn isolation$",
+    ):
+        AttemptRunner().run(
+            request(),
+            argv("pass"),
+            isolate_process_spawn=isolate_process_spawn,
+        )
+
+
+def test_process_spawn_detector_rejects_non_linux(monkeypatch):
+    monkeypatch.setattr(attempt_runner.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        attempt_runner.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail(
+            "non-Linux hosts do not probe process-spawn isolation"
+        ),
+    )
+
+    assert attempt_runner._detect_process_spawn_isolation() is False
+
+
+def test_process_spawn_detector_rejects_unsupported_architecture(
+    monkeypatch,
+):
+    monkeypatch.setattr(attempt_runner.sys, "platform", "linux")
+    monkeypatch.setattr(
+        attempt_runner.platform, "machine", lambda: "riscv64"
+    )
+    monkeypatch.setattr(
+        attempt_runner.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail(
+            "unsupported architectures do not probe process-spawn isolation"
+        ),
+    )
+
+    assert attempt_runner._detect_process_spawn_isolation() is False
+
+
+def test_process_spawn_detector_treats_architecture_errors_as_unavailable(
+    monkeypatch,
+):
+    monkeypatch.setattr(attempt_runner.sys, "platform", "linux")
+
+    def fail_architecture_lookup():
+        raise RuntimeError("arch lookup failed")
+
+    monkeypatch.setattr(
+        attempt_runner.platform,
+        "machine",
+        fail_architecture_lookup,
+    )
+    monkeypatch.setattr(
+        attempt_runner.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail(
+            "arch lookup failure must stop the process-spawn probe"
+        ),
+    )
+
+    assert attempt_runner._detect_process_spawn_isolation() is False
+
+
+@pytest.mark.parametrize(
+    "error", [OSError("probe failed"), RuntimeError("probe failed")]
+)
+def test_process_spawn_detector_treats_probe_errors_as_unavailable(
+    monkeypatch, error
+):
+    monkeypatch.setattr(attempt_runner.sys, "platform", "linux")
+    monkeypatch.setattr(
+        attempt_runner.platform, "machine", lambda: "x86_64"
+    )
+
+    def fail_probe(*_args, **_kwargs):
+        raise error
+
+    monkeypatch.setattr(attempt_runner.subprocess, "run", fail_probe)
+    assert attempt_runner._detect_process_spawn_isolation() is False
+
+
+def test_run_process_spawn_isolation_requires_boundary_before_spawn(
+    monkeypatch,
+):
+    spawned = False
+
+    def fail_if_spawned(*args, **kwargs):
+        nonlocal spawned
+        spawned = True
+        pytest.fail("isolation validation must precede spawn")
+
+    monkeypatch.setattr(
+        attempt_runner,
+        "_PROCESS_SPAWN_ISOLATION_ENFORCEABLE",
+        False,
+    )
+    monkeypatch.setattr(attempt_runner.subprocess, "Popen", fail_if_spawned)
+    with pytest.raises(
+        ValueError,
+        match="^attempt run process spawn isolation requires a seccomp filter boundary$",
+    ):
+        AttemptRunner().run(
+            request(),
+            argv("pass"),
+            isolate_process_spawn=True,
+        )
+    assert spawned is False
+
+
 def test_filesystem_write_detector_rejects_non_linux(monkeypatch):
     monkeypatch.setattr(attempt_runner.sys, "platform", "darwin")
     monkeypatch.setattr(
@@ -2056,6 +2172,138 @@ def test_dispatch_attempt_forwards_filesystem_write_isolation(monkeypatch):
         sequence,
         argv("pass"),
         isolate_filesystem_write=True,
+    )
+
+    assert calls == [True]
+    assert dispatch.run.record.state == "exited"
+    assert dispatch.run.record.events[-1].exit_code == 0
+
+
+@pytest.mark.skipif(
+    not attempt_runner.process_spawn_isolation_enforceable(),
+    reason="process-spawn isolation requires seccomp support",
+)
+def test_run_process_spawn_isolation_denies_forks_and_preserves_threads():
+    result = AttemptRunner().run(
+        request(),
+        argv(
+            "import os, subprocess, threading\n"
+            "try:\n"
+            " os.fork()\n"
+            "except PermissionError as error:\n"
+            " print(f'fork={error.errno}', flush=True)\n"
+            "else:\n"
+            " raise SystemExit('fork unexpectedly succeeded')\n"
+            "try:\n"
+            " subprocess.run(['true'], check=True)\n"
+            "except OSError as error:\n"
+            " print(f'subprocess={error.errno}', flush=True)\n"
+            "else:\n"
+            " raise SystemExit('subprocess unexpectedly succeeded')\n"
+            "ran = []\n"
+            "thread = threading.Thread(target=lambda: ran.append(True))\n"
+            "thread.start(); thread.join(timeout=3)\n"
+            "if thread.is_alive() or ran != [True]: raise SystemExit(4)\n"
+            "print('thread=ok')"
+        ),
+        isolate_process_spawn=True,
+    )
+
+    assert result.record.state == "exited"
+    assert result.record.events[-1].exit_code == 0
+    assert result.stdout == b"fork=1\nsubprocess=1\nthread=ok\n"
+
+
+def test_run_without_process_spawn_isolation_can_spawn_children():
+    result = AttemptRunner().run(
+        request(),
+        argv(
+            "import subprocess, sys\n"
+            "subprocess.run([sys.executable, '-c', 'pass'], check=True)\n"
+            "print('spawn=ok')"
+        ),
+    )
+
+    assert result.record.state == "exited"
+    assert result.record.events[-1].exit_code == 0
+    assert result.stdout == b"spawn=ok\n"
+
+
+@pytest.mark.skipif(
+    not attempt_runner.process_spawn_isolation_enforceable()
+    or not attempt_runner.filesystem_write_isolation_enforceable()
+    or not attempt_runner.network_isolation_enforceable()
+    or not attempt_runner.memory_bound_enforceable(),
+    reason="requires seccomp, mount/network namespaces, and memory bounds",
+)
+def test_process_spawn_isolation_combines_with_network_filesystem_and_memory():
+    result = AttemptRunner().run(
+        request(),
+        argv(
+            "import resource\n"
+            "print(resource.getrlimit(resource.RLIMIT_AS)[0])"
+        ),
+        memory_bound_mb=256,
+        isolate_network=True,
+        isolate_filesystem_write=True,
+        isolate_process_spawn=True,
+    )
+
+    assert result.record.state == "exited"
+    assert result.record.events[-1].exit_code == 0
+    assert int(result.stdout.strip()) == 256 * 1_048_576
+
+
+@pytest.mark.skipif(
+    os.name != "posix",
+    reason="namespace marker requires POSIX",
+)
+def test_run_process_spawn_isolation_setup_failure_is_failed(monkeypatch):
+    monkeypatch.setattr(
+        attempt_runner,
+        "_PROCESS_SPAWN_ISOLATION_ENFORCEABLE",
+        True,
+    )
+    monkeypatch.setattr(
+        attempt_runner,
+        "_NAMESPACE_MARKER_SCRIPT",
+        "import os; os._exit(126)",
+    )
+    result = AttemptRunner().run(
+        request(),
+        argv("print('unreached')"),
+        isolate_process_spawn=True,
+    )
+
+    assert result.record.state == "failed"
+    assert [event.kind for event in result.record.events] == [
+        "started",
+        "failed",
+    ]
+    assert result.record.events[-1].exit_code is None
+    assert result.stdout == b""
+
+
+def test_dispatch_attempt_forwards_process_spawn_isolation(monkeypatch):
+    calls = []
+    real_run = AttemptRunner.run
+
+    def record_run(self, execution_request, child_argv, **kwargs):
+        calls.append(kwargs["isolate_process_spawn"])
+        kwargs["isolate_process_spawn"] = False
+        return real_run(self, execution_request, child_argv, **kwargs)
+
+    monkeypatch.setattr(
+        attempt_runner,
+        "_PROCESS_SPAWN_ISOLATION_ENFORCEABLE",
+        True,
+    )
+    monkeypatch.setattr(AttemptRunner, "run", record_run)
+    sequence = AttemptSequence(FINGERPRINT, 10_000).begin_attempt()
+    dispatch = dispatch_attempt(
+        sequence,
+        argv("pass"),
+        isolate_process_spawn=True,
     )
 
     assert calls == [True]

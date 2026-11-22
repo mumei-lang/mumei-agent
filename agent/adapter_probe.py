@@ -20,11 +20,12 @@ from the `probe_argv` manifest key, and `probe_request_for(descriptor,
 stamp)` binds it to the descriptor's declared `max_timeout_ms` /
 `max_memory_mb` budgets — a manifest pins how much room its own probe
 gets, and a descriptor without the declaration is a static error, never
-a wildcard probe. Probes use a minimal environment, isolated network, and a
-private user+mount namespace with a read-only mount tree by default where
-the host can enforce them.
-Inherited environment, network access, and filesystem writes require the
-adapter to declare the corresponding permission and policy to allow it.
+a wildcard probe. Probes use a minimal environment, isolated network, a
+private user+mount namespace with a read-only mount tree, and process-spawn
+restrictions by default where the host can enforce them. Inherited
+environment, network access, and filesystem writes require the adapter to
+declare the corresponding permission and policy to allow it; process
+spawning requires the same declaration and policy to avoid isolation.
 
 For scheduling, `probe_requests_for(registry, request, policy,
 observations, stamp=...)` runs `plan()` and emits a request for each
@@ -76,6 +77,7 @@ from agent.attempt_runner import (
     minimal_environment,
     memory_bound_spawn_thread_safe,
     network_isolation_enforceable,
+    process_spawn_isolation_enforceable,
 )
 from agent.verification_attempt import (
     AttemptCancelRequest,
@@ -165,6 +167,7 @@ class AdapterProbeRequest:
     inherit_environment: bool = False
     isolate_network: bool = True
     isolate_filesystem_write: bool = True
+    isolate_process_spawn: bool = True
 
     def __post_init__(self) -> None:
         _label(self.adapter_id)
@@ -200,6 +203,7 @@ class AdapterProbeRequest:
             type(self.inherit_environment) is not bool
             or type(self.isolate_network) is not bool
             or type(self.isolate_filesystem_write) is not bool
+            or type(self.isolate_process_spawn) is not bool
         ):
             raise ValueError("invalid adapter probe enforcement")
 
@@ -313,6 +317,10 @@ def run_probe(
             request.isolate_filesystem_write
             and filesystem_write_isolation_enforceable()
         ),
+        isolate_process_spawn=(
+            request.isolate_process_spawn
+            and process_spawn_isolation_enforceable()
+        ),
     ).normalized()
     observation = RuntimeObservation(
         request.adapter_id,
@@ -366,6 +374,12 @@ def probe_request_for(
         and allowed is not None
         and "filesystem.write" in allowed
     )
+    isolate_process_spawn = not (
+        required is not None
+        and "process.spawn" in required
+        and allowed is not None
+        and "process.spawn" in allowed
+    )
     return AdapterProbeRequest(
         descriptor.adapter_id,
         descriptor.probe_argv,
@@ -377,6 +391,7 @@ def probe_request_for(
         inherit_environment=inherit_environment,
         isolate_network=isolate_network,
         isolate_filesystem_write=isolate_filesystem_write,
+        isolate_process_spawn=isolate_process_spawn,
     )
 
 

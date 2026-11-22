@@ -976,6 +976,10 @@ class _Builder:
         # between the literal and the call (`p := &a; h := func(){*p};
         # p = &b; h()` reads `b`, not `a`).
         self.closure_captures: dict[str, frozenset[str]] = {}
+        self.closure_factory_literals: dict[
+            str, tuple[Any, frozenset[str]]
+        ] = {}
+        self.closure_factory_results: set[str] = set()
         # Bound method values — `f := s.M` records `(method binding,
         # receiver binding)` under `f`'s id so a later `f(args)`
         # resolves through the method's summary like `s.M(args)` does.
@@ -10071,6 +10075,55 @@ class _Builder:
             and binding.type.elem.kind != "struct"
         )
 
+    def _comma_ok_container_field_map(
+        self, node: Any, width: int, params: dict | None = None
+    ) -> bool:
+        """`v, ok := p.M[k]` — the comma-ok pair on a param-root
+        struct's map field element.
+
+        Same two-name shape as the bound-map comma-ok: the element
+        read already flows through the single-name `e := p.M[k]`
+        index path, so the value carries the field slot's deps plus
+        the key's, and the flag conservatively takes them too.
+        `_scalar_container_field` does the member typing and the
+        param-root admission (pointer roots, aliases, reseat
+        accounting) — a member that is not a map, or a field the
+        slot model cannot name (reseated/dirty roots), stays closed."""
+        if width != 2 or node is None or node.type != "index_expression":
+            return False
+        operand = node.child_by_field_name("operand")
+        while (
+            operand is not None
+            and operand.type == "parenthesized_expression"
+        ):
+            operand = next(
+                (
+                    c
+                    for c in operand.named_children
+                    if c.type != "comment"
+                ),
+                None,
+            )
+        if operand is None or operand.type not in (
+            "selector_expression",
+            "field_expression",
+        ):
+            return False
+        _root_id, member = self._scalar_container_field(
+            operand, params, allow_struct_elements=True
+        )
+        return (
+            member is not None
+            and member.type is not None
+            and member.type.kind == "map"
+            and getattr(member.type, "elem", None) is not None
+            # An interface element binds the comma-ok value without
+            # the dispatch provenance the single-name `e := p.M[k]`
+            # read keeps, so `e.M()` would gap anyway — keep it
+            # closed rather than admit a half-supported read.
+            and member.type.elem.kind != "interface"
+        )
+
     def _call_result_fact(self, node: Any) -> tuple[Any | None, Any | None]:
         """(member, single-result fact) for a call operand.
 
@@ -12244,6 +12297,8 @@ class _Builder:
                             locals_,
                             _seen=_seen,
                         )
+                    if root in self.closure_factory_results:
+                        resolved |= locals_[root]
                 else:
                     resolved |= locals_[root]
                 binding = self.bindings.get(root)
@@ -16862,6 +16917,20 @@ class _Builder:
             rights = _children(right) if right is not None else []
             if not lefts or any(l.type != "identifier" for l in lefts):
                 raise _Unsupported("unsupported_statement", _span(node))
+            locals_pre = dict(locals_)
+            factory_captures_pre = dict(self.closure_captures)
+            factory_writes_pre = dict(self.closure_writes)
+            factory_star_pre = set(self.closure_star_writes)
+            factory_calls_pre = set(self.closure_inner_calls)
+            factory_pointee_pre = set(self.pointee_closures)
+            factory_opaque_pre = set(self.opaque_callees)
+            factory_aliases_pre = dict(self.func_aliases)
+            factory_mv_pre = dict(self.bound_method_values)
+            factory_imv_pre = dict(self.bound_interface_methods)
+            factory_literals_pre = dict(
+                self.closure_factory_literals
+            )
+            factory_results_pre = set(self.closure_factory_results)
             if len(lefts) != len(rights):
                 # `a, b := lib.F(x)` — a multi-valued imported call
                 # unpacks one RHS into every LHS; each result carries
@@ -16877,6 +16946,9 @@ class _Builder:
                     is None
                     and not self._comma_ok_opaque_map(
                         rights[0], len(lefts)
+                    )
+                    and not self._comma_ok_container_field_map(
+                        rights[0], len(lefts), params
                     )
                     and not self._is_chan_recv(rights[0], len(lefts))
                 ):
@@ -16909,6 +16981,12 @@ class _Builder:
             writes_before = dict(self.closure_writes)
             star_before = set(self.closure_star_writes)
             calls_before = set(self.closure_inner_calls)
+            factory_literals_before = dict(
+                self.closure_factory_literals
+            )
+            factory_results_before = set(
+                self.closure_factory_results
+            )
             # Identifier-RHS pointer provenance reads the pre-state
             # too — `p, r := q, p` hands r the OLD p's pointer.
             rhs_ptrs: list = []
@@ -17006,6 +17084,20 @@ class _Builder:
                 )
                 for i in range(len(lefts))
             ]
+            # A comma-ok pair `e, ok := p.M[k]` binds the element
+            # value to the FIRST name — it takes the same
+            # element-extraction share and container-field binding
+            # the single-name `e := p.M[k]` does; the flag name
+            # carries only the read's deps.
+            comma_ok_rhs = (
+                rights[0]
+                if len(lefts) != len(rights)
+                and len(rights) == 1
+                and self._comma_ok_container_field_map(
+                    rights[0], len(lefts), params
+                )
+                else None
+            )
             for i, (lhs, value) in enumerate(zip(lefts, values)):
                 # `_` discards its value — the RHS was still evaluated.
                 if lhs.text == b"_":
@@ -17020,6 +17112,30 @@ class _Builder:
                         binding = self.bindings.get(ref.binding_id)
                 if binding is None:
                     raise _Unsupported("binding_unavailable", _span(node))
+                factory_source = None
+                if (
+                    len(lefts) == len(rights)
+                    and binding.type is not None
+                    and binding.type.kind == "function"
+                ):
+                    factory_source = self._closure_factory_bind_source(
+                        rights[i],
+                        binding,
+                        params,
+                        locals_pre,
+                        conditional=conditional,
+                        statement=node,
+                        captures_before=factory_captures_pre,
+                        writes_before=factory_writes_pre,
+                        star_before=factory_star_pre,
+                        calls_before=factory_calls_pre,
+                        pointee_before=factory_pointee_pre,
+                        opaque_before=factory_opaque_pre,
+                        aliases_before=factory_aliases_pre,
+                        mv_before=factory_mv_pre,
+                        imv_before=factory_imv_pre,
+                        factory_literals_before=factory_literals_pre,
+                    )
                 # `s := lib.G(a)` — a container-typed call result
                 # binds a local whose single dep set conflates every
                 # element; the fresh backing keys on the call node.
@@ -17034,9 +17150,15 @@ class _Builder:
                 )
                 element_snapshot = (
                     self._struct_element_container_snapshot(
-                        rights[i], params
+                        (
+                            rights[i]
+                            if len(lefts) == len(rights)
+                            else comma_ok_rhs
+                        ),
+                        params,
                     )
                     if len(lefts) == len(rights)
+                    or (i == 0 and comma_ok_rhs is not None)
                     else None
                 )
                 target_struct = self._struct_value_fact(binding.type)
@@ -17676,6 +17798,8 @@ class _Builder:
                             else value
                         )
                     )
+                if not (conditional or self._may_skip > 0):
+                    self.closure_factory_results.discard(binding.id)
                 self._store(locals_, params, binding.id, value, conditional)
                 # `q := p` hands q the caller-shared pointee p's
                 # entry names — register it like the `p = q`
@@ -17730,7 +17854,9 @@ class _Builder:
                         binding.id, None
                     )
                 extract_rhs = (
-                    rights[i] if len(lefts) == len(rights) else None
+                    rights[i]
+                    if len(lefts) == len(rights)
+                    else (comma_ok_rhs if i == 0 else None)
                 )
                 if (
                     extract_rhs is not None
@@ -17790,7 +17916,7 @@ class _Builder:
                     (
                         rights[i]
                         if len(lefts) == len(rights)
-                        else None
+                        else (comma_ok_rhs if i == 0 else None)
                     ),
                     params,
                     conditional=conditional,
@@ -17811,6 +17937,12 @@ class _Builder:
                     src_id = (
                         src_ref.binding_id if src_ref is not None else None
                     )
+                    if src_id in factory_results_pre:
+                        self.closure_factory_results.add(binding.id)
+                    elif not (conditional or self._may_skip > 0):
+                        self.closure_factory_results.discard(
+                            binding.id
+                        )
                     if (
                         src_id is not None
                         and src_id in captures_before
@@ -17953,7 +18085,11 @@ class _Builder:
                     self.func_aliases.pop(binding.id, None)
                     self.opaque_callees.discard(binding.id)
                 elif len(lefts) == len(rights):
-                    if self._strip_parens(rights[i]).type == "func_literal":
+                    if factory_source is not None:
+                        self._bind_closure_factory_result(
+                            binding.id, factory_source
+                        )
+                    elif self._strip_parens(rights[i]).type == "func_literal":
                         # `f := func()...` — the literal just wrote
                         # the name's records; only an earlier alias
                         # cannot resolve through it. The fresh
@@ -18116,6 +18252,9 @@ class _Builder:
                         or self._comma_ok_opaque_map(
                             value_nodes[0], len(names)
                         )
+                        or self._comma_ok_container_field_map(
+                            value_nodes[0], len(names), params
+                        )
                         or self._is_chan_recv(
                             value_nodes[0], len(names)
                         )
@@ -18127,6 +18266,24 @@ class _Builder:
                     and not multi
                 ):
                     raise _Unsupported("unsupported_statement", _span(spec))
+                locals_pre = dict(locals_)
+                factory_captures_pre = dict(self.closure_captures)
+                factory_writes_pre = dict(self.closure_writes)
+                factory_star_pre = set(self.closure_star_writes)
+                factory_calls_pre = set(self.closure_inner_calls)
+                factory_pointee_pre = set(self.pointee_closures)
+                factory_opaque_pre = set(self.opaque_callees)
+                factory_aliases_pre = dict(self.func_aliases)
+                factory_mv_pre = dict(self.bound_method_values)
+                factory_imv_pre = dict(
+                    self.bound_interface_methods
+                )
+                factory_literals_pre = dict(
+                    self.closure_factory_literals
+                )
+                factory_results_pre = set(
+                    self.closure_factory_results
+                )
                 # `var a, b T` without values is the zero value —
                 # dep-free. With values the RHS evaluates in parallel
                 # against the pre-state before any store; `var a, b =
@@ -18149,6 +18306,19 @@ class _Builder:
                     ]
                 else:
                     values = [frozenset() for _ in names]
+                # See the short-declaration store loop: a comma-ok
+                # `var e, ok = p.M[k]` binds the element value to
+                # the FIRST name — it takes the container-field
+                # binding the single-name form does.
+                comma_ok_rhs = (
+                    value_nodes[0]
+                    if len(names) != len(value_nodes)
+                    and len(value_nodes) == 1
+                    and self._comma_ok_container_field_map(
+                        value_nodes[0], len(names), params
+                    )
+                    else None
+                )
                 # See the short-declaration store loop: tuple values
                 # evaluate against the pre-state, so copies read the
                 # capture maps as they were before any store.
@@ -18162,6 +18332,12 @@ class _Builder:
                 writes_before = dict(self.closure_writes)
                 star_before = set(self.closure_star_writes)
                 calls_before = set(self.closure_inner_calls)
+                factory_literals_before = dict(
+                    self.closure_factory_literals
+                )
+                factory_results_before = set(
+                    self.closure_factory_results
+                )
                 rhs_ptrs = []
                 for i in range(len(names)):
                     src_ref = (
@@ -18186,6 +18362,36 @@ class _Builder:
                     if binding is None:
                         raise _Unsupported(
                             "binding_unavailable", _span(spec)
+                        )
+                    factory_source = None
+                    if (
+                        not multi
+                        and value_nodes
+                        and len(names) == len(value_nodes)
+                        and binding.type is not None
+                        and binding.type.kind == "function"
+                    ):
+                        factory_source = (
+                            self._closure_factory_bind_source(
+                                value_nodes[i],
+                                binding,
+                                params,
+                                locals_pre,
+                                conditional=conditional,
+                                statement=node,
+                                captures_before=factory_captures_pre,
+                                writes_before=factory_writes_pre,
+                                star_before=factory_star_pre,
+                                calls_before=factory_calls_pre,
+                                pointee_before=factory_pointee_pre,
+                                opaque_before=factory_opaque_pre,
+                                aliases_before=factory_aliases_pre,
+                                mv_before=factory_mv_pre,
+                                imv_before=factory_imv_pre,
+                                factory_literals_before=(
+                                    factory_literals_pre
+                                ),
+                            )
                         )
                     if binding.type.kind == "interface" and value_nodes:
                         rhs = (
@@ -18941,6 +19147,8 @@ class _Builder:
                                 else value
                             )
                         )
+                    if not (conditional or self._may_skip > 0):
+                        self.closure_factory_results.discard(binding.id)
                     self._store(
                         locals_, params, binding.id, value, conditional
                     )
@@ -18949,7 +19157,7 @@ class _Builder:
                         (
                             value_nodes[i]
                             if len(names) == len(value_nodes)
-                            else None
+                            else (comma_ok_rhs if i == 0 else None)
                         ),
                         params,
                         conditional=conditional,
@@ -18971,6 +19179,14 @@ class _Builder:
                             if src_ref is not None
                             else None
                         )
+                        if src_id in factory_results_pre:
+                            self.closure_factory_results.add(
+                                binding.id
+                            )
+                        elif not (conditional or self._may_skip > 0):
+                            self.closure_factory_results.discard(
+                                binding.id
+                            )
                         if (
                             src_id is not None
                             and src_id in captures_before
@@ -19164,7 +19380,11 @@ class _Builder:
                         # Non-identifier RHS — any earlier alias drops.
                         self.func_aliases.pop(binding.id, None)
                     elif not multi and value_nodes:
-                        if (
+                        if factory_source is not None:
+                            self._bind_closure_factory_result(
+                                binding.id, factory_source
+                            )
+                        elif (
                             self._strip_parens(value_nodes[i]).type
                             == "func_literal"
                         ):
@@ -19424,6 +19644,9 @@ class _Builder:
                     or self._comma_ok_map_index(rights[0], len(lefts))
                     is not None
                     or self._comma_ok_opaque_map(rights[0], len(lefts))
+                    or self._comma_ok_container_field_map(
+                        rights[0], len(lefts), params
+                    )
                     or self._is_chan_recv(rights[0], len(lefts))
                 )
             )
@@ -21314,6 +21537,7 @@ class _Builder:
             # evaluation too — a literal RHS records its own captures
             # under the name it binds during eval, so `f, g = func(){…},
             # f` must read `f`'s OLD records, not the fresh literal's.
+            locals_pre = dict(locals_)
             captures_before = dict(self.closure_captures)
             pointee_before = set(self.pointee_closures)
             aliases_before = dict(self.func_aliases)
@@ -21324,6 +21548,12 @@ class _Builder:
             writes_before = dict(self.closure_writes)
             star_before = set(self.closure_star_writes)
             calls_before = set(self.closure_inner_calls)
+            factory_literals_before = dict(
+                self.closure_factory_literals
+            )
+            factory_results_before = set(
+                self.closure_factory_results
+            )
             values = (
                 [
                     self.expression(
@@ -21339,6 +21569,59 @@ class _Builder:
                     for rhs in rights
                 ]
             )
+            factory_sources: list[
+                tuple[
+                    frozenset[str],
+                    frozenset[str],
+                    bool,
+                    bool,
+                    bool,
+                    bool,
+                ]
+                | None
+            ] = [None] * len(lefts)
+            if (
+                not compound
+                and not conditional
+                and self._may_skip == 0
+                and not multi
+                and len(lefts) == len(rights)
+            ):
+                for i, ref in enumerate(refs):
+                    binding_id = getattr(ref, "binding_id", None)
+                    binding = (
+                        self.bindings.get(binding_id)
+                        if binding_id is not None
+                        else None
+                    )
+                    if (
+                        binding is None
+                        or binding.type is None
+                        or binding.type.kind != "function"
+                    ):
+                        continue
+                    factory_sources[i] = (
+                        self._closure_factory_bind_source(
+                            rights[i],
+                            binding,
+                            params,
+                            locals_pre,
+                            conditional=False,
+                            statement=node,
+                            captures_before=captures_before,
+                            writes_before=writes_before,
+                            star_before=star_before,
+                            calls_before=calls_before,
+                            pointee_before=pointee_before,
+                            opaque_before=opaque_before,
+                            aliases_before=aliases_before,
+                            mv_before=mv_before,
+                            imv_before=imv_before,
+                            factory_literals_before=(
+                                factory_literals_before
+                            ),
+                        )
+                    )
             for rhs_index, (_, rhs_deps) in field_rhs_snapshots.items():
                 if rhs_index < len(values):
                     values[rhs_index] |= rhs_deps
@@ -21545,7 +21828,20 @@ class _Builder:
                 int, tuple[frozenset, dict[str, frozenset]]
             ] = {}
             struct_rhs_element_snapshots: set[int] = set()
-            if not compound and len(lefts) == len(rights):
+            # `e, ok = p.M[k]` binds the element value to the FIRST
+            # LHS name — its struct snapshot comes from the single
+            # RHS the same way `e = p.M[k]` does.
+            comma_ok_multi = (
+                not compound
+                and len(lefts) != len(rights)
+                and len(rights) == 1
+                and self._comma_ok_container_field_map(
+                    rights[0], len(lefts), params
+                )
+            )
+            if not compound and (
+                len(lefts) == len(rights) or comma_ok_multi
+            ):
                 for rhs_index, rhs in enumerate(rights):
                     snapshot_rhs = rhs
                     while (
@@ -21748,6 +22044,34 @@ class _Builder:
             for dirty_id in double_pointer_dirty_targets.values():
                 self._double_pointer_dirty.add(dirty_id)
             for i, (ref, value) in enumerate(zip(refs, values)):
+                if (
+                    (conditional or self._may_skip > 0)
+                    and len(lefts) == len(rights)
+                ):
+                    target_id = getattr(ref, "binding_id", None)
+                    binding = (
+                        self.bindings.get(target_id)
+                        if target_id is not None
+                        else None
+                    )
+                    self._closure_factory_bind_source(
+                        rights[i],
+                        binding,
+                        params,
+                        locals_pre,
+                        conditional=True,
+                        statement=node,
+                        captures_before=captures_before,
+                        writes_before=writes_before,
+                        star_before=star_before,
+                        calls_before=calls_before,
+                        pointee_before=pointee_before,
+                        opaque_before=opaque_before,
+                        aliases_before=aliases_before,
+                        mv_before=mv_before,
+                        imv_before=imv_before,
+                        factory_literals_before=factory_literals_before,
+                    )
                 if ref is None:
                     if i in external_write_targets:
                         # The member/package-var store landed in
@@ -21866,6 +22190,13 @@ class _Builder:
                     # field reads observe it.
                     broadcast = len(ref) >= 3 and ref[2]
                     ref, accumulating = ref[0], ref[1]
+                if (
+                    not compound
+                    and not (conditional or self._may_skip > 0)
+                ):
+                    self.closure_factory_results.discard(
+                        ref.binding_id
+                    )
                 array_index_deps = value_struct_array_field_writes.get(i)
                 if array_index_deps is not None:
                     value = value | array_index_deps
@@ -22735,7 +23066,11 @@ class _Builder:
                                 (
                                     rights[i]
                                     if len(lefts) == len(rights)
-                                    else None
+                                    else (
+                                        rights[0]
+                                        if i == 0 and comma_ok_multi
+                                        else None
+                                    )
                                 ),
                                 params,
                                 conditional=(
@@ -23183,6 +23518,14 @@ class _Builder:
                     src_id = (
                         src_ref.binding_id if src_ref is not None else None
                     )
+                    if src_id in factory_results_before:
+                        self.closure_factory_results.add(
+                            ref.binding_id
+                        )
+                    elif not (conditional or self._may_skip > 0):
+                        self.closure_factory_results.discard(
+                            ref.binding_id
+                        )
                     tgt_bound = self.bindings.get(ref.binding_id)
                     if (
                         not conditional
@@ -23856,6 +24199,10 @@ class _Builder:
                                 else rights[0]
                             ),
                             ref.binding_id,
+                        )
+                    if factory_sources[i] is not None:
+                        self._bind_closure_factory_result(
+                            ref.binding_id, factory_sources[i]
                         )
                 elif i not in func_elem_targets:
                     # `h = (f)` / `h = f()` — a non-identifier RHS
@@ -28339,6 +28686,8 @@ class _Builder:
                                 deps |= frozenset(
                                     {params[escaped_id]}
                                 )
+                    if ref.binding_id in self.closure_factory_results:
+                        deps |= locals_[ref.binding_id]
                 if ref.binding_id in self.external_chan_locals:
                     # `ch := g()` names a callee-produced queue —
                     # contents live in `indirect_writes`, like a
@@ -32110,6 +32459,10 @@ class _Builder:
                     params,
                     locals_,
                 )
+                if binding_id in self.closure_factory_results:
+                    actual_values[index] |= locals_.get(
+                        binding_id, frozenset()
+                    )
         if local_chan_chan_roots is not None:
             for index, argument in enumerate(arguments):
                 root_id = self._local_chan_chan_id(argument)
@@ -34076,6 +34429,356 @@ class _Builder:
                 targets |= _chase(ref.binding_id)
         return targets
 
+    def _closure_factory_returned_literals(
+        self, literal: Any
+    ) -> tuple[list[Any], bool]:
+        body = literal.child_by_field_name("body")
+        if body is None:
+            return [], False
+        returned_literals: list[Any] = []
+        saw_return = False
+        all_returns_are_literals = True
+        stack = list(_children(body))
+        while stack:
+            current = stack.pop()
+            if current.type == "func_literal":
+                continue
+            if current.type == "return_statement":
+                saw_return = True
+                expressions = [
+                    child
+                    for child in current.named_children
+                    if child.type != "comment"
+                ]
+                if (
+                    len(expressions) == 1
+                    and expressions[0].type == "expression_list"
+                ):
+                    expressions = [
+                        child
+                        for child in expressions[0].named_children
+                        if child.type != "comment"
+                    ]
+                if len(expressions) != 1:
+                    all_returns_are_literals = False
+                    continue
+                returned = self._strip_parens(expressions[0])
+                if returned is None or returned.type != "func_literal":
+                    all_returns_are_literals = False
+                    continue
+                returned_literals.append(returned)
+                continue
+            stack.extend(_children(current))
+        return returned_literals, saw_return and all_returns_are_literals
+
+    def _closure_factory_source(
+        self,
+        rhs: Any,
+        params: dict[str, int],
+        locals_pre: dict[str, frozenset[int]],
+        *,
+        captures_before: dict[str, frozenset[str]],
+        writes_before: dict[str, frozenset[str]],
+        star_before: set[str],
+        calls_before: set[str],
+        pointee_before: set[str],
+        opaque_before: set[str],
+        aliases_before: dict[str, Any],
+        mv_before: dict[str, Any],
+        imv_before: dict[str, Any],
+        factory_literals_before: dict[
+            str, tuple[Any, frozenset[str]]
+        ],
+    ) -> tuple[
+        frozenset[str],
+        frozenset[str],
+        bool,
+        bool,
+        bool,
+        bool,
+    ] | None:
+        rhs = self._strip_parens(rhs)
+        if rhs is None or rhs.type != "call_expression":
+            return None
+        callee = self._strip_parens(
+            rhs.child_by_field_name("function")
+        )
+        if callee is None:
+            return None
+
+        def captures_factory_reference(
+            literal: Any, returned: list[Any]
+        ) -> bool:
+            factory_bindings: set[str] = set()
+            stack = [literal]
+            while stack:
+                current = stack.pop()
+                if (
+                    current is not literal
+                    and current.type == "func_literal"
+                ):
+                    continue
+                binding = self.bindings_by_span.get(
+                    self.node_key(current)
+                )
+                if binding is not None and binding.kind == "variable":
+                    factory_bindings.add(binding.id)
+                stack.extend(_children(current))
+
+            for returned_literal in returned:
+                stack = [returned_literal]
+                while stack:
+                    current = stack.pop()
+                    if current.type == "identifier":
+                        ref = self.references.get(
+                            self.node_key(current)
+                        )
+                        if (
+                            ref is not None
+                            and ref.binding_id in factory_bindings
+                        ):
+                            binding = self.bindings.get(ref.binding_id)
+                            if (
+                                binding is None
+                                or not self._scalar_value_fact(
+                                    binding.type
+                                )
+                            ):
+                                return True
+                    stack.extend(_children(current))
+            return False
+
+        if callee.type == "identifier":
+            ref = self.references.get(self.node_key(callee))
+            source_id = (
+                ref.binding_id if ref is not None else None
+            )
+            binding = (
+                self.bindings.get(source_id)
+                if source_id is not None
+                else None
+            )
+            factory = (
+                factory_literals_before.get(source_id)
+                if source_id is not None
+                else None
+            )
+            returned, all_returns_are_literals = (
+                self._closure_factory_returned_literals(factory[0])
+                if factory is not None
+                else ([], False)
+            )
+            if (
+                source_id is None
+                or binding is None
+                or binding.type is None
+                or binding.type.kind != "function"
+                or source_id not in captures_before
+                or source_id in opaque_before
+                or source_id in params
+                or source_id in aliases_before
+                or source_id in mv_before
+                or source_id in imv_before
+                or factory is None
+                or captures_before[source_id] is not factory[1]
+                or not all_returns_are_literals
+                or captures_factory_reference(factory[0], returned)
+            ):
+                return None
+            return (
+                captures_before[source_id],
+                writes_before.get(source_id, frozenset()),
+                source_id in star_before,
+                source_id in calls_before,
+                source_id in pointee_before,
+                source_id in opaque_before,
+            )
+
+        if callee.type != "func_literal":
+            return None
+        returned, all_returns_are_literals = (
+            self._closure_factory_returned_literals(callee)
+        )
+        if (
+            not all_returns_are_literals
+            or captures_factory_reference(callee, returned)
+        ):
+            return None
+        try:
+            (
+                _,
+                captured,
+                captures_pointer,
+                writes,
+                star_write,
+                has_call,
+            ) = self._func_literal_capture(
+                callee, params, locals_pre
+            )
+        except _Unsupported:
+            return None
+        return (
+            frozenset(captured),
+            frozenset(writes),
+            star_write,
+            has_call,
+            captures_pointer,
+            False,
+        )
+
+    def _closure_factory_bind_source(
+        self,
+        rhs: Any,
+        binding: Any,
+        params: dict[str, int],
+        locals_pre: dict[str, frozenset[int]],
+        *,
+        conditional: bool,
+        statement: Any,
+        captures_before: dict[str, frozenset[str]],
+        writes_before: dict[str, frozenset[str]],
+        star_before: set[str],
+        calls_before: set[str],
+        pointee_before: set[str],
+        opaque_before: set[str],
+        aliases_before: dict[str, Any],
+        mv_before: dict[str, Any],
+        imv_before: dict[str, Any],
+        factory_literals_before: dict[
+            str, tuple[Any, frozenset[str]]
+        ],
+    ) -> tuple[
+        frozenset[str],
+        frozenset[str],
+        bool,
+        bool,
+        bool,
+        bool,
+    ] | None:
+        if (
+            binding is None
+            or binding.type is None
+            or binding.type.kind != "function"
+        ):
+            return None
+        rhs = self._strip_parens(rhs)
+        if rhs is None or rhs.type != "call_expression":
+            return None
+        source = self._closure_factory_source(
+            rhs,
+            params,
+            locals_pre,
+            captures_before=captures_before,
+            writes_before=writes_before,
+            star_before=star_before,
+            calls_before=calls_before,
+            pointee_before=pointee_before,
+            opaque_before=opaque_before,
+            aliases_before=aliases_before,
+            mv_before=mv_before,
+            imv_before=imv_before,
+            factory_literals_before=factory_literals_before,
+        )
+        if source is not None:
+            if conditional:
+                raise _Unsupported(
+                    "unsupported_statement", _span(statement)
+                )
+            return source
+        callee = self._strip_parens(
+            rhs.child_by_field_name("function")
+        )
+        if callee is None:
+            return None
+        if callee.type == "func_literal":
+            returned, _ = self._closure_factory_returned_literals(callee)
+            if returned:
+                raise _Unsupported(
+                    "unsupported_statement", _span(statement)
+                )
+            return None
+        if callee.type != "identifier":
+            return None
+        ref = self.references.get(self.node_key(callee))
+        source_id = ref.binding_id if ref is not None else None
+        source_binding = (
+            self.bindings.get(source_id)
+            if source_id is not None
+            else None
+        )
+        factory = (
+            factory_literals_before.get(source_id)
+            if source_id is not None
+            else None
+        )
+        if factory is not None:
+            returned, _ = self._closure_factory_returned_literals(
+                factory[0]
+            )
+            if returned and captures_before.get(source_id):
+                raise _Unsupported(
+                    "unsupported_statement", _span(statement)
+                )
+            return None
+        if (
+            conditional
+            and source_id is not None
+            and source_id not in factory_literals_before
+            and source_id in opaque_before
+        ):
+            raise _Unsupported(
+                "unsupported_statement", _span(statement)
+            )
+        if (
+            source_id is not None
+            and source_id not in params
+            and source_binding is not None
+            and source_binding.kind == "variable"
+            and source_binding.type is not None
+            and source_binding.type.kind == "function"
+            and captures_before.get(source_id)
+        ):
+            raise _Unsupported(
+                "unsupported_statement", _span(statement)
+            )
+        return None
+
+    def _bind_closure_factory_result(
+        self,
+        binding_id: str,
+        source: tuple[
+            frozenset[str],
+            frozenset[str],
+            bool,
+            bool,
+            bool,
+            bool,
+        ],
+    ) -> None:
+        captured, writes, star, inner_calls, pointee, opaque = source
+        self.closure_captures[binding_id] = captured
+        self.closure_writes[binding_id] = writes
+        if star:
+            self.closure_star_writes.add(binding_id)
+        else:
+            self.closure_star_writes.discard(binding_id)
+        if inner_calls:
+            self.closure_inner_calls.add(binding_id)
+        else:
+            self.closure_inner_calls.discard(binding_id)
+        if pointee:
+            self.pointee_closures.add(binding_id)
+        else:
+            self.pointee_closures.discard(binding_id)
+        if opaque:
+            self.opaque_callees.add(binding_id)
+        else:
+            self.opaque_callees.discard(binding_id)
+        self._drop_bound_method(binding_id)
+        self.func_aliases.pop(binding_id, None)
+        self.closure_factory_literals.pop(binding_id, None)
+        self.closure_factory_results.add(binding_id)
+
     def _func_literal(
         self,
         node: Any,
@@ -34331,6 +35034,9 @@ class _Builder:
             ).append((node, func_arg_id))
         if bound_id is not None:
             may_skip = self._conditional or self._may_skip > 0
+            was_factory_literal = (
+                bound_id in self.closure_factory_literals
+            )
             if in_composite:
                 # An element literal inside `fs := []func(){…}` —
                 # the container may hold other elements with their
@@ -34362,6 +35068,7 @@ class _Builder:
                         )
                         | frozenset(writes)
                     )
+                    self.closure_factory_literals.pop(target_id, None)
                 if star_write:
                     self.closure_star_writes.update(composite_targets)
                 if has_call:
@@ -34457,6 +35164,25 @@ class _Builder:
                 # — a conditional rebind keeps it for the path
                 # that keeps the old literal.
                 self.pointee_closures.discard(bound_id)
+            if not may_skip:
+                self.closure_factory_results.discard(bound_id)
+            binding = self.bindings.get(bound_id)
+            if (
+                not may_skip
+                and not in_composite
+                and binding is not None
+                and binding.type is not None
+                and binding.type.kind == "function"
+                and bound_id in self.closure_captures
+            ):
+                self.closure_factory_literals[bound_id] = (
+                    node,
+                    self.closure_captures[bound_id],
+                )
+            else:
+                self.closure_factory_literals.pop(bound_id, None)
+            if may_skip and was_factory_literal:
+                self.opaque_callees.add(bound_id)
         return deps
 
     def _bound_closure_call(
@@ -34610,6 +35336,8 @@ class _Builder:
             # reassignments between the literal and the call move
             # what the call actually reads.
             deps = self._captured_current_deps(captured, params, locals_)
+            if ref.binding_id in self.closure_factory_results:
+                deps |= locals_.get(ref.binding_id, frozenset())
         else:
             deps = frozenset()
         # The callee name itself reads its CURRENT deps — `f = g`
@@ -34705,6 +35433,8 @@ class _Builder:
             deps |= self._captured_current_deps(
                 captured, params, locals_
             )
+            if ref.binding_id in self.closure_factory_results:
+                deps |= locals_.get(ref.binding_id, frozenset())
         if ref.binding_id in self.pointee_closures or external:
             for escaped_id in self.escaped:
                 if escaped_id in locals_:

@@ -5,8 +5,11 @@ import json
 
 import pytest
 
-from agent.adapter_probe import AdapterProbeHistory
-from agent.attempt_runner import filesystem_write_isolation_enforceable
+from agent.adapter_probe import AdapterProbeHistory, probe_request_for
+from agent.attempt_runner import (
+    filesystem_write_isolation_enforceable,
+    process_spawn_isolation_enforceable,
+)
 from agent.ts_interprocedural import PROFILE as TS_SUMMARY_PROFILE
 from agent.sol_interprocedural import PROFILE as SOL_SUMMARY_PROFILE
 from agent.summaries_adapters import (
@@ -261,14 +264,31 @@ def test_summaries_plan_route_emits_report(capsys, tmp_path):
 )
 @pytest.mark.skipif(
     not filesystem_write_isolation_enforceable(),
-    reason="read-only mount isolation requires unprivileged mount namespaces",
+    reason="read-only mount isolation is unavailable",
 )
-def test_builtin_summary_probes_are_available_with_readonly_filesystem(
-    descriptor,
-):
+@pytest.mark.skipif(
+    not process_spawn_isolation_enforceable(),
+    reason="process-spawn isolation is unavailable",
+)
+def test_builtin_summary_probes_are_available_with_isolation(descriptor):
     assert filesystem_write_isolation_enforceable()
+    assert process_spawn_isolation_enforceable()
     assert descriptor.required_permissions is not None
     assert "filesystem.write" not in descriptor.required_permissions
+    expected_process_spawn_isolation = (
+        "process.spawn" not in descriptor.required_permissions
+    )
+    probe_request = probe_request_for(
+        descriptor,
+        stamp=37,
+        policy=PlannerPolicy(
+            allowed_permissions=descriptor.required_permissions
+        ),
+    )
+    assert (
+        probe_request.isolate_process_spawn
+        is expected_process_spawn_isolation
+    )
     plan = plan_summary_route(
         sorted(descriptor.profiles)[0],
         PlannerPolicy(
