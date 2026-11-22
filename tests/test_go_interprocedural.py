@@ -18890,6 +18890,78 @@ def test_struct_composite_unresolved_positional_func_field_fails_closed(
     )
 
 
+def test_nested_imported_positional_struct_func_field_fails_closed(
+    go_types_helper,
+):
+    files = {
+        "main.go": 'package p\nimport "lib"\n'
+        "type O struct { F func() int64; In lib.S }\n"
+        "func F(x, y int64) int64 { w := int64(0); _ = w; "
+        "f0 := func() int64 { return y }; "
+        "o := O{F: f0, In: lib.S{func() { w = x }}}; "
+        "return o.F() }\n"
+    }
+    imports = {
+        "lib": {
+            "lib.go": "package lib\ntype S struct{ F func() }\n"
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, imports),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files,
+        snapshot,
+        ip.summarize_go_package(files, snapshot),
+        "F",
+    )
+    assert not result.available
+    assert any(
+        gap.reason == "unsupported_expression" for gap in result.gaps
+    )
+
+
+def test_nested_local_positional_struct_func_field_keeps_field_identity(
+    go_types_helper,
+):
+    declarations = (
+        "type S struct{ F func() }\n"
+        "type O struct{ F func() int64; In S }\n"
+        "func CompositeRead(x, y int64) int64 { w := int64(0); _ = w; "
+        "f0 := func() int64 { return y }; "
+        "o := O{F: f0, In: S{func() { w = x }}}; "
+        "return o.F() }\n"
+        "func AssignedRead(x, y int64) int64 { w := int64(0); _ = w; "
+        "f0 := func() int64 { return y }; var o O; "
+        "o.F = f0; o.In.F = func() { w = x }; return o.F() }\n"
+        "func CompositeWrite(x, y int64) int64 { w := int64(0); "
+        "f0 := func() int64 { return y }; "
+        "o := O{F: f0, In: S{func() { w = x }}}; "
+        "o.In.F(); return w }\n"
+        "func AssignedWrite(x, y int64) int64 { w := int64(0); "
+        "f0 := func() int64 { return y }; var o O; "
+        "o.F = f0; o.In.F = func() { w = x }; "
+        "o.In.F(); return w }"
+    )
+    source, snapshot, summaries = unit(go_types_helper, declarations)
+    composite_read = named(source, snapshot, summaries, "CompositeRead")
+    assigned_read = named(source, snapshot, summaries, "AssignedRead")
+    assert composite_read.available, composite_read.gaps
+    assert assigned_read.available, assigned_read.gaps
+    assert composite_read.return_dependencies == assigned_read.return_dependencies
+    assert composite_read.return_dependencies == frozenset({0, 1})
+    assert composite_read.effects == assigned_read.effects == "unknown"
+    composite_write = named(source, snapshot, summaries, "CompositeWrite")
+    assigned_write = named(source, snapshot, summaries, "AssignedWrite")
+    assert composite_write.available, composite_write.gaps
+    assert assigned_write.available, assigned_write.gaps
+    assert composite_write.return_dependencies == assigned_write.return_dependencies
+    assert composite_write.return_dependencies == frozenset({0, 1})
+    assert composite_write.effects == assigned_write.effects == "unknown"
+
+
 def test_bound_closure_local_channel_send_imported_callback(
     go_types_helper,
 ):

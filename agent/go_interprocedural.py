@@ -4324,7 +4324,7 @@ class _Builder:
         return (fact, binding) if fact is not None else None
 
     def _func_literal_struct_member(
-        self, literal: Any, node: Any, anchor_id: str | None
+        self, literal: Any, node: Any
     ) -> str | None:
         body = literal.child_by_field_name("body")
         if body is None:
@@ -4414,13 +4414,6 @@ class _Builder:
                 "unsupported_expression", _span(node)
             )
         struct_fact = self._local_struct_literal_fact(literal)
-        if struct_fact is None and anchor_id is not None:
-            anchor = self.bindings.get(anchor_id)
-            fact = self._struct_value_fact(
-                anchor.type if anchor is not None else None
-            )
-            if fact is not None:
-                struct_fact = (fact, anchor)
         if struct_fact is not None:
             fact, anchor = struct_fact
             field_values = self._struct_literal_field_values(
@@ -35026,7 +35019,7 @@ class _Builder:
                     )
         struct_member_id = (
             self._func_literal_struct_member(
-                innermost_composite, node, bound_id
+                innermost_composite, node
             )
             if innermost_composite is not None
             else None
