@@ -292,6 +292,10 @@ class _Record:
     # The scope the record was declared into — a type alias's body
     # resolves in its own scope, not the use-site scope stack.
     home_scope: Any = None
+    # A pattern-bound name's declaring annotation (`let W { opt } = w`
+    # keeps `opt`'s `Option<T>`) — heads prelude patterns on the name
+    # even though its resolved args were substituted at the site.
+    pattern_decl_node: Any = None
     # The item carries a `pub` visibility modifier — only `pub` items
     # come through a `use m::*` glob.
     public: bool = False
@@ -1743,6 +1747,44 @@ class _RustBindings:
         name = node.child_by_field_name("name")
         if path is None or name is None:
             return None, name
+        if path.type in {"identifier", "type_identifier"}:
+            head_record = self._through_import(
+                self._lookup(
+                    self._normalize_identifier(self.text(path)),
+                    path.start_byte,
+                    "type",
+                ),
+                path.start_byte,
+            )
+            if head_record is None:
+                head_record = next(
+                    (
+                        r
+                        for r in self.records.values()
+                        if r.binding.name
+                        == self._normalize_identifier(self.text(path))
+                        and r.binding.kind == "module"
+                    ),
+                    None,
+                )
+            if head_record is not None and (
+                head_record.binding.kind == "module"
+            ):
+                # `n::make` — the path names a module, so `make`
+                # is a free function (or item) declared inside it,
+                # not an impl member of a type.
+                member = next(
+                    (
+                        r
+                        for r in self.records.values()
+                        if r.binding.name
+                        == self._normalize_identifier(self.text(name))
+                        and r.binding.kind == "function"
+                    ),
+                    None,
+                )
+                if member is not None:
+                    return member, name
         if path.type == "generic_type":
             type_id, args = self._annotation_type(path)
         elif path.type in {"identifier", "type_identifier"}:
@@ -2801,9 +2843,10 @@ class _RustBindings:
                     ):
                         # `split_first()`/`split_last()` yield
                         # `Option<(&T, &[T])>` — the tuple payload
-                        # spells `(P, &P)` so `Some((f, rest))`
-                        # binds `f: P` and `rest: &[P]`.
-                        element = f"({element}, &{element})"
+                        # spells `(P, &[P])` so `Some((f, rest))`
+                        # binds `f: P` and `rest: &[P]` (indexing
+                        # `rest` still reads the slice element).
+                        element = f"({element}, &[{element}])"
                     if self.text(field).strip() == "and":
                         # `Option::and<U>(self, optb: Option<U>)`
                         # yields the ARGUMENT's payload, not the
@@ -4925,6 +4968,11 @@ class _RustBindings:
             )
             if pinned is not None:
                 record.type_args = pinned[1]
+                if len(pinned) > 2 and pinned[2] is not None:
+                    # A pattern-bound name keeps its declared
+                    # annotation — `let W { opt } = w` lets
+                    # `if let Some(q) = opt` read `Option`'s head.
+                    record.pattern_decl_node = pinned[2]
             if whole:
                 record.value_node = value
             self._add_to_scope(scope, record)
@@ -5503,6 +5551,15 @@ class _RustBindings:
             # impl's own parameters — map those positions to the
             # receiver's args, not the struct's.
             param_map = self._impl_param_map(member, impl_args)
+        if (
+            not param_map
+            and member.type_node is not None
+            and value_node is None
+        ):
+            # Nothing substitutes — `n::make() -> Box<P>` spells the
+            # `P` written in the member's own declaration scope, not
+            # a same-named type at the call site.
+            pos = member.type_node.start_byte
         type_id, args = self._field_annotation(
             member.type_node if annotation is None else annotation,
             param_map,
@@ -5511,6 +5568,37 @@ class _RustBindings:
         )
         if type_id is None and args is None:
             return None
+        if type_id is None and args is not None:
+            ann = member.type_node if annotation is None else annotation
+            ret = (
+                ann.child_by_field_name("return_type") if ann is not None else None
+            )
+            head = re.match(
+                r"\s*(?:&\s*(?:mut\s*)?(?!\[)|([A-Za-z_]\w*)\s*<)",
+                self.text(ann if ret is None else ret),
+            )
+            if head is not None and (
+                head.group(1) is None
+                or head.group(1) in {"Box", "Rc", "Arc", "Pin"}
+            ):
+                # `fn make() -> Box<P>` — a deref-transparent wrapper
+                # whose head never resolves, so the payload name
+                # (spelled in the member's scope) is the effective
+                # receiver type.
+                home = member.home_scope
+                pushed = home is not None and home not in self.scopes
+                if pushed:
+                    self.scopes.append(home)
+                resolved = self._spelled_type(
+                    next(
+                        iter(self._type_arg_list(args)), args
+                    ).strip(),
+                    pos,
+                )
+                if pushed:
+                    self.scopes.pop()
+                if resolved[0] is not None:
+                    return resolved
         return type_id, args
 
     def _member_scope_for_args(
@@ -5867,8 +5955,11 @@ class _RustBindings:
                 continue
             fields[
                 self._normalize_identifier(self.text(name_node))
-            ] = self._field_annotation(
-                type_node, param_map, head.start_byte, container
+            ] = (
+                *self._field_annotation(
+                    type_node, param_map, head.start_byte, container
+                ),
+                type_node,
             )
         return fields
 
@@ -6266,13 +6357,21 @@ class _RustBindings:
         )
         if record is None:
             return None, None, None
+        # A pattern-bound name's declaring annotation heads the
+        # scrutinee — `let W { opt } = w` reads `opt: Option<T>`'s
+        # head and position even though its args were substituted.
+        decl_node = (
+            record.pattern_decl_node
+            if record.pattern_decl_node is not None
+            else record.type_node
+        )
         position = (
             None
-            if record.type_node is None
-            else record.type_node.start_byte
+            if decl_node is None
+            else decl_node.start_byte
         )
         return (
-            self._alias_head_name(record.type_node, position),
+            self._alias_head_name(decl_node, position),
             position,
             record.home_scope,
         )
@@ -6527,7 +6626,7 @@ class _RustBindings:
                 field_type = fields.get(fname) if fname else None
                 if bound is not None:
                     tid, fargs = (
-                        field_type
+                        field_type[:2]
                         if field_type is not None
                         else (None, None)
                     )
@@ -6538,15 +6637,32 @@ class _RustBindings:
                             scrut_position,
                         )
                     )
+                    if (
+                        field_type is not None
+                        and bound.type == "identifier"
+                    ):
+                        # `W { opt }` shorthand — the bound name's
+                        # declared field annotation heads later
+                        # prelude patterns (`if let Some(q) = opt`).
+                        got = mapping.get(bound.start_byte)
+                        if got is not None and len(got) == 2:
+                            mapping[bound.start_byte] = (
+                                *got,
+                                field_type[2],
+                            )
                     continue
                 if fname_node is not None and field_type is not None:
-                    tid, fargs = field_type
+                    tid, fargs = field_type[:2]
                     if tid is not None or fargs is not None:
+                        # The field's own annotation rides along so
+                        # `if let Some(q) = opt` still reads `opt`'s
+                        # declared `Option` head in its scope.
                         mapping[fname_node.start_byte] = (
                             TypeFact(
                                 "named", fname or "", 0, None, tid or ""
                             ),
                             fargs,
+                            field_type[2],
                         )
             return mapping
         if kind == "slice_pattern":
@@ -6637,14 +6753,18 @@ class _RustBindings:
         type_map: dict | None = None,
     ) -> None:
         for name_node, mutable in names:
-            fact, args = (type_map or {}).get(
+            entry = (type_map or {}).get(
                 name_node.start_byte, (type_fact, type_args)
             )
+            fact, args = entry[0], entry[1]
+            decl_node = entry[2] if len(entry) > 2 else None
             record = self._make_record(
                 name_node, "local", binding_scope, self.current_function,
                 self.module_depth, item=False, type_fact=fact, mutable=mutable,
             )
             record.type_args = args
+            if decl_node is not None:
+                record.pattern_decl_node = decl_node
             self._add_to_scope(scope, record)
 
     def _bind_pattern(

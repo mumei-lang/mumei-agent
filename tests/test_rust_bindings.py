@@ -6001,3 +6001,53 @@ fn f(v: Vec<P>, s: &[P]) {
     assert len(calls) == 4
     for call in calls:
         assert call.target == pm.id
+
+def test_scoped_callee_return_spelled_in_decl_scope():
+    # `n::make() -> Box<P>` spells `P` in `n`'s scope — a same-named
+    # root `P` must not win the payload resolution.
+    source = """
+mod n {
+    pub struct P;
+    impl P { fn pm(&self) {} }
+    pub fn make() -> Box<P> { Box::new(P) }
+}
+struct P;
+fn g() { let b = n::make(); b.pm(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    calls = [
+        call for call in report.calls
+        if raw[call.span.start:call.span.end].decode() == "b.pm()"
+    ]
+    assert len(calls) == 1
+    assert calls[0].target == pm.id
+
+
+def test_struct_pattern_field_keeps_declared_head():
+    # `let m::W { opt } = w` binds `opt` to the field's declared
+    # `Option<T>` — a later `if let Some(q) = opt` still reads the
+    # `Option` head and resolves `m::Q` in the module's scope.
+    source = """
+mod m {
+    pub struct W<T> { pub opt: Option<T> }
+    pub struct Q;
+    impl Q { fn qm(&self) {} }
+}
+struct Q;
+fn f() {
+    let w: m::W<m::Q> = todo!();
+    let m::W { opt } = w;
+    if let Some(q) = opt { q.qm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    qm = _bindings(report, "qm", "associated_function")[0]
+    raw = source.encode()
+    calls = [
+        call for call in report.calls
+        if raw[call.span.start:call.span.end].decode() == "q.qm()"
+    ]
+    assert len(calls) == 1
+    assert calls[0].target == qm.id
