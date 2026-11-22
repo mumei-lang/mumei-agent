@@ -77,6 +77,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import re
 import sys
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, replace
@@ -12445,12 +12446,52 @@ class _Builder:
         captured, writes, roots, star = self._deferred_exit_shape(
             call_node, call, params, locals_
         )
+        arguments = call_node.child_by_field_name("arguments")
+        if arguments is not None:
+            for argument in _children(arguments):
+                if self._deferred_argument_is_pointer(argument):
+                    root_id = self._deferred_root_binding(
+                        argument, params, locals_
+                    )
+                    if root_id is not None:
+                        self.escaped.add(root_id)
+        function_node = self._strip_parens(
+            call_node.child_by_field_name("function")
+        )
+        if function_node is not None and function_node.type == "func_literal":
+            (
+                _,
+                literal_captured,
+                captures_pointer,
+                literal_writes,
+                star_write,
+                has_call,
+            ) = self._func_literal_capture(
+                function_node, params, locals_
+            )
+            captured = frozenset(literal_captured)
+            writes = frozenset(literal_writes)
+            roots = frozenset()
+            star = captures_pointer or star_write or has_call
         local_param_ids = set(locals_) | set(params)
+        argument_roots: set[str] = set()
+        if arguments is not None:
+            for argument in _children(arguments):
+                fact = self._deferred_expression_type(argument)
+                if (
+                    fact is not None
+                    and not self._scalar_value_fact(fact)
+                ):
+                    root_id = self._deferred_root_binding(
+                        argument, params, locals_
+                    )
+                    if root_id is not None:
+                        argument_roots.add(root_id)
         touched = (
             set(captured | writes | roots) & local_param_ids
         )
+        opaque_touched = touched | (argument_roots & local_param_ids)
         reference_involved = star or bool(roots)
-        arguments = call_node.child_by_field_name("arguments")
         if arguments is not None:
             reference_involved |= any(
                 self._deferred_argument_is_pointer(argument)
@@ -12567,6 +12608,45 @@ class _Builder:
                 return _children(current)
             return []
 
+        def stable_func_alias(binding_id: str) -> bool:
+            binding = self.bindings.get(binding_id)
+            if binding is None:
+                return False
+            for current in nodes:
+                if current.type in {
+                    "assignment_statement",
+                    "short_var_declaration",
+                    "inc_statement",
+                    "dec_statement",
+                }:
+                    defines_binding = (
+                        current.start_byte <= binding.span.start
+                        and binding.span.end <= current.end_byte
+                    )
+                    for lhs in lhs_items(current):
+                        root = root_identifier(lhs)
+                        if (
+                            root is not None
+                            and identifier_binding_id(root) == binding_id
+                            and not defines_binding
+                        ):
+                            return False
+                if current.type != "unary_expression":
+                    continue
+                operator = current.child_by_field_name("operator")
+                operand = self._strip_parens(
+                    current.child_by_field_name("operand")
+                )
+                if (
+                    operator is not None
+                    and operator.text == b"&"
+                    and operand is not None
+                    and operand.type == "identifier"
+                    and identifier_binding_id(operand) == binding_id
+                ):
+                    return False
+            return True
+
         written: set[str] = set()
         nonplain = False
         for current in region.values():
@@ -12578,7 +12658,121 @@ class _Builder:
                         written.add(binding_id)
                 if lhs.type != "identifier":
                     nonplain = True
+            if current.type == "send_statement":
+                root = root_identifier(
+                    current.child_by_field_name("channel")
+                )
+                if root is not None:
+                    binding_id = identifier_binding_id(root)
+                    if binding_id is not None:
+                        written.add(binding_id)
             if current.type == "call_expression":
+                callee = self._strip_parens(
+                    current.child_by_field_name("function")
+                )
+                callee_ref = (
+                    self.references.get(self.node_key(callee))
+                    if callee is not None
+                    and callee.type == "identifier"
+                    else None
+                )
+                callee_id = (
+                    callee_ref.binding_id
+                    if callee_ref is not None
+                    else None
+                )
+                callee_binding = (
+                    self.bindings.get(callee_id)
+                    if callee_id is not None
+                    else None
+                )
+                if (
+                    self.node_key(current) != self.node_key(call_node)
+                    and callee_id in local_param_ids
+                    and callee_binding is not None
+                    and callee_binding.type is not None
+                    and callee_binding.type.kind == "function"
+                ):
+                    deferred_shape = self._deferred_exit_shape(
+                        current,
+                        self.calls.get(self.node_key(current)),
+                        params,
+                        locals_,
+                    )
+                    resolved_literal = any(
+                        callee_id in records
+                        for records in (
+                            self.closure_captures,
+                            self.closure_writes,
+                            self.closure_star_writes,
+                            self.closure_inner_calls,
+                            self.pointee_closures,
+                        )
+                    ) or (
+                        callee_id in self.func_aliases
+                        and stable_func_alias(callee_id)
+                    )
+                    if not resolved_literal:
+                        if (
+                            (star and self.escaped)
+                            or any(
+                                binding_id in self.escaped
+                                or binding_id in self.external_chan_locals
+                                or (
+                                    (
+                                        binding := self.bindings.get(
+                                            binding_id
+                                        )
+                                    )
+                                    is None
+                                    or not self._scalar_value_fact(
+                                        binding.type
+                                    )
+                                )
+                                and not (
+                                    binding_id not in params
+                                    and binding is not None
+                                    and binding.type is not None
+                                    and binding.type.kind == "chan"
+                                    and binding_id
+                                    not in self.external_chan_locals
+                                )
+                                for binding_id in opaque_touched
+                            )
+                        ):
+                            return True
+                    else:
+                        added = set(
+                            deferred_shape[1] | deferred_shape[2]
+                        )
+                        for binding_id in deferred_shape[0]:
+                            binding = self.bindings.get(binding_id)
+                            if (
+                                binding is None
+                                or not self._scalar_value_fact(
+                                    binding.type
+                                )
+                            ):
+                                added.add(binding_id)
+                        written.update(added)
+                        if (
+                            added & touched
+                            or deferred_shape[2]
+                            or deferred_shape[3]
+                            or any(
+                                (
+                                    binding := self.bindings.get(
+                                        binding_id
+                                    )
+                                )
+                                is None
+                                or not self._scalar_value_fact(
+                                    binding.type
+                                )
+                                for binding_id in added
+                            )
+                        ):
+                            nonplain = True
                 arguments = current.child_by_field_name("arguments")
                 if arguments is None:
                     continue
@@ -15372,7 +15566,7 @@ class _Builder:
                 if raw_body is not None
                 else ""
             )
-            deferred_closures_only = (
+            go_defer_closures_only = (
                 not unsupported_switch
                 and bool(cfg.gaps)
                 and all(
@@ -15382,13 +15576,16 @@ class _Builder:
                     <= gap.span.start
                     <= gap.span.end
                     <= len(body_source)
-                    and body_source[gap.span.start : gap.span.end]
-                    .lstrip()
-                    .startswith("defer")
+                    and re.match(
+                        r"(defer|go)\b",
+                        body_source[
+                            gap.span.start : gap.span.end
+                        ].lstrip(),
+                    ) is not None
                     for gap in cfg.gaps
                 )
             )
-            if not deferred_closures_only:
+            if not go_defer_closures_only:
                 raise _Unsupported("cfg_unavailable", fn.body)
         statements = _children(block)
         if len(statements) == 1 and statements[0].type == "statement_list":
@@ -32142,7 +32339,9 @@ class _Builder:
             current = current.parent
         return None
 
-    def _literal_invoked_synchronously(self, literal_node: Any) -> bool:
+    def _literal_invoked_synchronously(
+        self, literal_node: Any, *, allow_go: bool = False
+    ) -> bool:
         def synchronous_call(call: Any) -> bool:
             parent = call.parent
             while (
@@ -32151,10 +32350,11 @@ class _Builder:
                 and self._strip_parens(parent) == call
             ):
                 parent = parent.parent
-            return parent is None or parent.type not in {
-                "go_statement",
-                "defer_statement",
-            }
+            if parent is not None and parent.type == "defer_statement":
+                return False
+            if parent is not None and parent.type == "go_statement":
+                return allow_go
+            return True
 
         parent = literal_node.parent
         while (
@@ -32336,9 +32536,9 @@ class _Builder:
         (`x = e`, `p.V = e`, `*p = e`) and the inner-call flag ride
         out in the returned record. A send to a literal-local channel
         can fold at the call site; captured scalar channels and
-        scalar-leaf queue/container operations fold only when their
-        literal is invoked synchronously. Other sends, `go` and
-        `defer` stay closed."""
+        scalar-leaf queue/container operations fold when their literal
+        is invoked synchronously or by a goroutine. Other sends and
+        nested `go`/`defer` statements stay closed."""
         deps: frozenset[int] = frozenset()
         captured: set[str] = set()
         captures_pointer = False
@@ -32745,7 +32945,9 @@ class _Builder:
             if (
                 target is None
                 or not current_literal_context(current)
-                or not self._literal_invoked_synchronously(node)
+                or not self._literal_invoked_synchronously(
+                    node, allow_go=True
+                )
                 or not local_channel_root(target[1], target[0])
                 or self._inside_select_operation(current)
             ):
@@ -32793,7 +32995,9 @@ class _Builder:
             kind, root = target
             if (
                 not current_literal_context(current)
-                or not self._literal_invoked_synchronously(node)
+                or not self._literal_invoked_synchronously(
+                    node, allow_go=True
+                )
                 or not local_channel_root(root, kind)
             ):
                 continue
@@ -32909,7 +33113,9 @@ class _Builder:
                         and self._chan_only_operations(
                             ref.binding_id, node
                         )
-                        and self._literal_invoked_synchronously(node)
+                        and self._literal_invoked_synchronously(
+                            node, allow_go=True
+                        )
                     )
                     if literal_internal:
                         pass

@@ -1510,7 +1510,7 @@ def test_unused_argument_is_still_evaluated_for_unsupported_effects(go_types_hel
 def test_opaque_callee_blocks_callers_but_not_an_unrelated_function(go_types_helper):
     data = unit(
         go_types_helper,
-        "func Bad(x int64)int64{go func(){}(); return x}; func F(x int64)int64{return Bad(x)}; func Good(x int64)int64{return x}",
+        "func Bad(x int64)int64{select{}; return x}; func F(x int64)int64{return Bad(x)}; func Good(x int64)int64{return x}",
     )
     assert not named(*data).available
     assert named(*data, "Good").available
@@ -18345,12 +18345,6 @@ def test_bound_closure_local_channel_container_operations_fold_dependencies(
         pytest.param(
             "func F(x int64) int64 { cc := make(chan chan int64, 1); "
             "g := func() { d := make(chan int64, 1); cc <- d }; "
-            "go g(); return x }",
-            id="queue-go",
-        ),
-        pytest.param(
-            "func F(x int64) int64 { cc := make(chan chan int64, 1); "
-            "g := func() { d := make(chan int64, 1); cc <- d }; "
             "defer g(); return x }",
             id="queue-defer",
         ),
@@ -18444,6 +18438,21 @@ def test_bound_closure_local_channel_container_unsupported_uses_stay_closed(
         else "unsupported_expression"
     )
     assert any(gap.reason == expected_reason for gap in result.gaps)
+
+
+def test_go_bound_closure_local_channel_nested_queue_send_is_admitted(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64) int64 { cc := make(chan chan int64, 1); "
+            "g := func() { d := make(chan int64, 1); cc <- d }; "
+            "go g(); return x }",
+        )
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
 
 
 @pytest.mark.parametrize(
@@ -18636,9 +18645,12 @@ def test_bound_closure_local_channel_send_imported_callback(
     assert not result.available
 
 
-@pytest.mark.parametrize("invocation", ["go g()", "defer g()"])
-def test_bound_closure_local_channel_send_async_call_stays_closed(
-    go_types_helper, invocation
+@pytest.mark.parametrize(
+    ("invocation", "available"),
+    [("go g()", True), ("defer g()", False)],
+)
+def test_bound_closure_local_channel_send_async_call(
+    go_types_helper, invocation, available
 ):
     result = named(
         *unit(
@@ -18648,6 +18660,484 @@ def test_bound_closure_local_channel_send_async_call_stays_closed(
             f"{invocation}; return <-c }}",
         )
     )
+    assert result.available is available
+    if available:
+        assert result.return_dependencies == frozenset({0})
+
+
+def test_go_bound_closure_local_channel_send_matches_named_call(
+    go_types_helper,
+):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func sendValue(ch chan int64, x int64) { ch <- x }\n"
+        "func Direct(x int64) int64 { "
+        "ch := make(chan int64, 1); go sendValue(ch, x); return <-ch }\n"
+        "func Bound(x int64) int64 { "
+        "ch := make(chan int64, 1); g := func() { ch <- x }; "
+        "go g(); return <-ch }\n",
+    )
+    direct = named(source, snapshot, summaries, "Direct")
+    bound = named(source, snapshot, summaries, "Bound")
+    assert direct.available and bound.available
+    assert direct.return_dependencies == bound.return_dependencies
+    assert bound.return_dependencies == frozenset({0})
+    assert direct.effects == bound.effects
+
+
+def test_go_bound_closure_local_channel_send_in_loop(go_types_helper):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64) int64 { "
+            "ch := make(chan int64, 1); g := func() { ch <- x }; "
+            "for i := 0; i < 2; i++ { go g() }; return <-ch }",
+        )
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_go_bound_closure_container_channel_send(go_types_helper):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64) int64 { "
+            "channels := []chan int64{make(chan int64, 1)}; "
+            "g := func() { channels[0] <- x }; go g(); "
+            "return <-channels[0] }",
+        )
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_go_bound_closure_after_synchronous_call_keeps_queue_deps(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64) int64 { "
+            "ch := make(chan int64, 1); g := func() { ch <- x }; "
+            "g(); go g(); return <-ch }",
+        )
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_go_bound_pipe_literal_matches_named_call(go_types_helper):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func pipe(ch, out chan int64) { out <- <-ch }\n"
+        "func Direct(x int64) int64 { "
+        "ch := make(chan int64, 1); out := make(chan int64, 1); "
+        "ch <- x; go pipe(ch, out); return <-out }\n"
+        "func Literal(x int64) int64 { "
+        "ch := make(chan int64, 1); out := make(chan int64, 1); "
+        "ch <- x; g := func() { out <- <-ch }; "
+        "go g(); return <-out }\n",
+    )
+    direct = named(source, snapshot, summaries, "Direct")
+    literal = named(source, snapshot, summaries, "Literal")
+    assert direct.available and literal.available
+    assert direct.return_dependencies == literal.return_dependencies
+    assert literal.return_dependencies == frozenset({0})
+    assert direct.effects == literal.effects
+
+
+@pytest.mark.parametrize(
+    "invocation",
+    [
+        "go func() { ch <- x }()",
+        "go (func() { ch <- x })()",
+    ],
+    ids=["unparenthesized", "parenthesized"],
+)
+def test_immediate_go_literal_channel_send_is_admitted(
+    go_types_helper, invocation
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64) int64 { "
+            "ch := make(chan int64, 1); "
+            f"{invocation}; return <-ch }}",
+        )
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_go_immediate_literal_scalar_write_matches_all_forms(
+    go_types_helper,
+):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func Literal(x int64) int64 { "
+        "w := int64(0); go func() { w = x }(); return w }\n"
+        "func Parenthesized(x int64) int64 { "
+        "w := int64(0); go (func() { w = x })(); return w }\n"
+        "func Bound(x int64) int64 { "
+        "w := int64(0); g := func() { w = x }; go g(); return w }\n",
+    )
+    results = [
+        named(source, snapshot, summaries, name)
+        for name in ("Literal", "Parenthesized", "Bound")
+    ]
+    assert all(result.available for result in results)
+    assert all(
+        result.return_dependencies == frozenset({0})
+        for result in results
+    )
+    assert len({result.return_dependencies for result in results}) == 1
+    assert len({result.effects for result in results}) == 1
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "y := z; w := int64(0); go func() { w = y }(); "
+        "y = x; return w",
+        "y := z; ch := make(chan int64, 1); "
+        "g := func() { ch <- y }; go g(); y = x; return <-ch",
+    ],
+    ids=["captured-scalar", "captured-channel-value"],
+)
+def test_go_literal_later_captured_stores_stay_closed(
+    go_types_helper, body
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            f"func F(x, z int64) int64 {{ {body} }}",
+        )
+    )
+    assert not result.available
+    assert any(gap.reason == "unsupported_statement" for gap in result.gaps)
+
+
+@pytest.mark.parametrize(
+    "later_call",
+    ["s();", "go s();"],
+    ids=["synchronous-call", "goroutine-call"],
+)
+def test_later_bound_literal_channel_send_closes_go_race(
+    go_types_helper, later_call
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64) int64 { "
+            "ch := make(chan int64, 1); out := make(chan int64, 1); "
+            "s := func() { ch <- x }; g := func() { out <- <-ch }; "
+            f"go g(); {later_call} return <-out }}",
+        )
+    )
+    assert not result.available
+    assert any(gap.reason == "unsupported_statement" for gap in result.gaps)
+
+
+def test_bound_literal_channel_send_before_go_stays_available(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64) int64 { "
+            "ch := make(chan int64, 1); out := make(chan int64, 1); "
+            "s := func() { ch <- x }; s(); "
+            "g := func() { out <- <-ch }; go g(); return <-out }",
+        )
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_later_bound_literal_unrelated_scalar_write_stays_available(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64) int64 { "
+            "y := int64(0); out := make(chan int64, 1); "
+            "s := func() { y = 1 }; g := func() { out <- x }; "
+            "go g(); s(); _ = y; return <-out }",
+        )
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_opaque_func_parameter_call_does_not_close_local_channel_race(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func send(ch chan int64, v int64) { ch <- v }\n"
+            "func F(f func(int64) int64, x, z int64) int64 { "
+            "ch := make(chan int64, 1); go send(ch, x); "
+            "y := f(z); return <-ch + y }",
+        )
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1, 2})
+
+
+def test_named_func_alias_call_does_not_close_local_channel_race(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func G(a int64) int64 { return a }\n"
+            "func F(x, z int64) int64 { "
+            "ch := make(chan int64, 1); "
+            "g := func() { ch <- x }; go g(); "
+            "h := G; y := h(z); return <-ch + y }",
+        )
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_opaque_func_call_still_closes_for_escaped_touched_binding(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func H(p *int64, v int64) { *p = v }\n"
+            "func F(f func(int64) int64, x, z int64) int64 { "
+            "w := int64(0); go H(&w, x); f(z); return w }",
+        )
+    )
+    assert not result.available
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        (
+            "func F(b []int64, f func(int64), x int64) int64 { "
+            "w := int64(0); g := func() { w = b[0] }; "
+            "go g(); f(x); return w }"
+        ),
+        (
+            "func F(b []int64, f func(int64), x int64) int64 { "
+            "w := int64(0); go func() { w = b[0] }(); "
+            "f(x); return w }"
+        ),
+        (
+            "func F(b []int64, f func(int64), x int64) int64 { "
+            "ch := make(chan int64, 1); "
+            "go func() { ch <- b[0] }(); "
+            "f(x); return <-ch }"
+        ),
+        (
+            "func rd(ch chan int64, b []int64) { ch <- b[0] }\n"
+            "func F(b []int64, f func(int64), x int64) int64 { "
+            "ch := make(chan int64, 1); go rd(ch, b); "
+            "f(x); return <-ch }"
+        ),
+        (
+            "func rd(ch chan int64, m map[int64]int64) { "
+            "ch <- m[0] }\n"
+            "func F(m map[int64]int64, f func(int64), x int64) int64 { "
+            "ch := make(chan int64, 1); go rd(ch, m); "
+            "f(x); return <-ch }"
+        ),
+    ],
+    ids=[
+        "bound-literal-slice-read",
+        "immediate-literal-slice-read",
+        "channel-literal-slice-read",
+        "named-slice-read",
+        "named-map-read",
+    ],
+)
+def test_opaque_func_call_closes_for_shared_reference_touched_by_go(
+    go_types_helper, source
+):
+    result = named(*unit(go_types_helper, source))
+    assert not result.available
+    assert result.gaps[0].reason == "unsupported_statement"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        (
+            "func G(a int64) int64 { return a }\n"
+            "func F(b []int64, x int64) int64 { "
+            "w := int64(0); h := G; "
+            "g := func() { w = b[0] }; go g(); "
+            "y := h(x); return w + y }"
+        ),
+        (
+            "func rd(ch chan int64, b []int64) { ch <- b[0] }\n"
+            "func G(a int64) int64 { return a }\n"
+            "func F(b []int64, x int64) int64 { "
+            "ch := make(chan int64, 1); h := G; go rd(ch, b); "
+            "y := h(x); return <-ch + y }"
+        ),
+        (
+            "func rd(ch chan int64, m map[string]int64) { "
+            "ch <- m[\"k\"] }\n"
+            "func G(a int64) int64 { return a }\n"
+            "func F(m map[string]int64, x int64) int64 { "
+            "ch := make(chan int64, 1); h := G; go rd(ch, m); "
+            "y := h(x); return <-ch + y }"
+        ),
+    ],
+    ids=[
+        "slice-literal-before-go",
+        "slice-named-before-go",
+        "map-named-before-go",
+    ],
+)
+def test_stable_named_func_alias_does_not_close_shared_go_race(
+    go_types_helper, source
+):
+    result = named(*unit(go_types_helper, source))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_rebound_named_func_alias_still_closes_shared_go_race(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func rd(ch chan int64, b []int64) { ch <- b[0] }\n"
+            "func G(a int64) int64 { return a }\n"
+            "func F(b []int64, x int64) int64 { "
+            "ch := make(chan int64, 1); h := G; go rd(ch, b); "
+            "h = func(a int64) int64 { b[0] = a; return a }; "
+            "y := h(x); return <-ch + y }",
+        )
+    )
+    assert not result.available
+
+
+def test_stable_named_func_alias_writer_still_closes_shared_go_race(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func rd(ch chan int64, b []int64) { ch <- b[0] }\n"
+            "func W(b []int64, a int64) int64 { "
+            "b[0] = a; return a }\n"
+            "func F(b []int64, x int64) int64 { "
+            "ch := make(chan int64, 1); h := W; go rd(ch, b); "
+            "y := h(b, x); return <-ch + y }",
+        )
+    )
+    assert not result.available
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "g := func() { ch <- x }; g(); return <-ch",
+        "g := func() { ch <- x }; go g(); return <-ch",
+    ],
+    ids=["synchronous-literal", "goroutine-literal"],
+)
+def test_channel_parameter_literal_sends_stay_closed(
+    go_types_helper, body
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            f"func F(ch chan int64, x int64) int64 {{ {body} }}",
+        )
+    )
+    assert not result.available
+
+
+def test_go_literal_select_send_stays_closed(go_types_helper):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64) int64 { "
+            "ch := make(chan int64, 1); "
+            "go func() { select { case ch <- x: default: } }(); "
+            "return <-ch }",
+        )
+    )
+    assert not result.available
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "ch := make(chan int64, 1); go func() { ch <- x }(); "
+        "switch x { case 0: default: }; return <-ch",
+        "ch := make(chan int64, 1); go func() { ch <- x }(); "
+        "select { default: }; return <-ch",
+    ],
+    ids=["switch-gap", "select-gap"],
+)
+def test_go_literal_other_cfg_gaps_remain_unavailable(
+    go_types_helper, body
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            f"func F(x int64) int64 {{ {body} }}",
+        )
+    )
+    assert not result.available
+    assert any(gap.reason == "cfg_unavailable" for gap in result.gaps)
+
+
+def test_go_literal_non_go_defer_closure_gap_remains_unavailable(
+    go_types_helper, monkeypatch
+):
+    body = (
+        " ch := make(chan int64, 1); go func() { ch <- x }(); "
+        "func(){}(); return <-ch "
+    )
+    source, snapshot, _ = unit(
+        go_types_helper, f"func F(x int64) int64 {{{body}}}"
+    )
+    gap_start = body.index("func(){}()")
+    gap = control_flow.CFGGap(
+        "unsupported_closure",
+        control_flow.SourceSpan(
+            gap_start, gap_start + len("func(){}()")
+        ),
+    )
+    monkeypatch.setattr(
+        type(snapshot),
+        "cfg_for_function",
+        lambda *args: control_flow.CFGConstruction(None, (gap,)),
+    )
+    result = named(source, snapshot, ip.summarize_go(source, snapshot))
+    assert not result.available
+    assert any(gap.reason == "cfg_unavailable" for gap in result.gaps)
+
+
+@pytest.mark.parametrize(
+    "nested",
+    ["go Sink(x)", "defer Sink(x)"],
+    ids=["go", "defer"],
+)
+def test_nested_go_and_defer_inside_go_literal_stay_closed(
+    go_types_helper, nested
+):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "func Sink(x int64) {}\n"
+        f"func F(x int64) int64 {{ go func() {{ {nested} }}(); return x }}",
+    )
+    result = named(source, snapshot, summaries, "F")
     assert not result.available
 
 
@@ -18752,7 +19242,7 @@ def test_closure_calls_resolve_captures_after_argument_writes(
     assert result.return_dependencies == frozenset({0})
 
 
-def test_bound_closure_local_channel_immediate_go_literal_stays_closed(
+def test_bound_closure_local_channel_immediate_go_literal_is_admitted(
     go_types_helper,
 ):
     result = named(
@@ -18762,8 +19252,8 @@ def test_bound_closure_local_channel_immediate_go_literal_stays_closed(
             "go func() { c <- x }(); return <-c }",
         )
     )
-    assert not result.available
-    assert any(gap.reason == "cfg_unavailable" for gap in result.gaps)
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
 
 
 @pytest.mark.parametrize(
@@ -44507,15 +44997,12 @@ def test_deferred_func_literal_closed_controls(go_types_helper):
             "PackageWriteInLiteral",
         )
     }
-    assert not results["GoLiteral"].available
-    assert any(
-        gap.reason == "cfg_unavailable"
-        for gap in results["GoLiteral"].gaps
-    )
-    assert not results["DeferredAndGoLiteral"].available
-    assert any(
-        gap.reason == "cfg_unavailable"
-        for gap in results["DeferredAndGoLiteral"].gaps
+    assert results["GoLiteral"].available
+    assert results["GoLiteral"].return_dependencies == frozenset({0})
+    assert results["DeferredAndGoLiteral"].available
+    assert (
+        results["DeferredAndGoLiteral"].return_dependencies
+        == frozenset({0})
     )
     for name in (
         "SendInLiteral",
@@ -44546,15 +45033,15 @@ def test_go_pure_callee_admitted(go_types_helper):
     assert any(c.target == g_id for c in result.calls)
 
 
-def test_go_func_literal_stays_closed(go_types_helper):
-    # `go func(){...}()` — the extractor classifies a func_literal
-    # callee as `closure`, which the CFG gate keeps closed.
+def test_go_func_literal_is_admitted(go_types_helper):
+    # The unparenthesized immediate literal's CFG gap starts with `go`.
     source, snapshot, summaries = unit(
         go_types_helper,
         "func F(x int64) int64 { go func() { }(); return x }",
     )
     result = named(source, snapshot, summaries)
-    assert not result.available
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
 
 
 def test_defer_void_callee_admitted(go_types_helper):
@@ -45738,7 +46225,7 @@ def test_func_result_direct_call_inner_closed_stays_closed(
     # cannot evaluate, so the outer call fails closed through it.
     source, snapshot, summaries = unit(
         go_types_helper,
-        "func mk() func() int64 { go func(){}(); return nil }; "
+        "func mk() func() int64 { select{}; return nil }; "
         "func F(x int64) int64 { return mk()() }",
     )
     result = named(source, snapshot, summaries)
