@@ -2661,54 +2661,24 @@ class _RustBindings:
                                 if arg_args is None
                                 else arg_args.strip()
                             )
-                            if element is not None:
-                                arg_pos = (
-                                    self._receiver_annotation_position(
-                                        first_arg
-                                    )
+                            arg_pos = (
+                                self._receiver_annotation_position(
+                                    first_arg
                                 )
-                                if (
-                                    arg_pos is not None
-                                    and not self._spelling_scope_stable(
-                                        element,
-                                        arg_pos,
-                                        node.start_byte,
-                                    )
-                                ):
-                                    # `u`'s `Q` resolves in the
-                                    # argument's own scope — at the
-                                    # receiver's annotation a
-                                    # same-named type is another
-                                    # record. Spell it
-                                    # `crate::`-qualified so the
-                                    # Option head survives while the
-                                    # payload still lands on `u`'s
-                                    # own `Q`.
-                                    element = self._qualified_spelling(
-                                        element, arg_pos
-                                    )
-                                    bare = re.sub(
-                                        r"\b(?:[A-Za-z_]\w*::)+"
-                                        r"[A-Za-z_]\w*",
-                                        "",
-                                        element,
-                                    )
-                                    if not self._spelling_scope_stable(
-                                        bare,
-                                        arg_pos,
-                                        node.start_byte,
-                                    ):
-                                        # A name that has no
-                                        # `crate::` path (a
-                                        # function-local type)
-                                        # stays bare and would
-                                        # re-resolve to a
-                                        # same-named type at the
-                                        # call site — leave the
-                                        # payload opaque rather
-                                        # than bind the wrong
-                                        # record.
-                                        return None, None
+                            )
+                            if (
+                                element is not None
+                                and arg_pos is not None
+                                and not self._spelling_scope_stable(
+                                    element, arg_pos, node.start_byte
+                                )
+                            ):
+                                # The argument's names were spelled
+                                # where different bindings are
+                                # visible — spelling the payload
+                                # would bind the wrong same-named
+                                # type.
+                                element = None
                     if element:
                         return None, prefix + element
                 if (
