@@ -4158,6 +4158,46 @@ class _Builder:
                 anchor=binding,
             )
             return
+        deref_operand = None
+        if rhs.type in {"unary_expression", "dereference_expression"}:
+            candidate = rhs.child_by_field_name("operand")
+            while (
+                candidate is not None
+                and candidate.type == "parenthesized_expression"
+            ):
+                candidate = next(
+                    (
+                        child
+                        for child in candidate.named_children
+                        if child.type != "comment"
+                    ),
+                    None,
+                )
+            if (
+                candidate is not None
+                and self._param_pointer_struct_root(candidate, params)
+            ):
+                deref_operand = candidate
+        if deref_operand is not None:
+            # `q := *p` copies a `*S` parameter's pointee: the
+            # collection members alias the pointee's backing the way
+            # `q := o` aliases `o`'s — a snapshot of the pointer's
+            # own container tokens.
+            deref_ref = self.references.get(self.node_key(deref_operand))
+            pointee_id = deref_ref.binding_id
+            tokens = self._opaque_container_tokens.get(pointee_id)
+            if not tokens:
+                tokens = frozenset({pointee_id})
+                self._opaque_container_tokens[pointee_id] = tokens
+            old_tokens = self._opaque_container_tokens.get(
+                binding_id, frozenset()
+            )
+            if reseat and not conditional:
+                self._detach_struct_container_aliases(binding_id)
+            if conditional:
+                tokens |= old_tokens
+            self._opaque_container_tokens[binding_id] = tokens
+            return
         if rhs.type == "identifier":
             source_ref = self.references.get(self.node_key(rhs))
             source_binding = (
@@ -13780,6 +13820,19 @@ class _Builder:
             # the same external read `*p` is.
             if binding is None or binding.type.kind != "pointer":
                 raise _Unsupported("non_parameter_reference", _span(node))
+            if (
+                not extra
+                and self._param_pointer_struct_root(inner, params)
+            ):
+                # `*p` on a `*S` parameter dereferences to the whole
+                # caller-shared pointee: the read carries the
+                # parameter's own dependencies, like `p.V` does for
+                # one member. A `q := *p` copy binds its member
+                # slots separately in _bind_struct_container_value.
+                return self.expression(
+                    inner, fn, params, locals_, transfers, count,
+                    depth + 1,
+                )
             if extra:
                 # `**pp`, `***t` — descend the fact chain `extra`
                 # levels past the pointer's own type: every level

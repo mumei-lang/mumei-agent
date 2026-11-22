@@ -7987,11 +7987,11 @@ def test_bound_pointer_deref_read_container_param_pointee_admits(
     assert read.target.endswith("/pointee")
 
 
-def test_bound_pointer_deref_read_struct_pointee_stays_closed(
-    go_types_helper,
-):
-    # `*s` on `s *lib.S` — a struct pointee is not a fragment value,
-    # so the read stays closed like `*lib.PS`.
+def test_bound_pointer_deref_read_struct_pointee(go_types_helper):
+    # `*s` on `s *lib.S` — the whole caller-shared pointee reads like
+    # `s.V` does for one member: the dependency is the parameter's
+    # own. A local `t := &o` pointer stays closed because its
+    # pointee's aliasing cannot be resolved.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(s *lib.S) int64 { _ = *s\n\treturn 0 }\n"
@@ -8000,7 +8000,7 @@ def test_bound_pointer_deref_read_struct_pointee_stays_closed(
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    assert result.available
 
 
 def test_bound_pointer_deref_read_computed_operand_stays_closed(
@@ -33284,6 +33284,33 @@ def test_named_select_clause_break_does_not_leak(
         "\t}\n"
         "\treturn 0\n"
         "}\n",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({1})
+
+
+def test_named_pointer_param_deref_copy(go_types_helper):
+    # `q := *p` copies a `*S` parameter's pointee: scalar members
+    # read the parameter's own dep and collection members alias the
+    # pointee's backing, like `q := o` does for a value parameter.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "type S4 struct { V int64; A []int64 }\n"
+        "func F(p *S4) int64 { q := *p; return q.V + q.A[0] }\n",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_named_pointer_param_deref_copy_reseated(go_types_helper):
+    # `p = q; r := *p` — the reseated pointer's deref resolves to
+    # the alias target's pointee (param 1), not `p`'s entry one.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "type S5 struct { V int64 }\n"
+        "func F(p *S5, q *S5) int64 { p = q; r := *p; return r.V }\n",
     )
     result = named(source, snapshot, summaries)
     assert result.available, result.gaps
