@@ -8019,6 +8019,11 @@ class _RustBindings:
                         # `o.map_or(d, f)` yields `f`'s return `U`
                         # itself — a plain value, not a container.
                         return None, node.start_byte, None
+                    if method == "find_map":
+                        # `it.find_map(f)` is iterator-only and
+                        # yields `Option<U>` — the receiver has no
+                        # container head to gate on.
+                        return "Option", node.start_byte, None
                     # `o.map(f)`/`o.and_then(f)` keep the receiver's
                     # container — `Option<U>` on `Option<_>`,
                     # `Result<U, E>` on `Result<_, _>`.
