@@ -33667,6 +33667,36 @@ def test_value_struct_scalar_array_fields_allow_value_embed(
         assert promoted_result.return_dependencies == expected
 
 
+def test_value_struct_multidim_scalar_array_field_value_embed_matches_direct(
+    go_types_helper,
+):
+    def result_for(declarations, body):
+        return named(
+            *unit(
+                go_types_helper,
+                declarations
+                + "func F(o O, x int64) int64 { "
+                + f"{body} }}\n",
+            )
+        )
+
+    promoted = result_for(
+        "type B struct { R [2][2]int64 }\n"
+        "type O struct { B }\n",
+        "o.R[0][1] = x; return o.R[0][1]",
+    )
+    direct = result_for(
+        "type B struct { R [2][2]int64 }\n"
+        "type O struct { B B }\n",
+        "o.B.R[0][1] = x; return o.B.R[0][1]",
+    )
+    assert promoted.available, promoted.gaps
+    assert direct.available, direct.gaps
+    assert promoted.return_dependencies == direct.return_dependencies
+    assert promoted.return_dependencies == frozenset({0, 1})
+    assert promoted.effects == direct.effects
+
+
 @pytest.mark.parametrize(
     (
         "promoted_declarations",
