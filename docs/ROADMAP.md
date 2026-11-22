@@ -5087,9 +5087,9 @@ Defined-from-struct and imported-struct roots stay closed.
 An interface method value (`f := i.M`) and a named interface method
 expression (`f := I.M`) may be directly called, and a plain function
 value copy preserves the record. Bound method values freeze receiver
-dependencies at binding time; passing, returning, capturing, storing
-or comparing the value, and invoking it with `go` or `defer`, stay
-closed.
+dependencies at binding time; invoking them with `go` or `defer` is
+admitted, while passing, returning, capturing, storing or comparing
+the value stays closed.
 
 ### C06 multi-valued imported results
 
