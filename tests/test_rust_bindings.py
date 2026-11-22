@@ -5148,3 +5148,38 @@ fn h(w: W) {
     m = _bindings(report, "m", "associated_function")[0]
     assert _call(report, source, "res?.m()").target == m.id
     assert _call(report, source, "w.opt?.m()").target == m.id
+
+
+def test_unwrap_receiver_of_array_payload_indexes_the_element() -> None:
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+struct W;
+impl W {
+    fn pick(&self) -> Option<[P; 2]> { None }
+    fn res(&self) -> Result<[P; 2], u8> { Err(0) }
+}
+fn f(w: W, o: Option<[P; 2]>, r: Result<[P; 2], u8>) -> u8 {
+    o.unwrap()[0].m();
+    r.unwrap()[1].m();
+    o?[0].m();
+    match w.pick() {
+        Some(a) => { a[0].m(); }
+        _ => {}
+    }
+    if let Ok(a) = w.res() {
+        a[1].m();
+    }
+    0
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = _bindings(report, "m", "associated_function")[0]
+    raw = source.encode()
+    calls = [
+        call
+        for call in report.calls
+        if raw[call.span.start : call.span.end].decode().endswith(".m()")
+    ]
+    assert len(calls) == 5
+    assert all(c.target == m.id for c in calls)

@@ -2210,7 +2210,10 @@ class _RustBindings:
         if key is not None and key in self._receiver_memo:
             return self._receiver_memo[key]
         result = self._receiver_type_uncached(node)
-        if key is not None:
+        if key is not None and result[0] is not None:
+            # Only resolved results are stable — an unresolved node may
+            # name a declaration that registers later in the walk, so
+            # caching (None, ...) would pin the stale miss.
             self._receiver_memo[key] = result
         return result
 
@@ -4521,6 +4524,12 @@ class _RustBindings:
                 spelled = spelled[1:-1].strip()
                 continue
             break
+        bracket = re.fullmatch(r"\[(.+?)(?:\s*;.+)?\]", spelled)
+        if bracket is not None:
+            # `[P; N]`/`[P]` — an anonymous array/slice carries its
+            # element type as the args spelling, same shape a resolved
+            # container's element keeps.
+            return None, bracket.group(1).strip()
         match = re.fullmatch(
             r"([A-Za-z_][\w:]*)\s*(?:<(.+)>)?", spelled
         )
