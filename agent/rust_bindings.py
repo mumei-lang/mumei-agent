@@ -1413,6 +1413,40 @@ class _RustBindings:
                 )
                 for x, y in zip(sub_a, sub_b)
             )
+        fn_a = re.fullmatch(
+            r"fn\s*\((.*)\)\s*(?:->\s*(.+))?", a, re.DOTALL
+        )
+        fn_b = re.fullmatch(
+            r"fn\s*\((.*)\)\s*(?:->\s*(.+))?", b, re.DOTALL
+        )
+        if (fn_a is None) != (fn_b is None):
+            return False
+        if fn_a is not None:
+            # `fn(P) -> Q` — parameter and return positions match
+            # structurally like tuple elements, so `fn(m::P)`
+            # covers the impl's `fn(P)`.
+            inner_a = fn_a.group(1).strip()
+            inner_b = fn_b.group(1).strip()
+            sub_a = [] if not inner_a else self._type_arg_list(inner_a)
+            sub_b = [] if not inner_b else self._type_arg_list(inner_b)
+            if len(sub_a) != len(sub_b):
+                return False
+            if not all(
+                self._type_arg_match(
+                    x, y, params, bindings, pattern_scope, position
+                )
+                for x, y in zip(sub_a, sub_b)
+            ):
+                return False
+            ret_a = (fn_a.group(2) or "").strip()
+            ret_b = (fn_b.group(2) or "").strip()
+            if bool(ret_a) != bool(ret_b):
+                return False
+            if not ret_a:
+                return True
+            return self._type_arg_match(
+                ret_a, ret_b, params, bindings, pattern_scope, position
+            )
         if a.startswith("[") and a.endswith("]"):
             if not (b.startswith("[") and b.endswith("]")):
                 return False
