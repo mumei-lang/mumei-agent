@@ -2762,3 +2762,25 @@ f(`\\\\${n}`);
         if source[c.span.start:c.span.end] == "f(`\\\\${n}`)"
     )
     assert call.target == string_fn.id
+
+
+def test_overload_double_backslash_constant_regression_detected():
+    # `` `\\${n}` `` interpolates; a literal spelling the same two
+    # backslashes matches only if the escape scan wrongly treats the
+    # interpolation as constant text — this keeps that regression
+    # detectable.
+    source = """
+function f(a: "\\\\${n}"): void {}
+function f(a: string): void {}
+declare const n: string;
+f(`\\\\${n}`);
+"""
+    report = build_ts_bindings(source)
+    string_fn = sorted(
+        _bindings(report, "f", "function"), key=lambda b: b.span.start
+    )[1]
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start:c.span.end] == "f(`\\\\${n}`)"
+    )
+    assert call.target == string_fn.id
