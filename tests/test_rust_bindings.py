@@ -5400,3 +5400,65 @@ fn f(a: Vec<P>, b: Vec<Q>) {
     assert _call(report, source, "p.0.m()").target == m.id
     assert _call(report, source, "p.1.q()").target == q.id
     assert _call(report, source, "t.1.m()").target == m.id
+
+
+def test_zip_named_tuple_struct_args_not_fields():
+    source = """
+struct P;
+struct Q;
+impl P { fn pm(&self) {} }
+impl Q { fn qm(&self) {} }
+struct W<T>(Q, T);
+fn f(w: W<(P, Q)>) {
+    w.0.qm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    qm = _bindings(report, "qm", "associated_function")[0]
+    call = _call(report, source, "w.0.qm()")
+    # `W<T>(Q, T)` declares field 0 as `Q` — the generic args are not
+    # field types, so the receiver never spells `P`.
+    assert call.target in {"", qm.id}
+    assert call.target != _bindings(
+        report, "pm", "associated_function"
+    )[0].id
+
+
+def test_zip_custom_container_stays_opaque():
+    source = """
+struct P;
+struct Q;
+impl P { fn pm(&self) {} }
+impl Q { fn qm(&self) {} }
+struct W<T>(T);
+fn f(w: W<P>, v: Vec<Q>) {
+    for (a, b) in w.iter().zip(v.iter()) {
+        a.pm();
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    # `W<P>` can Deref to `[Q]` — its args are not the element type.
+    assert _call(report, source, "a.pm()").target != pm.id
+
+
+def test_zip_element_resolves_at_annotation_scope():
+    source = """
+mod outer { pub struct P; impl P { pub fn pm(&self) {} } }
+use outer::P;
+fn f(arg: Vec<P>, v: Vec<u8>) {
+    {
+        struct P;
+        impl P { fn other(&self) {} }
+        for (a, b) in arg.iter().zip(v.iter()) {
+            a.pm();
+        }
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    # `arg`'s `P` was written in the signature — the inner block's
+    # `struct P` must not shadow the spelled element.
+    assert _call(report, source, "a.pm()").target == pm.id

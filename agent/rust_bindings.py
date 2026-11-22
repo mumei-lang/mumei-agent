@@ -2337,11 +2337,17 @@ class _RustBindings:
                 return self._annotation_type(element)
             # `p.0` on a spelled tuple binding (`for p in a.zip(b)`)
             # has no annotation node — index into the spelled args.
+            # A named head (`W<P>`) keeps its args as generic
+            # parameters, not field types — `struct Swap<A,B>(B,A)`
+            # orders its fields differently, so `t.0` stays opaque
+            # unless the declared fields resolved above.
             if field_node is not None:
                 index_text = self.text(field_node).strip()
                 if index_text.isdigit():
-                    _, spelled_args = self._receiver_type(value_node)
-                    if spelled_args is not None:
+                    head, spelled_args = self._receiver_type(
+                        value_node
+                    )
+                    if head is None and spelled_args is not None:
                         spelled_args = spelled_args.strip()
                         if self._paren_wraps(spelled_args):
                             spelled = self._type_arg_list(
@@ -2350,7 +2356,11 @@ class _RustBindings:
                             index = int(index_text)
                             if index < len(spelled):
                                 return self._spelled_type(
-                                    spelled[index], node.start_byte
+                                    spelled[index],
+                                    self._receiver_annotation_position(
+                                        value_node
+                                    )
+                                    or node.start_byte,
                                 )
             return None, None
         if node.type == "call_expression":
@@ -2706,6 +2716,15 @@ class _RustBindings:
             if member is None or member.type_node is None:
                 return None
             return member.type_node.start_byte
+        if node.type == "call_expression":
+            # `v.iter()`/`v.first()` spelled names were written in
+            # the receiver's annotation — follow the call's value.
+            callee = node.child_by_field_name("function")
+            if callee is not None and callee.type == "field_expression":
+                return self._receiver_annotation_position(
+                    callee.child_by_field_name("value")
+                )
+            return None
         if node.type != "identifier":
             return None
         record = self._lookup(
@@ -2713,9 +2732,39 @@ class _RustBindings:
             node.start_byte,
             "value",
         )
-        if record is None or record.type_node is None:
+        if record is None:
             return None
-        return record.type_node.start_byte
+        if record.type_node is not None:
+            return record.type_node.start_byte
+        if record.value_node is not None and (
+            record.value_node is not node
+        ):
+            # `let it = v.iter()` — the iterator's spelled element
+            # names were written in `v`'s annotation.
+            return self._receiver_annotation_position(
+                record.value_node
+            )
+        return None
+
+    def _spelling_scope_stable(
+        self, spelled: str, pos_a: int | None, pos_b: int | None
+    ) -> bool:
+        """Whether every name in `spelled` resolves to the same
+        record at both positions — guards a spelling whose names
+        were written at `pos_a` but are consumed at `pos_b` (a zip
+        pair carries names from two annotations)."""
+        if pos_a is None or pos_b is None or pos_a == pos_b:
+            return True
+        for token in re.findall(
+            r"\b[A-Za-z_][A-Za-z0-9_]*\b", spelled
+        ):
+            a = self._lookup(token, pos_a, "type")
+            b = self._lookup(token, pos_b, "type")
+            if (None if a is None else a.binding.id) != (
+                None if b is None else b.binding.id
+            ):
+                return False
+        return True
 
     def _iterator_spelling(
         self, call: Any, _depth: int = 0
@@ -2725,11 +2774,21 @@ class _RustBindings:
         `(P, Q)`, `enumerate` spells `(usize, P)`. Only undeclared
         std adaptors apply; a declared method's real return type is
         what `_iterator_method_element` types instead."""
+        return self._iterator_spelling_with_pos(call, _depth)[0]
+
+    def _iterator_spelling_with_pos(
+        self, call: Any, _depth: int = 0
+    ) -> "tuple[str | None, int | None]":
+        """(spelling, annotation position) — the position is where
+        the container's element names were written, so they resolve
+        in the annotating scope rather than at the use site. A zip
+        whose sides were annotated in different scopes stays
+        unpinned when the names would resolve differently."""
         if _depth > 8:
-            return None
+            return None, None
         callee = call.child_by_field_name("function")
         if callee is None or callee.type != "field_expression":
-            return None
+            return None, None
         if (
             self._field_member(callee, ("associated_function",))
             is not None
@@ -2738,30 +2797,64 @@ class _RustBindings:
         method_node = callee.child_by_field_name("field")
         receiver = callee.child_by_field_name("value")
         if method_node is None or receiver is None:
-            return None
+            return None, None
         method = self._normalize_identifier(self.text(method_node))
         if method in _ITER_ELEMENT_METHODS:
             container_id, args = self._receiver_type(receiver)
             if args is None:
-                return None
+                return None, None
             if self._is_map_container(container_id, receiver):
                 # `m.iter()` yields `(K, V)` — recover both halves
                 # from the annotation since index typing keeps V.
                 spelled = self._map_spelled_args(receiver)
-                return None if spelled is None else f"({spelled})"
-            return args.strip() or None
+                return (
+                    (None, None)
+                    if spelled is None
+                    else (
+                        f"({spelled})",
+                        self._receiver_annotation_position(receiver),
+                    )
+                )
+            if container_id is not None:
+                container_name = next(
+                    (
+                        b.name
+                        for b in self.bindings
+                        if b.id == container_id
+                    ),
+                    None,
+                )
+                if container_name not in _INDEX_ELEMENT_CONTAINERS:
+                    # A custom `W<P>` can `Deref` to a different
+                    # element — its args are not the iterated
+                    # element's type.
+                    return None, None
+            spelled = args.strip() or None
+            if spelled is None:
+                return None, None
+            return spelled, self._receiver_annotation_position(
+                receiver
+            )
         if method in _ITER_PRESERVING_METHODS or method in _ITER_SLICE_METHODS:
             if receiver.type != "call_expression":
-                return None
-            return self._iterator_spelling(receiver, _depth + 1)
+                return None, None
+            return self._iterator_spelling_with_pos(
+                receiver, _depth + 1
+            )
         if method == "enumerate":
             if receiver.type != "call_expression":
-                return None
-            inner = self._iterator_spelling(receiver, _depth + 1)
-            return None if inner is None else f"(usize, {inner})"
+                return None, None
+            inner, pos = self._iterator_spelling_with_pos(
+                receiver, _depth + 1
+            )
+            return (
+                (None, None)
+                if inner is None
+                else (f"(usize, {inner})", pos)
+            )
         if method == "zip":
             if receiver.type != "call_expression":
-                return None
+                return None, None
             args_node = call.child_by_field_name("arguments")
             zipped = (
                 None
@@ -2776,13 +2869,37 @@ class _RustBindings:
                 )
             )
             if zipped is None:
-                return None
-            left = self._iterator_spelling(receiver, _depth + 1)
-            right = self._iterator_spelling(zipped, _depth + 1)
+                return None, None
+            left, left_pos = self._iterator_spelling_with_pos(
+                receiver, _depth + 1
+            )
+            right, right_pos = self._iterator_spelling_with_pos(
+                zipped, _depth + 1
+            )
             if left is None or right is None:
-                return None
-            return f"({left}, {right})"
-        return None
+                return None, None
+            position = (
+                left_pos if left_pos is not None else right_pos
+            )
+            if (
+                left_pos is not None
+                and right_pos is not None
+                and left_pos != right_pos
+                and not (
+                    self._spelling_scope_stable(
+                        left, left_pos, position
+                    )
+                    and self._spelling_scope_stable(
+                        right, right_pos, position
+                    )
+                )
+            ):
+                # The two sides' names were written where different
+                # bindings are visible — resolving them at one
+                # position could bind the wrong same-named type.
+                return None, None
+            return f"({left}, {right})", position
+        return None, None
 
     def _iterator_method_element(
         self, call: Any
@@ -4421,10 +4538,19 @@ class _RustBindings:
                 if node is not None and node.type == "call_expression":
                     fact, spelled = self._iterator_method_element(node)
                     if spelled is not None:
+                        # The spelled element names were written in
+                        # the iterated container's annotation —
+                        # resolving at the pattern site would pick
+                        # up a same-named shadow.
+                        spelled_position = (
+                            self._iterator_spelling_with_pos(node)[1]
+                        )
                         type_map = self._pattern_type_map(
                             pattern,
                             None if fact is None else fact.type_id,
                             spelled,
+                            None,
+                            spelled_position,
                         )
                 else:
                     container_id, container_args = self._receiver_type(
