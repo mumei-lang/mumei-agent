@@ -6303,6 +6303,142 @@ def test_interface_dispatch_nested_element_receivers_stay_closed(
     )
 
 
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        (
+            "type I interface{ M() int64 }\n"
+            "type S struct{ A []I }\n"
+            "func F(p *S, e I) { p.A[0] = e }\n"
+        ),
+        (
+            "type I interface{ M() int64 }\n"
+            "type S struct{ A []I }\n"
+            "func F(p *S, i int64, e I) { p.A[i] = e }\n"
+        ),
+        (
+            "type I interface{ M() int64 }\n"
+            "type S struct{ A []I }\n"
+            "func F(o S, e I) { o.A[0] = e }\n"
+        ),
+        (
+            "type I interface{ M() int64 }\n"
+            "type S struct{ A []I }\n"
+            "func F(p *S, e I) { q := p; q.A[0] = e }\n"
+        ),
+        (
+            "type I interface{ M() int64 }\n"
+            "type S struct{ A []I }\n"
+            "func F(pp **S, e I) { (*pp).A[0] = e }\n"
+        ),
+    ],
+)
+def test_interface_element_store_through_collection_field(
+    go_types_helper, declarations
+):
+    # `p.A[i] = e` — storing an interface value into a `[]I` field
+    # element writes caller-visible element memory the dep model
+    # cannot track, so the function reports `unknown` effects like
+    # every other element store.
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.effects == "unknown"
+
+
+@pytest.mark.parametrize(
+    "declarations, expected",
+    [
+        (
+            "type I interface{ M() int64 }\n"
+            "type S struct{ A []I }\n"
+            "func callee(p *S, e I) { p.A[0] = e }\n"
+            "func F(p *S, e I) int64 { callee(p, e); "
+            "return p.A[0].M() }\n",
+            frozenset({0, 1}),
+        ),
+        (
+            "type I interface{ M() int64 }\n"
+            "type S struct{ A []I }\n"
+            "func callee(p *S, e I) { p.A[0] = e }\n"
+            "func F(p *S, e I) int64 { callee(p, e); "
+            "v := p.A[0]; return v.M() }\n",
+            frozenset({0, 1}),
+        ),
+        (
+            "type I interface{ M() int64 }\n"
+            "type S struct{ A []I }\n"
+            "func F(p *S, i int64, e I) int64 {\n"
+            "\tp.A[i] = e\n"
+            "\treturn p.A[i].M()\n"
+            "}\n",
+            frozenset({0, 1, 2}),
+        ),
+    ],
+)
+def test_interface_element_store_observed_by_dispatch(
+    go_types_helper, declarations, expected
+):
+    # A `[]I` element store folds the stored value's deps into the
+    # element slot: a later `p.A[i].M()` on the same field observes
+    # them like any other element write.
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == expected
+    assert result.effects == "unknown"
+
+
+def test_interface_element_store_literal_impl(
+    go_types_helper,
+):
+    # `p.A[0] = E{V: x}` — a concrete composite literal stored into
+    # a `[]I` element folds the literal's field deps the same way.
+    declarations = (
+        "type I interface{ M() int64 }\n"
+        "type E struct{ V int64 }\n"
+        "func (E) M() int64 { return 7 }\n"
+        "type S struct{ A []I }\n"
+        "func F(p *S, x int64) int64 {\n"
+        "\tp.A[0] = E{V: x}\n"
+        "\treturn p.A[0].M()\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        # `[][]I` — the nested-collection element write is unmodelled.
+        (
+            "type I interface{ M() int64 }\n"
+            "type S struct{ A [][]I }\n"
+            "func F(p *S, e I) { p.A[0][0] = e }\n"
+        ),
+        # A bare `[]I` parameter is an unmodelled signature shape —
+        # the element store stays closed with the read.
+        (
+            "type I interface{ M() int64 }\n"
+            "func F(a []I, e I) { a[0] = e }\n"
+        ),
+        # `x.A[0] = e` where `x` is a bare local binding is closed:
+        # no declared root admits the store.
+        (
+            "type I interface{ M() int64 }\n"
+            "type S struct{ A []I }\n"
+            "func F(e I) { var x *S; x.A[0] = e }\n"
+        ),
+    ],
+)
+def test_interface_element_store_stays_closed(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available
+
+
 def test_interface_dispatch_imported_struct_root_stays_closed(
     go_types_helper,
 ):
