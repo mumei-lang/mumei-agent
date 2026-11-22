@@ -8534,6 +8534,7 @@ class _Builder:
                 return base_deps | index_deps
         member = None
         package_var = None
+        package_field = None
         bound_pointer = None
         bound_operand = None
         package_pointee = None
@@ -8550,6 +8551,17 @@ class _Builder:
                     params,
                     allow_struct_elements=True,
                 )
+                if opaque_field is None:
+                    candidate = self._package_composite_field_read(inner)
+                    if candidate is not None:
+                        _, field_ident, extras = candidate
+                        field_type = getattr(field_ident, "type", None)
+                        if (
+                            not extras
+                            and field_type is not None
+                            and field_type.kind in {"slice", "array", "map"}
+                        ):
+                            package_field = candidate
         elif inner is not None and inner.type in (
             "call_expression",
             "type_conversion_expression",
@@ -8650,21 +8662,25 @@ class _Builder:
                 package_var.type
                 if package_var is not None
                 else (
-                    bound_pointer[2]
-                    if bound_pointer is not None
+                    package_field[1].type
+                    if package_field is not None
                     else (
-                        package_pointee[1]
-                        if package_pointee is not None
+                        bound_pointer[2]
+                        if bound_pointer is not None
                         else (
-                            call_fact
-                            if call_operand is not None
+                            package_pointee[1]
+                            if package_pointee is not None
                             else (
-                                self.bindings[opaque_composite].type
-                                if opaque_composite is not None
+                                call_fact
+                                if call_operand is not None
                                 else (
-                                    opaque_field[2].type
-                                    if opaque_field is not None
-                                    else None
+                                    self.bindings[opaque_composite].type
+                                    if opaque_composite is not None
+                                    else (
+                                        opaque_field[2].type
+                                        if opaque_field is not None
+                                        else None
+                                    )
                                 )
                             )
                         )
@@ -8750,6 +8766,7 @@ class _Builder:
             )
             and call_operand is None
             and package_var is None
+            and package_field is None
             and member is None
             and bound_pointer is None
             and package_pointee is None
@@ -8817,6 +8834,7 @@ class _Builder:
             or (
                 member is None
                 and package_var is None
+                and package_field is None
                 and bound_pointer is None
                 and package_pointee is None
                 and call_operand is None
@@ -8865,6 +8883,11 @@ class _Builder:
             self._pin_member_type(member)
         elif package_var is not None:
             self._pin_fact_identities(package_var.type)
+        elif package_field is not None:
+            package_binding, field_ident, _ = package_field
+            self.pinned.add(package_binding.id)
+            self._pin_fact_identities(package_binding.type)
+            self._pin_fact_identities(field_ident.type)
         elif bound_pointer is not None:
             # `(*p)[i]` — the pointee's container fact pins its
             # declared identities; the synthetic `{binding}/pointee`
@@ -8910,9 +8933,13 @@ class _Builder:
                             package_var.id
                             if package_var is not None
                             else (
-                                bound_pointer[1]
-                                if bound_pointer is not None
-                                else package_pointee[0]
+                                package_field[1].id
+                                if package_field is not None
+                                else (
+                                    bound_pointer[1]
+                                    if bound_pointer is not None
+                                    else package_pointee[0]
+                                )
                             )
                         )
                     ),
@@ -9071,6 +9098,7 @@ class _Builder:
         elif (
             member is not None
             or package_var is not None
+            or package_field is not None
             or package_pointee is not None
         ):
             # `lib.VA[i]`/`VA[i]`/`(*GP)[i]` — member and
@@ -22167,6 +22195,22 @@ class _Builder:
                     if right is not None and member is None
                     else None
                 )
+                container_field = None
+                if (
+                    right is not None
+                    and member is None
+                    and container_var is None
+                ):
+                    candidate = self._package_composite_field_read(right)
+                    if candidate is not None:
+                        _, field_ident, extras = candidate
+                        field_type = getattr(field_ident, "type", None)
+                        if (
+                            not extras
+                            and field_type is not None
+                            and field_type.kind in {"slice", "array", "map"}
+                        ):
+                            container_field = candidate
                 bound = None
                 package_pointee = None
                 range_ident = None
@@ -22238,6 +22282,7 @@ class _Builder:
                     range_field_operand is not None
                     and member is None
                     and container_var is None
+                    and container_field is None
                     and range_field_operand.type in {
                         "selector_expression", "field_expression"
                     }
@@ -22275,6 +22320,7 @@ class _Builder:
                     right is not None
                     and member is None
                     and container_var is None
+                    and container_field is None
                 ):
                     # `for range *p` / `for range p` — a bound
                     # pointer whose pointee is a container, or a
@@ -22488,6 +22534,7 @@ class _Builder:
                 if (
                     member is not None
                     or container_var is not None
+                    or container_field is not None
                     or bound is not None
                     or package_pointee is not None
                     or computed is not None
@@ -22515,7 +22562,14 @@ class _Builder:
                         raise _Unsupported(
                             "unsupported_statement", _span(clause)
                         )
-                    if (
+                    if container_field is not None:
+                        package_binding, field_ident, _ = container_field
+                        fact = field_ident.type
+                        target = field_ident.id
+                        self.pinned.add(package_binding.id)
+                        self._pin_fact_identities(package_binding.type)
+                        self._pin_fact_identities(fact)
+                    elif (
                         bound is not None
                         or package_pointee is not None
                         or computed is not None
@@ -22987,6 +23041,7 @@ class _Builder:
                                 and (
                                     member is not None
                                     or container_var is not None
+                                    or container_field is not None
                                     or (
                                         opaque_range is not None
                                         and opaque_range in params
@@ -23004,6 +23059,7 @@ class _Builder:
                                     and (
                                         member is not None
                                         or container_var is not None
+                                        or container_field is not None
                                         or (
                                             opaque_range is not None
                                             and opaque_range in params
@@ -29434,6 +29490,32 @@ class _Builder:
                                     return self._opaque_container_deps(
                                         len_ref.binding_id, locals_
                                     )
+                        if (
+                            operand is not None
+                            and operand.type == "identifier"
+                        ):
+                            package_var = self._package_container_var(
+                                operand
+                            )
+                            if package_var is not None:
+                                self.pinned.add(package_var.id)
+                                self._pin_fact_identities(
+                                    package_var.type
+                                )
+                                transfers.append(
+                                    CallTransfer(
+                                        FileSpan(
+                                            self.current_file,
+                                            node.start_byte,
+                                            node.end_byte,
+                                        ),
+                                        package_var.id,
+                                        (),
+                                        frozenset(),
+                                        imported=True,
+                                    )
+                                )
+                                return frozenset()
                         field_target = self._opaque_container_field_target(
                             arguments[0], params
                         )
@@ -29451,6 +29533,47 @@ class _Builder:
                                     field_key, locals_
                                 )
                             )
+                        if (
+                            operand is not None
+                            and operand.type == "selector_expression"
+                        ):
+                            package_field = (
+                                self._package_composite_field_read(
+                                    arguments[0]
+                                )
+                            )
+                            if package_field is not None:
+                                package_binding, field_ident, extras = (
+                                    package_field
+                                )
+                                field_type = getattr(
+                                    field_ident, "type", None
+                                )
+                                if (
+                                    not extras
+                                    and field_type is not None
+                                    and field_type.kind
+                                    in {"slice", "array", "map"}
+                                ):
+                                    self.pinned.add(package_binding.id)
+                                    self._pin_fact_identities(
+                                        package_binding.type
+                                    )
+                                    self._pin_fact_identities(field_type)
+                                    transfers.append(
+                                        CallTransfer(
+                                            FileSpan(
+                                                self.current_file,
+                                                node.start_byte,
+                                                node.end_byte,
+                                            ),
+                                            field_ident.id,
+                                            (),
+                                            frozenset(),
+                                            imported=True,
+                                        )
+                                    )
+                                    return frozenset()
                         if (
                             operand is not None
                             and operand.type == "call_expression"

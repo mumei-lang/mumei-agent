@@ -14630,6 +14630,357 @@ def test_package_container_var_range_binds_dep_free(
     assert all(c.imported for c in result.calls)
 
 
+def test_package_composite_container_field_indexes_record_field_transfers(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "type Values []int64\n"
+        "type Sz struct {\n"
+        "\tA Values\n"
+        "\tR [2]int64\n"
+        "\tV int64\n"
+        "\tM map[int64]int64\n"
+        "\tB [][]int64\n"
+        "}\n"
+        "type Outer struct{ S Sz }\n"
+        "var GS Sz\nvar GO Outer\nvar GP *Sz\n"
+        "var GA [2]int64\nvar GSL []int64\n"
+        "var GM map[int64]int64\nvar GB [][]int64\n"
+        "func ReadSlice(i int64) int64 { return GS.A[i] }\n"
+        "func ReadSliceControl(i int64) int64 { return GSL[i] }\n"
+        "func ReadArray(i int64) int64 { return GS.R[i] }\n"
+        "func ReadArrayControl(i int64) int64 { return GA[i] }\n"
+        "func ReadMap(k int64) int64 { return GS.M[k] }\n"
+        "func ReadMapControl(k int64) int64 { return GM[k] }\n"
+        "func ReadNested(i, j int64) int64 { return GS.B[i][j] }\n"
+        "func ReadNestedControl(i, j int64) int64 { return GB[i][j] }\n"
+        "func ReadValueChain(i int64) int64 { return GO.S.A[i] }\n"
+        "func ReadValueChainControl(i int64) int64 { return GSL[i] }\n"
+        "func ReadPointerRoot(i int64) int64 { return GP.A[i] }\n"
+        "func ReadPointerRootControl(i int64) int64 { return GSL[i] }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    variable_ids = {
+        binding.name: binding.id
+        for binding in snapshot.bindings
+        if binding.kind == "variable"
+    }
+    field_ids = {
+        binding.name: binding.id
+        for binding in snapshot.bindings
+        if binding.kind == "variable" and binding.scope is None
+    }
+    cases = (
+        ("ReadSlice", "ReadSliceControl", {0}, "A", "GSL"),
+        ("ReadArray", "ReadArrayControl", {0}, "R", "GA"),
+        ("ReadMap", "ReadMapControl", {0}, "M", "GM"),
+        ("ReadNested", "ReadNestedControl", {0, 1}, "B", "GB"),
+        ("ReadValueChain", "ReadValueChainControl", {0}, "A", "GSL"),
+        ("ReadPointerRoot", "ReadPointerRootControl", {0}, "A", "GSL"),
+    )
+    for function_name, control_name, deps, field, control_var in cases:
+        result = named_package(files, snapshot, summaries, function_name)
+        control = named_package(files, snapshot, summaries, control_name)
+        assert result.available and control.available
+        assert result.return_dependencies == control.return_dependencies
+        assert result.return_dependencies == frozenset(deps)
+        assert result.effects == control.effects == "unknown"
+        (read,) = [call for call in result.calls if call.imported]
+        (control_read,) = [
+            call for call in control.calls if call.imported
+        ]
+        assert read.target == field_ids[field]
+        assert control_read.target == variable_ids[control_var]
+        assert (
+            read.arguments,
+            read.result,
+            read.imported,
+        ) == (
+            control_read.arguments,
+            control_read.result,
+            control_read.imported,
+        )
+
+
+def test_package_composite_container_field_range_len_and_cap_transfers(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "type Sz struct{ A []int64; R [2]int64; M map[int64]int64 }\n"
+        "var GS Sz\nvar GSL []int64\n"
+        "var GA [2]int64\nvar GM map[int64]int64\n"
+        "func RangeSliceIndex() int64 {\n"
+        "\tvar n int64\n"
+        "\tfor i := range GS.A { n += int64(i) }\n"
+        "\treturn n\n}\n"
+        "func RangeSliceIndexControl() int64 {\n"
+        "\tvar n int64\n"
+        "\tfor i := range GSL { n += int64(i) }\n"
+        "\treturn n\n}\n"
+        "func RangeSliceValue() int64 {\n"
+        "\tvar n int64\n"
+        "\tfor _, v := range GS.A { n += v }\n"
+        "\treturn n\n}\n"
+        "func RangeSliceValueControl() int64 {\n"
+        "\tvar n int64\n"
+        "\tfor _, v := range GSL { n += v }\n"
+        "\treturn n\n}\n"
+        "func RangeArrayIndex() int64 {\n"
+        "\tvar n int64\n"
+        "\tfor i := range GS.R { n += int64(i) }\n"
+        "\treturn n\n}\n"
+        "func RangeArrayIndexControl() int64 {\n"
+        "\tvar n int64\n"
+        "\tfor i := range GA { n += int64(i) }\n"
+        "\treturn n\n}\n"
+        "func RangeArrayValue() int64 {\n"
+        "\tvar n int64\n"
+        "\tfor _, v := range GS.R { n += v }\n"
+        "\treturn n\n}\n"
+        "func RangeArrayValueControl() int64 {\n"
+        "\tvar n int64\n"
+        "\tfor _, v := range GA { n += v }\n"
+        "\treturn n\n}\n"
+        "func RangeMapIndex() int64 {\n"
+        "\tvar n int64\n"
+        "\tfor k := range GS.M { n += k }\n"
+        "\treturn n\n}\n"
+        "func RangeMapIndexControl() int64 {\n"
+        "\tvar n int64\n"
+        "\tfor k := range GM { n += k }\n"
+        "\treturn n\n}\n"
+        "func RangeMapValue() int64 {\n"
+        "\tvar n int64\n"
+        "\tfor k, v := range GS.M { n += k + v }\n"
+        "\treturn n\n}\n"
+        "func RangeMapValueControl() int64 {\n"
+        "\tvar n int64\n"
+        "\tfor k, v := range GM { n += k + v }\n"
+        "\treturn n\n}\n"
+        "func LenSlice() int { return len(GS.A) }\n"
+        "func LenSliceControl() int { return len(GA) }\n"
+        "func CapSlice() int { return cap(GS.A) }\n"
+        "func CapSliceControl() int { return cap(GA) }\n"
+        "func LenArray() int { return len(GS.R) }\n"
+        "func LenArrayControl() int { return len(GA) }\n"
+        "func CapArray() int { return cap(GS.R) }\n"
+        "func CapArrayControl() int { return cap(GA) }\n"
+        "func LenMap() int { return len(GS.M) }\n"
+        "func LenMapControl() int { return len(GA) }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    variable_ids = {
+        binding.name: binding.id
+        for binding in snapshot.bindings
+        if binding.kind == "variable"
+    }
+    field_ids = {
+        binding.name: binding.id
+        for binding in snapshot.bindings
+        if binding.kind == "variable" and binding.scope is None
+    }
+    cases = (
+        ("RangeSliceIndex", "RangeSliceIndexControl", "A", "GSL"),
+        ("RangeSliceValue", "RangeSliceValueControl", "A", "GSL"),
+        ("RangeArrayIndex", "RangeArrayIndexControl", "R", "GA"),
+        ("RangeArrayValue", "RangeArrayValueControl", "R", "GA"),
+        ("RangeMapIndex", "RangeMapIndexControl", "M", "GM"),
+        ("RangeMapValue", "RangeMapValueControl", "M", "GM"),
+        ("LenSlice", "LenSliceControl", "A", "GA"),
+        ("CapSlice", "CapSliceControl", "A", "GA"),
+        ("LenArray", "LenArrayControl", "R", "GA"),
+        ("CapArray", "CapArrayControl", "R", "GA"),
+        ("LenMap", "LenMapControl", "M", "GA"),
+    )
+    for function_name, control_name, field, control_var in cases:
+        result = named_package(files, snapshot, summaries, function_name)
+        control = named_package(files, snapshot, summaries, control_name)
+        assert result.available and control.available
+        assert result.return_dependencies == control.return_dependencies
+        assert result.return_dependencies == frozenset()
+        assert result.effects == control.effects == "unknown"
+        (read,) = [call for call in result.calls if call.imported]
+        (control_read,) = [
+            call for call in control.calls if call.imported
+        ]
+        assert read.target == field_ids[field]
+        assert control_read.target == variable_ids[control_var]
+        assert (
+            read.arguments,
+            read.result,
+            read.imported,
+        ) == (
+            control_read.arguments,
+            control_read.result,
+            control_read.imported,
+        )
+
+
+def test_package_composite_container_field_writes_match_package_var_controls(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "type Sz struct{ A []int64; R [2]int64; M map[int64]int64 }\n"
+        "var GS Sz\nvar GSL []int64\n"
+        "var GA [2]int64\nvar GM map[int64]int64\n"
+        "func WriteSlice(x int64) int64 {\n"
+        "\tGS.A[0] = x\n\treturn GS.A[0]\n}\n"
+        "func WriteSliceControl(x int64) int64 {\n"
+        "\tGSL[0] = x\n\treturn GSL[0]\n}\n"
+        "func WriteArray(i, x int64) int64 {\n"
+        "\tGS.R[i] = x\n\treturn GS.R[i]\n}\n"
+        "func WriteArrayControl(i, x int64) int64 {\n"
+        "\tGA[i] = x\n\treturn GA[i]\n}\n"
+        "func AddSlice(x int64) int64 {\n"
+        "\tGS.A[0] += x\n\treturn GS.A[0]\n}\n"
+        "func AddSliceControl(x int64) int64 {\n"
+        "\tGSL[0] += x\n\treturn GSL[0]\n}\n"
+        "func IncSlice() int64 {\n"
+        "\tGS.A[0]++\n\treturn GS.A[0]\n}\n"
+        "func IncSliceControl() int64 {\n"
+        "\tGSL[0]++\n\treturn GSL[0]\n}\n"
+        "func WriteMap(k, x int64) int64 {\n"
+        "\tGS.M[k] = x\n\treturn GS.M[k]\n}\n"
+        "func WriteMapControl(k, x int64) int64 {\n"
+        "\tGM[k] = x\n\treturn GM[k]\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    variable_ids = {
+        binding.name: binding.id
+        for binding in snapshot.bindings
+        if binding.kind == "variable"
+    }
+    field_ids = {
+        binding.name: binding.id
+        for binding in snapshot.bindings
+        if binding.kind == "variable" and binding.scope is None
+    }
+    cases = (
+        ("WriteSlice", "WriteSliceControl", "A", "GSL", 0),
+        ("WriteArray", "WriteArrayControl", "R", "GA", 1),
+        ("AddSlice", "AddSliceControl", "A", "GSL", 0),
+        ("IncSlice", "IncSliceControl", "A", "GSL", None),
+        ("WriteMap", "WriteMapControl", "M", "GM", 1),
+    )
+    global_targets = {variable_ids["GS"]}
+    for function_name, control_name, field, control_var, value_param in cases:
+        result = named_package(files, snapshot, summaries, function_name)
+        control = named_package(files, snapshot, summaries, control_name)
+        assert result.available and control.available
+        assert result.return_dependencies == control.return_dependencies
+        assert result.effects == control.effects == "unknown"
+        if value_param is not None:
+            assert value_param in result.return_dependencies
+        result_targets = [
+            call.target for call in result.calls if call.imported
+        ]
+        control_targets = [
+            call.target for call in control.calls if call.imported
+        ]
+        assert global_targets <= set(result_targets)
+        assert field_ids[field] in result_targets
+        assert control_targets
+        assert all(
+            target == variable_ids[control_var]
+            for target in control_targets
+        )
+        assert [call.imported for call in result.calls] == [
+            call.imported for call in control.calls
+        ]
+
+
+def test_package_container_field_fallback_leaves_local_and_param_roots_unchanged(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "type Sz struct{ A []int64 }\n"
+        "func Parameter(s Sz, i int64) int64 { return s.A[i] }\n"
+        "func ParameterControl(a []int64, i int64) int64 { return a[i] }\n"
+        "func Local(i int64) int64 {\n"
+        "\ts := Sz{A: []int64{1}}\n"
+        "\treturn s.A[i]\n}\n"
+        "func LocalControl(i int64) int64 {\n"
+        "\ta := []int64{1}\n"
+        "\treturn a[i]\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    for function_name, control_name in (
+        ("Parameter", "ParameterControl"),
+        ("Local", "LocalControl"),
+    ):
+        result = named_package(files, snapshot, summaries, function_name)
+        control = named_package(files, snapshot, summaries, control_name)
+        assert result.available == control.available
+        assert result.return_dependencies == control.return_dependencies
+        assert result.effects == control.effects
+        assert [call.target for call in result.calls] == [
+            call.target for call in control.calls
+        ]
+
+
+def test_package_container_field_type_pins_flag_stale_dependents(
+    go_types_helper,
+):
+    type_change_cases = (
+        (
+            "type Values []int64\n"
+            "type Sz struct{ A Values }\n",
+            "type Values []int64\n"
+            "type Padding int64\n"
+            "type Sz struct{ A Values }\n",
+            "Sz",
+        ),
+        (
+            "type Sz struct{ A Values }\n"
+            "type Values []int64\n",
+            "type Sz struct{ A Values }\n"
+            "type Padding int64\n"
+            "type Values []int64\n",
+            "Values",
+        ),
+    )
+    for old_types, new_types, changed_type in type_change_cases:
+        files = {
+            "a.go": "package p\n"
+            + old_types
+            + "var GS Sz\n"
+            + "func F(i int64) int64 { return GS.A[i] }\n"
+        }
+        snapshot = _snapshot_for(go_types_helper, files)
+        summaries = ip.summarize_go_package(files, snapshot)
+        result = named_package(files, snapshot, summaries, "F")
+        assert result.available
+        changed_id = next(
+            binding.id
+            for binding in snapshot.bindings
+            if binding.name == changed_type and binding.kind == "type"
+        )
+        assert changed_id in result.pinned
+        f_id = next(
+            function.binding_id
+            for function in snapshot.functions
+            if snapshot.binding(function.binding_id).name == "F"
+        )
+        new_files = {
+            "a.go": "package p\n"
+            + new_types
+            + "var GS Sz\n"
+            + "func F(i int64) int64 { return GS.A[i] }\n"
+        }
+        new_snapshot = _snapshot_for(go_types_helper, new_files)
+        new_known = {binding.id for binding in new_snapshot.bindings}
+        assert changed_id not in new_known
+        assert summaries.stale_dependents(new_known) == frozenset({f_id})
+
+
 def test_local_composite_write_is_not_a_package_write(
     go_types_helper,
 ):
@@ -35972,9 +36323,12 @@ def test_struct_field_parallel_assignment_field_rhs_preserves_alias(
         "type P struct { A []int64 }\n"
         "type Q struct { P *P }\n"
         "func F(q Q) int64 { return q.P.A[0] }\n",
-        "type S struct { A []int64 }\n"
-        "var GS S\n"
-        "func F() int64 { return GS.A[0] }\n",
+        "type E struct { A []int64 }\n"
+        "var GA []E\n"
+        "func F(i, j int64) int64 { return GA[j].A[i] }\n",
+        "type Sz struct { B [][]int64 }\n"
+        "var GS Sz\n"
+        "func F(i int64) int64 { _ = GS.B[i]; return i }\n",
         "func F(s struct { A []int64 }) int64 { return s.A[0] }\n",
         "type S[T any] struct { A []int64 }\n"
         "func F(s S[int64]) int64 { return s.A[0] }\n",
