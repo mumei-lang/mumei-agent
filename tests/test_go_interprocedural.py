@@ -33713,6 +33713,81 @@ def test_named_struct_element_pointer_param_root_member_pointee_write(
     ]
 
 
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        # A store through an element's pointer member lands in
+        # caller memory — effects unknown, like `p.P = q`.
+        "type E2 struct { V int64 }\n"
+        "type Elem struct { W *E2 }\n"
+        "type S struct { A []*Elem }\n"
+        "func F(p *S, i int64, q *E2) {\n"
+        "\tp.A[i].W = q\n}\n",
+        # Through a `**S` root's explicit dereference.
+        "type E2 struct { V int64 }\n"
+        "type Elem struct { W *E2 }\n"
+        "type S struct { A []*Elem }\n"
+        "func F(pp **S, i int64, q *E2) {\n"
+        "\t(*pp).A[i].W = q\n}\n",
+        # Through a `q := p` local bind's alias to the pointee.
+        "type E2 struct { V int64 }\n"
+        "type Elem struct { W *E2 }\n"
+        "type S struct { A []*Elem }\n"
+        "func F(p *S, i int64, q *E2) {\n"
+        "\tr := p\n"
+        "\tr.A[i].W = q\n}\n",
+    ],
+)
+def test_named_struct_element_pointer_member_store(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.effects == "unknown"
+    assert not [
+        gap for gap in result.gaps if gap.reason != "summary_effects"
+    ]
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        # The stored pointer's deps reach a read through the same
+        # member — `p.A[i].W.V` observes the store.
+        "type E2 struct { V int64 }\n"
+        "type Elem struct { W *E2 }\n"
+        "type S struct { A []*Elem }\n"
+        "func F(p *S, i int64, q *E2) int64 {\n"
+        "\tp.A[i].W = q\n"
+        "\treturn p.A[i].W.V\n}\n",
+    ],
+)
+def test_named_struct_element_pointer_member_store_read_back(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1, 2})
+
+
+def test_named_struct_element_pointer_member_store_local_root_closed(
+    go_types_helper,
+):
+    # `o.A[i].W = q` — a local composite's pointer member escapes
+    # the slot model; the store stays closed.
+    result = named(
+        *unit(
+            go_types_helper,
+            "type E2 struct { V int64 }\n"
+            "type Elem struct { W *E2 }\n"
+            "type S struct { A []*Elem }\n"
+            "func F(o S, i int64, q *E2) {\n"
+            "\to.A[i].W = q\n}\n",
+        )
+    )
+    assert result.effects == "unknown"
+    assert result.gaps
+
+
 def test_named_struct_element_double_pointer_param_root_collection(
     go_types_helper,
 ):

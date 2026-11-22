@@ -3079,7 +3079,10 @@ class _Builder:
         )
 
     def _opaque_container_struct_element_field_target(
-        self, node: Any, params: dict | None = None
+        self,
+        node: Any,
+        params: dict | None = None,
+        for_pointer_leaf: bool = False,
     ) -> tuple[
         Any, list[Any], str, Any, frozenset, Any, tuple[Any, ...]
     ] | None:
@@ -3229,7 +3232,23 @@ class _Builder:
                 # on the member's pointee like the element pointer.
                 field_fact = field_fact.elem
         if not self._scalar_value_fact(field_fact):
-            return None
+            # A store into a pointer leaf (`p.A[i].W = q`) resolves
+            # the chain to the member's pointee — caller memory for
+            # a param pointer root. The LHS consumer folds the write
+            # opaquely like `p.P = q`, so admit the target shape;
+            # a pointer leaf read stays closed.
+            if not (
+                for_pointer_leaf
+                and mid_pointer_root
+                and path_members
+                and getattr(
+                    path_members[-1].type, "kind", None
+                )
+                == "pointer"
+                and getattr(field_fact, "kind", None) == "struct"
+                and self._struct_value_fact(field_fact) is not None
+            ):
+                return None
         self._pin_fact_identities(container_fact)
         if (
             container_fact.kind == "array"
@@ -18470,9 +18489,87 @@ class _Builder:
                 # that external mutation stays closed here.
                 scalar_field_elem_lhs = (
                     self._opaque_container_struct_element_field_target(
-                        lhs, params
+                        lhs, params, for_pointer_leaf=True
                     )
                 )
+                if (
+                    scalar_field_elem_lhs is not None
+                    and scalar_field_elem_lhs[6]
+                    and getattr(
+                        scalar_field_elem_lhs[6][-1].type,
+                        "kind",
+                        None,
+                    )
+                    == "pointer"
+                ):
+                    (
+                        oref, indexes, field_key, _container_member,
+                        field_tokens, field_selector, _path_members,
+                    ) = scalar_field_elem_lhs
+                    # `p.A[i].W = q` — a store through an element's
+                    # pointer member lands in caller memory the slot
+                    # model does not track, exactly like `p.P = q`:
+                    # record the external mutation on the element's
+                    # pointee identity, read the destination (the
+                    # `p.A[i]` chain and its index) at pre-state, and
+                    # fold the stored value into the root's set plus
+                    # `indirect_writes` so other aliased reads see it.
+                    _ptr_leaf = _path_members[-1].type
+                    _leaf_target_id = getattr(
+                        getattr(_ptr_leaf, "elem", None),
+                        "type_id",
+                        "",
+                    )
+                    if not _leaf_target_id:
+                        _leaf_root = self.bindings.get(
+                            oref.binding_id
+                        )
+                        _leaf_target_id = getattr(
+                            getattr(
+                                getattr(_leaf_root, "type", None),
+                                "elem",
+                                None,
+                            ),
+                            "type_id",
+                            "",
+                        )
+                    if _leaf_target_id:
+                        transfers.append(
+                            CallTransfer(
+                                FileSpan(
+                                    self.current_file,
+                                    lhs.start_byte,
+                                    lhs.end_byte,
+                                ),
+                                _leaf_target_id,
+                                (),
+                                frozenset(),
+                                imported=True,
+                            )
+                        )
+                    self._for_write_target = True
+                    try:
+                        self._record_read(
+                            self.expression(
+                                field_selector, fn, params, locals_,
+                                transfers, count, 0,
+                            )
+                        )
+                    finally:
+                        self._for_write_target = False
+                    for index in reversed(indexes):
+                        if (
+                            index is not None
+                            and index.type not in _INDEX_LITERALS
+                        ):
+                            self._record_read(
+                                self.expression(
+                                    index, fn, params, locals_,
+                                    transfers, count, 0,
+                                )
+                            )
+                    refs.append((oref, True, True, True))
+                    continue
                 if (
                     scalar_field_elem_lhs is not None
                     and scalar_field_elem_lhs[3].type.kind != "map"
