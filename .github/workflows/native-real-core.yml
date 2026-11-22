@@ -1,0 +1,139 @@
+name: Native real-Core integration
+
+# The main CI job excludes integration tests; this workflow runs the bounded
+# real-Core native subset against Core develop to detect contract drift. It is
+# a consumption check and makes no ABI, runtime, or object-TV claim.
+
+on:
+  schedule:
+    # Friday 02:00 UTC, offset from Monday proliferate and Wednesday dogfood-triage.
+    - cron: '0 2 * * 5'
+  workflow_dispatch:
+  pull_request:
+    branches: [develop]
+    paths:
+      - agent/native_*.py
+      - agent/core_evidence*.py
+      - tests/test_native_*.py
+      - .github/workflows/native-real-core.yml
+
+jobs:
+  real-core-native:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    permissions:
+      contents: read
+    steps:
+      - name: Check out mumei-agent
+        uses: actions/checkout@v4
+        with:
+          path: mumei-agent
+
+      - name: Check out mumei
+        # mumei-lang/mumei is public, so a plain anonymous clone is
+        # sufficient. The workflow token is scoped to mumei-agent.
+        run: |
+          git clone --depth 1 --single-branch --branch develop \
+            https://github.com/mumei-lang/mumei.git mumei
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install mumei system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libclang-dev libz3-dev z3 libzstd-dev
+          CODENAME="$(lsb_release -cs)"
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
+            | sudo gpg --dearmor -o /usr/share/keyrings/llvm-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm-archive-keyring.gpg] \
+            http://apt.llvm.org/${CODENAME}/ llvm-toolchain-${CODENAME}-17 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm-17.list
+          sudo apt-get update
+          sudo apt-get install -y llvm-17-dev libpolly-17-dev
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            mumei/target
+          key: cargo-mumei-native-${{ hashFiles('mumei/Cargo.lock') }}
+          restore-keys: |
+            cargo-mumei-native-
+
+      - name: Build mumei compiler
+        working-directory: mumei
+        env:
+          LLVM_SYS_170_PREFIX: /usr/lib/llvm-17
+        run: |
+          cargo build --release
+          echo "$PWD/target/release" >> "$GITHUB_PATH"
+
+      - name: Install agent dependencies
+        working-directory: mumei-agent
+        run: uv sync --extra test --frozen
+
+      - name: Record Core commit
+        run: |
+          CORE_SHA="$(git -C mumei rev-parse HEAD)"
+          echo "Core develop commit: \`${CORE_SHA}\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run real-Core native integration tests
+        working-directory: mumei-agent
+        run: |
+          MUMEI_BIN="$GITHUB_WORKSPACE/mumei/target/release/mumei" \
+            uv run pytest \
+              tests/test_native_machine_tv_recheck.py \
+              tests/test_native_object_accept.py \
+              tests/test_native_object_recheck.py \
+              -m integration -k real_core --run-integration \
+              -v --tb=short --junitxml=real-core-junit.xml
+
+      - name: Reject skipped or missing real-Core tests
+        working-directory: mumei-agent
+        run: |
+          python - <<'PY'
+          import os
+          import sys
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          report = ET.parse("real-core-junit.xml").getroot()
+          testcases = report.findall(".//testcase")
+          total = len(testcases)
+          skipped = sum(case.find("skipped") is not None for case in testcases)
+          failures = sum(case.find("failure") is not None for case in testcases)
+          errors = sum(case.find("error") is not None for case in testcases)
+          lines = [
+              "### Real-Core native integration results",
+              "",
+              "| Total | Skipped | Failures | Errors |",
+              "| ---: | ---: | ---: | ---: |",
+              f"| {total} | {skipped} | {failures} | {errors} |",
+              "",
+          ]
+          summary = "\n".join(lines)
+          print(summary, end="")
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as stream:
+              stream.write(summary)
+          if total < 20 or skipped > 0 or failures + errors > 0:
+              print(
+                  "Real-Core native tests must include at least 20 tests with no skips, failures, or errors.",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+          PY
+
+      - name: Upload real-Core JUnit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-core-junit
+          path: mumei-agent/real-core-junit.xml
