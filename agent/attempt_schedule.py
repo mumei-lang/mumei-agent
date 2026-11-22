@@ -30,6 +30,7 @@ from agent.attempt_runner import (
     memory_bound_enforceable,
     minimal_environment,
     network_isolation_enforceable,
+    process_spawn_isolation_enforceable,
 )
 from agent.core_evidence import (
     MAX_ACCEPTANCE_DESCRIPTOR_BYTES,
@@ -97,6 +98,17 @@ def _filesystem_write_isolated(plan: VerificationPlan) -> bool:
         and "filesystem.write" in required
         and allowed is not None
         and "filesystem.write" in allowed
+    )
+
+
+def _process_spawn_isolated(plan: VerificationPlan) -> bool:
+    required = plan.selected.required_permissions
+    allowed = plan.policy.allowed_permissions
+    return not (
+        required is not None
+        and "process.spawn" in required
+        and allowed is not None
+        and "process.spawn" in allowed
     )
 
 
@@ -546,6 +558,10 @@ def run_attempt_schedule(
                 isolate_filesystem_write=(
                     _filesystem_write_isolated(plan)
                     and filesystem_write_isolation_enforceable()
+                ),
+                isolate_process_spawn=(
+                    _process_spawn_isolated(plan)
+                    and process_spawn_isolation_enforceable()
                 ),
                 # No declared feed means a closed pipe — a scheduled child
                 # must never inherit the parent's stdin and block on it.
