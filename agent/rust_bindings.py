@@ -2424,6 +2424,32 @@ class _RustBindings:
                     "value",
                 )
             if member is None:
+                field = (
+                    callee.child_by_field_name("field")
+                    if callee is not None
+                    and callee.type == "field_expression"
+                    else None
+                )
+                if (
+                    field is not None
+                    and self.text(field).strip() == "get"
+                    and receiver[1] is not None
+                    and self._container_head_name(
+                        callee.child_by_field_name("value")
+                    )
+                    in {"Vec", "HashMap", "BTreeMap"}
+                ):
+                    # `v.get(i)` yields `Option<&T>` — only its
+                    # payload spelling is carried (`&T`); the head
+                    # stays for `_scrutinee_shape` to declare.
+                    elements = self._type_arg_list(receiver[1])
+                    element = (
+                        elements[-1].strip()
+                        if len(elements) == 2
+                        else elements[0].strip() if len(elements) == 1 else None
+                    )
+                    if element is not None:
+                        return None, "&" + element
                 if (
                     callee is not None
                     and callee.type == "field_expression"
@@ -2431,6 +2457,7 @@ class _RustBindings:
                     return self._unwrapped(
                         callee, node.start_byte, receiver
                     )
+                return None, None
                 return None, None
             if member.binding.kind == "enum_member":
                 # A variant constructor spells its enum — `E::C(P)`
@@ -5087,6 +5114,28 @@ class _RustBindings:
         match = re.match(r"[A-Za-z_]\w*", args.strip())
         return None if match is None else match.group(0)
 
+    def _container_head_name(self, node: Any | None) -> "str | None":
+        """Declared container head of a value — `v: Vec<P>` reads
+        `Vec`, `m: HashMap<K, V>` reads `HashMap`. None when the
+        receiver is not a plainly-annotated identifier."""
+        while node is not None and node.type == "reference_expression":
+            node = next(iter(node.named_children), None)
+        if node is None or node.type != "identifier":
+            return None
+        record = self._lookup(
+            self._normalize_identifier(self.text(node)),
+            node.start_byte,
+            "value",
+        )
+        if record is None or record.type_node is None:
+            return None
+        head = re.match(
+            r"[A-Za-z_][\w:]*", self.text(record.type_node).strip()
+        )
+        if head is None:
+            return None
+        return head.group(0).split("::")[-1]
+
     def _scrutinee_shape(
         self, value: Any | None, scrut_id: str | None
     ) -> "tuple[str | None, int | None, _Scope | None]":
@@ -5211,7 +5260,28 @@ class _RustBindings:
                     node.start_byte,
                     "value",
                 )
-            if member is None or member.type_node is None:
+            if member is None:
+                field = (
+                    callee.child_by_field_name("field")
+                    if callee is not None
+                    and callee.type == "field_expression"
+                    else None
+                )
+                if (
+                    field is not None
+                    and self.text(field).strip() == "get"
+                    and self._container_head_name(
+                        callee.child_by_field_name("value")
+                    )
+                    in {"Vec", "HashMap", "BTreeMap"}
+                ):
+                    # `v.get(i)` returns `Option<&T>` — the prelude
+                    # container has no member record, but Some/None
+                    # still heads the scrutinee. A declared `get`
+                    # method takes the normal path above.
+                    return "Option", node.start_byte, None
+                return None, None, None
+            if member.type_node is None:
                 return None, None, None
             return (
                 self._alias_head_name(member.type_node),
