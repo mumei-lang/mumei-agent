@@ -156,6 +156,9 @@ class _Record:
     # The impl block's own `type` node — the declared type `self`
     # parameters inside it refer to (keeps generic args).
     self_type_node: Any = None
+    # A `let` initializer node — used to infer the binding's type
+    # when no annotation is present.
+    value_node: Any = None
 
 
 class _RustBindings:
@@ -1100,6 +1103,39 @@ class _RustBindings:
                 type_node=annotation,
             )
             member.member_of = record.binding.id
+
+    def _scoped_member(self, node: Any) -> tuple[Any | None, Any | None]:
+        """Member record + name node of a `Path::name` segment pair.
+
+        Only resolves when the path names a type reachable here —
+        `P::new` or `W<i32>::new` — deeper `m::P::new` paths stay
+        unresolved."""
+        path = node.child_by_field_name("path")
+        name = node.child_by_field_name("name")
+        if path is None or name is None:
+            return None, name
+        if path.type == "generic_type":
+            type_id, args = self._annotation_type(path)
+        elif path.type in {"identifier", "type_identifier"}:
+            record = self._lookup(
+                self._normalize_identifier(self.text(path)),
+                path.start_byte,
+                "type",
+            )
+            type_id, args = (None if record is None else record.binding.id), None
+        else:
+            return None, name
+        if type_id is None:
+            return None, name
+        member = self._member_record(
+            type_id,
+            self._normalize_identifier(self.text(name)),
+            ("associated_function", "associated_const", "enum_member"),
+            impl_args=args,
+            position=node.start_byte,
+        )
+        return member, name
+
     def _member_record(
         self,
         type_id: str | None,
@@ -1255,6 +1291,8 @@ class _RustBindings:
             return annotated
         if record.binding.type is not None and record.binding.type.type_id:
             return record.binding.type.type_id, None
+        if record.value_node is not None:
+            return self._receiver_type(record.value_node)
         return None, None
 
     def _receiver_type(
@@ -1288,9 +1326,20 @@ class _RustBindings:
             callee = None if callee is None else self._callee(callee)
             if callee is not None and callee.type == "generic_function":
                 callee = callee.child_by_field_name("function")
-            if callee is None or callee.type != "field_expression":
-                return None, None
-            member = self._field_member(callee, ("associated_function",))
+            member = None
+            if callee is not None and callee.type == "field_expression":
+                member = self._field_member(callee, ("associated_function",))
+            elif callee is not None and callee.type in {
+                "scoped_identifier",
+                "scoped_type_identifier",
+            }:
+                member, _ = self._scoped_member(callee)
+            elif callee is not None and callee.type == "identifier":
+                member = self._lookup(
+                    self._normalize_identifier(self.text(callee)),
+                    node.start_byte,
+                    "value",
+                )
             if member is None:
                 return None, None
             function = next(
@@ -1310,6 +1359,18 @@ class _RustBindings:
             if function.result.type_id:
                 return function.result.type_id, None
             return self._annotation_type(member.type_node)
+        if node.type == "struct_expression":
+            name = node.child_by_field_name("name")
+            if name is not None and name.type in {
+                "generic_type",
+                "generic_type_with_turbofish",
+            }:
+                name = name.child_by_field_name("type")
+            return self._annotation_type(name)
+        if node.type == "parenthesized_expression":
+            children = self._children(node)
+            if len(children) == 1:
+                return self._receiver_type(children[0])
         return None, None
 
     def _receiver_type_node(self, node: Any | None) -> Any | None:
@@ -2017,6 +2078,12 @@ class _RustBindings:
         return None
 
     def _record_qualified_path(self, node: Any) -> None:
+        member, name_node = self._scoped_member(node)
+        if member is not None:
+            self.references.append(
+                Reference(self.span(name_node), member.binding.id, "read")
+            )
+            return
         unresolved = Unresolved(
             self.span(node),
             self._normalize_identifier(self.text(node)),
@@ -2057,6 +2124,8 @@ class _RustBindings:
                 mutable=name_mutable,
                 type_node=annotation if whole else None,
             )
+            if whole:
+                record.value_node = value
             self._add_to_scope(scope, record)
 
     def _expr(self, node: Any | None) -> None:
@@ -2462,8 +2531,25 @@ class _RustBindings:
         kind = "opaque_expression"
         target = ""
         if callee is not None and callee.type in {"scoped_identifier", "scoped_type_identifier"}:
-            self.unresolved.append(Unresolved(self.span(callee), self.text(callee), "qualified_path"))
-            kind = "opaque_path"
+            member, name_node = self._scoped_member(callee)
+            if member is not None and member.binding.kind == "associated_function":
+                self.references.append(
+                    Reference(
+                        self.span(name_node), member.binding.id, "call"
+                    )
+                )
+                target = member.binding.id
+                kind = self._member_call_kind(member)
+            elif member is not None:
+                self.references.append(
+                    Reference(
+                        self.span(name_node), member.binding.id, "read"
+                    )
+                )
+                kind = "opaque_method"
+            else:
+                self.unresolved.append(Unresolved(self.span(callee), self.text(callee), "qualified_path"))
+                kind = "opaque_path"
         elif callee is not None and callee.type == "generic_function":
             self._generic_references(callee.child_by_field_name("type_arguments"))
             inner = callee.child_by_field_name("function")
@@ -2507,6 +2593,36 @@ class _RustBindings:
                     kind = "opaque_method"
                 else:
                     kind = "opaque_method"
+            elif inner is not None and inner.type in {
+                "scoped_identifier",
+                "scoped_type_identifier",
+            }:
+                member, name_node = self._scoped_member(inner)
+                if (
+                    member is not None
+                    and member.binding.kind == "associated_function"
+                ):
+                    self.references.append(
+                        Reference(
+                            self.span(name_node), member.binding.id, "call"
+                        )
+                    )
+                    target = member.binding.id
+                    kind = self._member_call_kind(member)
+                elif member is not None:
+                    self.references.append(
+                        Reference(
+                            self.span(name_node), member.binding.id, "read"
+                        )
+                    )
+                    kind = "opaque_method"
+                else:
+                    self.unresolved.append(
+                        Unresolved(
+                            self.span(callee), self.text(callee), "qualified_path"
+                        )
+                    )
+                    kind = "opaque_path"
             else:
                 self.unresolved.append(
                     Unresolved(self.span(callee), self.text(callee), "qualified_path")

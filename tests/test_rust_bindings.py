@@ -2325,3 +2325,75 @@ fn go(p: P) { (p.callback)(); }
         if r.kind == "read" and source[r.span.start : r.span.end] == "callback"
     )
     assert read.binding_id == field.id
+
+
+def test_member_scoped_path_call_and_result_chain():
+    source = """
+struct P;
+impl P { fn new() -> P { P } fn hello(&self) {} }
+fn f() { let p = P::new(); p.hello(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    new = next(
+        b
+        for b in _bindings(report, "new", "associated_function")
+        if b.span.start > source.index("impl P")
+    )
+    hello = _bindings(report, "hello", "associated_function")[0]
+    new_call = _call(report, source, "P::new()")
+    hello_call = _call(report, source, "p.hello()")
+    assert new_call.target == new.id
+    assert new_call.kind == "direct_local"
+    assert hello_call.target == hello.id
+
+
+def test_member_generic_scoped_path_call():
+    source = """
+struct W<T>(T);
+impl W<i32> { fn mk() -> W<i32> { W(0) } fn n(&self) {} }
+fn f() { let w = W::<i32>::mk(); w.n(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    calls = [c for c in report.calls if source[c.span.start] == source.index("W::<i32>::mk")]
+    mk_call = next(
+        c for c in report.calls if source[c.span.start : c.span.end].startswith("W::<i32>::mk")
+    )
+    assert mk_call.kind == "direct_local"
+    n_call = _call(report, source, "w.n()")
+    assert n_call.kind == "direct_local"
+
+
+def test_member_deep_scoped_path_stays_opaque():
+    source = "mod m { pub struct P; } fn f() { m::P::new(); }"
+    report = build_rust_bindings(source, pointer_width=64)
+    call = report.calls[0]
+    assert call.kind == "opaque_path"
+    assert [u.name for u in report.unresolved] == ["m::P::new"]
+
+
+def test_member_let_infers_struct_literal_type():
+    source = """
+struct P { x: i32 }
+fn f() { let p = P{x: 0}; p.x; }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    field = _bindings(report, "x", "struct_field")[0]
+    read = next(
+        r
+        for r in report.references
+        if source[r.span.start - 1 : r.span.end] == ".x"
+    )
+    assert read.binding_id == field.id
+
+
+def test_member_let_infers_function_result_type():
+    source = """
+fn mk() -> P { P }
+struct P;
+impl P { fn n(&self) {} }
+fn f() { let p = mk(); p.n(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    n = _bindings(report, "n", "associated_function")[0]
+    call = _call(report, source, "p.n()")
+    assert call.target == n.id
