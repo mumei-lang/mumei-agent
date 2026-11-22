@@ -901,6 +901,26 @@ func (receiver *T) Method(param, _ int) (result int, ok bool) {
     )
 
 
+def test_go_entry_assigned_names_include_variadic_parameters():
+    source = """package demo
+func f(prefix string, args ...int) int {
+\tn := len(args)
+\targs = nil
+\treturn n
+}
+"""
+    file_units = control_flow.go_file_units(source)
+    (function,) = file_units.functions
+    entry = control_flow.go_entry_assigned_names(
+        source, file_units, function
+    )
+    assert entry == frozenset({"prefix", "args"})
+
+    body = control_flow.function_body(source, file_units, function)
+    hints = control_flow.flow_hints(body, graph(body), entry_assigned=entry)
+    assert not any(use.name == "args" for use in hints.unassigned)
+
+
 def test_go_entry_assigned_names_handle_function_declarations():
     source = """package demo
 var global int

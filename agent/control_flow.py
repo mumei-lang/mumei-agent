@@ -1172,7 +1172,10 @@ def go_entry_assigned_names(
         if parameter_list is None or parameter_list.type != "parameter_list":
             return
         for parameter in parameter_list.named_children:
-            if parameter.type == "parameter_declaration":
+            if parameter.type in {
+                "parameter_declaration",
+                "variadic_parameter_declaration",
+            }:
                 add_name_fields(parameter)
 
     add_parameter_names(declaration.child_by_field_name("receiver"))
