@@ -1871,8 +1871,9 @@ y.n();
 
 
 def test_member_alias_prefers_clause_block_declaration():
-    # `export {f as g}` exports the merged `f` symbol; when the same
-    # block also declares an `f`, `N.g` binds that declaration.
+    # `export {f as g}` exports the merged `f` symbol — its overloads
+    # span the sibling blocks, so `N.g()` binds the 0-argument
+    # signature that actually matches the call.
     source = """
 declare namespace N {
   function f(): string { return "" }
@@ -1884,15 +1885,115 @@ declare namespace N {
 N.g();
 """
     report = build_ts_bindings(source)
+    zero_arg_f = next(
+        b for b in report.bindings
+        if b.name == "f" and b.span.start == source.index("f()")
+    )
+    call = next(
+        c for c in report.calls
+        if source[c.span.start : c.span.end] == "N.g()"
+    )
+    assert call.target == zero_arg_f.id
+
+
+def test_member_alias_prefers_clause_block_for_identical_signatures():
+    # Overloads that the call cannot separate still prefer the clause
+    # block's own declaration.
+    source = """
+declare namespace N {
+  function f(): string { return "" }
+}
+declare namespace N {
+  function f(): number { return 0 }
+  export { f as g }
+}
+N.g();
+"""
+    report = build_ts_bindings(source)
     clause_block_f = next(
         b for b in report.bindings
-        if b.name == "f" and b.span.start == source.index("f(x")
+        if b.name == "f"
+        and b.span.start > source.index("export { f as g }") - 200
+        and "number" in source[b.span.start : b.span.start + 30]
     )
     call = next(
         c for c in report.calls
         if source[c.span.start : c.span.end] == "N.g()"
     )
     assert call.target == clause_block_f.id
+
+
+def test_member_overload_narrows_by_literal_arg_kind():
+    source = """
+class C { m(x: number): void; m(x: string): void; }
+const c = new C(); c.m(1); c.m("s");
+"""
+    report = build_ts_bindings(source)
+    overloads = _member_bindings(report, "m", "associated_function")
+    number_sig = next(
+        b for b in overloads if "number" in source[b.span.start : b.span.start + 12]
+    )
+    string_sig = next(
+        b for b in overloads if "string" in source[b.span.start : b.span.start + 12]
+    )
+    calls = {source[c.span.start : c.span.end]: c for c in _calls(report)}
+    assert calls["c.m(1)"].target == number_sig.id
+    assert calls['c.m("s")'].target == string_sig.id
+
+
+def test_member_overload_narrows_against_first_signature():
+    source = """
+class D { n(x: string): void; n(x: number): void; }
+const d = new D(); d.n(1);
+"""
+    report = build_ts_bindings(source)
+    overloads = _member_bindings(report, "n", "associated_function")
+    number_sig = next(
+        b for b in overloads if "number" in source[b.span.start : b.span.start + 12]
+    )
+    calls = {source[c.span.start : c.span.end]: c for c in _calls(report)}
+    assert calls["d.n(1)"].target == number_sig.id
+
+
+def test_member_overload_narrows_by_arity():
+    source = """
+class F { p(x: number, y: string): void; p(x: number): void; }
+const f = new F(); f.p(1); f.p(1, "s");
+"""
+    report = build_ts_bindings(source)
+    overloads = _member_bindings(report, "p", "associated_function")
+    two = next(b for b in overloads if ", y" in source[b.span.start : b.span.start + 20])
+    one = next(b for b in overloads if ", y" not in source[b.span.start : b.span.start + 20])
+    calls = {source[c.span.start : c.span.end]: c for c in _calls(report)}
+    assert calls["f.p(1)"].target == one.id
+    assert calls['f.p(1, "s")'].target == two.id
+
+
+def test_member_overload_spread_arg_leaves_order():
+    source = """
+class C { m(x: number): void; m(x: string): void; }
+const c = new C(); const args: string[] = []; c.m(...args);
+"""
+    report = build_ts_bindings(source)
+    overloads = _member_bindings(report, "m", "associated_function")
+    calls = {source[c.span.start : c.span.end]: c for c in _calls(report)}
+    assert calls["c.m(...args)"].target in {b.id for b in overloads}
+
+
+def test_member_overload_identifier_arg_narrows_by_declared_type():
+    source = """
+class A {}
+class B {}
+class C { m(x: A): void; m(x: B): void; }
+const c = new C(); const a: A = new A(); c.m(a);
+"""
+    report = build_ts_bindings(source)
+    overloads = _member_bindings(report, "m", "associated_function")
+    a_sig = next(
+        b for b in overloads if "x: A" in source[b.span.start : b.span.start + 6]
+    )
+    calls = {source[c.span.start : c.span.end]: c for c in _calls(report)}
+    assert calls["c.m(a)"].target == a_sig.id
 
 
 def test_member_lookup_cyclic_extends_does_not_recurse():

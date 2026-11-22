@@ -1440,6 +1440,7 @@ class _TypeScriptBindings:
         for_type: bool = False,
         extra_seed: tuple[_Record, ...] = (),
         collect_extras: list[_Record] | None = None,
+        args_node: Any | None = None,
     ) -> _Record | None:
         """BFS over the declaring type and its bases for member `name`.
 
@@ -1466,6 +1467,7 @@ class _TypeScriptBindings:
                 for_type=for_type,
                 extra_seed=extra_seed,
                 collect_extras=collect_extras,
+                args_node=args_node,
             )
         finally:
             self._member_lookup_active.discard(active_key)
@@ -1481,6 +1483,7 @@ class _TypeScriptBindings:
         for_type: bool = False,
         extra_seed: tuple[_Record, ...] = (),
         collect_extras: list[_Record] | None = None,
+        args_node: Any | None = None,
     ) -> _Record | None:
         queue: list[tuple[Any, bool]] = [(type_record, False)]
         # Declaration merging: a namespace may merge with a class,
@@ -1595,6 +1598,8 @@ class _TypeScriptBindings:
                 in {"class", "interface", "enum", "type_alias"}
                 else 1
             )
+        if args_node is not None:
+            matches = self._narrow_overloads(matches, args_node)
         # When sibling `namespace` blocks re-export each other's members
         # (`namespace N { export {f as g} }` publishes the merged `f`),
         # prefer the member whose own block authored the looked-up name —
@@ -1625,6 +1630,186 @@ class _TypeScriptBindings:
             if not fallback:
                 collect_extras.extend(seeded_matches)
         return matches[0]
+
+    def _narrow_overloads(
+        self, matches: list[_Record], args_node: Any
+    ) -> list[_Record]:
+        """Pick the first overload whose signature the arguments fit.
+
+        Mirrors tsc's first-matching-signature rule over arity and
+        literal/identifier argument kinds. A `...arg` spread or fewer
+        than two signature-shaped candidates leaves the list untouched;
+        when nothing fits, the original match order is kept so the
+        reference still lands on a same-named member."""
+        args = [
+            child
+            for child in self.children(args_node)
+            if child.type != "comment"
+        ]
+        if any(arg.type == "spread_element" for arg in args):
+            return matches
+        signatures = [
+            candidate
+            for candidate in matches
+            if candidate.function_node is not None
+        ]
+        if len(signatures) < 2:
+            return matches
+
+        remaining = [
+            candidate
+            for candidate in signatures
+            if self._arity_accepts(candidate, len(args))
+        ]
+        if not remaining:
+            return matches
+        for index, arg in enumerate(args):
+            kind = self._arg_kind(arg)
+            if kind is None:
+                continue
+            filtered = [
+                candidate
+                for candidate in remaining
+                if self._param_accepts(candidate, index, kind)
+            ]
+            if filtered:
+                remaining = filtered
+        if not remaining:
+            return matches
+        # Non-signature matches (properties, clause aliases) lose to a
+        # signature the call actually fits — the call shape itself
+        # selects the overload view.
+        return remaining
+
+    def _arity_accepts(self, candidate: _Record, arg_count: int) -> bool:
+        params = (
+            candidate.function_node.child_by_field_name("parameters")
+            if candidate.function_node is not None
+            else None
+        )
+        if params is None:
+            return arg_count == 0
+        required = 0
+        total = 0
+        variadic = False
+        for item in self.children(params):
+            if item.type == "required_parameter":
+                pattern = item.child_by_field_name("pattern")
+                if pattern is not None and self.text(
+                    pattern
+                ).lstrip().startswith("..."):
+                    variadic = True
+                    continue
+                required += 1
+                total += 1
+            elif item.type == "optional_parameter":
+                total += 1
+        if arg_count < required:
+            return False
+        return variadic or arg_count <= total
+
+    def _arg_kind(self, arg: Any) -> str | None:
+        """Primitive kind of a literal, or the declared name for
+        identifiers — `None` when the argument type is not pinned."""
+        if arg.type == "number":
+            return "number"
+        if arg.type in {"string", "template_string"}:
+            return "string"
+        if arg.type in {"true", "false"}:
+            return "boolean"
+        if arg.type == "identifier":
+            record = self._lookup(
+                self.text(arg), arg.start_byte, "value"
+            )
+            if record is None or record.type_node is None:
+                return None
+            fact = self._type_fact(
+                next(iter(self.children(record.type_node)), None)
+            )
+            if fact.kind != "named":
+                return None
+            type_record = self._type_record_by_id(fact.type_id)
+            return None if type_record is None else type_record.binding.name
+        if arg.type == "new_expression":
+            constructor = arg.child_by_field_name("constructor")
+            if constructor is not None and constructor.type == "identifier":
+                return self.text(constructor)
+        return None
+
+    def _param_accepts(
+        self, candidate: _Record, index: int, kind: str
+    ) -> bool:
+        params = (
+            candidate.function_node.child_by_field_name("parameters")
+            if candidate.function_node is not None
+            else None
+        )
+        if params is None:
+            return False
+        items = [
+            item
+            for item in self.children(params)
+            if item.type in {"required_parameter", "optional_parameter"}
+        ]
+        if index >= len(items):
+            # Past the declared list: only a rest tail accepts more.
+            tail = items[-1] if items else None
+            pattern = (
+                tail.child_by_field_name("pattern")
+                if tail is not None
+                else None
+            )
+            return bool(
+                pattern is not None
+                and self.text(pattern).lstrip().startswith("...")
+            )
+        annotation = items[index].child_by_field_name("type")
+        if annotation is None:
+            return True
+        return self._annotation_accepts(
+            next(iter(self.children(annotation)), None), kind
+        )
+
+
+    def _annotation_accepts(self, node: Any | None, kind: str) -> bool:
+        """Whether the parameter annotation can hold `kind`.
+
+        `kind` is a primitive name or a named type's spelling. Missing
+        or unknown annotations accept — only spelled contradictions
+        eliminate a candidate."""
+        if node is None:
+            return True
+        if node.type == "union_type":
+            return any(
+                self._annotation_accepts(child, kind)
+                for child in self.children(node)
+                if child.type != "|"
+            )
+        if node.type == "literal_type":
+            inner = next(
+                (
+                    child
+                    for child in self.children(node)
+                    if child.type != "comment"
+                ),
+                None,
+            )
+            if inner is None:
+                return True
+            if inner.type == "number":
+                return kind == "number"
+            if inner.type == "string":
+                return kind == "string"
+            return True
+        text = self.text(node).strip()
+        if text in {"any", "unknown", "object"}:
+            return True
+        if text in {"number", "string", "boolean", "bigint", "symbol"}:
+            return kind == text
+        if node.type == "type_identifier" or node.type == "generic_type":
+            return text == kind
+        return True
+
 
     def _member_name_sets(
         self, candidate: _Record
@@ -2198,6 +2383,7 @@ class _TypeScriptBindings:
         position: int,
         *,
         collect_extras: list[_Record] | None = None,
+        args_node: Any | None = None,
     ) -> _Record | None:
         # Exported-name collisions on the object segment: the losing
         # members stay reachable for this one lookup step, so a value
@@ -2220,6 +2406,7 @@ class _TypeScriptBindings:
             via_this=via_this,
             extra_seed=tuple(inner_extras),
             collect_extras=collect_extras,
+            args_node=args_node,
         )
 
     def _resolve(
@@ -2734,6 +2921,7 @@ class _TypeScriptBindings:
                     receiver,
                     self.text(property_node),
                     node.start_byte,
+                    args_node=node.child_by_field_name("arguments"),
                 )
                 if new and member is not None:
                     member = self._merged_constructible(
