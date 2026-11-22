@@ -17167,31 +17167,38 @@ class _Builder:
                     if rhs is not None and rhs.type == "identifier"
                     else None
                 )
-                if (
-                    rhs_ref is not None
-                    and rhs_ref.binding_id == lhs_ref.binding_id
-                ):
-                    # A literal `p = p` keeps every status — entry,
-                    # alias and opaque reseat alike.
-                    continue
-                # An alias value already names the entry pointee the
-                # TARGET held when the copy ran — the copied pointer
-                # does not follow the target's later rebinding, so a
-                # single lookup resolves it. A chain walk would not
-                # only over-resolve (`p = q; q = r` still reads q's
+                # Resolve the rhs name to the pointee it holds at
+                # this statement's entry: an alias value already
+                # names the entry pointee the TARGET held when the
+                # copy ran — the copied pointer does not follow the
+                # target's later rebinding, so a single lookup
+                # resolves it. A chain walk would not only
+                # over-resolve (`p = q; q = r` still reads q's
                 # entry) but never terminate on a swap
-                # (`p, q = q, p` cycles p → q → p).
+                # (`p, q = q, p` cycles p → q → p). A reseated name
+                # holds opaque memory, so its value resolves to
+                # None — which makes `p, p = r, p` assign the
+                # pre-state value on the second element instead of
+                # skipping it, and `p = p` in any state a no-op.
                 if rhs_ref is not None:
-                    rhs_ref = self._param_pointer_aliases.get(
-                        rhs_ref.binding_id, rhs_ref
-                    )
+                    if (
+                        rhs_ref.binding_id
+                        in self._pointer_param_reseats
+                    ):
+                        rhs_ref = None
+                    else:
+                        rhs_ref = self._param_pointer_aliases.get(
+                            rhs_ref.binding_id, rhs_ref
+                        )
                 if (
                     rhs_ref is not None
                     and rhs_ref.binding_id == lhs_ref.binding_id
                 ):
                     # `p = q` where `q` already points at `p`'s own
                     # entry slot restores the original pointee —
-                    # the alias/reseat clears, not a reseat.
+                    # the alias/reseat clears, not a reseat. A
+                    # literal `p = p` resolves here the same way and
+                    # stays a no-op in every state.
                     self._pending_param_reseats.append(
                         (
                             lhs_ref.binding_id,
@@ -17208,8 +17215,6 @@ class _Builder:
                     rhs_ref is not None
                     and params is not None
                     and rhs_ref.binding_id in params
-                    and rhs_ref.binding_id
-                    not in self._pointer_param_reseats
                     and rhs_binding is not None
                     and rhs_binding.type is not None
                     and rhs_binding.type.kind == "pointer"
