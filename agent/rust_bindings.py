@@ -149,10 +149,14 @@ _OPTION_HEAD_METHODS = {
     "back": ("&", {"VecDeque", "LinkedList"}, -1),
     "pop_front": ("", {"VecDeque", "LinkedList"}, -1),
     "pop_back": ("", {"VecDeque", "LinkedList"}, -1),
-    # `h.peek()` yields `Option<&P>` — `peek_mut` returns a
-    # `PeekMut` wrapper instead of a plain borrow and stays
-    # opaque.
-    "peek": ("&", {"BinaryHeap"}, -1),
+    # `h.peek()`/`it.peek()` yield `Option<&P>` — `peek_mut`
+    # returns a `PeekMut` wrapper instead of a plain borrow
+    # and stays opaque.
+    "peek": ("&", None, -1),
+    # `it.next_if(f)`/`it.next_if_eq(&x)` yield `Option<&P>`
+    # like `next` — the same borrowed element.
+    "next_if": ("&", None, -1),
+    "next_if_eq": ("&", None, -1),
     "remove": ("", {"HashMap", "BTreeMap", "VecDeque"}, -1),
     "next": ("&", None, -1),
     # `it.next_back()` — the `DoubleEndedIterator` twin of `next`.
