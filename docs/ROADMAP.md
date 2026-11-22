@@ -4332,7 +4332,14 @@ param joins the caller-visible set and a grown dep set emits the
 `caller-backing` transfer like a shared slice. Two `*S` parameters
 that alias the same struct are not tracked as one group — the same
 may-alias gap the model already accepts between two slice or map
-parameters.
+parameters. A bare `*p` dereference read of a `*S` parameter admits
+too — the whole caller-shared pointee carries the parameter's own
+dependency like `p.V` does for one member, so `return *p` reports
+`p`'s dep — and `q := *p` copies the pointee's member bindings the
+way `q := o` copies a value parameter's: scalar members read the
+parameter's dep, collection members alias the pointee's backing
+tokens (an over-report on divergence is sound, matching the value
+copy).
 
 A *scalar-payload channel element* admits the same conflated way
 — `s := []chan int64{c}`, `var m map[K]chan int64 = {...}` bind
