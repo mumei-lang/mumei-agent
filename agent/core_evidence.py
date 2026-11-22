@@ -1746,33 +1746,44 @@ EVIDENCE_BINDING_SCHEMA = "mumei.evidence-binding/v1"
 # record's SHA-256 digest. Both conventions hash the record's raw
 # bytes: `subject_digest` on a producer-signature envelope and
 # `evidence_fingerprint` on a Core acceptance descriptor are the same
-# SHA-256 a consumer reproduces with `sha256sum`.
-_BINDING_CARRIERS: dict = {
-    PRODUCER_SIGNATURE_SCHEMA: "subject_digest",
-    "mumei.source-evidence-acceptance/v1": "evidence_fingerprint",
-    "mumei.native-evidence-acceptance/v1": "evidence_fingerprint",
+# SHA-256 a consumer reproduces with `sha256sum`. A carrier may name
+# several candidate subject fields when the schema pins different
+# artifacts by different field names — the descriptor's own schema
+# decides which is present; a missing candidate is an honest miss,
+# never an error.
+_BINDING_CARRIERS: dict[str, tuple[str, ...]] = {
+    PRODUCER_SIGNATURE_SCHEMA: ("subject_digest",),
+    "mumei.source-evidence-acceptance/v1": ("evidence_fingerprint",),
+    "mumei.native-evidence-acceptance/v1": ("evidence_fingerprint",),
     # The conjunctive acceptance descriptor pins `evidence_fingerprint`
-    # when it evaluates a single record; a list-pinned descriptor
-    # carries `list_fingerprint` instead and so binds no single record —
-    # a missing carrier is an honest miss, never an error.
-    REQUIREMENT_LIST_ACCEPTANCE_SCHEMA: "evidence_fingerprint",
+    # when it evaluates a single record and `list_fingerprint` when it
+    # evaluates a record list — its own schema allows exactly one, so
+    # a consumer binding the exported list bytes (the promotable gate
+    # triple) uses the list pin and a consumer binding one record uses
+    # the record pin.
+    REQUIREMENT_LIST_ACCEPTANCE_SCHEMA: (
+        "evidence_fingerprint",
+        "list_fingerprint",
+    ),
     # The single-requirement accept descriptor pins the record it
-    # evaluated by the same `evidence_fingerprint` convention; the
-    # record-list variant (`mumei.evidence-list-acceptance/v1`) carries
-    # only `list_fingerprint` and so is deliberately not a carrier.
-    EVIDENCE_ACCEPTANCE_SCHEMA: "evidence_fingerprint",
+    # evaluated by the same `evidence_fingerprint` convention.
+    EVIDENCE_ACCEPTANCE_SCHEMA: ("evidence_fingerprint",),
+    # `accept-list --requirement` pins the evidence list it evaluated
+    # by `list_fingerprint` — the same raw-bytes SHA-256 convention on
+    # the list envelope bytes.
+    EVIDENCE_LIST_ACCEPTANCE_SCHEMA: ("list_fingerprint",),
     # `recheck-source --json` emits the same binding convention — the
     # diagnostic stays anonymous and non-reusable, but its fingerprint
     # pins the consistency verdict to the record it was derived from.
-    "mumei.source-evidence-recheck/v1": "evidence_fingerprint",
+    "mumei.source-evidence-recheck/v1": ("evidence_fingerprint",),
     # The verification doc echoes the envelope's `subject_digest` — the
     # record digest the signature covers — so it binds to the record
     # bytes like the envelope itself.
-    SIGNATURE_VERIFICATION_SCHEMA: "subject_digest",
+    SIGNATURE_VERIFICATION_SCHEMA: ("subject_digest",),
     # The evaluation doc echoes the same digest — a bound
     # `key_not_revoked` observation names the record the signature
     # covers, not just an unscoped envelope.
-    SIGNATURE_ENVELOPE_EVALUATION_SCHEMA: "subject_digest",
+    SIGNATURE_ENVELOPE_EVALUATION_SCHEMA: ("subject_digest",),
 }
 
 
@@ -1784,11 +1795,13 @@ def evaluate_evidence_binding(record: bytes, document: dict) -> dict:
     recomputed by the fold, never trusted from a declared pin.
     `carrier_match` holds only when `document` is an object whose
     `schema_version` names a declared subject-bearing schema (a
-    producer-signature envelope's `subject_digest`, or a Core
-    acceptance descriptor's `evidence_fingerprint`). `subject_declared`
-    holds only when the matched carrier's subject field carries a
-    64-char lowercase-hex value. `bound` holds only when all three
-    hold AND the declared digest equals `record_digest` — a mismatched
+    producer-signature envelope's `subject_digest`, a Core
+    acceptance descriptor's `evidence_fingerprint`, or a
+    record-list acceptance descriptor's `list_fingerprint`).
+    `subject_declared` holds only when at least one of the matched
+    carrier's candidate subject fields carries a 64-char
+    lowercase-hex value. `bound` holds only when all three hold AND
+    a declared subject digest equals `record_digest` — a mismatched
     or missing subject reports `false` observations, never an error,
     since a document may honestly describe a different record.
 
@@ -1802,12 +1815,16 @@ def evaluate_evidence_binding(record: bytes, document: dict) -> dict:
         raise ValueError("unsupported evidence binding document")
     record_digest = hashlib.sha256(record).hexdigest()
     schema = document.get("schema_version")
-    field = (
+    fields = (
         _BINDING_CARRIERS.get(schema) if type(schema) is str else None
     )
-    match = field is not None
+    match = fields is not None
     declared = (
-        _is_fingerprint(document.get(field)) if match else False
+        any(
+            _is_fingerprint(document.get(field)) for field in fields
+        )
+        if match
+        else False
     )
     return {
         "schema_version": EVIDENCE_BINDING_SCHEMA,
@@ -1816,7 +1833,9 @@ def evaluate_evidence_binding(record: bytes, document: dict) -> dict:
         "subject_declared": declared,
         "bound": match
         and declared
-        and document[field] == record_digest,
+        and any(
+            document.get(field) == record_digest for field in fields
+        ),
         "checks_not_performed": [
             "carrier_authenticity",
             "binding_enforcement",
