@@ -2515,3 +2515,24 @@ i.m("s");
     )
     assert call.target == any_m.id
 
+
+
+def test_overload_generic_constraint_accepts_derived_argument():
+    # `T extends Base` accepts `new Derived()` — a derived argument
+    # fits the constraint, so the later `unknown` overload must not win.
+    source = """
+class Base {}
+class Derived extends Base {}
+function f<T extends Base>(x: T): void {}
+function f(x: unknown): void {}
+f(new Derived());
+"""
+    report = build_ts_bindings(source)
+    fs = sorted(
+        _bindings(report, "f", "function"), key=lambda b: b.span.start
+    )
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == "f(new Derived())"
+    )
+    assert call.target == fs[0].id

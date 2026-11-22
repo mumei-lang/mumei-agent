@@ -1950,10 +1950,43 @@ class _TypeScriptBindings:
                     None,
                 )
                 return self._annotation_accepts(inner, kind)
-            return text == kind
+            return text == kind or self._type_derives_from(
+                kind, text, node.start_byte
+            )
         if node.type == "generic_type":
-            return text == kind
+            return text == kind or self._type_derives_from(
+                kind, text, node.start_byte
+            )
         return True
+
+    def _type_derives_from(
+        self, name: str, ancestor: str, position: int
+    ) -> bool:
+        """True when type `name` transitively extends/implements
+        `ancestor` — `new Derived()` fits a `Base` parameter when
+        `class Derived extends Base`."""
+        first = self._lookup(name, position, "type")
+        if first is None:
+            return False
+        seen: set[int] = set()
+        queue = [first]
+        while queue:
+            record = queue.pop()
+            decl = record.node.parent if record.node is not None else None
+            if decl is None or decl.id in seen:
+                continue
+            seen.add(decl.id)
+            for base, base_value in self._type_bases.get(decl.id, ()):
+                if base == ancestor or base.split(".")[-1] == ancestor:
+                    return True
+                base_record = self._base_type_record(
+                    base,
+                    decl.start_byte,
+                    for_type=not base_value,
+                )
+                if base_record is not None:
+                    queue.append(base_record)
+        return False
 
 
     def _member_name_sets(
