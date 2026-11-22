@@ -2783,3 +2783,22 @@ f(`\\\\${n}`);
         if source[c.span.start:c.span.end] == "f(`\\\\${n}`)"
     )
     assert call.target == string_fn.id
+
+def test_call_receiver_uses_the_narrowed_overloads_return_type():
+    # `make(1).methodA()` reads the `number` overload's `A` return,
+    # not the last-declared `string -> B` signature.
+    source = """
+class A { methodA(): void {} }
+class B { methodB(): void {} }
+function make(x: number): A;
+function make(x: string): B;
+function make(x: any): any { return null as any; }
+make(1).methodA();
+"""
+    report = build_ts_bindings(source)
+    method_a = _bindings(report, "methodA", "associated_function")[0]
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start:c.span.end] == "make(1).methodA()"
+    )
+    assert call.target == method_a.id

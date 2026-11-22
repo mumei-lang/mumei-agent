@@ -2212,13 +2212,19 @@ class _TypeScriptBindings:
         return record
 
     def _callee_return_node(self, node: Any) -> Any | None:
-        """Return-type annotation node of a call's resolved callee."""
+        """Return-type annotation node of a call's resolved callee —
+        the signature the arguments narrow to, so `make(1).method()`
+        reads `make`'s chosen overload's return type."""
         callee = node.child_by_field_name("function")
+        args_node = node.child_by_field_name("arguments")
         record: _Record | None = None
         if callee is not None and callee.type == "identifier":
-            record = self._lookup(
+            candidates = self._lookup_candidates(
                 self.text(callee), node.start_byte, "value"
             )
+            if candidates:
+                narrowed = self._narrow_overloads(candidates, args_node)
+                record = narrowed[0] if narrowed else candidates[0]
         elif callee is not None and callee.type == "member_expression":
             property_node = callee.child_by_field_name("property")
             if (
@@ -2229,6 +2235,7 @@ class _TypeScriptBindings:
                     callee.child_by_field_name("object"),
                     self.text(property_node),
                     node.start_byte,
+                    args_node=args_node,
                 )
         if record is None or record.function_node is None:
             return None
