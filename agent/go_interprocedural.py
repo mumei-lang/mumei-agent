@@ -2650,17 +2650,35 @@ class _Builder:
                     # A `*S` function parameter shares its pointee
                     # with the caller the way a slice shares its
                     # backing, so `p.A[i].V` slots on `(p, A)` and
-                    # carries `p`'s dep. Only the bare parameter is
-                    # admitted: local pointer bindings (`q := p`),
-                    # reseats, double pointers and explicit derefs
-                    # stay closed because their aliasing cannot be
-                    # resolved in this slot model.
+                    # carries `p`'s dep. The bare parameter and a
+                    # `q := p` local alias whose target still names
+                    # its entry pointee are admitted — `q.A[i]` is
+                    # `p.A[i]` under one hop. Other local pointer
+                    # bindings, reseats, double pointers and
+                    # explicit derefs stay closed because their
+                    # aliasing cannot be resolved in this slot
+                    # model.
                     elem = getattr(binding.type, "elem", None)
-                    return not (
-                        params is not None
-                        and ref.binding_id in params
-                        and elem is not None
+                    if not (
+                        elem is not None
                         and elem.kind == "struct"
+                        and params is not None
+                    ):
+                        return True
+                    if ref.binding_id in params:
+                        return False
+                    alias = self._param_pointer_aliases.get(
+                        ref.binding_id
+                    )
+                    return not (
+                        alias is not None
+                        and alias.binding_id in params
+                        and alias.binding_id
+                        not in self._pointer_param_reseats
+                        and alias.binding_id
+                        not in self._param_pointer_aliases
+                        and alias.binding_id
+                        not in self._double_pointer_dirty
                     )
                 return False
             return False
