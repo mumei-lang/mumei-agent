@@ -6138,6 +6138,171 @@ def test_interface_dispatch_computed_receiver_shapes_stay_closed(
     assert any(gap.reason == reason for gap in result.gaps)
 
 
+@pytest.mark.parametrize(
+    "declarations, function, root_name",
+    [
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "type S struct{ A []I }\n"
+            "func F(p *S, i int64, x int64) int64 { "
+            "return p.A[i].M(x) }\n",
+            "F",
+            "p",
+        ),
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "type S struct{ A []I }\n"
+            "func F(o S, i int64, x int64) int64 { "
+            "return o.A[i].M(x) }\n",
+            "F",
+            "o",
+        ),
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "type S struct{ A []I }\n"
+            "func F(p *S, i int64, x int64) int64 {\n"
+            "\tv := p.A[i]\n"
+            "\treturn v.M(x)\n"
+            "}\n",
+            "F",
+            "v",
+        ),
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "type S struct{ A []I }\n"
+            "func F(p *S, i int64, x int64) int64 {\n"
+            "\tq := p\n"
+            "\treturn q.A[i].M(x)\n"
+            "}\n",
+            "F",
+            "p",
+        ),
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "type S struct{ A []I }\n"
+            "func F(pp **S, i int64, x int64) int64 { "
+            "return (*pp).A[i].M(x) }\n",
+            "F",
+            "pp",
+        ),
+    ],
+)
+def test_interface_dispatch_collection_element_receivers(
+    go_types_helper, declarations, function, root_name
+):
+    # `p.A[i].M(x)` — an interface-typed collection element reached
+    # through an admitted container field dispatches opaque like a
+    # field receiver: the read unions the root's own deps and the
+    # index's, the transfer records on the root's entry binding.
+    source, snapshot, summaries = unit(go_types_helper, declarations)
+    result = named(source, snapshot, summaries, function)
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1, 2})
+    assert result.effects == "unknown"
+    (transfer,) = result.calls
+    root_binding = next(
+        binding
+        for binding in snapshot.bindings
+        if binding.name == root_name and binding.scope is not None
+    )
+    assert transfer.target == root_binding.id
+    assert transfer.arguments == (frozenset({0, 1}), frozenset({2}))
+    assert transfer.imported
+
+
+def test_interface_dispatch_element_receiver_inner_indexes_read(
+    go_types_helper,
+):
+    # `s.A[i].F[0].M(x)` — the inner `i` reads like the outer `0`:
+    # the receiver deps must not drop it (and any index call runs).
+    declarations = (
+        "type I interface{ M(int64) int64 }\n"
+        "type E struct{ F []I }\n"
+        "type S struct{ A []E }\n"
+        "func F(s *S, i int64, x int64) int64 { "
+        "return s.A[i].F[0].M(x) }\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1, 2})
+    assert result.effects == "unknown"
+
+
+def test_interface_dispatch_element_receiver_pins_mid_field_type(
+    go_types_helper,
+):
+    # `p.B.A[0].M(x)` — the intermediate named struct `B`'s identity
+    # pins like the container field's, so redeclaring `B` alone
+    # stales this summary.
+    files = {
+        "a.go": (
+            "package p\n"
+            "func F(p *S, x int64) int64 { return p.B.A[0].M(x) }\n"
+        ),
+        "i.go": "package p\ntype I interface{ M(int64) int64 }\n",
+        "s.go": (
+            "package p\n"
+            "type B struct{ A []I }\n"
+            "type S struct{ B B }\n"
+        ),
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, {}),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available, result.gaps
+    b_id = next(
+        binding.id
+        for binding in snapshot.bindings
+        if binding.name == "B" and binding.kind == "type"
+    )
+    assert b_id in result.pinned
+
+
+def test_interface_dispatch_element_receiver_inner_index_order(
+    go_types_helper,
+):
+    # `s.A[Set(&v,x)].B[Get(v)].C[0].M(0)` — Go evaluates `Set`
+    # before `Get`, so `Get`'s argument reads `v`'s post-`Set`
+    # deps and `x` reaches the result.
+    declarations = (
+        "type I interface{ M(int64) int64 }\n"
+        "type E struct{ F []I }\n"
+        "type M0 struct{ B []E }\n"
+        "type S struct{ A []M0 }\n"
+        "func Set(v *int64, x int64) int64 { *v = x; return 0 }\n"
+        "func Get(v int64) int64 { return v }\n"
+        "func F(s *S, x int64) int64 {\n"
+        "\tvar v int64\n"
+        "\treturn s.A[Set(&v, x)].B[Get(v)].F[0].M(0)\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert 1 in result.return_dependencies
+
+
+def test_interface_dispatch_nested_element_receivers_stay_closed(
+    go_types_helper,
+):
+    # `p.A[i][j].M(x)` — the nested-collection element read itself
+    # is unmodelled, so the dispatch stays closed with it.
+    declarations = (
+        "type I interface{ M(int64) int64 }\n"
+        "type S struct{ A [][]I }\n"
+        "func F(p *S, i int64, j int64, x int64) int64 { "
+        "return p.A[i][j].M(x) }\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available
+    assert any(
+        gap.reason == "unresolved_or_opaque_call" for gap in result.gaps
+    )
+
+
 def test_interface_dispatch_imported_struct_root_stays_closed(
     go_types_helper,
 ):
