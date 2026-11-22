@@ -215,3 +215,256 @@ def test_expected_fingerprint_binds_descriptor_to_attempt(tmp_path, capsys):
     emitted = json.loads(capsys.readouterr().out)
     assert emitted["attempt_bound"] is True
     assert "attempt_binding" not in emitted["checks_not_performed"]
+
+
+def _conjunctive_descriptor(verdict: str = "accepted", **overrides) -> dict:
+    """The closed shape Core `evidence accept --requirement-list` emits."""
+    value = {
+        "schema_version": "mumei.evidence-requirement-list-acceptance/v1",
+        "acceptance": "evaluated",
+        "verdict": verdict,
+        "requirement_schema_version": "mumei.evidence-requirement-list/v1",
+        "requirement_list_fingerprint": "e" * 64,
+        "evidence_schema_version": "mumei.verification-evidence/v1",
+        "evidence_fingerprint": "f" * 64,
+        "consistent": True,
+        "conflict_count": 0,
+        "conflicts": [],
+        "requirements_evaluated": 1,
+        "records_evaluated": 1,
+        "requirements": [
+            {
+                "index": 0,
+                "requirement_fingerprint": "0" * 64,
+                "verdict": "accepted",
+                "records": [
+                    {
+                        "index": 0,
+                        "verdict": "accepted",
+                        "checks": [{"name": "c", "outcome": "passed"}],
+                    }
+                ],
+            }
+        ],
+        "checks_performed": ["conjunctive_requirement_fold"],
+        "checks_not_performed": ["claim_truth"],
+    }
+    value.update(overrides)
+    return value
+
+
+def _conjunctive_list_descriptor(**overrides) -> dict:
+    value = _conjunctive_descriptor(
+        evidence_schema_version="mumei.verification-evidence-list/v1",
+        list_fingerprint="1" * 64,
+    )
+    del value["evidence_fingerprint"]
+    value.update(overrides)
+    return value
+
+
+def test_conjunctive_descriptor_folds_to_accepted_evaluation(
+    tmp_path, capsys
+):
+    evaluation = evaluate_core_acceptance(_conjunctive_descriptor())
+    assert evaluation["schema_version"] == (
+        "mumei.core-acceptance-evaluation/v1"
+    )
+    assert evaluation["descriptor_match"] is True
+    assert evaluation["accepted"] is True
+    assert "attempt_binding" in evaluation["checks_not_performed"]
+
+    # The list-pinned variant is an equally valid family member.
+    listed = evaluate_core_acceptance(_conjunctive_list_descriptor())
+    assert listed["descriptor_match"] is True
+    assert listed["accepted"] is True
+
+    # The route accepts the conjunctive descriptor end to end.
+    descriptor = _write(
+        tmp_path / "conj.json", _conjunctive_descriptor()
+    )
+    parser = __import__("argparse").ArgumentParser()
+    build_eval_parser(parser)
+    assert (
+        main_eval(parser.parse_args(["--descriptor", str(descriptor)]))
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out)["accepted"] is True
+
+
+def test_conjunctive_non_accepted_verdicts_credit_nothing():
+    for verdict in ("rejected", "inconclusive"):
+        evaluation = evaluate_core_acceptance(
+            _conjunctive_descriptor(verdict=verdict)
+        )
+        assert evaluation["descriptor_match"] is True
+        assert evaluation["accepted"] is False
+
+
+def test_conjunctive_closed_shape_rejects_foreign_documents():
+    cases = [
+        _conjunctive_descriptor(verdict="unknown"),
+        _conjunctive_descriptor(verdict=True),
+        _conjunctive_descriptor(acceptance="not_evaluated"),
+        _conjunctive_descriptor(
+            requirement_schema_version="mumei.probe/v1"
+        ),
+        _conjunctive_descriptor(requirement_list_fingerprint="abc"),
+        _conjunctive_descriptor(evidence_schema_version="mumei.probe/v1"),
+        _conjunctive_descriptor(evidence_fingerprint="F" * 64),
+        _conjunctive_descriptor(consistent="yes"),
+        _conjunctive_descriptor(conflict_count=-1),
+        _conjunctive_descriptor(conflict_count=True),
+        _conjunctive_descriptor(conflicts={"field": "x"}),
+        _conjunctive_descriptor(requirements_evaluated="1"),
+        _conjunctive_descriptor(records_evaluated=None),
+        _conjunctive_descriptor(requirements={}),
+        _conjunctive_descriptor(checks_performed="fold"),
+        _conjunctive_descriptor(checks_not_performed=[1]),
+        {**_conjunctive_descriptor(), "extra": 1},
+        {
+            k: v
+            for k, v in _conjunctive_descriptor().items()
+            if k != "verdict"
+        },
+        # Both pins at once is ambiguous — never a member.
+        _conjunctive_descriptor(list_fingerprint="1" * 64),
+        # Neither pin names the evaluated evidence.
+        {
+            k: v
+            for k, v in _conjunctive_descriptor().items()
+            if k != "evidence_fingerprint"
+        },
+        # Pin/schema mismatches: list pin on record schema and the
+        # converse are foreign, not a different opinion.
+        _conjunctive_descriptor(
+            evidence_schema_version="mumei.verification-evidence-list/v1"
+        ),
+        _conjunctive_list_descriptor(
+            evidence_schema_version="mumei.verification-evidence/v1"
+        ),
+    ]
+    for value in cases:
+        evaluation = evaluate_core_acceptance(value)
+        assert evaluation["descriptor_match"] is False, value
+        assert evaluation["accepted"] is False
+
+
+def test_conjunctive_nested_shapes_are_closed_too():
+    def with_requirement(requirement):
+        return _conjunctive_descriptor(requirements=[requirement])
+
+    requirement = _conjunctive_descriptor()["requirements"][0]
+    record = requirement["records"][0]
+
+    bad_requirements = [
+        {**requirement, "extra": 1},
+        {k: v for k, v in requirement.items() if k != "verdict"},
+        {**requirement, "index": -1},
+        {**requirement, "index": True},
+        {**requirement, "requirement_fingerprint": "xyz"},
+        {**requirement, "verdict": "maybe"},
+        {**requirement, "verdict": ["accepted"]},
+        {**requirement, "records": "not-a-list"},
+        {**requirement, "records": [{**record, "extra": 0}]},
+        {
+            **requirement,
+            "records": [
+                {k: v for k, v in record.items() if k != "checks"}
+            ],
+        },
+        {**requirement, "records": [{**record, "index": "0"}]},
+        {**requirement, "records": [{**record, "verdict": "ok"}]},
+        {**requirement, "records": [{**record, "checks": "n"}]},
+        {
+            **requirement,
+            "records": [
+                {**record, "checks": [{"name": "c"}]}
+            ],
+        },
+        {
+            **requirement,
+            "records": [
+                {
+                    **record,
+                    "checks": [{"name": 1, "outcome": "passed"}],
+                }
+            ],
+        },
+        {
+            **requirement,
+            "records": [
+                {
+                    **record,
+                    "checks": [
+                        {"name": "c", "outcome": "passed", "x": 0}
+                    ],
+                }
+            ],
+        },
+    ]
+    for value in bad_requirements:
+        evaluation = evaluate_core_acceptance(with_requirement(value))
+        assert evaluation["descriptor_match"] is False, value
+        assert evaluation["accepted"] is False
+
+    # conflicts entries are the same closed {index_a, index_b, field}
+    # shape Core's consistency report emits.
+    for conflicts in (
+        [{"index_a": 0, "index_b": 1, "field": "subject.kind"}],
+        [{"index_a": 0, "index_b": 1, "field": "f", "extra": 0}],
+        [{"index_a": -1, "index_b": 1, "field": "f"}],
+        [{"index_a": "0", "index_b": 1, "field": "f"}],
+        [{"index_a": 0, "index_b": 1, "field": 7}],
+        ["a-string-conflict"],
+    ):
+        value = _conjunctive_descriptor(conflicts=conflicts)
+        matched = evaluate_core_acceptance(value)["descriptor_match"]
+        assert matched is (len(conflicts[0]) == 3 and
+            type(conflicts[0]["index_a"]) is int
+            and conflicts[0]["index_a"] >= 0
+            and type(conflicts[0]["field"]) is str), conflicts
+
+
+def test_conjunctive_attempt_binding_uses_evidence_fingerprint(
+    tmp_path, capsys
+):
+    fingerprint = "f" * 64
+    bound = evaluate_core_acceptance(
+        _conjunctive_descriptor(), fingerprint
+    )
+    assert bound["descriptor_match"] is True
+    assert bound["attempt_bound"] is True
+    assert "attempt_binding" not in bound["checks_not_performed"]
+
+    other = evaluate_core_acceptance(
+        _conjunctive_descriptor(), "d" * 64
+    )
+    assert other["attempt_bound"] is False
+
+    # A list-pinned descriptor can never bind a single-record attempt —
+    # honest false, not an error.
+    listed = evaluate_core_acceptance(
+        _conjunctive_list_descriptor(), fingerprint
+    )
+    assert listed["descriptor_match"] is True
+    assert listed["attempt_bound"] is False
+
+    # The route forwards --expected-fingerprint on the conjunctive shape.
+    path = _write(tmp_path / "conj.json", _conjunctive_descriptor())
+    parser = __import__("argparse").ArgumentParser()
+    build_eval_parser(parser)
+    assert (
+        main_eval(
+            parser.parse_args(
+                [
+                    "--descriptor",
+                    str(path),
+                    "--expected-fingerprint",
+                    fingerprint,
+                ]
+            )
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out)["attempt_bound"] is True
