@@ -1961,7 +1961,10 @@ class _TypeScriptBindings:
         )
 
     def _object_type(
-        self, node: Any | None, position: int
+        self,
+        node: Any | None,
+        position: int,
+        extras_out: list[_Record] | None = None,
     ) -> tuple[_Record | None, bool, bool]:
         """(type record, static side, via this/super) for a member object."""
         if node is None:
@@ -2012,6 +2015,7 @@ class _TypeScriptBindings:
                 node.child_by_field_name("object"),
                 self.text(property_node),
                 position,
+                collect_extras=extras_out,
             )
             if member is None:
                 return None, False, False
@@ -2073,10 +2077,20 @@ class _TypeScriptBindings:
         return None, False, False
 
     def _resolve_member(
-        self, object_node: Any | None, name: str, position: int
+        self,
+        object_node: Any | None,
+        name: str,
+        position: int,
+        *,
+        collect_extras: list[_Record] | None = None,
     ) -> _Record | None:
+        # Exported-name collisions on the object segment: the losing
+        # members stay reachable for this one lookup step, so a value
+        # path like `N.Public.f()` still reaches the namespace's `f`
+        # when the class won `Public`.
+        inner_extras: list[_Record] = []
         type_record, static, via_this = self._object_type(
-            object_node, position
+            object_node, position, extras_out=inner_extras
         )
         if type_record is None:
             return None
@@ -2086,6 +2100,8 @@ class _TypeScriptBindings:
             position,
             static=static,
             via_this=via_this,
+            extra_seed=tuple(inner_extras),
+            collect_extras=collect_extras,
         )
 
     def _resolve(

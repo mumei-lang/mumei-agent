@@ -1998,23 +1998,27 @@ namespace N { interface I { m(): void } export {I as Public} }
 def test_member_alias_collision_extra_does_not_leak_into_declared_name():
     # Duplicate `export {... as Public}` is a tsc error but must not
     # let a declared-name spelling reach the losing member: `N.I`
-    # names the interface only, never the namespace's members.
+    # names the interface only, never the namespace's members — while
+    # the aliased `N.Public.B` still resolves in the same input.
     source = """
 namespace N { interface I { m(): void } namespace M { export class B { n(): void {} } } export {I as Public}; export {M as Public} }
-interface X extends N.I {}
+interface X extends N.Public.B {}
+const x: X = null as any; x.n();
+interface Y extends N.I {}
+const y: Y = null as any; y.m();
 """
     report = build_ts_bindings(source)
-    assert not [
-        c
-        for c in _calls(report)
-        if source[c.span.start : c.span.end] == "x.m()"
-    ] or True
-    unresolved_paths = [
-        u
-        for u in report.unresolved
-        if u.reason == "qualified_path"
-    ]
-    assert unresolved_paths  # N.I is not exported under that name
+    member_n = _member_bindings(report, "n", "associated_function")[0]
+    aliased_call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == "x.n()"
+    )
+    assert aliased_call.target == member_n.id
+    declared_call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == "y.m()"
+    )
+    assert declared_call.target == ""
 
 
 def test_member_alias_collision_extra_still_descends_path():
