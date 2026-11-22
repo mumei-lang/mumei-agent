@@ -20458,6 +20458,48 @@ def test_closure_factory_result_controls_match_develop(
 
 
 @pytest.mark.parametrize(
+    ("source", "dependencies", "effects"),
+    [
+        pytest.param(
+            "func F(x, y int64) int64 { "
+            "v := y; g := func(p *int64) func() int64 { "
+            "return func() int64 { return *p } }; "
+            "h := g(&v); v = x; return h() }",
+            frozenset({0, 1}),
+            "unknown",
+            id="pointer-factory-param",
+        ),
+        pytest.param(
+            "func F(x, y int64) int64 { "
+            "a := []int64{y}; "
+            "g := func(s []int64) func() int64 { "
+            "return func() int64 { return s[0] } }; "
+            "h := g(a); a[0] = x; return h() }",
+            frozenset({0, 1}),
+            "unknown",
+            id="slice-factory-param",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { "
+            "g := func(a int64) func() int64 { "
+            "return func() int64 { return a } }; "
+            "h := g(x); return h() }",
+            frozenset({0}),
+            "none_in_supported_fragment",
+            id="scalar-factory-param",
+        ),
+    ],
+)
+def test_factory_results_reject_non_scalar_factory_local_captures(
+    go_types_helper, source, dependencies, effects
+):
+    result = named(*unit(go_types_helper, source))
+    assert result.available, result.gaps
+    assert result.return_dependencies == dependencies
+    assert result.effects == effects
+
+
+@pytest.mark.parametrize(
     "source",
     [
         pytest.param(

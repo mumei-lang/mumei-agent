@@ -34235,11 +34235,11 @@ class _Builder:
         if callee is None:
             return None
 
-        def returns_closures(literal: Any) -> bool:
+        def returned_literals(literal: Any) -> list[Any] | None:
             body = literal.child_by_field_name("body")
             if body is None:
-                return False
-            returns = 0
+                return None
+            returned_literals: list[Any] = []
             stack = list(_children(body))
             while stack:
                 current = stack.pop()
@@ -34267,11 +34267,53 @@ class _Builder:
                         returned is None
                         or returned.type != "func_literal"
                     ):
-                        return False
-                    returns += 1
+                        return None
+                    returned_literals.append(returned)
                     continue
                 stack.extend(_children(current))
-            return returns > 0
+            return returned_literals or None
+
+        def captures_factory_reference(
+            literal: Any, returned: list[Any]
+        ) -> bool:
+            factory_bindings: set[str] = set()
+            stack = [literal]
+            while stack:
+                current = stack.pop()
+                if (
+                    current is not literal
+                    and current.type == "func_literal"
+                ):
+                    continue
+                binding = self.bindings_by_span.get(
+                    self.node_key(current)
+                )
+                if binding is not None and binding.kind == "variable":
+                    factory_bindings.add(binding.id)
+                stack.extend(_children(current))
+
+            for returned_literal in returned:
+                stack = [returned_literal]
+                while stack:
+                    current = stack.pop()
+                    if current.type == "identifier":
+                        ref = self.references.get(
+                            self.node_key(current)
+                        )
+                        if (
+                            ref is not None
+                            and ref.binding_id in factory_bindings
+                        ):
+                            binding = self.bindings.get(ref.binding_id)
+                            if (
+                                binding is None
+                                or not self._scalar_value_fact(
+                                    binding.type
+                                )
+                            ):
+                                return True
+                    stack.extend(_children(current))
+            return False
 
         if callee.type == "identifier":
             ref = self.references.get(self.node_key(callee))
@@ -34288,6 +34330,11 @@ class _Builder:
                 if source_id is not None
                 else None
             )
+            returned = (
+                returned_literals(factory[0])
+                if factory is not None
+                else None
+            )
             if (
                 source_id is None
                 or binding is None
@@ -34301,7 +34348,8 @@ class _Builder:
                 or source_id in imv_before
                 or factory is None
                 or captures_before[source_id] is not factory[1]
-                or not returns_closures(factory[0])
+                or returned is None
+                or captures_factory_reference(factory[0], returned)
             ):
                 return None
             return (
@@ -34313,7 +34361,10 @@ class _Builder:
                 source_id in opaque_before,
             )
 
-        if callee.type != "func_literal" or not returns_closures(callee):
+        if callee.type != "func_literal":
+            return None
+        returned = returned_literals(callee)
+        if returned is None or captures_factory_reference(callee, returned):
             return None
         try:
             (
