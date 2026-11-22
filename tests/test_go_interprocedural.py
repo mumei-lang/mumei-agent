@@ -20281,6 +20281,156 @@ def test_bound_closure_resolves_captures_at_call(go_types_helper):
     assert result.return_dependencies == frozenset({1})
 
 
+@pytest.mark.parametrize(
+    ("source", "dependencies"),
+    [
+        pytest.param(
+            "func ap(f func() int64) int64 { return f() }\n"
+            "func F(x, y int64) int64 { "
+            "v := y; g := func() int64 { return v }; "
+            "v = x; return ap(g) }",
+            frozenset({0}),
+            id="c8-hof",
+        ),
+        pytest.param(
+            "func ap(f func() int64) int64 { return f() }\n"
+            "func F(x, y int64) int64 { "
+            "v := y; f := func() int64 { return v }; "
+            "v = x; return ap(f) + 0 }",
+            frozenset({0}),
+            id="h3-hof-inline-then",
+        ),
+        pytest.param(
+            "func ap(f func() int64) int64 { return f() }\n"
+            "func F(x, y int64) int64 { "
+            "v := y; g := func() int64 { return v }; "
+            "a := ap(g); v = x; return a + ap(g) }",
+            frozenset({0, 1}),
+            id="h4-hof-twice",
+        ),
+        pytest.param(
+            "func ap(f func(int64) int64, a int64) int64 { "
+            "return f(a) }\n"
+            "func F(x, y int64) int64 { "
+            "k := y; g := func(a int64) int64 { return a + k }; "
+            "k = x; return ap(g, 0) }",
+            frozenset({0}),
+            id="h6-hof-arg",
+        ),
+        pytest.param(
+            "func ap(f func() int64) int64 { return f() }\n"
+            "func F(x, y int64) int64 { "
+            "v := y; g := func() int64 { return v }; "
+            "h := g; v = x; return ap(h) }",
+            frozenset({0}),
+            id="h9-alias",
+        ),
+        pytest.param(
+            "func ap(f func()) { f() }\n"
+            "func F(x, y int64) (r int64) { "
+            "v := y; g := func() { r = v }; v = x; "
+            "defer ap(g); return 0 }",
+            frozenset({0}),
+            id="d1-defer-hof-before",
+        ),
+        pytest.param(
+            "func ap(f func()) { f() }\n"
+            "func F(x, y int64) (r int64) { "
+            "v := y; g := func() { r = v }; defer ap(g); "
+            "v = x; return 0 }",
+            frozenset({0, 1}),
+            id="n6-hof-defer",
+        ),
+        pytest.param(
+            "func ap(f func()) { f() }\n"
+            "func F(x, y int64) (r int64) { "
+            "v := y; defer ap(func() { r = v }); "
+            "v = x; return 0 }",
+            frozenset({0, 1}),
+            id="n7-hof-defer-literal",
+        ),
+        pytest.param(
+            "func ap(f func() int64) int64 { return f() }\n"
+            "func F(x, y int64) (r int64) { "
+            "v := y; g := func() int64 { return v }; "
+            "defer func() { r = ap(g) }(); v = x; return 0 }",
+            frozenset({0, 1}),
+            id="d2-defer-hof-return",
+        ),
+    ],
+)
+def test_function_literal_argument_uses_invocation_time_captures(
+    go_types_helper, source, dependencies
+):
+    result = named(*unit(go_types_helper, source))
+    assert result.available, result.gaps
+    assert result.return_dependencies == dependencies
+
+
+@pytest.mark.parametrize(
+    ("source", "dependencies"),
+    [
+        pytest.param(
+            "func ap(f func() int64) int64 { return f() }\n"
+            "func F(x, y int64) int64 { "
+            "v := x; g := func() int64 { return v }; "
+            "r := ap(g); v = y; return r }",
+            frozenset({0}),
+            id="h1-hof-before",
+        ),
+        pytest.param(
+            "func ap(f func() int64) int64 { return f() }\n"
+            "func F(x, y int64) int64 { "
+            "v := y; v = x; return ap(func() int64 { return v }) }",
+            frozenset({0}),
+            id="h2-hof-inline",
+        ),
+        pytest.param(
+            "func F(x, y int64) int64 { "
+            "v := x; g := func() int64 { return v }; "
+            "v = y; return g() }",
+            frozenset({1}),
+            id="c2-rebind-y",
+        ),
+        pytest.param(
+            "func F(x, y int64) (r int64) { "
+            "v := x; defer func(a int64) { r = a }(v); "
+            "v = y; return 0 }",
+            frozenset({0}),
+            id="c4-defer-argument",
+        ),
+    ],
+)
+def test_function_literal_value_controls_keep_dependency_sets(
+    go_types_helper, source, dependencies
+):
+    result = named(*unit(go_types_helper, source))
+    assert result.available, result.gaps
+    assert result.return_dependencies == dependencies
+
+
+def test_go_higher_order_later_write_stays_closed(go_types_helper):
+    source = (
+        "func ap(f func()) { f() }\n"
+        "func F(x, y int64) int64 { "
+        "v := y; ch := make(chan int64, 1); "
+        "g := func() { ch <- v }; go ap(g); v = x; return <-ch }"
+    )
+    result = named(*unit(go_types_helper, source))
+    assert not result.available
+
+
+def test_go_higher_order_before_write_stays_closed(go_types_helper):
+    source = (
+        "func ap(f func()) { f() }\n"
+        "func F(x, y int64) int64 { "
+        "v := y; ch := make(chan int64, 1); "
+        "g := func() { ch <- v }; v = x; go ap(g); return <-ch }"
+    )
+    result = named(*unit(go_types_helper, source))
+    assert not result.available
+
+
 def test_bound_closure_rebind_clears_captures(go_types_helper):
     # Rebinding `h` to a literal that captures nothing clears the
     # capture set the earlier literal left.
