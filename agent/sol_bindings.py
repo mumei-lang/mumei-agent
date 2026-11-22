@@ -855,6 +855,7 @@ class _SolBindings:
         contract = None
         type_record = None
         enum_via_type_name = False
+        via_type_name = False
         inside_owner = False
         if obj.type == "identifier" and text == "this":
             contract = self.current_contract
@@ -866,9 +867,11 @@ class _SolBindings:
             if record is not None:
                 if record.binding.kind in {"contract", "interface", "library"}:
                     contract = self.contracts.get(record.binding.name)
+                    via_type_name = True
                 elif record.binding.kind == "enum":
                     type_record = record
                     enum_via_type_name = True
+                    via_type_name = True
                 elif record.type_node is not None and re.match(
                     r"\s*function\b", self.text(record.type_node)
                 ):
@@ -915,6 +918,7 @@ class _SolBindings:
                 }:
                     type_record = inner
                     enum_via_type_name = inner.binding.kind == "enum"
+                    via_type_name = True
                 else:
                     type_record = self._type_record_for_type_node(
                         inner.type_node, inner.owner
@@ -943,6 +947,15 @@ class _SolBindings:
                 "value",
                 allow_private_own=inside_owner,
             )
+            if (
+                record is not None
+                and record.binding.kind in _TYPE_BINDINGS
+                and not via_type_name
+            ):
+                # Nested type declarations are reachable through the
+                # contract name only; on an instance (`inst.S(...)`) solc
+                # keeps looking — a `using` extension may own the call.
+                record, reason = None, None
             if record is not None or reason is not None:
                 return member, record, reason
         if type_record is not None:
@@ -1017,6 +1030,11 @@ class _SolBindings:
         self, type_node: Any | None, owner: _Contract | None
     ) -> _Record | None:
         if type_node is None or "." in self.text(type_node):
+            return None
+        if re.match(r"\s*function\b", self.text(type_node)):
+            # A function-typed slot (`S(cb).cb.selector`) carries
+            # builtin members; `_type_fact` would root at the
+            # signature's return struct and leak its fields.
             return None
         fact = self._type_fact(type_node, owner, set())
         if fact.type_id is None:

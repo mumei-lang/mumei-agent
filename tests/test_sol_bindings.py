@@ -1634,13 +1634,75 @@ contract Token { function transfer(address to, uint256 a) external {} }
 struct Coin { Token t; uint256 v; }
 contract Vault {
     Coin public coin;
-    function run() external { this.coin().transfer(address(0), 1); }
+    function run() external { uint256 s = this.coin().v; }
 }
 """
     # A public struct getter returns the exploded fields, not the
-    # struct — the member call keeps its opaque treatment.
+    # struct — `.v` must not bind to the Coin field.
     report = build_sol_bindings(source)
-    assert report.calls[-1].kind == "opaque_member"
+    v = next(
+        binding for binding in report.bindings if binding.name == "v"
+    )
+    assert not any(
+        ref.binding_id == v.id for ref in report.references
+    )
+
+
+def test_function_typed_struct_field_selector_stays_opaque():
+    source = """
+struct Coin { uint256 selector; }
+struct S { function() external returns (Coin memory) cb; }
+contract Vault {
+    S s;
+    function run() external {
+        s.cb.selector;
+    }
+}
+"""
+    # `cb` is a function pointer — `.selector` is its builtin member,
+    # not a field of the return struct.
+    report = build_sol_bindings(source)
+    field = next(
+        binding for binding in report.bindings if binding.name == "selector"
+    )
+    assert not any(
+        ref.binding_id == field.id for ref in report.references
+    )
+
+
+def test_instance_type_member_prefers_using_extension():
+    source = """
+library L {
+    function S(Vault c, uint256 x) internal pure returns (uint256) {}
+}
+contract Vault {
+    using L for Vault;
+    struct S { uint256 v; }
+    Vault inst;
+    function run() external { inst.S(1); }
+}
+"""
+    # `inst.S` is an extension call — the nested struct declaration is
+    # only reachable through the contract name, not an instance.
+    report = build_sol_bindings(source)
+    lib_fn = next(
+        binding
+        for binding in report.bindings
+        if binding.name == "S" and binding.kind == "function"
+    )
+    decl = next(
+        binding
+        for binding in report.bindings
+        if binding.name == "S" and binding.kind == "struct"
+    )
+    assert any(
+        ref.binding_id == lib_fn.id and ref.kind == "call"
+        for ref in report.references
+    )
+    assert not any(
+        ref.binding_id == decl.id and ref.kind == "call"
+        for ref in report.references
+    )
 
 
 def test_function_pointer_selector_does_not_bind_struct_field():
