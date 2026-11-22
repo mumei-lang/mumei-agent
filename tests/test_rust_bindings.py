@@ -4401,3 +4401,48 @@ fn f(w: W) {
 """
     report = build_rust_bindings(source, pointer_width=64)
     assert _call(report, source, "p.m()").target == ""
+
+
+def test_field_scrutinee_payload_resolves_in_declaring_module() -> None:
+    source = """
+mod m {
+    pub struct P;
+    impl P { pub fn same(&self) {} }
+    pub struct W { pub opt: Option<P> }
+}
+struct P;
+impl P { fn same(&self) {} }
+use m::W;
+fn f(w: W) {
+    match w.opt { Some(p) => p.same(), _ => {} }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    module_p = next(
+        b for b in report.bindings
+        if b.name == "P" and b.kind == "struct" and b.scope is not None
+        and b.scope.start != 0
+    )
+    module_same = min(
+        (b for b in report.bindings if b.name == "same"),
+        key=lambda b: int(b.id.split(":")[-3]),
+    )
+    bound = _bindings(report, "p", "local")
+    assert bound and bound[0].type.type_id == module_p.id
+    assert _call(report, source, "p.same()").target == module_same.id
+
+
+def test_generic_field_scrutinee_payload_uses_use_site_args() -> None:
+    source = """
+struct T;
+struct Q;
+impl Q { fn q(&self) {} }
+struct W<X> { opt: Option<X> }
+fn f(w: W<Q>) {
+    match w.opt { Some(p) => p.q(), _ => {} }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    q = _bindings(report, "q", "associated_function")[0]
+    bound = _bindings(report, "p", "local")
+    assert bound and _call(report, source, "p.q()").target == q.id
