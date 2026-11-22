@@ -8175,6 +8175,79 @@ class _Builder:
             ref,
         )
 
+    def _deref_operand(self, operand: Any) -> Any | None:
+        """The dereferenced operand inside a `(*…)` chain.
+
+        A bound model resolves a `(*…)` deref's root and slot but
+        never evaluates the dereferenced operand's own expression —
+        the `p.A[i]` index and member slot of `(*p.A[i].W).V` carry
+        deps (and call side effects) the root slot lacks. Returns
+        the operand of the outermost `*` unary reached by walking
+        the chain through selectors and indexes — `p.A[i].W` for
+        `(*p.A[i].W).V`, and the same node for `(*p.A[i].W).Next.V`.
+        Evaluating the returned node (not the `*` unary itself)
+        keeps a nested pointer field like `(*t.W).N` working: `*t.W`
+        is a closed dereference read, while `t.W` is an ordinary
+        bound field read. None when the chain holds no dereference
+        or the dereference wraps a bare identifier (`(*t).V` needs
+        no extra evaluation — the root slot already names it).
+        """
+        cur = operand
+        while cur is not None and cur.type == "parenthesized_expression":
+            cur = next(
+                (c for c in cur.named_children if c.type != "comment"),
+                None,
+            )
+        while cur is not None and cur.type in {
+            "selector_expression",
+            "field_expression",
+            "index_expression",
+        }:
+            cur = cur.child_by_field_name("operand")
+            while (
+                cur is not None
+                and cur.type == "parenthesized_expression"
+            ):
+                cur = next(
+                    (c for c in cur.named_children if c.type != "comment"),
+                    None,
+                )
+        if cur is None or cur.type != "unary_expression":
+            return None
+        operator = cur.child_by_field_name("operator")
+        inner = cur.child_by_field_name("operand")
+        while inner is not None and inner.type == "parenthesized_expression":
+            inner = next(
+                (c for c in inner.named_children if c.type != "comment"),
+                None,
+            )
+        if (
+            operator is None
+            or operator.text != b"*"
+            or inner is None
+            or inner.type == "identifier"
+        ):
+            return None
+        # Only a chain carrying an index or a call has evaluation the
+        # bound models skip — a pure selector like `(*t.W).N` reads a
+        # member slot the write already attributes, and evaluating it
+        # again would record a second member transfer.
+        if not self._has_evaluable(inner):
+            return None
+        return inner
+
+    def _has_evaluable(self, node: Any) -> bool:
+        """Whether a node's subtree holds an index or a call."""
+        if node is None:
+            return False
+        if node.type in {"index_expression", "call_expression"}:
+            return True
+        return any(
+            self._has_evaluable(child)
+            for child in node.named_children
+            if child.type != "comment"
+        )
+
     def _qualified_type_member(self, qualified_node: Any) -> PackageMember | None:
         """The imported member a `pkg.Name` qualified type names, or None.
 
@@ -19808,6 +19881,25 @@ class _Builder:
                     # (`p.Next.V = v`) — computing the destination
                     # reads that field's contents too.
                     refs.append((ref, True, bool(type_id), nested))
+                    # `(*p.A[i].W).V = x` — computing the
+                    # destination evaluates the dereferenced
+                    # chain: the `p.A[i]` index (calls included)
+                    # and the member slot read carry deps the
+                    # root slot lacks, and the store lands in the
+                    # pointee reached through `i`, so the address
+                    # deps broadcast like the `*p.A[i].W = s`
+                    # store's do. A bare `(*t).V` wraps an
+                    # identifier — nothing extra evaluates.
+                    _lhs_deref = self._deref_operand(
+                        lhs.child_by_field_name("operand")
+                    )
+                    if _lhs_deref is not None:
+                        _lhs_deref_deps = self.expression(
+                            _lhs_deref, fn, params, locals_,
+                            transfers, count, 0,
+                        )
+                        self._record_read(_lhs_deref_deps)
+                        self.indirect_writes |= _lhs_deref_deps
                     field_root, field_member = (
                         self._scalar_container_field(lhs, params)
                     )
@@ -20161,12 +20253,18 @@ class _Builder:
                     _pointee_id = _leaf_member.type.type_id or (
                         f"{_leaf_member.id}/pointee"
                     )
-                    self._record_read(
-                        self.expression(
-                            deref_elem_inner, fn, params, locals_,
-                            transfers, count, 0,
-                        )
+                    _lhs_read = self.expression(
+                        deref_elem_inner, fn, params, locals_,
+                        transfers, count, 0,
                     )
+                    self._record_read(_lhs_read)
+                    # The destination's provenance — `p.A[i]`'s
+                    # index — decides which pointee the store
+                    # lands in; a read through a different index
+                    # (`p.A[0].W.V`) can still alias it, so the
+                    # address deps join the broadcast like the
+                    # `p.A[i].W.V = x` member store's do.
+                    self.indirect_writes |= _lhs_read
                     transfers.append(
                         CallTransfer(
                             FileSpan(
@@ -28270,47 +28368,14 @@ class _Builder:
                     # index and the member's own slot read carry deps
                     # the root slot lacks. A bare `(*t)` operand is
                     # an identifier, so nothing extra evaluates.
-                    _opnd = node.child_by_field_name("operand")
-                    while (
-                        _opnd is not None
-                        and _opnd.type == "parenthesized_expression"
-                    ):
-                        _opnd = next(
-                            (
-                                c
-                                for c in _opnd.named_children
-                                if c.type != "comment"
-                            ),
-                            None,
+                    _deref = self._deref_operand(
+                        node.child_by_field_name("operand")
+                    )
+                    if _deref is not None:
+                        deps |= self.expression(
+                            _deref, fn, params, locals_,
+                            transfers, count, depth + 1,
                         )
-                    if (
-                        _opnd is not None
-                        and _opnd.type == "unary_expression"
-                    ):
-                        _op = _opnd.child_by_field_name("operator")
-                        _inn = _opnd.child_by_field_name("operand")
-                        while (
-                            _inn is not None
-                            and _inn.type == "parenthesized_expression"
-                        ):
-                            _inn = next(
-                                (
-                                    c
-                                    for c in _inn.named_children
-                                    if c.type != "comment"
-                                ),
-                                None,
-                            )
-                        if (
-                            _op is not None
-                            and _op.text == b"*"
-                            and _inn is not None
-                            and _inn.type != "identifier"
-                        ):
-                            deps |= self.expression(
-                                _opnd, fn, params, locals_,
-                                transfers, count, depth + 1,
-                            )
                     return deps | self.indirect_writes
                 # `g(a).V` — a field of a call result: the call's
                 # conflated result dep set covers whichever field the

@@ -38118,6 +38118,55 @@ def test_named_struct_element_pointer_member_pointee_ops(
 
 
 @pytest.mark.parametrize(
+    "declarations, expected",
+    [
+        # `*p.A[i].W = s` lands in the pointee reached through `i` —
+        # a read through a literal index can still alias it, so the
+        # index's deps broadcast like `p.A[i].W.V = x`'s do.
+        (
+            "type E2 struct { V int64 }\n"
+            "type Elem struct { W *E2 }\n"
+            "type S struct { A []*Elem }\n"
+            "func F(p *S, i int64, x int64) int64 {\n"
+            "\t*p.A[i].W = E2{V: x}\n"
+            "\treturn p.A[0].W.V\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # `(*p.A[G(x)].W).V = y` — the destination's index call
+        # evaluates: `x`'s deps (and the call itself) reach a read
+        # through a different index.
+        (
+            "type E2 struct { V int64 }\n"
+            "type Elem struct { W *E2 }\n"
+            "type S struct { A []*Elem }\n"
+            "func G(x int64) int64 { return x }\n"
+            "func F(p *S, x int64, y int64) int64 {\n"
+            "\t(*p.A[G(x)].W).V = y\n"
+            "\treturn p.A[0].W.V\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # `(*p.A[i].W).Next.V` — a multi-hop read still evaluates
+        # the dereferenced chain's index.
+        (
+            "type E2 struct { V int64; Next *E2 }\n"
+            "type Elem struct { W *E2 }\n"
+            "type S struct { A []*Elem }\n"
+            "func F(p *S, i int64, x int64) int64 {\n"
+            "\t(*p.A[i].W).V = x\n"
+            "\treturn (*p.A[i].W).Next.V\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+    ],
+)
+def test_named_struct_element_pointer_member_pointee_operand_eval(
+    go_types_helper, declarations, expected
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == expected
+
+
+@pytest.mark.parametrize(
     "declarations",
     [
         # Whole-pointee ops stay closed on a value-struct root.
