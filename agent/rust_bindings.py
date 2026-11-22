@@ -3608,9 +3608,13 @@ class _RustBindings:
             names, pattern, mutable_specifier
         )
         scrut_id, scrut_args = (
-            (None, None)
-            if value is None
-            else self._receiver_type(value)
+            self._annotation_type(annotation)
+            if annotation is not None
+            else (
+                (None, None)
+                if value is None
+                else self._receiver_type(value)
+            )
         )
         scrut_name, scrut_position, scrut_scope = (
             self._scrutinee_shape(value, scrut_id)
