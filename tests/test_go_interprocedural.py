@@ -20308,6 +20308,42 @@ def test_chained_closure_values_resolve_shared_captures_once(
 
 
 @pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(
+            "func ap(f func() int64, _ int64) int64 { return f() }\n"
+            "func set(p *int64, a int64) int64 { *p = a; return 0 }\n"
+            "func F(x, y int64) int64 { "
+            "v := y; g := func() int64 { return v }; "
+            "return ap(g, set(&v, x)) }",
+            id="pointer-write-argument",
+        ),
+        pytest.param(
+            "func ap(f func() int64, _ int64) int64 { return f() }\n"
+            "func F(x, y int64) int64 { "
+            "v := y; g := func() int64 { return v }; "
+            "return ap(g, func() int64 { v = x; return 0 }()) }",
+            id="immediate-literal-argument",
+        ),
+        pytest.param(
+            "func ap(f func() int64, _ int64) int64 { return f() }\n"
+            "func F(x, y int64) int64 { "
+            "v := y; g := func() int64 { return v }; "
+            "s := func() int64 { v = x; return 0 }; "
+            "return ap(g, s()) }",
+            id="bound-literal-call-argument",
+        ),
+    ],
+)
+def test_closure_argument_uses_captures_after_all_arguments(
+    go_types_helper, source
+):
+    result = named(*unit(go_types_helper, source))
+    assert result.available, result.gaps
+    assert 0 in result.return_dependencies
+
+
+@pytest.mark.parametrize(
     ("source", "dependencies"),
     [
         pytest.param(

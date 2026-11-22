@@ -31737,6 +31737,22 @@ class _Builder:
                 actual_values[index] = (
                     actual_values[index] | self.indirect_writes
                 )
+        for index, argument in enumerate(arguments):
+            value = self._strip_parens(argument)
+            if value is None or value.type != "identifier":
+                continue
+            ref = self.references.get(self.node_key(value))
+            binding_id = ref.binding_id if ref is not None else None
+            if binding_id is not None and self._is_tracked_literal_value(
+                binding_id, params
+            ):
+                actual_values[index] |= self._captured_current_deps(
+                    self.closure_captures.get(
+                        binding_id, frozenset()
+                    ),
+                    params,
+                    locals_,
+                )
         if local_chan_chan_roots is not None:
             for index, argument in enumerate(arguments):
                 root_id = self._local_chan_chan_id(argument)
