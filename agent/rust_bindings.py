@@ -3617,7 +3617,15 @@ class _RustBindings:
             )
         )
         scrut_name, scrut_position, scrut_scope = (
-            self._scrutinee_shape(value, scrut_id)
+            (
+                self._alias_head_name(
+                    annotation, annotation.start_byte
+                ),
+                annotation.start_byte,
+                None,
+            )
+            if annotation is not None
+            else self._scrutinee_shape(value, scrut_id)
         )
         type_map = (
             {}
@@ -4390,7 +4398,13 @@ class _RustBindings:
         heads — None when the head does not name the scrutinee."""
         record = self._pattern_head_record(head, scrut_id)
         if record is None:
-            if scrut_id is not None or scrut_position is None:
+            scrut_record = (
+                None if scrut_id is None else self.records.get(scrut_id)
+            )
+            if scrut_position is None or (
+                scrut_record is not None
+                and scrut_record.binding.kind != "type_alias"
+            ):
                 # A resolved scrutinee (a user `enum Option`) does
                 # not reach the prelude path, and prelude payloads
                 # need the annotation position to resolve args.
@@ -4398,8 +4412,6 @@ class _RustBindings:
             return self._prelude_pattern_payload(
                 head, scrut_name, scrut_args, scrut_position
             )
-||||||| parent of 3ba57951 (C06: resolve prelude payloads when the scrutinee type id is unresolvable)
-            return None
         container = (
             record
             if record.binding.id == scrut_id
@@ -4438,6 +4450,34 @@ class _RustBindings:
             return self._normalize_identifier(self.text(node))
         return None
 
+    def _alias_head_name(
+        self, node: Any | None, position: int | None = None
+    ) -> str | None:
+        """Head name after following `type` alias chains — `type O =
+        Option<P>` still gates the prelude fallback as `Option`; a
+        head that is not an alias returns as written."""
+        seen: set[str] = set()
+        head = self._annotation_head_name(node)
+        while head is not None and head not in seen:
+            seen.add(head)
+            record = self._through_import(
+                self._lookup(
+                    head,
+                    node.start_byte if node is not None else 0,
+                    "type",
+                ),
+                node.start_byte if node is not None else 0,
+            )
+            if (
+                record is None
+                or record.binding.kind != "type_alias"
+                or record.alias_node is None
+            ):
+                return head
+            node = record.alias_node
+            head = self._annotation_head_name(node)
+        return head
+
     def _type_head_name(
         self, type_id: str | None, args: str | None
     ) -> str | None:
@@ -4464,11 +4504,21 @@ class _RustBindings:
         resolves to `m::P`, never a root `P` of the same spelling."""
         if scrut_id is not None:
             record = self.records.get(scrut_id)
-            return (
-                (None, None, None)
-                if record is None
-                else (record.binding.name, None, None)
-            )
+            if record is None:
+                return None, None, None
+            if (
+                record.binding.kind == "type_alias"
+                and record.alias_node is not None
+            ):
+                # `type O = Option<P>` — the alias's body heads the
+                # scrutinee, so `Some(p)` on an `O` still reads as a
+                # prelude pattern.
+                return (
+                    self._alias_head_name(record.alias_node),
+                    record.alias_node.start_byte,
+                    record.home_scope,
+                )
+            return record.binding.name, None, None
         node = value
         while node is not None and node.type == "reference_expression":
             node = next(iter(node.named_children), None)
@@ -4510,7 +4560,7 @@ class _RustBindings:
                     ):
                         position = record.type_node.start_byte
             return (
-                self._annotation_head_name(field.type_node),
+                self._alias_head_name(field.type_node, position),
                 position,
                 args_scope,
             )
@@ -4544,22 +4594,34 @@ class _RustBindings:
                 if ret is None:
                     return None, None, None
                 return (
-                    self._annotation_head_name(ret),
+                    self._alias_head_name(ret),
                     ret.start_byte,
                     self._member_scope_for_args(
                         callee.child_by_field_name("value"), field
                     ),
                 )
-            member = (
-                self._field_member(callee, ("associated_function",))
-                if callee is not None
-                and callee.type == "field_expression"
-                else None
-            )
+            member = None
+            if callee is not None and callee.type == "field_expression":
+                member = self._field_member(
+                    callee, ("associated_function",)
+                )
+            elif callee is not None and callee.type in {
+                "scoped_identifier",
+                "scoped_type_identifier",
+            }:
+                member, _ = self._scoped_member(callee)
+            elif callee is not None and callee.type == "identifier":
+                # `match make() { Some(p) => }` — a bare callee's
+                # declared return annotation heads the scrutinee.
+                member = self._lookup(
+                    self._normalize_identifier(self.text(callee)),
+                    node.start_byte,
+                    "value",
+                )
             if member is None or member.type_node is None:
                 return None, None, None
             return (
-                self._annotation_head_name(member.type_node),
+                self._alias_head_name(member.type_node),
                 member.type_node.start_byte,
                 self._member_scope_for_args(
                     callee.child_by_field_name("value"), member
@@ -4580,7 +4642,7 @@ class _RustBindings:
             else record.type_node.start_byte
         )
         return (
-            self._annotation_head_name(record.type_node),
+            self._alias_head_name(record.type_node, position),
             position,
             record.home_scope,
         )
@@ -4651,11 +4713,7 @@ class _RustBindings:
         if pattern is None:
             return {}
         kind = pattern.type
-        if (
-            scrut_id is None
-            and scrut_name is None
-            and not (kind == "tuple_pattern" and scrut_args)
-        ):
+        if scrut_id is None and scrut_name is None and scrut_args is None:
             return {}
         if kind == "tuple_pattern":
             # `let (a, b) = t` on `t: (P, Q)` types each name by the
@@ -4727,15 +4785,6 @@ class _RustBindings:
                 else _UNKNOWN
             )
             return {pattern.start_byte: (fact, scrut_args)}
-||||||| parent of 165a9939 (C06: type tuple-pattern bindings by the scrutinee's element types)
-        if kind in {"identifier", "self"}:
-            name = self._normalize_identifier(self.text(pattern))
-            return {
-                pattern.start_byte: (
-                    TypeFact("named", name, 0, None, scrut_id),
-                    scrut_args,
-                )
-            }
         if kind in {"ref_pattern", "mut_pattern"}:
             inner = next(
                 (
@@ -4777,53 +4826,6 @@ class _RustBindings:
                     )
                 )
             return mapping
-        if kind == "tuple_struct_pattern":
-            head = pattern.child_by_field_name("type")
-            payload = self._pattern_head_payload(
-                head, scrut_id, scrut_args
-            )
-            if payload is None:
-                return {}
-            children = [
-                child
-                for child in self._children(pattern)
-                if child != head
-            ]
-            rest_at = next(
-                (
-                    index
-                    for index, child in enumerate(children)
-                    if child.type == "remaining_field_pattern"
-                ),
-                None,
-            )
-            mapping = {}
-            for index, child in enumerate(children):
-                if child.type == "remaining_field_pattern":
-                    continue
-                if rest_at is not None and index > rest_at:
-                    # `V(.., x)` binds `x` to the LAST payload
-                    # element — `..` covers the skipped middle.
-                    position = len(payload) - (len(children) - index)
-                else:
-                    position = index
-                if position < 0 or position >= len(payload):
-                    continue
-                tid, fargs = payload[position]
-                mapping.update(
-                    self._pattern_type_map(child, tid, fargs)
-                )
-            return mapping
-        if scrut_id is None:
-            return {}
-        if kind in {"identifier", "self"}:
-            name = self._normalize_identifier(self.text(pattern))
-            return {
-                pattern.start_byte: (
-                    TypeFact("named", name, 0, None, scrut_id),
-                    scrut_args,
-                )
-            }
         if kind == "struct_pattern":
             head = pattern.child_by_field_name("type")
             fields = self._pattern_head_fields(
