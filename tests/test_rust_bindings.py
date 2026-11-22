@@ -2607,3 +2607,39 @@ fn f(p: P) { P::m(&p); }
     )
     call = _call(report, source, "P::m(&p)")
     assert call.target == default_m.id
+
+
+def test_vec_index_receiver_types_member_by_element():
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn f(v: Vec<P>) { v[0].m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = _bindings(report, "m", "associated_function")[0]
+    call = _call(report, source, "v[0].m()")
+    assert call.target == m.id
+
+
+def test_nested_vec_index_receiver_resolves_innermost_element():
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn f(v: Vec<Vec<P>>) { v[0][0].m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = _bindings(report, "m", "associated_function")[0]
+    call = _call(report, source, "v[0][0].m()")
+    assert call.target == m.id
+
+
+def test_multi_arg_container_index_stays_opaque():
+    source = """
+struct P;
+struct Q;
+fn f(m: HashMap<u32, P>) { m[&0].q(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    call = _call(report, source, "m[&0].q()")
+    assert call.kind == "opaque_method"
+    assert call.target == ""

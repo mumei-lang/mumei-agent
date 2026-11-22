@@ -1471,7 +1471,10 @@ class _RustBindings:
     ) -> tuple[str | None, str | None]:
         """(type id, generic-args key) declared for a binding."""
         annotated = self._annotation_type(record.type_node)
-        if annotated[0] is not None:
+        if annotated[0] is not None or annotated[1] is not None:
+            # An opaque container still carries its args (`v: Vec<P>` →
+            # (None, "P")) — index receivers read the element type
+            # from them.
             return annotated
         if record.binding.type is not None and record.binding.type.type_id:
             return record.binding.type.type_id, None
@@ -1494,6 +1497,31 @@ class _RustBindings:
             if record is None:
                 return None, None
             return self._record_type(record, node.start_byte)
+        if node.type == "index_expression":
+            # `v[i]` yields the element type — the collection's single
+            # generic argument (`Vec<P>` → P). The element keeps its
+            # own args so nested indexing stays typed (`Vec<Vec<P>>`).
+            # Multi-arg containers and arrays stay honest opaque.
+            children = node.named_children
+            if not children:
+                return None, None
+            _, elem_args = self._receiver_type(children[0])
+            if elem_args is None or "," in elem_args:
+                return None, None
+            match = re.fullmatch(
+                r"([A-Za-z_][\w:]*)\s*(?:<(.+)>)?", elem_args.strip()
+            )
+            if match is None:
+                return None, None
+            elem = self._lookup(
+                self._normalize_identifier(match.group(1)),
+                node.start_byte,
+                "type",
+            )
+            return (
+                None if elem is None else elem.binding.id,
+                match.group(2),
+            )
         if node.type == "field_expression":
             member = self._field_member(
                 node, ("struct_field", "associated_const")
