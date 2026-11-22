@@ -20372,6 +20372,57 @@ def test_later_defer_literal_write_remains_race_closed(go_types_helper):
     ("source", "dependencies"),
     [
         pytest.param(
+            "func ap(f func()) { f() }\n"
+            "func F(x, y int64) int64 { "
+            "v := y; w := int64(0); g := func(){ w = v }; "
+            "go ap(g); v = x; return w }",
+            None,
+            id="bound-write-after-go",
+        ),
+        pytest.param(
+            "func ap(f func()) { f() }\n"
+            "func F(x, y int64) int64 { "
+            "v := y; w := int64(0); "
+            "go ap(func(){ w = v }); v = x; return w }",
+            None,
+            id="literal-write-after-go",
+        ),
+        pytest.param(
+            "func ap(f func()) { f() }\n"
+            "func F(x, y int64) int64 { "
+            "v := y; w := int64(0); g := func(){ w = v }; "
+            "v = x; go ap(g); return w }",
+            frozenset({0}),
+            id="bound-write-before-go",
+        ),
+        pytest.param(
+            "func ap(f func() int64) int64 { return f() }\n"
+            "func F(x, y int64) int64 { "
+            "v := y; g := func() int64 { return v }; "
+            "go ap(g); v = x; return 0 }",
+            None,
+            id="bound-read-after-go",
+        ),
+    ],
+)
+def test_go_higher_order_literal_races_use_capture_shape(
+    go_types_helper, source, dependencies
+):
+    result = named(*unit(go_types_helper, source))
+    if dependencies is None:
+        assert not result.available
+        assert any(
+            gap.reason == "unsupported_statement" for gap in result.gaps
+        )
+    else:
+        assert result.available, result.gaps
+        assert result.return_dependencies == dependencies
+
+
+@pytest.mark.parametrize(
+    ("source", "dependencies"),
+    [
+        pytest.param(
             "func ap(f func() int64) int64 { return f() }\n"
             "func F(x, y int64) int64 { "
             "v := y; g := func() int64 { return v }; "
