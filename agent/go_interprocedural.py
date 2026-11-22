@@ -2409,6 +2409,7 @@ class _Builder:
         *,
         for_write: bool = False,
         allow_struct_elements: bool = False,
+        allow_interface_member: bool = False,
     ) -> tuple[str | None, Any]:
         """`s.F` (or a nested `s.W.F`) naming a scalar-element
         collection field — or its one-level nested form — on a
@@ -2557,7 +2558,7 @@ class _Builder:
                 or self._scalar_elem_nested_collection(member.type)
                 or (
                     allow_struct_elements
-                    and member.type.kind in {"slice", "map"}
+                    and member.type.kind in {"slice", "map", "array"}
                     and getattr(member.type, "elem", None)
                     is not None
                     and (
@@ -2576,6 +2577,10 @@ class _Builder:
                         )
                         or member.type.elem.kind == "interface"
                     )
+                )
+                or (
+                    allow_interface_member
+                    and member.type.kind == "interface"
                 )
             )
             or root_ref is None
@@ -3090,7 +3095,22 @@ class _Builder:
                     allow_struct_elements
                     and allow_struct_element_arrays
                     and getattr(fact, "elem", None) is not None
-                    and self._named_value_struct_supported(fact.elem)
+                    and (
+                        self._named_value_struct_supported(fact.elem)
+                        or fact.elem.kind == "interface"
+                        or (
+                            # A named struct element carrying
+                            # pointer members resolves under a
+                            # param pointer root like the slice
+                            # element does — downstream leaf
+                            # checks still decide each op.
+                            self._struct_value_fact(fact.elem)
+                            is not None
+                            and bool(
+                                getattr(fact.elem, "type_id", "")
+                            )
+                        )
+                    )
                 )
             )
         ):
@@ -3513,18 +3533,40 @@ class _Builder:
             # and a store into it (`p.A[i].W = q`) resolves the
             # chain to the member's pointee the LHS consumer folds
             # opaquely like `p.P = q`. A local composite's pointer
-            # member escapes the slot model either way.
+            # member escapes the slot model either way. The write
+            # side (`for_pointer_leaf`) only reseats the member's
+            # slot, so any pointer leaf admits — including one
+            # whose pointee is not a struct (`*int64`) — and an
+            # interface member (`p.B[i].J = e`) reseats the same
+            # slot way.
+            _leaf_kind = (
+                getattr(path_members[-1].type, "kind", None)
+                if path_members
+                else None
+            )
             if not (
                 mid_pointer_root
                 and path_members
-                and getattr(
-                    path_members[-1].type, "kind", None
+                and (
+                    (
+                        _leaf_kind == "pointer"
+                        and (
+                            for_pointer_leaf
+                            or self._struct_value_fact(
+                                getattr(
+                                    path_members[-1].type,
+                                    "elem",
+                                    None,
+                                )
+                            )
+                            is not None
+                        )
+                    )
+                    or (
+                        for_pointer_leaf
+                        and _leaf_kind == "interface"
+                    )
                 )
-                == "pointer"
-                and self._struct_value_fact(
-                    getattr(path_members[-1].type, "elem", None)
-                )
-                is not None
             ):
                 return None
         if share_extract is not None and not any(
@@ -6395,6 +6437,23 @@ class _Builder:
                     field_receiver
                 )
                 self.pinned.update(struct_type_ids)
+            elif (
+                # `f := p.I.M` — a method value bound from an
+                # interface-typed field on a bound pointer root:
+                # the bound call's receiver is the root binding,
+                # whose frozen deps plus every indirect store at
+                # the call site match the dispatch path.
+                (
+                    _iface_leaf := self._bound_field_read(
+                        operand, locals_, params
+                    )
+                )
+                is not None
+                and _iface_leaf[1].type is not None
+                and _iface_leaf[1].type.kind == "interface"
+            ):
+                receiver_id = _iface_leaf[2].binding_id
+                interface_id = _iface_leaf[1].type.type_id or None
             else:
                 interface_member = self._package_member(operand)
                 if (
@@ -6413,7 +6472,7 @@ class _Builder:
             # call folds is the root's element memory, named by the
             # post-alias root binding id like the dispatch path.
             element = self._interface_element_receiver(
-                operand, params
+                operand, params, locals_
             )
             if element is None:
                 return None
@@ -6487,7 +6546,7 @@ class _Builder:
             # provenance plus the field slot's, and every index
             # innermost-first (Go's order).
             element = self._interface_element_receiver(
-                operand, params
+                operand, params, locals_
             )
             if element is None:
                 return self.expression(
@@ -7465,7 +7524,9 @@ class _Builder:
         through its own `import` reference to a scalar-or-pointer
         `var` member, like the imported-struct-var path — or, for a
         package-local struct type, through the field's `local`
-        reference to its `scope`-less `variable` binding. Only when
+        reference to its `scope`-less `variable` binding. An
+        interface-typed leaf also resolves — `v := p.I` binds the
+        interface value the field's slot tracks. Only when
         `intermediate=True` may a named struct-valued field also be
         returned, so recursive selection can pin its type identity;
         anonymous struct fields and intermediates under generic
@@ -7495,7 +7556,7 @@ class _Builder:
             not in (
                 {"integer", "boolean", "pointer", "struct"}
                 if intermediate
-                else {"integer", "boolean", "pointer"}
+                else {"integer", "boolean", "pointer", "interface"}
             )
             or field_member.type.kind == "struct"
             and not field_member.type.type_id
@@ -8664,6 +8725,7 @@ class _Builder:
                     inner,
                     params,
                     allow_struct_elements=True,
+                    allow_struct_element_arrays=True,
                 )
                 if opaque_field is None:
                     candidate = self._package_composite_field_read(inner)
@@ -8763,6 +8825,18 @@ class _Builder:
                             # element carries the bound container's
                             # conflated dep set plus the index's
                             # own, like a field on `st := P{...}`.
+                            opaque_composite = ref.binding_id
+                        elif (
+                            ref.binding_id in locals_
+                            and self._interface_element_receiver(
+                                node, params, locals_
+                            )
+                            is not None
+                        ):
+                            # `x[i]` on `x := p.A` — the bare `[]I`
+                            # binding names the same caller memory
+                            # its own dep set already conflates;
+                            # read it like an opaque container.
                             opaque_composite = ref.binding_id
         # Descend one `elem` fact per extra index level — `[][]T`
         # yields `[]T` then `T`. Every container's own named identity
@@ -8932,7 +9006,10 @@ class _Builder:
                 and inner.type == "selector_expression"
             ):
                 opaque_field = self._opaque_container_field_target(
-                    inner, params, allow_struct_elements=True
+                    inner,
+                    params,
+                    allow_struct_elements=True,
+                    allow_struct_element_arrays=True,
                 )
         if (
             struct_element_target is not None
@@ -8989,7 +9066,10 @@ class _Builder:
                         )
                     )
                     or (
-                        opaque_field is not None
+                        (
+                            opaque_field is not None
+                            or opaque_composite is not None
+                        )
                         and elem.kind == "interface"
                     )
                 )
@@ -9409,6 +9489,13 @@ class _Builder:
                         conditional=conditional,
                         copy_root=True,
                     )
+                    continue
+                if pos == 1 and binding.type.kind == "interface":
+                    # `for _, v := range p.A` on `A []I` — the
+                    # element name binds like `v := p.A[i]`: an
+                    # interface-typed local whose method calls
+                    # dispatch through `_interface_value_binding`.
+                    scope[binding.id] = deps
                     continue
                 if binding.type.kind not in {
                     "integer",
@@ -16200,9 +16287,27 @@ class _Builder:
                         # container field binds like `v := i`.
                         len(lefts) == len(rights)
                         and self._interface_element_receiver(
-                            rights[i], params
+                            rights[i], params, locals_
                         )
                         is not None
+                    )
+                    and not (
+                        # `v := p.I` — an interface-typed field
+                        # reached through a bound pointer binds
+                        # like `v := i` too: the read carries the
+                        # root's accumulated write deps plus every
+                        # indirect store.
+                        len(lefts) == len(rights)
+                        and (
+                            _iface_field := (
+                                self._bound_field_read(
+                                    rights[i], locals_, params
+                                )
+                            )
+                        )
+                        is not None
+                        and _iface_field[1].type is not None
+                        and _iface_field[1].type.kind == "interface"
                     )
                 ):
                     raise _Unsupported("binding_unavailable", _span(node))
@@ -17058,10 +17163,26 @@ class _Builder:
                         )
                         if (
                             rhs is None
-                            or self._interface_value_binding(
-                                rhs, params, locals_
+                            or (
+                                self._interface_value_binding(
+                                    rhs, params, locals_
+                                )
+                                is None
+                                and not (
+                                    (
+                                        _var_iface_field := (
+                                            self._bound_field_read(
+                                                rhs, locals_, params
+                                            )
+                                        )
+                                    )
+                                    is not None
+                                    and _var_iface_field[1].type
+                                    is not None
+                                    and _var_iface_field[1].type.kind
+                                    == "interface"
+                                )
                             )
-                            is None
                         ):
                             raise _Unsupported(
                                 "binding_unavailable", _span(spec)
@@ -18507,6 +18628,87 @@ class _Builder:
                             # write path folds `e`'s deps into the
                             # element slot like any element write.
                             pass
+                        elif (
+                            lhs.type == "index_expression"
+                            and self._opaque_container_index_target(
+                                lhs
+                            )
+                            is not None
+                        ):
+                            # `x[i] = e` — `x` binds a `[]I` local
+                            # that sits in a share group (`x := p.A`
+                            # mints the field slot's tokens), so the
+                            # element-write path folds `e`'s deps
+                            # into every sharer's slot like a
+                            # scalar-element store. An unbound `x`
+                            # has no tracked backing and stays
+                            # closed.
+                            pass
+                        elif (
+                            lhs.type
+                            in {
+                                "selector_expression",
+                                "field_expression",
+                            }
+                            and self._opaque_write_target(
+                                lhs, locals_, params
+                            )
+                            is not None
+                            and (
+                                (_iface_member := (
+                                    self._scalar_container_field(
+                                        lhs,
+                                        params,
+                                        for_write=True,
+                                        allow_struct_elements=True,
+                                        allow_interface_member=True,
+                                    )
+                                )[1])
+                                is not None
+                                and _iface_member.type is not None
+                                and _iface_member.type.kind
+                                == "interface"
+                            )
+                        ):
+                            # `p.I = e` — a store into an
+                            # interface-typed field: `t.f = v`'s
+                            # write path already folds the RHS deps
+                            # into the base's slot, so a later
+                            # `p.I.M()` observes them through the
+                            # field receiver's conflated deps.
+                            pass
+                        elif (
+                            lhs.type
+                            in {
+                                "selector_expression",
+                                "field_expression",
+                            }
+                            and (
+                                _elem_iface_lhs := (
+                                    self._opaque_container_struct_element_field_target(
+                                        lhs,
+                                        params,
+                                        for_pointer_leaf=True,
+                                    )
+                                )
+                            )
+                            is not None
+                            and _elem_iface_lhs[6]
+                            and getattr(
+                                _elem_iface_lhs[6][-1].type,
+                                "kind",
+                                None,
+                            )
+                            == "interface"
+                        ):
+                            # `p.B[i].J = e` — a store into an
+                            # interface member inside a struct
+                            # element: the LHS loop's element-member
+                            # write path folds `e`'s deps into the
+                            # element's member slot like the
+                            # pointer-member reseat does, so a later
+                            # `p.B[j].J.M()` observes them.
+                            pass
                         else:
                             target_ref = (
                                 self.references.get(
@@ -18582,6 +18784,58 @@ class _Builder:
                             and value.type is not None
                             and value.type.kind == "interface"
                             for value in (field, member)
+                        ) and not (
+                            member is None
+                            and field is not None
+                            and field.type is not None
+                            and field.type.kind == "interface"
+                            and (
+                                (
+                                    self._opaque_write_target(
+                                        lhs, locals_, params
+                                    )
+                                    is not None
+                                    and (
+                                        _iface_w := (
+                                            self._scalar_container_field(
+                                                lhs,
+                                                params,
+                                                for_write=True,
+                                                allow_struct_elements=True,
+                                                allow_interface_member=True,
+                                            )
+                                        )[1]
+                                    )
+                                    is not None
+                                    and _iface_w.type is not None
+                                    and _iface_w.type.kind
+                                    == "interface"
+                                )
+                                # `p.B[i].J = e` — the interface
+                                # member sits inside an element:
+                                # the element-member write path
+                                # below folds the RHS into the
+                                # element's member slot.
+                                or (
+                                    (
+                                        _elem_w := (
+                                            self._opaque_container_struct_element_field_target(
+                                                lhs,
+                                                params,
+                                                for_pointer_leaf=True,
+                                            )
+                                        )
+                                    )
+                                    is not None
+                                    and _elem_w[6]
+                                    and getattr(
+                                        _elem_w[6][-1].type,
+                                        "kind",
+                                        None,
+                                    )
+                                    == "interface"
+                                )
+                            )
                         ):
                             raise _Unsupported(
                                 "unsupported_statement", _span(node)
@@ -22631,6 +22885,7 @@ class _Builder:
                                 right,
                                 params,
                                 allow_struct_elements=True,
+                                allow_struct_element_arrays=True,
                             )
                         )
                     if opaque_range_field is None:
@@ -27945,6 +28200,107 @@ class _Builder:
                                         params[escaped_id]
                                     }
                         return deps
+            iface_collection = self._opaque_container_field_target(
+                node,
+                params,
+                allow_struct_elements=True,
+                allow_struct_element_arrays=True,
+            )
+            if iface_collection is not None:
+                field_key, root_id, iface_member, _, _ = iface_collection
+                iface_type = iface_member.type
+                if (
+                    iface_type is not None
+                    and iface_type.kind in {"slice", "array", "map"}
+                    and getattr(iface_type, "elem", None) is not None
+                    and iface_type.elem.kind == "interface"
+                ):
+                    # `p.A` on a `*S` root with `A []I` — reading the
+                    # collection itself (range iterable, `append`
+                    # argument, a plain `x := p.A` bind) names caller
+                    # memory exactly like `p.A[i]` does: the root's
+                    # own deps plus the field slot's.
+                    self._pin_member_type(iface_member)
+                    coll_deps = self._opaque_container_deps(
+                        field_key, locals_
+                    )
+                    root_binding = self.bindings.get(root_id)
+                    if (
+                        root_binding is not None
+                        and root_binding.type is not None
+                        and root_binding.type.kind == "pointer"
+                    ):
+                        coll_deps |= self._pointer_deps(
+                            root_id, params, locals_
+                        )
+                        # The pointee is caller-shared memory — a
+                        # whole-pointee store (`*p = s`) or any
+                        # aliased write lands in `indirect_writes`
+                        # like `(*p)[i]` and the scalar-field read
+                        # observe.
+                        coll_deps |= self.indirect_writes
+                    elif root_id in locals_:
+                        coll_deps |= locals_[root_id]
+                    elif root_id in params:
+                        coll_deps |= {params[root_id]}
+                    # `p.A[i].F` — indexes below the field level
+                    # live inside the operand chain, so the
+                    # synthesized read must evaluate them itself
+                    # (each intermediate member's declared type
+                    # pins alongside). Indexes the `lib.VSM[k].F`
+                    # pre-scan already evaluated contribute through
+                    # `field_index_deps` instead — evaluating them
+                    # again would replay their calls and side
+                    # effects.
+                    coll_deps |= field_index_deps
+                    cur = node
+                    chain_indexes: list[Any] = []
+                    while cur is not None:
+                        cur = self._strip_parens(cur)
+                        if cur is None:
+                            break
+                        if cur.type == "index_expression":
+                            chain_indexes.append(
+                                cur.child_by_field_name("index")
+                            )
+                            cur = cur.child_by_field_name("operand")
+                            continue
+                        if cur.type != "selector_expression":
+                            break
+                        chain_field = cur.child_by_field_name("field")
+                        chain_ref = (
+                            self.references.get(
+                                self.node_key(chain_field)
+                            )
+                            if chain_field is not None
+                            else None
+                        )
+                        chain_member = self._field_identity(chain_ref)
+                        if (
+                            chain_member is not None
+                            and chain_member.type is not None
+                        ):
+                            self._pin_fact_identities(
+                                chain_member.type
+                            )
+                        cur = cur.child_by_field_name("operand")
+                    for chain_index in reversed(chain_indexes):
+                        if (
+                            chain_index is not None
+                            and chain_index.type not in _INDEX_LITERALS
+                            and self.node_key(chain_index)
+                            not in field_index_nodes
+                        ):
+                            coll_deps |= self.expression(
+                                chain_index,
+                                fn,
+                                params,
+                                locals_,
+                                transfers,
+                                count,
+                                0,
+                            )
+                    return coll_deps
             if (
                 member is None
                 or member.kind != "const"
@@ -29300,15 +29656,60 @@ class _Builder:
                         scalar_cont = append_cont is not None
                     if append_cont is None:
                         field_target = self._opaque_container_field_target(
-                            arguments[0], params
+                            arguments[0], params,
+                            allow_struct_elements=True,
                         )
-                        if (
-                            field_target is not None
-                            and self._scalar_elem_collection(
+                        if field_target is not None and (
+                            self._scalar_elem_collection(
                                 field_target[2].type
                             )
+                            or (
+                                field_target[2].type is not None
+                                and getattr(
+                                    field_target[2].type, "elem",
+                                    None,
+                                ) is not None
+                                and field_target[2].type.elem.kind
+                                == "interface"
+                            )
                         ):
+                            # `append(p.A, e)` on `A []I` — each
+                            # extra evaluates plainly and the result
+                            # reseats the field slot like a scalar
+                            # container does.
                             append_cont = field_target[0]
+                            scalar_cont = True
+                    if append_cont is None:
+                        # `append(x, e)` on `x := p.A` — a bare
+                        # `[]I` binding folds the same element deps;
+                        # the reseat lands on the binding itself.
+                        arg0 = arguments[0]
+                        arg_ref = (
+                            self.references.get(self.node_key(arg0))
+                            if arg0 is not None
+                            and arg0.type == "identifier"
+                            else None
+                        )
+                        arg_binding = (
+                            self.bindings.get(arg_ref.binding_id)
+                            if arg_ref is not None
+                            and arg_ref.binding_id
+                            else None
+                        )
+                        if (
+                            arg_binding is not None
+                            and arg_binding.id in locals_
+                            and arg_binding.type is not None
+                            and arg_binding.type.kind
+                            in {"slice", "array", "map"}
+                            and getattr(
+                                arg_binding.type, "elem", None
+                            )
+                            is not None
+                            and arg_binding.type.elem.kind
+                            == "interface"
+                        ):
+                            append_cont = arg_binding.id
                             scalar_cont = True
                     if append_cont is None:
                         # `append(s, c)` on a bound chan-element
@@ -29930,9 +30331,26 @@ class _Builder:
                                 )
                                 return frozenset()
                         field_target = self._opaque_container_field_target(
-                            arguments[0], params
+                            arguments[0], params,
+                            allow_struct_elements=True,
                         )
-                        if field_target is not None:
+                        if field_target is not None and (
+                            self._scalar_elem_collection(
+                                field_target[2].type
+                            )
+                            or self._scalar_elem_nested_collection(
+                                field_target[2].type
+                            )
+                            or (
+                                field_target[2].type is not None
+                                and getattr(
+                                    field_target[2].type, "elem",
+                                    None,
+                                ) is not None
+                                and field_target[2].type.elem.kind
+                                == "interface"
+                            )
+                        ):
                             field_key = field_target[0]
                             self._pin_fact_identities(
                                 field_target[2].type
@@ -33686,16 +34104,22 @@ class _Builder:
             )
 
     def _interface_element_receiver(
-        self, node: Any, params: dict[str, int]
+        self,
+        node: Any,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
     ) -> tuple[Any, str, list[Any], str] | None:
         """`p.A[i]` (or deeper index chains like `p.A[i][j]`) whose
         final element is interface-typed — the container field must
         resolve through the same roots the element-read path admits,
         then one `elem` descent per index level must end in an
-        interface fact. Returns `(member, root_id, index_nodes,
-        field_key)` — the field member, the chain root's binding id
+        interface fact. A bare binding root is admitted too: `x[i]`
+        on a local `x := p.A` or a `s []I` parameter names the same
+        caller memory the binding's own deps already track. Returns
+        `(member, root_id, index_nodes, field_key)` — the field
+        member (or the bare binding), the chain root's binding id
         (post-alias), every index node outermost-first, and the
-        field's slot key, or None."""
+        slot key, or None."""
         current = self._strip_parens(node)
         if current is None or current.type != "index_expression":
             return None
@@ -33706,10 +34130,47 @@ class _Builder:
             operand = self._strip_parens(
                 operand.child_by_field_name("operand")
             )
-        if operand is None or operand.type != "selector_expression":
+        if operand is None:
+            return None
+        if operand.type == "identifier":
+            # `x[i]` — a slice/map/array binding whose element
+            # chain ends in an interface. The binding's own dep
+            # set already names every sharer (`x := p.A` records
+            # the field's provenance when bound), so the element
+            # read folds the same way as the field-root form.
+            root_ref = self.references.get(self.node_key(operand))
+            if (
+                root_ref is None
+                or not root_ref.binding_id
+                or (
+                    root_ref.binding_id not in params
+                    and root_ref.binding_id not in locals_
+                )
+            ):
+                return None
+            binding = self.bindings.get(root_ref.binding_id)
+            if binding is None or binding.type is None:
+                return None
+            fact = binding.type
+            for _ in index_nodes:
+                if fact is None or fact.kind not in {
+                    "slice",
+                    "array",
+                    "map",
+                }:
+                    return None
+                fact = fact.elem
+            if fact is None or fact.kind != "interface":
+                return None
+            self._pin_fact_identities(binding.type)
+            return binding, binding.id, index_nodes, binding.id, []
+        if operand.type != "selector_expression":
             return None
         target = self._opaque_container_field_target(
-            operand, params, allow_struct_elements=True
+            operand,
+            params,
+            allow_struct_elements=True,
+            allow_struct_element_arrays=True,
         )
         if target is None:
             return None
@@ -33814,6 +34275,94 @@ class _Builder:
                 field_receiver = self._interface_parameter_field_receiver(
                     receiver_id, params
                 )
+                if field_receiver is None:
+                    # `p.I` — an interface-typed field through a
+                    # pointer-parameter (or bound local) root: the
+                    # member gate admits it only for this receiver,
+                    # and the deps recipe is the same one the
+                    # element receiver uses (root's pointee provenance
+                    # plus the field slot's conflated deps).
+                    ptr_field_receiver = self._scalar_container_field(
+                        receiver_id,
+                        params,
+                        allow_struct_elements=True,
+                        allow_interface_member=True,
+                    )
+                    if (
+                        ptr_field_receiver[1] is not None
+                        and ptr_field_receiver[1].type is not None
+                        and ptr_field_receiver[1].type.kind
+                        == "interface"
+                        and not (
+                            self._scalar_container_field_pointer_crossing(
+                                receiver_id, params
+                            )
+                        )
+                    ):
+                        # The receiver's own operand chain may
+                        # index (`p.A[k].I`) and nest (`p.W.I`):
+                        # every index evaluates like the element
+                        # receiver's, and every intermediate
+                        # member's declared identity pins so a
+                        # redeclared `W` stales this summary.
+                        chain_indexes: list[Any] = []
+                        cur = receiver_id.child_by_field_name(
+                            "operand"
+                        )
+                        while cur is not None:
+                            cur = self._strip_parens(cur)
+                            if cur is None:
+                                break
+                            if cur.type == "index_expression":
+                                chain_indexes.append(
+                                    cur.child_by_field_name(
+                                        "index"
+                                    )
+                                )
+                                cur = cur.child_by_field_name(
+                                    "operand"
+                                )
+                                continue
+                            if cur.type != "selector_expression":
+                                break
+                            chain_field = (
+                                cur.child_by_field_name("field")
+                            )
+                            chain_ref = (
+                                self.references.get(
+                                    self.node_key(chain_field)
+                                )
+                                if chain_field is not None
+                                else None
+                            )
+                            chain_member = self._field_identity(
+                                chain_ref
+                            )
+                            if (
+                                chain_member is not None
+                                and chain_member.type is not None
+                            ):
+                                self._pin_fact_identities(
+                                    chain_member.type
+                                )
+                            cur = cur.child_by_field_name(
+                                "operand"
+                            )
+                        element_receiver = (
+                            ptr_field_receiver[1],
+                            ptr_field_receiver[0],
+                            [],
+                            self._opaque_container_field_key(
+                                ptr_field_receiver[0],
+                                ptr_field_receiver[1].id,
+                            ),
+                            chain_indexes,
+                        )
+                        self._pin_method_binding(function_node)
+                        self._pin_fact_identities(
+                            ptr_field_receiver[1].type
+                        )
+                        admitted = True
                 if field_receiver is not None:
                     _, struct_type_ids, interface_type_id = field_receiver
                     self.pinned.update(struct_type_ids)
@@ -33846,7 +34395,7 @@ class _Builder:
                 # and the interface's identity) cover its shape, and
                 # the method's signature pins for the same reason.
                 element_receiver = self._interface_element_receiver(
-                    receiver_id, params
+                    receiver_id, params, locals_
                 )
                 if element_receiver is not None:
                     self._pin_method_binding(function_node)
@@ -33894,9 +34443,15 @@ class _Builder:
             # the element read's deps are the root's own provenance
             # plus every index's, which is what a representable
             # `o.A[i]` read yields for the value-struct root too.
-            receiver_deps = self._pointer_deps(
-                root_id, params, locals_
-            ) | self._opaque_container_deps(field_key, locals_)
+            # `locals_[root_id]` carries the local composite's
+            # conflated contents: a `w.I = e` store folds `e` there,
+            # and a param's folded pointee contents are already the
+            # field slot's `indirect_writes` share.
+            receiver_deps = (
+                self._pointer_deps(root_id, params, locals_)
+                | locals_.get(root_id, frozenset())
+                | self._opaque_container_deps(field_key, locals_)
+            )
             # Innermost index first (Go's order) — `s.A[i].F[0]`
             # evaluates `i` before `0`, so an index-position call
             # sees the post-state of every earlier index's calls.

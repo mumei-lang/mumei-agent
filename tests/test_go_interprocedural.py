@@ -6070,8 +6070,25 @@ def test_interface_dispatch_field_receiver_pins_method_set(
 
 
 @pytest.mark.parametrize(
-    ("declarations", "reason"),
+    ("declarations", "expected"),
     [
+        # `p.I.M()` — the interface field on a `*S` parameter root.
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "type S struct{ I I }\n"
+            "func F(p *S, x int64) int64 { return p.I.M(x) }\n",
+            frozenset({0, 1}),
+        ),
+        # `(*w).i.M(x)` — an explicit deref lands on the same
+        # caller-shared pointee.
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "type W struct{ i I }\n"
+            "func F(w *W, x int64) int64 { return (*w).i.M(x) }\n",
+            frozenset({0, 1}),
+        ),
+        # `w.i.M(0)` — a bound local-composite root; `w` binds a
+        # constant literal, so its dep set is empty.
         (
             "type I interface{ M(int64) int64 }\n"
             "type T struct{}\n"
@@ -6079,32 +6096,149 @@ def test_interface_dispatch_field_receiver_pins_method_set(
             "type W struct{ i I }\n"
             "func F(x int64) int64 { "
             "w := W{i: T{}}; return w.i.M(0) }",
-            "unresolved_or_opaque_call",
+            frozenset(),
         ),
+        # `w.i.M(x)` — a named type over the struct resolves its
+        # underlying member.
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "type B struct{ i I }\n"
+            "type WD B\n"
+            "func F(w WD, x int64) int64 { return w.i.M(x) }\n",
+            frozenset({0, 1}),
+        ),
+        # `p.W.I.M()` — the nested selector chain resolves through
+        # the same root.
+        (
+            "type I interface{ M(int64) int64 }\n"
+            "type W struct{ I I }\n"
+            "type S struct{ W W }\n"
+            "func F(p *S, x int64) int64 { return p.W.I.M(x) }\n",
+            frozenset({0, 1}),
+        ),
+    ],
+)
+def test_interface_field_dispatch(go_types_helper, declarations, expected):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == expected
+
+
+def test_interface_field_store_then_dispatch(go_types_helper):
+    # `p.I = e` — a store into the interface field lands `e`'s
+    # deps in the base's slot, and the later `p.I.M()` receiver
+    # observes them through the field's conflated deps.
+    declarations = (
+        "type I interface{ M() int64 }\n"
+        "type S struct{ I I }\n"
+        "func F(p *S, e I) int64 {\n"
+        "\tp.I = e\n"
+        "\treturn p.I.M()\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_interface_field_store_local_composite(go_types_helper):
+    # `w.I = e` on a local composite folds `e` into w's conflated
+    # set — the `w.I.M()` receiver reads that set, so `e` reaches
+    # the result.
+    declarations = (
+        "type I interface{ M() int64 }\n"
+        "type S struct{ I I }\n"
+        "func F(e I) int64 {\n"
+        "\tw := S{}\n"
+        "\tw.I = e\n"
+        "\treturn w.I.M()\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_interface_field_bare_read(go_types_helper):
+    # `v := p.I` binds the interface value the field slot tracks —
+    # the read carries the root's accumulated write deps plus every
+    # indirect store, so `v.M()` dispatches with p's deps.
+    declarations = (
+        "type I interface{ M() int64 }\n"
+        "type S struct{ I I }\n"
+        "func F(p *S, e I) int64 {\n"
+        "\tp.I = e\n"
+        "\tv := p.I\n"
+        "\treturn v.M()\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_interface_field_method_value(go_types_helper):
+    # `f := p.I.M` binds a method value whose receiver is the
+    # interface-typed field: the bound call folds the root's
+    # frozen deps plus every indirect store at the call site,
+    # so a `p.I = e` store between bind and call still reaches
+    # the result.
+    declarations = (
+        "type I interface{ M() int64 }\n"
+        "type S struct{ I I }\n"
+        "func F(p *S, e I) int64 {\n"
+        "\tf := p.I.M\n"
+        "\tp.I = e\n"
+        "\treturn f()\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+@pytest.mark.parametrize(
+    ("declarations", "expected"),
+    [
+        # `p.A[k].I.M()` — the receiver's own index chain
+        # evaluates: `k`'s dep reaches the result.
+        (
+            "type I interface{ M() int64 }\n"
+            "type T struct{ I I }\n"
+            "type S struct{ A []T }\n"
+            "func F(p *S, k int64) int64 { return p.A[k].I.M() }\n",
+            frozenset({0, 1}),
+        ),
+        # `p.A[k].B[j].I.M()` — both inner indexes evaluate in
+        # evaluation order.
+        (
+            "type I interface{ M() int64 }\n"
+            "type B struct{ I I }\n"
+            "type T struct{ B []B }\n"
+            "type S struct{ A []T }\n"
+            "func F(p *S, k int64, j int64) int64 {\n"
+            "\treturn p.A[k].B[j].I.M()\n"
+            "}\n",
+            frozenset({0, 1, 2}),
+        ),
+    ],
+)
+def test_interface_field_dispatch_indexed_receiver(
+    go_types_helper, declarations, expected
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == expected
+
+
+@pytest.mark.parametrize(
+    ("declarations", "reason"),
+    [
         (
             "type I interface{ M(int64) int64 }\n"
             "type P struct{ i I }\n"
             "type W struct{ p *P }\n"
             "func F(w W, x int64) int64 { return w.p.i.M(x) }",
-            "unresolved_or_opaque_call",
-        ),
-        (
-            "type I interface{ M(int64) int64 }\n"
-            "type W struct{ i I }\n"
-            "func F(w *W, x int64) int64 { return w.i.M(x) }",
-            "unresolved_or_opaque_call",
-        ),
-        (
-            "type I interface{ M(int64) int64 }\n"
-            "type W struct{ i I }\n"
-            "func F(w *W, x int64) int64 { return (*w).i.M(x) }",
-            "unresolved_or_opaque_call",
-        ),
-        (
-            "type I interface{ M(int64) int64 }\n"
-            "type B struct{ i I }\n"
-            "type WD B\n"
-            "func F(w WD, x int64) int64 { return w.i.M(x) }",
             "unresolved_or_opaque_call",
         ),
         (
@@ -6408,6 +6542,62 @@ def test_interface_element_store_literal_impl(
     assert result.effects == "unknown"
 
 
+def test_interface_member_store_inside_element(
+    go_types_helper,
+):
+    # `p.B[i].J = e` — a store into an interface member inside a
+    # struct element reseats the member's slot like a pointer
+    # member does; a later `p.B[j].J.M()` on the same field
+    # observes the stored value's deps.
+    declarations = (
+        "type I interface{ M() int64 }\n"
+        "type E struct{ J I; V int64 }\n"
+        "type S struct{ B []E }\n"
+        "func F(p *S, e I) int64 {\n"
+        "\tp.B[0].J = e\n"
+        "\treturn p.B[1].J.M()\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+
+
+def test_interface_member_store_inside_element_roots(
+    go_types_helper,
+):
+    # The same member store admits through `**S` and a `q := p`
+    # alias — all name caller memory — while a value-struct root
+    # (`o.B[i].J` writes the parameter's copy of the slice header,
+    # not the element) stays closed.
+    for body in ("(*pp).B[0].J = e", "q := p; q.B[0].J = e"):
+        declarations = (
+            "type I interface{ M() int64 }\n"
+            "type E struct{ J I; V int64 }\n"
+            "type S struct{ B []E }\n"
+            + (
+                "func F(pp **S, e I) {\n"
+                if body.startswith("(*pp)")
+                else "func F(p *S, e I) {\n"
+            )
+            + f"\t{body}\n"
+            + "}\n"
+        )
+        result = named(*unit(go_types_helper, declarations))
+        assert result.available, (body, result.gaps)
+    declarations = (
+        "type I interface{ M() int64 }\n"
+        "type E struct{ J I; V int64 }\n"
+        "type S struct{ B []E }\n"
+        "func F(o S, e I) {\n"
+        "\to.B[0].J = e\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available
+
+
 def test_interface_element_store_evaluates_chain_index_calls(
     go_types_helper,
 ):
@@ -6512,7 +6702,269 @@ def test_interface_element_store_stays_closed(
     assert not result.available
 
 
-def test_interface_dispatch_imported_struct_root_stays_closed(
+@pytest.mark.parametrize(
+    "declarations, expected",
+    [
+        # `*S` root — the iteration reads caller memory.
+        (
+            "type I interface{ M() int64 }\n"
+            "type S struct{ A []I }\n"
+            "func F(p *S) int64 {\n"
+            "\tvar t int64\n"
+            "\tfor _, v := range p.A { t = v.M() }\n"
+            "\treturn t\n"
+            "}\n",
+            frozenset({0}),
+        ),
+        # `q := p` alias root resolves to `p`'s pointee.
+        (
+            "type I interface{ M() int64 }\n"
+            "type S struct{ A []I }\n"
+            "func F(p *S) int64 {\n"
+            "\tvar t int64\n"
+            "\tq := p\n"
+            "\tfor _, v := range q.A { t = v.M() }\n"
+            "\treturn t\n"
+            "}\n",
+            frozenset({0}),
+        ),
+        # `(*pp)` on a `**S` root.
+        (
+            "type I interface{ M() int64 }\n"
+            "type S struct{ A []I }\n"
+            "func F(pp **S) int64 {\n"
+            "\tvar t int64\n"
+            "\tfor _, v := range (*pp).A { t = v.M() }\n"
+            "\treturn t\n"
+            "}\n",
+            frozenset({0}),
+        ),
+        # `map[int64]I` field — element reads are admitted, so
+        # range follows.
+        (
+            "type I interface{ M() int64 }\n"
+            "type S struct{ M map[int64]I }\n"
+            "func F(p *S) int64 {\n"
+            "\tvar t int64\n"
+            "\tfor _, v := range p.M { t = v.M() }\n"
+            "\treturn t\n"
+            "}\n",
+            frozenset({0}),
+        ),
+        # value-struct root — the same model a `o.A[i]` read uses.
+        (
+            "type I interface{ M() int64 }\n"
+            "type S struct{ A []I }\n"
+            "func F(o S) int64 {\n"
+            "\tvar t int64\n"
+            "\tfor _, v := range o.A { t = v.M() }\n"
+            "\treturn t\n"
+            "}\n",
+            frozenset({0}),
+        ),
+        # `p.A[i].F` — a deeper chain's collection field; the
+        # chain index evaluates into the read like the element
+        # store's chain does.
+        (
+            "type I interface{ M() int64 }\n"
+            "type E struct{ F []I }\n"
+            "type S struct{ A []E }\n"
+            "func F(p *S, i int64) int64 {\n"
+            "\tvar t int64\n"
+            "\tfor _, v := range p.A[i].F { t = v.M() }\n"
+            "\treturn t\n"
+            "}\n",
+            frozenset({0, 1}),
+        ),
+    ],
+)
+def test_interface_collection_range(
+    go_types_helper, declarations, expected,
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == expected
+
+
+def test_interface_collection_append_reseats_field(
+    go_types_helper,
+):
+    # `p.A = append(p.A, e)` grows the caller's slice — a callee
+    # reading the appended element observes both `p` and `e`.
+    declarations = (
+        "type I interface{ M() int64 }\n"
+        "type S struct{ A []I }\n"
+        "func callee(s *S, i int64) int64 { return s.A[i].M() }\n"
+        "func F(p *S, e I) int64 {\n"
+        "\tp.A = append(p.A, e)\n"
+        "\treturn callee(p, 1)\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+
+
+def test_interface_collection_len(
+    go_types_helper,
+):
+    # `len(p.A)` on `A []I` reads the container like `len(p.B)`
+    # on `B []int64` — dep set of the root plus the field slot.
+    declarations = (
+        "type I interface{ M() int64 }\n"
+        "type S struct{ A []I }\n"
+        "func F(p *S) int64 { return int64(len(p.A)) }\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "none_in_supported_fragment"
+
+
+def test_interface_collection_len_observes_pointee_store(
+    go_types_helper,
+):
+    # `*p = s; len(p.A)` — the whole-pointee store lands in
+    # `indirect_writes`; the collection read observes `s` like a
+    # scalar-field read does.
+    declarations = (
+        "type I interface{ M() int64 }\n"
+        "type S struct{ A []I }\n"
+        "func F(p *S, s S) int64 {\n"
+        "\t*p = s\n"
+        "\treturn int64(len(p.A))\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_interface_collection_bound_local(
+    go_types_helper,
+):
+    # `x := p.A` binds the field's provenance — element calls,
+    # reads and `append` on the bare `[]I` local fold the same
+    # deps the field-root forms do.
+    declarations = (
+        "type I interface{ M() int64 }\n"
+        "type S struct{ A []I }\n"
+        "func F(p *S, e I, i int64) int64 {\n"
+        "\tx := p.A\n"
+        "\tx = append(x, e)\n"
+        "\ty := x[i]\n"
+        "\treturn y.M() + x[0].M()\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1, 2})
+
+
+def test_interface_collection_chain_index_call_once(
+    go_types_helper,
+):
+    # `len(p.A[Set(v, x)].F)` — the index call evaluates through
+    # the `lib.VSM[k].F` pre-scan exactly once: no duplicated
+    # call record and no replayed side effect.
+    declarations = (
+        "type I interface{ M() int64 }\n"
+        "type E struct{ F []I }\n"
+        "type S struct{ A []E }\n"
+        "func Set(v *int64, x int64) int64 { return x }\n"
+        "func F(p *S, v *int64, x int64) int64 {\n"
+        "\treturn int64(len(p.A[Set(v, x)].F))\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 2})
+    # `Set` is recorded exactly once — a second evaluation would
+    # both duplicate the record and replay its side effects.
+    assert len(result.calls) == 1
+
+
+def test_interface_collection_bound_local_store(go_types_helper):
+    # `x[i] = e` on `x := p.A` — the bound `[]I` local sits in the
+    # field's share group, so the element store reaches `p.A`'s
+    # slot like the scalar-element `x := p.A; x[i] = v` store.
+    declarations = (
+        "type I interface{ M() int64 }\n"
+        "type S struct{ A []I }\n"
+        "func F(p *S, e I, i int64) int64 {\n"
+        "\tx := p.A\n"
+        "\tx[i] = e\n"
+        "\treturn p.A[0].M()\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1, 2})
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        # `[][]I` — the nested-collection read is unmodelled.
+        (
+            "type I interface{ M() int64 }\n"
+            "type S struct{ A [][]I }\n"
+            "func F(p *S) int64 {\n"
+            "\tvar t int64\n"
+            "\tfor _, v := range p.A { t = int64(len(v)) }\n"
+            "\treturn t\n"
+            "}\n"
+        ),
+        # `f := s.I.M` — a method value on a local-composite
+        # root's interface field stays closed: `s` binds no
+        # pointer root for the receiver slot.
+        (
+            "type I interface{ M() int64 }\n"
+            "type S struct{ I I }\n"
+            "func F() int64 {\n"
+            "\tvar s S\n"
+            "\tf := s.I.M\n"
+            "\treturn f()\n"
+            "}\n"
+        ),
+        # `p.W.I` — an interface field nested behind a
+        # pointer-typed member stays closed (the receiver chain
+        # crosses a pointer the slot model cannot identify).
+        (
+            "type I interface{ M() int64 }\n"
+            "type P struct{ I I }\n"
+            "type S struct{ W *P }\n"
+            "func F(p *S) int64 { return p.W.I.M() }\n"
+        ),
+        # `x[i] = e` — a store into a bare `[]I` binding that has
+        # no tracked backing: `var x []I` never joined a share
+        # group, so the write stays unmodelled.
+        (
+            "type I interface{ M() int64 }\n"
+            "func F(e I, i int64) int64 {\n"
+            "\tvar x []I\n"
+            "\tx[i] = e\n"
+            "\treturn x[0].M()\n"
+            "}\n"
+        ),
+        # `[][]I` — `append(p.A[0], e)` on a nested level stays
+        # unmodelled.
+        (
+            "type I interface{ M() int64 }\n"
+            "type S struct{ A [][]I }\n"
+            "func F(p *S, e I) { p.A[0] = append(p.A[0], e) }\n"
+        ),
+    ],
+)
+def test_interface_collection_stays_closed(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available
+
+
+def test_interface_dispatch_imported_struct_root(
     go_types_helper,
 ):
     files = {
@@ -6538,10 +6990,12 @@ def test_interface_dispatch_imported_struct_root_stays_closed(
     )
     summaries = ip.summarize_go_package(files, snapshot)
     result = named_package(files, snapshot, summaries, "F")
-    assert not result.available
-    assert any(
-        gap.reason == "unresolved_or_opaque_call" for gap in result.gaps
-    )
+    # `w.I` — the imported struct's interface field resolves
+    # through the same member machinery as a domestic one: the
+    # receiver folds `w`'s provenance plus the field slot's
+    # conflated deps.
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
 
 
 def test_interface_dispatch_local_interface_call_result_stays_closed(
@@ -6567,7 +7021,7 @@ def test_interface_dispatch_local_interface_call_result_stays_closed(
     )
 
 
-def test_interface_dispatch_local_struct_pointer_value_stays_closed(
+def test_interface_dispatch_local_struct_pointer_value(
     go_types_helper,
 ):
     declarations = (
@@ -6583,21 +7037,18 @@ def test_interface_dispatch_local_struct_pointer_value_stays_closed(
         "}\n"
     )
     result = named(*unit(go_types_helper, declarations))
-    assert not result.available
-    assert any(
-        gap.reason == "unresolved_or_opaque_call" for gap in result.gaps
-    )
+    # The opaque dispatch may run `(*P).M`, whose store reaches
+    # `q.V` — so the read observes `x`'s dep.
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
 
 
 @pytest.mark.parametrize(
     "source",
     [
-        pytest.param(
-            "type I interface{ M(int64) int64 }\n"
-            "type W struct{ i I }\n"
-            "func F(w *W, x int64) int64 { f := w.i.M; return f(x) }\n",
-            id="pointer-root",
-        ),
+        # `f := w.i.M` on a pointer root binds like the
+        # `w.i.M(x)` dispatch — covered positively by
+        # `test_interface_field_method_value`.
         pytest.param(
             "type I interface{ M(int64) int64 }\n"
             "type T struct{}\n"
@@ -6629,7 +7080,7 @@ def test_interface_dispatch_local_struct_pointer_value_stays_closed(
         ),
     ],
 )
-def test_interface_field_method_values_stay_closed_outside_value_parameters(
+def test_interface_field_method_values_stay_closed_outside_pointer_roots(
     go_types_helper, source
 ):
     result = named(*unit(go_types_helper, source))
@@ -7024,16 +7475,6 @@ def test_interface_element_method_value_matches_direct_dispatch(
             "func F(x *S, i int64) int64 {\n"
             "\tvar y *S\n"
             "\tf := y.A[i].M\n"
-            "\treturn f(0)\n"
-            "}\n"
-        ),
-        # `p.I.M` — an interface-typed *field* read stays closed
-        # consistently; binding its method value does too.
-        (
-            "type I interface{ M(int64) int64 }\n"
-            "type S struct{ I I }\n"
-            "func F(p *S) int64 {\n"
-            "\tf := p.I.M\n"
             "\treturn f(0)\n"
             "}\n"
         ),
@@ -36915,6 +37356,13 @@ def test_named_struct_element_pointer_member_store_local_root_closed(
         "func F(p *S, i int64, q *E2) {\n"
         "\tr := p\n"
         "\tr.B[i].W = q\n}\n",
+        # A scalar-pointee member (`*int64`) reseats the same
+        # element slot — the store only writes the pointer the
+        # slot holds, so no struct pointee is needed.
+        "type Elem struct { W *int64; V int64 }\n"
+        "type S struct { B []Elem }\n"
+        "func F(p *S, i int64, q *int64) {\n"
+        "\tp.B[i].W = q\n}\n",
     ],
 )
 def test_named_struct_value_element_pointer_member_store(
@@ -37204,28 +37652,46 @@ def test_named_struct_value_element_extract_share_closed(
 
 
 @pytest.mark.parametrize(
-    "declarations",
+    ("declarations", "expected"),
     [
-        # `R [N]Elem` — an array member's value-copy semantics keep
-        # its elements outside the share-group slot model; the
-        # pointer-member read and store stay closed.
-        "type E2 struct { V int64 }\n"
-        "type Elem struct { W *E2 }\n"
-        "type S struct { R [4]Elem }\n"
-        "func F(p *S, i int64) int64 {\n"
-        "\treturn p.R[i].W.V\n}\n",
-        "type E2 struct { V int64 }\n"
-        "type Elem struct { W *E2 }\n"
-        "type S struct { R [4]Elem }\n"
-        "func F(p *S, i int64, q *E2) {\n"
-        "\tp.R[i].W = q\n}\n",
+        (
+            # `p.R[i].W.V` — under a `*S` root the array backing
+            # is caller memory, so the pointer-member chain reads
+            # like the slice element's does.
+            "type E2 struct { V int64 }\n"
+            "type Elem struct { W *E2 }\n"
+            "type S struct { R [4]Elem }\n"
+            "func F(p *S, i int64) int64 {\n"
+            "\treturn p.R[i].W.V\n}\n",
+            frozenset({0, 1}),
+        ),
+        (
+            # `p.R[i].W = q` — a store into the element's
+            # pointer-member slot lands in caller memory.
+            "type E2 struct { V int64 }\n"
+            "type Elem struct { W *E2 }\n"
+            "type S struct { R [4]Elem }\n"
+            "func F(p *S, i int64, q *E2) {\n"
+            "\tp.R[i].W = q\n}\n",
+            None,
+        ),
+        (
+            # A `*int64` pointer member reseats the same slot.
+            "type Elem struct { W *int64; V int64 }\n"
+            "type S struct { R [4]Elem }\n"
+            "func F(p *S, i int64, q *int64) {\n"
+            "\tp.R[i].W = q\n}\n",
+            None,
+        ),
     ],
 )
-def test_named_struct_value_element_pointer_member_array_closed(
-    go_types_helper, declarations
+def test_named_struct_value_element_pointer_member_array(
+    go_types_helper, declarations, expected
 ):
     result = named(*unit(go_types_helper, declarations))
-    assert result.gaps
+    assert result.available, result.gaps
+    if expected is not None:
+        assert result.return_dependencies == expected
 
 
 def test_named_struct_element_double_pointer_param_root_collection(
