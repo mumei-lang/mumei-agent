@@ -7018,3 +7018,107 @@ fn f(v: Vec<P>, q: VecDeque<P>, w: Q) {
         == "w.swap_remove(0).qm()"
     ]
     assert len(calls) == 1 and calls[0].target
+
+def test_mut_slice_accessors_spell_borrowed_elements():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(mut v: Vec<P>, s: &mut [P]) {
+    for c in v.chunks_mut(2) { c[0].pm(); }
+    for c in s.split_mut(|x| true) { c[0].pm(); }
+    let (a, b) = v.split_at_mut(1);
+    a[0].pm();
+    b[0].pm();
+    if let Some((h, rest)) = v.split_first_mut() { h.pm(); rest[0].pm(); }
+    if let Some((l, rest)) = s.split_last_mut() { l.pm(); rest[0].pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    calls = [
+        call for call in report.calls
+        if raw[call.span.start:call.span.end].decode()
+        in {
+            "c[0].pm()", "a[0].pm()", "b[0].pm()", "h.pm()",
+            "l.pm()", "rest[0].pm()",
+        }
+    ]
+    assert len(calls) == 8
+    for call in calls:
+        assert call.target == pm.id
+
+def test_mut_chunk_spelling_honors_declared_methods():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct Q;
+impl Q { fn qm(&self) {} }
+struct W<T> { _m: T }
+impl<T> W<T> { fn chunks_mut(&mut self, n: usize) -> Vec<Vec<Q>> { vec![] } }
+fn f(mut v: Vec<P>, mut w: W<P>) {
+    for c in v.chunks_mut(2) { c[0].pm(); }
+    for c in w.chunks_mut(2) { c[0].qm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    qm = _bindings(report, "qm", "associated_function")[0]
+    chunks_mut = _bindings(report, "chunks_mut", "associated_function")[0]
+    assert _call(report, source, "c[0].pm()").target == pm.id
+    # A declared `W<T>::chunks_mut` wins over the std recipe.
+    assert _call(report, source, "w.chunks_mut(2)").target == chunks_mut.id
+    assert _call(report, source, "c[0].qm()").target == qm.id
+
+def test_mut_split_resplit_and_array_elements():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(mut v: Vec<P>, s: &mut [P], w: Vec<[P; 2]>) {
+    let (a, b) = v.split_at_mut(1);
+    b[0].pm();
+    let (c, d) = a.split_at(0);
+    c[0].pm();
+    let (e, g) = s.split_at_mut(0);
+    g[0].pm();
+    if let Some((h, rest)) = w.split_first_mut() { h[0].pm(); }
+    if let Some((h2, rest2)) = w.split_first() { h2[0].pm(); rest2[0][0].pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    wanted = {
+        "b[0].pm()", "c[0].pm()", "g[0].pm()", "h[0].pm()",
+        "h2[0].pm()", "rest2[0][0].pm()",
+    }
+    calls = [
+        call for call in report.calls
+        if raw[call.span.start:call.span.end].decode() in wanted
+    ]
+    assert len(calls) == 6
+    for call in calls:
+        assert call.target == pm.id
+
+def test_mut_split_option_element_binds_nested_some():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(v: Vec<Option<P>>, s: &mut [Option<P>]) {
+    if let Some((Some(p), rest)) = v.split_first_mut() { p.pm(); }
+    match s.split_last_mut() {
+        Some((Some(q), rest)) => { q.pm(); }
+        _ => {}
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    calls = [
+        call for call in report.calls
+        if raw[call.span.start:call.span.end].decode() in {"p.pm()", "q.pm()"}
+    ]
+    assert len(calls) == 2
+    for call in calls:
+        assert call.target == pm.id
