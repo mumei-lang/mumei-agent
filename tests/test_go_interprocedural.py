@@ -6215,18 +6215,306 @@ def test_interface_dispatch_local_struct_pointer_value_stays_closed(
     )
 
 
-def test_interface_dispatch_field_method_value_stays_closed(
-    go_types_helper,
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(
+            "type I interface{ M(int64) int64 }\n"
+            "type W struct{ i I }\n"
+            "func F(w *W, x int64) int64 { f := w.i.M; return f(x) }\n",
+            id="pointer-root",
+        ),
+        pytest.param(
+            "type I interface{ M(int64) int64 }\n"
+            "type T struct{}\n"
+            "func (T) M(x int64) int64 { return x }\n"
+            "type W struct{ i I }\n"
+            "func F(x int64) int64 { "
+            "w := W{i: T{}}; f := w.i.M; return f(x) }\n",
+            id="local-struct-root",
+        ),
+        pytest.param(
+            "type I interface{ M(int64) int64 }\n"
+            "type W struct{ i I }\n"
+            "func F(w W, x int64) int64 { "
+            "f := w.i.M; go f(x); return 0 }\n",
+            id="go-call",
+        ),
+        pytest.param(
+            "type I interface{ M(int64) int64 }\n"
+            "type W struct{ i I }\n"
+            "func F(w W, x int64) int64 { "
+            "f := w.i.M; defer f(x); return 0 }\n",
+            id="defer-call",
+        ),
+        pytest.param(
+            "type I interface{ M(int64) int64 }\n"
+            "type W struct{ i I }\n"
+            "func G(f func(int64) int64, x int64) int64 { return f(x) }\n"
+            "func F(w W, x int64) int64 { return G(w.i.M, x) }\n",
+            id="passed-as-argument",
+        ),
+        pytest.param(
+            "type I interface{ M(int64) int64 }\n"
+            "type W struct{ i I }\n"
+            "func F(w W, x int64) int64 { "
+            "f := w.i.M; g := func() int64 { return f(x) }; return g() }\n",
+            id="closure-capture",
+        ),
+        pytest.param(
+            "type I interface{ M(int64) int64 }\n"
+            "func F(is []I, x int64) int64 { "
+            "f := is[0].M; return f(x) }\n",
+            id="element-receiver",
+        ),
+    ],
+)
+def test_interface_field_method_values_stay_closed_outside_value_parameters(
+    go_types_helper, source
 ):
-    declarations = (
+    result = named(*unit(go_types_helper, source))
+    assert not result.available
+
+
+@pytest.mark.parametrize(
+    ("binding", "value_result", "direct_result"),
+    [
+        ("f := w.i.M", "return f(x)", "return w.i.M(x)"),
+        ("var f = w.i.M", "return f(x)", "return w.i.M(x)"),
+        (
+            "var f func(int64) int64 = w.i.M",
+            "return f(x)",
+            "return w.i.M(x)",
+        ),
+        (
+            "var f func(int64) int64; f = w.i.M",
+            "return f(x)",
+            "return w.i.M(x)",
+        ),
+        (
+            "var f, g = w.i.M, w.i.M",
+            "return f(x) + g(x)",
+            "return w.i.M(x) + w.i.M(x)",
+        ),
+        (
+            "var f, g func(int64) int64; f, g = w.i.M, w.i.M",
+            "return f(x) + g(x)",
+            "return w.i.M(x) + w.i.M(x)",
+        ),
+    ],
+    ids=[
+        "short-declaration",
+        "var-inferred-type",
+        "var-explicit-type",
+        "assignment",
+        "multi-name-var",
+        "multi-assignment",
+    ],
+)
+def test_interface_field_method_value_bindings_match_direct_dispatch(
+    go_types_helper, binding, value_result, direct_result
+):
+    source, snapshot, summaries = unit(
+        go_types_helper,
         "type I interface{ M(int64) int64 }\n"
         "type W struct{ i I }\n"
-        "func F(w W, x int64) int64 { f := w.i.M; return f(x) }\n"
+        "func F(w W, x int64) int64 { "
+        f"{binding}; {value_result} }}\n"
+        "func D(w W, x int64) int64 { "
+        f"{direct_result} }}\n",
     )
-    result = named(*unit(go_types_helper, declarations))
-    assert not result.available
-    assert any(
-        gap.reason == "non_parameter_reference" for gap in result.gaps
+    value = named(source, snapshot, summaries, "F")
+    direct = named(source, snapshot, summaries, "D")
+    assert value.available, value.gaps
+    assert direct.available, direct.gaps
+    assert value.return_dependencies == direct.return_dependencies
+    assert value.return_dependencies == frozenset({0, 1})
+    assert value.effects == direct.effects == "unknown"
+    value_calls = [
+        (call.arguments, call.result, call.imported)
+        for call in value.calls
+    ]
+    direct_calls = [
+        (call.arguments, call.result, call.imported)
+        for call in direct.calls
+    ]
+    assert len(value_calls) == len(direct_calls)
+    assert [call[1:] for call in value_calls] == [
+        call[1:] for call in direct_calls
+    ]
+    if len(value_calls) == 1:
+        assert value_calls == direct_calls
+    else:
+        assert all(call[0][0] >= frozenset({0}) for call in value_calls)
+        assert all(call[0][1] == frozenset({1}) for call in value_calls)
+
+
+def test_interface_field_method_value_matches_direct_nested_dispatch(
+    go_types_helper,
+):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "type I interface{ M(int64) int64 }\n"
+        "type W struct{ i I }\n"
+        "type WW struct{ w W }\n"
+        "func F(w WW, x int64) int64 { "
+        "f := w.w.i.M; return f(x) }\n"
+        "func D(w WW, x int64) int64 { return w.w.i.M(x) }\n",
+    )
+    value = named(source, snapshot, summaries, "F")
+    direct = named(source, snapshot, summaries, "D")
+    assert value.available, value.gaps
+    assert direct.available, direct.gaps
+    assert value.return_dependencies == direct.return_dependencies
+    assert value.return_dependencies == frozenset({0, 1})
+    assert value.effects == direct.effects == "unknown"
+    assert [
+        (call.arguments, call.result, call.imported)
+        for call in value.calls
+    ] == [
+        (call.arguments, call.result, call.imported)
+        for call in direct.calls
+    ]
+    type_ids = {
+        binding.name: binding.id
+        for binding in snapshot.bindings
+        if binding.kind == "type" and binding.name in {"I", "W", "WW"}
+    }
+    assert set(type_ids.values()) <= set(value.pinned)
+
+
+def test_interface_field_method_value_freezes_receiver_dependencies(
+    go_types_helper,
+):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "type I interface{ M(int64) int64 }\n"
+        "type W struct{ i I }\n"
+        "func F(w, w2 W, x int64) int64 { "
+        "f := w.i.M; w = w2; return f(x) }\n",
+    )
+    result = named(source, snapshot, summaries, "F")
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 2})
+    root_id = next(
+        binding.id
+        for binding in snapshot.bindings
+        if binding.name == "w" and binding.scope is not None
+    )
+    transfer = next(
+        call for call in result.calls if call.target == root_id
+    )
+    assert transfer.arguments == (frozenset({0}), frozenset({2}))
+
+
+def test_interface_field_method_value_pointer_argument_matches_direct(
+    go_types_helper,
+):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "type I interface{ M(*int64) }\n"
+        "type W struct{ i I }\n"
+        "func F(w W, x int64) int64 { "
+        "y := x; f := w.i.M; f(&y); return y }\n"
+        "func D(w W, x int64) int64 { "
+        "y := x; w.i.M(&y); return y }\n",
+    )
+    value = named(source, snapshot, summaries, "F")
+    direct = named(source, snapshot, summaries, "D")
+    assert value.available, value.gaps
+    assert direct.available, direct.gaps
+    assert value.return_dependencies == direct.return_dependencies
+    assert value.return_dependencies == frozenset({0, 1})
+    assert value.effects == direct.effects == "unknown"
+    assert [
+        (call.arguments, call.result, call.imported)
+        for call in value.calls
+    ] == [
+        (call.arguments, call.result, call.imported)
+        for call in direct.calls
+    ]
+
+
+def test_interface_field_method_value_slice_argument_matches_direct(
+    go_types_helper,
+):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "type I interface{ M([]int64) }\n"
+        "type W struct{ i I }\n"
+        "func F(w W, x int64) int64 { "
+        "b := []int64{x}; f := w.i.M; f(b); return b[0] }\n"
+        "func D(w W, x int64) int64 { "
+        "b := []int64{x}; w.i.M(b); return b[0] }\n",
+    )
+    value = named(source, snapshot, summaries, "F")
+    direct = named(source, snapshot, summaries, "D")
+    assert value.available, value.gaps
+    assert direct.available, direct.gaps
+    assert value.return_dependencies == direct.return_dependencies
+    assert 1 in value.return_dependencies
+    assert value.effects == direct.effects == "unknown"
+    assert [
+        (call.arguments, call.result, call.imported)
+        for call in value.calls
+    ] == [
+        (call.arguments, call.result, call.imported)
+        for call in direct.calls
+    ]
+
+
+@pytest.mark.parametrize("redeclared", ["W", "I", "R"])
+def test_interface_field_method_value_pins_field_and_signature_types(
+    go_types_helper, redeclared
+):
+    files = {
+        "a.go": (
+            "package p\n"
+            "func F(w W, x int64) int64 { "
+            "f := w.i.M; f(x); return x }\n"
+        ),
+        "i.go": (
+            "package p\n"
+            "type I interface{ M(int64) R }\n"
+        ),
+        "w.go": "package p\ntype W struct{ i I }\n",
+        "r.go": "package p\ntype R *int64\n",
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available, result.gaps
+    type_ids = {
+        binding.name: binding.id
+        for binding in snapshot.bindings
+        if binding.kind == "type" and binding.name in {"I", "R", "W"}
+    }
+    assert set(type_ids) == {"I", "R", "W"}
+    assert set(type_ids.values()) <= set(result.pinned)
+
+    changed = dict(files)
+    if redeclared == "W":
+        changed["w.go"] = "package p\n"
+        changed["w2.go"] = "package p\ntype W struct{ i I }\n"
+    elif redeclared == "I":
+        changed["i.go"] = "package p\n"
+        changed["i2.go"] = (
+            "package p\n"
+            "type I interface{ M(int64) R }\n"
+        )
+    else:
+        changed["r.go"] = "package p\n"
+        changed["r2.go"] = "package p\ntype R *int64\n"
+    snapshot2 = _snapshot_for(go_types_helper, changed)
+    known = {binding.id for binding in snapshot2.bindings}
+    function_id = next(
+        function.binding_id
+        for function in snapshot.functions
+        if snapshot.binding(function.binding_id).name == "F"
+    )
+    assert type_ids[redeclared] not in known
+    assert summaries.stale_dependents(known) == frozenset(
+        {function_id}
     )
 
 
@@ -6668,13 +6956,6 @@ def test_interface_method_value_binding_pins_stale_dependents(
             "type I interface{ M(int64) int64 }\n"
             "func F(mk func() I, x int64) int64 { "
             "f := mk().M; return f(x) }",
-            "non_parameter_reference",
-        ),
-        (
-            "type I interface{ M(int64) int64 }\n"
-            "type S struct{ i I }\n"
-            "func F(s S, x int64) int64 { "
-            "f := s.i.M; return f(x) }",
             "non_parameter_reference",
         ),
         (

@@ -5040,10 +5040,10 @@ on interface-typed parameters and their plain copies with integer,
 boolean or pointer results. Receivers may also be selector chains
 through non-pointer named-struct fields rooted at a value-struct
 parameter and ending at an interface field, or a `direct_import` call
-result whose expression is representable. Local-struct and
+result whose expression is representable. Method-value bindings on
+those parameter field chains are admitted too. Local-struct and
 package-variable roots, pointer roots or crossings, element receivers,
-local call results and type assertions stay closed; method-value
-bindings on field chains stay closed too. Interface results,
+local call results and type assertions stay closed. Interface results,
 concrete-to-interface uses and promoted methods stay closed.
 Defined-from-struct and imported-struct roots stay closed.
 An interface method value (`f := i.M`) and a named interface method
