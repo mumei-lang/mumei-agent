@@ -2723,3 +2723,43 @@ contract B {
     assert len(call_refs) == 1
     bound = next(b for b in f_overloads if b.id == call_refs[0].binding_id)
     assert bound is f_overloads[0]
+
+
+def test_member_call_on_mapping_getter_contract_value_binds():
+    source = """
+contract Token { function transfer(uint256 a) external {} }
+contract Vault {
+    mapping(uint256 => Token) public byId;
+    function run() external { this.byId(0).transfer(1); }
+}
+"""
+    report = build_sol_bindings(source)
+    # The getter's peeled value type is `Token` — its member call
+    # binds as solc resolves it.
+    transfer = next(b for b in report.bindings if b.name == "transfer")
+    assert any(
+        ref.binding_id == transfer.id and ref.kind == "call"
+        for ref in report.references
+    )
+
+
+def test_using_on_mapping_getter_enum_value_binds():
+    source = """
+enum Status { Ready, Done }
+library L {
+    function f(Status s, uint256 x) internal pure returns (uint256) {}
+}
+contract Vault {
+    using L for Status;
+    mapping(uint256 => Status) public states;
+    function run() external { this.states(0).f(1); }
+}
+"""
+    report = build_sol_bindings(source)
+    # `this.states(k)` returns `Status` — the enum-typed extension
+    # applies (a getter explodes only struct values into tuples).
+    f = next(b for b in report.bindings if b.name == "f")
+    assert any(
+        ref.binding_id == f.id and ref.kind == "call"
+        for ref in report.references
+    )

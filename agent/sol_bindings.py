@@ -1166,37 +1166,21 @@ class _SolBindings:
                         if child.type == "call_argument"
                     )
                     for _ in range(args):
-                        mapping_value = self._mapping_value_type_text(
-                            text
-                        )
-                        if mapping_value is not None:
-                            # `this.balances(k)` returns the mapping's
-                            # value type.
-                            text = mapping_value
-                            continue
-                        stripped = re.sub(
-                            r"\[[^\]]*\]\s*$", "", text
-                        ).strip()
-                        if stripped == text:
-                            if text == "bytes":
-                                stripped = "bytes1"
-                            else:
-                                break
-                        text = stripped
-                # A public getter on a struct/enum-typed member returns
-                # the exploded fields, not the type — no extension
-                # target exists for the tuple.
-                resolved = self._type_record_for_type_node(
-                    record.type_node, record.owner
+                        peeled = self._index_value_type_text(text)
+                        if peeled is None:
+                            break
+                        text = peeled
+                # A public getter on a struct-typed member — directly or
+                # as a mapping's value — returns the exploded fields as
+                # a tuple, not the type, so no extension target exists.
+                # An enum value comes back as the enum type itself.
+                resolved = self._user_type_record(
+                    text, record.owner, record.node.start_byte
                 )
-                if resolved is None:
-                    resolved, _reason = self._lookup(
-                        text, record.node.start_byte, "type"
-                    )
-                if resolved is not None and resolved.binding.kind in {
-                    "struct",
-                    "enum",
-                }:
+                if (
+                    resolved is not None
+                    and resolved.binding.kind == "struct"
+                ):
                     return None
                 return text, record.owner
             function_node = record.node.parent
@@ -1771,15 +1755,43 @@ class _SolBindings:
                 # declared type. Function-typed variables (`cb(t)`)
                 # would root at the signature's first identifier. A
                 # struct-typed public getter returns the exploded
-                # fields, not the struct, and an enum-typed value is
-                # not callable, so neither carries a member surface.
+                # fields as a tuple, so it carries no member surface;
+                # an enum value comes back as the enum type itself.
+                text = self.text(record.type_node)
+                if callee.type == "member_expression":
+                    # An indexable member's getter peels one level per
+                    # index argument (`this.tokens(k)` on
+                    # `mapping(uint => Token)` returns `Token`), the
+                    # same peel `_object_declared_type_text` applies.
+                    args = sum(
+                        1
+                        for child in self.children(call)
+                        if child.type == "call_argument"
+                    )
+                    peeled = False
+                    for _ in range(args):
+                        value = self._index_value_type_text(text)
+                        if value is None:
+                            break
+                        text = value
+                        peeled = True
+                    if peeled:
+                        resolved = self._user_type_record(
+                            text, record.owner, call.start_byte
+                        )
+                        if (
+                            resolved is not None
+                            and resolved.binding.kind == "struct"
+                        ):
+                            return None
+                        return resolved
                 resolved = self._type_record_for_type_node(
                     record.type_node, record.owner
                 )
-                if resolved is not None and resolved.binding.kind in {
-                    "struct",
-                    "enum",
-                }:
+                if (
+                    resolved is not None
+                    and resolved.binding.kind == "struct"
+                ):
                     return None
                 return resolved
             return None
