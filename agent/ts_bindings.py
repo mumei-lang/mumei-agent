@@ -1335,10 +1335,24 @@ class _TypeScriptBindings:
 
     def _type_record_by_id(self, binding_id_value: str) -> _Record | None:
         for record in self.records:
-            if record.binding.id == binding_id_value and (
-                record.class_like or record.binding.kind == "namespace"
-            ):
+            if record.binding.id != binding_id_value:
+                continue
+            if record.class_like or record.binding.kind == "namespace":
                 return record
+            # Aliases are transparent for member resolution — `x: T`
+            # with `type T = C` types `x` as `C`. Cyclic aliases leave
+            # the fact `unknown`, which stays unresolvable.
+            if (
+                record.binding.kind == "type_alias"
+                and record.alias_node is not None
+            ):
+                fact = self._type_fact(record.alias_node)
+                if (
+                    fact.kind == "named"
+                    and fact.type_id != binding_id_value
+                ):
+                    return self._type_record_by_id(fact.type_id)
+            return None
         return None
 
     def _type_record_for_node(self, decl_node: Any | None) -> _Record | None:

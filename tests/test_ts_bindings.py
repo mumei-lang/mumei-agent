@@ -2178,3 +2178,35 @@ let z: N.Inner.B = null as any; z.m();
     assert call.target is None or call.kind == "opaque_method"
     unresolved = [u for u in report.unresolved if source[u.span.start : u.span.end] == "N.Inner.B"]
     assert unresolved
+
+
+def test_member_qualified_alias_annotation_resolves_through_alias():
+    # `N.T` aliasing class `C` types `x` as `C` — the alias is
+    # transparent for member resolution, so `x.m()` reaches `C.m`.
+    source = """
+namespace N { class C { m(): void {} } export type T = C }
+const x: N.T = null as any; x.m();
+"""
+    report = build_ts_bindings(source)
+    member_m = _member_bindings(report, "m", "associated_function")[0]
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == "x.m()"
+    )
+    assert call.target == member_m.id
+
+
+def test_member_qualified_alias_annotation_keeps_initializer_inference():
+    # A named-alias annotation must not block initializer inference:
+    # `new C()` still types `x` as `C` when the alias resolves nowhere.
+    source = """
+class C { m(): void {} }
+const x: Missing.T = new C(); x.m();
+"""
+    report = build_ts_bindings(source)
+    member_m = _member_bindings(report, "m", "associated_function")[0]
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == "x.m()"
+    )
+    assert call.target == member_m.id
