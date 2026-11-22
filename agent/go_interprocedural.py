@@ -12433,9 +12433,23 @@ class _Builder:
             roots = frozenset()
             star = captures_pointer or star_write or has_call
         local_param_ids = set(locals_) | set(params)
+        argument_roots: set[str] = set()
+        if arguments is not None:
+            for argument in _children(arguments):
+                fact = self._deferred_expression_type(argument)
+                if (
+                    fact is not None
+                    and not self._scalar_value_fact(fact)
+                ):
+                    root_id = self._deferred_root_binding(
+                        argument, params, locals_
+                    )
+                    if root_id is not None:
+                        argument_roots.add(root_id)
         touched = (
             set(captured | writes | roots) & local_param_ids
         )
+        opaque_touched = touched | (argument_roots & local_param_ids)
         reference_involved = star or bool(roots)
         if arguments is not None:
             reference_involved |= any(
@@ -12620,9 +12634,27 @@ class _Builder:
                             (star and self.escaped)
                             or any(
                                 binding_id in self.escaped
-                                or binding_id
-                                in self.external_chan_locals
-                                for binding_id in touched
+                                or binding_id in self.external_chan_locals
+                                or (
+                                    (
+                                        binding := self.bindings.get(
+                                            binding_id
+                                        )
+                                    )
+                                    is None
+                                    or not self._scalar_value_fact(
+                                        binding.type
+                                    )
+                                )
+                                and not (
+                                    binding_id not in params
+                                    and binding is not None
+                                    and binding.type is not None
+                                    and binding.type.kind == "chan"
+                                    and binding_id
+                                    not in self.external_chan_locals
+                                )
+                                for binding_id in opaque_touched
                             )
                         ):
                             return True

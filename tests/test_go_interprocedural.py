@@ -18739,6 +18739,55 @@ def test_opaque_func_call_still_closes_for_escaped_touched_binding(
 
 
 @pytest.mark.parametrize(
+    "source",
+    [
+        (
+            "func F(b []int64, f func(int64), x int64) int64 { "
+            "w := int64(0); g := func() { w = b[0] }; "
+            "go g(); f(x); return w }"
+        ),
+        (
+            "func F(b []int64, f func(int64), x int64) int64 { "
+            "w := int64(0); go func() { w = b[0] }(); "
+            "f(x); return w }"
+        ),
+        (
+            "func F(b []int64, f func(int64), x int64) int64 { "
+            "ch := make(chan int64, 1); "
+            "go func() { ch <- b[0] }(); "
+            "f(x); return <-ch }"
+        ),
+        (
+            "func rd(ch chan int64, b []int64) { ch <- b[0] }\n"
+            "func F(b []int64, f func(int64), x int64) int64 { "
+            "ch := make(chan int64, 1); go rd(ch, b); "
+            "f(x); return <-ch }"
+        ),
+        (
+            "func rd(ch chan int64, m map[int64]int64) { "
+            "ch <- m[0] }\n"
+            "func F(m map[int64]int64, f func(int64), x int64) int64 { "
+            "ch := make(chan int64, 1); go rd(ch, m); "
+            "f(x); return <-ch }"
+        ),
+    ],
+    ids=[
+        "bound-literal-slice-read",
+        "immediate-literal-slice-read",
+        "channel-literal-slice-read",
+        "named-slice-read",
+        "named-map-read",
+    ],
+)
+def test_opaque_func_call_closes_for_shared_reference_touched_by_go(
+    go_types_helper, source
+):
+    result = named(*unit(go_types_helper, source))
+    assert not result.available
+    assert result.gaps[0].reason == "unsupported_statement"
+
+
+@pytest.mark.parametrize(
     "body",
     [
         "g := func() { ch <- x }; g(); return <-ch",
