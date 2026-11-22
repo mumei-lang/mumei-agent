@@ -96,6 +96,7 @@ def _run(paths, *extra):
         "PYTHONPATH": str(REPO_ROOT),
         "PATH": "/usr/bin:/bin",
         "MUMEI_TEST_SECRET": SECRET,
+        "MUMEI_TEST_FAKE_SENTINEL": "not-a-secret-sentinel",
     }
     out = subprocess.run(
         [
@@ -290,6 +291,22 @@ def test_declared_success_exit_code_selects_nonzero_exit(tmp_path):
     assert doc["selected_adapter_id"] == "alpha"
     assert [a["adapter_id"] for a in doc["attempts"]] == ["alpha"]
     assert doc["attempts"][0]["exit_code"] == 7
+
+
+def test_verify_schedule_does_not_pass_environment_to_undeclared_adapter(
+    tmp_path,
+):
+    paths = _base(
+        tmp_path,
+        argv_alpha=stub_argv(
+            "--require-env", "MUMEI_TEST_FAKE_SENTINEL"
+        ),
+    )
+
+    doc = _doc(_run(paths))
+
+    assert doc["selected_adapter_id"] == "alpha"
+    assert doc["attempts"][0]["exit_code"] == 0
 
 
 def test_invalid_settings_fail_statically(tmp_path):

@@ -59,6 +59,27 @@ NOT_DISPATCHED = "not_dispatched"
 _MAX_LABEL = 128
 
 
+def _minimal_environment() -> dict[str, str]:
+    environment = {}
+    if "PATH" in os.environ:
+        environment["PATH"] = os.environ["PATH"]
+    if os.name == "nt" and "SYSTEMROOT" in os.environ:
+        environment["SYSTEMROOT"] = os.environ["SYSTEMROOT"]
+    return environment
+
+
+def _adapter_environment(plan: VerificationPlan) -> dict[str, str] | None:
+    required = plan.selected.required_permissions
+    allowed = plan.policy.allowed_permissions
+    if (
+        required is not None
+        and "environment.read" in required
+        and (allowed is None or "environment.read" in allowed)
+    ):
+        return None
+    return _minimal_environment()
+
+
 def _label(value: str) -> None:
     if (
         type(value) is not str
@@ -498,6 +519,7 @@ def run_attempt_schedule(
                 # No declared feed means a closed pipe — a scheduled child
                 # must never inherit the parent's stdin and block on it.
                 feed_bytes=feed if feed is not None else b"",
+                environment=_adapter_environment(plan),
             )
             sequences.append(dispatch.sequence)
             record = dispatch.run.record

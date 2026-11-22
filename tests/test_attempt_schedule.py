@@ -10,8 +10,10 @@ from agent.attempt_schedule import (
     MAX_SCHEDULE_ATTEMPTS,
     SCHEDULE_SCHEMA_VERSION,
     AttemptScheduleResult,
+    _adapter_environment,
     run_attempt_schedule,
 )
+from agent.verification_attempt import AttemptExecutionRequest
 from agent.verification_planner import (
     AdapterDescriptor,
     AdapterRegistry,
@@ -34,7 +36,17 @@ def argv(code):
     return (PY, "-c", f"import sys; sys.exit({code})")
 
 
+def environment_probe(present):
+    return argv(
+        "0 if ('MUMEI_TEST_FAKE_SENTINEL' in __import__('os').environ) "
+        f"is {present} else 1"
+    )
+
+
 def descriptor(adapter_id, priority=0, **overrides):
+    required_permissions = overrides.pop(
+        "required_permissions", frozenset()
+    )
     return AdapterDescriptor(
         adapter_id,
         "1.0.0",
@@ -43,7 +55,7 @@ def descriptor(adapter_id, priority=0, **overrides):
         priority=priority,
         result_contracts=(CONTRACT,),
         input_formats=frozenset({SOURCE_INPUT_FORMAT}),
-        required_permissions=frozenset(),
+        required_permissions=required_permissions,
         **overrides,
     )
 
@@ -101,6 +113,64 @@ def test_first_adapter_success_selects_without_fallback():
     doc = result.to_dict()
     assert doc["schema_version"] == SCHEDULE_SCHEMA_VERSION
     assert SOURCE.decode() not in json.dumps(doc) + repr(result)
+
+
+def test_schedule_scrubs_environment_without_environment_permission(monkeypatch):
+    monkeypatch.setenv("MUMEI_TEST_FAKE_SENTINEL", "not-a-secret-sentinel")
+    registry = registry_with("alpha")
+
+    result = schedule(
+        registry,
+        ("alpha",),
+        {"alpha": environment_probe(False)},
+    )
+
+    assert result.outcome == "selected"
+    assert result.entries[0].exit_code == 0
+
+
+def test_schedule_inherits_environment_when_permission_is_allowed(monkeypatch):
+    monkeypatch.setenv("MUMEI_TEST_FAKE_SENTINEL", "not-a-secret-sentinel")
+    registry = AdapterRegistry()
+    registry.register(
+        descriptor(
+            "alpha",
+            required_permissions=frozenset({"environment.read"}),
+        )
+    )
+
+    result = schedule(
+        registry,
+        ("alpha",),
+        {"alpha": environment_probe(True)},
+        policy=policy(allowed_permissions=frozenset({"environment.read"})),
+    )
+
+    assert result.outcome == "selected"
+    assert result.entries[0].exit_code == 0
+
+
+def test_schedule_helper_scrubs_environment_when_permissions_are_undeclared(
+    monkeypatch,
+):
+    monkeypatch.setenv("MUMEI_TEST_FAKE_SENTINEL", "not-a-secret-sentinel")
+    registry = AdapterRegistry()
+    registry.register(descriptor("alpha", required_permissions=None))
+    plan = registry.plan(
+        request(),
+        policy(allowed_permissions=None),
+        observations("alpha"),
+    )
+    environment = _adapter_environment(plan)
+    assert environment is not None
+
+    result = AttemptRunner().run(
+        AttemptExecutionRequest("c" * 64, 1, 10_000),
+        environment_probe(False),
+        environment=environment,
+    )
+
+    assert result.record.events[-1].exit_code == 0
 
 
 def test_failed_exit_falls_back_to_next_adapter():
