@@ -87,6 +87,9 @@ class _Record:
     member_static: bool = False
     member_visibility: str = "public"
     member_container: str | None = None
+    # Exported alias when a member is only reachable under a
+    # different name (`export {A as B}`); None otherwise.
+    member_alias: str | None = None
 
 
 @dataclass
@@ -1014,6 +1017,54 @@ class _TypeScriptBindings:
                         self._decl_qualified_name(decl)
                     )
             elif decl.type == "internal_module":
+                # Ambient namespaces export every member implicitly,
+                # at any depth — unless the body has an `export {…}`
+                # clause, which disables the implicit export. The
+                # clause is body-wide; collect it once per decl.
+                ambient = False
+                ancestor = decl.parent
+                while ancestor is not None:
+                    if ancestor.type == "ambient_declaration":
+                        ambient = True
+                        break
+                    ancestor = ancestor.parent
+                export_clause = False
+                exported_names: set[str] = set()
+                exported_aliases: dict[str, str] = {}
+                for statement in body.named_children:
+                    if statement.type != "export_statement":
+                        continue
+                    type_only = any(
+                        child.type == "type"
+                        for child in statement.children
+                    )
+                    for child in statement.children:
+                        if child.type != "export_clause":
+                            continue
+                        export_clause = True
+                        if type_only:
+                            continue
+                        for spec in child.named_children:
+                            if spec.type != "export_specifier" or any(
+                                part.type == "type"
+                                for part in spec.children
+                            ):
+                                continue
+                            local_name = spec.child_by_field_name("name")
+                            alias_node = spec.child_by_field_name("alias")
+                            if local_name is None:
+                                continue
+                            if alias_node is None:
+                                exported_names.add(
+                                    self.text(local_name)
+                                )
+                            else:
+                                exported_aliases[self.text(alias_node)] = (
+                                    self.text(local_name)
+                                )
+                if ambient and export_clause:
+                    ambient = False
+                alias_targets = set(exported_aliases.values())
                 for other in self.records:
                     if other is record or other.member_of is not None:
                         continue
@@ -1071,42 +1122,26 @@ class _TypeScriptBindings:
                         # private member. Ambient namespaces export
                         # every member implicitly, at any depth —
                         # unless the body has an `export {…}` clause,
-                        # which disables the implicit export.
-                        ambient = False
-                        ancestor = decl.parent
-                        while ancestor is not None:
-                            if ancestor.type == "ambient_declaration":
-                                ambient = True
-                                break
-                            ancestor = ancestor.parent
-                        export_clause = False
-                        exported_names: set[str] = set()
-                        for statement in body.named_children:
-                            if statement.type != "export_statement":
-                                continue
-                            for child in statement.children:
-                                if child.type == "export_clause":
-                                    export_clause = True
-                                    for spec in child.named_children:
-                                        if spec.type == "export_specifier":
-                                            local_name = (
-                                                spec.child_by_field_name(
-                                                    "name"
-                                                )
-                                            )
-                                            if local_name is not None:
-                                                exported_names.add(
-                                                    self.text(local_name)
-                                                )
-                        if ambient and export_clause:
-                            ambient = False
-                        other.member_visibility = (
-                            "public"
-                            if node.type == "export_statement"
+                        # which disables the implicit export. A member
+                        # exported under an alias (`export {A as B}`)
+                        # is reachable only through the alias.
+                        member_name = self.text(other.node)
+                        public = (
+                            node.type == "export_statement"
                             or ambient
-                            or self.text(other.node) in exported_names
-                            else "private"
+                            or member_name in exported_names
+                            or member_name in alias_targets
                         )
+                        other.member_visibility = (
+                            "public" if public else "private"
+                        )
+                        if member_name in alias_targets:
+                            other.member_alias = next(
+                                exported
+                                for exported, local
+                                in exported_aliases.items()
+                                if local == member_name
+                            )
                         other.member_container = (
                             self._decl_qualified_name(decl)
                         )
@@ -1181,7 +1216,8 @@ class _TypeScriptBindings:
                 if (
                     decl_id is None
                     or candidate.member_of != decl_id
-                    or candidate.binding.name != name
+                    or (candidate.member_alias or candidate.binding.name)
+                    != name
                 ):
                     continue
                 if (
@@ -1446,6 +1482,10 @@ class _TypeScriptBindings:
             if (
                 sibling is record
                 or sibling.binding.name != record.binding.name
+                or (
+                    sibling.member_of is not None
+                    and sibling.member_visibility == "private"
+                )
             ):
                 continue
             if not self._mergeable_kind_pair(

@@ -1544,10 +1544,65 @@ new M.E();
     d_rec = _member_bindings(report, "D", "ambient")
     e_rec = _member_bindings(report, "E", "ambient")
     assert c_rec and d_rec and e_rec
-    bound = {r.binding_id for r in report.references}
-    assert c_rec[0].id not in bound
-    assert e_rec[0].id not in bound
-    assert d_rec[0].id in bound
+    call_targets = {c.target for c in report.calls if c.target}
+    assert c_rec[0].id not in call_targets
+    assert e_rec[0].id not in call_targets
+    assert d_rec[0].id in call_targets
+
+
+def test_member_alias_export_resolves_under_exported_name():
+    # `export {A as B}` makes the member reachable only as `N.B` —
+    # `N.A` is private and a same-named sibling must not shadow it.
+    source = """
+declare namespace M {
+    export {Other as Inner};
+    class Other { m(): void }
+    class Inner { n(): void }
+}
+new M.Inner();
+new M.Other();
+"""
+    report = build_ts_bindings(source)
+    other = _member_bindings(report, "Other", "ambient")[0]
+    inner = _member_bindings(report, "Inner", "ambient")[0]
+    call_targets = {c.target for c in report.calls if c.target}
+    assert other.id in call_targets
+    assert inner.id not in call_targets
+
+
+def test_member_type_only_export_stays_private_for_values():
+    # `export type {Inner}` / `export {type Inner}` export no value:
+    # `N.Inner.f()` is a TS2339 error and must not resolve.
+    source = """
+declare namespace M {
+    export type {Inner};
+    namespace Inner { function f(): void; }
+}
+declare namespace K {
+    export {type Inner};
+    namespace Inner { function f(): void; }
+}
+M.Inner.f();
+K.Inner.f();
+"""
+    report = build_ts_bindings(source)
+    assert not [r for r in report.references if r.kind == "call"]
+
+
+def test_member_private_split_block_does_not_merge():
+    # A non-exported `namespace Inner` is a distinct symbol — its
+    # members do not merge into the public same-named namespace.
+    source = """
+namespace N { namespace Inner { export function f(): void {} } }
+namespace N { export namespace Inner { export function g(): void {} } }
+N.Inner.f();
+N.Inner.g();
+"""
+    report = build_ts_bindings(source)
+    g_rec = _member_bindings(report, "g", "function")
+    assert g_rec
+    call_targets = {c.target for c in report.calls if c.target}
+    assert call_targets == {g_rec[0].id}
 
 
 def test_member_bare_inner_namespace_in_ambient():
