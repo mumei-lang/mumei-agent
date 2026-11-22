@@ -1069,6 +1069,18 @@ class _RustBindings:
                 if key is not None:
                     args = key
             node = node.child_by_field_name("type")
+        if node is not None and node.type in {
+            "slice_type",
+            "array_type",
+        }:
+            # Index receivers read the element type out of `args` —
+            # `[P]` and `[P; N]` both expose `P`.
+            element = node.child_by_field_name("element")
+            if element is None:
+                return None, None
+            return None, re.sub(
+                r"\s+", " ", self.text(element)
+            ).strip()
         if node is not None and node.type == "scoped_type_identifier":
             record = self._scoped_type(node)
             return (None if record is None else record.binding.id), None
@@ -1508,11 +1520,24 @@ class _RustBindings:
             _, elem_args = self._receiver_type(children[0])
             if elem_args is None or "," in elem_args:
                 return None, None
+            elem_args = elem_args.strip()
+            # A slice or array element exposes its own element type —
+            # `&[[P; 2]]` indexes first to `[P; 2]`, then to `P`.
+            bracket = re.fullmatch(
+                r"\[(.+?)(?:\s*;.+)?\]", elem_args
+            )
+            if bracket is not None:
+                # The element is an anonymous slice/array — `v[i]` has
+                # that anonymous type, indexed further by its own
+                # element (`[P; 2]` → `P`), not `P` itself.
+                return None, bracket.group(1).strip()
             match = re.fullmatch(
-                r"([A-Za-z_][\w:]*)\s*(?:<(.+)>)?", elem_args.strip()
+                r"([A-Za-z_][\w:]*)\s*(?:<(.+)>)?", elem_args
             )
             if match is None:
-                return None, None
+                # The element is a reference or composite type —
+                # keep its text so deeper indexing still reads args.
+                return None, elem_args
             elem = self._lookup(
                 self._normalize_identifier(match.group(1)),
                 node.start_byte,

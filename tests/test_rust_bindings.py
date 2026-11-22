@@ -2643,3 +2643,22 @@ fn f(m: HashMap<u32, P>) { m[&0].q(); }
     call = _call(report, source, "m[&0].q()")
     assert call.kind == "opaque_method"
     assert call.target == ""
+
+
+def test_index_receiver_slice_and_array_element_types():
+    # `&[P]` and `[P; N]` index to `P`; a nested `[P; 2]` element is
+    # an anonymous type that keeps indexing to `P` without gaining
+    # `P`'s own members at the first level.
+    source = """
+struct P { }
+impl P { fn m(&self) {} }
+fn f(v: &[P]) { v[0].m(); }
+fn g(v: &[[P; 2]]) { v[0][1].m(); }
+fn h(v: &[[P; 2]]) { v[0].m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    member_m = _bindings(report, "m", "associated_function")[0]
+    calls = [c for c in report.calls]
+    assert calls[0].target == member_m.id
+    assert calls[1].target == member_m.id
+    assert calls[2].target == ""
