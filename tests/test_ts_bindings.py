@@ -1096,3 +1096,16 @@ function go(s: Shape) { s.base(); s.area(); }
     area = _member_bindings(report, "area", "associated_function")[0]
     targets = {c.target for c in report.calls}
     assert base.id in targets and area.id in targets
+
+
+def test_member_access_walks_dotted_base_chain():
+    source = """
+namespace Lib { export class Base { base(): void {} } }
+class C extends Lib.Base { run(): void { this.base(); } }
+"""
+    report = build_ts_bindings(source)
+    base = _member_bindings(report, "base", "associated_function")[0]
+    assert any(
+        c.kind == "direct_local" and c.target == base.id
+        for c in report.calls
+    )

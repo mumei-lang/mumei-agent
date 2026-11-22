@@ -911,7 +911,7 @@ class _TypeScriptBindings:
                         for name_node in self.children(clause):
                             text = self.text(name_node).strip()
                             match = re.match(
-                                r"[A-Za-z_$][A-Za-z0-9_$]*", text
+                                r"[A-Za-z_$][A-Za-z0-9_$.]*", text
                             )
                             if match:
                                 bases.append(match.group(0))
@@ -1089,11 +1089,27 @@ class _TypeScriptBindings:
                 return candidate
             if decl_id is not None:
                 for base in self._type_bases.get(decl_id, ()):
-                    base_record = self._lookup(base, position, "type")
+                    base_record = self._base_type_record(base, position)
                     if base_record is not None:
                         queue.append(base_record)
             first = False
         return None
+
+    def _base_type_record(
+        self, base: str, position: int
+    ) -> _Record | None:
+        """Resolve an extends/implements spelling, incl. `N.Base` chains."""
+        segments = base.split(".")
+        record = self._lookup(segments[0], position, "type")
+        if record is None:
+            record = self._lookup(segments[0], position, "value")
+        for segment in segments[1:]:
+            if record is None:
+                return None
+            record = self._member_lookup(
+                record, segment, position, static=True, via_this=False
+            )
+        return record
 
     def _callee_return_node(self, node: Any) -> Any | None:
         """Return-type annotation node of a call's resolved callee."""
@@ -1197,7 +1213,7 @@ class _TypeScriptBindings:
             for base in self._type_bases.get(
                 None if decl is None else decl.id, ()
             )[:1]:
-                base_record = self._lookup(base, position, "type")
+                base_record = self._base_type_record(base, position)
                 if base_record is not None:
                     return base_record, False, True
             return None, False, True
