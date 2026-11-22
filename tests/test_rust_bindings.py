@@ -2068,3 +2068,33 @@ fn f() { let p: P; p.m(); }
     call = _call(report, source, "p.m()")
     assert call.kind == "opaque_method"
     assert call.target == ""
+
+
+def test_trait_default_does_not_apply_to_other_specialization():
+    source = """
+trait T { fn m(&self) {} }
+struct W<T>(T);
+impl T for W<i32> {}
+fn f(w: W<u32>) { w.m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    call = _call(report, source, "w.m()")
+    assert call.kind == "opaque_method"
+    assert call.target == ""
+
+
+def test_trait_default_applies_to_matching_specialization():
+    source = """
+trait T { fn m(&self) {} }
+struct W<T>(T);
+impl T for W<i32> {}
+fn f(w: W<i32>) { w.m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    default_m = next(
+        b
+        for b in report.bindings
+        if b.name == "m" and b.span.start == source.index("fn m") + 3
+    )
+    call = _call(report, source, "w.m()")
+    assert call.target == default_m.id

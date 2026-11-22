@@ -173,7 +173,9 @@ class _RustBindings:
         self.gaps: list[Gap] = []
         self.scopes: list[_Scope] = []
         self.records: dict[str, _Record] = {}
-        self._type_impl_traits: dict[str, set[str]] = {}
+        self._type_impl_traits: dict[
+            str, list[tuple[str, str | None, bool]]
+        ] = {}
         self.current_function = ""
         self.call_owner = ""
         self.module_depth = 0
@@ -829,10 +831,14 @@ class _RustBindings:
                         elif member_of is not None:
                             # Record the `impl T for <type>` edge even
                             # when the impl block is empty, so the
-                            # trait's default members can apply.
+                            # trait's default members can apply. The
+                            # specialization args matter: `impl T for
+                            # W<i32>` does not implement T for `W<u32>`.
                             self._type_impl_traits.setdefault(
-                                member_of, set()
-                            ).add(member_trait)
+                                member_of, []
+                            ).append(
+                                (member_trait, member_args, member_generic)
+                            )
                 if body is not None:
                     self._scan_associated_container(
                         body,
@@ -1007,9 +1013,15 @@ class _RustBindings:
         # Trait-declared defaults apply when an `impl T for <type>`
         # exists but does not spell `name` — they rank below both
         # inherent and trait-impl members of the type itself.
-        impl_traits = set(self._type_impl_traits.get(type_id, ()))
+        impl_traits = self._type_impl_traits.get(type_id, ())
         if impl_traits:
-            for trait_id in impl_traits:
+            for trait_id, edge_args, edge_generic in impl_traits:
+                if (
+                    edge_args is not None
+                    and not edge_generic
+                    and edge_args != impl_args
+                ):
+                    continue
                 trait = self.records.get(trait_id)
                 if trait is None:
                     continue
