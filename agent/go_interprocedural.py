@@ -12609,7 +12609,10 @@ class _Builder:
                     if (
                         parent is None
                         or parent.type != "send_statement"
-                        or parent.child_by_field_name("channel") != current
+                        or (
+                            parent.child_by_field_name("channel") != current
+                            and parent.child_by_field_name("value") != current
+                        )
                     ):
                         return False
                 return True

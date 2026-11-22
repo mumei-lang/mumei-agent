@@ -19253,6 +19253,51 @@ def test_go_channel_argument_send_only_controls_remain_available(
     assert result.return_dependencies == dependencies
 
 
+def test_go_channel_value_transfer_control_remains_available(
+    go_types_helper,
+):
+    source = (
+        "func put(q chan chan int64, c chan int64) { q <- c }\n"
+        "func F(x int64) int64 { "
+        "q := make(chan chan int64, 1); c := make(chan int64, 1); "
+        "go put(q, c); c <- x; return <-(<-q) }"
+    )
+    result = named(*unit(go_types_helper, source))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(
+            "func put(q chan chan int64, c chan int64) { q <- c }\n"
+            "func reader(q chan chan int64, out chan int64) { "
+            "out <- <-(<-q) }\n"
+            "func F(x int64) int64 { "
+            "q := make(chan chan int64, 1); c := make(chan int64, 1); "
+            "out := make(chan int64, 1); go put(q, c); "
+            "go reader(q, out); c <- x; return <-out }",
+            id="two-goroutines",
+        ),
+        pytest.param(
+            "func put(q chan chan int64, c chan int64) { "
+            "q <- c; _ = <-c }\n"
+            "func F(x int64) int64 { "
+            "q := make(chan chan int64, 1); c := make(chan int64, 1); "
+            "go put(q, c); c <- x; return <-(<-q) }",
+            id="mixed-send-value-and-receive",
+        ),
+    ],
+)
+def test_go_channel_value_transfer_races_remain_closed(
+    go_types_helper, source
+):
+    result = named(*unit(go_types_helper, source))
+    assert not result.available
+    assert result.gaps[0].reason == "unsupported_statement"
+
+
 @pytest.mark.parametrize(
     "body",
     [
