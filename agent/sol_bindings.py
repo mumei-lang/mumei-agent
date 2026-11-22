@@ -861,23 +861,15 @@ class _SolBindings:
             or record.binding.kind in {"contract", "interface", "library"}
         ):
             return None, None
-        # Normalize whitespace (`uint256 [ ]`) and the bare `uint`/`int`/
-        # `byte` spellings so they match their canonical directive
-        # target (`uint` is exactly `uint256` to solc).
-        type_text = re.sub(r"\s+", "", self.text(record.type_node))
-        alias = re.fullmatch(
-            r"(u?int|bytes)([0-9]*)", type_text
-        )
-        if alias is not None:
-            default = {"uint": "256", "int": "256", "bytes": "1"}
-            width = alias.group(2) or default[alias.group(1)]
-            type_text = f"{alias.group(1)}{width}"
+        type_text = self._canonical_type_text(self.text(record.type_node))
         directives = list(self.file_usings)
         if self.current_contract is not None:
             directives.extend(self.current_contract.usings)
+        candidates: list[_Record] = []
+        first_reason: str | None = None
         for directive in directives:
-            if directive.target and re.sub(
-                r"\s+", "", directive.target
+            if directive.target and self._canonical_type_text(
+                directive.target
             ) != type_text:
                 continue
             library = self.contracts.get(directive.library)
@@ -891,10 +883,35 @@ class _SolBindings:
                 allow_private_own=False,
             )
             if member_record is not None:
-                return member_record, None
-            if member_reason is not None:
-                return None, member_reason
-        return None, None
+                if all(
+                    candidate.binding.id != member_record.binding.id
+                    for candidate in candidates
+                ):
+                    candidates.append(member_record)
+            elif member_reason is not None and first_reason is None:
+                first_reason = member_reason
+        # solc picks the binding by implicit argument types; without
+        # argument typing a name declared by more than one applicable
+        # directive is an overload set the call resolves against, which
+        # stays opaque rather than binding to the first directive.
+        if len(candidates) > 1:
+            return None, "ambiguous_overload"
+        if candidates:
+            return candidates[0], None
+        return None, first_reason
+
+    def _canonical_type_text(self, text: str) -> str:
+        # Whitespace (`uint256 [ ]`) and the bare `uint`/`int`/`byte`
+        # spellings map to their canonical widths (`uint` is exactly
+        # `uint256`, `byte` is `bytes1` to solc); dynamic `bytes` is a
+        # distinct type and stays as written.
+        canonical = re.sub(r"\s+", "", text)
+        match = re.fullmatch(r"(u?int)([0-9]*)", canonical)
+        if match is not None:
+            return f"{match.group(1)}{match.group(2) or '256'}"
+        if canonical == "byte":
+            return "bytes1"
+        return canonical
 
     def _lookup(
         self, name: str, position: int, namespace: str = "value"
@@ -1212,8 +1229,9 @@ class _SolBindings:
 
     def _scan_using_refs(self, node: Any) -> None:
         # The library name in `using Lib for T` is a real reference to
-        # the library declaration; the `for` target is a type name the
-        # compiler does not bind, so only the library identifier emits.
+        # the library declaration, and a `for` target naming a
+        # user-defined type (`for Coin`) references its declaration;
+        # primitive targets carry no compiler reference.
         for child in self.children(node):
             if child.type in {"type_alias", "user_defined_type"}:
                 identifier = next(
@@ -1228,7 +1246,27 @@ class _SolBindings:
                     self._resolve_name(
                         identifier, namespace="type", reference_kind="read"
                     )
-                return
+            elif child.type == "type_name":
+                # The `for` target binds to its declaration only when
+                # it names a user-defined type (`for Coin`); primitive
+                # targets carry no compiler reference.
+                for descendant in self._walk(child):
+                    if descendant.type != "user_defined_type":
+                        continue
+                    identifier = next(
+                        (
+                            item
+                            for item in descendant.named_children
+                            if item.type == "identifier"
+                        ),
+                        None,
+                    )
+                    if identifier is not None:
+                        self._resolve_name(
+                            identifier,
+                            namespace="type",
+                            reference_kind="read",
+                        )
 
     def _record_for_declaration(self, node: Any) -> _Record | None:
         for record in self.records:

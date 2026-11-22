@@ -10,11 +10,19 @@ contract Base {
 library SafeMath {
     function add(uint256 a, uint256 b) internal pure returns (uint256) {}
 }
+struct Coin {
+    uint256 v;
+}
+library Stamps {
+    function stamp(Coin memory c) internal pure {}
+}
+using Stamps for Coin global;
 contract Vault is Base {
     using SafeMath for uint256;
     Token token;
     uint256[] values;
     uint256 total;
+    Coin coin;
     function run() external {
         token.transfer(address(0), 1);
         uint256 s = token.supply();
@@ -24,6 +32,7 @@ contract Vault is Base {
         super.baseFn();
         s = this.seed();
         total.add(s);
+        coin.stamp();
     }
     function vaultFn() public {}
 }

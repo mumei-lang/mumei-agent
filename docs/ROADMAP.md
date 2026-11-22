@@ -9707,9 +9707,13 @@ the member declarations.
 member: contract-body and file-level `using Lib for T` / `for *`
 directives are collected per contract and the member is looked up in
 the named library's scope when the object's declared type text equals
-the `for` target (bare `uint`/`int`/`bytes` spellings normalize to
-their canonical widths). The first matching directive whose library
-declares the member wins; a member that exists but is private reports
+the `for` target (bare `uint`/`int`/`byte` spellings normalize to
+their canonical widths — `uint`/`int` are `uint256`/`int256`, `byte`
+is `bytes1`; dynamic `bytes` is distinct). solc picks among several
+applicable directives by implicit argument types, which the lexical
+side does not model, so a name declared by more than one matching
+library reports `ambiguous_overload` rather than binding the first
+directive; a member that exists but is private reports
 `private_base_member`, and the library identifier inside the directive
 emits a `read` reference like any other type name. Declared members
 still win over directives, matching solc's lookup order. The aliased
@@ -9729,8 +9733,9 @@ while builtins (`.length`, `.push`, `msg.sender`) carry no
 `referencedDeclaration` and record as builtin references. The
 `member_access.sol` fixture exercises member calls, a public getter,
 builtin members, reassignment, `this.`/`super.`/inherited member
-calls, and a `using SafeMath for uint256` member call: 19 `agree` and
-5 `builtin` statuses against the lexical report's member resolution. Envelope shape, pinned-version allowlist
+calls, a `using SafeMath for uint256` member call and a file-level
+`using Stamps for Coin global` call: 25 `agree` and 5 `builtin`
+statuses against the lexical report's member resolution. Envelope shape, pinned-version allowlist
 and fail-closed boundary are unchanged. Metadata comparison only — no
 new capture surface, route or claim.
 

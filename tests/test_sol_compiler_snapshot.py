@@ -100,7 +100,7 @@ def _assert_rejected(envelope, source, *, raw=None):
         ),
         (
             "member_access",
-            ["agree"] * 8
+            ["agree"] * 12
             + ["builtin"]
             + ["agree"] * 4
             + ["builtin"] * 2
@@ -108,7 +108,7 @@ def _assert_rejected(envelope, source, *, raw=None):
             + ["builtin"]
             + ["agree"] * 2
             + ["builtin"]
-            + ["agree"] * 4,
+            + ["agree"] * 6,
         ),
     ],
 )
@@ -601,9 +601,10 @@ def test_member_access_declarations_match_lexical_member_bindings():
         item
         for item in comparison["references"]
         if item["name"]
-        in {"transfer", "supply", "vaultFn", "baseFn", "seed", "add"}
+        in {"transfer", "supply", "vaultFn", "baseFn", "seed", "add", "stamp"}
     ]
     assert [item["status"] for item in member_items] == [
+        "agree",
         "agree",
         "agree",
         "agree",

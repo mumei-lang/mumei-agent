@@ -1406,23 +1406,25 @@ def test_member_call_through_using_star_and_global_resolves():
     source = """
 library SafeMath {
     function add(uint256 a, uint256 b) internal pure returns (uint256) {}
-    function mark(Coin c) internal pure {}
 }
-using SafeMath for uint256 global;
 struct Coin { uint256 v; }
+library Stamps {
+    function stamp(Coin memory c) internal pure {}
+}
+using Stamps for Coin global;
 contract Vault {
     using SafeMath for *;
     uint256 total;
     Coin coin;
     function run() external {
         total.add(1);
-        coin.mark(coin);
+        coin.stamp();
     }
 }
 """
     report = build_sol_bindings(source)
-    mark = next(
-        binding for binding in report.bindings if binding.name == "mark"
+    stamp = next(
+        binding for binding in report.bindings if binding.name == "stamp"
     )
     add = next(
         binding for binding in report.bindings if binding.name == "add"
@@ -1432,8 +1434,84 @@ contract Vault {
         for ref in report.references
     )
     assert any(
+        ref.binding_id == stamp.id and ref.kind == "call"
+        for ref in report.references
+    )
+
+
+def test_using_uint_alias_matches_declared_uint256():
+    source = """
+library L {
+    function mark(uint256 a) internal pure {}
+}
+contract Vault {
+    using L for uint;
+    uint u;
+    function run() external { u.mark(); }
+}
+"""
+    report = build_sol_bindings(source)
+    mark = next(
+        binding for binding in report.bindings if binding.name == "mark"
+    )
+    assert any(
         ref.binding_id == mark.id and ref.kind == "call"
         for ref in report.references
+    )
+
+
+def test_using_for_dynamic_bytes_is_not_bytes1():
+    source = """
+library L {
+    function mark(bytes memory b) internal pure {}
+    function markByte(bytes1 b) internal pure {}
+}
+contract Vault {
+    using L for bytes;
+    bytes payload;
+    bytes1 tag;
+    function run() external {
+        payload.mark();
+        tag.markByte();
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    mark = next(
+        binding for binding in report.bindings if binding.name == "mark"
+    )
+    mark_byte = next(
+        binding
+        for binding in report.bindings
+        if binding.name == "markByte"
+    )
+    assert any(
+        ref.binding_id == mark.id and ref.kind == "call"
+        for ref in report.references
+    )
+    # `bytes` is dynamic, not `bytes1`: the directive does not cover
+    # `tag`, so its call stays opaque.
+    assert not any(
+        ref.binding_id == mark_byte.id and ref.kind == "call"
+        for ref in report.references
+    )
+
+
+def test_using_ambiguous_across_libraries_stays_opaque():
+    source = """
+library A { function f(uint256 a, bool b) internal pure {} }
+library B { function f(uint256 a, uint256 b) internal pure {} }
+contract Vault {
+    using A for uint256;
+    using B for uint256;
+    uint256 total;
+    function run() external { total.f(1); }
+}
+"""
+    report = build_sol_bindings(source)
+    assert _unresolved(report, "f", "ambiguous_overload")
+    assert not any(
+        ref.kind == "call" for ref in report.references
     )
 
 
