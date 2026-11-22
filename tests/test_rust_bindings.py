@@ -5719,3 +5719,17 @@ fn f(d: VecDeque<P>, m: HashMap<u32, P>) {
     ]
     assert len(calls) == 5
     assert [call.target for call in calls] == [m.id] * 5
+
+
+def test_for_element_resolves_at_receiver_annotation():
+    source = """
+struct Q;
+impl Q { fn qm(&self) {} }
+struct W<T> { xs: Vec<T> }
+fn f(w: W<Q>) {
+    for q in w.xs { q.qm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    qm = _bindings(report, "qm", "associated_function")[0]
+    assert _call(report, source, "q.qm()").target == qm.id
