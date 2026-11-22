@@ -1682,11 +1682,32 @@ class _TypeScriptBindings:
             # behind it — narrowing must not cross the nearest
             # declaration to reach a base type's method.
             return matches
+        owner_ids = {matches[0].member_of}
+        # Declaration merging splits one entity's members across
+        # several blocks; signatures on merge siblings of the nearest
+        # declaring block are overloads of the same member, not
+        # overrides hidden behind it.
+        owner_record = next(
+            (
+                record
+                for record in self.records
+                if record.node is not None
+                and record.node.parent is not None
+                and record.node.parent.id == matches[0].member_of
+            ),
+            None,
+        )
+        if owner_record is not None:
+            owner_ids.update(
+                sibling.node.parent.id
+                for sibling in self._merge_siblings(owner_record)
+                if sibling.node is not None and sibling.node.parent is not None
+            )
         signatures = [
             candidate
             for candidate in matches
             if candidate.function_node is not None
-            and candidate.member_of == matches[0].member_of
+            and candidate.member_of in owner_ids
         ]
         if len(signatures) < 2:
             return matches
@@ -1895,8 +1916,26 @@ class _TypeScriptBindings:
                 record is not None
                 and record.binding.kind == "generic_parameter"
             ):
-                # `T` accepts whatever the caller binds to it.
-                return True
+                # `T` accepts whatever its `extends` constraint
+                # accepts; an unconstrained parameter accepts
+                # anything the caller binds to it.
+                owner = record.node.parent if record.node is not None else None
+                constraint = (
+                    owner.child_by_field_name("constraint")
+                    if owner is not None and owner.type == "type_parameter"
+                    else None
+                )
+                if constraint is None:
+                    return True
+                inner = next(
+                    (
+                        child
+                        for child in self.children(constraint)
+                        if child.type != "extends"
+                    ),
+                    None,
+                )
+                return self._annotation_accepts(inner, kind)
             return text == kind
         if node.type == "generic_type":
             return text == kind
