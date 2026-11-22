@@ -826,6 +826,22 @@ class _SolBindings:
                             ),
                             None,
                         )
+        elif obj.type == "member_expression":
+            # Member chains (`vault.token.transfer`): resolve the inner
+            # member first, then use its declared type.
+            _inner_member, inner, _inner_reason = self._resolve_member(obj)
+            if inner is not None:
+                contract = self._contract_for_type_node(
+                    inner.type_node, inner.owner
+                )
+        elif obj.type == "array_access":
+            # `tokens[0].transfer()`: the element type of a contract
+            # array is contract-typed.
+            base = self._unwrap(obj.child_by_field_name("base"))
+            base_record = self._object_record(base)
+            contract = self._array_element_contract(base_record)
+        elif obj.type == "call_expression":
+            contract = self._call_return_contract(obj)
         if contract is not None:
             inside_owner = inside_owner or (
                 self.current_contract is not None
@@ -899,6 +915,83 @@ class _SolBindings:
         if candidates:
             return candidates[0], None
         return None, first_reason
+
+    def _contract_for_type_node(
+        self, type_node: Any | None, owner: _Contract | None
+    ) -> _Contract | None:
+        if type_node is None or "." in self.text(type_node):
+            return None
+        fact = self._type_fact(type_node, owner, set())
+        if fact.type_id is None:
+            return None
+        return next(
+            (
+                candidate
+                for candidate in self.contracts.values()
+                if candidate.record.binding.id == fact.type_id
+            ),
+            None,
+        )
+
+    def _object_record(self, obj: Any | None) -> _Record | None:
+        if obj is None:
+            return None
+        if obj.type == "identifier":
+            record, _reason = self._lookup(
+                self.text(obj), obj.start_byte, "value"
+            )
+            if record is None:
+                record, _reason = self._lookup(
+                    self.text(obj), obj.start_byte, "type"
+                )
+            return record
+        if obj.type == "member_expression":
+            _member, record, _reason = self._resolve_member(obj)
+            return record
+        return None
+
+    def _array_element_contract(
+        self, record: _Record | None
+    ) -> _Contract | None:
+        if record is None or record.type_node is None:
+            return None
+        text = re.sub(
+            r"\b(memory|calldata|storage)\b", "", self.text(record.type_node)
+        )
+        # Strip one array dimension; anything left that still indexes
+        # (nested arrays, mappings) has no contract member surface.
+        element = re.sub(r"\[[^\]]*\]\s*$", "", text).strip()
+        if element == text.strip() or "[" in element:
+            return None
+        base = self._lookup_type_record(element, record.node.start_byte, record.owner)
+        if base is None or base.binding.kind not in {
+            "contract",
+            "interface",
+            "library",
+        }:
+            return None
+        return self.contracts.get(base.binding.name)
+
+    def _call_return_contract(self, call: Any) -> _Contract | None:
+        callee = self._unwrap(call.child_by_field_name("function"))
+        record = self._object_record(callee)
+        if record is None:
+            return None
+        if record.binding.kind in {"contract", "interface", "library"}:
+            # `new Token()` / `Token(addr)` — the value is typed by the
+            # contract itself.
+            return self.contracts.get(record.binding.name)
+        if record.binding.kind != "function":
+            return None
+        function_node = record.node.parent
+        if function_node is None:
+            return None
+        returns = self._return_parameters(function_node)
+        if not returns:
+            return None
+        return self._contract_for_type_node(
+            returns[0].child_by_field_name("type"), record.owner
+        )
 
     def _canonical_type_text(self, text: str) -> str:
         # Whitespace (`uint256 [ ]`) and the bare `uint`/`int`/`byte`

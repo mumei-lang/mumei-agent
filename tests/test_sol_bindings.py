@@ -1533,6 +1533,83 @@ contract Vault {
     )
 
 
+def test_member_call_on_array_element_resolves():
+    source = """
+contract Token {
+    function transfer(address to, uint256 amount) external {}
+}
+contract Vault {
+    Token[] tokens;
+    uint256[] values;
+    function run() external {
+        tokens[0].transfer(address(0), 1);
+        values[0].push;
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    transfer = next(
+        binding
+        for binding in report.bindings
+        if binding.name == "transfer"
+    )
+    assert any(
+        ref.binding_id == transfer.id and ref.kind == "call"
+        for ref in report.references
+    )
+
+
+def test_member_call_on_call_return_resolves():
+    source = """
+contract Token {
+    function transfer(address to, uint256 amount) external {}
+}
+contract Vault {
+    function getToken() internal returns (Token) {}
+    function run() external {
+        getToken().transfer(address(0), 1);
+        Token(address(0)).transfer(address(0), 1);
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    transfer = next(
+        binding
+        for binding in report.bindings
+        if binding.name == "transfer"
+    )
+    transfer_refs = [
+        ref
+        for ref in report.references
+        if ref.binding_id == transfer.id and ref.kind == "call"
+    ]
+    assert len(transfer_refs) == 2
+
+
+def test_member_call_chain_resolves_inner_member_type():
+    source = """
+contract Token {
+    function transfer(address to, uint256 amount) external {}
+}
+contract Vault {
+    Token token;
+    function run() external {
+        this.token.transfer(address(0), 1);
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    transfer = next(
+        binding
+        for binding in report.bindings
+        if binding.name == "transfer"
+    )
+    assert any(
+        ref.binding_id == transfer.id and ref.kind == "call"
+        for ref in report.references
+    )
+
+
 def test_using_member_binds_before_opaque_fallback():
     source = """
 contract Owned {
