@@ -5,6 +5,11 @@ Tail truncation or rollback is detected only against a host-pinned
 ``expected_head``. This is not authentication: a writer can rewrite the whole
 chain. Plans contain only the existing non-secret ``to_dict()`` projection.
 The log is not a dispatch or acceptance record.
+
+Cross-process writer exclusion requires POSIX ``fcntl``; where it is
+unavailable, locking is process-local and hosts must use a single writer
+process. A write or fsync failure triggers best-effort rollback to the
+validated prefix. Entries use standard JSON; NaN and Infinity are rejected.
 """
 
 from __future__ import annotations

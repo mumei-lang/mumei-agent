@@ -152,6 +152,11 @@ authentication: a writer can rewrite the complete chain. The projection
 contains only the existing non-secret plan fields, and the log is not
 Evidence or a dispatch or acceptance record.
 
+Cross-process writer exclusion requires POSIX `fcntl`; where it is
+unavailable, locking is process-local and hosts must use a single writer
+process. A write or fsync failure triggers best-effort rollback to the
+validated prefix. Entries use standard JSON and reject NaN and Infinity.
+
 C04/C11 remain partial: Evidence acceptance and default routes are open
 work. The log does not wire persistence into planning, dispatch or runtime
 fallback.
