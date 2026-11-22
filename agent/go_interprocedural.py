@@ -2558,7 +2558,7 @@ class _Builder:
                 or self._scalar_elem_nested_collection(member.type)
                 or (
                     allow_struct_elements
-                    and member.type.kind in {"slice", "map"}
+                    and member.type.kind in {"slice", "map", "array"}
                     and getattr(member.type, "elem", None)
                     is not None
                     and (
@@ -3095,7 +3095,10 @@ class _Builder:
                     allow_struct_elements
                     and allow_struct_element_arrays
                     and getattr(fact, "elem", None) is not None
-                    and self._named_value_struct_supported(fact.elem)
+                    and (
+                        self._named_value_struct_supported(fact.elem)
+                        or fact.elem.kind == "interface"
+                    )
                 )
             )
         ):
@@ -8654,6 +8657,7 @@ class _Builder:
                     inner,
                     params,
                     allow_struct_elements=True,
+                    allow_struct_element_arrays=True,
                 )
                 if opaque_field is None:
                     candidate = self._package_composite_field_read(inner)
@@ -8935,7 +8939,10 @@ class _Builder:
                 and inner.type == "selector_expression"
             ):
                 opaque_field = self._opaque_container_field_target(
-                    inner, params, allow_struct_elements=True
+                    inner,
+                    params,
+                    allow_struct_elements=True,
+                    allow_struct_element_arrays=True,
                 )
         if (
             struct_element_target is not None
@@ -22690,6 +22697,7 @@ class _Builder:
                                 right,
                                 params,
                                 allow_struct_elements=True,
+                                allow_struct_element_arrays=True,
                             )
                         )
                     if opaque_range_field is None:
@@ -27959,7 +27967,10 @@ class _Builder:
                                     }
                         return deps
             iface_collection = self._opaque_container_field_target(
-                node, params, allow_struct_elements=True
+                node,
+                params,
+                allow_struct_elements=True,
+                allow_struct_element_arrays=True,
             )
             if iface_collection is not None:
                 field_key, root_id, iface_member, _, _ = iface_collection
@@ -33915,7 +33926,10 @@ class _Builder:
         if operand.type != "selector_expression":
             return None
         target = self._opaque_container_field_target(
-            operand, params, allow_struct_elements=True
+            operand,
+            params,
+            allow_struct_elements=True,
+            allow_struct_element_arrays=True,
         )
         if target is None:
             return None
