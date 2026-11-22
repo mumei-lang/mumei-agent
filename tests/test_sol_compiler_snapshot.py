@@ -80,7 +80,7 @@ def _assert_rejected(envelope, source, *, raw=None):
         ),
         (
             "inheritance_override",
-            ["agree"],
+            ["agree", "agree"],
         ),
         (
             "require_builtin",
@@ -160,6 +160,30 @@ def test_inheritance_call_resolves_to_the_override_declaration():
     assert call["declaration"] == {
         "start": override_start,
         "end": override_start + len("hook"),
+    }
+
+
+def test_inheritance_specifier_path_agrees_with_the_base_declaration():
+    # `is Base` is an `IdentifierPath` reference in the 0.8.39 AST —
+    # captured alongside `Identifier` references and agreeing with the
+    # lexical base-name record.
+    source = _source("inheritance_override")
+    envelope = _envelope("inheritance_override")
+    snapshot = load_sol_compiler_snapshot(_payload(envelope), source)
+    comparison = compare_with_lexical(snapshot, build_sol_bindings(source))
+
+    base_use = source.index("Base", source.index("contract Child"))
+    base = next(
+        item
+        for item in comparison["references"]
+        if item["span"] == {"start": base_use, "end": base_use + len("Base")}
+    )
+    base_decl = source.index("Base", source.index("contract "))
+    assert base["name"] == "Base"
+    assert base["status"] == "agree"
+    assert base["declaration"] == {
+        "start": base_decl,
+        "end": base_decl + len("Base"),
     }
 
 

@@ -218,7 +218,14 @@ def load_sol_compiler_snapshot(
 
         references: list[CompilerReference] = []
         for node in nodes:
-            if node["nodeType"] != "Identifier":
+            # `IdentifierPath` is the 0.8.39 path form: it carries
+            # inheritance specifiers, `using ... for` lists and
+            # user-defined type names (the older `UserDefinedTypeName`
+            # node no longer appears). A dotted path such as `Lib.S`
+            # still resolves atomically to one declaration; the lexical
+            # report only records the base segment's reference, so the
+            # whole-path span honestly compares as `lexical_missing`.
+            if node["nodeType"] not in {"Identifier", "IdentifierPath"}:
                 continue
             name = node.get("name")
             referenced = node.get("referencedDeclaration")

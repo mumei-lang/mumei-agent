@@ -9596,3 +9596,29 @@ representation-level のみ — verdict 昇格・grade promotion・Core check �
 新規クレームなし。
 
 **回帰ゲート**: `uv run pytest tests/test_recovery_eval.py tests/test_binding_eval.py tests/test_evidence_acceptance_eval.py tests/test_contract_vocabulary.py -q`
+
+### C06 second compiler-backed Solidity binding slice — IdentifierPath
+
+`agent/sol_compiler_snapshot.py` now also captures `IdentifierPath`
+references — the 0.8.39 AST path form carrying inheritance specifiers
+(`is Base`), `using ... for` lists and user-defined type names (the
+older `UserDefinedTypeName` node no longer appears; its inner `pathNode`
+is itself an `IdentifierPath` and is covered without double counting).
+The envelope shape, pinned-version allowlist and fail-closed boundary
+(imports, inline assembly) are unchanged — the reader still launches no
+compiler and emits metadata only.
+
+A dotted path such as `Lib.S` resolves atomically to one declaration on
+the compiler side while the lexical report records only the base
+segment's reference, so the whole-path span honestly compares as
+`lexical_missing` — no path semantics are invented to force agreement.
+`MemberAccess` member names stay uncaptured because the lexical report
+never resolves them (member names would compare `lexical_missing` on
+every hit — noise, not signal).
+
+Fixture `inheritance_override` now yields two `agree` references: the
+`is Base` path and the `hook()` call (which resolves to the override).
+metadata only — no trust, audit, Evidence acceptance, Seal Grade, ABI,
+runtime or proof claim.
+
+**回帰ゲート**: `uv run pytest tests/test_sol_compiler_snapshot.py tests/test_sol_bindings.py -q`
