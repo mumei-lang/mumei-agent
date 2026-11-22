@@ -5066,3 +5066,41 @@ fn f(v: Vec<Vec<P>>) {
     # `inner` is Vec<P> — not P itself — so inner.m() stays unpinned.
     assert _call(report, source, "inner.m()").target == ""
     assert _call(report, source, "deep.m()").target == m.id
+
+
+def test_slice_pattern_rest_binding_stays_opaque() -> None:
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn f(arr: [P; 3]) {
+    let [h @ .., t] = arr;
+    h.m();
+    t.m();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = _bindings(report, "m", "associated_function")[0]
+    # `h` binds the rest slice `[P]`, not `P` — stays opaque.
+    assert _call(report, source, "h.m()").target == ""
+    assert _call(report, source, "t.m()").target == m.id
+
+
+def test_slice_pattern_element_resolves_at_annotation_scope() -> None:
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn g(arr: [P; 1]) {
+    {
+        struct P;
+        impl P { fn m(&self) {} }
+        let [p] = arr;
+        p.m();
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    ms = _bindings(report, "m", "associated_function")
+    outer = min(ms, key=lambda b: int(b.id.split(":")[-3]))
+    # The element resolves the spelled P at arr's annotation, not the
+    # inner block's shadow.
+    assert _call(report, source, "p.m()").target == outer.id

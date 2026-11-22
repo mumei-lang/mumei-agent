@@ -5019,12 +5019,28 @@ class _RustBindings:
             # `let [a, b, ..] = arr` — each element binds the
             # container's element type (`[P; N]`/`Vec<P>` → P);
             # `..` covers the rest without binding a name.
+            elem_position = (
+                pattern.start_byte
+                if scrut_position is None
+                else scrut_position
+            )
             elem_id, elem_args = self._element_of(
-                scrut_id, scrut_args or "", pattern.start_byte
+                scrut_id, scrut_args or "", elem_position
             )
             mapping = {}
             for child in self._children(pattern):
                 if child.type == "remaining_field_pattern":
+                    continue
+                if (
+                    child.type == "captured_pattern"
+                    and any(
+                        grand.type == "remaining_field_pattern"
+                        for grand in self._children(child)
+                    )
+                ):
+                    # `h @ ..` binds the rest slice, not an
+                    # element — its type is `[P]`, not `P`, so it
+                    # stays opaque.
                     continue
                 mapping.update(
                     self._pattern_type_map(
