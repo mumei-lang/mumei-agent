@@ -885,16 +885,21 @@ def test_revocation_list_v2_shape_rejects_foreign_documents():
 
 
 def test_revocation_list_rollback_check():
-    # `min_revocation_version` + a v2 list + a declared reference
-    # discharges `revocation_list_rollback`; the emitted verdict
-    # follows the conservative window rules.
+    # `min_revocation_version` + a signed v2 list + a declared
+    # reference discharges `revocation_list_rollback`; the emitted
+    # verdict follows the conservative window rules.
+    import hashlib
+
     from agent.core_evidence import revocation_list_metadata
 
     meta = revocation_list_metadata(_V2_LIST)
+    digest = hashlib.sha256(json.dumps(_V2_LIST).encode()).hexdigest()
     base = dict(
         revoked_keys=frozenset(_V2_LIST["revoked_keys"]),
         revocation_list_meta=meta,
         reference_time="2026-11-10T00:00:00Z",
+        revocation_signature=_anchor_signature(digest),
+        revocation_digest=digest,
     )
     evaluation = evaluate_signature_envelope(
         _envelope(), min_revocation_version=3, **base
@@ -927,6 +932,31 @@ def test_revocation_list_rollback_check():
     assert evaluation["revocation_list_current"] is False
 
 
+def test_revocation_list_rollback_requires_bound_signature():
+    # Currency only counts on a signature bound to the list's digest:
+    # an unsigned or mis-bound list cannot prove it is current — the
+    # eval route mirrors the Core verify route's authenticity gate.
+    import hashlib
+
+    from agent.core_evidence import revocation_list_metadata
+
+    meta = revocation_list_metadata(_V2_LIST)
+    digest = hashlib.sha256(json.dumps(_V2_LIST).encode()).hexdigest()
+    base = dict(
+        revoked_keys=frozenset(_V2_LIST["revoked_keys"]),
+        revocation_list_meta=meta,
+        reference_time="2026-11-10T00:00:00Z",
+    )
+    evaluation = evaluate_signature_envelope(
+        _envelope(),
+        min_revocation_version=3,
+        **base,
+        revocation_signature=_anchor_signature("c" * 64),
+        revocation_digest=digest,
+    )
+    assert evaluation["revocation_list_current"] is False
+
+
 def test_revocation_list_rollback_dependencies():
     # The minimum pin without its prerequisites is a caller error.
     from agent.core_evidence import revocation_list_metadata
@@ -944,6 +974,13 @@ def test_revocation_list_rollback_dependencies():
             "revoked_keys": frozenset(_V2_LIST["revoked_keys"]),
             "revocation_list_meta": meta,
             # no reference_time
+        },
+        {
+            "min_revocation_version": 3,
+            "revoked_keys": frozenset(_V2_LIST["revoked_keys"]),
+            "revocation_list_meta": meta,
+            "reference_time": "2026-11-10T00:00:00Z",
+            # no revocation signature
         },
         {
             "min_revocation_version": -1,
