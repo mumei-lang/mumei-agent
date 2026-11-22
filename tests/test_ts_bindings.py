@@ -3009,6 +3009,64 @@ make<number, string>(1).methodA();
     assert call.target == method_a.id
 
 
+def test_type_argument_constraints_disqualify_overloads():
+    # `make<number>` cannot bind `make<T extends string>` — the
+    # explicit type argument violates the constraint, so the
+    # unconstrained overload wins even though it is declared later.
+    source = """
+declare function make<T extends string>(x: T): number;
+declare function make<T>(x: T): string;
+make<number>(1);
+"""
+    report = build_ts_bindings(source)
+    overloads = _bindings(report, "make", "ambient")
+    unconstrained = max(overloads, key=lambda b: b.span.start)
+    ref = next(
+        r for r in report.references
+        if source[r.span.start:r.span.end] == "make"
+    )
+    assert ref.binding_id == unconstrained.id
+
+
+def test_type_argument_defaults_check_value_arguments():
+    # `make<number>` binds `U = string` by default on the first
+    # overload — `2n` does not fit `y: string`, so the `U = bigint`
+    # overload takes the call despite being declared second.
+    source = """
+declare function make<T, U = string>(x: T, y: U): number;
+declare function make<T, U = bigint>(x: T, y: U): string;
+make<number>(1, 2n);
+"""
+    report = build_ts_bindings(source)
+    overloads = _bindings(report, "make", "ambient")
+    bigint_default = max(overloads, key=lambda b: b.span.start)
+    ref = next(
+        r for r in report.references
+        if source[r.span.start:r.span.end] == "make"
+    )
+    assert ref.binding_id == bigint_default.id
+
+
+def test_tuple_spread_arguments_narrow_overloads():
+    # `make(...t)` with `t: [string, number]` supplies a string then a
+    # number — only the second overload's parameters accept them.
+    source = """
+declare function make(x: number, y: string): number;
+declare function make(x: string, y: number): string;
+const t: [string, number] = ["s", 1];
+make(...t);
+"""
+    report = build_ts_bindings(source)
+    overloads = _bindings(report, "make", "ambient")
+    fitting = max(overloads, key=lambda b: b.span.start)
+    ref = next(
+        r for r in report.references
+        if source[r.span.start:r.span.end] == "make"
+        and r.span.start > source.index("];")
+    )
+    assert ref.binding_id == fitting.id
+
+
 def test_bigint_literal_separators_match_by_value():
     # `1_000n` and `1000n` spell the same bigint — the literal-typed
     # overload keeps the call over the generic `bigint` one.
