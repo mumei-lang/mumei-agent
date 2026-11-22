@@ -4308,9 +4308,30 @@ way — `p.M[k].V` on `M map[K]*E` conflates like the slice —
 while a map element's field write (`p.M[k].V = x`) stays closed
 because the element is not addressable, and `map[string]…`
 closes on the key's side (string indices sit outside the scalar
-fragment). An array of pointer elements (`A [N]*E`) and a
-deeper pointer member inside the element (`a[i].W.V`) stay
-closed too. An explicit `(*p)` deref of a
+fragment). An array of pointer elements (`A [N]*E`) stays
+closed too. Through a *parameter pointer root* (`*S`, `(*pp)`
+on `**S`, or a `q := p` alias) an element's pointer member
+resolves one level deeper — `p.A[i].W.V` reads the member's
+pointee, caller memory the caller's `indirect_writes` union
+already covers, so `*q = …` before the read shows up in it;
+a local composite root keeps the chain closed (its pointer
+member escapes the slot model). A store through the same
+member — `p.A[i].W = q` — lands in caller memory the slot
+model does not track, so it folds opaquely like `p.P = q`:
+an external-mutation transfer on the pointee identity, and
+the stored value plus the index's dependencies unioned into
+the root's set and `indirect_writes`. Whole-element stores
+admit the same way on every supported root — `p.A[i] = e`,
+`o.A[i] = e`, `p.M[k] = e`, `p.A[i][j] = e` — and an inline
+*array* member (`o.R[i] = e` on `R [N]E`) folds into the
+field's own slot too, since its tokens name no share-group
+holder a `o.R[i].V` read could observe the store through.
+A pointer member read with no deeper field (`p.A[i].W`), a
+value-struct element's pointer member (`p.B[i].W` on
+`B []Elem`), a local root's member store (`o.A[i].W = q`),
+a nested array member's element (`o.R[i][j]`), and a `&x`
+escape into an element (`p.A[i] = &e`) stay closed.
+An explicit `(*p)` deref of a
 `*S` param resolves through the same slot machinery as the
 implicit deref — Go's grammar parses `(*p)` as a parenthesized
 unary `*`, so the root walks unwrap it (a non-`*` unary operand
