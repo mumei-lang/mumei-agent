@@ -679,10 +679,10 @@ def _observation_host_match(value: object) -> bool:
 
 
 # `mumei.native-evidence-acceptance/v1`-only extras. The observation
-# route emits `invocation`/`host`/`pin_envelope` only when it performed
-# `runtime_observation_semantics` — enforced by
-# _OBSERVATION_REQUIRED_CHECK below. The object route pins the compared
-# artifacts and the machine-TV outcome.
+# routes emit `invocation`/`host`/`pin_envelope` only when they
+# performed one of the runtime-observation checks — enforced by
+# _OBSERVATION_REQUIRED_CHECKS below. The object route pins the
+# compared artifacts and the machine-TV outcome.
 _NATIVE_ACCEPTANCE_EXTRA_FIELDS = {
     "invocation": _observation_invocation_match,
     "host": _observation_host_match,
@@ -700,7 +700,19 @@ _NATIVE_ACCEPTANCE_EXTRA_FIELDS = {
 _OBSERVATION_EXTRA_FIELDS = frozenset(
     {"invocation", "host", "pin_envelope"}
 )
-_OBSERVATION_REQUIRED_CHECK = "runtime_observation_semantics"
+# The single-invocation observations route reports
+# `runtime_observation_semantics`; the per-channel routes
+# (accept-exit-status/-stdout/-stderr) report only their own channel
+# check under the same bounded envelope. Any of the four pins the
+# observation extras.
+_OBSERVATION_REQUIRED_CHECKS = frozenset(
+    {
+        "os_exit_status_observation",
+        "os_stdout_observation",
+        "os_stderr_observation",
+        "runtime_observation_semantics",
+    }
+)
 
 # The conjunctive promotable descriptor Core `evidence accept
 # --requirement-list` emits: same `acceptance: "evaluated"` convention,
@@ -1066,8 +1078,11 @@ def evaluate_core_acceptance(
                 not extras & _OBSERVATION_EXTRA_FIELDS
                 or (
                     type(descriptor.get("checks_performed")) is list
-                    and _OBSERVATION_REQUIRED_CHECK
-                    in descriptor["checks_performed"]
+                    and any(
+                        type(check) is str
+                        and check in _OBSERVATION_REQUIRED_CHECKS
+                        for check in descriptor["checks_performed"]
+                    )
                 )
             )
         )
