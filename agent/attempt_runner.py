@@ -15,6 +15,7 @@ import select
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Mapping
@@ -199,6 +200,46 @@ def _detect_ulimit_sh() -> "str | None":
 _SH = _detect_ulimit_sh()
 
 
+def _detect_unshare() -> "str | None":
+    """An `unshare` supporting a fresh user/network namespace, or None."""
+    if not sys.platform.startswith("linux"):
+        return None
+    unshare = shutil.which("unshare")
+    if unshare is None:
+        return None
+    try:
+        supported = subprocess.run(
+            [unshare, "--net", "--map-current-user", "--", "true"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        ).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        supported = False
+    return unshare if supported else None
+
+
+_UNSHARE = _detect_unshare()
+_NETNS_MARKER_SCRIPT = """import os, signal, sys
+fd = int(sys.argv[1])
+lc_ctype = sys.argv[2]
+if lc_ctype:
+    os.environ["LC_CTYPE"] = lc_ctype[1:]
+else:
+    os.environ.pop("LC_CTYPE", None)
+for name in ("SIGPIPE", "SIGXFSZ"):
+    if hasattr(signal, name):
+        signal.signal(getattr(signal, name), signal.SIG_DFL)
+os.write(fd, b"x")
+os.set_inheritable(fd, False)
+try:
+    os.execvp(sys.argv[3], sys.argv[3:])
+except OSError:
+    os.write(fd, b"e")
+    os._exit(127)
+"""
+
+
 def memory_bound_enforceable() -> bool:
     """Whether any POSIX bound mechanism can cap a child's address space.
 
@@ -216,6 +257,11 @@ def memory_bound_spawn_thread_safe() -> bool:
     `sh` present the bound is applied by an exec wrapper instead,
     making bounded spawns thread-safe."""
     return _PRLIMIT is not None or _SH is not None
+
+
+def network_isolation_enforceable() -> bool:
+    """Whether this host can place a child in a network namespace."""
+    return _UNSHARE is not None
 
 
 def _spawn_target_resolvable(
@@ -336,6 +382,38 @@ class AttemptRunResult:
         )
 
 
+def _spawn_failure_result(record: AttemptRecord) -> AttemptRunResult:
+    return AttemptRunResult(
+        record.record(AttemptEvent("started", 0)).record(
+            AttemptEvent("failed", 0)
+        ),
+        b"",
+        True,
+        b"",
+        True,
+    )
+
+
+def _read_network_marker(fd: int) -> bytes | None:
+    marker = bytearray()
+    eof = False
+    try:
+        while len(marker) < 8:
+            chunk = os.read(fd, 8 - len(marker))
+            if not chunk:
+                eof = True
+                break
+            marker.extend(chunk)
+    except OSError:
+        return None
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    return bytes(marker) if eof else None
+
+
 class AttemptRunner:
     """Executes one declared request per call with real process control.
 
@@ -353,6 +431,7 @@ class AttemptRunner:
         memory_bound_mb: int | None = None,
         feed_bytes: bytes | None = None,
         environment: Mapping[str, str] | None = None,
+        isolate_network: bool = False,
     ) -> AttemptRunResult:
         """Spawn `argv`, observe one attempt and return a terminal record.
 
@@ -374,6 +453,10 @@ class AttemptRunner:
         mapping is passed to the child as its complete environment.
         Environment scrubbing is not a sandbox and does not restrict
         filesystem, network or process access.
+        `isolate_network=True` runs the child in a fresh network namespace
+        with only a down loopback and the current uid mapped to the current
+        user. This is not a sandbox and imposes no filesystem or process
+        restriction.
         """
         if type(request) is not AttemptExecutionRequest:
             raise ValueError("attempt run requires an execution request")
@@ -385,6 +468,12 @@ class AttemptRunner:
             raise ValueError("attempt run requires a nonempty immutable argv")
         if cancel_event is not None and type(cancel_event) is not threading.Event:
             raise ValueError("attempt run cancellation requires an event")
+        if type(isolate_network) is not bool:
+            raise ValueError("invalid attempt run network isolation")
+        if isolate_network and _UNSHARE is None:
+            raise ValueError(
+                "attempt run network isolation requires a network namespace boundary"
+            )
         if memory_bound_mb is not None and (
             type(memory_bound_mb) is not int
             or not 1 <= memory_bound_mb <= MAX_MEMORY_BOUND_MB
@@ -423,6 +512,17 @@ class AttemptRunner:
             request.attempt_number,
             request.timeout_ms,
         )
+        if isolate_network and not _spawn_target_resolvable(
+            argv[0], child_environment
+        ):
+            return _spawn_failure_result(record)
+        marker_read_fd = None
+        marker_write_fd = None
+        if isolate_network:
+            try:
+                marker_read_fd, marker_write_fd = os.pipe()
+            except OSError:
+                return _spawn_failure_result(record)
         spawn_argv: list[str] = list(argv)
         preexec = None
         if memory_bound_mb is not None:
@@ -456,6 +556,31 @@ class AttemptRunner:
                     ]
             else:
                 preexec = _memory_bound_preexec(memory_bound_mb)
+        if isolate_network:
+            # The close-on-exec marker distinguishes target exits from setup failures.
+            target_environment = (
+                os.environ if child_environment is None else child_environment
+            )
+            target_lc_ctype = target_environment.get("LC_CTYPE")
+            lc_ctype_argument = (
+                "" if target_lc_ctype is None else f"={target_lc_ctype}"
+            )
+            spawn_argv = [
+                _UNSHARE,
+                "--net",
+                "--map-current-user",
+                "--",
+                sys.executable,
+                "-I",
+                "-c",
+                _NETNS_MARKER_SCRIPT,
+                str(marker_write_fd),
+                lc_ctype_argument,
+                *spawn_argv,
+            ]
+        popen_options = (
+            {} if marker_write_fd is None else {"pass_fds": (marker_write_fd,)}
+        )
         try:
             popen_environment = (
                 {} if child_environment is None else {"env": child_environment}
@@ -468,17 +593,15 @@ class AttemptRunner:
                 preexec_fn=preexec,
                 start_new_session=_PROCESS_GROUP,
                 **popen_environment,
+                **popen_options,
             )
         except (OSError, subprocess.SubprocessError):
-            return AttemptRunResult(
-                record.record(AttemptEvent("started", 0)).record(
-                    AttemptEvent("failed", 0)
-                ),
-                b"",
-                True,
-                b"",
-                True,
-            )
+            for fd in (marker_read_fd, marker_write_fd):
+                if fd is not None:
+                    os.close(fd)
+            return _spawn_failure_result(record)
+        if marker_write_fd is not None:
+            os.close(marker_write_fd)
         feed_stop = threading.Event()
         feeder = None
         if feed_bytes is not None:
@@ -541,6 +664,17 @@ class AttemptRunner:
         if feeder is not None:
             feed_stop.set()
             feeder.join(COLLECTOR_JOIN_SECONDS)
+        marker = (
+            None
+            if marker_read_fd is None
+            else _read_network_marker(marker_read_fd)
+        )
+        if (
+            isolate_network
+            and marker != b"x"
+            and events[-1].kind == "exited"
+        ):
+            events[-1] = AttemptEvent("failed", events[-1].elapsed_ms)
         for event in events:
             record = record.record(event)
         return AttemptRunResult(
@@ -635,6 +769,7 @@ def dispatch_attempt(
     feed_bytes: bytes | None = None,
     report_stamp: int | None = None,
     environment: Mapping[str, str] | None = None,
+    isolate_network: bool = False,
 ) -> AttemptDispatch:
     """Run the sequence's outstanding dispatch and reconcile the observation.
 
@@ -671,6 +806,7 @@ def dispatch_attempt(
         memory_bound_mb=memory_bound_mb,
         feed_bytes=feed_bytes,
         environment=environment,
+        isolate_network=isolate_network,
     )
     return AttemptDispatch(
         sequence.reconcile_report(run.record, report_stamp), run

@@ -27,6 +27,7 @@ from agent.attempt_runner import (
     AttemptRunner,
     dispatch_attempt,
     memory_bound_enforceable,
+    network_isolation_enforceable,
 )
 from agent.core_evidence import (
     MAX_ACCEPTANCE_DESCRIPTOR_BYTES,
@@ -82,6 +83,17 @@ def _adapter_environment(plan: VerificationPlan) -> dict[str, str] | None:
     ):
         return None
     return _minimal_environment()
+
+
+def _network_isolated(plan: VerificationPlan) -> bool:
+    required = plan.selected.required_permissions
+    allowed = plan.policy.allowed_permissions
+    return not (
+        required is not None
+        and "network.connect" in required
+        and allowed is not None
+        and "network.connect" in allowed
+    )
 
 
 def _label(value: str) -> None:
@@ -520,6 +532,12 @@ def run_attempt_schedule(
                         if memory_bound_enforceable()
                         else None
                     )
+                ),
+                # Without a host namespace boundary this remains
+                # unenforced, like the memory-budget fallback.
+                isolate_network=(
+                    _network_isolated(plan)
+                    and network_isolation_enforceable()
                 ),
                 # No declared feed means a closed pipe — a scheduled child
                 # must never inherit the parent's stdin and block on it.
