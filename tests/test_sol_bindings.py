@@ -922,7 +922,7 @@ contract C {
         ),
         (
             "contract C { function h() public {} function f() public { this.h(); } }",
-            "opaque_member",
+            "direct_local",
         ),
         (
             "contract C { function f(function() external cb) public { cb(); } }",
@@ -1122,3 +1122,136 @@ def test_cli_fails_with_fixed_errors_and_no_json(tmp_path, contents, expected_er
     assert result.returncode == 2
     assert result.stdout == b""
     assert result.stderr == expected_error
+
+
+def test_member_call_resolves_through_declared_contract_type():
+    source = """
+contract Token {
+    function transfer(address to, uint256 amount) external {}
+    uint256 public supply;
+}
+contract Vault {
+    Token token;
+    function run() external {
+        token.transfer(address(0), 1);
+        uint256 s = token.supply;
+        s = s + 1;
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    token = next(
+        binding for binding in report.bindings if binding.name == "Token"
+    )
+    transfer = next(
+        binding
+        for binding in report.bindings
+        if binding.name == "transfer" and binding.scope is not None
+    )
+    supply = next(
+        binding
+        for binding in report.bindings
+        if binding.name == "supply" and binding.scope is not None
+    )
+    assert token.id
+    transfer_refs = [
+        ref for ref in report.references if ref.binding_id == transfer.id
+    ]
+    assert [ref.kind for ref in transfer_refs] == ["call"]
+    assert _text(source, transfer_refs[0].span) == "transfer"
+    supply_refs = [
+        ref for ref in report.references if ref.binding_id == supply.id
+    ]
+    assert [ref.kind for ref in supply_refs] == ["read"]
+    assert _text(source, supply_refs[0].span) == "supply"
+    call = next(
+        call for call in report.calls if call.target == transfer.id
+    )
+    assert call.kind == "direct_local"
+
+
+def test_member_call_through_this_and_super_resolves():
+    source = """
+contract B {
+    function f() internal virtual {}
+}
+contract C is B {
+    function f() internal override {}
+    function g() public {
+        this.g();
+        super.f();
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    g = next(
+        binding for binding in report.bindings if binding.name == "g"
+    )
+    f_base = next(
+        binding for binding in report.bindings if binding.name == "f"
+    )
+    this_call = next(
+        ref
+        for ref in report.references
+        if ref.binding_id == g.id and ref.kind == "call"
+    )
+    assert _text(source, this_call.span) == "g"
+    super_call = next(
+        ref
+        for ref in report.references
+        if ref.binding_id == f_base.id and ref.kind == "call"
+    )
+    assert _text(source, super_call.span) == "f"
+    calls = {call.kind for call in report.calls}
+    assert "direct_local" in calls
+    assert "opaque_virtual" in calls
+    assert _unresolved(report, "this", "builtin")
+    assert _unresolved(report, "super", "builtin")
+
+
+def test_member_lookup_finds_inherited_members_and_rejects_private():
+    source = """
+contract B {
+    uint256 internal shared;
+    uint256 private hidden;
+}
+contract C is B {
+    B other;
+    function g() external {
+        uint256 x = other.shared;
+        uint256 y = other.hidden;
+        x = x + y;
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    shared = next(
+        binding for binding in report.bindings if binding.name == "shared"
+    )
+    shared_ref = next(
+        ref for ref in report.references if ref.binding_id == shared.id
+    )
+    assert _text(source, shared_ref.span) == "shared"
+    assert _unresolved(report, "hidden", "private_base_member")
+
+
+def test_member_access_on_non_contract_types_stays_opaque():
+    source = """
+contract C {
+    uint256[] values;
+    function g() external {
+        uint256 n = values.length;
+        values.push(1);
+        n = n + 1;
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    assert any(
+        call.kind == "opaque_member" and call.target == ""
+        for call in report.calls
+    )
+    assert not any(
+        _text(source, ref.span) in {"length", "push"}
+        for ref in report.references
+    )

@@ -572,7 +572,9 @@ def test_sol_reader_rejects_wrong_constructor_target_kind_and_bad_owner():
 
 
 def test_sol_reader_rejects_targets_for_opaque_member_calls():
-    source = "contract C { function f() public { this.f(); new C(); } }"
+    source = (
+        "contract C { uint256 n; function f() public { n.f(); new C(); } }"
+    )
     doc = _sol_document(source)
     call = next(item for item in doc["calls"] if item["kind"] == "opaque_member")
     call["target"] = next(

@@ -617,6 +617,7 @@ class _SolBindings:
         position: int,
         namespace: str,
         visited: set[str] | None = None,
+        allow_private_own: bool = True,
     ) -> tuple[_Record | None, str | None]:
         if namespace == "value":
             layers = self._contract_layers(
@@ -627,7 +628,7 @@ class _SolBindings:
             for index, (_layer, records) in enumerate(layers):
                 if not records:
                     continue
-                if index > 0:
+                if index > 0 or not allow_private_own:
                     private_match = private_match or any(
                         record.binding.kind in {"function", "state_variable"}
                         and record.visibility == "private"
@@ -675,6 +676,85 @@ class _SolBindings:
                     return None, "private_base_member"
                 return record, None
         return None, None
+
+    def _resolve_member(
+        self, node: Any
+    ) -> tuple[Any | None, _Record | None, str | None]:
+        """Resolve `object.property` when the object has a declared
+        contract/interface/library type or names one directly.
+
+        Returns the member name node, the member record and a failure
+        reason. When the object's declared type is not a contract kind —
+        a struct, enum, elementary type, mapping or array — the triple
+        carries no record and no reason: builtin members (`.length`,
+        `.balance`) and struct fields stay unmodeled rather than being
+        guessed, so the member position keeps its pre-existing opaque
+        treatment.
+        """
+        member = node.child_by_field_name("property")
+        if member is None or member.type != "identifier":
+            return None, None, None
+        name = self.text(member)
+        obj = self._unwrap(node.child_by_field_name("object"))
+        if obj is None:
+            return member, None, None
+        text = self.text(obj)
+        if obj.type == "identifier" and text == "super":
+            owner = self.current_contract
+            if owner is not None:
+                for base_name, _base_node in owner.bases:
+                    base = self.contracts.get(base_name)
+                    if base is None:
+                        continue
+                    record, reason = self._lookup_contract(
+                        name,
+                        base,
+                        member.start_byte,
+                        "value",
+                        allow_private_own=False,
+                    )
+                    if record is not None or reason is not None:
+                        return member, record, reason
+            return member, None, None
+        contract = None
+        inside_owner = False
+        if obj.type == "identifier" and text == "this":
+            contract = self.current_contract
+            inside_owner = True
+        elif obj.type == "identifier":
+            record, _reason = self._lookup(text, obj.start_byte, "value")
+            if record is None:
+                record, _reason = self._lookup(text, obj.start_byte, "type")
+            if record is not None:
+                if record.binding.kind in {"contract", "interface", "library"}:
+                    contract = self.contracts.get(record.binding.name)
+                else:
+                    fact = self._type_fact(
+                        record.type_node, record.owner, set()
+                    )
+                    if fact.type_id is not None:
+                        contract = next(
+                            (
+                                candidate
+                                for candidate in self.contracts.values()
+                                if candidate.record.binding.id == fact.type_id
+                            ),
+                            None,
+                        )
+        if contract is None:
+            return member, None, None
+        inside_owner = inside_owner or (
+            self.current_contract is not None
+            and contract is self.current_contract
+        )
+        record, reason = self._lookup_contract(
+            name,
+            contract,
+            member.start_byte,
+            "value",
+            allow_private_own=inside_owner,
+        )
+        return member, record, reason
 
     def _lookup(
         self, name: str, position: int, namespace: str = "value"
@@ -1155,6 +1235,11 @@ class _SolBindings:
         if kind == "member_expression":
             obj = node.child_by_field_name("object")
             self._expr(obj)
+            member, record, reason = self._resolve_member(node)
+            if member is not None and record is not None:
+                self._add_ref(member, record, "read")
+            elif member is not None and reason is not None:
+                self._add_unresolved(member, self.text(member), reason)
             return
         if kind == "array_access":
             self._expr(node.child_by_field_name("base"))
@@ -1604,13 +1689,46 @@ class _SolBindings:
         if callee.type == "member_expression":
             base = callee.child_by_field_name("object")
             self._expr(base)
+            member, record, reason = self._resolve_member(callee)
+            if member is None or (record is None and reason is None):
+                self.calls.append(
+                    Call(
+                        self.span(node),
+                        args,
+                        self.call_owner,
+                        "",
+                        "opaque_member",
+                    )
+                )
+                return
+            if record is None:
+                self._add_unresolved(member, self.text(member), reason)
+                self.calls.append(
+                    Call(self.span(node), args, self.call_owner, "", "unresolved")
+                )
+                return
+            self._add_ref(member, record, "call")
+            binding_kind = record.binding.kind
+            if binding_kind == "function":
+                if has_options:
+                    call_kind = "opaque_call_options"
+                elif record.body is None:
+                    call_kind = "opaque_bodyless"
+                elif self._is_virtual_dispatch(record):
+                    call_kind = "opaque_virtual"
+                else:
+                    call_kind = "direct_local"
+            elif binding_kind in _FUNCTION_BINDINGS:
+                call_kind = "opaque_call_options" if has_options else "opaque_value"
+            else:
+                call_kind = "opaque_call_options" if has_options else "opaque_value"
             self.calls.append(
                 Call(
                     self.span(node),
                     args,
                     self.call_owner,
-                    "",
-                    "opaque_member",
+                    record.binding.id,
+                    call_kind,
                 )
             )
             return
