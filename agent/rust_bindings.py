@@ -73,6 +73,11 @@ _MAP_CONTAINER_NAMES = frozenset({"HashMap", "BTreeMap"})
 # opaque.
 _DEREF_WRAPPER_NAMES = frozenset({"Box", "Rc", "Arc"})
 
+# `Option` heads slices and arrays share with `Vec` — `s.get(i)`,
+# `s.first()`, `s.last()` yield `Option<&T>` on `&[T]`/`[T; N]` too.
+# `pop`/`remove` stay Vec-only — slices cannot shrink.
+_SLICE_OPTION_METHODS = frozenset({"get", "first", "last"})
+
 # Prelude container methods that hand back `Option` — `v.get(i)`,
 # `v.first()` and `v.last()` yield `Option<&T>` while `v.pop()`
 # yields `Option<T>`. Each maps to its payload prefix and the
@@ -82,6 +87,7 @@ _DEREF_WRAPPER_NAMES = frozenset({"Box", "Rc", "Arc"})
 # `Result<P, E>`, `err` reads E); -1 is the last arg.
 _OPTION_HEAD_METHODS = {
     "get": ("&", {"Vec", "VecDeque", "HashMap", "BTreeMap"}, -1),
+    "get_mut": ("&mut ", {"Vec", "VecDeque", "HashMap", "BTreeMap"}, -1),
     "first": ("&", {"Vec"}, -1),
     "last": ("&", {"Vec"}, -1),
     "pop": ("", {"Vec"}, -1),
@@ -103,6 +109,7 @@ _OPTION_HEAD_METHODS = {
     "as_mut": ("&mut ", {"Option"}, 0),
     # `o.and(o2)`/`o.or(o2)`/`o.xor(o2)` still yield `Option<P>` —
     # the payload index keeps the receiver's own first arg.
+    "filter": ("", {"Option"}, 0),
     "and": ("", {"Option"}, 0),
     "or": ("", {"Option"}, 0),
     "xor": ("", {"Option"}, 0),
@@ -2642,6 +2649,16 @@ class _RustBindings:
                     node.start_byte,
                     "value",
                 )
+            if member is None and (
+                callee is not None
+                and callee.type == "field_expression"
+            ):
+                # A trait-inherited `first()`/`get()` on a slice or
+                # array declares its own `Option<&Q>` — resolve the
+                # method before the prelude recipe guesses `P`.
+                member = self._field_member(
+                    callee, ("associated_function",)
+                )
             if member is None:
                 field = (
                     callee.child_by_field_name("field")
@@ -2662,6 +2679,16 @@ class _RustBindings:
                         or self._container_head_name(
                             callee.child_by_field_name("value")
                         ) in option_head[1]
+                        or (
+                            self.text(field).strip()
+                            in _SLICE_OPTION_METHODS
+                            and self._is_slice_receiver(
+                                callee.child_by_field_name("value")
+                            )
+                            and not self._slice_has_declared_method(
+                                self.text(field).strip()
+                            )
+                        )
                     )
                 ):
                     prefix = option_head[0]
@@ -2676,6 +2703,29 @@ class _RustBindings:
                         if -len(elements) <= index < len(elements)
                         else None
                     )
+                    if self.text(field).strip() == "get" and element:
+                        arg_list = node.child_by_field_name(
+                            "arguments"
+                        )
+                        first_arg = (
+                            None
+                            if arg_list is None
+                            else next(
+                                (
+                                    c
+                                    for c in arg_list.named_children
+                                    if "comment" not in c.type
+                                ),
+                                None,
+                            )
+                        )
+                        if (
+                            first_arg is not None
+                            and first_arg.type == "range_expression"
+                        ):
+                            # `s.get(0..1)` yields `Option<&[P]>`,
+                            # not `Option<&P>`.
+                            element = "[" + element + "]"
                     if self.text(field).strip() == "and":
                         # `Option::and<U>(self, optb: Option<U>)`
                         # yields the ARGUMENT's payload, not the
@@ -5704,6 +5754,75 @@ class _RustBindings:
             return None
         return head.group(0).split("::")[-1]
 
+    def _slice_has_declared_method(self, name: str) -> bool:
+        """True when an impl block declares `name` on a slice/array
+        target — `impl T for [P]` means `s.first()` uses the trait's
+        `Option<&Q>`, not the std recipe's `Option<&P>`."""
+        for impl in self._descendants(self.root):
+            if impl.type != "impl_item":
+                continue
+            tn = impl.child_by_field_name("type")
+            while tn is not None and tn.type == "reference_type":
+                tn = next(
+                    (
+                        c
+                        for c in tn.named_children
+                        if c.type
+                        not in {"lifetime", "mutable_specifier"}
+                    ),
+                    None,
+                )
+            if tn is None or tn.type != "array_type":
+                continue
+            body = next(
+                (
+                    c
+                    for c in impl.named_children
+                    if c.type == "declaration_list"
+                ),
+                None,
+            )
+            for item in [] if body is None else body.named_children:
+                if item.type in {
+                    "function_item",
+                    "function_signature_item",
+                }:
+                    name_node = self._item_name(item)
+                    if (
+                        name_node is not None
+                        and self.text(name_node).strip() == name
+                    ):
+                        return True
+        return False
+
+    def _is_slice_receiver(self, node: Any | None) -> bool:
+        """True when `node` is annotated `&[T]`/`[T]`/`[T; N]` —
+        slices and arrays share `first`/`last`/`get`/`chunks` with
+        `Vec` but carry no named container head."""
+        inner = node
+        while inner is not None and inner.type == "reference_expression":
+            inner = next(iter(inner.named_children), None)
+        if inner is None or inner.type != "identifier":
+            return False
+        record = self._lookup(
+            self._normalize_identifier(self.text(inner)),
+            inner.start_byte,
+            "value",
+        )
+        tn = record.type_node if record is not None else None
+        while tn is not None and tn.type == "reference_type":
+            # `&'a [P]`/`&'a mut [P]` lead their named children with
+            # the lifetime — the type is the non-lifetime child.
+            tn = next(
+                (
+                    c
+                    for c in tn.named_children
+                    if c.type not in {"lifetime", "mutable_specifier"}
+                ),
+                None,
+            )
+        return tn is not None and tn.type == "array_type"
+
     def _scrutinee_shape(
         self, value: Any | None, scrut_id: str | None
     ) -> "tuple[str | None, int | None, _Scope | None]":
@@ -5854,6 +5973,16 @@ class _RustBindings:
                         or self._container_head_name(
                             callee.child_by_field_name("value")
                         ) in option_head[1]
+                        or (
+                            self.text(field).strip()
+                            in _SLICE_OPTION_METHODS
+                            and self._is_slice_receiver(
+                                callee.child_by_field_name("value")
+                            )
+                            and not self._slice_has_declared_method(
+                                self.text(field).strip()
+                            )
+                        )
                     )
                 ):
                     # `v.get(i)`/`v.pop()` return `Option<_>` — the
