@@ -15,6 +15,7 @@ FIXTURE_NAMES = (
     "require_builtin",
     "state_write",
     "state_write_operators",
+    "block_scope_shadowing",
     "compile_error",
     "import_source",
 )

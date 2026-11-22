@@ -9622,3 +9622,18 @@ metadata only — no trust, audit, Evidence acceptance, Seal Grade, ABI,
 runtime or proof claim.
 
 **回帰ゲート**: `uv run pytest tests/test_sol_compiler_snapshot.py tests/test_sol_bindings.py -q`
+
+### C06 Solidity compiler fixture — block-scope shadowing and reassignment
+
+`tests/fixtures/solc/block_scope_shadowing.sol` (envelope regenerated with
+the pinned solc 0.8.39 binary, SHA-256 verified against the fixture
+README) exercises the acceptance criterion's shadowing/reassignment
+requirement for Solidity: a block-local `count` shadows the state
+variable — block reads/writes bind to the inner declaration while
+references before and after the block bind to the state variable — and
+a `local` reassignment keeps one declaration identity. All eight
+references compare `agree`. Fixture registered in
+`tests/fixtures/solc/regenerate.py`. Metadata comparison only — no new
+capture surface, route or claim.
+
+**回帰ゲート**: `uv run pytest tests/test_sol_compiler_snapshot.py -q`
