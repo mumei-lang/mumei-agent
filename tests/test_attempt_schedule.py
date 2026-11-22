@@ -235,6 +235,7 @@ def test_schedule_computes_network_isolation_from_permissions(
         requested_isolation.append(kwargs["isolate_network"])
         kwargs["isolate_network"] = False
         kwargs["isolate_filesystem_write"] = False
+        kwargs["isolate_process_spawn"] = False
         return real_dispatch(sequence, child_argv, **kwargs)
 
     monkeypatch.setattr(attempt_schedule, "dispatch_attempt", record_dispatch)
@@ -297,6 +298,7 @@ def test_schedule_computes_filesystem_write_isolation_from_permissions(
         requested_isolation.append(kwargs["isolate_filesystem_write"])
         kwargs["isolate_filesystem_write"] = False
         kwargs["isolate_network"] = False
+        kwargs["isolate_process_spawn"] = False
         return real_dispatch(sequence, child_argv, **kwargs)
 
     monkeypatch.setattr(attempt_schedule, "dispatch_attempt", record_dispatch)
@@ -369,6 +371,120 @@ def test_filesystem_write_isolation_fails_closed_for_unspecified_permissions():
     assert plan.selected is not None
     assert plan.selected.required_permissions is None
     assert attempt_schedule._filesystem_write_isolated(plan) is True
+
+
+@pytest.mark.parametrize(
+    ("required_permissions", "allowed_permissions", "expected_isolation"),
+    [
+        (
+            frozenset({"process.spawn"}),
+            frozenset({"process.spawn"}),
+            False,
+        ),
+        (
+            frozenset({"process.spawn"}),
+            frozenset(),
+            True,
+        ),
+        (
+            frozenset(),
+            frozenset({"process.spawn"}),
+            True,
+        ),
+        (None, None, True),
+    ],
+    ids=[
+        "declared-and-allowed",
+        "declared-not-allowed",
+        "allowed-not-declared",
+        "permissions-unspecified",
+    ],
+)
+def test_process_spawn_isolation_predicate_fails_closed(
+    required_permissions, allowed_permissions, expected_isolation
+):
+    registry = AdapterRegistry()
+    registry.register(descriptor("alpha", required_permissions=frozenset()))
+    plan = registry.plan(
+        request(),
+        policy(allowed_permissions=frozenset()),
+        observations("alpha"),
+    )
+    assert plan.selected is not None
+    plan = replace(
+        plan,
+        selected=replace(
+            plan.selected,
+            required_permissions=required_permissions,
+        ),
+        policy=replace(
+            plan.policy,
+            allowed_permissions=allowed_permissions,
+        ),
+    )
+
+    assert (
+        attempt_schedule._process_spawn_isolated(plan)
+        is expected_isolation
+    )
+
+
+@pytest.mark.parametrize(
+    ("required_permissions", "allowed_permissions", "enforceable", "expected"),
+    [
+        (
+            frozenset({"process.spawn"}),
+            frozenset({"process.spawn"}),
+            True,
+            False,
+        ),
+        (frozenset(), frozenset({"process.spawn"}), True, True),
+        (frozenset(), frozenset(), True, True),
+        (frozenset(), frozenset(), False, False),
+    ],
+    ids=[
+        "declared-and-allowed",
+        "allowed-not-declared",
+        "undeclared",
+        "boundary-unavailable",
+    ],
+)
+def test_schedule_gates_process_spawn_isolation(
+    monkeypatch,
+    required_permissions,
+    allowed_permissions,
+    enforceable,
+    expected,
+):
+    registry = AdapterRegistry()
+    registry.register(
+        descriptor("alpha", required_permissions=required_permissions)
+    )
+    requested_isolation = []
+    real_dispatch = attempt_schedule.dispatch_attempt
+
+    def record_dispatch(sequence, child_argv, **kwargs):
+        requested_isolation.append(kwargs["isolate_process_spawn"])
+        kwargs["isolate_process_spawn"] = False
+        kwargs["isolate_network"] = False
+        kwargs["isolate_filesystem_write"] = False
+        return real_dispatch(sequence, child_argv, **kwargs)
+
+    monkeypatch.setattr(attempt_schedule, "dispatch_attempt", record_dispatch)
+    monkeypatch.setattr(
+        attempt_schedule,
+        "process_spawn_isolation_enforceable",
+        lambda: enforceable,
+    )
+    result = schedule(
+        registry,
+        ("alpha",),
+        {"alpha": argv(0)},
+        policy=policy(allowed_permissions=allowed_permissions),
+    )
+
+    assert result.outcome == "selected"
+    assert requested_isolation == [expected]
 
 
 def test_network_isolation_predicate_rejects_disallowed_permission():

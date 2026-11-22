@@ -457,6 +457,7 @@ class _ConcurrencyStubRunner:
         environment=None,
         isolate_network=False,
         isolate_filesystem_write=False,
+        isolate_process_spawn=False,
     ):
         with self._lock:
             self.inflight += 1
@@ -476,11 +477,26 @@ def test_probe_request_defaults_to_fail_closed_enforcement():
     assert request.inherit_environment is False
     assert request.isolate_network is True
     assert request.isolate_filesystem_write is True
+    assert request.isolate_process_spawn is True
+
+
+def test_probe_request_without_policy_fails_closed_for_process_spawn():
+    descriptor = AdapterDescriptor.from_manifest(
+        _manifest(required_permissions=["process.spawn"])
+    )
+    request = probe_request_for(descriptor, stamp=1)
+
+    assert request.isolate_process_spawn is True
 
 
 def test_probe_request_enforcement_requires_declared_and_allowed_permissions():
     permissions = frozenset(
-        {"environment.read", "network.connect", "filesystem.write"}
+        {
+            "environment.read",
+            "network.connect",
+            "filesystem.write",
+            "process.spawn",
+        }
     )
     descriptor = AdapterDescriptor.from_manifest(
         _manifest(required_permissions=sorted(permissions))
@@ -494,6 +510,7 @@ def test_probe_request_enforcement_requires_declared_and_allowed_permissions():
     assert request.inherit_environment is True
     assert request.isolate_network is False
     assert request.isolate_filesystem_write is False
+    assert request.isolate_process_spawn is False
 
 
 @pytest.mark.parametrize(
@@ -502,15 +519,18 @@ def test_probe_request_enforcement_requires_declared_and_allowed_permissions():
         ({"environment.read"}, set()),
         ({"network.connect"}, set()),
         ({"filesystem.write"}, set()),
+        ({"process.spawn"}, set()),
         (set(), {"environment.read"}),
         (set(), {"network.connect"}),
         (set(), {"filesystem.write"}),
+        (set(), {"process.spawn"}),
         (
             None,
             {
                 "environment.read",
                 "network.connect",
                 "filesystem.write",
+                "process.spawn",
             },
         ),
     ],
@@ -529,6 +549,7 @@ def test_probe_request_permission_mismatch_fails_closed(required, allowed):
     assert request.inherit_environment is False
     assert request.isolate_network is True
     assert request.isolate_filesystem_write is True
+    assert request.isolate_process_spawn is True
 
 
 @pytest.mark.parametrize(
@@ -537,6 +558,7 @@ def test_probe_request_permission_mismatch_fails_closed(required, allowed):
         ("inherit_environment", 1),
         ("isolate_network", 1),
         ("isolate_filesystem_write", 1),
+        ("isolate_process_spawn", 1),
     ],
 )
 def test_probe_request_enforcement_fields_require_bools(field, value):
@@ -556,16 +578,22 @@ def test_probe_command_fingerprint_ignores_enforcement_fields():
         inherit_environment=True,
         isolate_network=False,
         isolate_filesystem_write=False,
+        isolate_process_spawn=False,
     )
     fail_closed = _req(
         inherit_environment=False,
         isolate_network=True,
         isolate_filesystem_write=True,
+        isolate_process_spawn=True,
     )
 
     assert inherited.command_fingerprint() == fail_closed.command_fingerprint()
     assert (
         "isolate_filesystem_write"
+        not in AdapterProbeHistory.start(inherited).to_dict()
+    )
+    assert (
+        "isolate_process_spawn"
         not in AdapterProbeHistory.start(inherited).to_dict()
     )
 
@@ -584,9 +612,15 @@ def test_run_probe_passes_enforcement_to_runner(monkeypatch):
             environment=None,
             isolate_network=False,
             isolate_filesystem_write=False,
+            isolate_process_spawn=False,
         ):
             self.calls.append(
-                (environment, isolate_network, isolate_filesystem_write)
+                (
+                    environment,
+                    isolate_network,
+                    isolate_filesystem_write,
+                    isolate_process_spawn,
+                )
             )
             return _ConcurrencyStubRunner._Result()
 
@@ -599,15 +633,23 @@ def test_run_probe_passes_enforcement_to_runner(monkeypatch):
         "agent.adapter_probe.filesystem_write_isolation_enforceable",
         lambda: True,
     )
+    monkeypatch.setattr(
+        "agent.adapter_probe.process_spawn_isolation_enforceable",
+        lambda: True,
+    )
     run_probe(_req(), runner=runner)
-    assert runner.calls[-1] == (minimal_environment(), True, True)
+    assert runner.calls[-1] == (
+        minimal_environment(), True, True, True
+    )
 
     monkeypatch.setattr(
         "agent.adapter_probe.network_isolation_enforceable",
         lambda: False,
     )
     run_probe(_req(), runner=runner)
-    assert runner.calls[-1] == (minimal_environment(), False, True)
+    assert runner.calls[-1] == (
+        minimal_environment(), False, True, True
+    )
 
     monkeypatch.setattr(
         "agent.adapter_probe.network_isolation_enforceable",
@@ -618,17 +660,33 @@ def test_run_probe_passes_enforcement_to_runner(monkeypatch):
         lambda: False,
     )
     run_probe(_req(), runner=runner)
-    assert runner.calls[-1] == (minimal_environment(), True, False)
+    assert runner.calls[-1] == (
+        minimal_environment(), True, False, True
+    )
+
+    monkeypatch.setattr(
+        "agent.adapter_probe.process_spawn_isolation_enforceable",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        "agent.adapter_probe.filesystem_write_isolation_enforceable",
+        lambda: True,
+    )
+    run_probe(_req(), runner=runner)
+    assert runner.calls[-1] == (
+        minimal_environment(), True, True, False
+    )
 
     run_probe(
         _req(
             inherit_environment=True,
             isolate_network=False,
             isolate_filesystem_write=False,
+            isolate_process_spawn=False,
         ),
         runner=runner,
     )
-    assert runner.calls[-1] == (None, False, False)
+    assert runner.calls[-1] == (None, False, False, False)
 
 
 def test_real_probe_uses_minimal_environment_by_default(monkeypatch):
@@ -1115,13 +1173,16 @@ def test_probe_retry_replaces_observation_in_plan(tmp_path):
     )
     registry = _registry(
         probe_argv=list(argv),
-        required_permissions=["filesystem.write"],
+        required_permissions=["filesystem.write", "process.spawn"],
     )
     policy = PlannerPolicy(
-        allowed_permissions=frozenset({"filesystem.write"})
+        allowed_permissions=frozenset(
+            {"filesystem.write", "process.spawn"}
+        )
     )
     req = probe_requests_for(registry, _route(), policy, stamp=1)[0]
     assert req.isolate_filesystem_write is False
+    assert req.isolate_process_spawn is False
     miss = run_probe(req)
     assert miss.observation.availability == "missing"
     hist = AdapterProbeHistory.start(req).record(req, miss)
@@ -1136,6 +1197,7 @@ def test_probe_retry_replaces_observation_in_plan(tmp_path):
     )
     assert [r.attempt_number for r in retries] == [2]
     assert retries[0].isolate_filesystem_write is False
+    assert retries[0].isolate_process_spawn is False
     flag.touch()
     ok = run_probe(retries[0])
     assert ok.observation.availability == "available"
