@@ -875,6 +875,9 @@ class _TypeScriptBindings:
 
     _MEMBER_DECLARATIONS = {
         "function_declaration", "generator_function_declaration",
+        # `function f(): void` in an ambient namespace is a bare
+        # function_signature, not wrapped in ambient_declaration.
+        "function_signature",
         "class_declaration", "abstract_class_declaration",
         "interface_declaration", "enum_declaration",
         "type_alias_declaration", "internal_module",
@@ -1048,15 +1051,18 @@ class _TypeScriptBindings:
                         # qualified `N.x` access — a block-private
                         # declaration is module-local, like a class's
                         # private member. Ambient namespaces export
-                        # every member implicitly.
+                        # every member implicitly, at any depth.
+                        ambient = False
+                        ancestor = decl.parent
+                        while ancestor is not None:
+                            if ancestor.type == "ambient_declaration":
+                                ambient = True
+                                break
+                            ancestor = ancestor.parent
                         other.member_visibility = (
                             "public"
                             if node.type == "export_statement"
-                            or (
-                                decl.parent is not None
-                                and decl.parent.type
-                                == "ambient_declaration"
-                            )
+                            or ambient
                             else "private"
                         )
                         other.member_container = (
@@ -2167,12 +2173,23 @@ class _TypeScriptBindings:
             elif (
                 new
                 and member is not None
+                and member.binding.kind == "ambient"
+            ):
+                kind = "opaque_ambient"
+            elif (
+                new
+                and member is not None
                 and member.binding.kind == "class"
             ):
                 kind = "opaque_new"
-            elif member is not None and member.binding.kind in {
-                "function", "associated_function",
-            }:
+            elif member is not None and (
+                member.binding.kind
+                in {"function", "associated_function"}
+                or (
+                    member.binding.kind == "ambient"
+                    and member.function_node is not None
+                )
+            ):
                 info = (
                     self.function_infos.get(member.function_node.id)
                     if member.function_node is not None
@@ -2199,7 +2216,7 @@ class _TypeScriptBindings:
                 in {
                     "direct_local", "opaque_generic", "opaque_async",
                     "opaque_bodyless", "opaque_virtual",
-                    "opaque_generator", "opaque_new",
+                    "opaque_generator", "opaque_new", "opaque_ambient",
                 }
                 else ""
             )

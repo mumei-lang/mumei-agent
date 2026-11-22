@@ -1485,6 +1485,41 @@ const t = new T();
     )
 
 
+def test_member_nested_ambient_namespace_implicit_exports():
+    # Inside `declare namespace` every member is implicitly exported
+    # at any depth, and bare `function f(): void` declarations parse
+    # as function_signature nodes — both must be reachable through
+    # qualified `N.Inner.x` access.
+    source = """
+declare namespace N {
+    export namespace Inner {
+        function f(): void;
+        const v: number;
+    }
+    export declare class C { m(): void }
+}
+N.Inner.f();
+const x = N.Inner.v;
+const c = new N.C();
+c.m();
+"""
+    report = build_ts_bindings(source)
+    f = _member_bindings(report, "f", "ambient")[0]
+    v = _member_bindings(report, "v", "ambient")[0]
+    m = _member_bindings(report, "m", "associated_function")[0]
+    call_refs = {r.binding_id for r in report.references if r.kind == "call"}
+    read_refs = {r.binding_id for r in report.references if r.kind == "read"}
+    assert {f.id, m.id} & call_refs
+    assert v.id in read_refs
+    kinds = {(c.kind, c.target) for c in report.calls}
+    assert ("opaque_bodyless", f.id) in kinds
+    assert ("opaque_bodyless", m.id) in kinds
+    assert any(
+        c.kind == "opaque_ambient"
+        for c in report.calls if c.target
+    )
+
+
 def test_member_ambient_declarations_have_no_tdz():
     # `declare class`/`declare namespace` initialize nothing at
     # runtime: `new A()` textually before the declarations is not a
