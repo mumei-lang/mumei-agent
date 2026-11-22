@@ -2823,12 +2823,18 @@ class _RustBindings:
             # std::iter::once(1)` reaches an unresolvable extern
             # call) — the element stays opaque.
             return None, None
+        literal_args = literal_args or container_id is not None
         if elem_args.startswith("&"):
             # `&P`/`&mut P`/`&[P]` spell a borrowed element — the
             # receiver of `x.m()`/`x[0]` is `P`.
             inner = elem_args.lstrip("&").strip()
             if inner.startswith("mut "):
                 inner = inner[4:].strip()
+            if literal_args and inner.startswith("["):
+                # A container's arg names the element type literally
+                # — `Vec<&[P]>` has `v[0]` typed `&[P]`, not `P`, so
+                # `v[0][0]` still reads the slice element.
+                return self._spelled_type(elem_args, position)
             return self._element_of(None, inner, position)
         # A slice or array element exposes its own element type —
         # `&[[P; 2]]` reads first to `[P; 2]`, then to `P`.
@@ -3265,8 +3271,15 @@ class _RustBindings:
                 return None, None
             # `v.split_at(i)` yields `(&[P], &[P])` — a pair of
             # borrowed slices that feeds the tuple-pattern path.
+            # Re-splitting a `&[P]` keeps the same slice — the
+            # spelling is not wrapped a second time.
+            pair = (
+                spelled
+                if spelled.startswith("&[")
+                else f"&[{spelled}]"
+            )
             return (
-                f"(&[{spelled}], &[{spelled}])",
+                f"({pair}, {pair})",
                 self._receiver_annotation_position(receiver),
             )
         if method in _ITER_CHUNK_METHODS:
@@ -3296,10 +3309,10 @@ class _RustBindings:
             spelled = args.strip() or None
             if spelled is None:
                 return None, None
-            # The element is a borrowed slice — `&P` unwraps to `P`
+            # The element is a borrowed slice — `&[P]` reads `P`
             # at the index/iter sites that consume it.
             return (
-                "&" + spelled,
+                f"&[{spelled}]",
                 self._receiver_annotation_position(receiver),
             )
         if method in _ITER_PRESERVING_METHODS or method in _ITER_SLICE_METHODS:
@@ -3631,7 +3644,10 @@ class _RustBindings:
                 elem_id, rest = None, "&" + args.strip()
             else:
                 elem_id, rest = self._element_of(
-                    container_id, args.strip(), position
+                    container_id,
+                    args.strip(),
+                    position,
+                    self._literal_element_args(receiver),
                 )
         elif (index := _MAP_ELEMENT_METHODS.get(method)) is not None:
             if not self._is_map_container(container_id, receiver):
