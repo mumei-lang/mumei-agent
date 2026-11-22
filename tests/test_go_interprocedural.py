@@ -8206,11 +8206,13 @@ def test_local_named_pointee_write_is_admitted(
     assert result.effects == "unknown"
 
 
-def test_local_named_pointee_composites_stay_closed(
+def test_local_named_pointee_composites_match_value_control(
     go_types_helper,
 ):
-    # A non-scalar field type keeps the read closed — indexing a
-    # slice *field* (`p.V[0]`) never reaches a container pointee.
+    # `p.V[0]` on `p *P` resolves the same way `o.V[0]` does — the
+    # pointer shares its pointee with the caller the way a slice
+    # shares its backing, so the element read is dep-free like the
+    # value root's.
     decl, expression = "type P struct{ V []int64 }", "p.V[0]"
     files = {
         "a.go": f"package p\n{decl}\n"
@@ -8221,7 +8223,19 @@ def test_local_named_pointee_composites_stay_closed(
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    files_o = {
+        "a.go": f"package p\n{decl}\n"
+        f"func F(o {decl.split()[1]}, x int64) int64 {{ "
+        f"_ = o.V[0]; return x }}\n"
+    }
+    snapshot_o = _snapshot_for(go_types_helper, files_o)
+    direct = named_package(
+        files_o, snapshot_o,
+        ip.summarize_go_package(files_o, snapshot_o), "F",
+    )
+    assert result.available == direct.available
+    assert result.available
+    assert result.return_dependencies == direct.return_dependencies
 
 
 def test_local_named_container_pointee_index_read(
@@ -12752,7 +12766,6 @@ def test_empty_struct_literal_address_supports_nested_field_write(
     ("types", "field_expr"),
     [
         ("type S struct{ A struct{ B int64 } }\n", "t.A.B"),
-        ("type S struct{ A []int64 }\n", "t.A[0]"),
     ],
 )
 def test_bound_pointer_anonymous_or_slice_intermediate_stays_closed(
@@ -30705,13 +30718,6 @@ def test_container_builtin_dep_free_param_write_marks_effects(
         "\tb := a[0][0]\n"
         "\tb[0] = x\n"
         "\treturn a[0][0][0]\n}\n",
-        # `a := s.F` on a POINTER-to-composite root — field
-        # shares need a local-composite root, so the extraction
-        # stays closed.
-        "func F(s *struct{ F [][][]int64 }, x int64) int64 {\n"
-        "\ta := s.F\n"
-        "\ta[0][0][0] = x\n"
-        "\treturn a[0][0][0]\n}\n",
         # `a := <-cc` — a container received off a channel has no
         # identity to share; the bind stays closed.
         "func F(cc chan []int64, x int64) int64 {\n"
@@ -32086,11 +32092,6 @@ def test_struct_field_scalar_element_callee_write_reaches_source(
     "source",
     [
         (
-            "type E struct { V int64 }\n"
-            "type S2 struct { A []E }\n"
-            "func F(p *S2, i int64) int64 { return p.A[i].V }\n"
-        ),
-        (
             "type P struct { V int64 }\n"
             "type E struct { P *P }\n"
             "type S2 struct { A []E }\n"
@@ -32126,7 +32127,6 @@ def test_struct_field_scalar_element_callee_write_reaches_source(
         ),
         ],
         ids=[
-            "pointer-root",
             "pointer-field",
             "anonymous-element",
             "generic-element",
@@ -32981,14 +32981,6 @@ def test_named_struct_extraction_applies_index_effects_before_read(
         ),
         (
             "type E struct { V int64 }\n"
-            "type S2 struct { A []E }\n"
-            "func F(p *S2) int64 {\n"
-            "\tr := int64(0)\n"
-            "\tfor _, e := range p.A { r += e.V }\n"
-            "\treturn r\n}\n"
-        ),
-        (
-            "type E struct { V int64 }\n"
             "func F(p *[][]E, i int64) int64 {\n"
             "\te := (*p)[0][i]\n"
             "\treturn e.V\n}\n"
@@ -33005,7 +32997,6 @@ def test_named_struct_extraction_applies_index_effects_before_read(
         "anonymous",
         "generic",
         "comma-ok",
-        "pointer-root-field",
         "pointer-root-index",
         "deep-nested-root",
     ],

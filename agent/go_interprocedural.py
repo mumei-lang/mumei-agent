@@ -2524,6 +2524,30 @@ class _Builder:
             return False
         return False
 
+    def _param_pointer_struct_root(
+        self, node: Any, params: dict | None = None
+    ) -> bool:
+        """`p` where `p` is a `*S` function parameter with a struct
+        pointee — the pointer shares its pointee with the caller the
+        way a slice shares its backing, so fields reached through it
+        slot on the parameter. Local pointer bindings (`q := p`),
+        reseats and `**S` roots stay closed because their aliasing
+        cannot be resolved in this slot model."""
+        if params is None or node is None or node.type != "identifier":
+            return False
+        ref = self.references.get(self.node_key(node))
+        if ref is None or ref.binding_id is None or ref.binding_id not in params:
+            return False
+        binding = self.bindings.get(ref.binding_id)
+        if (
+            binding is None
+            or binding.type is None
+            or binding.type.kind != "pointer"
+        ):
+            return False
+        elem = getattr(binding.type, "elem", None)
+        return elem is not None and elem.kind == "struct"
+
     def _opaque_container_field_index_path_supported(
         self, sel: Any, root_binding: Any
     ) -> bool:
@@ -13996,7 +14020,14 @@ class _Builder:
         # it) — seed it with the parameter's own index so reads
         # carry the caller's provenance.
         for p in sig_params:
-            if p.binding_id and p.type.kind == "struct":
+            if p.binding_id and (
+                p.type.kind == "struct"
+                or (
+                    p.type.kind == "pointer"
+                    and getattr(p.type, "elem", None) is not None
+                    and p.type.elem.kind == "struct"
+                )
+            ):
                 locals_[p.binding_id] = frozenset(
                     {params[p.binding_id]}
                 )
@@ -14142,6 +14173,7 @@ class _Builder:
                     p.type,
                     self.bindings.get(p.binding_id),
                 )
+
         # The summary embeds the function's declared parameter and
         # result type facts, so the named/alias identities they carry
         # pin it directly: redeclaring one makes this summary's
@@ -25337,6 +25369,9 @@ class _Builder:
                         if (
                             operand_fact is not None
                             and operand_fact.kind == "pointer"
+                            and not self._param_pointer_struct_root(
+                                field_operand, params
+                            )
                         ):
                             pointer_crossed = True
                         if field_operand.type == "selector_expression":
