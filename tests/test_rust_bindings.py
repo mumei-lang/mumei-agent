@@ -8019,3 +8019,31 @@ fn f(r: Result<P, u8>) {
     }
     assert bound.get("p.pm()") == pm.id
     assert bound.get("q.pm()") == pm.id
+def test_btree_set_range_binds_borrowed_elements():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct K;
+fn f(s: std::collections::BTreeSet<P>, m: std::collections::BTreeMap<K, P>) {
+    for a in s.range(..) { a.pm(); }
+    for b in s.range_mut(..) { b.pm(); }
+    let r = s.range(..);
+    for c in r { c.pm(); }
+    for d in m.range(..) { d.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `BTreeSet::range`/`range_mut` iterate `&P` like the
+    # set-algebra methods.
+    assert bound.get("a.pm()") == pm.id
+    assert bound.get("b.pm()") == pm.id
+    assert bound.get("c.pm()") == pm.id
+    # A map's `range` yields `(K, V)` pairs, not `P` — a single
+    # loop name stays opaque.
+    assert not bound.get("d.pm()")
