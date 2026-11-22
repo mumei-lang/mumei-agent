@@ -1884,6 +1884,28 @@ contract Vault {
     assert report.calls[0].kind == "opaque_member"
 
 
+def test_using_not_applied_to_struct_getter_tuple():
+    source = """
+library SafeMath {
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {}
+}
+struct Coin { uint256 v; }
+contract Vault {
+    using SafeMath for uint256;
+    Coin public coin;
+    function run() external { this.coin().v.add(1); }
+}
+"""
+    # `this.coin()` returns the exploded fields — no `uint256`
+    # receiver exists for the extension to bind.
+    report = build_sol_bindings(source)
+    add = next(b for b in report.bindings if b.name == "add")
+    assert not any(
+        ref.binding_id == add.id for ref in report.references
+    )
+    assert report.calls[-1].kind == "opaque_member"
+
+
 def test_using_on_nested_array_stays_opaque():
     source = """
 library SafeMath {

@@ -1045,11 +1045,22 @@ class _SolBindings:
                 # the declared type itself.
                 return record.binding.name
             if record.binding.kind != "function":
-                if record.type_node is not None and not re.match(
+                if record.type_node is None or re.match(
                     r"\s*function\b", self.text(record.type_node)
                 ):
-                    return self.text(record.type_node)
-                return None
+                    return None
+                # A public getter on a struct/enum-typed member returns
+                # the exploded fields, not the type — no extension
+                # target exists for the tuple.
+                resolved = self._type_record_for_type_node(
+                    record.type_node, record.owner
+                )
+                if resolved is not None and resolved.binding.kind in {
+                    "struct",
+                    "enum",
+                }:
+                    return None
+                return self.text(record.type_node)
             function_node = record.node.parent
             if function_node is None:
                 return None
