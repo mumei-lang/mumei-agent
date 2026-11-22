@@ -2754,6 +2754,15 @@ class _Builder:
         )
         if root_ref is None or root_ref.binding_id is None:
             return None
+        aliased_ref = self._param_pointer_aliases.get(
+            root_ref.binding_id
+        )
+        if aliased_ref is not None:
+            # The same substitution `_scalar_container_field`
+            # applied above: `p = q` means a write through `p`
+            # lands on `q`'s entry pointee — the store must fold
+            # into the target's dep set, not the alias's.
+            root_ref = aliased_ref
         root_binding = self.bindings.get(root_ref.binding_id)
         fact = member.type
         operand = sel.child_by_field_name("operand")
