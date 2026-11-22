@@ -5855,3 +5855,26 @@ fn f(b: Box<P>, r: std::rc::Rc<P>, w: W<P>, m: std::sync::Mutex<P>) {
     # not Deref straight to `P`.
     assert not resolved["w.pm()"]
     assert not resolved["m.pm()"]
+
+
+def test_slice_and_array_option_heads():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(s: &[P], a: [P; 4]) {
+    if let Some(p) = s.first() { p.pm(); }
+    if let Some(p) = a.last() { p.pm(); }
+    if let Some(p) = s.get(0) { p.pm(); }
+    match s.first() { Some(p) => p.pm(), None => {} }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    calls = [
+        call for call in report.calls
+        if raw[call.span.start:call.span.end].decode() == "p.pm()"
+    ]
+    assert len(calls) == 4
+    for call in calls:
+        assert call.target == pm.id

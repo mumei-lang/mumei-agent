@@ -73,6 +73,11 @@ _MAP_CONTAINER_NAMES = frozenset({"HashMap", "BTreeMap"})
 # opaque.
 _DEREF_WRAPPER_NAMES = frozenset({"Box", "Rc", "Arc"})
 
+# `Option` heads slices and arrays share with `Vec` — `s.get(i)`,
+# `s.first()`, `s.last()` yield `Option<&T>` on `&[T]`/`[T; N]` too.
+# `pop`/`remove` stay Vec-only — slices cannot shrink.
+_SLICE_OPTION_METHODS = frozenset({"get", "first", "last"})
+
 # Prelude container methods that hand back `Option` — `v.get(i)`,
 # `v.first()` and `v.last()` yield `Option<&T>` while `v.pop()`
 # yields `Option<T>`. Each maps to its payload prefix and the
@@ -2593,6 +2598,13 @@ class _RustBindings:
                         or self._container_head_name(
                             callee.child_by_field_name("value")
                         ) in option_head[1]
+                        or (
+                            self.text(field).strip()
+                            in _SLICE_OPTION_METHODS
+                            and self._is_slice_receiver(
+                                callee.child_by_field_name("value")
+                            )
+                        )
                     )
                 ):
                     prefix = option_head[0]
@@ -5502,6 +5514,25 @@ class _RustBindings:
             return None
         return head.group(0).split("::")[-1]
 
+    def _is_slice_receiver(self, node: Any | None) -> bool:
+        """True when `node` is annotated `&[T]`/`[T]`/`[T; N]` —
+        slices and arrays share `first`/`last`/`get`/`chunks` with
+        `Vec` but carry no named container head."""
+        inner = node
+        while inner is not None and inner.type == "reference_expression":
+            inner = next(iter(inner.named_children), None)
+        if inner is None or inner.type != "identifier":
+            return False
+        record = self._lookup(
+            self._normalize_identifier(self.text(inner)),
+            inner.start_byte,
+            "value",
+        )
+        tn = record.type_node if record is not None else None
+        while tn is not None and tn.type == "reference_type":
+            tn = next(iter(tn.named_children), None)
+        return tn is not None and tn.type == "array_type"
+
     def _scrutinee_shape(
         self, value: Any | None, scrut_id: str | None
     ) -> "tuple[str | None, int | None, _Scope | None]":
@@ -5652,6 +5683,13 @@ class _RustBindings:
                         or self._container_head_name(
                             callee.child_by_field_name("value")
                         ) in option_head[1]
+                        or (
+                            self.text(field).strip()
+                            in _SLICE_OPTION_METHODS
+                            and self._is_slice_receiver(
+                                callee.child_by_field_name("value")
+                            )
+                        )
                     )
                 ):
                     # `v.get(i)`/`v.pop()` return `Option<_>` — the
