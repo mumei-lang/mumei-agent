@@ -7074,6 +7074,104 @@ class _Builder:
             return None
         return self._local_field(field_ref)
 
+    def _indexed_pointer_method_root_may_change(
+        self, node: Any, root_binding_id: str
+    ) -> bool:
+        current = node
+        enclosing = None
+        while current is not None:
+            if current.type in {
+                "function_declaration",
+                "method_declaration",
+            }:
+                enclosing = current
+                break
+            current = current.parent
+        body = (
+            enclosing.child_by_field_name("body")
+            if enclosing is not None
+            else None
+        )
+        if body is None:
+            return True
+        file_id = self.node_key(node)[0]
+
+        def binding_id(identifier: Any) -> str | None:
+            identifier = self._strip_parens(identifier)
+            if identifier is None or identifier.type != "identifier":
+                return None
+            key = (
+                file_id,
+                identifier.start_byte,
+                identifier.end_byte,
+            )
+            ref = self.references.get(key)
+            if ref is not None:
+                return ref.binding_id
+            binding = self.bindings_by_span.get(key)
+            return binding.id if binding is not None else None
+
+        def is_root_identifier(target: Any) -> bool:
+            target = self._strip_parens(target)
+            return (
+                target is not None
+                and target.type == "identifier"
+                and binding_id(target) == root_binding_id
+            )
+
+        stack = [body]
+        while stack:
+            current = stack.pop()
+            stack.extend(_children(current))
+            if current.type in {
+                "assignment_statement",
+                "short_var_declaration",
+            }:
+                left = current.child_by_field_name("left")
+                targets = (
+                    _children(left)
+                    if left is not None
+                    and left.type == "expression_list"
+                    else [left]
+                )
+                for target in targets:
+                    if not is_root_identifier(target):
+                        continue
+                    declaration = self.bindings_by_span.get(
+                        (
+                            file_id,
+                            target.start_byte,
+                            target.end_byte,
+                        )
+                    )
+                    if (
+                        current.type == "short_var_declaration"
+                        and declaration is not None
+                        and declaration.id == root_binding_id
+                    ):
+                        continue
+                    return True
+            elif current.type == "range_clause":
+                left = current.child_by_field_name("left")
+                targets = (
+                    _children(left)
+                    if left is not None
+                    and left.type == "expression_list"
+                    else [left]
+                )
+                if any(is_root_identifier(target) for target in targets):
+                    return True
+            elif current.type == "unary_expression":
+                operator = current.child_by_field_name("operator")
+                operand = current.child_by_field_name("operand")
+                if (
+                    operator is not None
+                    and operator.text == b"&"
+                    and is_root_identifier(operand)
+                ):
+                    return True
+        return False
+
     def _method_value_parts(
         self, node: Any
     ) -> tuple[str, str | None, str | None] | None:
@@ -7085,9 +7183,9 @@ class _Builder:
         selector isn't one.
 
         The field must resolve to a same-package method record
-        (receiver non-null) and the operand — parens unwrapped —
-        to a bare identifier; a computed operand (`g().M`) binds no
-        stable receiver, so it stays closed.
+        (receiver non-null). A bare identifier binds directly; one
+        index into a supported local slice/array value struct binds
+        its container root, while a computed receiver stays closed.
         """
         node = self._strip_parens(node)
         if node is None or node.type != "selector_expression":
@@ -7114,7 +7212,30 @@ class _Builder:
                 (c for c in operand.named_children if c.type != "comment"),
                 None,
             )
-        if operand is None or operand.type != "identifier":
+        if operand is None:
+            return None
+        if operand.type == "index_expression":
+            source_id = self._local_struct_value_record_source_id(
+                operand
+            )
+            index = self._strip_parens(
+                operand.child_by_field_name("index")
+            )
+            if (
+                source_id is None
+                or index is None
+                or index.type not in {"identifier", "int_literal"}
+            ):
+                return None
+            if (
+                method_fn.receiver.type.kind == "pointer"
+                and self._indexed_pointer_method_root_may_change(
+                    node, source_id
+                )
+            ):
+                return None
+            return method_fn.binding_id, source_id, None
+        if operand.type != "identifier":
             return None
         operand_ref = self.references.get(self.node_key(operand))
         if operand_ref is None:
@@ -7655,7 +7776,12 @@ class _Builder:
         method = self._method_value_parts(node)
         if method is not None:
             self._record_bound_method(
-                bid, method, params, locals_, node
+                bid,
+                method,
+                params,
+                locals_,
+                node,
+                receiver_deps,
             )
             return
         self._record_bound_interface_method(
@@ -13297,6 +13423,186 @@ class _Builder:
                 return member.id
         return None
 
+    def _method_value_receiver_may_write(
+        self, method: Function
+    ) -> bool:
+        receiver = method.receiver
+        binding = self.bindings.get(method.binding_id)
+        if (
+            receiver is None
+            or method.body is None
+            or binding is None
+            or binding.span is None
+        ):
+            return True
+        file_id = self._binding_source_file(binding)
+        raw = self.raws.get(file_id)
+        syntax = _syntax(raw) if raw is not None else None
+        if syntax is None:
+            return True
+        body = None
+        stack = [syntax]
+        while stack:
+            current = stack.pop()
+            if (
+                current.type == "block"
+                and current.start_byte == method.body.start
+                and current.end_byte == method.body.end
+            ):
+                body = current
+                break
+            stack.extend(_children(current))
+        if body is None:
+            return True
+        receiver_id = receiver.binding_id
+
+        def root_binding_id(node: Any) -> str | None:
+            current = self._strip_parens(node)
+            while current is not None:
+                if current.type in {
+                    "selector_expression",
+                    "index_expression",
+                }:
+                    current = self._strip_parens(
+                        current.child_by_field_name("operand")
+                    )
+                elif current.type == "unary_expression":
+                    current = self._strip_parens(
+                        current.child_by_field_name("operand")
+                    )
+                elif current.type == "type_conversion_expression":
+                    current = self._strip_parens(
+                        current.child_by_field_name("operand")
+                    )
+                else:
+                    break
+            if current is None or current.type != "identifier":
+                return None
+            ref = self.references.get(
+                (
+                    file_id,
+                    current.start_byte,
+                    current.end_byte,
+                )
+            )
+            return ref.binding_id if ref is not None else None
+
+        def may_share_through(node: Any) -> bool:
+            if root_binding_id(node) != receiver_id:
+                return False
+            previous_file = self.current_file
+            self.current_file = file_id
+            try:
+                fact = self._deferred_expression_type(node)
+            finally:
+                self.current_file = previous_file
+            if fact is None:
+                return True
+            if self._scalar_value_fact(fact):
+                return False
+            struct_fact = self._struct_value_fact(fact)
+            if struct_fact is not None:
+                return not self._alias_free_value_struct_supported(fact)
+            if fact.kind == "array":
+                return not self._alias_free_value_field_supported(
+                    fact, None, frozenset()
+                )
+            return True
+
+        stack = [body]
+        while stack:
+            current = stack.pop()
+            stack.extend(_children(current))
+            if current.type in {
+                "assignment_statement",
+                "short_var_declaration",
+            }:
+                left = current.child_by_field_name("left")
+                if left is not None:
+                    targets = (
+                        _children(left)
+                        if left.type == "expression_list"
+                        else [left]
+                    )
+                    if any(
+                        root_binding_id(target) == receiver_id
+                        for target in targets
+                    ):
+                        return True
+            elif current.type in {"inc_statement", "dec_statement"}:
+                target = next(iter(_children(current)), None)
+                if root_binding_id(target) == receiver_id:
+                    return True
+            elif current.type == "send_statement":
+                channel = current.child_by_field_name("channel")
+                if root_binding_id(channel) == receiver_id:
+                    return True
+            elif current.type == "call_expression":
+                function = self._strip_parens(
+                    current.child_by_field_name("function")
+                )
+                if (
+                    function is not None
+                    and function.type == "selector_expression"
+                    and root_binding_id(
+                        function.child_by_field_name("operand")
+                    )
+                    == receiver_id
+                ):
+                    return True
+                arguments = current.child_by_field_name("arguments")
+                if arguments is not None and any(
+                    may_share_through(argument)
+                    for argument in _children(arguments)
+                ):
+                    return True
+        return False
+
+    def _unsupported_index_method_value_needs_close(
+        self, node: Any
+    ) -> bool:
+        value = self._strip_parens(node)
+        if value is None or value.type != "selector_expression":
+            return False
+        field = value.child_by_field_name("field")
+        field_ref = (
+            self.references.get(self.node_key(field))
+            if field is not None
+            else None
+        )
+        method = (
+            self.functions.get(field_ref.binding_id)
+            if field_ref is not None
+            else None
+        )
+        receiver = self._strip_parens(
+            value.child_by_field_name("operand")
+        )
+        if (
+            method is None
+            or method.receiver is None
+            or receiver is None
+            or receiver.type != "index_expression"
+        ):
+            return False
+        source_id = self._local_struct_value_record_source_id(
+            receiver
+        )
+        if (
+            source_id is not None
+            and method.receiver.type.kind == "pointer"
+            and self._indexed_pointer_method_root_may_change(
+                value, source_id
+            )
+        ):
+            return True
+        try:
+            if self._struct_argument_field_record_ids(receiver):
+                return True
+        except _Unsupported:
+            return True
+        return self._method_value_receiver_may_write(method)
+
     def _method_value_field_record_ids(
         self, node: Any
     ) -> tuple[str, ...]:
@@ -13314,7 +13620,15 @@ class _Builder:
             )
         if value.type == "selector_expression":
             method = self._method_value_parts(value)
-            if method is None or method[1] is None:
+            if method is None:
+                if self._unsupported_index_method_value_needs_close(
+                    value
+                ):
+                    raise _Unsupported(
+                        "unsupported_expression", _span(value)
+                    )
+                return ()
+            if method[1] is None:
                 return ()
             receiver = value.child_by_field_name("operand")
             if receiver is None:
@@ -14113,6 +14427,13 @@ class _Builder:
             )
             if receiver_id is not None:
                 roots.add(receiver_id)
+        bound_method = (
+            self.bound_method_values.get(callee_id)
+            if callee_id is not None
+            else None
+        )
+        if bound_method is not None and bound_method[1] is not None:
+            roots.add(bound_method[1])
         star_or_external = (
             callee_id in self.closure_star_writes
             or callee_id in self.closure_inner_calls
@@ -25807,6 +26128,7 @@ class _Builder:
                             self._record_bound_method(
                                 ref.binding_id, mv, params, locals_,
                                 rights[i],
+                                values[i] if len(lefts) > 1 else None,
                             )
                         else:
                             self._record_bound_interface_method(
@@ -34385,6 +34707,24 @@ class _Builder:
             value = self._strip_parens(argument)
             if value is None:
                 continue
+            bound_method = None
+            if value.type == "identifier":
+                value_ref = self.references.get(self.node_key(value))
+                if value_ref is not None:
+                    bound_method = self.bound_method_values.get(
+                        value_ref.binding_id
+                    )
+            elif value.type == "selector_expression":
+                bound_method = self._method_value_parts(value)
+            if bound_method is not None:
+                actual_values[index] = (
+                    self._bound_method_live_receiver_deps(
+                        bound_method,
+                        actual_values[index],
+                        params,
+                        locals_,
+                    )
+                )
             binding_id = self._closure_argument_record_id(value, params)
             if binding_id is not None:
                 actual_values[index] |= self._captured_current_deps(
@@ -34698,6 +35038,7 @@ class _Builder:
         params: dict[str, int],
         locals_: dict[str, frozenset[int]],
         method_value_node: Any | None = None,
+        receiver_deps: frozenset[int] | None = None,
     ) -> None:
         """Record (or clear) a bound-method record under `bid` and
         FREEZE the receiver's current dep set: a Go method value
@@ -34742,13 +35083,44 @@ class _Builder:
             and recv_binding.type.kind == "pointer"
             and recv_id in params
         )
-        if recv_id in locals_:
+        if receiver_deps is not None:
+            deps = receiver_deps
+        elif recv_id in locals_:
             deps = locals_[recv_id]
         elif recv_id in params:
             deps = frozenset({params[recv_id]})
         else:
             self.bound_method_receiver_deps.pop(bid, None)
             return
+        receiver_value = None
+        if method_value_node is not None:
+            method_value = self._strip_parens(method_value_node)
+            receiver_value = (
+                self._strip_parens(
+                    method_value.child_by_field_name("operand")
+                )
+                if method_value is not None
+                and method_value.type == "selector_expression"
+                else None
+            )
+        if (
+            receiver_deps is None
+            and
+            receiver_value is not None
+            and receiver_value.type == "index_expression"
+        ):
+            index = self._strip_parens(
+                receiver_value.child_by_field_name("index")
+            )
+            if index is not None and index.type == "identifier":
+                index_ref = self.references.get(self.node_key(index))
+                if index_ref is not None:
+                    if index_ref.binding_id in locals_:
+                        deps |= locals_[index_ref.binding_id]
+                    elif index_ref.binding_id in params:
+                        deps |= frozenset(
+                            {params[index_ref.binding_id]}
+                        )
         if shared_pointee:
             deps |= self.indirect_writes
         self.bound_method_receiver_deps[bid] = deps
@@ -38813,6 +39185,28 @@ class _Builder:
                 continue
             self.escaped.add(binding_id)
 
+    def _bound_method_live_receiver_deps(
+        self,
+        bound_mv: tuple[str, str | None, str | None],
+        receiver_deps: frozenset[int],
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+    ) -> frozenset[int]:
+        method_id, recv_id, _ = bound_mv
+        method = self.functions.get(method_id)
+        if (
+            recv_id is None
+            or method is None
+            or method.receiver is None
+            or method.receiver.type.kind != "pointer"
+        ):
+            return receiver_deps
+        if recv_id in locals_:
+            return receiver_deps | locals_[recv_id]
+        if recv_id in params:
+            return receiver_deps | frozenset({params[recv_id]})
+        return receiver_deps
+
     def _bound_method_call(
         self,
         node: Any,
@@ -38910,6 +39304,9 @@ class _Builder:
                 raise _Unsupported(
                     "unsupported_expression", _span(node)
                 )
+            recv_deps = self._bound_method_live_receiver_deps(
+                bound_mv, recv_deps, params, locals_
+            )
             if (
                 recv_binding is not None
                 and recv_binding.type.kind == "pointer"

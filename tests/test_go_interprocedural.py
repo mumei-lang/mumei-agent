@@ -55114,6 +55114,227 @@ def test_alias_free_slice_array_struct_element_copies(go_types_helper):
         assert not result.available, (function_name, result.gaps)
 
 
+def test_slice_array_element_method_values(go_types_helper):
+    declarations = (
+        "type S struct { F func() int64; V int64 }\n"
+        "type W struct { F func() }\n"
+        "type SS []S\n"
+        "type A struct { B []int64; F func() int64 }\n"
+        "type AW struct { B []int64 }\n"
+        "func ap(cb func() int64) int64 { return cb() }\n"
+        "func g() int { return 0 }\n"
+        "func (s S) Run() int64 { return s.F() }\n"
+        "func (s *S) PRun() int64 { return s.F() }\n"
+        "func (s *S) PGet() int64 { return s.V }\n"
+        "func (w W) Do() { w.F() }\n"
+        "func (s S) Get() int64 { return s.V }\n"
+        "func (s *S) Set(x int64) { s.V = x }\n"
+        "func (a A) Run() int64 { return a.F() }\n"
+        "func (a AW) Set(x int64) { a.B[0] = x }\n"
+        "func FValue(x, y int64) int64 {\n"
+        "\tv := y; ss := make([]S, 1)\n"
+        "\tss[0].F = func() int64 { return v }; f := ss[0].Run\n"
+        "\tv = x; return f()\n"
+        "}\n"
+        "func FCallback(x, y int64) int64 {\n"
+        "\tv := y; ss := make([]S, 1)\n"
+        "\tss[0].F = func() int64 { return v }; v = x\n"
+        "\treturn ap(ss[0].Run)\n"
+        "}\n"
+        "func FPointerReceiver(x, y int64) int64 {\n"
+        "\tv := y; ss := make([]S, 1)\n"
+        "\tss[0].F = func() int64 { return v }; f := ss[0].PRun\n"
+        "\tv = x; return f()\n"
+        "}\n"
+        "func FPointerSlice(x, y int64) int64 {\n"
+        "\tss := []S{{V: y}}; f := ss[0].PGet\n"
+        "\tss[0].V = x; return f()\n"
+        "}\n"
+        "func FPointerArray(x, y int64) int64 {\n"
+        "\tss := [1]S{{V: y}}; f := ss[0].PGet\n"
+        "\tss[0].V = x; return f()\n"
+        "}\n"
+        "func FPointerParam(ss []S, x int64) int64 {\n"
+        "\tf := ss[0].PGet; ss[0].V = x; return f()\n"
+        "}\n"
+        "func FPointerIdentifier(x, y int64) int64 {\n"
+        "\ts := S{V: y}; f := s.PGet; s.V = x; return f()\n"
+        "}\n"
+        "func FPointerIdentifierReseat(x, y int64) int64 {\n"
+        "\ts := S{V: y}; f := s.PGet; s = S{V: x}; return f()\n"
+        "}\n"
+        "func FPointerReseatSet(x, y int64) int64 {\n"
+        "\tss := []S{{V: y}}; old := ss; f := ss[0].Set\n"
+        "\tss = []S{{V: 0}}; f(x); return old[0].V\n"
+        "}\n"
+        "func FPointerReseatRead(x, y int64) int64 {\n"
+        "\tss := []S{{V: y}}; f := ss[0].PGet; old := ss\n"
+        "\tss = nil; old[0].V = x; return f()\n"
+        "}\n"
+        "func FPointerReseatAppend(y int64) int64 {\n"
+        "\tss := []S{{V: y}}; f := ss[0].PGet\n"
+        "\tss = append(ss, S{}); return f()\n"
+        "}\n"
+        "func FPointerAddressTaken(y int64) int64 {\n"
+        "\tss := []S{{V: y}}; f := ss[0].PGet; p := &ss\n"
+        "\t_ = p; return f()\n"
+        "}\n"
+        "func FPointerNestedReseat(y int64) int64 {\n"
+        "\tss := []S{{V: y}}; f := ss[0].PGet\n"
+        "\tfunc() { ss = nil }(); return f()\n"
+        "}\n"
+        "func FPointerShortReseat(x, y int64) int64 {\n"
+        "\tss := []S{{V: y}}; f := ss[0].PGet\n"
+        "\tss, other := []S{{V: x}}, 0; _ = other; return f()\n"
+        "}\n"
+        "func FValueReseat(x, y int64) int64 {\n"
+        "\tss := []S{{V: y}}; f := ss[0].Get; ss = nil; return f()\n"
+        "}\n"
+        "func FIndexSimul(x, y int64, i int) int64 {\n"
+        "\tss := []S{{V: y}, {V: x}}; var f func() int64\n"
+        "\ti, f = 0, ss[i].Get; return f() + int64(i)\n"
+        "}\n"
+        "func FIdentifierSimul(x, y int64) int64 {\n"
+        "\ts := S{V: y}; var f func() int64\n"
+        "\ts, f = S{V: x}, s.Get; return f()\n"
+        "}\n"
+        "func FShortSimul(x, y int64) int64 {\n"
+        "\ts := S{V: y}; s, f := S{V: x}, s.Get; return f()\n"
+        "}\n"
+        "func FPointerCallback(x, y int64) int64 {\n"
+        "\ts := S{V: y}; f := s.PGet; s.V = x; return ap(f)\n"
+        "}\n"
+        "func FIndex(x, y int64, i int) int64 {\n"
+        "\tv := y; ss := make([]S, 2)\n"
+        "\tss[i].F = func() int64 { return v }; f := ss[i].Run\n"
+        "\tv = x; return f()\n"
+        "}\n"
+        "func FWrite(x int64) int64 {\n"
+        "\tw := int64(0); ws := make([]W, 1)\n"
+        "\tws[0].F = func() { w = x }; f := ws[0].Do\n"
+        "\tf(); return w\n"
+        "}\n"
+        "func FDefer(x int64) (r int64) {\n"
+        "\tws := make([]W, 1); ws[0].F = func() { r = x }\n"
+        "\tf := ws[0].Do; defer f(); return 0\n"
+        "}\n"
+        "func FGet(x, y int64) int64 {\n"
+        "\tss := make([]S, 1); ss[0].V = x\n"
+        "\tf := ss[0].Get; return f() + y\n"
+        "}\n"
+        "func FSet(x int64) int64 {\n"
+        "\tss := make([]S, 1); f := ss[0].Set\n"
+        "\tf(x); return ss[0].V\n"
+        "}\n"
+        "func FReseat(x, y int64) int64 {\n"
+        "\tv := y; ss := make([]S, 1)\n"
+        "\tss[0].F = func() int64 { return v }; f := ss[0].Run\n"
+        "\tss[0].F = func() int64 { return x }; return f()\n"
+        "}\n"
+        "func FArray(x, y int64) int64 {\n"
+        "\tv := y; var a [1]S\n"
+        "\ta[0].F = func() int64 { return v }; f := a[0].Run\n"
+        "\tv = x; return f()\n"
+        "}\n"
+        "func FNamed(x, y int64) int64 {\n"
+        "\tv := y; ss := SS{{F: func() int64 { return v }}}\n"
+        "\tf := ss[0].Run; v = x; return f()\n"
+        "}\n"
+        "func FParameter(ss []S) int64 {\n"
+        "\tf := ss[0].Run; return f()\n"
+        "}\n"
+        "func FMap(x, y int64) int64 {\n"
+        "\tv := y; m := map[int]S{0: {F: func() int64 { return v }}}\n"
+        "\tv = x; f := m[0].Run; return f()\n"
+        "}\n"
+        "func FPointerElement(x, y int64) int64 {\n"
+        "\tv := y; ps := []*S{{}}\n"
+        "\tps[0].F = func() int64 { return v }; v = x\n"
+        "\tf := ps[0].PRun; return f()\n"
+        "}\n"
+        "func FMulti(x, y int64) int64 {\n"
+        "\tv := y; ss := make([][]S, 1); ss[0] = make([]S, 1)\n"
+        "\tss[0][0].F = func() int64 { return v }; v = x\n"
+        "\tf := ss[0][0].Run; return f()\n"
+        "}\n"
+        "func FComputedIndex(x, y int64) int64 {\n"
+        "\tv := y; ss := make([]S, 1)\n"
+        "\tss[0].F = func() int64 { return v }; v = x\n"
+        "\tf := ss[g()].Run; return f()\n"
+        "}\n"
+        "func FAliasClosure(x, y int64) int64 {\n"
+        "\tv := y; as := []A{{B: []int64{0}, F: func() int64 { return v }}}\n"
+        "\tv = x; f := as[0].Run; return f()\n"
+        "}\n"
+        "func FAliasWrite(x int64) int64 {\n"
+        "\tas := []AW{{B: []int64{0}}}; f := as[0].Set\n"
+        "\tf(x); return as[0].B[0]\n"
+        "}\n"
+    )
+    files = {"a.go": "package p\n" + declarations}
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    expected = {
+        "FValue": frozenset({0, 1}),
+        "FCallback": frozenset({0, 1}),
+        "FPointerReceiver": frozenset({0, 1}),
+        "FIndex": frozenset({0, 1, 2}),
+        "FWrite": frozenset({0}),
+        "FDefer": frozenset({0}),
+        "FGet": frozenset({0, 1}),
+        "FArray": frozenset({0, 1}),
+        "FNamed": frozenset({0, 1}),
+        "FParameter": frozenset({0}),
+        "FValueReseat": frozenset({1}),
+        "FIndexSimul": frozenset({0, 1, 2}),
+        "FIdentifierSimul": frozenset({1}),
+        "FShortSimul": frozenset({1}),
+    }
+    for function_name, dependencies in expected.items():
+        result = named_package(files, snapshot, summaries, function_name)
+        assert result.available, (function_name, result.gaps)
+        assert result.return_dependencies == dependencies, function_name
+    for function_name, dependency in (
+        ("FPointerSlice", 0),
+        ("FPointerArray", 0),
+        ("FPointerParam", 1),
+        ("FPointerIdentifierReseat", 0),
+        ("FPointerCallback", 0),
+    ):
+        result = named_package(files, snapshot, summaries, function_name)
+        assert result.available, (function_name, result.gaps)
+        assert dependency in result.return_dependencies, function_name
+    pointer_identifier = named_package(
+        files, snapshot, summaries, "FPointerIdentifier"
+    )
+    assert pointer_identifier.available, pointer_identifier.gaps
+    assert pointer_identifier.return_dependencies == frozenset({0, 1})
+    set_result = named_package(files, snapshot, summaries, "FSet")
+    assert (
+        not set_result.available
+        or set_result.return_dependencies == frozenset({0})
+    ), set_result
+    reseat = named_package(files, snapshot, summaries, "FReseat")
+    assert reseat.available, reseat.gaps
+    assert 1 in reseat.return_dependencies
+    for function_name in (
+        "FMap",
+        "FPointerElement",
+        "FMulti",
+        "FComputedIndex",
+        "FAliasClosure",
+        "FAliasWrite",
+        "FPointerReseatSet",
+        "FPointerReseatRead",
+        "FPointerReseatAppend",
+        "FPointerAddressTaken",
+        "FPointerNestedReseat",
+        "FPointerShortReseat",
+    ):
+        result = named_package(files, snapshot, summaries, function_name)
+        assert not result.available, (function_name, result.gaps)
+
+
 def test_returned_structs_resolve_current_func_field_captures(
     go_types_helper,
 ):
