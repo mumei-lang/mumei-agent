@@ -8154,3 +8154,29 @@ fn f(h: std::collections::BinaryHeap<P>, v: Vec<[P; 2]>, w: Vec<P>, s: std::coll
     # `into_vec` — both stay opaque.
     assert not bound.get("e.pm()")
     assert not bound.get("hs[0].pm()")
+def test_concat_and_take_if_bind_elements():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(v: Vec<Vec<P>>, o: Option<P>, w: Vec<P>) {
+    let c = v.concat();
+    for a in c { a.pm(); }
+    let t = o.take_if(|x| true);
+    if let Some(y) = t { y.pm(); }
+    let d = w.concat();
+    for e in d { e.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `Vec<Vec<P>>::concat()` yields `Vec<P>`.
+    assert bound.get("a.pm()") == pm.id
+    # `o.take_if(f)` keeps `Option<P>`.
+    assert bound.get("y.pm()") == pm.id
+    # `Vec<P>::concat` does not exist — stays opaque.
+    assert not bound.get("e.pm()")
