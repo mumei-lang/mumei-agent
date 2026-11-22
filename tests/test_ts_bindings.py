@@ -2100,3 +2100,38 @@ const x: X = null as any; x.k();
         if source[c.span.start : c.span.end] == "x.k()"
     )
     assert call.target == member_k.id
+
+
+def test_member_alias_collision_shared_base_keeps_winner_inheritance():
+    # C1 and C2 collide on the alias `Public` and share a base class:
+    # the winner's inherited static member beats the loser's
+    # overriding member — the shared base must not be demoted to a
+    # seeded candidate.
+    source = """
+class Base { static f(): void {} }
+namespace N { class C1 extends Base { } class C2 extends Base { static f(): void {} } export {C1 as Public}; export {C2 as Public} }
+N.Public.f();
+"""
+    report = build_ts_bindings(source)
+    base_f = _member_bindings(report, "f", "associated_function")[0]
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == "N.Public.f()"
+    )
+    assert call.target == base_f.id
+
+
+def test_member_alias_collision_value_side_deep_loser_path():
+    # `N.Public.B.D.k()` — the loser's intermediate members carry the
+    # rest of the path on the value side too.
+    source = """
+namespace N { namespace A { export class B { } } namespace M { export class B { } } namespace M { export namespace B { export class D { static k(): void {} } } } export {A as Public}; export {M as Public} }
+N.Public.B.D.k();
+"""
+    report = build_ts_bindings(source)
+    member_k = _member_bindings(report, "k", "associated_function")[0]
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == "N.Public.B.D.k()"
+    )
+    assert call.target == member_k.id

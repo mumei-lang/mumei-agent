@@ -1389,7 +1389,7 @@ class _TypeScriptBindings:
         extra_seed: tuple[_Record, ...] = (),
         collect_extras: list[_Record] | None = None,
     ) -> _Record | None:
-        queue = [type_record]
+        queue: list[tuple[Any, bool]] = [(type_record, False)]
         # Declaration merging: a namespace may merge with a class,
         # interface or enum of the same name in the same container, so
         # the siblings' members merge into a single type. A merged
@@ -1398,24 +1398,23 @@ class _TypeScriptBindings:
         for sibling in self._merge_siblings(type_record):
             if not static and sibling.binding.kind == "namespace":
                 continue
-            queue.append(sibling)
+            queue.append((sibling, False))
         # Seeded members (alias-collision losers of an earlier path
         # segment) can never win this lookup — they only apply when
         # the primary candidates yield nothing — but their matches
-        # still chain into `collect_extras` for deeper segments.
-        seeded: set[str] = set()
+        # still chain into `collect_extras` for deeper segments. The
+        # flag travels with the queue entry, so a shared base class
+        # keeps the primary side's priority.
         for seed in extra_seed:
-            queue.append(seed)
-            seeded.add(seed.binding.id)
+            queue.append((seed, True))
             for sibling in self._merge_siblings(seed):
-                queue.append(sibling)
-                seeded.add(sibling.binding.id)
+                queue.append((sibling, True))
         visited: set[str] = set()
-        seed_ids = {record.binding.id for record in queue}
+        seed_ids = {record.binding.id for record, _ in queue}
         matches: list[_Record] = []
         seeded_matches: list[_Record] = []
         while queue:
-            current = queue.pop(0)
+            current, is_seeded = queue.pop(0)
             if current.binding.id in visited:
                 continue
             visited.add(current.binding.id)
@@ -1467,7 +1466,7 @@ class _TypeScriptBindings:
                     continue
                 if candidate.member_visibility == "protected" and not via_this:
                     continue
-                if current.binding.id in seeded:
+                if is_seeded:
                     seeded_matches.append(candidate)
                 else:
                     matches.append(candidate)
@@ -1484,9 +1483,7 @@ class _TypeScriptBindings:
                         for_type=not base_value,
                     )
                     if base_record is not None:
-                        queue.append(base_record)
-                        if current.binding.id in seeded:
-                            seeded.add(base_record.binding.id)
+                        queue.append((base_record, is_seeded))
         if not matches and not seeded_matches:
             return None
         fallback = not matches
