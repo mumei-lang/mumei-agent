@@ -3615,9 +3615,15 @@ class _RustBindings:
         # only the value type, so the pair's shape is unpinned here.
         if self._is_map_container(container_id, iterator):
             return _UNKNOWN, None
-        if elem_args.strip().startswith("&"):
+        if (
+            self._receiver_type_node(iterator) is None
+            and elem_args.strip().startswith("&")
+        ):
             # `let it = v.chunks(n)` — `it`'s spelled args ARE the
-            # element (`&[P]`), not a container's type args.
+            # element (`&[P]`), not a container's type args. A
+            # declared `Vec<&P>`/`[&P]` still names a container
+            # head — its `&` arg is the element's own reference
+            # type, unwrapped by `_element_of` below.
             return _UNKNOWN, elem_args.strip()
         # Spelled element names on `it` (`let it = v.iter()`) were
         # written in `it`'s annotation — resolve them there.
