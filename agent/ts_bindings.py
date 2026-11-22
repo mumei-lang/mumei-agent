@@ -895,12 +895,17 @@ class _TypeScriptBindings:
                         self.children(child)
                         if child.type == "class_heritage"
                         else [child]
-                        if child.type in {"extends_clause", "implements_clause"}
+                        if child.type
+                        in {
+                            "extends_clause", "implements_clause",
+                            "extends_type_clause",
+                        }
                         else []
                     )
                     for clause in heritage:
                         if clause.type not in {
                             "extends_clause", "implements_clause",
+                            "extends_type_clause",
                         }:
                             continue
                         for name_node in self.children(clause):

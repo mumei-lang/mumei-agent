@@ -1083,3 +1083,16 @@ function go(cars: Car[], row: Car[][]) {
         if c.kind == "direct_local" and c.target == start.id
     ]
     assert len(calls) == 2
+
+
+def test_member_access_walks_interface_extends_chain():
+    source = """
+interface Base { base(): void }
+interface Shape extends Base { area(): number }
+function go(s: Shape) { s.base(); s.area(); }
+"""
+    report = build_ts_bindings(source)
+    base = _member_bindings(report, "base", "associated_function")[0]
+    area = _member_bindings(report, "area", "associated_function")[0]
+    targets = {c.target for c in report.calls}
+    assert base.id in targets and area.id in targets
