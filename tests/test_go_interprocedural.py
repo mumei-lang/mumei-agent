@@ -43587,6 +43587,99 @@ def test_go_statement_admitted(go_types_helper):
     assert result.available and result.return_dependencies == frozenset({0})
 
 
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        pytest.param(
+            "func F(x, z int64) int64 { y := z; w := int64(0); "
+            "g := func() { w = y }; go g(); y = x; return w }",
+            id="captured-read-overwritten-after-go",
+        ),
+        pytest.param(
+            "func F(x, z int64) int64 { w := int64(0); "
+            "g := func() { w = x }; go g(); w = z; return w }",
+            id="captured-write-overwritten-after-go",
+        ),
+        pytest.param(
+            "func F(x, z int64) int64 { w := int64(0); "
+            "g := func(v int64) { w = v }; "
+            "go g(x); w = z; return w }",
+            id="argument-write-overwritten-after-go",
+        ),
+        pytest.param(
+            "func H(p *int64, v int64) { *p = v }\n"
+            "func F(x, z int64) int64 { w := z; "
+            "go H(&w, x); w = z; return w }",
+            id="pointer-argument-write-overwritten-after-go",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { y := int64(0); w := int64(0); "
+            "g := func() { w = y }; "
+            "for i := 0; i < 1; i++ { go g(); y = x }; return w }",
+            id="loop-store-after-go",
+        ),
+        pytest.param(
+            "func F(x, z int64) int64 { w := int64(0); "
+            "g := func() { w = x }; h := func() { w = z }; "
+            "defer h(); go g(); return w }",
+            id="defer-writes-touched-binding",
+        ),
+        pytest.param(
+            "func F(x, z int64) int64 { "
+            "s := []int64{0}; t := s; "
+            "g := func() { s[0] = x }; go g(); "
+            "t[0] = z; return t[0] }",
+            id="aliased-container-store-after-go",
+        ),
+        pytest.param(
+            "func F(x, z int64) int64 { w := z; p := &w; "
+            "g := func() { w = x }; go g(); *p = z; return w }",
+            id="indirect-store-through-address-taken-local",
+        ),
+    ],
+)
+def test_go_later_store_races_stay_closed(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available
+    assert any(
+        gap.reason == "unsupported_statement" for gap in result.gaps
+    )
+
+
+@pytest.mark.parametrize(
+    "declarations, expected",
+    [
+        pytest.param(
+            "func F(x int64) int64 { w := int64(0); "
+            "g := func() { w = x }; go g(); return w }",
+            frozenset({0}),
+            id="no-later-store",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { w := int64(0); q := int64(0); "
+            "g := func() { w = x }; go g(); q = x; _ = q; return w }",
+            frozenset({0}),
+            id="unrelated-scalar-store",
+        ),
+        pytest.param(
+            "func F(x, z int64) int64 { w := int64(0); "
+            "g := func(v int64) { w = v }; "
+            "go g(x); x = z; return w }",
+            frozenset({0}),
+            id="scalar-argument-evaluated-at-go",
+        ),
+    ],
+)
+def test_go_later_unrelated_stores_remain_available(
+    go_types_helper, declarations, expected
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available
+    assert result.return_dependencies == expected
+
+
 def test_defer_statement_admitted(go_types_helper):
     # `defer g(x)`: arguments evaluate at the statement, the call
     # runs before the function returns — its effects fold exactly
