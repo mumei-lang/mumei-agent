@@ -716,6 +716,7 @@ class _SolBindings:
         namespace: str,
         visited: set[str] | None = None,
         allow_private_own: bool = True,
+        exclude_type_members: bool = False,
     ) -> tuple[_Record | None, str | None]:
         if namespace == "value":
             layers = self._contract_layers(
@@ -724,6 +725,12 @@ class _SolBindings:
             functions: list[_Record] = []
             private_match = False
             for index, (_layer, records) in enumerate(layers):
+                if exclude_type_members:
+                    records = [
+                        record
+                        for record in records
+                        if record.binding.kind not in _TYPE_BINDINGS
+                    ]
                 if not records:
                     continue
                 if index > 0 or not allow_private_own:
@@ -821,6 +828,7 @@ class _SolBindings:
                         record
                         for record in records
                         if record.visibility != "private"
+                        and record.binding.kind not in _TYPE_BINDINGS
                     ]
                     saw_private = saw_private or len(visible) < len(records)
                     if not visible:
@@ -940,22 +948,18 @@ class _SolBindings:
                 self.current_contract is not None
                 and contract is self.current_contract
             )
+            # Nested type declarations are reachable through the
+            # contract name only; on an instance (`inst.S(...)`) the
+            # member position skips them, so an inherited same-named
+            # function or a `using` extension owns the call instead.
             record, reason = self._lookup_contract(
                 name,
                 contract,
                 member.start_byte,
                 "value",
                 allow_private_own=inside_owner,
+                exclude_type_members=not via_type_name,
             )
-            if (
-                record is not None
-                and record.binding.kind in _TYPE_BINDINGS
-                and not via_type_name
-            ):
-                # Nested type declarations are reachable through the
-                # contract name only; on an instance (`inst.S(...)`) solc
-                # keeps looking — a `using` extension may own the call.
-                record, reason = None, None
             if record is not None or reason is not None:
                 return member, record, reason
         if type_record is not None:

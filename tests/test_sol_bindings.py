@@ -1634,11 +1634,12 @@ contract Token { function transfer(address to, uint256 a) external {} }
 struct Coin { Token t; uint256 v; }
 contract Vault {
     Coin public coin;
-    function run() external { uint256 s = this.coin().v; }
+    function run() external { uint256 s = this.coin().v; this.coin().f(1); }
 }
 """
     # A public struct getter returns the exploded fields, not the
-    # struct — `.v` must not bind to the Coin field.
+    # struct — `.v` must not bind to the Coin field and a member call
+    # on the tuple stays opaque.
     report = build_sol_bindings(source)
     v = next(
         binding for binding in report.bindings if binding.name == "v"
@@ -1646,6 +1647,7 @@ contract Vault {
     assert not any(
         ref.binding_id == v.id for ref in report.references
     )
+    assert report.calls[-1].kind == "opaque_member"
 
 
 def test_function_typed_struct_field_selector_stays_opaque():
@@ -1701,6 +1703,29 @@ contract Vault {
     )
     assert not any(
         ref.binding_id == decl.id and ref.kind == "call"
+        for ref in report.references
+    )
+
+
+def test_instance_member_finds_inherited_function_past_type_decl():
+    source = """
+contract Base { function S(uint256 x) public {} }
+contract Vault is Base {
+    struct S { uint256 v; }
+    Vault inst;
+    function run() external { inst.S(1); }
+}
+"""
+    # `inst.S` skips the nested type declaration and keeps looking —
+    # the inherited function wins.
+    report = build_sol_bindings(source)
+    base_fn = next(
+        binding
+        for binding in report.bindings
+        if binding.name == "S" and binding.kind == "function"
+    )
+    assert any(
+        ref.binding_id == base_fn.id and ref.kind == "call"
         for ref in report.references
     )
 
