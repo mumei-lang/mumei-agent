@@ -178,6 +178,7 @@ def append_plan_history(path: str, plan: VerificationPlan) -> str:
     history_path = _as_path(path)
 
     try:
+        history_path = history_path.resolve()
         history_path.parent.mkdir(parents=True, exist_ok=True)
         with _locked(history_path):
             entries, current_size, _ = _read_entries(history_path)

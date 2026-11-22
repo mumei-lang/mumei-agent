@@ -5,6 +5,7 @@ import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 
 import pytest
 
@@ -400,3 +401,44 @@ def test_two_threads_append_a_valid_shared_chain(tmp_path):
         *[entry["digest"] for entry in entries[:-1]],
     ]
     assert len(read_plan_history(str(path))) == 40
+
+
+def test_symlink_aliases_share_lock_for_concurrent_appends(tmp_path):
+    real_path = tmp_path / "history.jsonl"
+    alias_path = tmp_path / "alias.jsonl"
+    append_plan_history(str(real_path), _plan("adapter-initial"))
+    try:
+        alias_path.symlink_to(real_path)
+    except (NotImplementedError, OSError):
+        pytest.skip("symlinks are unavailable")
+
+    groups = [
+        tuple(_plan(f"adapter-{group}-{index}") for index in range(20))
+        for group in ("real", "alias")
+    ]
+    paths = (str(real_path), str(alias_path))
+    start = Barrier(2)
+
+    def append_group(path, plans):
+        start.wait()
+        return [
+            append_plan_history(path, plan)
+            for plan in plans
+        ]
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(append_group, path, plans)
+            for path, plans in zip(paths, groups)
+        ]
+        returned_digests = [digest for future in futures for digest in future.result()]
+
+    entries = [json.loads(line) for line in _lines(real_path)]
+    assert len(entries) == 41
+    assert set(returned_digests) == {entry["digest"] for entry in entries[1:]}
+    assert [entry["index"] for entry in entries] == list(range(41))
+    assert [entry["prev_digest"] for entry in entries] == [
+        None,
+        *[entry["digest"] for entry in entries[:-1]],
+    ]
+    assert len(read_plan_history(str(alias_path))) == 41
