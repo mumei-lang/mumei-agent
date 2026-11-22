@@ -114,11 +114,6 @@ jobs:
           CORE_SHA="$(git -C mumei rev-parse HEAD)"
           echo "Core develop commit: \`${CORE_SHA}\`" >> "$GITHUB_STEP_SUMMARY"
 
-      # The 4 deselected violation fixtures are rejected by Core develop, but Core
-      # does not yet report the expected failure_type (no failure_type for
-      # precondition/linearity/temporal; effect_mismatch classified as
-      # precondition_violated). Core-side classification fix is pending in the
-      # Core lane; remove these --deselect lines once it lands.
       - name: Run real-Core native integration tests
         working-directory: mumei-agent
         run: |
@@ -149,10 +144,6 @@ jobs:
               tests/test_verify_attempt.py \
               tests/test_binary_integration.py \
               tests/test_audit.py \
-              --deselect 'tests/test_binary_integration.py::TestVerifyViolationFixtures::test_verify_detects_violation[precondition_fail]' \
-              --deselect 'tests/test_binary_integration.py::TestVerifyViolationFixtures::test_verify_detects_violation[linearity_fail]' \
-              --deselect 'tests/test_binary_integration.py::TestVerifyViolationFixtures::test_verify_detects_violation[temporal_effect_fail]' \
-              --deselect 'tests/test_binary_integration.py::TestVerifyViolationFixtures::test_verify_detects_violation[effect_mismatch]' \
               -m integration --run-integration \
               -v --tb=short --junitxml=real-core-junit.xml
 
@@ -191,7 +182,7 @@ jobs:
           from pathlib import Path
 
           reports = [
-              ("Real-Core native integration", "real-core-junit.xml", 95),
+              ("Real-Core native integration", "real-core-junit.xml", 99),
               ("Real-Core binary-gated unit tests", "real-core-unmarked-junit.xml", 20),
           ]
           lines = [
