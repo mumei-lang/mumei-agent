@@ -20310,6 +20310,437 @@ def test_chained_closure_values_resolve_shared_captures_once(
     "source",
     [
         pytest.param(
+            "func F(x, y int64) int64 { "
+            "v := y; g := func() func() int64 { "
+            "return func() int64 { return v } }; "
+            "h := g(); v = x; return h() }",
+            id="n1-short-var",
+        ),
+        pytest.param(
+            "func F(x, y int64) int64 { "
+            "v := y; g := func() func() int64 { "
+            "return func() int64 { return v } }; "
+            "var h func() int64; h = g(); v = x; return h() }",
+            id="n1b-assignment",
+        ),
+        pytest.param(
+            "func F(x, y int64) int64 { "
+            "v := y; g := func() func() int64 { "
+            "return func() int64 { return v } }; "
+            "var h func() int64 = g(); v = x; return h() }",
+            id="var-spec",
+        ),
+        pytest.param(
+            "func F(x, y int64) int64 { "
+            "v := y; h := func() func() int64 { "
+            "return func() int64 { return v } }(); "
+            "v = x; return h() }",
+            id="n1c-immediate",
+        ),
+        pytest.param(
+            "func F(x, y int64) int64 { "
+            "v := y; w := int64(0); "
+            "g := func() func() { return func() { w = v } }; "
+            "h := g(); v = x; h(); return w }",
+            id="n1f-write",
+        ),
+        pytest.param(
+            "func ap(f func() int64) int64 { return f() }\n"
+            "func F(x, y int64) int64 { "
+            "v := y; g := func() func() int64 { "
+            "return func() int64 { return v } }; "
+            "h := g(); v = x; return ap(h) }",
+            id="n1g-passed",
+        ),
+    ],
+)
+def test_closure_factory_results_resolve_captures_at_call(
+    go_types_helper, source
+):
+    result = named(*unit(go_types_helper, source))
+    assert result.available, result.gaps
+    assert 0 in result.return_dependencies
+
+
+@pytest.mark.parametrize(
+    ("source", "dependencies"),
+    [
+        pytest.param(
+            "func F(x, y int64, cb func() int64) int64 { "
+            "g := func() func() int64 { return cb }; "
+            "h := g(); return h() }",
+            frozenset({2}),
+            id="factory-returns-callback",
+        ),
+        pytest.param(
+            "func F(x, y int64, cb func() int64) int64 { "
+            "h := func() func() int64 { return cb }(); return h() }",
+            frozenset({2}),
+            id="immediate-factory-returns-callback",
+        ),
+        pytest.param(
+            "func F(b bool, x, y int64, cb func() int64) int64 { "
+            "v := y; g := func() func() int64 { "
+            "if b { return func() int64 { return v } }; "
+            "return cb }; h := g(); v = x; return h() }",
+            None,
+            id="factory-mixed-returns",
+        ),
+        pytest.param(
+            "func F(x, y int64) int64 { "
+            "v := y; g := func() func() int64 { "
+            "u := v; return func() int64 { return u } }; "
+            "h := g(); v = x; return h() }",
+            frozenset({0, 1}),
+            id="factory-local-snapshot",
+        ),
+        pytest.param(
+            "func F(b bool, x, y int64) int64 { "
+            "v := y; g := func() func() int64 { "
+            "return func() int64 { return v } }; "
+            "var h func() int64 = func() int64 { return y }; "
+            "if b { h = g() }; v = x; return h() }",
+            None,
+            id="conditional-factory-assignment",
+        ),
+        pytest.param(
+            "func F(x, y int64) int64 { "
+            "v := y; g := func() func() int64 { "
+            "return func() int64 { return v } }; "
+            "h := g(); h2 := h; v = x; return h2() }",
+            frozenset({0, 1}),
+            id="factory-result-copy",
+        ),
+        pytest.param(
+            "func F(x, y int64) int64 { "
+            "v := y; g := func() func() int64 { "
+            "return func() int64 { return v } }; "
+            "h := g(); h = func() int64 { return y }; "
+            "v = x; return h() }",
+            frozenset({1}),
+            id="factory-result-rebound",
+        ),
+        pytest.param(
+            "func F(x, y int64) (r int64) { "
+            "v := y; g := func() func() int64 { "
+            "return func() int64 { return v } }; "
+            "h := g(); defer func() { r = h() }(); "
+            "v = x; return 0 }",
+            frozenset({0, 1}),
+            id="factory-result-named-defer",
+        ),
+        pytest.param(
+            "func ap(f func() int64) int64 { return f() }\n"
+            "func F(x, y int64) int64 { "
+            "v := y; g := func() func() int64 { "
+            "return func() int64 { return v } }; "
+            "h := g(); go ap(h); v = x; return 0 }",
+            None,
+            id="factory-result-go-before-store",
+        ),
+        pytest.param(
+            "func ap(f func() int64) int64 { return f() }\n"
+            "func F(x, y int64) int64 { "
+            "v := y; g := func() func() int64 { "
+            "return func() int64 { return v } }; "
+            "h := g(); v = x; go ap(h); return 0 }",
+            frozenset(),
+            id="factory-result-go-after-store",
+        ),
+    ],
+)
+def test_closure_factory_result_controls_match_develop(
+    go_types_helper, source, dependencies
+):
+    result = named(*unit(go_types_helper, source))
+    if dependencies is None:
+        assert not result.available
+        assert any(
+            gap.reason == "unsupported_statement" for gap in result.gaps
+        )
+    else:
+        assert result.available, result.gaps
+        assert result.return_dependencies == dependencies
+
+
+def test_conditional_literal_rebind_keeps_factory_result_snapshot(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x, y int64, c bool) int64 { "
+            "g := func(a int64) func() int64 { "
+            "return func() int64 { return a } }; "
+            "h := g(x); "
+            "if c { h = func() int64 { return y } }; "
+            "return h() }",
+        )
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "none_in_supported_fragment"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(
+            "func F(x int64, c bool, cb func() int64) int64 { "
+            "v := x; "
+            "g := func() func() int64 { return cb }; "
+            "if c { g = func() func() int64 { "
+            "return func() int64 { return v } } }; "
+            "h := g(); return h() }",
+            id="callback-return",
+        ),
+        pytest.param(
+            "func F(x int64, c bool, cb func()) int64 { "
+            "v := x; w := int64(0); "
+            "g := func() func() { return cb }; "
+            "if c { g = func() func() { "
+            "return func() { w = v } } }; "
+            "h := g(); h(); return w }",
+            id="callback-write",
+        ),
+    ],
+)
+def test_conditional_factory_rebind_with_captured_callbacks_closes(
+    go_types_helper, source
+):
+    result = named(*unit(go_types_helper, source))
+    assert not result.available, result.gaps
+    assert any(
+        gap.reason == "unsupported_statement" for gap in result.gaps
+    )
+
+
+def test_conditional_factory_assignment_retains_current_capture_dependency(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x, y int64, c bool, cb func() int64) int64 { "
+            "v := y; u := y; "
+            "g := func() func() int64 { return cb }; "
+            "if c { g = func() func() int64 { "
+            "return func() int64 { return v } } }; "
+            "h := func() int64 { return u }; "
+            "if c { h = g() }; v = x; return h() }",
+        )
+    )
+    if result.available:
+        assert 0 in result.return_dependencies
+        assert result.effects == "unknown"
+    else:
+        assert result.gaps
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(
+            "func F(x, y int64, c bool) int64 { "
+            "v := y; u := y; "
+            "g := func() func() int64 { "
+            "return func() int64 { return v } }; "
+            "h := func() int64 { return u }; "
+            "if c { h = g() }; v = x; return h() }",
+            id="assignment-if",
+        ),
+        pytest.param(
+            "func F(x, y int64, c bool) int64 { "
+            "v := y; u := y; "
+            "h := func() int64 { return u }; "
+            "if c { h = func() func() int64 { "
+            "return func() int64 { return v } }() }; "
+            "v = x; return h() }",
+            id="immediate-assignment-if",
+        ),
+    ],
+)
+def test_conditional_factory_result_calls_close(go_types_helper, source):
+    result = named(*unit(go_types_helper, source))
+    assert not result.available, result.gaps
+    assert any(
+        gap.reason == "unsupported_statement" for gap in result.gaps
+    )
+
+
+@pytest.mark.parametrize(
+    ("source", "dependencies"),
+    [
+        pytest.param(
+            "func F(x, y int64, c bool) int64 { "
+            "v := y; "
+            "g := func() func() int64 { "
+            "return func() int64 { return v } }; "
+            "if c { var h func() int64 = g(); return h() }; "
+            "return 0 }",
+            frozenset({1}),
+            id="var-if",
+        ),
+        pytest.param(
+            "func F(x, y int64, c bool) int64 { "
+            "v := y; "
+            "g := func() func() int64 { "
+            "return func() int64 { return v } }; "
+            "for c { var h func() int64 = g(); return h() }; "
+            "return 0 }",
+            frozenset({1}),
+            id="var-loop",
+        ),
+        pytest.param(
+            "func F(x, y int64, c bool) int64 { "
+            "v := y; "
+            "g := func() func() int64 { "
+            "return func() int64 { return v } }; "
+            "for c { h := g(); return h() }; "
+            "return 0 }",
+            frozenset({1}),
+            id="short-var-loop",
+        ),
+        pytest.param(
+            "func F(x, y int64, c bool) int64 { "
+            "v := y; "
+            "g := func() func() int64 { "
+            "return func() int64 { return v } }; "
+            "r := int64(0); "
+            "if c { h := g(); v = x; r = h() }; "
+            "return r }",
+            frozenset({0, 1}),
+            id="if-short-var",
+        ),
+        pytest.param(
+            "func F(x, y int64, n int) int64 { "
+            "v := y; "
+            "g := func() func() int64 { "
+            "return func() int64 { return v } }; "
+            "r := int64(0); "
+            "for i := 0; i < n; i++ { "
+            "h := g(); v = x; r += h() }; "
+            "return r }",
+            frozenset({0, 1}),
+            id="loop-short-var",
+        ),
+        pytest.param(
+            "func F(x, y int64, c bool) int64 { "
+            "v := y; "
+            "g := func() func() int64 { "
+            "return func() int64 { return v } }; "
+            "r := int64(0); "
+            "if c { var h = g(); v = x; r = h() }; "
+            "return r }",
+            frozenset({0, 1}),
+            id="if-var",
+        ),
+    ],
+)
+def test_fresh_factory_results_in_conditional_declarations_remain_available(
+    go_types_helper, source, dependencies
+):
+    result = named(*unit(go_types_helper, source))
+    assert result.available, result.gaps
+    assert result.return_dependencies == dependencies
+
+
+@pytest.mark.parametrize(
+    ("source", "dependencies", "effects"),
+    [
+        pytest.param(
+            "func F(x, y int64) int64 { "
+            "v := y; g := func(p *int64) func() int64 { "
+            "return func() int64 { return *p } }; "
+            "h := g(&v); v = x; return h() }",
+            frozenset({0, 1}),
+            "unknown",
+            id="pointer-factory-param",
+        ),
+        pytest.param(
+            "func F(x, y int64) int64 { "
+            "a := []int64{y}; "
+            "g := func(s []int64) func() int64 { "
+            "return func() int64 { return s[0] } }; "
+            "h := g(a); a[0] = x; return h() }",
+            frozenset({0, 1}),
+            "unknown",
+            id="slice-factory-param",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { "
+            "g := func(a int64) func() int64 { "
+            "return func() int64 { return a } }; "
+            "h := g(x); return h() }",
+            frozenset({0}),
+            "none_in_supported_fragment",
+            id="scalar-factory-param",
+        ),
+    ],
+)
+def test_factory_results_reject_non_scalar_factory_local_captures(
+    go_types_helper, source, dependencies, effects
+):
+    result = named(*unit(go_types_helper, source))
+    assert result.available, result.gaps
+    assert result.return_dependencies == dependencies
+    assert result.effects == effects
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(
+            "func F(x, y int64) int64 { "
+            "v := y; u := y; "
+            "g := func(p *int64) func() int64 { "
+            "return func() int64 { return *p + v } }; "
+            "h := g(&u); v = x; return h() }",
+            id="pointer-param-and-outer-capture",
+        ),
+        pytest.param(
+            "func F(x, y int64, c bool) int64 { "
+            "v := y; "
+            "g := func() func() int64 { "
+            "return func() int64 { return v } }; "
+            "if c { g = func() func() int64 { "
+            "return func() int64 { return v + 1 } } }; "
+            "h := g(); v = x; return h() }",
+            id="conditionally-reassigned-factory",
+        ),
+        pytest.param(
+            "func F(x, y int64) int64 { "
+            "v := y; a := []int64{y}; "
+            "g := func(s []int64) func() int64 { "
+            "return func() int64 { return s[0] + v } }; "
+            "h := g(a); v = x; return h() }",
+            id="slice-param-and-outer-capture",
+        ),
+        pytest.param(
+            "func F(x, y int64, cb func() int64) int64 { "
+            "v := y; "
+            "g := func() func() int64 { "
+            "if x > 0 { return cb }; "
+            "return func() int64 { return v } }; "
+            "h := g(); v = x; return h() }",
+            id="mixed-returns-and-outer-capture",
+        ),
+    ],
+)
+def test_rejected_closure_factories_with_outer_captures_close(
+    go_types_helper, source
+):
+    result = named(*unit(go_types_helper, source))
+    assert not result.available, result.gaps
+    assert any(
+        gap.reason == "unsupported_statement" for gap in result.gaps
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(
             "func ap(f func() int64, _ int64) int64 { return f() }\n"
             "func set(p *int64, a int64) int64 { *p = a; return 0 }\n"
             "func F(x, y int64) int64 { "
