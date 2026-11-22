@@ -1883,6 +1883,9 @@ class _RustBindings:
             # from them.
             return annotated
         if record.binding.type is not None and record.binding.type.type_id:
+            # A declared element type keeps its own generics —
+            # `Vec<W<u8>>` binds the element as `W` with "u8" here so
+            # `impl W<u8>` members still match.
             return record.binding.type.type_id, record.type_args
         if record.type_args is not None:
             return None, record.type_args
@@ -2089,6 +2092,32 @@ class _RustBindings:
         container_id, elem_args = self._receiver_type(iterator)
         if elem_args is None or "," in elem_args:
             return _UNKNOWN, None
+        # Iterating a map yields (K, V) pairs — index typing keeps
+        # only the value type, so the pair's shape is unpinned here.
+        if container_id is not None and next(
+            (
+                True
+                for b in self.bindings
+                if b.id == container_id
+                and b.name in {"HashMap", "BTreeMap"}
+            ),
+            False,
+        ):
+            return _UNKNOWN, None
+        if iterator.type == "identifier":
+            irec = self._lookup(
+                self._normalize_identifier(self.text(iterator)),
+                iterator.start_byte,
+                "value",
+            )
+            if irec is not None and irec.type_node is not None and (
+                re.search(
+                    r"\b(?:HashMap|BTreeMap)\s*<",
+                    self.text(irec.type_node),
+                )
+                is not None
+            ):
+                return _UNKNOWN, None
         elem_id, rest = self._element_of(
             container_id, elem_args.strip(), iterator.start_byte
         )
@@ -3291,9 +3320,19 @@ class _RustBindings:
         if body is not None:
             scope = _Scope(body, self.module_depth, self.current_function)
             self.scopes.append(scope)
-            element_fact, element_args = self._for_element(iterator)
-            self._bind_pattern(
-                pattern,
+            names = self._pattern_names(pattern, scope)
+            if (
+                pattern is not None
+                and pattern.type == "identifier"
+                and len(names) == 1
+            ):
+                element_fact, element_args = self._for_element(iterator)
+            else:
+                # Destructuring binds fields/elements, not the iterated
+                # value — `for P { x } in v` leaves `x` unpinned.
+                element_fact, element_args = _UNKNOWN, None
+            self._bind_pattern_names(
+                names,
                 scope,
                 self.span(body),
                 element_fact,

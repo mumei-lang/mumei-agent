@@ -3637,3 +3637,64 @@ fn f() {
             if source[c.span.start:c.span.end] == text
         )
         assert call.target == ""
+
+
+def test_for_loop_destructuring_pattern_stays_opaque():
+    # `for P { x } in v` binds `x` to a field, not the element — its
+    # type is unpinned so neither impl is picked up.
+    source = """
+struct P { x: i32 }
+impl P { fn m(&self) {} }
+impl i32 { fn bogus(&self) {} }
+fn f(v: Vec<P>) {
+    for P { x } in v { x.m(); x.bogus(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    for text in ("x.m()", "x.bogus()"):
+        call = next(
+            c for c in report.calls
+            if source[c.span.start:c.span.end] == text
+        )
+        assert call.target == ""
+
+
+def test_for_loop_over_map_stays_opaque():
+    # Map iteration yields (K, V) pairs — a shape the element model
+    # cannot spell, so neither `for e in map` nor a destructured
+    # `(k, v)` picks up `P`'s methods.
+    source = """
+use std::collections::HashMap;
+struct P;
+impl P { fn m(&self) {} }
+fn f(map: HashMap<u32, P>) {
+    for e in map { e.m(); }
+    for (k, v) in map { v.m(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    for text in ("e.m()", "v.m()"):
+        call = next(
+            c for c in report.calls
+            if source[c.span.start:c.span.end] == text
+        )
+        assert call.target == ""
+
+
+def test_for_loop_element_keeps_own_generic_args():
+    # `Vec<W<u8>>` binds the element as `W` carrying "u8" — a
+    # specialization impl's member resolves.
+    source = """
+struct W<T>(T);
+impl W<u8> { fn m(&self) {} }
+fn f(v: Vec<W<u8>>) {
+    for w in v { w.m(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = next(b for b in report.bindings if b.name == "m")
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "w.m()"
+    )
+    assert call.target == method.id
