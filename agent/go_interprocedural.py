@@ -10092,18 +10092,27 @@ class _Builder:
         if width != 2 or node is None or node.type != "index_expression":
             return False
         operand = node.child_by_field_name("operand")
-        while (
-            operand is not None
-            and operand.type == "parenthesized_expression"
+        # `v, ok := p.M[k1][k2]` — a comma-ok pair on a NESTED map:
+        # peel index levels down to the field selector, counting how
+        # many map elements the chain crosses. Each crossed element
+        # type must itself be a map for the pair to be a map lookup.
+        index_depth = 0
+        while operand is not None and operand.type in (
+            "index_expression",
+            "parenthesized_expression",
         ):
-            operand = next(
-                (
-                    c
-                    for c in operand.named_children
-                    if c.type != "comment"
-                ),
-                None,
-            )
+            if operand.type == "index_expression":
+                index_depth += 1
+                operand = operand.child_by_field_name("operand")
+            else:
+                operand = next(
+                    (
+                        c
+                        for c in operand.named_children
+                        if c.type != "comment"
+                    ),
+                    None,
+                )
         if operand is None or operand.type not in (
             "selector_expression",
             "field_expression",
@@ -10112,16 +10121,28 @@ class _Builder:
         _root_id, member = self._scalar_container_field(
             operand, params, allow_struct_elements=True
         )
+        # The outermost index is the comma-ok lookup itself; the
+        # field must be a map, and every intermediate element type
+        # crossed by deeper indexes must also be a map.
+        elem = member.type if member is not None else None
+        for _level in range(index_depth):
+            if (
+                elem is None
+                or elem.kind != "map"
+                or getattr(elem, "elem", None) is None
+            ):
+                return False
+            elem = elem.elem
         return (
             member is not None
             and member.type is not None
             and member.type.kind == "map"
-            and getattr(member.type, "elem", None) is not None
+            and elem is not None
             # An interface element binds the comma-ok value without
             # the dispatch provenance the single-name `e := p.M[k]`
             # read keeps, so `e.M()` would gap anyway — keep it
             # closed rather than admit a half-supported read.
-            and member.type.elem.kind != "interface"
+            and elem.kind != "interface"
         )
 
     def _call_result_fact(self, node: Any) -> tuple[Any | None, Any | None]:
