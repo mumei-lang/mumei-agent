@@ -157,6 +157,61 @@ def test_stub_adapter_selects_on_declared_exit_code(tmp_path):
     assert doc["attempts"][0]["exit_code"] == 3
 
 
+def test_adapter_overlay_replaces_base_manifest_for_dispatch(tmp_path):
+    paths = _base(tmp_path, argv_alpha=stub_argv("--sleep", "30"))
+    overlay = tmp_path / "alpha-overlay.json"
+    overlay.write_text(
+        json.dumps(
+            [
+                _manifest(
+                    "alpha",
+                    adapter_version="2.0.0",
+                    priority=10,
+                    max_timeout_ms=100,
+                )
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    doc = _doc(_run(paths, "--adapter-overlay", str(overlay)))
+
+    assert doc["outcome"] == "selected"
+    assert doc["selected_adapter_id"] == "beta"
+    assert [attempt["adapter_id"] for attempt in doc["attempts"]] == [
+        "alpha",
+        "beta",
+    ]
+    assert doc["attempts"][0]["terminal_state"] == "timed_out"
+
+
+def test_adapter_overlay_addition_dispatches_through_argv_map(tmp_path):
+    observations = [
+        {"adapter_id": "alpha", "availability": "available",
+         "tool_version": "1.0.0", "stamp": 1},
+        {"adapter_id": "beta", "availability": "available",
+         "tool_version": "1.0.0", "stamp": 2},
+        {"adapter_id": "gamma", "availability": "available",
+         "tool_version": "1.0.0", "stamp": 3},
+    ]
+    paths = _base(tmp_path, observations=observations)
+    argv_map_path = Path(paths["argv"])
+    argv_map = json.loads(argv_map_path.read_text(encoding="utf-8"))
+    argv_map["gamma"] = stub_argv()
+    argv_map_path.write_text(json.dumps(argv_map), encoding="utf-8")
+    overlay = tmp_path / "gamma-overlay.json"
+    overlay.write_text(
+        json.dumps([_manifest("gamma", priority=20)]), encoding="utf-8"
+    )
+
+    doc = _doc(_run(paths, "--adapter-overlay", str(overlay)))
+
+    assert doc["selected_adapter_id"] == "gamma"
+    assert [attempt["adapter_id"] for attempt in doc["attempts"]] == [
+        "gamma",
+    ]
+
+
 def test_explicit_selection_runs_only_the_named_adapter(tmp_path):
     paths = _base(
         tmp_path,

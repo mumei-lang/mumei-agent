@@ -19,6 +19,7 @@ import hashlib
 import json
 import os
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 from agent.attempt_schedule import MAX_SCHEDULE_ATTEMPTS, run_attempt_schedule
@@ -47,6 +48,12 @@ _POLICY_KEYS = frozenset(
      "allow_manifest_attempt_argv", "allow_manifest_attempt_stdin"}
 )
 _OBSERVATION_KEYS = frozenset({"adapter_id", "availability", "tool_version", "stamp"})
+_ADAPTER_OVERLAY_HELP = (
+    "Declared JSON array of user adapter manifests registered after --adapters; "
+    "an overlay entry adds a new adapter or replaces the same adapter_id. "
+    "Repeatable; later overlays win. Manifests are parsed statically; "
+    "nothing is loaded or executed."
+)
 
 
 def _load_document(path: str, what: str):
@@ -178,13 +185,35 @@ def _load_argv_map(path: str) -> dict[str, tuple[str, ...]]:
     return argvs
 
 
-def _load_registry(path: str) -> AdapterRegistry:
+def _load_registry(
+    path: str, overlays: Sequence[str] = ()
+) -> AdapterRegistry:
     document = _load_document(path, "adapter manifests")
     if type(document) is not list or not document:
         raise ValueError("adapter manifests must be a nonempty JSON array")
     registry = AdapterRegistry()
     for manifest in document:
         registry.register_manifest(manifest)
+    for overlay_path in overlays:
+        overlay = _load_document(overlay_path, "adapter overlay manifests")
+        if type(overlay) is not list or not overlay:
+            raise ValueError(
+                "adapter overlay manifests must be a nonempty JSON array"
+            )
+        overlay_ids: set[str] = set()
+        for manifest in overlay:
+            adapter_id = (
+                manifest.get("adapter_id")
+                if type(manifest) is dict
+                else None
+            )
+            if type(adapter_id) is str:
+                if adapter_id in overlay_ids:
+                    raise ValueError(
+                        "adapter overlay declares a duplicate adapter_id"
+                    )
+                overlay_ids.add(adapter_id)
+            registry.register_manifest(manifest, replace=True)
     return registry
 
 
@@ -205,6 +234,10 @@ def build_schedule_parser(
     parser.add_argument(
         "--adapters", required=True, metavar="PATH",
         help="Declared JSON array of adapter manifests to register.",
+    )
+    parser.add_argument(
+        "--adapter-overlay", action="append", default=None, metavar="PATH",
+        help=_ADAPTER_OVERLAY_HELP,
     )
     parser.add_argument(
         "--argv-map", required=True, metavar="PATH",
@@ -288,7 +321,9 @@ def run_schedule(args: argparse.Namespace) -> dict:
     request = _load_request(args.request)
     if request.input_format != SOURCE_INPUT_FORMAT or request.result_contract is None:
         raise ValueError("verify-schedule requires the source input contract and format")
-    registry = _load_registry(args.adapters)
+    registry = _load_registry(
+        args.adapters, getattr(args, "adapter_overlay", None) or ()
+    )
     argv_map = _load_argv_map(args.argv_map)
     policy = _load_policy(args.policy)
     observations = _load_observations(args.observations)
@@ -422,6 +457,7 @@ def run_schedule(args: argparse.Namespace) -> dict:
 def _declared_paths(args: argparse.Namespace) -> list[str]:
     paths = [args.request, args.adapters, args.argv_map, args.policy,
              args.source]
+    paths.extend(getattr(args, "adapter_overlay", None) or ())
     if getattr(args, "core", None) is not None:
         paths.append(args.core)
     if getattr(args, "core_requirement", None) is not None:
@@ -469,6 +505,10 @@ def build_plan_parser(
         help="Declared JSON array of adapter manifests to register.",
     )
     parser.add_argument(
+        "--adapter-overlay", action="append", default=None, metavar="PATH",
+        help=_ADAPTER_OVERLAY_HELP,
+    )
+    parser.add_argument(
         "--policy", required=True, metavar="PATH",
         help=(
             "Declared planner policy JSON. allowed_permissions must be "
@@ -503,7 +543,9 @@ def build_plan_parser(
 
 def _build_plan(args: argparse.Namespace) -> VerificationPlan:
     request = _load_request(args.request)
-    registry = _load_registry(args.adapters)
+    registry = _load_registry(
+        args.adapters, getattr(args, "adapter_overlay", None) or ()
+    )
     policy = _load_policy(args.policy)
     observations = _load_observations(args.observations)
     return registry.plan(request, policy, observations)
@@ -515,6 +557,7 @@ def run_plan(args: argparse.Namespace) -> dict:
 
 def _plan_declared_paths(args: argparse.Namespace) -> list[str]:
     paths = [args.request, args.adapters, args.policy]
+    paths.extend(getattr(args, "adapter_overlay", None) or ())
     if args.observations is not None:
         paths.append(args.observations)
     if args.output is not None:
@@ -542,6 +585,7 @@ def main_plan(args: argparse.Namespace | None = None) -> int:
             raise ValueError("--expected-history-head requires --history-log")
         if args.output is not None:
             inputs = [args.request, args.adapters, args.policy]
+            inputs.extend(getattr(args, "adapter_overlay", None) or ())
             if args.observations is not None:
                 inputs.append(args.observations)
             if any(_same_file(path, args.output) for path in inputs):
@@ -550,6 +594,9 @@ def main_plan(args: argparse.Namespace | None = None) -> int:
                 )
         if history_log is not None:
             declared_inputs = [args.request, args.adapters, args.policy]
+            declared_inputs.extend(
+                getattr(args, "adapter_overlay", None) or ()
+            )
             if args.observations is not None:
                 declared_inputs.append(args.observations)
             if args.output is not None:
@@ -588,6 +635,7 @@ def main_schedule(args: argparse.Namespace | None = None) -> int:
             target = os.path.realpath(args.output)
             inputs = [args.request, args.adapters, args.argv_map,
                       args.policy, args.source]
+            inputs.extend(getattr(args, "adapter_overlay", None) or ())
             if args.observations is not None:
                 inputs.append(args.observations)
             if getattr(args, "core", None) is not None:

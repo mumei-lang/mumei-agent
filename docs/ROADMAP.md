@@ -174,6 +174,16 @@ enforces only the environment category; `filesystem.*`, `network.connect`, and
 `process.spawn` remain declared-only. Environment scrubbing is not a
 sandbox and is not Evidence.
 
+### C04 declarative adapter overlay
+
+`verify-plan` and `verify-schedule` accept repeatable
+`--adapter-overlay PATH` JSON manifest files registered after
+`--adapters`. Overlay manifests are parsed statically; adding or replacing
+an adapter is explicit through the flag, and later overlays win. No plugin
+code is loaded, discovered, probed or executed. Registration does not imply
+availability, trust or Evidence. MCP `verify_plan` and `verify_schedule`
+are unchanged.
+
 ### C11 declared memory bounds for attempted executions
 
 `AttemptRunner.run(request, argv, cancel_event=None, memory_bound_mb=None)`
