@@ -6594,6 +6594,66 @@ def test_interface_member_read_inside_element(
     assert not result.available
 
 
+def test_range_struct_element_unsupported_members(
+    go_types_helper,
+):
+    # `for _, e := range p.B` — a struct element whose type has
+    # members the snapshot model does not cover (interface,
+    # pointer) still binds the copy plainly like `x := p.B[i]`:
+    # scalar member reads carry the element's deps, while writes
+    # through pointer members stay closed.
+    declarations = (
+        "type I interface{ M() int64 }\n"
+        "type T struct{ V int64 }\n"
+        "type E struct{ J I; W *T; V int64 }\n"
+        "type S struct{ B []E }\n"
+        "func F(p *S) int64 {\n"
+        "\tn := int64(0)\n"
+        "\tfor _, e := range p.B {\n"
+        "\t\tn += e.V\n"
+        "\t}\n"
+        "\treturn n\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+    # The copy's interface member still dispatches: `e.J.M()`
+    # folds the element's deps through the interface call.
+    declarations = (
+        "type I interface{ M() int64 }\n"
+        "type T struct{ V int64 }\n"
+        "type E struct{ J I; W *T; V int64 }\n"
+        "type S struct{ B []E }\n"
+        "func F(p *S) int64 {\n"
+        "\tn := int64(0)\n"
+        "\tfor _, e := range p.B {\n"
+        "\t\tn += e.J.M()\n"
+        "\t}\n"
+        "\treturn n\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+    # A pointer member's pointee stays closed — the write would
+    # reach shared memory the copy's plain binding cannot name.
+    declarations = (
+        "type I interface{ M() int64 }\n"
+        "type T struct{ V int64 }\n"
+        "type E struct{ J I; W *T; V int64 }\n"
+        "type S struct{ B []E }\n"
+        "func F(p *S, x int64) int64 {\n"
+        "\tfor _, e := range p.B {\n"
+        "\t\te.W.V = x\n"
+        "\t}\n"
+        "\treturn 0\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available
+
+
 def test_interface_member_method_value_inside_element(
     go_types_helper,
 ):
@@ -17457,11 +17517,12 @@ def test_bound_array_pointee_sugar_indexed_field_store(
     assert result.return_dependencies == frozenset({0, 1, 2})
 
 
-def test_bound_container_pointee_range_struct_element_closed(
+def test_bound_container_pointee_range_struct_element_binds(
     go_types_helper,
 ):
     # `for _, v := range *p` on `p *[]Q` — a struct-typed element
-    # cannot bind under the scalar-or-pointer gate.
+    # binds plainly like `x := (*p)[i]`: the copy's scalar member
+    # reads carry the element's deps.
     files = {
         "a.go": "package p\n"
         "type Q struct{ V int64 }\n"
@@ -17473,8 +17534,8 @@ def test_bound_container_pointee_range_struct_element_closed(
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
-    assert result.gaps[0].reason == "binding_unavailable"
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
 
 
 def test_bound_map_pointee_range_string_key_closed(

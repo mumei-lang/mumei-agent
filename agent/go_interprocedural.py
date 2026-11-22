@@ -9517,6 +9517,18 @@ class _Builder:
                     # dispatch through `_interface_value_binding`.
                     scope[binding.id] = deps
                     continue
+                if pos == 1 and binding.type.kind == "struct":
+                    # `for _, e := range p.B` — a struct element
+                    # whose type has no collection-member snapshot
+                    # (a pointer, interface, or other unsupported
+                    # member) still binds plainly like `x := p.B[i]`:
+                    # scalar member reads carry the element's deps,
+                    # `e.J.M()` folds the copy's deps through the
+                    # interface dispatch, and writes through pointer
+                    # members stay closed like on a local struct
+                    # literal.
+                    scope[binding.id] = deps
+                    continue
                 if binding.type.kind not in {
                     "integer",
                     "boolean",
