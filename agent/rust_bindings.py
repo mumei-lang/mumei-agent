@@ -3139,6 +3139,16 @@ class _RustBindings:
                 ):
                     spelled = self._fn_return_payload(node)
                     if spelled is not None:
+                        if (
+                            self.text(
+                                callee.child_by_field_name("field")
+                            ).strip() in {"map_or", "map_or_else"}
+                        ):
+                            # `o.map_or(d, f)` yields `f`'s return
+                            # `U` itself, not `Option<U>`.
+                            return self._spelled_type(
+                                spelled, node.start_byte
+                            )
                         return None, spelled
                 if (
                     callee is not None
@@ -3650,9 +3660,13 @@ class _RustBindings:
             if "comment" not in c.type
         ]
         target = (
-            args[-1]
-            if method in {"map_or", "map_or_else"}
-            else (args[0] if args else None)
+            (
+                args[-1]
+                if method in {"map_or", "map_or_else"}
+                else args[0]
+            )
+            if args
+            else None
         )
         if target is None or target.type != "identifier":
             return None
@@ -3672,6 +3686,10 @@ class _RustBindings:
             or record.type_node is None
         ):
             return None
+        if record.is_async:
+            # `async fn f() -> U` returns a `Future<U>` — `o.map(f)`
+            # stores the future, not `U`.
+            return None
         ret = (
             record.type_node.child_by_field_name("return_type")
             or record.type_node
@@ -3682,33 +3700,49 @@ class _RustBindings:
             if wrap is None:
                 return None
             text = self._type_arg_list(wrap.group(1))[0].strip()
-        qualified = self._qualified_spelling(text, ret.start_byte)
-        if method == "map_err":
-            # `Result<P, E>` — replace the error arg with `f`'s
-            # return while the ok payload stays.
-            receiver = self._receiver_type(
-                call.child_by_field_name("function").child_by_field_name(
-                    "value"
+        pushed = False
+        if record.home_scope is not None:
+            self.scopes.append(record.home_scope)
+            pushed = True
+        try:
+            qualified = self._qualified_spelling(text, ret.start_byte)
+            if method == "map_err":
+                # `Result<P, E>` — replace the error arg with `f`'s
+                # return while the ok payload stays.
+                recv_node = call.child_by_field_name(
+                    "function"
+                ).child_by_field_name("value")
+                receiver = self._receiver_type(recv_node)
+                if receiver[1] is None:
+                    return None
+                parts = self._type_arg_list(receiver[1])
+                if not parts:
+                    return None
+                ann_pos = (
+                    self._receiver_annotation_position(recv_node)
+                    or call.start_byte
                 )
+                # The kept ok arg was written in the receiver's
+                # annotation — qualify it there, not at the call.
+                kept = [
+                    self._qualified_spelling(part.strip(), ann_pos)
+                    for part in parts[:-1]
+                ]
+                return ", ".join(kept + [qualified])
+            bare = re.sub(
+                r"\b(?:[A-Za-z_]\w*::)+[A-Za-z_]\w*", "", qualified
             )
-            if receiver[1] is None:
+            if not self._spelling_scope_stable(
+                bare, ret.start_byte, call.start_byte
+            ):
+                # An unqualifiable name (a generic parameter of `f`,
+                # a function-local type) would re-resolve to a
+                # same-named type at the call site — opaque instead.
                 return None
-            parts = self._type_arg_list(receiver[1])
-            if not parts:
-                return None
-            parts[-1] = qualified
-            return ", ".join(parts)
-        bare = re.sub(
-            r"\b(?:[A-Za-z_]\w*::)+[A-Za-z_]\w*", "", qualified
-        )
-        if not self._spelling_scope_stable(
-            bare, ret.start_byte, call.start_byte
-        ):
-            # An unqualifiable name (a generic parameter of `f`,
-            # a function-local type) would re-resolve to a
-            # same-named type at the call site — opaque instead.
-            return None
-        return qualified
+            return qualified
+        finally:
+            if pushed:
+                self.scopes.pop()
 
     def _iterator_spelling(
         self, call: Any, _depth: int = 0
@@ -7362,15 +7396,20 @@ class _RustBindings:
                     and self.text(field).strip() in _FN_PAYLOAD_METHODS
                     and self._fn_return_payload(node) is not None
                 ):
-                    # `o.map(f)`/`o.and_then(f)` yield `Option<U>`
-                    # spelled from `f`'s return annotation —
-                    # `map_err` yields `Result<_, F>` instead.
                     method = self.text(field).strip()
-                    return (
-                        "Result" if method == "map_err" else "Option",
-                        node.start_byte,
-                        None,
+                    if method in {"map_or", "map_or_else"}:
+                        # `o.map_or(d, f)` yields `f`'s return `U`
+                        # itself — a plain value, not a container.
+                        return None, node.start_byte, None
+                    # `o.map(f)`/`o.and_then(f)` keep the receiver's
+                    # container — `Option<U>` on `Option<_>`,
+                    # `Result<U, E>` on `Result<_, _>`.
+                    head = self._container_head_name(
+                        callee.child_by_field_name("value")
                     )
+                    if head not in _TRY_HEADS:
+                        return None, None, None
+                    return head, node.start_byte, None
                 return None, None, None
             if member.type_node is None:
                 return None, None, None
