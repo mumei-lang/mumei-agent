@@ -2195,10 +2195,21 @@ class _RustBindings:
                 )
                 if ret is not None:
                     spelled_pos = ret.start_byte
+                    # The substitution map comes from the
+                    # receiver's declared container (`w: W<Q>`),
+                    # not the call's own return head (`Option`
+                    # has no declared record to map params
+                    # against).
+                    callee_value = callee.child_by_field_name(
+                        "value"
+                    )
+                    receiver_head = self._receiver_type(
+                        callee_value
+                    )[0]
                     container = (
                         None
-                        if receiver[0] is None
-                        else self.records.get(receiver[0])
+                        if receiver_head is None
+                        else self.records.get(receiver_head)
                     )
                     param_map = (
                         {}
