@@ -3202,3 +3202,143 @@ fn g() { A::m(&a); }
             if source[c.span.start:c.span.end] == text
         )
         assert call.target == method.id
+
+
+def test_glob_import_resolves_module_items():
+    # `use m::*` exposes `m`'s items — a type annotation and a call
+    # resolve to the module's declared bindings.
+    source = """
+mod m {
+    pub struct P;
+    pub fn go() {}
+}
+use m::*;
+fn f() { let v: P = P; go(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    struct_p = next(
+        b for b in report.bindings if b.name == "P" and b.kind == "struct"
+    )
+    go = next(
+        b for b in report.bindings if b.name == "go" and b.kind == "function"
+    )
+    refs = _refs(report, source, "P")
+    assert any(ref.binding_id == struct_p.id for ref in refs)
+    call = _call(report, source, "go()")
+    assert call.target == go.id
+
+
+def test_glob_import_ambiguity_stays_unresolved():
+    # Two glob-imported modules exporting the same name is ambiguous —
+    # the name does not silently resolve to either.
+    source = """
+mod a { pub struct P; }
+mod b { pub struct P; }
+use a::*;
+use b::*;
+fn f() { let v: P = P; }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    refs = _refs(report, source, "P")
+    assert not any(
+        ref.binding_id
+        in {b.id for b in report.bindings if b.name == "P"}
+        for ref in refs
+    )
+
+
+def test_local_binding_shadows_glob_import():
+    # An explicit local `P` wins over `use m::*`'s `P`.
+    source = """
+mod m { pub struct P; }
+use m::*;
+struct P;
+fn f() { let v: P = P; }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    local_p = next(
+        b for b in report.bindings
+        if b.name == "P" and b.span.start == source.rindex("struct P") + 7
+    )
+    refs = _refs(report, source, "P")
+    assert any(ref.binding_id == local_p.id for ref in refs)
+
+
+def test_glob_import_resolves_at_declaration_scope_not_use_site():
+    # `use m::*` binds to the `m` visible where the import is
+    # declared — a same-named inner `mod m` at the call site does
+    # not redirect the call.
+    source = """
+mod m { pub fn f() {} }
+use m::*;
+fn main() {
+    mod m { pub fn wrong() {} }
+    f();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    outer_f = next(
+        b for b in report.bindings
+        if b.name == "f" and b.kind == "function"
+    )
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "f()"
+    )
+    assert call.target == outer_f.id
+
+
+def test_glob_import_skips_private_items():
+    source = """
+mod m { fn priv_() {} pub fn f() {} }
+use m::*;
+fn main() { priv_(); f(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    calls = {
+        source[c.span.start:c.span.end]: c for c in report.calls
+    }
+    assert calls["priv_()"].target == ""
+    public_f = next(
+        b for b in report.bindings
+        if b.name == "f" and b.kind == "function"
+    )
+    assert calls["f()"].target == public_f.id
+
+
+def test_glob_import_follows_pub_use_reexports():
+    source = """
+mod n { pub fn g() {} }
+mod m { pub use n::*; }
+use m::*;
+fn main() { g(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    g = next(
+        b for b in report.bindings
+        if b.name == "g" and b.kind == "function"
+    )
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "g()"
+    )
+    assert call.target == g.id
+
+
+def test_glob_import_does_not_follow_private_reexports():
+    source = """
+mod n { pub fn g() {} }
+mod m { use n::*; pub fn h() {} }
+use m::*;
+fn main() { g(); h(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    calls = {
+        source[c.span.start:c.span.end]: c for c in report.calls
+    }
+    assert calls["g()"].target == ""
+    h = next(
+        b for b in report.bindings
+        if b.name == "h" and b.kind == "function"
+    )
+    assert calls["h()"].target == h.id
