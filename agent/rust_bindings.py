@@ -1214,6 +1214,44 @@ class _RustBindings:
         elif path.type in {"scoped_identifier", "scoped_type_identifier"}:
             record = self._scoped_type(path)
             type_id, args = (None if record is None else record.binding.id), None
+        elif path.type == "bracketed_type":
+            qualified = next(
+                (
+                    child
+                    for child in self._children(path)
+                    if child.type == "qualified_type"
+                ),
+                None,
+            )
+            if qualified is None:
+                # `<P>::m` — bare qualified path, same member pool as
+                # `P::m`.
+                inner = next(iter(self._children(path)), None)
+                type_id, args = self._annotation_type(inner)
+                member = self._member_record(
+                    type_id,
+                    self._normalize_identifier(self.text(name)),
+                    (
+                        "associated_function",
+                        "associated_const",
+                        "enum_member",
+                    ),
+                    args,
+                    node.start_byte,
+                )
+                return member, name
+            type_id, args = self._annotation_type(
+                qualified.child_by_field_name("type")
+            )
+            trait_node = qualified.child_by_field_name("alias")
+            member = self._ufcs_member(
+                type_id,
+                self._normalize_identifier(self.text(name)),
+                trait_node,
+                args,
+                node.start_byte,
+            )
+            return member, name
         else:
             return None, name
         if type_id is None:
@@ -1355,6 +1393,51 @@ class _RustBindings:
             if sum(1 for record in candidates if tier(record) == 2) > 1:
                 return None
         return first
+
+    def _ufcs_member(
+        self,
+        type_id: str | None,
+        name: str,
+        trait_node: Any | None,
+        impl_args: str | None,
+        position: int,
+    ) -> _Record | None:
+        """Member picked by `<P as T>::name` UFCS syntax.
+
+        With an `as` qualifier the spelling names the trait-impl member
+        specifically — it only resolves when the trait record resolves at
+        the access site. Without it (`<P>::m`) the member set is the same
+        pool `P::m` would see."""
+        if type_id is None:
+            return None
+        if trait_node is None:
+            return self._member_record(
+                type_id,
+                name,
+                ("associated_function", "associated_const", "enum_member"),
+                impl_args,
+                position,
+            )
+        trait = self._lookup(
+            self._normalize_identifier(self.text(trait_node)),
+            trait_node.start_byte,
+            "type",
+        )
+        if trait is None:
+            return None
+        pool = [
+            record
+            for record in self.records.values()
+            if record.member_of == type_id
+            and record.binding.name == name
+            and record.member_trait == trait.binding.id
+            and (
+                record.member_impl_args is None
+                or record.member_impl_generic
+                or record.member_impl_args == impl_args
+            )
+        ]
+        return pool[0] if pool else None
 
     def _field_member(
         self, node: Any, kinds: tuple[str, ...] = ()

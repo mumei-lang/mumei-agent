@@ -2476,3 +2476,64 @@ fn f(e: E) { match e { E::A => {}, E::B => {} } }
     }
     assert reads == {"A": variants["A"].id, "B": variants["B"].id}
     assert not [u for u in report.unresolved if u.name.startswith("E::")]
+
+
+def test_member_ufcs_resolves_named_trait_impl():
+    source = """
+struct P { x: i32 }
+trait T { fn get(&self) -> i32; }
+trait U { fn get(&self) -> i32; }
+impl T for P { fn get(&self) -> i32 { self.x } }
+impl U for P { fn get(&self) -> i32 { 2 } }
+fn f() { <P as T>::get(); <P as U>::get(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    impls = _bindings(report, "get", "associated_function")
+    t_impl = next(b for b in impls if b.span.start > source.index("impl T"))
+    u_impl = next(b for b in impls if b.span.start > source.index("impl U"))
+    t_call = _call(report, source, "<P as T>::get()")
+    u_call = _call(report, source, "<P as U>::get()")
+    assert t_call.target == t_impl.id
+    assert u_call.target == u_impl.id
+
+
+def test_member_ufcs_unknown_trait_stays_opaque():
+    source = """
+struct P { x: i32 }
+fn f() { <P as Z>::get(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    call = _call(report, source, "<P as Z>::get()")
+    assert call.kind == "opaque_path"
+
+
+def test_member_ufcs_bare_bracket_resolves_inherent_member():
+    source = """
+struct P { x: i32 }
+impl P { fn get(&self) -> i32 { 3 } const K: i32 = 1; }
+fn f() { <P>::get(); let k = <P>::K; }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    get = _bindings(report, "get", "associated_function")[0]
+    const = _bindings(report, "K", "associated_const")[0]
+    call = _call(report, source, "<P>::get()")
+    assert call.target == get.id
+    reads = [
+        r
+        for r in report.references
+        if r.kind == "read" and source[r.span.start : r.span.end] == "K"
+    ]
+    assert [r.binding_id == const.id for r in reads] == [True]
+
+
+def test_member_ufcs_missing_trait_member_stays_opaque():
+    source = """
+struct P { x: i32 }
+trait T { fn get(&self) -> i32; }
+impl T for P { fn get(&self) -> i32 { self.x } }
+impl P { fn other(&self) -> i32 { 3 } }
+fn f() { <P as T>::other(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    call = _call(report, source, "<P as T>::other()")
+    assert call.kind == "opaque_path"
