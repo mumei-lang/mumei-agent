@@ -5540,3 +5540,85 @@ fn f(items: Vec<m::P>) {
     report = build_rust_bindings(source, pointer_width=64)
     p = _bindings(report, "p", "associated_function")[0]
     assert _call(report, source, "items[0].p()").target == p.id
+
+
+def test_get_on_prelude_containers_heads_option() -> None:
+    source = """
+struct P;
+struct Q;
+impl P { fn m(&self) {} }
+impl Q { fn q(&self) {} }
+use std::collections::HashMap;
+fn f(v: Vec<P>, m: HashMap<P, Q>, i: usize) {
+    if let Some(p) = v.get(i) { p.m(); }
+    match m.get(&i) {
+        Some(q) => q.q(),
+        None => (),
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = _bindings(report, "m", "associated_function")[0]
+    q = _bindings(report, "q", "associated_function")[0]
+    assert _call(report, source, "p.m()").target == m.id
+    assert _call(report, source, "q.q()").target == q.id
+
+
+def test_get_on_declared_method_keeps_member_resolution() -> None:
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+struct C;
+impl C { fn get(&self) -> Option<P> { None } }
+fn f(c: C) {
+    c.get();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    get = _bindings(report, "get", "associated_function")[0]
+    assert _call(report, source, "c.get()").target == get.id
+
+
+def test_option_head_methods_on_prelude_containers() -> None:
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn f(v: Vec<P>) {
+    if let Some(p) = v.first() { p.m(); }
+    if let Some(p) = v.last() { p.m(); }
+    if let Some(p) = v.pop() { p.m(); }
+}
+use std::collections::HashMap;
+fn g(m: HashMap<u32, P>) {
+    if let Some(p) = m.pop() { p.m(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = _bindings(report, "m", "associated_function")[0]
+    calls = [
+        call
+        for call in report.calls
+        if source.encode()[call.span.start : call.span.end] == b"p.m()"
+    ]
+    assert [c.target for c in calls[:3]] == [m.id] * 3
+    # HashMap has no `pop` — the Some payload stays untyped.
+    assert not calls[3].target
+
+
+
+def test_unwrap_receiver_resolves_at_return_annotation():
+    source = """
+use std::option::Option;
+struct Q;
+impl Q { fn qm(&self) {} }
+struct W;
+impl W { fn get(&self) -> Option<Q> { None } }
+fn f(w: W) {
+    struct Q;
+    impl Q { fn bad(&self) {} }
+    w.get().unwrap().qm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    qm = _bindings(report, "qm", "associated_function")[0]
+    assert _call(report, source, "w.get().unwrap().qm()").target == qm.id

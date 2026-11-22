@@ -60,6 +60,17 @@ _ITER_SLICE_METHODS = frozenset({"as_slice", "as_mut_slice"})
 _MAP_ELEMENT_METHODS = {"keys": 0, "values": 1}
 _MAP_CONTAINER_NAMES = frozenset({"HashMap", "BTreeMap"})
 
+# Prelude container methods that hand back `Option` — `v.get(i)`,
+# `v.first()` and `v.last()` yield `Option<&T>` while `v.pop()`
+# yields `Option<T>`. Each maps to its payload prefix and the
+# container heads the method actually exists on.
+_OPTION_HEAD_METHODS = {
+    "get": ("&", {"Vec", "HashMap", "BTreeMap"}),
+    "first": ("&", {"Vec"}),
+    "last": ("&", {"Vec"}),
+    "pop": ("", {"Vec"}),
+}
+
 _PRELUDE_NAMES = frozenset(
     {
         "Some", "None", "Ok", "Err", "Vec", "String", "Box", "Option",
@@ -2166,6 +2177,113 @@ class _RustBindings:
             # — walk the declaration to recover one, or the spelled
             # args would resolve at the call site and hit shadows.
             _, spelled_pos, _ = self._scrutinee_shape(value, None)
+        decl_scope = None
+        ret = None
+        if value.type == "call_expression":
+            # `o.unwrap()` reads the args the method's return
+            # annotation wrote (`fn get(&self) -> Option<Q>`) —
+            # resolving at the receiver's own annotation position
+            # picks up a `Q` shadowed there instead.
+            callee = value.child_by_field_name("function")
+            member = (
+                self._field_member(callee, ("associated_function",))
+                if callee is not None
+                and callee.type == "field_expression"
+                else None
+            )
+            if member is not None and member.type_node is not None:
+                ret = (
+                    member.type_node.child_by_field_name(
+                        "return_type"
+                    )
+                    or member.type_node
+                )
+                if ret is not None:
+                    spelled_pos = ret.start_byte
+                    owner = (
+                        self.records.get(member.member_of)
+                        if member.member_of
+                        else None
+                    )
+                    decl_scope = (
+                        owner.home_scope
+                        if owner is not None
+                        else None
+                    )
+                    # The substitution map comes from the
+                    # receiver's declared container (`w: W<Q>`),
+                    # not the call's own return head (`Option`
+                    # has no declared record to map params
+                    # against).
+                    callee_value = callee.child_by_field_name(
+                        "value"
+                    )
+                    receiver_head, receiver_args = (
+                        self._receiver_type(callee_value)
+                    )
+                    container = (
+                        None
+                        if receiver_head is None
+                        else self.records.get(receiver_head)
+                    )
+                    param_map = (
+                        {}
+                        if container is None
+                        else self._pattern_param_map(
+                            container, receiver_args
+                        )
+                    )
+                    member_text = self.text(member.type_node)
+                    ret_args = []
+                    ret_generics = re.search(
+                        r"<([\s\S]*)>",
+                        self.text(ret),
+                    )
+                    if ret_generics is not None:
+                        ret_args = [
+                            a.strip()
+                            for a in self._type_arg_list(
+                                ret_generics.group(1)
+                            )
+                        ]
+                    arg_head = (
+                        None
+                        if index >= len(ret_args)
+                        else re.match(
+                            r"[A-Za-z_][\w:]*",
+                            re.sub(
+                                r"^(?:[\s&*()]+|(?:const|mut)\s+|'\w+\s*)+",
+                                "",
+                                ret_args[index],
+                            ),
+                        )
+                    )
+                    if (
+                        param_map
+                        and arg_head is not None
+                        and self._normalize_identifier(arg_head.group(0))
+                        in param_map
+                        and any(
+                            re.search(
+                                rf"\b{re.escape(param)}\b",
+                                member_text,
+                            )
+                            for param in param_map
+                        )
+                    ):
+                        # The payload arg spells the container's
+                        # own param — it was substituted from the
+                        # receiver's annotation, so resolve it
+                        # there. A fixed sibling arg (`E` in
+                        # `Result<T, E>`) stays in the method's
+                        # declaring scope.
+                        inner_pos = (
+                            self._receiver_annotation_position(
+                                callee.child_by_field_name("value")
+                            )
+                        )
+                        if inner_pos is not None:
+                            spelled_pos = inner_pos
         args = self._type_arg_list(value_args or "")
         if len(args) <= index:
             return None, None
@@ -2185,10 +2303,21 @@ class _RustBindings:
         # annotated — resolving at the call site picks up a same-named
         # shadow, and the import's record id must not gate on
         # index-element containers.
-        return self._spelled_type(
-            args[index].strip(),
-            position if spelled_pos is None else spelled_pos,
-        )
+        arg_pos = position if spelled_pos is None else spelled_pos
+        if (
+            decl_scope is not None
+            and ret is not None
+            and arg_pos == ret.start_byte
+        ):
+            # A fixed arg (`E` in `Result<T, E>`) resolves in the
+            # member's declaring scope — a call-site `struct E`
+            # must not shadow it.
+            self.scopes.append(decl_scope)
+            try:
+                return self._spelled_type(args[index].strip(), arg_pos)
+            finally:
+                self.scopes.pop()
+        return self._spelled_type(args[index].strip(), arg_pos)
 
     def _field_member(
         self, node: Any, kinds: tuple[str, ...] = ()
@@ -2436,6 +2565,40 @@ class _RustBindings:
                     "value",
                 )
             if member is None:
+                field = (
+                    callee.child_by_field_name("field")
+                    if callee is not None
+                    and callee.type == "field_expression"
+                    else None
+                )
+                if field is not None and receiver[1] is not None:
+                    option_head = _OPTION_HEAD_METHODS.get(
+                        self.text(field).strip()
+                    )
+                else:
+                    option_head = None
+                if (
+                    option_head is not None
+                    and self._container_head_name(
+                        callee.child_by_field_name("value")
+                    )
+                    in option_head[1]
+                ):
+                    prefix = option_head[0]
+                    # `v.get(i)`/`v.first()`/`v.pop()` yield
+                    # `Option<&T>`/`Option<T>` — only the payload
+                    # spelling is carried; the head stays for
+                    # `_scrutinee_shape` to declare.
+                    elements = self._type_arg_list(receiver[1])
+                    element = (
+                        elements[-1].strip()
+                        if len(elements) == 2
+                        else elements[0].strip()
+                        if len(elements) == 1
+                        else None
+                    )
+                    if element is not None:
+                        return None, prefix + element
                 if (
                     callee is not None
                     and callee.type == "field_expression"
@@ -4826,6 +4989,22 @@ class _RustBindings:
                 re.search(rf"\b{re.escape(param)}\b", member_text)
                 for param in param_map
             ):
+                # A fixed sibling arg (`E` in `Result<T, E>`)
+                # still wants the declaring scope — hand it back
+                # when it shadows none of the substituted
+                # spellings.
+                decl = member.home_scope
+                if decl is None:
+                    owner = self.records.get(member.member_of)
+                    decl = None if owner is None else owner.home_scope
+                if decl is not None and decl not in self.scopes and not any(
+                    (m := re.match(r"[A-Za-z_][\w:]*", s.strip()))
+                    is not None
+                    and m.group(0).rsplit("::", 1)[-1]
+                    in decl.bindings
+                    for s in param_map.values()
+                ):
+                    return decl
                 return None
         if member.home_scope is not None:
             return member.home_scope
@@ -5157,6 +5336,28 @@ class _RustBindings:
         match = re.match(r"[A-Za-z_]\w*", args.strip())
         return None if match is None else match.group(0)
 
+    def _container_head_name(self, node: Any | None) -> "str | None":
+        """Declared container head of a value — `v: Vec<P>` reads
+        `Vec`, `m: HashMap<K, V>` reads `HashMap`. None when the
+        receiver is not a plainly-annotated identifier."""
+        while node is not None and node.type == "reference_expression":
+            node = next(iter(node.named_children), None)
+        if node is None or node.type != "identifier":
+            return None
+        record = self._lookup(
+            self._normalize_identifier(self.text(node)),
+            node.start_byte,
+            "value",
+        )
+        if record is None or record.type_node is None:
+            return None
+        head = re.match(
+            r"[A-Za-z_][\w:]*", self.text(record.type_node).strip()
+        )
+        if head is None:
+            return None
+        return head.group(0).split("::")[-1]
+
     def _scrutinee_shape(
         self, value: Any | None, scrut_id: str | None
     ) -> "tuple[str | None, int | None, _Scope | None]":
@@ -5181,7 +5382,14 @@ class _RustBindings:
                     record.alias_node.start_byte,
                     record.home_scope,
                 )
-            return record.binding.name, None, None
+            # Spelled args (`Option<&P>` from `v.first()`) were
+            # written in the receiver's annotation — resolve them
+            # there, not at the pattern site.
+            return (
+                record.binding.name,
+                self._receiver_annotation_position(value),
+                None,
+            )
         node = value
         while node is not None and node.type == "reference_expression":
             node = next(iter(node.named_children), None)
@@ -5281,7 +5489,41 @@ class _RustBindings:
                     node.start_byte,
                     "value",
                 )
-            if member is None or member.type_node is None:
+            if member is None:
+                field = (
+                    callee.child_by_field_name("field")
+                    if callee is not None
+                    and callee.type == "field_expression"
+                    else None
+                )
+                option_head = (
+                    _OPTION_HEAD_METHODS.get(self.text(field).strip())
+                    if field is not None
+                    else None
+                )
+                if (
+                    option_head is not None
+                    and self._container_head_name(
+                        callee.child_by_field_name("value")
+                    )
+                    in option_head[1]
+                ):
+                    # `v.get(i)`/`v.pop()` return `Option<_>` — the
+                    # prelude container has no member record, but
+                    # Some/None still heads the scrutinee. A declared
+                    # method takes the normal path above. The spelled
+                    # payload args were written in the receiver's
+                    # annotation — resolve them there, not at the
+                    # call site.
+                    return (
+                        "Option",
+                        self._receiver_annotation_position(
+                            callee.child_by_field_name("value")
+                        ) or node.start_byte,
+                        None,
+                    )
+                return None, None, None
+            if member.type_node is None:
                 return None, None, None
             return (
                 self._alias_head_name(member.type_node),
