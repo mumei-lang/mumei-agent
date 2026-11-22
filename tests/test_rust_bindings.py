@@ -2309,3 +2309,19 @@ fn f(w: W<&mutable::Value, u8>) { w.m(); }
     report = build_rust_bindings(source, pointer_width=64)
     member_m = _bindings(report, "m", "associated_function")[0]
     assert _call(report, source, "w.m()").target == member_m.id
+
+
+def test_function_pointer_field_call_reads_the_field():
+    # `(p.callback)()` reads field `callback` (type `fn()`) — the read
+    # reference must be recorded even though no function is called.
+    source = """
+struct P { callback: fn() }
+fn go(p: P) { (p.callback)(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    field = _bindings(report, "callback", "struct_field")[0]
+    read = next(
+        r for r in report.references
+        if r.kind == "read" and source[r.span.start : r.span.end] == "callback"
+    )
+    assert read.binding_id == field.id

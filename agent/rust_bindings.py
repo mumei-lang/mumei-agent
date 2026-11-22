@@ -2450,6 +2450,13 @@ class _RustBindings:
         arguments_node = node.child_by_field_name("arguments")
         arguments = () if arguments_node is None else self._children(arguments_node)
         args = tuple(self.span(arg) for arg in arguments)
+        # `(p.f)()` calls the field value while `p.f()` prefers a
+        # method — remember whether parens wrapped the callee before
+        # _callee unwraps them.
+        paren_wrapped = (
+            callee is not None
+            and callee.type == "parenthesized_expression"
+        )
         callee = None if callee is None else self._callee(callee)
         span = self.span(node)
         kind = "opaque_expression"
@@ -2476,9 +2483,12 @@ class _RustBindings:
                 receiver = inner.child_by_field_name("value")
                 if receiver is not None:
                     self._expr(receiver)
+                # Method-call spelling prefers methods; when none is
+                # named `field`, a same-named field can still be the
+                # callee — `(p.callback)()` reads the `fn()` field.
                 member = self._field_member(
                     inner, ("associated_function", "associated_const")
-                )
+                ) or self._field_member(inner, ("struct_field",))
                 field_node = inner.child_by_field_name("field")
                 if member is not None and member.binding.kind == "associated_function":
                     self.references.append(
@@ -2530,8 +2540,16 @@ class _RustBindings:
             value = callee.child_by_field_name("value")
             if value is not None:
                 self._expr(value)
-            member = self._field_member(
-                callee, ("associated_function", "associated_const")
+            member = (
+                self._field_member(callee, ("struct_field",))
+                or self._field_member(
+                    callee, ("associated_function", "associated_const")
+                )
+                if paren_wrapped
+                else self._field_member(
+                    callee, ("associated_function", "associated_const")
+                )
+                or self._field_member(callee, ("struct_field",))
             )
             field_node = callee.child_by_field_name("field")
             if member is not None and member.binding.kind == "associated_function":
