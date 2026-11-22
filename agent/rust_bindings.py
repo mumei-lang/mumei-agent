@@ -51,7 +51,7 @@ _ITER_ELEMENT_METHODS = frozenset({"iter", "iter_mut", "into_iter", "drain"})
 # Iterator adaptors that keep the same element type — `map`/`flat_map`
 # change it through a closure and stay opaque.
 _ITER_PRESERVING_METHODS = frozenset(
-    {"rev", "skip", "take", "filter", "step_by"}
+    {"rev", "skip", "take", "filter", "step_by", "chain"}
 )
 # Vec/slice accessors that iterate the same element as `iter()`.
 _ITER_SLICE_METHODS = frozenset({"as_slice", "as_mut_slice"})
@@ -275,6 +275,7 @@ class _RustBindings:
         self.in_extern = False
         self._function_records: dict[str, _Record] = {}
         self._receiver_memo: dict[tuple, tuple] = {}
+        self._spelling_memo: dict[tuple, tuple] = {}
         # Receiver-resolution epoch — bumped only by declarations that
         # can change a `_receiver_type` result (type/function/impl
         # items, or a record overwrite), so long `let` chains do not
@@ -2473,10 +2474,12 @@ class _RustBindings:
                     option_head = None
                 if (
                     option_head is not None
-                    and self._container_head_name(
-                        callee.child_by_field_name("value")
+                    and (
+                        option_head[1] is None
+                        or self._container_head_name(
+                            callee.child_by_field_name("value")
+                        ) in option_head[1]
                     )
-                    in option_head[1]
                 ):
                     prefix = option_head[0]
                     # `v.get(i)`/`v.first()`/`v.pop()` yield
@@ -2497,6 +2500,11 @@ class _RustBindings:
                     callee is not None
                     and callee.type == "field_expression"
                 ):
+                    # Iterator chains (`v.iter()`, `it.zip(u)` …)
+                    # spell their element from the receiver's args.
+                    spelled = self._iterator_spelling(node)
+                    if spelled is not None:
+                        return None, spelled
                     return self._unwrapped(
                         callee, node.start_byte, receiver
                     )
@@ -2855,6 +2863,20 @@ class _RustBindings:
         unpinned when the names would resolve differently."""
         if _depth > 8:
             return None, None
+        key = (
+            call.start_byte,
+            call.end_byte,
+            self._resolution_epoch,
+        )
+        if key in self._spelling_memo:
+            return self._spelling_memo[key]
+        result = self._iterator_spelling_uncached(call, _depth)
+        self._spelling_memo[key] = result
+        return result
+
+    def _iterator_spelling_uncached(
+        self, call: Any, _depth: int
+    ) -> "tuple[str | None, int | None]":
         callee = call.child_by_field_name("function")
         if callee is None or callee.type != "field_expression":
             return None, None
@@ -2862,7 +2884,7 @@ class _RustBindings:
             self._field_member(callee, ("associated_function",))
             is not None
         ):
-            return None
+            return None, None
         method_node = callee.child_by_field_name("field")
         receiver = callee.child_by_field_name("value")
         if method_node is None or receiver is None:
@@ -3296,8 +3318,13 @@ class _RustBindings:
         # only the value type, so the pair's shape is unpinned here.
         if self._is_map_container(container_id, iterator):
             return _UNKNOWN, None
+        # Spelled element names on `it` (`let it = v.iter()`) were
+        # written in `it`'s annotation — resolve them there.
+        position = self._receiver_annotation_position(iterator)
+        if position is None:
+            position = iterator.start_byte
         elem_id, rest = self._element_of(
-            container_id, elem_args.strip(), iterator.start_byte
+            container_id, elem_args.strip(), position
         )
         if elem_id is None:
             return _UNKNOWN, rest
@@ -4626,13 +4653,27 @@ class _RustBindings:
                         iterator
                     )
                     if container_args is not None:
+                        # `for p in it` — `it`'s args may be spelled
+                        # names written in `it`'s own annotation
+                        # (`let it = v.iter()`), not at the loop.
+                        iterator_position = (
+                            self._receiver_annotation_position(
+                                iterator
+                            )
+                        )
+                        if iterator_position is None:
+                            iterator_position = iterator.start_byte
                         elem_id, elem_args = self._element_of(
                             container_id,
                             container_args.strip(),
-                            iterator.start_byte,
+                            iterator_position,
                         )
                         type_map = self._pattern_type_map(
-                            pattern, elem_id, elem_args
+                            pattern,
+                            elem_id,
+                            elem_args,
+                            None,
+                            iterator_position,
                         )
             self._bind_pattern_names(
                 names,
@@ -5323,10 +5364,12 @@ class _RustBindings:
                 )
                 if (
                     option_head is not None
-                    and self._container_head_name(
-                        callee.child_by_field_name("value")
+                    and (
+                        option_head[1] is None
+                        or self._container_head_name(
+                            callee.child_by_field_name("value")
+                        ) in option_head[1]
                     )
-                    in option_head[1]
                 ):
                     # `v.get(i)`/`v.pop()` return `Option<_>` — the
                     # prelude container has no member record, but
