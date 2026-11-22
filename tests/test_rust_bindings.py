@@ -3886,15 +3886,16 @@ fn f() { let x: P = P::new(); }
 
 def test_parent_module_use_does_not_leak_into_child_module():
     # `use x::Tr` in `mod outer` names `Tr` in outer only — `p.m()`
-    # inside `mod inner` cannot reach the trait's impl.
+    # inside `mod inner` cannot reach the trait's impl. The receiver's
+    # `P` resolves through inner's own `use x::P`, so trait visibility
+    # — not type resolution — is what keeps the call opaque.
     source = """
-mod x { pub trait Tr { fn m(&self) {} } }
+mod x { pub struct P; pub trait Tr { fn m(&self) {} } impl Tr for P {} }
 mod outer {
     use x::Tr;
-    struct P;
-    impl Tr for P {}
     mod inner {
-        fn f(p: super::P) { p.m(); }
+        use x::P;
+        fn f(p: P) { p.m(); }
     }
 }
 """
@@ -3904,3 +3905,25 @@ mod outer {
         if source[c.span.start:c.span.end] == "p.m()"
     )
     assert call.target == ""
+
+
+def test_child_module_use_makes_the_trait_visible():
+    # Control case: the same receiver resolves when `mod inner`
+    # imports the trait itself.
+    source = """
+mod x { pub struct P; pub trait Tr { fn m(&self) {} } impl Tr for P {} }
+mod outer {
+    mod inner {
+        use x::P;
+        use x::Tr;
+        fn f(p: P) { p.m(); }
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = next(b for b in report.bindings if b.name == "m")
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "p.m()"
+    )
+    assert call.target == method.id
