@@ -6,7 +6,6 @@ import pytest
 from agent.lexical_bindings import LexicalReportError, load_lexical_report
 from agent.rust_bindings import PROFILE, build_rust_bindings as _build_rust_bindings
 
-
 def build_rust_bindings(source, *, pointer_width):
     report = _build_rust_bindings(source, pointer_width=pointer_width)
     reference_keys = [
@@ -25,7 +24,6 @@ def build_rust_bindings(source, *, pointer_width):
     assert restored.to_json() == report.to_json(), source
     return report
 
-
 def _bindings(report, name, kind=None):
     return sorted(
         (
@@ -35,7 +33,6 @@ def _bindings(report, name, kind=None):
         ),
         key=lambda binding: binding.span.start,
     )
-
 
 def _refs(report, source, name):
     raw = source.encode()
@@ -48,14 +45,12 @@ def _refs(report, source, name):
         key=lambda ref: (ref.span.start, ref.kind),
     )
 
-
 def _unresolved(report, name=None, reason=None):
     return [
         item
         for item in report.unresolved
         if (name is None or item.name == name) and (reason is None or item.reason == reason)
     ]
-
 
 def _call(report, source, call_text):
     raw = source.encode()
@@ -64,7 +59,6 @@ def _call(report, source, call_text):
         for call in report.calls
         if raw[call.span.start : call.span.end].decode() == call_text
     )
-
 
 def test_shadowing_initializer_resolves_outer_binding_and_spans_are_utf8_bytes():
     source = "fn f(){ let x = 1; let x = x + 1; x; }"
@@ -81,7 +75,6 @@ def test_shadowing_initializer_resolves_outer_binding_and_spans_are_utf8_bytes()
     for reference in _refs(unicode_report, unicode_source, "λ"):
         assert unicode_source.encode()[reference.span.start : reference.span.end] == "λ".encode()
 
-
 def test_reassignment_is_write_and_compound_assignment_is_read_write():
     source = "fn f(){ let mut x = 1; x = 2; x += 3; x; }"
     report = build_rust_bindings(source, pointer_width=64)
@@ -95,7 +88,6 @@ def test_reassignment_is_write_and_compound_assignment_is_read_write():
         build_rust_bindings(name_source, pointer_width=64), "mutation", "local"
     )[0].mutable
 
-
 def test_dereference_compound_assignment_only_reads_the_pointer_binding():
     source = "fn f(mut pointer: &mut i32){ *pointer += 1; }"
     report = build_rust_bindings(source, pointer_width=64)
@@ -103,7 +95,6 @@ def test_dereference_compound_assignment_only_reads_the_pointer_binding():
     refs = _refs(report, source, "pointer")
     assert [ref.kind for ref in refs] == ["read"]
     assert all(ref.binding_id == binding.id for ref in refs)
-
 
 @pytest.mark.parametrize(
     ("place", "root", "expected", "index_read", "compound"),
@@ -138,7 +129,6 @@ def test_place_assignments_reference_the_binding_root(
     if index_read:
         assert [ref.kind for ref in _refs(report, source, "i")] == ["read"]
 
-
 def test_nested_place_indexes_are_traversed_for_reads_and_calls():
     source = (
         "struct S { f: [i32;4] } fn index()->usize {0} "
@@ -148,12 +138,10 @@ def test_nested_place_indexes_are_traversed_for_reads_and_calls():
     assert [ref.kind for ref in _refs(report, source, "s")] == ["read", "write"]
     assert _call(report, source, "index()").kind == "direct_local"
 
-
 def test_nested_place_index_names_remain_explicitly_unresolved():
     source = "fn f(mut a:[i32;4]) { a[missing].field = 1; }"
     report = build_rust_bindings(source, pointer_width=64)
     assert _unresolved(report, "missing", "unknown_name")
-
 
 def test_assignment_to_const_is_a_read_with_an_unsupported_gap():
     source = "const K:u8=0; fn f(){ K = 1; }"
@@ -162,13 +150,11 @@ def test_assignment_to_const_is_a_read_with_an_unsupported_gap():
     assert any(g.reason == "unsupported_syntax" for g in report.gaps)
     assert not report.complete
 
-
 def test_block_scope_and_nested_item_boundary_are_explicit():
     source = "fn f(x:i32){ { let y = 1; } y; fn nested(){ x; } }"
     report = build_rust_bindings(source, pointer_width=64)
     assert _unresolved(report, "y", "unknown_name")
     assert _unresolved(report, "x", "item_boundary")
-
 
 def test_items_are_visible_before_declaration_and_calls_are_conservative():
     source = "fn first(){ later(); } fn later(){}"
@@ -180,12 +166,10 @@ def test_items_are_visible_before_declaration_and_calls_are_conservative():
     assert later.id.endswith(":0:0")
     assert _refs(report, source, "later")[0].kind == "call"
 
-
 def test_inline_module_does_not_resolve_outer_module_items():
     source = "fn outer(){} mod inner { fn f(){ outer(); } }"
     report = build_rust_bindings(source, pointer_width=64)
     assert _unresolved(report, "outer", "module_boundary")
-
 
 def test_closure_captures_lexically_and_does_not_claim_call_owner():
     source = "fn target(x:i32){} fn f(x:i32){ let c = |q| target(q + x); c(1); }"
@@ -201,7 +185,6 @@ def test_closure_captures_lexically_and_does_not_claim_call_owner():
         ref.binding_id == captured_parameter.id
         for ref in _refs(report, source, "x")
     )
-
 
 def test_match_const_patterns_imported_names_and_or_patterns():
     source = "const K:u8=1; fn f(v:u8){ match v { K => (), Some(x) | Other(x) => { x; }, _ => () } }"
@@ -225,7 +208,6 @@ def test_match_const_patterns_imported_names_and_or_patterns():
     )
     later_use = build_rust_bindings(later_use_source, pointer_width=64)
     assert _unresolved(later_use, "K", "unknown_name")
-
 
 @pytest.mark.parametrize(
     ("source", "local_names"),
@@ -251,7 +233,6 @@ def test_wildcard_and_rest_patterns_bind_only_named_identifiers(source, local_na
     if "Some(_)" in source:
         assert _unresolved(report, "Some", "prelude_name")
 
-
 def test_literal_range_and_captured_range_patterns_are_supported():
     source = (
         "fn f(value:i32){ match value { -1 => (), 1.5 => (), "
@@ -268,7 +249,6 @@ def test_literal_range_and_captured_range_patterns_are_supported():
     assert any(ref.binding_id == _bindings(report, "w", "local")[0].id for ref in _refs(report, source, "w"))
     assert report.complete
 
-
 def test_range_pattern_path_bounds_resolve_or_remain_unresolved():
     source = "const K:i32=0; const L:i32=5; fn f(v:i32){ match v { K..=L => (), _ => () } }"
     report = build_rust_bindings(source, pointer_width=64)
@@ -279,7 +259,6 @@ def test_range_pattern_path_bounds_resolve_or_remain_unresolved():
         _bindings(report, "L", "const")[0].id
     ]
     assert not report.gaps
-
 
 @pytest.mark.parametrize(
     ("source", "name", "reason"),
@@ -300,7 +279,6 @@ def test_unresolved_range_path_bounds_are_not_bound(source, name, reason):
     report = build_rust_bindings(source, pointer_width=64)
     assert _unresolved(report, name, reason)
     assert not report.gaps
-
 
 @pytest.mark.parametrize(
     ("source", "constructor", "binding_kind", "reason"),
@@ -332,7 +310,6 @@ def test_unresolved_range_path_bounds_are_not_bound(source, name, reason):
     ],
 )
 
-
 def test_pattern_constructor_paths_are_referenced_or_explicitly_unresolved(
     source, constructor, binding_kind, reason
 ):
@@ -346,7 +323,6 @@ def test_pattern_constructor_paths_are_referenced_or_explicitly_unresolved(
             for name in ("Some", "Ok", "Err", "None"):
                 assert _unresolved(report, name, "prelude_name")
 
-
 def test_pattern_enum_variant_path_resolves_to_the_member():
     source = "enum E { V(i32) } fn f(value:E){ match value { E::V(x) => x } }"
     report = build_rust_bindings(source, pointer_width=64)
@@ -358,7 +334,6 @@ def test_pattern_enum_variant_path_resolves_to_the_member():
         for ref in report.references
     )
     assert not _unresolved(report, "E::V", "qualified_path")
-
 
 def test_match_guards_resolve_inside_the_arm_after_pattern_bindings():
     source = (
@@ -379,13 +354,11 @@ def test_match_guards_resolve_inside_the_arm_after_pattern_bindings():
     assert len(_bindings(report, "x", "local")) == 1
     assert len(_refs(report, source, "x")) == 1
 
-
 def test_unresolved_match_guard_does_not_create_a_pattern_binding():
     source = "fn f(n:i32){ match n { x if missing => x, _ => 0 } }"
     report = build_rust_bindings(source, pointer_width=64)
     assert len(_bindings(report, "x", "local")) == 1
     assert _unresolved(report, "missing", "unknown_name")
-
 
 @pytest.mark.parametrize(
     "attribute",
@@ -420,7 +393,6 @@ def test_allowlisted_attributes_do_not_create_gaps(attribute):
     report = build_rust_bindings(f"#[{attribute}] fn f(){{}}", pointer_width=64)
     assert not report.gaps
 
-
 def test_derive_attribute_policy_and_conditional_compilation_gaps():
     standard = build_rust_bindings(
         "#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, "
@@ -451,7 +423,6 @@ def test_derive_attribute_policy_and_conditional_compilation_gaps():
     inner_unknown = build_rust_bindings("#![my_proc_macro] fn f(){}", pointer_width=64)
     assert [gap.reason for gap in inner_unknown.gaps] == ["macro_invocation"]
 
-
 def test_inner_and_nested_attributes_are_classified():
     source = (
         "#![allow(dead_code)] struct S { #[unknown_field] value:i32 } "
@@ -469,7 +440,6 @@ def test_inner_and_nested_attributes_are_classified():
         "macro_invocation",
     ]
 
-
 def test_if_while_for_and_let_else_scopes():
     source = """
 fn f(xs: Vec<u8>) {
@@ -486,7 +456,6 @@ fn f(xs: Vec<u8>) {
     assert _unresolved(report, "item", "unknown_name")
     assert any(g.reason == "pattern_name_ambiguous" for g in report.gaps) is False
     assert len(_bindings(report, "b", "local")) == 1
-
 
 @pytest.mark.parametrize(
     ("width", "typ", "kind", "bits", "signed"),
@@ -510,7 +479,6 @@ def test_explicit_primitive_type_facts(width, typ, kind, bits, signed):
     assert (fact.bit_width, fact.signed) == (bits, signed)
     assert _bindings(report, "y", "local")[0].type == fact
 
-
 def test_alias_chains_named_local_types_and_unsupported_types_stay_unknown():
     source = """
 type A = u8;
@@ -530,7 +498,6 @@ fn f(a:B, s:S, e:E) { let x: B = 1; let r: &u8 = &x; let t: (u8,u8)=(1,2); let z
 
     cycle = build_rust_bindings("type A=B; type B=A; fn f(x:A){}", pointer_width=64)
     assert _bindings(cycle, "x", "parameter")[0].type.kind == "unknown"
-
 
 def test_type_lifetime_and_const_generics_resolve_in_item_scopes():
     source = """
@@ -597,7 +564,6 @@ fn outside(x: T) {}
     alias = _bindings(report, "T", "type_alias")[0]
     assert outside.type.type_id == alias.id
 
-
 def test_const_generic_type_facts_follow_forward_aliases():
     sources = (
         "fn f<const N: Count>() {} type Count = u32;",
@@ -626,7 +592,6 @@ def test_const_generic_type_facts_follow_forward_aliases():
         pointer_width=64,
     )
     assert _bindings(cyclic, "N", "generic_parameter")[0].type.kind == "unknown"
-
 
 def test_extern_functions_declare_generic_parameters_and_signature_references():
     source = """
@@ -664,7 +629,6 @@ extern "C" {
     assert not _bindings(report, "Missing", "generic_parameter")
     assert not _refs(report, source, "Missing")
 
-
 @pytest.mark.parametrize(
     "source",
     [
@@ -689,7 +653,6 @@ def test_generic_const_references_are_emitted_once(source):
     ]
     assert len(n_references) == 1
     assert n_references[0].kind == "read"
-
 
 def test_higher_ranked_lifetimes_are_scoped_to_their_binders():
     source = """
@@ -744,7 +707,6 @@ where
         for item in report.unresolved
     )
 
-
 def test_higher_ranked_lifetimes_cover_their_complete_predicate_or_type():
     source = """
 trait Tr<'a> {}
@@ -779,7 +741,6 @@ where
             for reference in _refs(report, source, name)
         )
 
-
 def test_generic_type_parameters_do_not_leak_outside_their_item_scope():
     source = "type T=u8; fn generic<T>(x:T){} fn outside(x:T){}"
     report = build_rust_bindings(source, pointer_width=64)
@@ -792,7 +753,6 @@ def test_generic_type_parameters_do_not_leak_outside_their_item_scope():
     alias = _bindings(report, "T", "type_alias")[0]
     assert generic.scope is not None
     assert outside.type.type_id == alias.id
-
 
 def test_nested_function_items_do_not_inherit_outer_function_generics():
     source = """
@@ -821,7 +781,6 @@ fn outer<T, const N: usize>() {
         and unresolved.span.start > source.index("fn inner")
     ]
     assert {unresolved.name for unresolved in boundary_references} == {"T", "N"}
-
 
 def test_nested_impl_and_trait_methods_use_their_own_generics():
     source = """
@@ -863,7 +822,6 @@ fn outer<T>() {
         if item.reason == "item_boundary"
     } == {("T", "item_boundary"), ("U", "item_boundary")}
 
-
 def test_where_clauses_record_generic_parameters_without_binding_other_names():
     source = """
 type Outside = u8;
@@ -887,7 +845,6 @@ fn unrelated<T>() where Outside: Copy {}
         )
         assert report.binding(reference.binding_id).kind == "generic_parameter"
     assert not _refs(report, source, "Outside")
-
 
 def test_body_type_positions_record_generic_parameter_references():
     source = """
@@ -933,7 +890,6 @@ fn outside(value: Missing) {
     )
     assert tuple_constructor.kind == "constructor"
     assert not _refs(report, source, "Missing")
-
 
 def test_bare_generic_arguments_search_type_then_const_value_namespaces():
     source = """
@@ -1000,7 +956,6 @@ fn local_is_not_a_const_argument() {
     )
     assert raw[unknown.span.start : unknown.span.end] == b"Unknown"
 
-
 def test_generic_argument_fallback_respects_glob_barriers_and_prelude_types():
     source = """
 const Vec: usize = 1;
@@ -1033,7 +988,6 @@ fn glob_barrier() { use external::*; let _: Generic<Hidden>; }
     )
     assert raw[vec_start : vec_start + len("Vec")] == b"Vec"
 
-
 def test_generic_argument_value_fallback_ignores_outer_module_value_names():
     source = """
 const N: usize = 1;
@@ -1058,7 +1012,6 @@ mod m {
     assert reference.binding_id == local_n.id
     assert not any(item.span.start == argument_start for item in report.unresolved)
 
-
 def test_bodyless_trait_const_generic_facts_finalize_after_item_predeclaration():
     source = """
 trait Tr {
@@ -1077,7 +1030,6 @@ type Width = u8;
         width.id,
     )
     assert unknown.type.kind == "unknown"
-
 
 def test_mutability_does_not_spread_into_nested_rust_patterns():
     source = """
@@ -1101,7 +1053,6 @@ fn patterns(value: S) {
         True,
     ]
     assert not _bindings(report, "plain", "local")[0].mutable
-
 
 def test_qualified_rust_paths_stay_unresolved_as_whole_paths():
     source = """
@@ -1144,7 +1095,6 @@ fn qualified() {
         if unresolved.reason == "qualified_path"
     )
 
-
 def test_local_type_alias_precedes_primitive_type_facts():
     source = """
 type u8 = u16;
@@ -1176,7 +1126,6 @@ fn builtin(x: i8) -> i8 { x }
         8,
     )
 
-
 def test_raw_identifiers_are_normalized_in_declarations_and_references():
     source = """
 fn r#helper() {}
@@ -1199,14 +1148,12 @@ fn missing_call() { r#missing(); }
     assert report.resolve(missing.span) is None
     assert report.calls[-1].kind == "unresolved"
 
-
 def test_raw_identifier_function_item_lookup_round_trips():
     source = "fn r#helper() {} fn f() { helper(); r#helper(); }"
     report = build_rust_bindings(source, pointer_width=64)
     helper = _bindings(report, "helper", "function")[0]
     assert [call.target for call in report.calls] == [helper.id, helper.id]
     assert [call.kind for call in report.calls] == ["direct_local", "direct_local"]
-
 
 def test_impl_trait_arguments_are_generic_and_turbofish_stays_on_the_callee():
     source = """
@@ -1228,7 +1175,6 @@ fn caller() { plain(target::<u8>()); impl_trait(1); }
     assert calls[target.id].kind == "opaque_generic"
     assert calls[plain.id].kind == "direct_local"
 
-
 @pytest.mark.parametrize(
     "source",
     [
@@ -1247,14 +1193,12 @@ def test_type_position_macros_create_macro_gaps(source):
     )
     assert not report.complete
 
-
 def test_explicit_non_macro_types_do_not_create_macro_gaps():
     report = build_rust_bindings(
         "struct S { field: u8 } type Alias = u16; fn f(x: u8) -> u16 { x as u16 }",
         pointer_width=64,
     )
     assert not any(gap.reason == "macro_invocation" for gap in report.gaps)
-
 
 def test_turbofish_method_calls_traverse_the_receiver():
     source = "fn caller(x: Thing) { x.method::<u8>(); }"
@@ -1274,7 +1218,6 @@ def test_turbofish_method_calls_traverse_the_receiver():
     assert not any(
         unresolved.name.startswith("x.method") for unresolved in report.unresolved
     )
-
 
 def test_pattern_mutability_is_preserved_per_binding():
     source = """
@@ -1299,7 +1242,6 @@ fn locals(pair: (i32, i32), value: S) {
     for (name, kind), mutable in expected.items():
         assert _bindings(report, name, kind)[0].mutable is mutable
 
-
 def test_comments_are_skipped_in_call_arguments_and_other_visitor_children():
     source = """
 fn identity(/* parameter */ value: u8) {
@@ -1322,7 +1264,6 @@ fn caller(value: u8) {
     assert not any(gap.reason == "unsupported_syntax" for gap in report.gaps)
     assert not report.unresolved
 
-
 def test_macros_and_glob_imports_keep_hidden_names_unresolved_and_incomplete():
     macro_source = 'fn f(x:i32){ println!("{}", x); }'
     macro = build_rust_bindings(macro_source, pointer_width=64)
@@ -1334,7 +1275,6 @@ def test_macros_and_glob_imports_keep_hidden_names_unresolved_and_incomplete():
     report = build_rust_bindings(source, pointer_width=64)
     assert _unresolved(report, "bar", "glob_import")
     assert any(g.reason == "glob_import" for g in report.gaps)
-
 
 def test_inner_glob_import_blocks_outer_items_but_not_other_scopes():
     source = (
@@ -1358,7 +1298,6 @@ def test_inner_glob_import_blocks_outer_items_but_not_other_scopes():
     assert calls[1].target == helper.id
     assert _unresolved(report, "helper", "glob_import")
 
-
 def test_glob_import_in_inline_module_blocks_outer_name_lookup():
     source = "fn helper(){} mod m { use other::*; fn f(){ helper(); } }"
     report = build_rust_bindings(source, pointer_width=64)
@@ -1366,7 +1305,6 @@ def test_glob_import_in_inline_module_blocks_outer_name_lookup():
     assert call.kind == "unresolved"
     assert call.target == ""
     assert _unresolved(report, "helper", "glob_import")
-
 
 def test_use_imports_prelude_qualified_method_and_generic_calls():
     source = """
@@ -1392,7 +1330,6 @@ fn f(x:i32){
     assert _call(report, source, "generic::<i32>(x)").kind == "opaque_generic"
     assert _call(report, source, "asynchronous()").kind == "opaque_async"
 
-
 def test_tuple_struct_constructor_parenthesized_fn_and_struct_shorthand():
     source = """
 struct Pair(u8);
@@ -1404,13 +1341,11 @@ struct Point { x:u8 }
     assert _call(report, source, "Pair(x)").kind == "constructor"
     assert _refs(report, source, "x")[-1].binding_id == _bindings(report, "x", "parameter")[0].id
 
-
 def test_struct_pattern_shorthand_creates_a_local_binding():
     source = "struct Point { value:u8 } fn f(point:Point){ let Point { value }=point; value; }"
     report = build_rust_bindings(source, pointer_width=64)
     local = _bindings(report, "value", "local")[0]
     assert _refs(report, source, "value")[0].binding_id == local.id
-
 
 def test_associated_functions_are_not_bare_names_and_self_is_a_parameter():
     source = "struct S; impl S { fn method(&mut self){ self_call(); } } fn f(){ method(); }"
@@ -1420,7 +1355,6 @@ def test_associated_functions_are_not_bare_names_and_self_is_a_parameter():
     assert fn_record.method
     assert _bindings(report, "self", "self_parameter")[0].mutable
     assert _unresolved(report, "method", "unknown_name")
-
 
 def test_static_mut_write_parse_limits_source_hash_and_determinism():
     source = "static mut COUNT:u8=0; fn f(){ COUNT = 1; }"
@@ -1439,7 +1373,6 @@ def test_static_mut_write_parse_limits_source_hash_and_determinism():
         with pytest.raises(LexicalReportError):
             build_rust_bindings("fn f(){}", pointer_width=invalid)
 
-
 def test_deep_expression_recursion_is_reported_as_a_source_limit_error():
     expression = " + ".join("1" for _ in range(2000))
     source = f"fn f() {{ let value = {expression}; }}"
@@ -1453,7 +1386,6 @@ def test_deep_expression_recursion_is_reported_as_a_source_limit_error():
             build_rust_bindings(source, pointer_width=64)
     finally:
         sys.setrecursionlimit(previous_limit)
-
 
 def test_explicit_function_const_static_and_unit_types_and_extern_calls():
     source = """
@@ -1474,7 +1406,6 @@ fn caller() { external(1); }
     assert _call(report, source, "enabled()").owner == ""
     assert _call(report, source, "external(1)").kind == "opaque_bodyless"
 
-
 def test_use_group_self_alias_names_and_report_completeness():
     source = "use foo::{self, a, b as d}; fn f(){ a(); d(); foo(); }"
     report = build_rust_bindings(source, pointer_width=64)
@@ -1487,7 +1418,6 @@ def test_use_group_self_alias_names_and_report_completeness():
     )
     assert build_rust_bindings("fn clean(){}", pointer_width=64).complete
     assert not build_rust_bindings("fn unresolved(){ missing(); }", pointer_width=64).complete
-
 
 def test_every_emitted_target_and_reference_points_to_an_existing_binding():
     fixtures = [
@@ -1508,7 +1438,6 @@ def test_every_emitted_target_and_reference_points_to_an_existing_binding():
             report.to_json(), source, profile=PROFILE, target={"pointer_width": 64}
         )
         assert restored.to_json() == report.to_json()
-
 
 def test_cli_emits_loadable_json_requires_width_and_fails_closed(tmp_path):
     source_file = tmp_path / "sample.rs"
@@ -1542,7 +1471,6 @@ def test_cli_emits_loadable_json_requires_width_and_fails_closed(tmp_path):
     assert failed.stdout == ""
     assert failed.stderr
 
-
 def test_cli_preserves_crlf_bytes_for_report_hash_and_spans(tmp_path):
     source = "fn first() {}\r\nfn second() { first(); }\r\n"
     source_file = tmp_path / "crlf.rs"
@@ -1571,7 +1499,6 @@ def test_cli_preserves_crlf_bytes_for_report_hash_and_spans(tmp_path):
     assert restored.source_sha256 == build_rust_bindings(
         source, pointer_width=64
     ).source_sha256
-
 
 def test_member_access_resolves_declared_type_fields_and_methods():
     source = """
@@ -1607,7 +1534,6 @@ fn use_it(p: Point, q: Point) {
     y_refs = [ref for ref in _refs(report, source, "y") if ref.binding_id == y_rec.id]
     assert len(y_refs) == 2
 
-
 def test_member_write_emits_write_reference_on_field():
     source = """
 struct P { v: i32 }
@@ -1621,7 +1547,6 @@ fn f(p: &mut P, w: i32) { p.v = w; }
         if ref.kind == "write" and ref.binding_id == v_rec.id
     ]
     assert len(writes) == 1
-
 
 def test_member_call_on_trait_impl_resolves_when_trait_in_scope():
     source = """
@@ -1640,7 +1565,6 @@ fn f(p: P) { p.t(); }
     assert call.kind == "direct_local"
     assert call.target == impl_member.id
 
-
 def test_member_tuple_positional_field_stays_unresolved():
     source = """
 struct T(i32, i32);
@@ -1648,7 +1572,6 @@ fn f(t: T) { t.0; }
 """
     report = build_rust_bindings(source, pointer_width=64)
     assert not _bindings(report, "0")
-
 
 def test_member_call_through_method_return_type_chains():
     source = """
@@ -1663,7 +1586,6 @@ fn f(a: A) { a.mk().hit(); }
     call = _call(report, source, "a.mk().hit()")
     assert call.target == hit.id
 
-
 def test_member_generic_impl_method_resolves_through_generic_impl():
     source = """
 struct Wrap<T> { inner: T }
@@ -1675,7 +1597,6 @@ fn f(w: Wrap<i32>) { w.get(); }
     get = _bindings(report, "get", "associated_function")[0]
     assert call.target == get.id
     assert call.kind == "direct_local"
-
 
 def test_member_write_prefers_field_over_same_named_method():
     source = """
@@ -1694,7 +1615,6 @@ fn f(p: &P) { p.m = 1; p.m(); }
     assert write.binding_id == field.id
     assert call.target == method.id
 
-
 def test_member_call_respects_concrete_impl_specialization():
     source = """
 struct Wrap<T>(T);
@@ -1706,7 +1626,6 @@ fn f(w: Wrap<bool>) { w.get(); }
     bool_get = _bindings(report, "get", "associated_function")[1]
     call = _call(report, source, "w.get()")
     assert call.target == bool_get.id
-
 
 def test_member_resolves_annotation_at_its_own_position():
     source = """
@@ -1723,7 +1642,6 @@ struct Q { x: i32 }
     )
     assert read.binding_id == field.id
 
-
 def test_member_destructured_parameter_does_not_resolve_as_whole_type():
     source = """
 struct P { inner: i32 }
@@ -1733,7 +1651,6 @@ fn f(P { inner }: P) { inner.n(); }
     report = build_rust_bindings(source, pointer_width=64)
     method_call = _call(report, source, "inner.n()")
     assert method_call.kind == "opaque_method"
-
 
 def test_member_async_method_return_does_not_chain_members():
     source = """
@@ -1747,7 +1664,6 @@ fn h(a: A) { a.mk().hit(); }
     hit_call = _call(report, source, "a.mk().hit()")
     assert hit_call.kind == "opaque_method"
     assert not hit_call.target
-
 
 def test_member_forward_reference_inside_impl_resolves():
     source = """
@@ -1763,7 +1679,6 @@ impl S {
     assert call.target == inner.id
     assert call.kind == "direct_local"
 
-
 def test_member_call_chains_through_reference_return_type():
     source = """
 struct A {}
@@ -1777,7 +1692,6 @@ fn h(a: A) { a.mk().hit(); }
     call = _call(report, source, "a.mk().hit()")
     assert call.target == hit.id
 
-
 def test_member_reference_annotated_local_resolves():
     source = """
 struct P { x: i32 }
@@ -1790,7 +1704,6 @@ fn f() { let q: &P = &P { x: 0 }; q.x; }
         if r.kind == "read" and source[r.span.start : r.span.end] == "x"
     )
     assert read.binding_id == field.id
-
 
 def test_member_receiver_prefers_field_over_same_named_method():
     # `a.b.hit()` reads field `b` (type B), not method `b() -> C`.
@@ -1808,7 +1721,6 @@ fn f(a: &A) { a.b.hit(); }
     assert call.target == hit.id
     assert call.kind == "direct_local"
 
-
 def test_member_self_call_in_specialized_impl():
     source = """
 struct W<T>(T);
@@ -1819,7 +1731,6 @@ impl W<i32> { fn inner(&self) {} fn outer(&self) { self.inner(); } }
     call = _call(report, source, "self.inner()")
     assert call.target == inner.id
     assert call.kind == "direct_local"
-
 
 def test_member_captured_pattern_keeps_annotation():
     source = """
@@ -1835,7 +1746,6 @@ fn f(q @ P{x}: P) { q.x; }
     ]
     assert [r.binding_id == field.id for r in reads] == [True]
 
-
 def test_ref_pattern_binding_is_not_the_annotated_type():
     # `ref p: P` binds `p: &P` — the annotation must not be
     # reported as `p`'s type.
@@ -1843,7 +1753,6 @@ def test_ref_pattern_binding_is_not_the_annotated_type():
     report = build_rust_bindings(source, pointer_width=64)
     p = _bindings(report, "p", "parameter")[0]
     assert p.type.kind == "unknown"
-
 
 def test_member_captured_pattern_inner_name_stays_opaque():
     source = """
@@ -1858,7 +1767,6 @@ fn f(q @ P{inner}: P) { inner.n(); q.n(); }
     assert inner_call.kind == "opaque_method"
     assert q_call.target == n.id
 
-
 def test_member_tuple_element_receiver_resolves_by_index():
     source = """
 struct P { x: i32 }
@@ -1871,7 +1779,6 @@ fn f(t: (i32, P)) { t.1.get(); }
     assert call.target == get.id
     assert call.kind == "direct_local"
 
-
 def test_member_tuple_element_receiver_through_reference():
     source = """
 struct P { x: i32 }
@@ -1883,7 +1790,6 @@ fn f(u: &(i32, P)) { u.1.get(); }
     call = _call(report, source, "u.1.get()")
     assert call.target == get.id
 
-
 def test_member_tuple_element_out_of_range_stays_opaque():
     source = """
 struct P { x: i32 }
@@ -1893,7 +1799,6 @@ fn f(t: (i32,)) { t.1.get(); }
     report = build_rust_bindings(source, pointer_width=64)
     call = _call(report, source, "t.1.get()")
     assert call.kind == "opaque_method"
-
 
 def test_member_tuple_element_let_annotation_receiver():
     source = """
@@ -1906,7 +1811,6 @@ fn f() { let t: (i32, P) = (0, P{x: 1}); t.1.get(); }
     call = _call(report, source, "t.1.get()")
     assert call.target == get.id
 
-
 def test_member_tuple_element_non_tuple_receiver_stays_opaque():
     source = """
 struct T(i32, i32);
@@ -1915,7 +1819,6 @@ fn f(t: T) { t.0.get(); }
     report = build_rust_bindings(source, pointer_width=64)
     call = _call(report, source, "t.0.get()")
     assert call.kind == "opaque_method"
-
 
 def test_member_tuple_element_receiver_through_lifetime_reference():
     source = """
@@ -1928,8 +1831,6 @@ fn f<'a>(t: &'a mut (i32, P), u: &'static (i32, P)) { t.1.get(); u.1.get(); }
     calls = {source[c.span.start : c.span.end]: c for c in report.calls}
     assert calls["t.1.get()"].target == get.id
     assert calls["u.1.get()"].target == get.id
-
-
 
 def test_member_trait_impl_resolves_when_trait_in_scope():
     source = """
@@ -1948,7 +1849,6 @@ fn f(p: &P) { p.hi(); }
     assert call.target == hi.id
     assert call.kind == "direct_local"
 
-
 def test_member_trait_impl_via_imported_trait_resolves():
     source = """
 mod inner { pub trait Greet { fn hi(&self); } }
@@ -1962,7 +1862,6 @@ fn f(p: &P) { p.hi(); }
     assert call.kind == "direct_local"
     assert call.target
 
-
 def test_member_scoped_trait_impl_stays_opaque():
     # `impl inner::Greet` — the scoped trait is not resolvable here,
     # so its members must not resolve as methods.
@@ -1975,7 +1874,6 @@ fn f(p: &P) { p.hi(); }
     report = build_rust_bindings(source, pointer_width=64)
     call = _call(report, source, "p.hi()")
     assert call.kind == "opaque_method"
-
 
 def test_member_inherent_impl_shadows_trait_impl():
     source = """
@@ -1994,7 +1892,6 @@ fn f(p: &P) { p.hi(); }
     call = _call(report, source, "p.hi()")
     assert call.target == inherent.id
 
-
 def test_member_ambiguous_trait_impls_stay_opaque():
     # `p.get()` could call T::get or U::get — Rust reports ambiguity,
     # so no single implementation is bound.
@@ -2011,7 +1908,6 @@ fn f(p: P) { p.get(); }
     assert call.kind == "opaque_method"
     assert not call.target
 
-
 def test_member_single_trait_impl_still_resolves():
     source = """
 struct Q { y: i32 }
@@ -2027,7 +1923,6 @@ fn f(q: Q) { q.only(); }
     )
     call = _call(report, source, "q.only()")
     assert call.target == only.id
-
 
 def test_trait_default_method_resolves_through_empty_impl():
     source = """
@@ -2046,7 +1941,6 @@ fn f() { let p: P; p.m(); }
     assert call.kind == "direct_local"
     assert call.target == default_m.id
 
-
 def test_impl_member_shadows_trait_default():
     source = """
 trait T { fn m(&self) {} }
@@ -2063,7 +1957,6 @@ fn f() { let p: P; p.m(); }
     call = _call(report, source, "p.m()")
     assert call.target == impl_m.id
 
-
 def test_two_trait_defaults_stay_ambiguous():
     source = """
 trait T { fn m(&self) {} }
@@ -2078,7 +1971,6 @@ fn f() { let p: P; p.m(); }
     assert call.kind == "opaque_method"
     assert call.target == ""
 
-
 def test_trait_default_does_not_apply_to_other_specialization():
     source = """
 trait T { fn m(&self) {} }
@@ -2090,7 +1982,6 @@ fn f(w: W<u32>) { w.m(); }
     call = _call(report, source, "w.m()")
     assert call.kind == "opaque_method"
     assert call.target == ""
-
 
 def test_trait_default_applies_to_matching_specialization():
     source = """
@@ -2107,7 +1998,6 @@ fn f(w: W<i32>) { w.m(); }
     )
     call = _call(report, source, "w.m()")
     assert call.target == default_m.id
-
 
 def test_generic_impl_default_matches_concrete_positions():
     # impl<A> T for W<A, i32> covers W<u8, i32> — the parameter
@@ -2128,7 +2018,6 @@ fn f(w: W<u8, i32>) { w.m(); }
     call = _call(report, source, "w.m()")
     assert call.target == default_m.id
 
-
 def test_generic_impl_default_misses_other_concrete_position():
     source = """
 trait T { fn m(&self) {} }
@@ -2141,7 +2030,6 @@ fn f(w: W<u8, u16>) { w.m(); }
     call = _call(report, source, "w.m()")
     assert call.kind == "opaque_method"
     assert call.target == ""
-
 
 def test_member_generic_impl_covers_composite_args():
     # A generic impl covers receivers whose args contain commas or
@@ -2157,7 +2045,6 @@ fn f(w: W<(u8, u16)>) { w.m(); }
     member_m = _bindings(report, "m", "associated_function")[0]
     call = _call(report, source, "w.m()")
     assert call.target == member_m.id
-
 
 def test_member_generic_impl_nested_generic_arg():
     source = """
@@ -2182,7 +2069,6 @@ fn g(w: W<Box<u8>>) { w.m(); }
     report2 = build_rust_bindings(source2, pointer_width=64)
     assert _call(report2, source2, "w.m()").target == ""
 
-
 def test_member_generic_impl_const_and_lifetime_params():
     source = """
 trait T { fn m(&self) {} fn n(&self) {} }
@@ -2198,7 +2084,6 @@ fn f(w: W<4>, r: R<'static>) { w.m(); r.p(); }
     member_p = _bindings(report, "p", "associated_function")[0]
     assert _call(report, source, "w.m()").target == member_m.id
     assert _call(report, source, "r.p()").target == member_p.id
-
 
 def test_member_generic_impl_repeated_param_binds_consistently():
     # Every occurrence of a pattern parameter must bind the same
@@ -2222,7 +2107,6 @@ fn f(w: W<(u8, u16)>) { w.m(); }
     report2 = build_rust_bindings(source2, pointer_width=64)
     assert _call(report2, source2, "w.m()").target == ""
 
-
 def test_member_generic_impl_reference_mutability_matters():
     # Shared and mutable references are distinct types: each impl
     # covers only its own mutability side.
@@ -2242,7 +2126,6 @@ fn g(u: {miss}) {{ u.m(); }}
         assert _call(report, source, "w.m()").target == member_m.id
         assert _call(report, source, "u.m()").target == ""
 
-
 def test_member_generic_impl_whitespace_independent_concrete_args():
     # `W<(u8,u16)>` and `W<(u8, u16)>` spell the same type — concrete
     # impl-arg keys compare structurally, not by raw text.
@@ -2255,7 +2138,6 @@ fn f(w: W<(u8, u16), u8>) { w.m(); }
     report = build_rust_bindings(source, pointer_width=64)
     member_m = _bindings(report, "m", "associated_function")[0]
     assert _call(report, source, "w.m()").target == member_m.id
-
 
 def test_member_generic_impl_repeated_const_param_must_bind_same_value():
     # `impl<const A: usize> T for W<A, A>` covers `W<3, 3>` but not
@@ -2277,7 +2159,6 @@ fn g(w: W<3, 3>) { w.m(); }
     assert calls[0].target == ""
     assert calls[1].target == member_m.id
 
-
 def test_member_generic_impl_spaceless_reference_syntax():
     # `&mut&u8` and `&'b[u8]` are valid Rust — optional whitespace
     # after `mut` and lifetimes must not break the reference match.
@@ -2292,7 +2173,6 @@ fn f(w: W<&mut&u8, u8>, g: W<&'b[u8], i8>) { w.m(); g.m(); }
     member_m = _bindings(report, "m", "associated_function")[0]
     assert _call(report, source, "w.m()").target == member_m.id
     assert _call(report, source, "g.m()").target == member_m.id
-
 
 def test_member_generic_impl_mut_prefixed_type_name_not_mut_ref():
     # `&mutable::Value` is a shared reference to a type named
@@ -2319,7 +2199,6 @@ fn f(w: W<&mutable::Value, u8>) { w.m(); }
     member_m = _bindings(report, "m", "associated_function")[0]
     assert _call(report, source, "w.m()").target == member_m.id
 
-
 def test_function_pointer_field_call_reads_the_field():
     # `(p.callback)()` reads field `callback` (type `fn()`) — the read
     # reference must be recorded even though no function is called.
@@ -2334,7 +2213,6 @@ fn go(p: P) { (p.callback)(); }
         if r.kind == "read" and source[r.span.start : r.span.end] == "callback"
     )
     assert read.binding_id == field.id
-
 
 def test_member_scoped_path_call_and_result_chain():
     source = """
@@ -2355,7 +2233,6 @@ fn f() { let p = P::new(); p.hello(); }
     assert new_call.kind == "direct_local"
     assert hello_call.target == hello.id
 
-
 def test_member_generic_scoped_path_call():
     source = """
 struct W<T>(T);
@@ -2371,14 +2248,12 @@ fn f() { let w = W::<i32>::mk(); w.n(); }
     n_call = _call(report, source, "w.n()")
     assert n_call.kind == "direct_local"
 
-
 def test_member_deep_scoped_path_stays_opaque():
     source = "mod m { pub struct P; } fn f() { m::P::new(); }"
     report = build_rust_bindings(source, pointer_width=64)
     call = report.calls[0]
     assert call.kind == "opaque_path"
     assert [u.name for u in report.unresolved] == ["m::P::new"]
-
 
 def test_member_let_infers_struct_literal_type():
     source = """
@@ -2394,7 +2269,6 @@ fn f() { let p = P{x: 0}; p.x; }
     )
     assert read.binding_id == field.id
 
-
 def test_member_let_infers_function_result_type():
     source = """
 fn mk() -> P { P }
@@ -2406,7 +2280,6 @@ fn f() { let p = mk(); p.n(); }
     n = _bindings(report, "n", "associated_function")[0]
     call = _call(report, source, "p.n()")
     assert call.target == n.id
-
 
 def test_member_scoped_module_type_annotation_resolves():
     source = """
@@ -2422,7 +2295,6 @@ fn f(p: m::P) { p.x; }
     )
     assert read.binding_id == field.id
 
-
 def test_member_scoped_module_path_call_resolves():
     source = """
 mod m { pub struct P; impl P { pub fn new() -> P { P } } }
@@ -2434,7 +2306,6 @@ fn f() { let p = m::P::new(); }
     assert call.target == new.id
     assert call.kind == "direct_local"
 
-
 def test_member_nested_module_type_annotation_resolves():
     source = """
 mod a { pub mod b { pub struct P; impl P { pub fn n(&self) {} } } }
@@ -2444,7 +2315,6 @@ fn f(p: a::b::P) { p.n(); }
     n = _bindings(report, "n", "associated_function")[0]
     call = _call(report, source, "p.n()")
     assert call.target == n.id
-
 
 def test_member_enum_variant_path_resolves():
     source = """
@@ -2470,7 +2340,6 @@ fn f() { let e = E::A; let g = E::B; }
     assert b_ref.binding_id == variants["B"].id
     assert not [u for u in report.unresolved if u.name == "E::A"]
 
-
 def test_member_enum_variant_in_match_pattern_resolves():
     source = """
 enum E { A, B }
@@ -2485,7 +2354,6 @@ fn f(e: E) { match e { E::A => {}, E::B => {} } }
     }
     assert reads == {"A": variants["A"].id, "B": variants["B"].id}
     assert not [u for u in report.unresolved if u.name.startswith("E::")]
-
 
 def test_member_ufcs_resolves_named_trait_impl():
     source = """
@@ -2505,7 +2373,6 @@ fn f() { <P as T>::get(); <P as U>::get(); }
     assert t_call.target == t_impl.id
     assert u_call.target == u_impl.id
 
-
 def test_member_ufcs_unknown_trait_stays_opaque():
     source = """
 struct P { x: i32 }
@@ -2514,7 +2381,6 @@ fn f() { <P as Z>::get(); }
     report = build_rust_bindings(source, pointer_width=64)
     call = _call(report, source, "<P as Z>::get()")
     assert call.kind == "opaque_path"
-
 
 def test_member_ufcs_bare_bracket_resolves_inherent_member():
     source = """
@@ -2534,7 +2400,6 @@ fn f() { <P>::get(); let k = <P>::K; }
     ]
     assert [r.binding_id == const.id for r in reads] == [True]
 
-
 def test_member_ufcs_missing_trait_member_stays_opaque():
     source = """
 struct P { x: i32 }
@@ -2546,7 +2411,6 @@ fn f() { <P as T>::other(); }
     report = build_rust_bindings(source, pointer_width=64)
     call = _call(report, source, "<P as T>::other()")
     assert call.kind == "opaque_path"
-
 
 def test_function_pointer_field_call_records_field_read():
     source = """
@@ -2566,7 +2430,6 @@ fn f() { let p: P; (p.callback)(); }
     assert len(field_refs) == 1
     assert source[field_refs[0].span.start : field_refs[0].span.end] == "callback"
 
-
 def test_ufcs_falls_back_to_trait_default_method():
     source = """
 trait T { fn m(&self) {} }
@@ -2582,7 +2445,6 @@ fn f(p: P) { <P as T>::m(&p); }
     )
     call = _call(report, source, "<P as T>::m(&p)")
     assert call.target == default_m.id
-
 
 def test_ufcs_prefers_impl_member_over_trait_default():
     source = """
@@ -2600,7 +2462,6 @@ fn f(p: P) { <P as T>::m(&p); }
     call = _call(report, source, "<P as T>::m(&p)")
     assert call.target == impl_m.id
 
-
 def test_bare_type_path_call_sees_trait_default():
     source = """
 trait T { fn m(&self) {} }
@@ -2617,7 +2478,6 @@ fn f(p: P) { P::m(&p); }
     call = _call(report, source, "P::m(&p)")
     assert call.target == default_m.id
 
-
 def test_vec_index_receiver_types_member_by_element():
     source = """
 struct P;
@@ -2628,7 +2488,6 @@ fn f(v: Vec<P>) { v[0].m(); }
     m = _bindings(report, "m", "associated_function")[0]
     call = _call(report, source, "v[0].m()")
     assert call.target == m.id
-
 
 def test_nested_vec_index_receiver_resolves_innermost_element():
     source = """
@@ -2641,7 +2500,6 @@ fn f(v: Vec<Vec<P>>) { v[0][0].m(); }
     call = _call(report, source, "v[0][0].m()")
     assert call.target == m.id
 
-
 def test_multi_arg_container_index_stays_opaque():
     source = """
 struct P;
@@ -2652,7 +2510,6 @@ fn f(m: HashMap<u32, P>) { m[&0].q(); }
     call = _call(report, source, "m[&0].q()")
     assert call.kind == "opaque_method"
     assert call.target == ""
-
 
 def test_index_receiver_slice_and_array_element_types():
     # `&[P]` and `[P; N]` index to `P`; a nested `[P; 2]` element is
@@ -2671,7 +2528,6 @@ fn h(v: &[[P; 2]]) { v[0].m(); }
     assert calls[0].target == member_m.id
     assert calls[1].target == member_m.id
     assert calls[2].target == ""
-
 
 def test_index_receiver_std_map_indexes_to_value_type():
     # `HashMap<K, V>`/`BTreeMap<K, V>` index to `V`; a value that is
@@ -2704,7 +2560,6 @@ enum E { A = P::K }
     ]
     assert len(refs) == 1
 
-
 def test_range_subscript_indexes_to_slice_not_element():
     source = """
 struct P;
@@ -2714,7 +2569,6 @@ fn f(v: Vec<P>) { v[..].m(); }
     report = build_rust_bindings(source, pointer_width=64)
     call = _call(report, source, "v[..].m()")
     assert not call.target
-
 
 def test_custom_container_index_stays_opaque():
     # `Wrapper<P>` may pick any `Index::Output` — P's method must not
@@ -2729,7 +2583,6 @@ fn f(w: Wrapper<P>) { w[0].m(); }
     call = _call(report, source, "w[0].m()")
     assert not call.target
 
-
 def test_imported_map_index_receiver_uses_value_type():
     source = """
 use std::collections::HashMap;
@@ -2742,7 +2595,6 @@ fn f(m: HashMap<u32, P>) { m[&0].m(); }
     call = _call(report, source, "m[&0].m()")
     assert call.target == m.id
 
-
 def test_scoped_generic_annotation_keeps_type_args():
     source = """
 mod m { pub struct W<T>; }
@@ -2754,7 +2606,6 @@ fn f(p: m::W<i32>) { p.n(); }
     call = _call(report, source, "p.n()")
     assert call.target == n.id
 
-
 def test_struct_literal_generic_keeps_type_args():
     source = """
 struct W<T>;
@@ -2765,7 +2616,6 @@ fn f() { let w = W::<i32> { }; w.n(); }
     n = _bindings(report, "n", "associated_function")[0]
     call = _call(report, source, "w.n()")
     assert call.target == n.id
-
 
 def test_module_declared_after_use_still_resolves():
     source = """
@@ -2780,7 +2630,6 @@ mod m {
     call = _call(report, source, "p.m()")
     assert call.target == m.id
 
-
 def test_plain_function_generic_return_types_receiver():
     source = """
 struct W<T>;
@@ -2792,7 +2641,6 @@ fn f() { let w = mk(); w.n(); }
     n = _bindings(report, "n", "associated_function")[0]
     call = _call(report, source, "w.n()")
     assert call.target == n.id
-
 
 def test_ufcs_scoped_trait_name_resolves():
     source = """
@@ -2808,7 +2656,6 @@ fn f(p: P) { <P as m::T>::go(&p); }
     )
     call = _call(report, source, "<P as m::T>::go(&p)")
     assert call.target == impl_member.id
-
 
 def test_ufcs_alias_receiver_uses_concrete_impl():
     source = """
@@ -2827,7 +2674,6 @@ fn f() { <A as T>::m(&P); }
     )
     call = _call(report, source, "<A as T>::m(&P)")
     assert call.target == impl_member.id
-
 
 def test_ufcs_generic_trait_picks_matching_impl():
     # `<P as T<u32>>::m` resolves to the `u32` impl, not the first
@@ -2848,7 +2694,6 @@ fn f(p: P) { <P as T<u32>>::m(&p); }
     call = _call(report, source, "<P as T<u32>>::m(&p)")
     assert call.target == u32_impl.id
 
-
 def test_index_range_then_index_resolves_element():
     # `v[1..][0]` is a `P` — the slice's anonymous element type.
     source = """
@@ -2863,7 +2708,6 @@ fn f(v: &[P]) { v[1..][0].m(); }
     )
     call = _call(report, source, "v[1..][0].m()")
     assert call.target == member.id
-
 
 def test_index_call_arg_with_range_stays_element():
     # `v[find_index(0..10)]` is an integer index — the `..` inside the
@@ -2881,7 +2725,6 @@ fn f(v: &[P]) { v[find_index(0..10)].m(); }
     )
     call = _call(report, source, "v[find_index(0..10)].m()")
     assert call.target == member.id
-
 
 def test_module_const_generic_type_annotation_resolves():
     # `const N: Count` inside `mod m` finds the module-local alias.
@@ -2923,7 +2766,6 @@ fn f() { let x = <P as T<u32>>::C; }
     ref = _refs(report, source, "C")[-1]
     assert ref.binding_id == u32_const.id
 
-
 def test_parenthesized_range_index_stays_a_slice():
     # `v[(..)]` is still a range — `.m()` on the slice does not
     # resolve to `P`'s method.
@@ -2939,7 +2781,6 @@ fn f(v: &[P]) { v[(..)].m(); }
     )
     call = _call(report, source, "v[(..)].m()")
     assert call.target != member.id
-
 
 def test_ufcs_generic_impl_trait_args_match_concrete_call():
     # `impl<A> T<A> for P` — `A` is an impl parameter, a wildcard:
@@ -2958,7 +2799,6 @@ fn f() { <P as T<u32>>::m(&P); }
     call = _call(report, source, "<P as T<u32>>::m(&P)")
     assert call.target == impl_m.id
 
-
 def test_ufcs_generic_impl_concrete_trait_arg_still_filters():
     # `impl<A> T<i32> for W<A>` is generic over the impl type but its
     # trait args are concrete — `T<u32>` must not reach it.
@@ -2976,7 +2816,6 @@ fn f() { <P as T<u32>>::m(&P); }
     )
     call = _call(report, source, "<P as T<u32>>::m(&P)")
     assert call.target != impl_m.id
-
 
 def test_ufcs_trait_arg_binding_constrains_impl_type_args():
     # `impl<A> T<A> for W<A>` cannot answer `<W<V<u16>> as T<u8>>::m`
@@ -3004,7 +2843,6 @@ fn f() { <W<V<u16>> as T<u8>>::m(&W(V(0u16))); }
     assert call.target == right_m.id
     assert call.target != wrong_m.id
 
-
 def test_ufcs_alias_receiver_carries_impl_args():
     # `type Alias = W<u8>` — `<Alias as T>::m` reads `W<u8>` for the
     # impl match, so `impl<A> T for W<A>` answers with A = u8.
@@ -3023,7 +2861,6 @@ fn f() { <Alias as T>::m(&W(0u8)); }
     call = _call(report, source, "<Alias as T>::m(&W(0u8))")
     assert call.target == impl_m.id
 
-
 def test_ufcs_omitted_receiver_args_still_matches_generic_impl():
     # `<W as T>::m` spells no receiver args — `impl<A> T for W<A>`
     # still applies (every impl arg is a parameter).
@@ -3040,7 +2877,6 @@ fn f() { <W as T>::m(&W(0u8)); }
     )
     call = _call(report, source, "<W as T>::m(&W(0u8))")
     assert call.target == impl_m.id
-
 
 def test_ufcs_nested_generic_impl_arg_matches():
     # `Result<A, B>` — the comma inside `<>` is nested and does not
@@ -3060,7 +2896,6 @@ fn f() { <W<R<u8, u16>> as T>::m(&W(R(0u8, 0u16))); }
     call = _call(report, source, "<W<R<u8, u16>> as T>::m(&W(R(0u8, 0u16)))")
     assert call.target == impl_m.id
 
-
 def test_ufcs_array_impl_arg_matches_element_and_length():
     # `impl<A, const N: usize> T for W<[A; N]>` — the receiver's
     # `[u8; 4]` binds `A = u8` and `N = 4`.
@@ -3077,7 +2912,6 @@ fn f() { <W<[u8; 4]> as T>::m(&W([0u8; 4])); }
     )
     call = _call(report, source, "<W<[u8; 4]> as T>::m(&W([0u8; 4]))")
     assert call.target == impl_m.id
-
 
 def test_ufcs_generic_alias_substitutes_spelled_args():
     # `type Alias<B> = W<B>` — `<Alias<u8> as T<u8>>::m` substitutes
@@ -3097,7 +2931,6 @@ fn f() { <Alias<u8> as T<u8>>::m(&W(0u8)); }
     call = _call(report, source, "<Alias<u8> as T<u8>>::m(&W(0u8))")
     assert call.target == impl_m.id
 
-
 def test_ufcs_omitted_args_reject_repeated_param_impl():
     # `impl<A> T for W<A, A>` cannot cover `<W as T>::m` — an omitted
     # arg list cannot satisfy `A` at both positions; the trait default
@@ -3115,7 +2948,6 @@ fn f() { <W as T>::m(&W(0u8, 0u16)); }
     )
     call = _call(report, source, "<W as T>::m(&W(0u8, 0u16))")
     assert call.target != impl_m.id
-
 
 def test_ufcs_const_expr_shift_arg_splits():
     # `{1 << 2}, N` — the shift's `<`/`>` inside braces are not
@@ -3146,7 +2978,6 @@ fn f(a: A) { a.m(); }
     call = _call(report, source, "a.m()")
     assert call.target == m.id
 
-
 def test_type_alias_chain_resolves_through_intermediate_aliases():
     source = """
 struct P;
@@ -3160,7 +2991,6 @@ fn f(a: A) { a.m(); }
     call = _call(report, source, "a.m()")
     assert call.target == m.id
 
-
 def test_cyclic_type_aliases_do_not_recurse():
     source = """
 type A = B;
@@ -3169,7 +2999,6 @@ fn f(a: A) { }
 """
     report = build_rust_bindings(source, pointer_width=64)
     assert report is not None
-
 
 def test_module_scoped_alias_body_resolves_in_its_own_scope():
     # `inner::A` where `inner::A = inner::P` must type the receiver as
@@ -3192,7 +3021,6 @@ fn f(a: inner::A) { a.inner_m(); }
     )
     assert call.target == inner_m.id
 
-
 def test_associated_call_through_alias_spelling_resolves():
     # `impl A` writes members against the alias's target, so `A::m()`
     # must look them up through the same unwrap.
@@ -3211,7 +3039,6 @@ fn g() { A::m(&a); }
             if source[c.span.start:c.span.end] == text
         )
         assert call.target == method.id
-
 
 def test_glob_import_resolves_module_items():
     # `use m::*` exposes `m`'s items — a type annotation and a call
@@ -3236,7 +3063,6 @@ fn f() { let v: P = P; go(); }
     call = _call(report, source, "go()")
     assert call.target == go.id
 
-
 def test_glob_import_ambiguity_stays_unresolved():
     # Two glob-imported modules exporting the same name is ambiguous —
     # the name does not silently resolve to either.
@@ -3255,7 +3081,6 @@ fn f() { let v: P = P; }
         for ref in refs
     )
 
-
 def test_local_binding_shadows_glob_import():
     # An explicit local `P` wins over `use m::*`'s `P`.
     source = """
@@ -3271,7 +3096,6 @@ fn f() { let v: P = P; }
     )
     refs = _refs(report, source, "P")
     assert any(ref.binding_id == local_p.id for ref in refs)
-
 
 def test_glob_import_resolves_at_declaration_scope_not_use_site():
     # `use m::*` binds to the `m` visible where the import is
@@ -3296,7 +3120,6 @@ fn main() {
     )
     assert call.target == outer_f.id
 
-
 def test_glob_import_skips_private_items():
     source = """
 mod m { fn priv_() {} pub fn f() {} }
@@ -3313,7 +3136,6 @@ fn main() { priv_(); f(); }
         if b.name == "f" and b.kind == "function"
     )
     assert calls["f()"].target == public_f.id
-
 
 def test_glob_import_follows_pub_use_reexports():
     source = """
@@ -3333,7 +3155,6 @@ fn main() { g(); }
     )
     assert call.target == g.id
 
-
 def test_glob_import_does_not_follow_private_reexports():
     source = """
 mod n { pub fn g() {} }
@@ -3352,7 +3173,6 @@ fn main() { g(); h(); }
     )
     assert calls["h()"].target == h.id
 
-
 def test_match_enum_variant_payload_is_typed():
     # `match e { E::C(p) => p.m() }` types `p` by the variant's
     # declared payload.
@@ -3369,7 +3189,6 @@ fn f(e: E) {
     call = _call(report, source, "p.m()")
     assert call.target == method.id
 
-
 def test_let_condition_variant_payload_is_typed():
     source = """
 enum E { C(P), D }
@@ -3385,7 +3204,6 @@ fn f(e: E) {
     for text in ("p.m()", "q.m()"):
         assert _call(report, source, text).target == method.id
 
-
 def test_match_named_variant_fields_are_typed():
     source = """
 enum E { D { x: P } }
@@ -3400,7 +3218,6 @@ fn f(e: E) {
     for text in ("x.m()", "q.m()"):
         assert _call(report, source, text).target == method.id
 
-
 def test_struct_pattern_fields_are_typed():
     source = """
 struct W { p: P }
@@ -3414,7 +3231,6 @@ fn f(w: W) {
     report = build_rust_bindings(source, pointer_width=64)
     method = _bindings(report, "m", "associated_function")[0]
     assert _call(report, source, "p.m()").target == method.id
-
 
 def test_pattern_head_must_name_the_scrutinee():
     # A pattern naming another type does not type its names by the
@@ -3431,7 +3247,6 @@ fn f(e: E) {
     report = build_rust_bindings(source, pointer_width=64)
     assert _call(report, source, "p.m()").target == ""
 
-
 def test_generic_scrutinee_substitutes_field_types():
     source = """
 struct W<T> { f: T }
@@ -3444,7 +3259,6 @@ fn f(w: W<P>) {
     report = build_rust_bindings(source, pointer_width=64)
     method = _bindings(report, "m", "associated_function")[0]
     assert _call(report, source, "f.m()").target == method.id
-
 
 def test_prelude_variant_payload_on_unresolvable_option():
     # `Option` has no record, but the spelled arg still types the
@@ -3460,7 +3274,6 @@ fn f(o: O) {
     report = build_rust_bindings(source, pointer_width=64)
     m = next(b for b in report.bindings if b.name == "m")
     assert _call(report, source, "p.m()").target == m.id
-
 
 def test_reference_and_cast_receivers_are_typed():
     source = """
@@ -3478,7 +3291,6 @@ fn f(v: Vec<P>, x: u32) {
     assert _call(report, source, "p.m()").target == method.id
     assert _call(report, source, "q.m()").target == method.id
 
-
 def test_variant_constructor_initializer_types_the_binding():
     source = """
 enum E { C(P), F }
@@ -3493,7 +3305,6 @@ fn f() {
     method = _bindings(report, "m", "associated_function")[0]
     assert _call(report, source, "p.m()").target == method.id
 
-
 def test_pattern_field_args_keep_string_type_id():
     # `items: Vec<P>` resolves args-only — the emitted fact keeps a
     # string (empty) type_id so the shared loader re-reads it.
@@ -3501,7 +3312,6 @@ def test_pattern_field_args_keep_string_type_id():
     report = build_rust_bindings(source, pointer_width=64)
     items = next(b for b in report.bindings if b.name == "items")
     assert isinstance(items.type.type_id, str)
-
 
 def test_rest_pattern_skips_to_trailing_payload():
     source = """
@@ -3519,7 +3329,6 @@ fn f(e: E) {
         if source[c.span.start:c.span.end] == "x.n()"
     )
     assert call.target == method.id
-
 
 def test_pub_tuple_fields_do_not_shift_positions():
     source = """
@@ -3539,7 +3348,6 @@ fn f(w: W) {
             if source[c.span.start:c.span.end] == text
         )
         assert call.target == method.id
-
 
 def test_module_field_types_resolve_in_the_module_scope():
     source = """
@@ -3565,7 +3373,6 @@ fn f(w: m::W) {
     )
     assert call.target == method.id
 
-
 def test_for_loop_binds_element_type_from_container_args():
     # `for p in v` types `p` as the container's element — `Vec<P>`
     # yields `P`, so `p.m()` binds.
@@ -3584,7 +3391,6 @@ fn f(v: Vec<P>) {
     )
     assert call.target == method.id
 
-
 def test_for_loop_binds_element_type_through_reference():
     source = """
 struct P { x: i32 }
@@ -3600,7 +3406,6 @@ fn f(v: Vec<P>) {
         if source[c.span.start:c.span.end] == "p.m()"
     )
     assert call.target == method.id
-
 
 def test_for_loop_binds_nested_container_elements():
     # `Vec<Vec<P>>` binds the inner loop variable to `Vec<P>` whose
@@ -3622,7 +3427,6 @@ fn f(w: Vec<Vec<P>>) {
     )
     assert call.target == method.id
 
-
 def test_for_loop_stays_opaque_on_ranges_and_undeclared_iterables():
     source = """
 struct P { x: i32 }
@@ -3639,7 +3443,6 @@ fn f() {
             if source[c.span.start:c.span.end] == text
         )
         assert call.target == ""
-
 
 def test_for_loop_destructuring_pattern_stays_opaque():
     # `for P { x } in v` binds `x` to a field, not the element — its
@@ -3660,7 +3463,6 @@ fn f(v: Vec<P>) {
         )
         assert call.target == ""
 
-
 def test_for_loop_over_map_stays_opaque():
     # Map iteration yields (K, V) pairs — a single-name loop stays
     # unpinned, while a destructured `(k, v)` binds the pair's ends.
@@ -3677,7 +3479,6 @@ fn f(map: HashMap<u32, P>) {
     method = _bindings(report, "m", "associated_function")[0]
     assert _call(report, source, "e.m()").target == ""
     assert _call(report, source, "v.m()").target == method.id
-
 
 def test_for_loop_element_keeps_own_generic_args():
     # `Vec<W<u8>>` binds the element as `W` carrying "u8" — a
@@ -3697,7 +3498,6 @@ fn f(v: Vec<W<u8>>) {
     )
     assert call.target == method.id
 
-
 def test_for_loop_mutable_binding_keeps_element_type():
     # `for mut p in v` still binds one identifier — `mut` only marks
     # it writable, so `p.m()` resolves.
@@ -3716,7 +3516,6 @@ fn f(v: Vec<P>) {
     )
     assert call.target == method.id
 
-
 def test_for_loop_ref_binding_stays_opaque():
     # `for ref p in v` binds `&P`, not `P` — the pattern is left
     # unpinned rather than guessing the reference's target.
@@ -3734,7 +3533,6 @@ fn f(v: Vec<P>) {
     )
     assert call.target == ""
 
-
 def test_use_target_resolves_scoped_calls():
     # `use m::P` — `P::new()` resolves the module's `P`, then the
     # associated function.
@@ -3751,7 +3549,6 @@ fn f() { let x = P::new(); }
     call = _call(report, source, "P::new()")
     assert call.target == new.id
 
-
 def test_use_alias_target_resolves_scoped_calls():
     # `use m::P as Q` — `Q::new()` resolves through the alias's path.
     source = """
@@ -3766,7 +3563,6 @@ fn f() { let x = Q::new(); }
     )
     call = _call(report, source, "Q::new()")
     assert call.target == new.id
-
 
 def test_use_target_types_annotated_receivers():
     # `let x: P` with `use m::P` — `x.v()` resolves the module
@@ -3784,7 +3580,6 @@ fn f() { let x: P = P; x.v(); }
     call = _call(report, source, "x.v()")
     assert call.target == v.id
 
-
 def test_use_target_unresolvable_module_stays_opaque():
     # A use whose module path does not resolve keeps scoped calls
     # opaque rather than guessing.
@@ -3796,7 +3591,6 @@ fn f() { let x = P::new(); }
     report = build_rust_bindings(source, pointer_width=64)
     call = _call(report, source, "P::new()")
     assert call.kind == "opaque_path"
-
 
 def test_use_target_resolves_at_declaration_scope():
     # `use m::P` resolves `m` where the import is declared — an
@@ -3814,7 +3608,6 @@ fn main() { mod m { pub struct P; } let x = P::new(); }
     call = _call(report, source, "P::new()")
     assert call.target == p.id
 
-
 def test_use_target_trait_alias_resolves_impl_members_and_ufcs():
     source = """
 mod m { pub trait Tr { fn m(&self); } }
@@ -3831,7 +3624,6 @@ fn f(p: P) { p.m(); <P as Q>::m(&p); }
     )
     assert _call(report, source, "p.m()").target == impl_m.id
     assert _call(report, source, "<P as Q>::m(&p)").target == impl_m.id
-
 
 def test_use_target_trait_default_via_alias():
     source = """
@@ -3852,7 +3644,6 @@ fn f(p: P) { p.m(); <P as Q>::m(&p); }
         _call(report, source, "<P as Q>::m(&p)").target == default_m.id
     )
 
-
 def test_use_target_unresolvable_external_trait_keeps_impl_members():
     # `use ext::Trait` — `ext` cannot be resolved, but the imported
     # name is still the trait the impl matches against.
@@ -3865,7 +3656,6 @@ fn f(p: P) { p.m(); }
     report = build_rust_bindings(source, pointer_width=64)
     m = next(b for b in report.bindings if b.name == "m")
     assert _call(report, source, "p.m()").target == m.id
-
 
 def test_use_target_prefers_the_type_namespace_for_annotations():
     source = """
@@ -3880,7 +3670,6 @@ fn f() { let x: P = P::new(); }
     report = build_rust_bindings(source, pointer_width=64)
     new = next(b for b in report.bindings if b.name == "new")
     assert _call(report, source, "P::new()").target == new.id
-
 
 def test_parent_module_use_does_not_leak_into_child_module():
     # `use x::Tr` in `mod outer` names `Tr` in outer only — `p.m()`
@@ -3904,7 +3693,6 @@ mod outer {
     )
     assert call.target == ""
 
-
 def test_child_module_use_makes_the_trait_visible():
     # Control case: the same receiver resolves when `mod inner`
     # imports the trait itself.
@@ -3926,7 +3714,6 @@ mod outer {
     )
     assert call.target == method.id
 
-
 def test_prelude_some_pattern_binds_option_element():
     # `match opt { Some(p) => p.m() }` types `p` as Option's element —
     # the prelude constructor's payload is pinned by the scrutinee's
@@ -3945,7 +3732,6 @@ fn f(opt: Option<P>) {
         if source[c.span.start:c.span.end] == "p.m()"
     )
     assert call.target == method.id
-
 
 def test_prelude_ok_err_patterns_bind_result_args():
     # `Ok(p)` binds Result's first arg, `Err(e)` its second — each
@@ -3967,7 +3753,6 @@ fn f(r: Result<P, E>) {
     }
     assert by_text["p.m()"].target == m.id
     assert by_text["e.n()"].target == n.id
-
 
 def test_prelude_pattern_in_let_while_and_let_else():
     # `if let Some(p)`, `while let Ok(p)` and `let Some(p) = ... else`
@@ -3992,7 +3777,6 @@ fn f(opt: Option<P>, r: Result<P, E>) {
         )
         assert call.target == method.id
 
-
 def test_prelude_pattern_stays_opaque_on_wrong_container():
     # `Some(x)` only pins Option's element — on `Vec<P>` (or an
     # undeclared scrutinee) the payload name stays untyped.
@@ -4011,7 +3795,6 @@ fn f(v: Vec<P>, mystery: Undeclared) {
             if source[c.span.start:c.span.end] == text
         )
         assert call.target == ""
-
 
 def test_bare_match_arm_on_prelude_container_keeps_valid_type_fact():
     # `match opt { x => }` on `Option<P>` binds `x` with an `unknown`
@@ -4036,7 +3819,6 @@ fn f(o: Option<P>) {
         and "type_id" in b.to_dict()["type"]
     )
 
-
 def test_user_defined_option_keeps_payload_unpinned():
     # A user `enum Option` whose `Some` doesn't resolve at the
     # pattern must not be typed by the std prelude payload.
@@ -4055,7 +3837,6 @@ fn f(o: Option<P>) {
         if source[c.span.start:c.span.end] == "q.m()"
     )
     assert call.target == ""
-
 
 def test_prelude_payload_args_resolve_at_annotation_scope():
     # `o: Option<P>`'s `P` is the outer declaration — a `struct P`
@@ -4080,7 +3861,6 @@ fn f(o: Option<P>) {
     assert call.target == outer.id
     assert call.target != inner.id
 
-
 def test_imported_enum_variant_binds_match_payload() -> None:
     source = """
     enum E { V(P), W }
@@ -4094,7 +3874,6 @@ def test_imported_enum_variant_binds_match_payload() -> None:
     report = build_rust_bindings(source, pointer_width=64)
     method = _bindings(report, "m", "associated_function")[0]
     assert _call(report, source, "p.m()").target == method.id
-
 
 def test_imported_enum_variant_through_module_chain() -> None:
     source = """
@@ -4110,7 +3889,6 @@ def test_imported_enum_variant_through_module_chain() -> None:
     method = _bindings(report, "m", "associated_function")[0]
     assert _call(report, source, "p.m()").target == method.id
 
-
 def test_imported_variant_stays_opaque_on_other_type() -> None:
     source = """
     enum E { V(P), W }
@@ -4125,7 +3903,6 @@ def test_imported_variant_stays_opaque_on_other_type() -> None:
     report = build_rust_bindings(source, pointer_width=64)
     assert _call(report, source, "p.m()").target == ""
 
-
 def test_imported_tuple_struct_still_binds_pattern_payload() -> None:
     source = """
     mod m { pub struct S(pub P); }
@@ -4139,7 +3916,6 @@ def test_imported_tuple_struct_still_binds_pattern_payload() -> None:
     report = build_rust_bindings(source, pointer_width=64)
     method = _bindings(report, "m", "associated_function")[0]
     assert _call(report, source, "p.m()").target == method.id
-
 
 def test_self_named_use_path_does_not_recurse() -> None:
     # `use log::log` — an import whose path starts with its own name —
@@ -4156,7 +3932,6 @@ fn f(p: P) {
 """
     report = build_rust_bindings(source, pointer_width=64)
     assert _call(report, source, "p.t()").target == ""
-
 
 def test_for_loop_iter_methods_bind_container_element():
     # `for p in v.iter()/iter_mut()/into_iter()` types `p` as the
@@ -4179,7 +3954,6 @@ fn f(v: Vec<P>) {
         )
         assert call.target == method.id
 
-
 def test_for_loop_iter_on_array_element():
     source = """
 struct P;
@@ -4195,7 +3969,6 @@ fn f(arr: [P; 4]) {
         if source[c.span.start:c.span.end] == "p.m()"
     )
     assert call.target == method.id
-
 
 def test_for_loop_map_values_bind_value_type():
     # `m.values()` yields `V` of `HashMap<K, V>` — `m.keys()` reads
@@ -4219,7 +3992,6 @@ fn f(m: HashMap<K, P>) {
     assert by_text["k.k()"].target == k.id
     assert by_text["pair.m()"].target == ""
 
-
 def test_for_loop_chained_iterator_stays_opaque():
     # `v.iter().enumerate()`/`v.iter().map(f)` yield a new iterator
     # shape — the element stays unpinned rather than guessed.
@@ -4239,7 +4011,6 @@ fn f(v: Vec<P>) {
         )
         assert call.target == ""
 
-
 def test_for_loop_over_call_return_binds_element() -> None:
     source = """
 struct P;
@@ -4252,7 +4023,6 @@ fn f() {
     report = build_rust_bindings(source, pointer_width=64)
     method = _bindings(report, "m", "associated_function")[0]
     assert _call(report, source, "p.m()").target == method.id
-
 
 def test_for_loop_declared_iter_method_stays_opaque() -> None:
     # A user-defined `iter()` need not yield the container's element —
@@ -4272,7 +4042,6 @@ fn f(v: MyVec<P>) {
     report = build_rust_bindings(source, pointer_width=64)
     assert _call(report, source, "x.m()").target == ""
 
-
 def test_for_loop_iter_element_resolves_at_annotation_scope() -> None:
     source = """
 struct P;
@@ -4288,7 +4057,6 @@ fn f(v: Vec<P>) {
     call = _call(report, source, "x.m()")
     # The bound `m` is the outer `P`'s — the inner `P` only has `n`.
     assert call.target == m.id
-
 
 def test_for_loop_declared_values_return_type_binds_element() -> None:
     source = """
@@ -4340,7 +4108,6 @@ fn g(w: W) {
     assert len(calls) == 2
     assert all(c.target == "" for c in calls)
 
-
 def test_prelude_pattern_on_field_scrutinee() -> None:
     source = """
 struct P;
@@ -4353,7 +4120,6 @@ fn f(w: W) {
     report = build_rust_bindings(source, pointer_width=64)
     method = _bindings(report, "m", "associated_function")[0]
     assert _call(report, source, "p.m()").target == method.id
-
 
 def test_prelude_pattern_on_self_field_scrutinee() -> None:
     source = """
@@ -4370,7 +4136,6 @@ impl W {
     method = _bindings(report, "m", "associated_function")[0]
     assert _call(report, source, "p.m()").target == method.id
 
-
 def test_prelude_pattern_on_nested_field_chain() -> None:
     source = """
 struct P;
@@ -4385,7 +4150,6 @@ fn f(g: G) {
     method = _bindings(report, "m", "associated_function")[0]
     assert _call(report, source, "p.m()").target == method.id
 
-
 def test_prelude_pattern_on_wrong_field_container_stays_opaque() -> None:
     source = """
 struct P;
@@ -4397,7 +4161,6 @@ fn f(w: W) {
 """
     report = build_rust_bindings(source, pointer_width=64)
     assert _call(report, source, "p.m()").target == ""
-
 
 def test_field_scrutinee_payload_resolves_in_declaring_module() -> None:
     source = """
@@ -4427,7 +4190,6 @@ fn f(w: W) {
     assert bound and bound[0].type.type_id == module_p.id
     assert _call(report, source, "p.same()").target == module_same.id
 
-
 def test_generic_field_scrutinee_payload_uses_use_site_args() -> None:
     source = """
 struct T;
@@ -4442,7 +4204,6 @@ fn f(w: W<Q>) {
     q = _bindings(report, "q", "associated_function")[0]
     bound = _bindings(report, "p", "local")
     assert bound and _call(report, source, "p.q()").target == q.id
-
 
 def test_impl_param_reorder_maps_receiver_args() -> None:
     source = """
@@ -4466,7 +4227,6 @@ fn f(w: W<P, Q>) {
     assert _call(report, source, "t.qm()").target == qm.id
     assert _call(report, source, "t.pm()").target == ""
 
-
 def test_generic_field_substitution_is_simultaneous() -> None:
     source = """
 struct B;
@@ -4489,7 +4249,6 @@ fn f(w: W<B, P>) {
     # rewrite would chain A→B then B→P into Result<P, P>.
     assert _call(report, source, "x.bm()").target == bm.id
     assert _call(report, source, "e.pm()").target == pm.id
-
 
 def test_field_scrutinee_substituted_arg_resolves_fn_local_type() -> None:
     source = """
@@ -4536,7 +4295,6 @@ fn f(w: W<P>) {
     assert _call(report, source, "q.qm()").target == qm.id
     assert _call(report, source, "q.lm()").target == ""
 
-
 def test_impl_const_generic_braced_param_substitutes() -> None:
     source = """
 struct R<const N: usize>;
@@ -4556,8 +4314,6 @@ fn f(w: W<4>) {
     # the return as R<N> and the call opaque.
     assert _call(report, source, "w.get().rn()").target == rn.id
 
-
-
 def test_prelude_pattern_on_method_call_scrutinee() -> None:
     source = """
 struct P;
@@ -4573,7 +4329,6 @@ fn f(m: MyMap) {
     report = build_rust_bindings(source, pointer_width=64)
     method = _bindings(report, "m", "associated_function")[0]
     assert _call(report, source, "p.m()").target == method.id
-
 
 def test_prelude_pattern_on_result_returning_call() -> None:
     source = """
@@ -4593,7 +4348,6 @@ fn f(o: O) {
     method = _bindings(report, "e", "associated_function")[0]
     assert _call(report, source, "e.e()").target == method.id
 
-
 def test_prelude_pattern_on_wrong_call_return_stays_opaque() -> None:
     source = """
 struct P;
@@ -4608,7 +4362,6 @@ fn f(m: MyMap) {
 """
     report = build_rust_bindings(source, pointer_width=64)
     assert _call(report, source, "p.m()").target == ""
-
 
 def test_method_call_scrutinee_payload_resolves_in_declaring_module() -> None:
     source = """
@@ -4631,7 +4384,6 @@ fn f(w: W) {
         key=lambda b: int(b.id.split(":")[-3]),
     )
     assert _call(report, source, "p.same()").target == module_same.id
-
 
 def test_method_call_scrutinee_unwraps_turbofish() -> None:
     source = """
@@ -4681,7 +4433,6 @@ fn f(w: W) {
     assert calls[0].target == q_same.id
     assert calls[1].target == p_same.id
 
-
 def test_for_tuple_pattern_binds_map_pair() -> None:
     source = """
 struct K;
@@ -4697,7 +4448,6 @@ fn f(m: HashMap<K, V>) {
     v = _bindings(report, "v", "associated_function")[0]
     assert _call(report, source, "k.k()").target == k.id
     assert _call(report, source, "v.v()").target == v.id
-
 
 def test_for_tuple_pattern_binds_map_iter_pair() -> None:
     source = """
@@ -4715,7 +4465,6 @@ fn f(m: std::collections::BTreeMap<K, V>) {
     assert _call(report, source, "k.k()").target == k.id
     assert _call(report, source, "v.v()").target == v.id
 
-
 def test_for_tuple_pattern_wrong_arity_stays_opaque() -> None:
     source = """
 struct K;
@@ -4727,7 +4476,6 @@ fn f(m: HashMap<K, V>) {
 """
     report = build_rust_bindings(source, pointer_width=64)
     assert _call(report, source, "x.v()").target == ""
-
 
 def test_for_tuple_pattern_declared_iter_stays_opaque() -> None:
     source = """
@@ -4743,7 +4491,6 @@ fn f(m: M) {
 """
     report = build_rust_bindings(source, pointer_width=64)
     assert _call(report, source, "v.v()").target == ""
-
 
 def test_for_tuple_pattern_substitutes_generic_map_alias() -> None:
     source = """
@@ -4765,7 +4512,6 @@ fn f(m: Flip<K, V>) {
     assert _call(report, source, "k.k()").target == ""
     assert _call(report, source, "v.v()").target == ""
 
-
 def test_for_tuple_pattern_binds_mut_borrowed_map() -> None:
     source = """
 struct K;
@@ -4781,7 +4527,6 @@ fn f(m: HashMap<K, V>) {
     v = _bindings(report, "v", "associated_function")[0]
     assert _call(report, source, "k.k()").target == k.id
     assert _call(report, source, "v.v()").target == v.id
-
 
 def test_tuple_pattern_binds_elements_by_position():
     source = """\
@@ -4801,7 +4546,6 @@ fn f(t: (P, Q)) {
     calls = [c for c in report.calls if source[c.span.start:c.span.end].endswith(("m()", "q()"))]
     assert [c.target for c in calls] == [m.id, q.id]
 
-
 def test_tuple_pattern_in_match_and_nested_variant():
     source = """\
 struct P;
@@ -4819,7 +4563,6 @@ fn f(t: (E, P)) {
     calls = [c for c in report.calls if source[c.span.start:c.span.end].endswith("m()")]
     assert [c.target for c in calls] == [m.id]
 
-
 def test_tuple_pattern_rest_binds_last_element():
     source = """\
 struct P;
@@ -4836,7 +4579,6 @@ fn f(t: (P, P, Q)) {
     calls = [c for c in report.calls if source[c.span.start:c.span.end].endswith("q()")]
     assert [c.target for c in calls] == [q.id]
 
-
 def test_tuple_pattern_short_pattern_stays_unpinned():
     source = """\
 struct P;
@@ -4849,7 +4591,6 @@ fn f(t: (P, P, P)) {
     report = build_rust_bindings(source, pointer_width=64)
     calls = [c for c in report.calls if source[c.span.start:c.span.end].endswith("m()")]
     assert calls and all(c.target in {"", None} for c in calls)
-
 
 def test_for_tuple_pattern_binds_vec_of_tuples() -> None:
     source = """\
@@ -4873,7 +4614,6 @@ fn f(v: Vec<(P, Q)>) {
         if source[c.span.start : c.span.end].endswith(("m()", "q()"))
     ]
     assert [c.target for c in calls] == [m.id, q.id]
-
 
 def test_prelude_pattern_on_call_returned_option_tuple() -> None:
     source = """\
@@ -4899,7 +4639,6 @@ fn f() {
     ]
     assert [c.target for c in calls] == [m.id, q.id]
 
-
 def test_err_pattern_on_call_returned_result() -> None:
     source = """\
 struct P;
@@ -4924,36 +4663,6 @@ fn f() {
     ]
     assert [c.target for c in calls] == [m.id, e.id]
 
-
-def test_let_pattern_uses_inline_annotation() -> None:
-    source = """\
-struct P;
-impl P { fn m(&self) {} }
-struct Q;
-impl Q { fn q(&self) {} }
-struct W { x: P, y: Q }
-fn h() {
-    let (a, b): (P, P) = (P, P);
-    a.m();
-    b.m();
-    let Some(v): Option<P> = Some(P);
-    v.m();
-    let W { x, y }: W = W { x: P, y: Q };
-    x.m();
-    y.q();
-}
-"""
-    report = build_rust_bindings(source, pointer_width=64)
-    m = next(b for b in report.bindings if b.name == "m")
-    q = next(b for b in report.bindings if b.name == "q")
-    calls = [
-        c
-        for c in report.calls
-        if source[c.span.start : c.span.end].endswith(("m()", "q()"))
-    ]
-    assert [c.target for c in calls] == [m.id, m.id, m.id, m.id, q.id]
-
-
 def test_tuple_pattern_prelude_variant_in_tuple() -> None:
     source = """
 struct P;
@@ -4968,7 +4677,6 @@ fn f(t: (Option<P>, P)) {
     report = build_rust_bindings(source, pointer_width=64)
     m = _bindings(report, "m", "associated_function")[0]
     assert _call(report, source, "p.m()").target == m.id
-
 
 def test_let_pattern_inferred_annotation_slots() -> None:
     source = """
@@ -4991,7 +4699,6 @@ fn f(t: (P, Q)) {
     assert _call(report, source, "c.m()").target == m.id
     assert _call(report, source, "d.q()").target == q.id
 
-
 def test_for_tuple_pattern_binds_map_pair_around_rest() -> None:
     source = """
 struct P;
@@ -5008,7 +4715,6 @@ fn f(m: HashMap<P, Q>) {
     q = _bindings(report, "q", "associated_function")[0]
     assert _call(report, source, "k.m()").target == m.id
     assert _call(report, source, "v.q()").target == q.id
-
 
 def test_for_tuple_pattern_binds_partial_map_pair() -> None:
     source = """
@@ -5029,7 +4735,6 @@ fn f(m: HashMap<P, Q>, t: BTreeMap<P, Q>) {
     assert _call(report, source, "k.m()").target == m.id
     assert _call(report, source, "v.q()").target == q.id
 
-
 def test_slice_pattern_binds_element_types() -> None:
     source = """
 struct P;
@@ -5049,7 +4754,6 @@ fn f(arr: [P; 3], v: Vec<P>) {
     for text in ("a.m()", "x.m()", "s.m()", "t.m()"):
         assert _call(report, source, text).target == m.id
 
-
 def test_slice_pattern_nested_element_types() -> None:
     source = """
 struct P;
@@ -5067,7 +4771,6 @@ fn f(v: Vec<Vec<P>>) {
     assert _call(report, source, "inner.m()").target == ""
     assert _call(report, source, "deep.m()").target == m.id
 
-
 def test_slice_pattern_rest_binding_stays_opaque() -> None:
     source = """
 struct P;
@@ -5083,7 +4786,6 @@ fn f(arr: [P; 3]) {
     # `h` binds the rest slice `[P]`, not `P` — stays opaque.
     assert _call(report, source, "h.m()").target == ""
     assert _call(report, source, "t.m()").target == m.id
-
 
 def test_slice_pattern_element_resolves_at_annotation_scope() -> None:
     source = """
@@ -5104,7 +4806,6 @@ fn g(arr: [P; 1]) {
     # The element resolves the spelled P at arr's annotation, not the
     # inner block's shadow.
     assert _call(report, source, "p.m()").target == outer.id
-
 
 def test_unwrap_receivers_yield_option_result_payload() -> None:
     source = """
@@ -5130,7 +4831,6 @@ fn f(opt: Option<P>, res: Result<P, E>, v: Vec<P>) {
     # Vec<P> exposes no `unwrap` — stays opaque.
     assert _call(report, source, "v.unwrap().m()").target == ""
 
-
 def test_try_operator_receiver_yields_payload() -> None:
     source = """
 struct P;
@@ -5148,7 +4848,6 @@ fn h(w: W) {
     m = _bindings(report, "m", "associated_function")[0]
     assert _call(report, source, "res?.m()").target == m.id
     assert _call(report, source, "w.opt?.m()").target == m.id
-
 
 def test_unwrap_receiver_of_array_payload_indexes_the_element() -> None:
     source = """
@@ -5184,7 +4883,6 @@ fn f(w: W, o: Option<[P; 2]>, r: Result<[P; 2], u8>) -> u8 {
     assert len(calls) == 5
     assert all(c.target == m.id for c in calls)
 
-
 def test_for_element_through_preserving_iter_adaptors() -> None:
     source = """\
 struct P;
@@ -5205,7 +4903,6 @@ fn f(v: Vec<P>) {
     ]
     assert [c.target for c in calls] == [m.id] * 4
 
-
 def test_for_element_map_adaptor_stays_unpinned() -> None:
     source = """\
 struct P;
@@ -5221,7 +4918,6 @@ fn f(v: Vec<P>) {
         if source[c.span.start : c.span.end].endswith("m()")
     )
     assert call.target == ""
-
 
 def test_for_enumerate_binds_value_by_element_type() -> None:
     source = """\
@@ -5241,7 +4937,6 @@ fn f(v: Vec<P>) {
         if source[c.span.start : c.span.end].endswith("m()")
     )
     assert call.target == m.id
-
 
 def test_for_declared_adaptor_uses_its_own_return_type() -> None:
     source = """\
@@ -5268,7 +4963,6 @@ fn f(w: W<P>) {
     ]
     assert [c.target for c in calls] == [q.id, q.id]
 
-
 def test_for_custom_container_args_do_not_leak_as_tuple_elements() -> None:
     source = """\
 struct P;
@@ -5286,7 +4980,6 @@ fn f(w: W<(P, Q)>) {
         if source[c.span.start : c.span.end].endswith("m()")
     )
     assert call.target == ""
-
 
 def test_for_enumerate_declared_inner_iter_stays_opaque() -> None:
     source = """\
@@ -5306,7 +4999,6 @@ fn f(r: R) {
         if source[c.span.start : c.span.end].endswith("m()")
     )
     assert call.target == ""
-
 
 def test_let_pattern_uses_inline_annotation() -> None:
     source = """\
@@ -5336,7 +5028,6 @@ fn h() {
     ]
     assert [c.target for c in calls] == [m.id, m.id, m.id, m.id, q.id]
 
-
 def test_for_tuple_pattern_binds_zipped_elements() -> None:
     source = """
 struct P;
@@ -5355,7 +5046,6 @@ fn f(v: Vec<P>, u: Vec<Q>, w: Vec<Vec<P>>) {
     assert _call(report, source, "a.p()").target == p.id
     assert _call(report, source, "b.q()").target == q.id
     assert _call(report, source, "x[0].p()").target == p.id
-
 
 def test_for_tuple_pattern_binds_zipped_map_pair() -> None:
     source = """
@@ -5376,7 +5066,6 @@ fn f(m: HashMap<Q, P>, v: Vec<P>) {
     assert _call(report, source, "k.q()").target == q.id
     assert _call(report, source, "val.p()").target == p.id
     assert _call(report, source, "o.p()").target == p.id
-
 
 def test_tuple_index_on_spelled_zip_pair_binding() -> None:
     source = """
@@ -5401,7 +5090,6 @@ fn f(a: Vec<P>, b: Vec<Q>) {
     assert _call(report, source, "p.1.q()").target == q.id
     assert _call(report, source, "t.1.m()").target == m.id
 
-
 def test_zip_named_tuple_struct_args_not_fields():
     source = """
 struct P;
@@ -5423,7 +5111,6 @@ fn f(w: W<(P, Q)>) {
         report, "pm", "associated_function"
     )[0].id
 
-
 def test_zip_custom_container_stays_opaque():
     source = """
 struct P;
@@ -5441,7 +5128,6 @@ fn f(w: W<P>, v: Vec<Q>) {
     pm = _bindings(report, "pm", "associated_function")[0]
     # `W<P>` can Deref to `[Q]` — its args are not the element type.
     assert _call(report, source, "a.pm()").target != pm.id
-
 
 def test_zip_element_resolves_at_annotation_scope():
     source = """
@@ -5463,7 +5149,6 @@ fn f(arg: Vec<P>, v: Vec<u8>) {
     # `struct P` must not shadow the spelled element.
     assert _call(report, source, "a.pm()").target == pm.id
 
-
 def test_index_receiver_element_through_import_and_scope() -> None:
     source = """
 mod m {
@@ -5482,7 +5167,6 @@ fn f(items: Vec<P>, v: Vec<m::P>, nested: Vec<Vec<P>>) {
     assert _call(report, source, "items[0].p()").target == p.id
     assert _call(report, source, "v[0].p()").target == p.id
     assert _call(report, source, "nested[0][1].p()").target == p.id
-
 
 def test_index_field_element_resolves_in_the_fields_module() -> None:
     source = """
@@ -5506,7 +5190,6 @@ fn g(w: W<i32>) {
     assert _call(report, source, "w.items[0].pm()").target == pm.id
     assert _call(report, source, "w.items[0].wrong()").target == ""
 
-
 def test_index_field_element_across_newline_args() -> None:
     source = """
 mod m {
@@ -5528,7 +5211,6 @@ fn f(w: m::W<P>) {
     assert _call(report, source, "w.items[0].pm()").target == pm.id
     assert _call(report, source, "w.items[0].wrong()").target == ""
 
-
 def test_index_element_resolves_at_annotation_scope():
     source = """
 mod m { pub struct P; impl P { pub fn p(&self) {} } }
@@ -5540,7 +5222,6 @@ fn f(items: Vec<m::P>) {
     report = build_rust_bindings(source, pointer_width=64)
     p = _bindings(report, "p", "associated_function")[0]
     assert _call(report, source, "items[0].p()").target == p.id
-
 
 def test_get_on_prelude_containers_heads_option() -> None:
     source = """
@@ -5563,7 +5244,6 @@ fn f(v: Vec<P>, m: HashMap<P, Q>, i: usize) {
     assert _call(report, source, "p.m()").target == m.id
     assert _call(report, source, "q.q()").target == q.id
 
-
 def test_get_on_declared_method_keeps_member_resolution() -> None:
     source = """
 struct P;
@@ -5577,7 +5257,6 @@ fn f(c: C) {
     report = build_rust_bindings(source, pointer_width=64)
     get = _bindings(report, "get", "associated_function")[0]
     assert _call(report, source, "c.get()").target == get.id
-
 
 def test_option_head_methods_on_prelude_containers() -> None:
     source = """
@@ -5621,7 +5300,6 @@ fn f(w: W) {
     qm = _bindings(report, "qm", "associated_function")[0]
     assert _call(report, source, "w.get().unwrap().qm()").target == qm.id
 
-
 def test_reference_pattern_tuple_bindings() -> None:
     source = """
 struct P;
@@ -5640,7 +5318,6 @@ fn f() {
     assert _call(report, source, "x.m()").target == m.id
     assert _call(report, source, "y.q()").target == q.id
 
-
 def test_reference_pattern_on_option_match() -> None:
     source = """
 struct P;
@@ -5656,7 +5333,6 @@ fn f(o: Option<P>) {
     m = _bindings(report, "m", "associated_function")[0]
     assert _call(report, source, "p.m()").target == m.id
 
-
 def test_reference_pattern_whole_binding_tuple_index() -> None:
     source = """
 struct P;
@@ -5671,7 +5347,6 @@ fn f() {
     m = _bindings(report, "m", "associated_function")[0]
     assert _call(report, source, "w.0.m()").target == m.id
     assert _call(report, source, "w.1.m()").target == m.id
-
 
 def test_iterator_chain_and_next_head_option() -> None:
     source = """
@@ -5696,7 +5371,6 @@ fn f(v: Vec<P>) {
     assert len(calls) == 5
     assert [call.target for call in calls] == [m.id] * 5
 
-
 def test_option_head_methods_on_vecdeque_and_map_remove() -> None:
     source = """
 struct P;
@@ -5720,7 +5394,6 @@ fn f(d: VecDeque<P>, m: HashMap<u32, P>) {
     assert len(calls) == 5
     assert [call.target for call in calls] == [m.id] * 5
 
-
 def test_for_element_resolves_at_receiver_annotation():
     source = """
 struct Q;
@@ -5733,7 +5406,6 @@ fn f(w: W<Q>) {
     report = build_rust_bindings(source, pointer_width=64)
     qm = _bindings(report, "qm", "associated_function")[0]
     assert _call(report, source, "q.qm()").target == qm.id
-
 
 def test_option_transforms_and_cloned():
     source = """
@@ -5761,7 +5433,6 @@ fn f(o: Option<P>, mut o2: Option<P>, r: Result<P, E>, v: Vec<P>, d: P) {
     assert len(calls) == 4
     assert [call.target for call in calls] == [pm.id] * 4
     assert _call(report, source, "e.em()").target == em.id
-
 
 def test_option_ok_stays_opaque():
     source = """
@@ -5803,7 +5474,6 @@ fn f(v: Vec<P>) {
     assert _call(report, source, "x.pm()").target == pm.id
     assert _call(report, source, "w[0].pm()").target == pm.id
 
-
 def test_chunk_spelling_honors_declared_and_bound_methods():
     source = """
 struct P;
@@ -5829,7 +5499,6 @@ fn f(v: Vec<P>, w: W<P>) {
     assert _call(report, source, "w.chunks(2)").target == chunks.id
     assert _call(report, source, "c[0].qm()").target == qm.id
 
-
 def test_option_iter_as_ref_and_split_at():
     source = """
 struct P;
@@ -5850,7 +5519,6 @@ fn f(o: Option<P>, v: Vec<P>) {
     assert _call(report, source, "p.pm()").target == pm.id
     assert _call(report, source, "a[0].pm()").target == pm.id
     assert _call(report, source, "b[0].pm()").target == pm.id
-
 
 def test_preserving_adaptors_keep_the_element_type():
     source = """
@@ -5874,7 +5542,6 @@ fn f(v: Vec<P>) {
     assert len(calls) == 5
     for call in calls:
         assert call.target == pm.id
-
 
 def test_option_combinators_keep_the_payload():
     source = """
@@ -5906,7 +5573,6 @@ fn f(o: Option<P>, u: Option<P>, v: Option<Q>) {
     assert targets.count(pm.id) == 3
     assert sum(1 for t in targets if not t) == 1
 
-
 def test_smart_pointer_receivers_deref_to_the_payload():
     source = """
 struct P;
@@ -5935,122 +5601,33 @@ fn f(b: Box<P>, r: std::rc::Rc<P>, w: W<P>, m: std::sync::Mutex<P>) {
     assert not resolved["m.pm()"]
 
 
-def test_slice_and_array_option_heads():
-    source = """
-struct P;
-impl P { fn pm(&self) {} }
-fn f(s: &[P], a: [P; 4]) {
-    if let Some(p) = s.first() { p.pm(); }
-    if let Some(p) = a.last() { p.pm(); }
-    if let Some(p) = s.get(0) { p.pm(); }
-    match s.first() { Some(p) => p.pm(), None => {} }
-}
-"""
-    report = build_rust_bindings(source, pointer_width=64)
-    pm = _bindings(report, "pm", "associated_function")[0]
-    raw = source.encode()
-    calls = [
-        call for call in report.calls
-        if raw[call.span.start:call.span.end].decode() == "p.pm()"
-    ]
-    assert len(calls) == 4
-    for call in calls:
-        assert call.target == pm.id
-
-
-def test_get_mut_and_option_filter_heads():
-    source = """
-use std::collections::HashMap;
-struct P;
-impl P { fn pm(&self) {} }
-fn f(v: Vec<P>, m: HashMap<i32, P>, o: Option<P>) {
-    if let Some(p) = v.get_mut(0) { p.pm(); }
-    if let Some(p) = m.get_mut(&1) { p.pm(); }
-    if let Some(p) = o.filter(|x| true) { p.pm(); }
-}
-"""
-    report = build_rust_bindings(source, pointer_width=64)
-    pm = _bindings(report, "pm", "associated_function")[0]
-    raw = source.encode()
-    calls = [
-        call for call in report.calls
-        if raw[call.span.start:call.span.end].decode() == "p.pm()"
-    ]
-    assert len(calls) == 3
-    for call in calls:
-        assert call.target == pm.id
-
-
-def test_split_first_and_last_pair_payloads():
-    source = """
-struct P;
-impl P { fn pm(&self) {} }
-fn f(v: Vec<P>, s: &[P]) {
-    if let Some((h, rest)) = v.split_first() { h.pm(); rest[0].pm(); }
-    if let Some((l, rest)) = s.split_last() { l.pm(); rest[0].pm(); }
-}
-"""
-    report = build_rust_bindings(source, pointer_width=64)
-    pm = _bindings(report, "pm", "associated_function")[0]
-    raw = source.encode()
-    calls = [
-        call for call in report.calls
-        if raw[call.span.start:call.span.end].decode()
-        in {"h.pm()", "l.pm()", "rest[0].pm()"}
-    ]
-    assert len(calls) == 4
-    for call in calls:
-        assert call.target == pm.id
-
-def test_scoped_callee_return_spelled_in_decl_scope():
-    # `n::make() -> Box<P>` spells `P` in `n`'s scope — a same-named
-    # root `P` must not win the payload resolution.
-    source = """
-mod n {
-    pub struct P;
-    impl P { fn pm(&self) {} }
-    pub fn make() -> Box<P> { Box::new(P) }
-}
-struct P;
-fn g() { let b = n::make(); b.pm(); }
-"""
-    report = build_rust_bindings(source, pointer_width=64)
-    pm = _bindings(report, "pm", "associated_function")[0]
-    raw = source.encode()
-    calls = [
-        call for call in report.calls
-        if raw[call.span.start:call.span.end].decode() == "b.pm()"
-    ]
-    assert len(calls) == 1
-    assert calls[0].target == pm.id
-
-
-def test_struct_pattern_field_keeps_declared_head():
-    # `let m::W { opt } = w` binds `opt` to the field's declared
-    # `Option<T>` — a later `if let Some(q) = opt` still reads the
-    # `Option` head and resolves `m::Q` in the module's scope.
+def test_option_and_keeps_the_option_head_when_scopes_differ():
     source = """
 mod m {
-    pub struct W<T> { pub opt: Option<T> }
     pub struct Q;
-    impl Q { fn qm(&self) {} }
+    impl Q { pub fn qm(&self) {} }
 }
 struct Q;
-fn f() {
-    let w: m::W<m::Q> = todo!();
-    let m::W { opt } = w;
-    if let Some(q) = opt { q.qm(); }
+impl Q { fn qm(&self) {} }
+struct Is;
+impl Is { fn is_some(&self) {} }
+fn f(o: Option<m::Q>, u: Option<Q>) {
+    match o.and(u) { Some(q) => q.qm(), _ => () }
+    match u.and(o) { Some(q2) => q2.qm(), _ => () }
 }
 """
     report = build_rust_bindings(source, pointer_width=64)
-    qm = _bindings(report, "qm", "associated_function")[0]
+    qms = _bindings(report, "qm", "associated_function")
+    inner, outer = qms[0], qms[1]
     raw = source.encode()
-    calls = [
-        call for call in report.calls
-        if raw[call.span.start:call.span.end].decode() == "q.qm()"
-    ]
-    assert len(calls) == 1
-    assert calls[0].target == qm.id
+    resolved = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `o.and(u)` yields u's payload — the local `Q`.
+    assert resolved["q.qm()"] == outer.id, resolved
+    # `u.and(o)` yields o's payload — `m::Q`, not the local `Q`.
+    assert resolved["q2.qm()"] == inner.id, resolved
 
 def test_scoped_module_call_picks_its_own_function():
     source = """
@@ -6085,7 +5662,6 @@ fn g() {
         if call.target
     )
 
-
 def test_member_borrowing_a_container_keeps_the_container():
     source = """
 struct P;
@@ -6105,7 +5681,6 @@ fn f(w: &W) {
     report = build_rust_bindings(source, pointer_width=64)
     pm = _bindings(report, "pm", "associated_function")[0]
     assert sum(1 for c in report.calls if c.target == pm.id) == 3
-
 
 def test_pattern_field_args_resolve_in_the_declaring_module():
     source = """
@@ -6128,7 +5703,6 @@ fn f(w: m::W) {
     assert qm.id in targets
     assert stray.id not in targets
 
-
 def test_substituted_pattern_args_resolve_at_the_use_site():
     source = """
 mod m {
@@ -6150,7 +5724,6 @@ fn f(w: m::W<Q>) {
     assert qm.id in targets
     assert stray.id not in targets
 
-
 def test_borrowed_smart_pointer_return_resolves_in_member_scope():
     source = """
 struct P;
@@ -6170,7 +5743,6 @@ fn g() {
     targets = [c.target for c in report.calls]
     assert pm.id in targets
     assert stray.id not in targets
-
 
 def test_module_reexport_and_same_named_alias():
     source = """
@@ -6196,9 +5768,7 @@ fn g() {
     targets = [c.target for c in report.calls]
     assert p2m.id in targets
 
-
-
-def test_option_and_keeps_the_option_head_when_scopes_differ():
+def test_smart_pointer_receivers_bind_their_payload():
     source = """
 struct P;
 impl P { fn pm(&self) {} }
@@ -6225,7 +5795,6 @@ fn f(b: Box<P>, r: std::rc::Rc<P>, w: W<P>, m: std::sync::Mutex<P>) {
     assert not resolved["w.pm()"]
     assert not resolved["m.pm()"]
 
-
 def test_slice_and_array_option_heads():
     source = """
 struct P;
@@ -6248,7 +5817,6 @@ fn f(s: &[P], a: [P; 4]) {
     for call in calls:
         assert call.target == pm.id
 
-
 def test_get_mut_and_option_filter_heads():
     source = """
 use std::collections::HashMap;
@@ -6270,7 +5838,6 @@ fn f(v: Vec<P>, m: HashMap<i32, P>, o: Option<P>) {
     assert len(calls) == 3
     for call in calls:
         assert call.target == pm.id
-
 
 def test_split_first_and_last_pair_payloads():
     source = """
@@ -6315,7 +5882,6 @@ fn g() { let b = n::make(); b.pm(); }
     assert len(calls) == 1
     assert calls[0].target == pm.id
 
-
 def test_struct_pattern_field_keeps_declared_head():
     # `let m::W { opt } = w` binds `opt` to the field's declared
     # `Option<T>` — a later `if let Some(q) = opt` still reads the
@@ -6342,7 +5908,6 @@ fn f() {
     ]
     assert len(calls) == 1
     assert calls[0].target == qm.id
-
 
 def test_flatten_unwraps_the_iterated_element():
     source = """
@@ -6372,7 +5937,6 @@ fn f(v: Vec<Vec<P>>, o: Option<Vec<P>>, w: W<Vec<P>>, s: Vec<P>, n: Vec<Vec<Vec<
     )
     assert resolved == 5
 
-
 def test_flatten_array_elem_const_block_and_alias_scopes() -> None:
     source = """
 struct P;
@@ -6397,7 +5961,6 @@ fn f(v: Vec<&[P<{1; 2}>; 4]>, w: Vec<m::Row<P>>) {
     # `Row`'s `Q` was spelled in `mod m` — resolving it at the use
     # site would bind a different type, so the element stays opaque.
     assert _call(report, source, "q.wrong()").target == ""
-
 
 def test_flatten_alias_std_import_and_shadowed_params() -> None:
     source = """
@@ -6429,7 +5992,6 @@ fn f(v: Vec<Line<P>>, w: Vec<m::Row<P>>) {
     assert resolved == 2
     assert _call(report, source, "p.wrong()").target == ""
 
-
 def test_flatten_alias_to_custom_container_stays_opaque() -> None:
     source = """
 struct P;
@@ -6445,7 +6007,6 @@ fn f(v: Vec<Row<P>>) {
     # The alias target `Vec` resolves to the declared custom type —
     # flattening it as a std container would misbind `p.pm()`.
     assert _call(report, source, "p.pm()").target == ""
-
 
 def test_flatten_unwraps_array_refs_and_container_aliases():
     source = """
@@ -6467,7 +6028,6 @@ fn f(v: Vec<&[P; 2]>, w: Vec<Row<P>>) {
         and call.target == pm.id
     )
     assert resolved == 2
-
 
 def test_flatten_through_cloned_and_owned_containers():
     source = """
@@ -6491,7 +6051,6 @@ fn f(v: Vec<Vec<P>>, s: &[Vec<P>], o: Option<Vec<P>>) {
     )
     assert resolved == 4
 
-
 def test_let_bound_next_result_heads_some_patterns():
     source = """
 struct P;
@@ -6514,8 +6073,6 @@ fn f(v: Vec<P>, w: Vec<Vec<P>>) {
     )
     assert resolved == 2
 
-
-
 def test_borrowed_slice_return_keeps_the_substituted_element():
     source = """
 struct P;
@@ -6534,7 +6091,6 @@ fn f(w: W<P>) { w.sref()[0].pm(); }
     ]
     assert targets == [pm.id]
 
-
 def test_first_on_array_elements_keeps_the_array_shape():
     source = """
 struct P;
@@ -6552,7 +6108,6 @@ fn f(v: Vec<[P; 2]>) {
         if raw[call.span.start:call.span.end].decode() == "a[0].pm()"
     ]
     assert targets == [pm.id]
-
 
 def test_fixed_field_args_stay_in_the_declaring_module():
     source = """
@@ -6578,7 +6133,6 @@ fn f(w: m::W<P>) {
         if raw[call.span.start:call.span.end].decode() == "e.em()"
     ]
     assert targets == [em.id]
-
 
 def test_deref_clone_as_ref_payload_bindings() -> None:
     source = """
@@ -6614,7 +6168,6 @@ fn f(b: Box<P>, v: Vec<P>, o: Option<P>, s: &[P]) {
     )
     assert resolved_index == 2
 
-
 def test_option_and_drops_an_unspellable_payload():
     source = """
 fn g<Q>(x: Option<Q>) -> Option<Q> { x }
@@ -6635,7 +6188,6 @@ fn f<T>(o: Option<T>) {
     qm = _bindings(report, "qm", "associated_function")[0]
     assert _call(report, source, "q.qm()").target != qm.id
 
-
 def test_specialized_impl_matches_crate_qualified_args():
     source = """
 mod m {
@@ -6655,7 +6207,6 @@ fn f(o: Option<W<m::P>>, u: Option<W<m::P>>) {
     report = build_rust_bindings(source, pointer_width=64)
     pm = _bindings(report, "pm", "associated_function")[0]
     assert _call(report, source, "w.pm()").target == pm.id
-
 
 def test_crate_path_never_binds_a_generic_parameter():
     # A module fn's `g<P>` parameter shadows the module's own
@@ -6679,7 +6230,6 @@ fn f(o: Option<m::P>, u: Option<m::P>) {
     report = build_rust_bindings(source, pointer_width=64)
     pm = _bindings(report, "pm", "associated_function")[0]
     assert _call(report, source, "p.pm()").target == pm.id
-
 
 def test_impl_args_keep_relative_paths_distinct_from_bare_names():
     # `W<m::P>` and `W<P>` are different specializations — a
@@ -6708,7 +6258,6 @@ fn f(o: Option<W<P>>, u: Option<W<P>>) {
     pm = _bindings(report, "pm", "associated_function")[0]
     assert _call(report, source, "w.pm()").target == pm.id
 
-
 def test_specialized_impl_args_resolve_through_use_alias():
     # `use m::P` makes `P` an alias — `impl W<P>` is the same
     # specialization as `W<m::P>` and must answer for it.
@@ -6728,7 +6277,6 @@ fn f(w: W<m::P>) {
     report = build_rust_bindings(source, pointer_width=64)
     pm = _bindings(report, "pm", "associated_function")[0]
     assert _call(report, source, "w.pm()").target == pm.id
-
 
 def test_call_site_alias_does_not_rebind_impl_specialization():
     source = """
@@ -6759,7 +6307,6 @@ fn f() {
     assert _call(report, source, "w.qm()").target == qm.id
     assert _call(report, source, "w.pm()").target != pm.id
 
-
 def test_raw_pointer_args_distinguish_specializations():
     source = """
 struct P;
@@ -6786,7 +6333,6 @@ fn f(w: W<*mut P>) {
     assert _call(report, source, "w.mm()").target == mm.id
     assert _call(report, source, "w.cm()").target != cm.id
     assert _call(report, source, "w.pm()").target != pm.id
-
 
 def test_declared_conversion_args_resolve_in_the_member_scope():
     # `m::W::to_owned -> Vec<Vec<Q>>` — the `Q` spelled in the
