@@ -2192,12 +2192,49 @@ class _RustBindings:
             )
             return self._annotation_type(element)
         if node.type == "call_expression":
-            callee = node.child_by_field_name("function")
-            callee = None if callee is None else self._callee(callee)
+            callee_node = node.child_by_field_name("function")
+            callee = (
+                None if callee_node is None else self._callee(callee_node)
+            )
             if callee is not None and callee.type == "generic_function":
                 callee = callee.child_by_field_name("function")
             member = None
             receiver: "tuple[str | None, str | None]" = (None, None)
+            if (
+                callee is not None
+                and callee.type == "field_expression"
+                and callee_node is not None
+                and callee_node.type == "parenthesized_expression"
+            ):
+                # `(w.f)()` invokes the field's function pointer — a
+                # struct_field of that name shadows the method.
+                field, frecv_id, frecv_args = self._field_member_typed(
+                    callee, ("struct_field",)
+                )
+                if field is not None:
+                    fn_ret = (
+                        None
+                        if field.type_node is None
+                        else field.type_node.child_by_field_name(
+                            "return_type"
+                        )
+                    )
+                    if fn_ret is None:
+                        # `f: F` where `F: Deref<Target = fn()>` —
+                        # the field is not spelled as a function
+                        # pointer, so calling it stays opaque rather
+                        # than binding to F's own members.
+                        return None, None
+                    declared = self._member_declared_type(
+                        callee.child_by_field_name("value"),
+                        field,
+                        node.start_byte,
+                        (frecv_id, frecv_args),
+                        fn_ret,
+                    )
+                    return (
+                        (None, None) if declared is None else declared
+                    )
             if callee is not None and callee.type == "field_expression":
                 member, recv_id, recv_args = self._field_member_typed(
                     callee, ("associated_function",)
@@ -3895,6 +3932,7 @@ class _RustBindings:
         member: _Record,
         position: int,
         receiver: "tuple[str | None, str | None] | None" = None,
+        annotation: Any | None = None,
     ) -> "tuple[str | None, str | None] | None":
         """(type id, args) of a member's declared annotation with the
         receiver's generic arguments substituted — `W<T>` at `W<P>`
@@ -3928,7 +3966,7 @@ class _RustBindings:
             # receiver's args, not the struct's.
             param_map = self._impl_param_map(member, impl_args)
         type_id, args = self._field_annotation(
-            member.type_node,
+            member.type_node if annotation is None else annotation,
             param_map,
             pos,
             container,
@@ -4261,6 +4299,57 @@ class _RustBindings:
                 self._annotation_head_name(field.type_node),
                 position,
                 args_scope,
+            )
+        if node.type == "call_expression":
+            # `match m.get(k)` — the scrutinee's spelled head is the
+            # callee's declared return annotation, whose args
+            # resolve in the method's declaring scope. A turbofish
+            # (`m.get::<u8>()`) wraps the callee in generic_function.
+            callee_node = node.child_by_field_name("function")
+            callee = (
+                None if callee_node is None else self._callee(callee_node)
+            )
+            if (
+                callee is not None
+                and callee.type == "generic_function"
+            ):
+                callee = callee.child_by_field_name("function")
+            if (
+                callee is not None
+                and callee.type == "field_expression"
+                and callee_node is not None
+                and callee_node.type == "parenthesized_expression"
+            ):
+                # `match (w.f)()` calls the field's function pointer —
+                # the spelled head is the field's declared `fn`
+                # return, resolved in the field's declaring scope.
+                field = self._field_member(callee, ("struct_field",))
+                if field is None or field.type_node is None:
+                    return None, None, None
+                ret = field.type_node.child_by_field_name("return_type")
+                if ret is None:
+                    return None, None, None
+                return (
+                    self._annotation_head_name(ret),
+                    ret.start_byte,
+                    self._member_scope_for_args(
+                        callee.child_by_field_name("value"), field
+                    ),
+                )
+            member = (
+                self._field_member(callee, ("associated_function",))
+                if callee is not None
+                and callee.type == "field_expression"
+                else None
+            )
+            if member is None or member.type_node is None:
+                return None, None, None
+            return (
+                self._annotation_head_name(member.type_node),
+                member.type_node.start_byte,
+                self._member_scope_for_args(
+                    callee.child_by_field_name("value"), member
+                ),
             )
         if node.type != "identifier":
             return None, None, None
