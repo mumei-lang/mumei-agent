@@ -2772,17 +2772,25 @@ contract Derived is Base {}
 contract C {
     mapping(uint256 => Derived) byId;
     function take(Base b) external {}
-    function run() external { take(byId[0]); }
+    function take(uint256 x) external {}
+    function run() external { this.take(byId[0]); }
 }
 """
     report = build_sol_bindings(source)
-    # `byId[0]` is `Derived`-typed; it implicitly converts to `Base`
-    # for the call — a member overload set must not lose it.
-    take = next(b for b in report.bindings if b.name == "take")
-    assert any(
-        ref.binding_id == take.id and ref.kind == "call"
-        for ref in report.references
+    # `byId[0]` is `Derived`-typed; it implicitly converts to `Base`.
+    # The member overload set only survives on that conversion —
+    # `take(uint256)` cannot take a contract value.
+    take_overloads = sorted(
+        (b for b in report.bindings if b.name == "take"),
+        key=lambda b: b.span.start,
     )
+    assert len(take_overloads) == 2
+    call_refs = [
+        r
+        for r in report.references
+        if r.kind == "call" and r.binding_id == take_overloads[0].id
+    ]
+    assert len(call_refs) == 1
 
 
 def test_nested_mapping_value_type_resolves_in_declaring_scope():
