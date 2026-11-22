@@ -3707,20 +3707,17 @@ class _RustBindings:
             return self._element_of(None, inner, position)
         # A slice or array element exposes its own element type —
         # `&[[P; 2]]` reads first to `[P; 2]`, then to `P`.
-        bracket = re.fullmatch(
-            r"\[(.+?)(?:\s*;.+)?\]", elem_args
-        )
-        if bracket is not None:
-            # The element is an anonymous slice/array — it is indexed
-            # further by its own element (`[P; 2]` → `P`), not `P`.
+        if elem_args.startswith("[") and self._bracket_wraps(
+            elem_args
+        ):
+            inner = elem_args[1:-1].strip()
+            elem = self._array_elem(inner)
             # A slice element `[P]` resolves to `P` so member calls
             # on `a[0]` reach `P`'s members; an array `[P; N]` keeps
             # the spelled element for deeper indexing (`a[0][1]`).
-            if ";" not in bracket.group(0):
-                return self._spelled_type(
-                    bracket.group(1).strip(), position
-                )
-            return None, bracket.group(1).strip()
+            if elem == inner:
+                return self._spelled_type(elem, position)
+            return None, elem
         match = re.fullmatch(
             r"([A-Za-z_][\w:]*)\s*(?:<(.+)>)?", elem_args
         )
@@ -4295,11 +4292,14 @@ class _RustBindings:
             # Re-splitting a `&[P]`/`&mut [P]` keeps the same
             # slice — the spelling is not wrapped a second time.
             prefix = "&mut " if method == "split_at_mut" else "&"
-            pair = (
-                spelled
-                if spelled.startswith(prefix + "[")
-                else f"{prefix}[{spelled}]"
-            )
+            element = spelled
+            if element.startswith("&mut [") and element.endswith(
+                "]"
+            ):
+                element = element[6:-1]
+            elif element.startswith("&[") and element.endswith("]"):
+                element = element[2:-1]
+            pair = f"{prefix}[{element}]"
             return (
                 f"({pair}, {pair})",
                 self._receiver_annotation_position(receiver),
@@ -7342,12 +7342,11 @@ class _RustBindings:
                 spelled = spelled[1:-1].strip()
                 continue
             break
-        bracket = re.fullmatch(r"\[(.+?)(?:\s*;.+)?\]", spelled)
-        if bracket is not None:
-            # `[P; N]`/`[P]` — an anonymous array/slice carries its
-            # element type as the args spelling, same shape a resolved
-            # container's element keeps.
-            return None, bracket.group(1).strip()
+        if spelled.startswith("[") and self._bracket_wraps(spelled):
+            # `[P; N]`/`[P]`/`[[P; N]]` — an anonymous array/slice
+            # carries its element type as the args spelling, same
+            # shape a resolved container's element keeps.
+            return None, self._array_elem(spelled[1:-1])
         match = re.fullmatch(
             r"([A-Za-z_][\w:]*)\s*(?:<(.+)>)?", spelled
         )
@@ -7402,6 +7401,21 @@ class _RustBindings:
             if char == "(":
                 depth += 1
             elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    return index == len(spelled) - 1
+        return False
+
+    @staticmethod
+    def _bracket_wraps(spelled: str) -> bool:
+        """Whether `[...]` wraps the whole spelling — `[P], [Q]`
+        only starts and ends with brackets; the first one closes
+        early. Nested `[[P; N]]` counts as wrapped."""
+        depth = 0
+        for index, char in enumerate(spelled):
+            if char == "[":
+                depth += 1
+            elif char == "]":
                 depth -= 1
                 if depth == 0:
                     return index == len(spelled) - 1

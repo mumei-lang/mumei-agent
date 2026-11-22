@@ -7069,3 +7069,56 @@ fn f(mut v: Vec<P>, mut w: W<P>) {
     # A declared `W<T>::chunks_mut` wins over the std recipe.
     assert _call(report, source, "w.chunks_mut(2)").target == chunks_mut.id
     assert _call(report, source, "c[0].qm()").target == qm.id
+
+def test_mut_split_resplit_and_array_elements():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(mut v: Vec<P>, s: &mut [P], w: Vec<[P; 2]>) {
+    let (a, b) = v.split_at_mut(1);
+    b[0].pm();
+    let (c, d) = a.split_at(0);
+    c[0].pm();
+    let (e, g) = s.split_at_mut(0);
+    g[0].pm();
+    if let Some((h, rest)) = w.split_first_mut() { h[0].pm(); }
+    if let Some((h2, rest2)) = w.split_first() { h2[0].pm(); rest2[0][0].pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    wanted = {
+        "b[0].pm()", "c[0].pm()", "g[0].pm()", "h[0].pm()",
+        "h2[0].pm()", "rest2[0][0].pm()",
+    }
+    calls = [
+        call for call in report.calls
+        if raw[call.span.start:call.span.end].decode() in wanted
+    ]
+    assert len(calls) == 6
+    for call in calls:
+        assert call.target == pm.id
+
+def test_mut_split_option_element_binds_nested_some():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(v: Vec<Option<P>>, s: &mut [Option<P>]) {
+    if let Some((Some(p), rest)) = v.split_first_mut() { p.pm(); }
+    match s.split_last_mut() {
+        Some((Some(q), rest)) => { q.pm(); }
+        _ => {}
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    calls = [
+        call for call in report.calls
+        if raw[call.span.start:call.span.end].decode() in {"p.pm()", "q.pm()"}
+    ]
+    assert len(calls) == 2
+    for call in calls:
+        assert call.target == pm.id
