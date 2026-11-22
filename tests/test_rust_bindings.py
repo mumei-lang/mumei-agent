@@ -4781,3 +4781,71 @@ fn f(m: HashMap<K, V>) {
     v = _bindings(report, "v", "associated_function")[0]
     assert _call(report, source, "k.k()").target == k.id
     assert _call(report, source, "v.v()").target == v.id
+
+
+def test_tuple_pattern_binds_elements_by_position():
+    source = """\
+struct P;
+impl P { fn m(&self) {} }
+struct Q;
+impl Q { fn q(&self) {} }
+fn f(t: (P, Q)) {
+    let (a, b) = t;
+    a.m();
+    b.q();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = next(b for b in report.bindings if b.name == "m")
+    q = next(b for b in report.bindings if b.name == "q")
+    calls = [c for c in report.calls if source[c.span.start:c.span.end].endswith(("m()", "q()"))]
+    assert [c.target for c in calls] == [m.id, q.id]
+
+
+def test_tuple_pattern_in_match_and_nested_variant():
+    source = """\
+struct P;
+impl P { fn m(&self) {} }
+enum E { V(P), W }
+fn f(t: (E, P)) {
+    match t {
+        (E::V(p), _) => p.m(),
+        _ => (),
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = next(b for b in report.bindings if b.name == "m")
+    calls = [c for c in report.calls if source[c.span.start:c.span.end].endswith("m()")]
+    assert [c.target for c in calls] == [m.id]
+
+
+def test_tuple_pattern_rest_binds_last_element():
+    source = """\
+struct P;
+impl P { fn m(&self) {} }
+struct Q;
+impl Q { fn q(&self) {} }
+fn f(t: (P, P, Q)) {
+    let (h, .., last) = t;
+    last.q();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    q = next(b for b in report.bindings if b.name == "q")
+    calls = [c for c in report.calls if source[c.span.start:c.span.end].endswith("q()")]
+    assert [c.target for c in calls] == [q.id]
+
+
+def test_tuple_pattern_short_pattern_stays_unpinned():
+    source = """\
+struct P;
+impl P { fn m(&self) {} }
+fn f(t: (P, P, P)) {
+    let (a, b) = t;
+    a.m();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    calls = [c for c in report.calls if source[c.span.start:c.span.end].endswith("m()")]
+    assert calls and all(c.target in {"", None} for c in calls)

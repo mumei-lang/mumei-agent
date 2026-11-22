@@ -1292,6 +1292,14 @@ class _RustBindings:
             return None, re.sub(
                 r"\s+", " ", self.text(element)
             ).strip()
+        if node is not None and node.type == "tuple_type":
+            # `(P, Q)` carries no head type — its args key lists the
+            # element spellings so destructuring patterns can type
+            # each bound name by position.
+            return None, ", ".join(
+                re.sub(r"\s+", " ", self.text(child)).strip()
+                for child in self._children(node)
+            )
         if node is not None and node.type == "scoped_type_identifier":
             # `m::W<i32>` keeps its own type arguments — the scoped
             # node's field takes them when the loop did not.
@@ -4613,9 +4621,74 @@ class _RustBindings:
         scrut_name: str | None = None,
         scrut_position: int | None = None,
     ) -> dict:
-        if pattern is None or (scrut_id is None and scrut_name is None):
+        if pattern is None:
             return {}
         kind = pattern.type
+        if (
+            scrut_id is None
+            and scrut_name is None
+            and not (kind == "tuple_pattern" and scrut_args)
+        ):
+            return {}
+        if kind == "tuple_pattern":
+            # `let (a, b) = t` on `t: (P, Q)` types each name by the
+            # tuple's element at its position — the args key lists
+            # the element spellings (`_annotation_type`'s tuple arm).
+            spelled_args = (
+                "" if scrut_args is None else scrut_args.strip()
+            )
+            if (
+                spelled_args.startswith("(")
+                and spelled_args.endswith(")")
+            ):
+                # A nested tuple spells its elements in parens —
+                # `(A, B)` inside the parent's args key unwraps here.
+                spelled_args = spelled_args[1:-1]
+            elements = (
+                []
+                if not spelled_args
+                else self._type_arg_list(spelled_args)
+            )
+            # Positions count anonymous `_` too — `(_, b)` binds
+            # `b` to element 1, not 0.
+            slots = [
+                child
+                for child in pattern.children
+                if self.text(child).strip() not in {"(", ")", ","}
+                and child.type not in {"line_comment", "block_comment"}
+            ]
+            rest_at = next(
+                (
+                    index
+                    for index, child in enumerate(slots)
+                    if child.type == "remaining_field_pattern"
+                ),
+                None,
+            )
+            if rest_at is None and len(slots) != len(elements):
+                # `let (a, b) = t3` on a 3-tuple does not compile —
+                # an arity mismatch stays unpinned, not guessed.
+                return {}
+            mapping: dict = {}
+            for index, child in enumerate(slots):
+                if child.type in {"remaining_field_pattern", "_"}:
+                    continue
+                if not child.is_named or self.text(child).strip() == "_":
+                    continue
+                if rest_at is not None and index > rest_at:
+                    # `(a, .., z)` binds `z` to the LAST element.
+                    position = len(elements) - (len(slots) - index)
+                else:
+                    position = index
+                if position < 0 or position >= len(elements):
+                    continue
+                tid, fargs = self._spelled_type(
+                    elements[position], pattern.start_byte
+                )
+                mapping.update(
+                    self._pattern_type_map(child, tid, fargs)
+                )
+            return mapping
         if kind in {"identifier", "self"}:
             name = self._normalize_identifier(self.text(pattern))
             # An unresolvable scrutinee (`Option<P>` has no record)
@@ -4627,6 +4700,15 @@ class _RustBindings:
                 else _UNKNOWN
             )
             return {pattern.start_byte: (fact, scrut_args)}
+||||||| parent of 165a9939 (C06: type tuple-pattern bindings by the scrutinee's element types)
+        if kind in {"identifier", "self"}:
+            name = self._normalize_identifier(self.text(pattern))
+            return {
+                pattern.start_byte: (
+                    TypeFact("named", name, 0, None, scrut_id),
+                    scrut_args,
+                )
+            }
         if kind in {"ref_pattern", "mut_pattern"}:
             inner = next(
                 (
@@ -4668,6 +4750,16 @@ class _RustBindings:
                     )
                 )
             return mapping
+        if scrut_id is None:
+            return {}
+        if kind in {"identifier", "self"}:
+            name = self._normalize_identifier(self.text(pattern))
+            return {
+                pattern.start_byte: (
+                    TypeFact("named", name, 0, None, scrut_id),
+                    scrut_args,
+                )
+            }
         if kind == "struct_pattern":
             head = pattern.child_by_field_name("type")
             fields = self._pattern_head_fields(
