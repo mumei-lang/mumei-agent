@@ -23077,7 +23077,20 @@ class _Builder:
                         direct_ptr = self._param_pointer_state()
                         if not falls:
                             chan_origin_exits.append(direct_origins)
-                            ptr_exits.append(direct_ptr)
+                            # A clause that ends in return/goto/
+                            # continue never reaches post-state —
+                            # its end state is not a switch exit.
+                            if not (
+                                statements
+                                and statements[-1].type
+                                in {
+                                    "return_statement",
+                                    "goto_statement",
+                                    "continue_statement",
+                                    "break_statement",
+                                }
+                            ):
+                                ptr_exits.append(direct_ptr)
                             self._join(scope, branch, params)
                             self._join_ptr(ptr_branch, params)
                             branch = None
@@ -23146,7 +23159,17 @@ class _Builder:
                         chan_origin_exits.extend(
                             [chain_origins, fresh_origins]
                         )
-                        ptr_exits.extend([chain_ptr, fresh_ptr])
+                        if not (
+                            statements
+                            and statements[-1].type
+                            in {
+                                "return_statement",
+                                "goto_statement",
+                                "continue_statement",
+                                "break_statement",
+                            }
+                        ):
+                            ptr_exits.extend([chain_ptr, fresh_ptr])
                         self._join(scope, branch, params)
                         self._join_ptr(ptr_branch, params)
                         branch = None
@@ -23836,10 +23859,26 @@ class _Builder:
                         ),
                         None,
                     )
+                    clause_stmts = (
+                        _children(body) if body is not None else []
+                    )
                     self._branch_sequence(
-                        _children(body) if body is not None else [],
+                        clause_stmts,
                         fn, params, branch, transfers,
                         count, deps, saw_return, conditional,
+                    )
+                    # A clause that ends in return/goto/continue
+                    # never reaches post-state — its end state is
+                    # not a select exit.
+                    clause_reaches_post = not (
+                        clause_stmts
+                        and clause_stmts[-1].type
+                        in {
+                            "return_statement",
+                            "goto_statement",
+                            "continue_statement",
+                            "break_statement",
+                        }
                     )
                     for bid, bdeps in branch.items():
                         joined[bid] = joined.get(
@@ -23856,9 +23895,10 @@ class _Builder:
                     clause_origins.append(
                         dict(self._chan_chan_param_origins)
                     )
-                    clause_ptr_states.append(
-                        self._param_pointer_state()
-                    )
+                    if clause_reaches_post:
+                        clause_ptr_states.append(
+                            self._param_pointer_state()
+                        )
                 self._chan_chan_param_origins = (
                     self._merge_chan_chan_param_origin_states(
                         *clause_origins
