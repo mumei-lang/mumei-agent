@@ -120,6 +120,7 @@ def test_schedule_runs_fallback_and_emits_descriptor(inputs, capsys):
     assert set(doc["attempts"][0]["enforcement"]) == {
         "environment",
         "network",
+        "filesystem",
         "memory_bound_mb",
     }
     assert "FAKE_PRIVATE" not in capsys.readouterr().out + repr(doc)

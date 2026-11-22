@@ -135,6 +135,7 @@ def schedule_with_runner_stub(monkeypatch, registry, ids, argv_map, **kwargs):
         received.append(dict(run_kwargs))
         run_kwargs["memory_bound_mb"] = None
         run_kwargs["isolate_network"] = False
+        run_kwargs["isolate_filesystem_write"] = False
         return actual_run(request, child_argv, **run_kwargs)
 
     monkeypatch.setattr(runner, "run", run_stub)
@@ -222,38 +223,66 @@ def test_schedule_helper_scrubs_environment_when_permissions_are_undeclared(
     (
         "required_permissions",
         "allowed_permissions",
-        "enforceable",
+        "network_enforceable",
+        "filesystem_enforceable",
         "expected_environment",
         "expected_network",
+        "expected_filesystem",
     ),
     [
         (
             frozenset(),
             frozenset(),
             True,
+            True,
             "minimal",
+            "isolated",
             "isolated",
         ),
         (
             frozenset(),
             frozenset(),
             False,
+            False,
             "minimal",
+            "unenforced",
             "unenforced",
         ),
         (
             frozenset({"environment.read", "network.connect"}),
             frozenset({"environment.read", "network.connect"}),
             True,
+            True,
             "inherited",
             "permitted",
+            "isolated",
         ),
         (
             frozenset(),
             frozenset({"network.connect"}),
             True,
+            True,
             "minimal",
             "isolated",
+            "isolated",
+        ),
+        (
+            frozenset(),
+            frozenset({"filesystem.write"}),
+            True,
+            True,
+            "minimal",
+            "isolated",
+            "isolated",
+        ),
+        (
+            frozenset({"filesystem.write"}),
+            frozenset({"filesystem.write"}),
+            True,
+            True,
+            "minimal",
+            "isolated",
+            "permitted",
         ),
     ],
     ids=[
@@ -261,15 +290,19 @@ def test_schedule_helper_scrubs_environment_when_permissions_are_undeclared(
         "undeclared-and-unenforceable",
         "environment-and-network-declared-and-allowed",
         "network-allowed-but-not-declared",
+        "filesystem-allowed-but-not-declared",
+        "filesystem-declared-and-allowed",
     ],
 )
 def test_schedule_records_and_dispatches_effective_enforcement(
     monkeypatch,
     required_permissions,
     allowed_permissions,
-    enforceable,
+    network_enforceable,
+    filesystem_enforceable,
     expected_environment,
     expected_network,
+    expected_filesystem,
 ):
     registry = AdapterRegistry()
     registry.register(
@@ -279,7 +312,12 @@ def test_schedule_records_and_dispatches_effective_enforcement(
     real_dispatch = attempt_schedule.dispatch_attempt
 
     def record_dispatch(sequence, child_argv, **kwargs):
-        requested_isolation.append(kwargs["isolate_network"])
+        requested_isolation.append(
+            (
+                kwargs["isolate_network"],
+                kwargs["isolate_filesystem_write"],
+            )
+        )
         kwargs["isolate_network"] = False
         kwargs["isolate_filesystem_write"] = False
         return real_dispatch(sequence, child_argv, **kwargs)
@@ -288,7 +326,12 @@ def test_schedule_records_and_dispatches_effective_enforcement(
     monkeypatch.setattr(
         attempt_schedule,
         "network_isolation_enforceable",
-        lambda: enforceable,
+        lambda: network_enforceable,
+    )
+    monkeypatch.setattr(
+        attempt_schedule,
+        "filesystem_write_isolation_enforceable",
+        lambda: filesystem_enforceable,
     )
     monkeypatch.setattr(
         attempt_schedule,
@@ -308,13 +351,17 @@ def test_schedule_records_and_dispatches_effective_enforcement(
     assert enforcement == {
         "environment": expected_environment,
         "network": expected_network,
+        "filesystem": expected_filesystem,
         "memory_bound_mb": None,
     }
+    assert requested_isolation == [
+        (
+            enforcement["network"] == "isolated",
+            enforcement["filesystem"] == "isolated",
+        )
+    ]
     assert len(runner_calls) == 1
     assert runner_calls[0]["memory_bound_mb"] == enforcement["memory_bound_mb"]
-    assert runner_calls[0]["isolate_network"] is (
-        enforcement["network"] == "isolated"
-    )
     if enforcement["environment"] == "inherited":
         assert runner_calls[0]["environment"] is None
     else:
@@ -446,6 +493,8 @@ def test_network_isolation_predicate_treats_unspecified_policy_as_denied():
 
 
 def test_filesystem_write_isolation_predicate_rejects_disallowed_permission():
+    # Explicit permission mismatches are filtered before dispatch, so
+    # exercise the enforcement predicate with a plan snapshot.
     registry = AdapterRegistry()
     registry.register(
         descriptor("alpha", required_permissions=frozenset())
@@ -504,25 +553,26 @@ def test_network_isolation_predicate_rejects_disallowed_permission():
 
 
 @pytest.mark.parametrize(
-    ("environment", "network", "memory_bound_mb"),
+    ("environment", "network", "filesystem", "memory_bound_mb"),
     [
-        ("scrubbed", "isolated", None),
-        ("minimal", "missing", None),
-        ("minimal", "isolated", 0),
-        ("minimal", "isolated", True),
-        ("minimal", "isolated", 1.0),
-        (None, "isolated", None),
+        ("scrubbed", "isolated", "isolated", None),
+        ("minimal", "missing", "isolated", None),
+        ("minimal", "isolated", "missing", None),
+        ("minimal", "isolated", "isolated", 0),
+        ("minimal", "isolated", "isolated", True),
+        ("minimal", "isolated", "isolated", 1.0),
+        (None, "isolated", "isolated", None),
     ],
 )
 def test_dispatch_enforcement_rejects_invalid_values(
-    environment, network, memory_bound_mb
+    environment, network, filesystem, memory_bound_mb
 ):
     with pytest.raises(ValueError, match="invalid dispatch enforcement"):
-        DispatchEnforcement(environment, network, memory_bound_mb)
+        DispatchEnforcement(environment, network, filesystem, memory_bound_mb)
 
 
 def test_schedule_entry_validates_and_serializes_enforcement():
-    enforcement = DispatchEnforcement("minimal", "isolated", 64)
+    enforcement = DispatchEnforcement("minimal", "isolated", "isolated", 64)
     entry = ScheduledAttemptEntry(
         ordinal=1,
         adapter_id="alpha",
@@ -536,6 +586,7 @@ def test_schedule_entry_validates_and_serializes_enforcement():
     assert entry.to_dict()["enforcement"] == {
         "environment": "minimal",
         "network": "isolated",
+        "filesystem": "isolated",
         "memory_bound_mb": 64,
     }
     with pytest.raises(ValueError, match="invalid schedule entry enforcement"):
@@ -548,6 +599,16 @@ def test_schedule_entry_validates_and_serializes_enforcement():
             exit_code=0,
             enforcement={},
         )
+    not_dispatched = ScheduledAttemptEntry(
+        ordinal=1,
+        adapter_id="alpha",
+        plan_fingerprint="a" * 64,
+        request_fingerprint=None,
+        terminal_state=NOT_DISPATCHED,
+        exit_code=None,
+        enforcement=None,
+    )
+    assert not_dispatched.to_dict()["enforcement"] is None
     with pytest.raises(ValueError, match="not-dispatched"):
         ScheduledAttemptEntry(
             ordinal=1,

@@ -121,6 +121,7 @@ def _plan_fingerprint(plan: VerificationPlan) -> str:
 class DispatchEnforcement:
     environment: str
     network: str
+    filesystem: str
     memory_bound_mb: int | None
 
     def __post_init__(self) -> None:
@@ -129,6 +130,8 @@ class DispatchEnforcement:
             or self.environment not in {"inherited", "minimal"}
             or type(self.network) is not str
             or self.network not in {"permitted", "isolated", "unenforced"}
+            or type(self.filesystem) is not str
+            or self.filesystem not in {"permitted", "isolated", "unenforced"}
             or (
                 self.memory_bound_mb is not None
                 and (
@@ -143,6 +146,7 @@ class DispatchEnforcement:
         return {
             "environment": self.environment,
             "network": self.network,
+            "filesystem": self.filesystem,
             "memory_bound_mb": self.memory_bound_mb,
         }
 
@@ -573,6 +577,13 @@ def run_attempt_schedule(
                 network_isolation_required
                 and network_isolation_enforceable()
             )
+            filesystem_write_isolation_required = _filesystem_write_isolated(
+                plan
+            )
+            isolate_filesystem_write = (
+                filesystem_write_isolation_required
+                and filesystem_write_isolation_enforceable()
+            )
             enforcement = DispatchEnforcement(
                 environment=(
                     "inherited" if environment_arg is None else "minimal"
@@ -582,6 +593,13 @@ def run_attempt_schedule(
                     if not network_isolation_required
                     else "isolated"
                     if isolate
+                    else "unenforced"
+                ),
+                filesystem=(
+                    "permitted"
+                    if not filesystem_write_isolation_required
+                    else "isolated"
+                    if isolate_filesystem_write
                     else "unenforced"
                 ),
                 memory_bound_mb=memory_arg,
@@ -600,10 +618,7 @@ def run_attempt_schedule(
                 # Without a host namespace boundary this remains
                 # unenforced, like the memory-budget fallback.
                 isolate_network=isolate,
-                isolate_filesystem_write=(
-                    _filesystem_write_isolated(plan)
-                    and filesystem_write_isolation_enforceable()
-                ),
+                isolate_filesystem_write=isolate_filesystem_write,
                 # No declared feed means a closed pipe — a scheduled child
                 # must never inherit the parent's stdin and block on it.
                 feed_bytes=feed if feed is not None else b"",

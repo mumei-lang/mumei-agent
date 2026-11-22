@@ -213,11 +213,12 @@ acceptance is unchanged.
 
 Each dispatched schedule entry has an additive `enforcement` object with
 `environment` (`inherited` or `minimal`), `network` (`permitted`,
-`isolated` or `unenforced`) and `memory_bound_mb` (an integer or `null`).
-It reports what the runner was asked to apply; `unenforced` means the host
-lacks the network namespace boundary. `filesystem.*` and `process.spawn`
-are omitted because they are not enforced. This is not a sandbox or
-Evidence and does not change selection.
+`isolated` or `unenforced`), `filesystem` (`permitted`, `isolated` or
+`unenforced`) and `memory_bound_mb` (an integer or `null`). It reports what
+the runner was asked to apply; `unenforced` means the host lacks the
+corresponding network namespace or read-only mount boundary.
+`filesystem.read` and `process.spawn` are omitted because they are not
+enforced. This is not a sandbox or Evidence and does not change selection.
 
 ### C04 permission enforcement for availability probes
 
