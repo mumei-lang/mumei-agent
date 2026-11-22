@@ -271,6 +271,25 @@ def test_noncanonical_whitespace_is_rejected(tmp_path):
         read_plan_history(str(path))
 
 
+def test_extremely_nested_plan_is_rejected_with_value_error(tmp_path):
+    path = tmp_path / "history.jsonl"
+    depth = 100_000
+    nested = b"[" * depth + b"0" + b"]" * depth
+    path.write_bytes(
+        b'{"digest":"'
+        + b"0" * 64
+        + b'","index":0,"plan":{"deep":'
+        + nested
+        + b',"schema_version":"mumei.verification-plan/v1"},'
+        + b'"prev_digest":null,"schema_version":"'
+        + plan_history_log.ENTRY_SCHEMA.encode()
+        + b'"}\n'
+    )
+
+    with pytest.raises(ValueError):
+        read_plan_history(str(path))
+
+
 def test_corrupted_log_refuses_append_without_changing_file_bytes(tmp_path):
     path = tmp_path / "history.jsonl"
     path.write_bytes(b'{"sentinel-plan-history-content":')

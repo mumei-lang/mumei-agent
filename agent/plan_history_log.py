@@ -97,7 +97,11 @@ def _read_entries(
             raise ValueError(_INVALID_LOG) from None
         if type(entry) is not dict or set(entry) != _ENTRY_KEYS:
             raise ValueError(_INVALID_ENTRY)
-        if _canonical_json(entry) + b"\n" != line:
+        try:
+            canonical_entry = _canonical_json(entry)
+        except (RecursionError, ValueError):
+            raise ValueError(_INVALID_ENTRY) from None
+        if canonical_entry + b"\n" != line:
             raise ValueError(_INVALID_ENTRY)
         if entry["schema_version"] != ENTRY_SCHEMA:
             raise ValueError(_INVALID_ENTRY)
@@ -113,7 +117,11 @@ def _read_entries(
         if not _is_digest(digest):
             raise ValueError(_INVALID_ENTRY)
         unsigned = {key: value for key, value in entry.items() if key != "digest"}
-        if hashlib.sha256(_canonical_json(unsigned)).hexdigest() != digest:
+        try:
+            computed_digest = hashlib.sha256(_canonical_json(unsigned)).hexdigest()
+        except (RecursionError, ValueError):
+            raise ValueError(_INVALID_ENTRY) from None
+        if computed_digest != digest:
             raise ValueError(_INVALID_ENTRY)
 
         entries.append(entry)
