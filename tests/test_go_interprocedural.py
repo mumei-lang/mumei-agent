@@ -32666,6 +32666,47 @@ def test_value_struct_scalar_array_callee_mixed_writes_keep_x(
         assert result.return_dependencies == frozenset({0, 1})
 
 
+def test_value_struct_scalar_array_promoted_pointer_fields_stay_closed(
+    go_types_helper,
+):
+    declarations = (
+        "type EmbedB struct { R [2]int64 }\n"
+        "type EmbedOuter struct { *EmbedB; A []int64 }\n"
+    )
+    read = named(
+        *unit(
+            go_types_helper,
+            declarations
+            + "func F(s EmbedOuter, i int64) int64 { return s.R[i] }\n",
+        )
+    )
+    whole_store = named(
+        *unit(
+            go_types_helper,
+            declarations
+            + "func G(s EmbedOuter) { s.R = [2]int64{1, 2} }\n"
+            "func F(s EmbedOuter) int64 { G(s); return s.R[0] }\n",
+        )
+    )
+    element_store = named(
+        *unit(
+            go_types_helper,
+            declarations
+            + "func G(s EmbedOuter, x int64) { s.R[0] = x }\n"
+            "func F(s EmbedOuter, x int64) int64 {\n"
+            "\tG(s, x)\n"
+            "\treturn s.R[0]\n"
+            "}\n",
+        )
+    )
+    assert not read.available
+    assert read.gaps[0].reason == "non_parameter_reference"
+    assert not whole_store.available
+    assert whole_store.gaps[0].reason == "callee_unsupported"
+    assert not element_store.available
+    assert element_store.gaps[0].reason == "callee_unsupported"
+
+
 def test_caller_backing_transfer_survives_param_slice_reseat(
     go_types_helper,
 ):

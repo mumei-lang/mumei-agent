@@ -3181,6 +3181,13 @@ class _Builder:
                 member is None
                 or member.type is None
                 or member.name.encode("utf-8") != field.text
+                or member.id
+                not in {
+                    direct_member.id
+                    for direct_member in self._struct_fields_for_fact(
+                        fact
+                    )
+                }
             ):
                 return None
             members.append(member)
