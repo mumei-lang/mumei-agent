@@ -32540,6 +32540,40 @@ def test_value_struct_scalar_array_field_operations_match_alias(
         assert direct_result.return_dependencies == expected
 
 
+@pytest.mark.parametrize(
+    ("binding", "term"),
+    [
+        ("i := range", "int64(i)"),
+        ("_, v := range", "v"),
+    ],
+    ids=["index", "value"],
+)
+def test_value_struct_scalar_array_range_parentheses_match_plain(
+    go_types_helper, binding, term
+):
+    declarations = "type Sz struct { R [2]int64 }\n"
+
+    def result_for(operand):
+        return named(
+            *unit(
+                go_types_helper,
+                declarations
+                + "func F(o Sz) int64 {\n"
+                + "\tsum := int64(0)\n"
+                + f"\tfor {binding} {operand} {{ sum += {term} }}\n"
+                + "\treturn sum\n"
+                + "}\n",
+            )
+        )
+
+    plain = result_for("o.R")
+    parenthesized = result_for("(o.R)")
+    assert plain.available, plain.gaps
+    assert parenthesized.available, parenthesized.gaps
+    assert parenthesized.return_dependencies == plain.return_dependencies
+    assert parenthesized.effects == plain.effects
+
+
 def test_value_struct_scalar_array_field_updates_are_weak(
     go_types_helper,
 ):

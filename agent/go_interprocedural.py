@@ -21986,25 +21986,45 @@ class _Builder:
                 computed_pointer_result = False
                 opaque_range = None
                 opaque_range_field = None
+                range_field_operand = right
+                while (
+                    range_field_operand is not None
+                    and range_field_operand.type
+                    == "parenthesized_expression"
+                ):
+                    range_field_operand = next(
+                        (
+                            child
+                            for child in range_field_operand.named_children
+                            if child.type != "comment"
+                        ),
+                        None,
+                    )
                 if (
-                    right is not None
+                    range_field_operand is not None
                     and member is None
                     and container_var is None
-                    and right.type in {
+                    and range_field_operand.type in {
                         "selector_expression", "field_expression"
                     }
                 ):
-                    opaque_range_field = (
-                        self._opaque_container_field_target(
-                            right,
-                            params,
-                            allow_struct_elements=True,
+                    if (
+                        right is not None
+                        and right.type in {
+                            "selector_expression", "field_expression"
+                        }
+                    ):
+                        opaque_range_field = (
+                            self._opaque_container_field_target(
+                                right,
+                                params,
+                                allow_struct_elements=True,
+                            )
                         )
-                    )
                     if opaque_range_field is None:
                         value_array_field = (
                             self._value_struct_scalar_array_field_target(
-                                right, params
+                                range_field_operand, params
                             )
                         )
                         if value_array_field is not None:
@@ -22622,7 +22642,7 @@ class _Builder:
                     value_deps = frozenset()
                     if opaque_range_field is not None:
                         value_deps = self.expression(
-                            right, fn, params, scope, transfers,
+                            range_field_operand, fn, params, scope, transfers,
                             count, 0,
                         ) | self._opaque_container_deps(
                             opaque_range_field[0], scope
