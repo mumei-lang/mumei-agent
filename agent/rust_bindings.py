@@ -87,6 +87,7 @@ _SLICE_OPTION_METHODS = frozenset({"get", "first", "last"})
 # `Result<P, E>`, `err` reads E); -1 is the last arg.
 _OPTION_HEAD_METHODS = {
     "get": ("&", {"Vec", "VecDeque", "HashMap", "BTreeMap"}, -1),
+    "get_mut": ("&mut ", {"Vec", "VecDeque", "HashMap", "BTreeMap"}, -1),
     "first": ("&", {"Vec"}, -1),
     "last": ("&", {"Vec"}, -1),
     "pop": ("", {"Vec"}, -1),
@@ -108,6 +109,7 @@ _OPTION_HEAD_METHODS = {
     "as_mut": ("&mut ", {"Option"}, 0),
     # `o.and(o2)`/`o.or(o2)`/`o.xor(o2)` still yield `Option<P>` —
     # the payload index keeps the receiver's own first arg.
+    "filter": ("", {"Option"}, 0),
     "and": ("", {"Option"}, 0),
     "or": ("", {"Option"}, 0),
     "xor": ("", {"Option"}, 0),
