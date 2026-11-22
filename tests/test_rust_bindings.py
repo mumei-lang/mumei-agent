@@ -5335,3 +5335,130 @@ fn h() {
         if source[c.span.start : c.span.end].endswith(("m()", "q()"))
     ]
     assert [c.target for c in calls] == [m.id, m.id, m.id, m.id, q.id]
+
+
+def test_for_tuple_pattern_binds_zipped_elements() -> None:
+    source = """
+struct P;
+struct Q;
+impl P { fn p(&self) {} }
+impl Q { fn q(&self) {} }
+fn f(v: Vec<P>, u: Vec<Q>, w: Vec<Vec<P>>) {
+    for (a, b) in v.iter().zip(u.iter()) { a.p(); b.q(); }
+    for (x, y) in w.iter().zip(u.iter()) { x[0].p(); }
+    for (a, b) in v.iter().rev().zip(u.iter().take(2)) { a.p(); b.q(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    p = _bindings(report, "p", "associated_function")[0]
+    q = _bindings(report, "q", "associated_function")[0]
+    assert _call(report, source, "a.p()").target == p.id
+    assert _call(report, source, "b.q()").target == q.id
+    assert _call(report, source, "x[0].p()").target == p.id
+
+
+def test_for_tuple_pattern_binds_zipped_map_pair() -> None:
+    source = """
+struct P;
+struct Q;
+impl P { fn p(&self) {} }
+impl Q { fn q(&self) {} }
+use std::collections::HashMap;
+fn f(m: HashMap<Q, P>, v: Vec<P>) {
+    for ((k, val), o) in m.iter().zip(v.iter()) {
+        k.q(); val.p(); o.p();
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    p = _bindings(report, "p", "associated_function")[0]
+    q = _bindings(report, "q", "associated_function")[0]
+    assert _call(report, source, "k.q()").target == q.id
+    assert _call(report, source, "val.p()").target == p.id
+    assert _call(report, source, "o.p()").target == p.id
+
+
+def test_tuple_index_on_spelled_zip_pair_binding() -> None:
+    source = """
+struct P;
+struct Q;
+impl P { fn m(&self) {} }
+impl Q { fn q(&self) {} }
+fn f(a: Vec<P>, b: Vec<Q>) {
+    for p in a.iter().zip(b.iter()) {
+        p.0.m();
+        p.1.q();
+    }
+    for t in a.iter().enumerate() {
+        t.1.m();
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = _bindings(report, "m", "associated_function")[0]
+    q = _bindings(report, "q", "associated_function")[0]
+    assert _call(report, source, "p.0.m()").target == m.id
+    assert _call(report, source, "p.1.q()").target == q.id
+    assert _call(report, source, "t.1.m()").target == m.id
+
+
+def test_zip_named_tuple_struct_args_not_fields():
+    source = """
+struct P;
+struct Q;
+impl P { fn pm(&self) {} }
+impl Q { fn qm(&self) {} }
+struct W<T>(Q, T);
+fn f(w: W<(P, Q)>) {
+    w.0.qm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    qm = _bindings(report, "qm", "associated_function")[0]
+    call = _call(report, source, "w.0.qm()")
+    # `W<T>(Q, T)` declares field 0 as `Q` — the generic args are not
+    # field types, so the receiver never spells `P`.
+    assert call.target in {"", qm.id}
+    assert call.target != _bindings(
+        report, "pm", "associated_function"
+    )[0].id
+
+
+def test_zip_custom_container_stays_opaque():
+    source = """
+struct P;
+struct Q;
+impl P { fn pm(&self) {} }
+impl Q { fn qm(&self) {} }
+struct W<T>(T);
+fn f(w: W<P>, v: Vec<Q>) {
+    for (a, b) in w.iter().zip(v.iter()) {
+        a.pm();
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    # `W<P>` can Deref to `[Q]` — its args are not the element type.
+    assert _call(report, source, "a.pm()").target != pm.id
+
+
+def test_zip_element_resolves_at_annotation_scope():
+    source = """
+mod outer { pub struct P; impl P { pub fn pm(&self) {} } }
+use outer::P;
+fn f(arg: Vec<P>, v: Vec<u8>) {
+    {
+        struct P;
+        impl P { fn other(&self) {} }
+        for (a, b) in arg.iter().zip(v.iter()) {
+            a.pm();
+        }
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    # `arg`'s `P` was written in the signature — the inner block's
+    # `struct P` must not shadow the spelled element.
+    assert _call(report, source, "a.pm()").target == pm.id
