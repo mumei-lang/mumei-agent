@@ -5035,6 +5035,15 @@ deps. A computed receiver (`g().M`) records nothing — calls
 through it keep the `indirect_or_selector` record closed like
 before.
 
+When the bound receiver carries recorded function-field closures,
+`f := s.M` also freezes those field-member ids at bind time. Calls
+through `f`, including deferred/goroutine calls and supported
+function-parameter callbacks, re-resolve the member captures at
+invocation time and fold queued writes while retaining external-capable
+effects. Receiver values without recorded function fields keep the
+ordinary bound-method path; method-value escapes to other consumers
+stay `unsupported_expression`.
+
 ### C06 imported method calls on concrete named types
 
 A method call `recv.M(args)` now classifies as `direct_import` when

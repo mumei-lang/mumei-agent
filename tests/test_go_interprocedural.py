@@ -45244,6 +45244,252 @@ def test_bound_method_value_chan_receiver_send_broadcasts(
     assert result.return_dependencies == frozenset({0, 1})
 
 
+def test_bound_method_value_propagates_receiver_func_field_records(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "type S struct { F func() int64 }\n"
+        "type T struct { F func() int64 }\n"
+        "type W struct { F func() }\n"
+        "type N struct { F func() int64; V int64 }\n"
+        "type I interface { Get() int64 }\n"
+        "func (s S) Run() int64 { return s.F() }\n"
+        "func (s S) RunArg(a int64) int64 { return s.F() }\n"
+        "func (s *S) PtrRun() int64 { return s.F() }\n"
+        "func (t T) RunArg(a int64) int64 { return t.F() }\n"
+        "func (w W) Run() { w.F() }\n"
+        "func (n N) Get() int64 { return n.V }\n"
+        "func apRead(cb func() int64) int64 { return cb() }\n"
+        "func apArg(cb func(int64) int64, a int64) int64 { return cb(a) }\n"
+        "func apWrite(cb func()) { cb() }\n"
+        "func bump(p *int64, x int64) int64 { *p = x; return x }\n"
+        "func FReadDirect(x, y int64) int64 {\n"
+        "\tv := y; var s S; s.F = func() int64 { return v }; v = x\n"
+        "\treturn s.Run()\n}\n"
+        "func FReadBound(x, y int64) int64 {\n"
+        "\tv := y; var s S; s.F = func() int64 { return v }; f := s.Run; v = x\n"
+        "\treturn f()\n}\n"
+        "func FReadComposite(x, y int64) int64 {\n"
+        "\tv := y; s := S{F: func() int64 { return v }}; f := s.Run; v = x\n"
+        "\treturn f()\n}\n"
+        "func FReadVar(x, y int64) int64 {\n"
+        "\tv := y; var s S; s.F = func() int64 { return v }; var f = s.Run; v = x\n"
+        "\treturn f()\n}\n"
+        "func FReadAssign(x, y int64) int64 {\n"
+        "\tv := y; var s S; s.F = func() int64 { return v }; var f func() int64; f = s.Run; v = x\n"
+        "\treturn f()\n}\n"
+        "func FReadPtrValue(x, y int64) int64 {\n"
+        "\tv := y; var s S; s.F = func() int64 { return v }; f := s.PtrRun; v = x\n"
+        "\treturn f()\n}\n"
+        "func FReadPtrPointer(p *S, x, y int64) int64 {\n"
+        "\tv := y; p.F = func() int64 { return v }; f := p.PtrRun; v = x\n"
+        "\treturn f()\n}\n"
+        "func FReadAlias(x, y int64) int64 {\n"
+        "\tv := y; var s S; s.F = func() int64 { return v }; f := s.Run; g := f; v = x\n"
+        "\treturn g()\n}\n"
+        "func FReadFrozen(x, y, z int64) int64 {\n"
+        "\tv := y; var s S; s.F = func() int64 { return v }; f := s.Run\n"
+        "\ts.F = func() int64 { return z }; v = x\n"
+        "\treturn f()\n}\n"
+        "func FReadSwap(x, y int64) int64 {\n"
+        "\tvar s S; s.F = func() int64 { return x }; var t T; t.F = func() int64 { return y }\n"
+        "\tf := s.RunArg; g := t.RunArg; f, g = g, f\n"
+        "\treturn g(0)\n}\n"
+        "func FReadConditional(c bool, x, y int64) int64 {\n"
+        "\tvar s S; s.F = func() int64 { return x }; f := s.RunArg\n"
+        "\tif c { var t T; t.F = func() int64 { return y }; f = t.RunArg }\n"
+        "\treturn f(0)\n}\n"
+        "func FWrite(x int64) int64 {\n"
+        "\tw := int64(0); var s W; s.F = func() { w = x }; f := s.Run; f()\n"
+        "\treturn w\n}\n"
+        "func FWriteDirect(x int64) int64 {\n"
+        "\tw := int64(0); var s W; s.F = func() { w = x }; s.Run()\n"
+        "\treturn w\n}\n"
+        "func FCallbackSelector(x, y int64) int64 {\n"
+        "\tv := y; var s S; s.F = func() int64 { return v }; v = x\n"
+        "\treturn apRead(s.Run)\n}\n"
+        "func FCallbackBound(x, y int64) int64 {\n"
+        "\tv := y; var s S; s.F = func() int64 { return v }; f := s.Run; v = x\n"
+        "\treturn apRead(f)\n}\n"
+        "func FCallbackWrite(x int64) int64 {\n"
+        "\tw := int64(0); var s W; s.F = func() { w = x }; f := s.Run\n"
+        "\tapWrite(f); return w\n}\n"
+        "func FCallArgAfter(x, y int64) int64 {\n"
+        "\tv := y; var s S; s.F = func() int64 { return v }; f := s.RunArg\n"
+        "\treturn f(bump(&v, x))\n}\n"
+        "func FCallbackArgAfter(x, y int64) int64 {\n"
+        "\tv := y; var s S; s.F = func() int64 { return v }\n"
+        "\treturn apArg(s.RunArg, bump(&v, x))\n}\n"
+        "func FCallbackBoundArgAfter(x, y int64) int64 {\n"
+        "\tv := y; var s S; s.F = func() int64 { return v }; f := s.RunArg\n"
+        "\treturn apArg(f, bump(&v, x))\n}\n"
+        "func FDefer(x int64) (r int64) {\n"
+        "\tvar s W; s.F = func() { r = x }; f := s.Run; defer f(); return 0\n"
+        "}\n"
+        "func FDeferCallback(x int64) (r int64) {\n"
+        "\tvar s W; s.F = func() { r = x }; f := s.Run; defer apWrite(f); return 0\n"
+        "}\n"
+        "func FDeferCallbackSelector(x int64) (r int64) {\n"
+        "\tvar s W; s.F = func() { r = x }; defer apWrite(s.Run); return 0\n"
+        "}\n"
+        "func FGoRace(x, z int64) int64 {\n"
+        "\tv := z; var s W; s.F = func() { _ = v }; f := s.Run; go f(); v = x\n"
+        "\treturn v\n"
+        "}\n"
+        "func FNoRecords(x int64) int64 {\n"
+        "\tn := N{V: x}; f := n.Get; return f()\n"
+        "}\n"
+        "func FInterface(i I) int64 { f := i.Get; return f() }\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+
+    def result(name):
+        return named_package(files, snapshot, summaries, name)
+
+    for name in (
+        "FReadDirect",
+        "FReadBound",
+        "FReadComposite",
+        "FReadVar",
+        "FReadAssign",
+        "FReadPtrValue",
+        "FReadAlias",
+    ):
+        summary = result(name)
+        assert summary.available
+        assert summary.return_dependencies == frozenset({0, 1})
+        assert summary.effects == "unknown"
+    pointer_receiver = result("FReadPtrPointer")
+    assert pointer_receiver.available
+    assert {0, 1} <= pointer_receiver.return_dependencies
+    assert {0} <= result("FReadFrozen").return_dependencies
+    assert result("FReadSwap").return_dependencies == frozenset({0})
+    assert result("FReadConditional").return_dependencies == frozenset(
+        {1, 2}
+    )
+    for name in (
+        "FWrite",
+        "FWriteDirect",
+        "FCallbackWrite",
+        "FDefer",
+        "FDeferCallback",
+        "FDeferCallbackSelector",
+    ):
+        summary = result(name)
+        assert summary.available
+        assert summary.return_dependencies == frozenset({0})
+        assert summary.effects == "unknown"
+    for name in (
+        "FCallbackSelector",
+        "FCallbackBound",
+        "FCallArgAfter",
+        "FCallbackArgAfter",
+        "FCallbackBoundArgAfter",
+    ):
+        summary = result(name)
+        assert summary.available
+        assert 0 in summary.return_dependencies
+    assert not result("FGoRace").available
+    no_records = result("FNoRecords")
+    assert no_records.available
+    assert no_records.return_dependencies == frozenset({0})
+    assert no_records.effects == "none_in_supported_fragment"
+    interface = result("FInterface")
+    assert interface.available
+    assert interface.return_dependencies == frozenset({0})
+    assert interface.effects == "unknown"
+
+
+def test_bound_method_value_unsupported_field_record_consumers_stay_closed(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+            "type S struct { F func() int64 }\n"
+            "type H struct { F func() int64 }\n"
+            "var SendChan chan func() int64\n"
+            "func (s S) Run() int64 { return s.F() }\n"
+        "func CloseField(x int64) { var s S; s.F = func() int64 { return x }; f := s.Run; var h H; h.F = f }\n"
+        "func CloseSlice(x int64) { var s S; s.F = func() int64 { return x }; fs := make([]func() int64, 1); fs[0] = s.Run }\n"
+        "func CloseMap(x int64) { var s S; s.F = func() int64 { return x }; fs := map[int]func() int64{}; fs[0] = s.Run }\n"
+        "func CloseReturn(x int64) func() int64 { var s S; s.F = func() int64 { return x }; return s.Run }\n"
+            "func CloseSend(x int64) { var s S; s.F = func() int64 { return x }; SendChan <- s.Run }\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    for name in (
+        "CloseField",
+        "CloseSlice",
+        "CloseMap",
+        "CloseReturn",
+        "CloseSend",
+    ):
+        summary = named_package(files, snapshot, summaries, name)
+        assert not summary.available
+        assert any(
+            gap.reason == "unsupported_expression"
+            for gap in summary.gaps
+        )
+
+
+def test_bound_method_value_field_invocation_includes_receiver_deps(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "type W struct { F func(int64); V int64 }\n"
+        "func (s W) Run() { s.F(s.V) }\n"
+        "func FDirect(x int64) int64 {\n"
+        "\tw := int64(0); var s W; s.V = x\n"
+        "\ts.F = func(a int64) { w = a }; s.Run(); return w\n"
+        "}\n"
+        "func FBound(x int64) int64 {\n"
+        "\tw := int64(0); var s W; s.V = x\n"
+        "\ts.F = func(a int64) { w = a }; f := s.Run; f(); return w\n"
+        "}\n"
+        "func FBoundAfterRebind(x, y int64) int64 {\n"
+        "\tw := int64(0); var s W; s.V = x\n"
+        "\ts.F = func(a int64) { w = a }; f := s.Run; s.V = y\n"
+        "\tf(); return w\n"
+        "}\n"
+        "func FDirectAfterRebind(x, y int64) int64 {\n"
+        "\tw := int64(0); var s W; s.V = x\n"
+        "\ts.F = func(a int64) { w = a }; s.V = y\n"
+        "\ts.Run(); return w\n"
+        "}\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    for name in ("FDirect", "FBound", "FBoundAfterRebind"):
+        summary = named_package(files, snapshot, summaries, name)
+        assert summary.available
+        assert summary.return_dependencies == frozenset({0})
+    direct_after_rebind = named_package(
+        files, snapshot, summaries, "FDirectAfterRebind"
+    )
+    assert direct_after_rebind.available
+    assert direct_after_rebind.return_dependencies == frozenset({0, 1})
+
+
+def test_bound_method_value_method_expression_callback_parameter_offset(
+    go_types_helper,
+):
+    files = {
+        "a.go": "package p\n"
+        "type S struct { F func() int64 }\n"
+        "func (s S) Run() int64 { return s.F() }\n"
+        "type T struct{}\n"
+        "func (T) Apply(cb func() int64) int64 { return cb() }\n"
+        "func F(x, y int64) int64 {\n"
+        "\tv := y; var s S; s.F = func() int64 { return v }; v = x\n"
+        "\tt := T{}; return T.Apply(t, s.Run)\n"
+        "}\n"
+    }
+    _, snapshot, summaries = _method_unit(go_types_helper, files)
+    summary = named_package(files, snapshot, summaries, "F")
+    assert summary.available
+    assert summary.return_dependencies == frozenset({0, 1})
+
+
 def test_package_function_var_call_records_imported_transfer(
     go_types_helper,
 ):
