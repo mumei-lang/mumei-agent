@@ -18343,6 +18343,21 @@ class _Builder:
                     if source_interface is not None:
                         if lhs.type == "identifier" and lhs.text == b"_":
                             pass
+                        elif (
+                            lhs.type == "index_expression"
+                            and self._opaque_container_field_index_target(
+                                lhs, params
+                            )
+                            is not None
+                        ):
+                            # `p.A[i] = e` — an interface-typed
+                            # element store into a `[]I` field.
+                            # Go's assignability already proved the
+                            # element accepts `e`, so the store is
+                            # well-formed; the LHS loop's field-elem
+                            # write path folds `e`'s deps into the
+                            # element slot like any element write.
+                            pass
                         else:
                             target_ref = (
                                 self.references.get(
@@ -19227,14 +19242,125 @@ class _Builder:
                         # `indirect_writes` and the field's slot —
                         # which `o.R[i].V` reads — never sees it.
                         opaque_elem_root_slots[ri] = field_key
-                    self._for_write_target = True
-                    try:
-                        opaque_elem_index_deps[ri] = self.expression(
-                            field_selector, fn, params, locals_,
-                            transfers, count, 0,
+                    interface_elem = (
+                        getattr(
+                            getattr(
+                                _field_member.type, "elem", None
+                            ),
+                            "kind",
+                            None,
                         )
-                    finally:
-                        self._for_write_target = False
+                        == "interface"
+                    )
+                    if interface_elem:
+                        # `p.A[i] = e` on `A []I` — the bare field
+                        # read `p.A` stays closed (no `[]I`-typed
+                        # binding can name it), so the destination
+                        # deps are synthesized like the dispatch
+                        # receiver's: the pointer root's deps plus
+                        # the field slot's share-group deps.
+                        oref_binding = self.bindings.get(
+                            oref.binding_id
+                        )
+                        if (
+                            oref_binding is not None
+                            and oref_binding.type is not None
+                            and oref_binding.type.kind == "pointer"
+                            and oref.binding_id in params
+                        ):
+                            opaque_elem_index_deps[ri] = (
+                                self._pointer_deps(
+                                    oref.binding_id, params, locals_
+                                )
+                                | self._opaque_container_deps(
+                                    field_key, locals_
+                                )
+                            )
+                        else:
+                            opaque_elem_index_deps[ri] = (
+                                locals_.get(
+                                    oref.binding_id,
+                                    frozenset(
+                                        {params[oref.binding_id]}
+                                    )
+                                    if oref.binding_id in params
+                                    else frozenset(),
+                                )
+                                | self._opaque_container_deps(
+                                    field_key, locals_
+                                )
+                            )
+                        # `s.A[Set(&v,x)].F[0] = e` — the indexes
+                        # below the field level live inside
+                        # `field_selector`'s operand chain, so the
+                        # synthesized path must evaluate them
+                        # itself: a call in one writes like the
+                        # general `expression` walk would run it.
+                        # Every member's declared type pins along
+                        # the way — the field's own named slice
+                        # type included — so redeclaring one
+                        # stales the caller's summary.
+                        cur = field_selector
+                        chain_indexes: list[Any] = []
+                        while cur is not None:
+                            cur = self._strip_parens(cur)
+                            if cur is None:
+                                break
+                            if cur.type == "index_expression":
+                                chain_indexes.append(
+                                    cur.child_by_field_name("index")
+                                )
+                                cur = cur.child_by_field_name(
+                                    "operand"
+                                )
+                                continue
+                            if cur.type != "selector_expression":
+                                break
+                            field_node = cur.child_by_field_name(
+                                "field"
+                            )
+                            field_ref = (
+                                self.references.get(
+                                    self.node_key(field_node)
+                                )
+                                if field_node is not None
+                                else None
+                            )
+                            chain_member = self._field_identity(
+                                field_ref
+                            )
+                            if (
+                                chain_member is not None
+                                and chain_member.type is not None
+                            ):
+                                self._pin_fact_identities(
+                                    chain_member.type
+                                )
+                            cur = cur.child_by_field_name(
+                                "operand"
+                            )
+                        for chain_index in reversed(chain_indexes):
+                            if (
+                                chain_index is not None
+                                and chain_index.type
+                                not in _INDEX_LITERALS
+                            ):
+                                opaque_elem_index_deps[ri] |= (
+                                    self.expression(
+                                        chain_index, fn, params,
+                                        locals_, transfers, count,
+                                        0,
+                                    )
+                                )
+                    else:
+                        self._for_write_target = True
+                        try:
+                            opaque_elem_index_deps[ri] = self.expression(
+                                field_selector, fn, params, locals_,
+                                transfers, count, 0,
+                            )
+                        finally:
+                            self._for_write_target = False
                     self._record_read(opaque_elem_index_deps[ri])
                     for inner_index in reversed(inner_indexes or ()):
                         if (
