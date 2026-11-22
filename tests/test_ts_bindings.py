@@ -2135,3 +2135,46 @@ N.Public.B.D.k();
         if source[c.span.start : c.span.end] == "N.Public.B.D.k()"
     )
     assert call.target == member_k.id
+
+
+def test_qualified_type_annotation_types_receiver_members():
+    source = """
+namespace N { export class A { m(): void {} } }
+let w: N.A = null as any; w.m();
+"""
+    report = build_ts_bindings(source)
+    base_m = _member_bindings(report, "m", "associated_function")[0]
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == "w.m()"
+    )
+    assert call.target == base_m.id
+
+
+def test_qualified_type_annotation_through_clause_alias():
+    source = """
+namespace N { namespace Inner { export class B { m(): void {} } } export {Inner as Public} }
+let v: N.Public.B = null as any; v.m();
+"""
+    report = build_ts_bindings(source)
+    base_m = _member_bindings(report, "m", "associated_function")[0]
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == "v.m()"
+    )
+    assert call.target == base_m.id
+
+
+def test_qualified_type_annotation_private_segment_stays_unresolved():
+    source = """
+namespace N { namespace Inner { export class B { m(): void {} } } export {Inner as Public} }
+let z: N.Inner.B = null as any; z.m();
+"""
+    report = build_ts_bindings(source)
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == "z.m()"
+    )
+    assert call.target is None or call.kind == "opaque_method"
+    unresolved = [u for u in report.unresolved if source[u.span.start : u.span.end] == "N.Inner.B"]
+    assert unresolved
