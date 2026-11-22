@@ -7471,3 +7471,28 @@ fn f(m: HashMap<K, P>, b: BTreeMap<K, P>, w: W<K, P>, s: S, t: T) {
     assert targets("val3.pm()") == [""]
     # `hm` is the hasher's method — never a values element target.
     assert all(t != _bindings(report, "hm", "associated_function")[0].id for _, t in calls)
+
+def test_next_back_and_or_else_keep_the_payload():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn def() -> P { P }
+fn f(v: Vec<P>, o: Option<P>, r: Result<P, E>, w: W<P>) {
+    let x1 = v.iter().next_back(); if let Some(p1) = x1 { p1.pm(); }
+    let x2 = o.or_else(|| Some(def())); if let Some(p2) = x2 { p2.pm(); }
+    let x3 = r.or_else(|e| Err(e)); if let Ok(p3) = x3 { p3.pm(); }
+    let x4 = o.or_else(def); if let Some(p4) = x4 { p4.pm(); }
+    let x5 = w.or_else(|| w); if let Some(p5) = x5 { p5.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    for call in ("p1.pm()", "p2.pm()", "p3.pm()", "p4.pm()"):
+        assert bound.get(call) == pm.id, call
+    # A custom `W` receiver keeps `or_else` opaque.
+    assert not bound.get("p5.pm()")
