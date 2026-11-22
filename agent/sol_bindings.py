@@ -1216,6 +1216,18 @@ class _SolBindings:
                 else member_candidates
             )
             for item in pool:
+                signature = item.parameter_signature
+                if (
+                    signature
+                    and self._param_accepts(
+                        signature[0], "typed", type_text
+                    )
+                    == "nomatch"
+                ):
+                    # A `for *` directive admits every name, but a
+                    # function still only applies when the receiver
+                    # implicitly converts to its first parameter.
+                    continue
                 if all(
                     candidate.binding.id != item.binding.id
                     for candidate in candidates
