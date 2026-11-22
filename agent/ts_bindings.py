@@ -135,6 +135,9 @@ class _TypeScriptBindings:
         self.calls: list[Call] = []
         self.gaps: list[Gap] = []
         self.function_infos: dict[int, _FunctionInfo] = {}
+        self._member_lookup_active: set[
+            tuple[str, str, bool]
+        ] = set()
         self.function_records: dict[int, _Record] = {}
         self._function_node_ids: set[int] = set()
         self._type_alias_cache: dict[str, TypeFact] = {}
@@ -1324,6 +1327,38 @@ class _TypeScriptBindings:
         `for_type` resolves on the type side (implements and interface
         `extends` spellings), where `export type`-only members are
         reachable; class `extends` is a value position."""
+        # Reentrancy guard: base clauses can cycle (`Outer extends
+        # Middle`, `Middle extends Outer.Base`), and `_base_type_record`
+        # re-enters `_member_lookup` for qualified segments. A cycle
+        # cannot name a target — return None.
+        active_key = (
+            type_record.binding.id, name, for_type
+        )
+        if active_key in self._member_lookup_active:
+            return None
+        self._member_lookup_active.add(active_key)
+        try:
+            return self._member_lookup_inner(
+                type_record,
+                name,
+                position,
+                static=static,
+                via_this=via_this,
+                for_type=for_type,
+            )
+        finally:
+            self._member_lookup_active.discard(active_key)
+
+    def _member_lookup_inner(
+        self,
+        type_record: _Record,
+        name: str,
+        position: int,
+        *,
+        static: bool,
+        via_this: bool,
+        for_type: bool = False,
+    ) -> _Record | None:
         queue = [type_record]
         # Declaration merging: a namespace may merge with a class,
         # interface or enum of the same name in the same container, so
