@@ -4647,7 +4647,6 @@ fn f(w: W) {
     same = _bindings(report, "same", "associated_function")[0]
     assert _call(report, source, "p.same()").target == same.id
 
-
 def test_parenthesized_field_call_reads_the_field_fn_return():
     # `(w.get)()` invokes the field's function pointer — a
     # struct_field of that name shadows the same-named method.
@@ -5029,3 +5028,41 @@ fn f(m: HashMap<P, Q>, t: BTreeMap<P, Q>) {
     q = _bindings(report, "q", "associated_function")[0]
     assert _call(report, source, "k.m()").target == m.id
     assert _call(report, source, "v.q()").target == q.id
+
+
+def test_slice_pattern_binds_element_types() -> None:
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn f(arr: [P; 3], v: Vec<P>) {
+    let [a, b, c] = arr;
+    a.m();
+    let [x, y, ..] = arr;
+    x.m();
+    if let [s, ..] = v { s.m(); }
+    let [h @ .., t] = arr;
+    t.m();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = _bindings(report, "m", "associated_function")[0]
+    for text in ("a.m()", "x.m()", "s.m()", "t.m()"):
+        assert _call(report, source, text).target == m.id
+
+
+def test_slice_pattern_nested_element_types() -> None:
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn f(v: Vec<Vec<P>>) {
+    let [inner] = v;
+    inner.m();
+    let [deep, ..] = inner;
+    deep.m();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = _bindings(report, "m", "associated_function")[0]
+    # `inner` is Vec<P> — not P itself — so inner.m() stays unpinned.
+    assert _call(report, source, "inner.m()").target == ""
+    assert _call(report, source, "deep.m()").target == m.id

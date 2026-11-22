@@ -5015,6 +5015,25 @@ class _RustBindings:
                             fargs,
                         )
             return mapping
+        if kind == "slice_pattern":
+            # `let [a, b, ..] = arr` — each element binds the
+            # container's element type (`[P; N]`/`Vec<P>` → P);
+            # `..` covers the rest without binding a name.
+            elem_id, elem_args = self._element_of(
+                scrut_id, scrut_args or "", pattern.start_byte
+            )
+            mapping = {}
+            for child in self._children(pattern):
+                if child.type == "remaining_field_pattern":
+                    continue
+                mapping.update(
+                    self._pattern_type_map(
+                        child, elem_id, elem_args,
+                        self._type_head_name(elem_id, elem_args),
+                        scrut_position,
+                    )
+                )
+            return mapping
         if kind == "tuple_struct_pattern":
             head = pattern.child_by_field_name("type")
             payload = self._pattern_head_payload(
