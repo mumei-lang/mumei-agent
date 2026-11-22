@@ -1399,10 +1399,21 @@ class _TypeScriptBindings:
             if not static and sibling.binding.kind == "namespace":
                 continue
             queue.append(sibling)
-        queue.extend(extra_seed)
+        # Seeded members (alias-collision losers of an earlier path
+        # segment) can never win this lookup — they only apply when
+        # the primary candidates yield nothing — but their matches
+        # still chain into `collect_extras` for deeper segments.
+        seeded: set[str] = set()
+        for seed in extra_seed:
+            queue.append(seed)
+            seeded.add(seed.binding.id)
+            for sibling in self._merge_siblings(seed):
+                queue.append(sibling)
+                seeded.add(sibling.binding.id)
         visited: set[str] = set()
         seed_ids = {record.binding.id for record in queue}
         matches: list[_Record] = []
+        seeded_matches: list[_Record] = []
         while queue:
             current = queue.pop(0)
             if current.binding.id in visited:
@@ -1456,7 +1467,10 @@ class _TypeScriptBindings:
                     continue
                 if candidate.member_visibility == "protected" and not via_this:
                     continue
-                matches.append(candidate)
+                if current.binding.id in seeded:
+                    seeded_matches.append(candidate)
+                else:
+                    matches.append(candidate)
             if decl_id is not None and decl is not None:
                 for base, base_value in self._type_bases.get(
                     decl_id, ()
@@ -1471,8 +1485,13 @@ class _TypeScriptBindings:
                     )
                     if base_record is not None:
                         queue.append(base_record)
-        if not matches:
+                        if current.binding.id in seeded:
+                            seeded.add(base_record.binding.id)
+        if not matches and not seeded_matches:
             return None
+        fallback = not matches
+        if fallback:
+            matches = seeded_matches
         if for_type:
             # A namespace merges with a same-named class/interface/
             # enum in the same container; the merged symbol's type
@@ -1508,9 +1527,13 @@ class _TypeScriptBindings:
                     collect_extras.extend(
                         m for m in matches if m is not candidate
                     )
+                    if not fallback:
+                        collect_extras.extend(seeded_matches)
                 return candidate
         if collect_extras is not None:
             collect_extras.extend(matches[1:])
+            if not fallback:
+                collect_extras.extend(seeded_matches)
         return matches[0]
 
     def _member_name_sets(
@@ -1570,27 +1593,16 @@ class _TypeScriptBindings:
             if record is None:
                 return None
             next_extras: list[_Record] = []
-            resolved = self._member_lookup(
+            record = self._member_lookup(
                 record,
                 segment,
                 position,
                 static=True,
                 via_this=False,
                 for_type=for_type,
+                extra_seed=tuple(extras),
                 collect_extras=next_extras,
             )
-            if resolved is None and extras:
-                resolved = self._member_lookup(
-                    record,
-                    segment,
-                    position,
-                    static=True,
-                    via_this=False,
-                    for_type=for_type,
-                    extra_seed=tuple(extras),
-                    collect_extras=next_extras,
-                )
-            record = resolved
             extras = next_extras
         return record
 
@@ -2107,28 +2119,18 @@ class _TypeScriptBindings:
         )
         if type_record is None:
             return None
-        member = self._member_lookup(
+        # The collision losers only apply when the winning member
+        # record does not provide the name — seeded candidates can
+        # never beat the winner's own members.
+        return self._member_lookup(
             type_record,
             name,
             position,
             static=static,
             via_this=via_this,
+            extra_seed=tuple(inner_extras),
             collect_extras=collect_extras,
         )
-        # The collision losers only apply when the winning member
-        # record does not provide the name — the winner's own members
-        # always rank first.
-        if member is None and inner_extras:
-            member = self._member_lookup(
-                type_record,
-                name,
-                position,
-                static=static,
-                via_this=via_this,
-                extra_seed=tuple(inner_extras),
-                collect_extras=collect_extras,
-            )
-        return member
 
     def _resolve(
         self,

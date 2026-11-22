@@ -2082,3 +2082,21 @@ N.Public.f();
     calls = _calls(report)
     assert len(calls) == 2
     assert all(c.target == ns_f.id for c in calls)
+
+
+def test_member_alias_collision_deeper_segments_fall_back_to_loser():
+    # Both `Public` candidates provide `B`; the rest of the path
+    # exists only under the losing namespace's `B` — the inherited
+    # member still resolves.
+    source = """
+namespace N { namespace A { export class B { } } namespace M { export class B { } } namespace M { export namespace B { export class D { k(): void {} } } } export {A as Public}; export {M as Public} }
+interface X extends N.Public.B.D {}
+const x: X = null as any; x.k();
+"""
+    report = build_ts_bindings(source)
+    member_k = _member_bindings(report, "k", "associated_function")[0]
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == "x.k()"
+    )
+    assert call.target == member_k.id
