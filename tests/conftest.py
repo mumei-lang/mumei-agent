@@ -303,6 +303,21 @@ def mumei_bin() -> str:
 
 
 @pytest.fixture()
+def mumei_executable(mumei_bin: str) -> str:
+    """Return the absolute path of a single-binary mumei, or skip.
+
+    Tests passing ``--core`` need an absolute executable; a compound
+    ``MUMEI_BIN`` command or an unresolvable name skips instead of failing.
+    """
+    if len(mumei_bin.split()) != 1:
+        pytest.skip("MUMEI_BIN is a compound command, not a single binary")
+    resolved = shutil.which(mumei_bin)
+    if resolved is None:
+        pytest.skip("mumei binary not found (set MUMEI_BIN or install mumei)")
+    return os.path.abspath(resolved)
+
+
+@pytest.fixture()
 def real_mumei_client(mumei_bin: str) -> MumeiClient:
     """Provide a *real* MumeiClient backed by the mumei binary."""
     return MumeiClient(mumei_bin)

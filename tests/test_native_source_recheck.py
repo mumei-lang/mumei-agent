@@ -362,10 +362,10 @@ def test_cli_dispatch():
     assert "--expected-build-id" in proc.stdout
 
 
-def test_real_core_end_to_end(tmp_path, capsys, mumei_bin):
+def test_real_core_end_to_end(tmp_path, capsys, mumei_executable):
     """Build a real bundle with the real Core, then run the source
     recheck as a declared attempt — rechecked + discharged checks."""
-    core = Path(mumei_bin)
+    core = Path(mumei_executable)
     source = tmp_path / "main.mm"
     source.write_text(SOURCE)
     bundle = tmp_path / "bundle"
