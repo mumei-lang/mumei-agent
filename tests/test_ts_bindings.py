@@ -469,7 +469,11 @@ function use() { external(ambientValue); N.localFunction(); }
     assert _bindings(report, "N", "namespace")
     local_value = _bindings(report, "localValue", "local")[0]
     assert any(reference.binding_id == local_value.id for reference in _refs(report, source, "localValue"))
-    assert any(call.kind == "opaque_method" for call in report.calls)
+    local_function = _bindings(report, "localFunction", "function")[0]
+    assert any(
+        call.kind == "direct_local" and call.target == local_function.id
+        for call in report.calls
+    )
 
 
 def test_import_forms_and_type_only_import_namespaces():
@@ -974,3 +978,1160 @@ def test_cli_fails_with_fixed_errors_without_json(tmp_path, contents, expected):
     assert result.stdout == ""
     assert expected in result.stderr
     assert result.stderr.startswith("ts-bindings: ")
+
+
+def _member_bindings(report, name, kind):
+    return [b for b in report.bindings if b.name == name and b.kind == kind]
+
+
+def test_member_access_binds_class_members():
+    source = """
+class Base { base(): number { return 1 } }
+class C extends Base {
+    static count = 0;
+    field: number;
+    method(): number { return this.base() + this.field }
+    run(other: C) { other.method(); }
+}
+const c = new C();
+c.method(); C.count;
+"""
+    report = build_ts_bindings(source)
+    base = _member_bindings(report, "base", "associated_function")[0]
+    assert any(r.binding_id == base.id for r in _refs(report, source, "base"))
+    method = _member_bindings(report, "method", "associated_function")[0]
+    virtual = [
+        c for c in report.calls
+        if c.kind == "opaque_virtual" and c.target == method.id
+    ]
+    assert len(virtual) == 2  # `other.method()` and `c.method()`
+    field = _member_bindings(report, "field", "struct_field")[0]
+    assert any(r.binding_id == field.id for r in _refs(report, source, "field"))
+    count = _member_bindings(report, "count", "struct_field")[0]
+    assert any(r.binding_id == count.id for r in _refs(report, source, "count"))
+
+
+def test_member_access_binds_interface_and_enum_members():
+    source = """
+interface Shape { area(): number; name: string }
+function areaOf(s: Shape): number { return s.area() + s.name.length }
+enum Color { Red, Blue }
+const pick = Color.Blue;
+"""
+    report = build_ts_bindings(source)
+    area = _member_bindings(report, "area", "associated_function")[0]
+    assert any(
+        c.kind == "opaque_bodyless" and c.target == area.id
+        for c in report.calls
+    )
+    name = _member_bindings(report, "name", "struct_field")[0]
+    assert any(r.binding_id == name.id for r in _refs(report, source, "name"))
+    blue = _member_bindings(report, "Blue", "enum_member")[0]
+    assert any(r.binding_id == blue.id for r in _refs(report, source, "Blue"))
+
+
+def test_member_access_private_and_unknown_stay_unbound():
+    source = """
+class C {
+    private secret = 0;
+    show(): number { return this.secret }
+}
+const c = new C();
+const leak = c.secret;
+const nothing = c.ghost;
+"""
+    report = build_ts_bindings(source)
+    secret = _member_bindings(report, "secret", "struct_field")[0]
+    reads = [r for r in _refs(report, source, "secret") if r.binding_id == secret.id]
+    assert len(reads) == 1  # only `this.secret`, not `c.secret`
+    assert not any(r.kind == "read" for r in _refs(report, source, "ghost"))
+
+
+def test_member_access_chains_through_field_types():
+    source = """
+class Engine { start(): void {} }
+class Car { engine: Engine; drive(): void { this.engine.start(); } }
+function getCar(): Car { return new Car() }
+getCar().drive();
+"""
+    report = build_ts_bindings(source)
+    engine = _member_bindings(report, "engine", "struct_field")[0]
+    assert any(r.binding_id == engine.id for r in _refs(report, source, "engine"))
+    start = _member_bindings(report, "start", "associated_function")[0]
+    assert any(
+        c.kind == "opaque_virtual" and c.target == start.id
+        for c in report.calls
+    )
+    drive = _member_bindings(report, "drive", "associated_function")[0]
+    assert any(
+        c.kind == "opaque_virtual" and c.target == drive.id
+        for c in report.calls
+    )
+
+
+def test_member_access_on_array_elements_binds():
+    source = """
+class Car { start(): void {} }
+function go(cars: Car[], row: Car[][]) {
+    cars[0].start();
+    row[0][1].start();
+}
+"""
+    report = build_ts_bindings(source)
+    start = _member_bindings(report, "start", "associated_function")[0]
+    calls = [
+        c for c in report.calls
+        if c.kind == "opaque_virtual" and c.target == start.id
+    ]
+    assert len(calls) == 2
+
+
+def test_member_access_walks_interface_extends_chain():
+    source = """
+interface Base { base(): void }
+interface Shape extends Base { area(): number }
+function go(s: Shape) { s.base(); s.area(); }
+"""
+    report = build_ts_bindings(source)
+    base = _member_bindings(report, "base", "associated_function")[0]
+    area = _member_bindings(report, "area", "associated_function")[0]
+    targets = {c.target for c in report.calls}
+    assert base.id in targets and area.id in targets
+
+
+def test_member_access_walks_dotted_base_chain():
+    source = """
+namespace Lib { export class Base { base(): void {} } }
+class C extends Lib.Base { run(): void { this.base(); } }
+"""
+    report = build_ts_bindings(source)
+    base = _member_bindings(report, "base", "associated_function")[0]
+    assert any(
+        c.kind == "opaque_virtual" and c.target == base.id
+        for c in report.calls
+    )
+
+
+def test_member_call_kinds_follow_method_modifiers():
+    source = """
+class C {
+    static async fetch(): Promise<number> { return 0 }
+    *items(): Generator<number> { yield 1 }
+    static make(): void {}
+}
+namespace N { export function *gen(): Generator<number> { yield 2 } }
+C.fetch(); C.make(); const c = new C(); c.items(); N.gen();
+"""
+    report = build_ts_bindings(source)
+    fetch = _member_bindings(report, "fetch", "associated_function")[0]
+    items = _member_bindings(report, "items", "associated_function")[0]
+    make = _member_bindings(report, "make", "associated_function")[0]
+    gen = [b for b in report.bindings if b.name == "gen"][0]
+    kinds = {(c.kind, c.target) for c in report.calls}
+    assert ("opaque_async", fetch.id) in kinds
+    assert ("opaque_generator", items.id) in kinds
+    assert ("opaque_generator", gen.id) in kinds
+    assert ("direct_local", make.id) in kinds
+
+
+def test_member_base_resolves_at_declaration_scope():
+    source = """
+class Base { greet(): void {} }
+class Derived extends Base { }
+function scope() {
+    class Base { other(): void {} }
+    const d = new Derived();
+    d.greet();
+}
+"""
+    report = build_ts_bindings(source)
+    greet = _member_bindings(report, "greet", "associated_function")[0]
+    other = _member_bindings(report, "other", "associated_function")[0]
+    assert any(
+        c.kind == "opaque_virtual" and c.target == greet.id
+        for c in report.calls
+    )
+    assert not any(c.target == other.id for c in report.calls)
+
+
+def test_method_body_multiplication_is_not_a_generator():
+    source = """
+class C {
+    make(): number { const y = 2 * 3; return y }
+}
+const c = new C(); c.make();
+"""
+    report = build_ts_bindings(source)
+    make = _member_bindings(report, "make", "associated_function")[0]
+    assert any(
+        c.kind == "opaque_virtual" and c.target == make.id
+        for c in report.calls
+    )
+    assert not any(c.kind == "opaque_generator" for c in report.calls)
+
+
+def test_member_base_with_spaces_and_multi_segment_chains():
+    source = """
+namespace Lib { export namespace Inner { export class Base { m(): void {} } } }
+class A extends Lib . Inner . Base { run(): void { this.m(); } }
+class B extends Lib.Inner.Base { run(): void { this.m(); } }
+"""
+    report = build_ts_bindings(source)
+    m = _member_bindings(report, "m", "associated_function")[0]
+    calls = [
+        c for c in report.calls
+        if c.kind == "opaque_virtual" and c.target == m.id
+    ]
+    assert len(calls) == 2
+
+
+def test_member_declaration_merging_namespace_and_class():
+    source = """
+namespace Lib {
+    export class Inner { static run(): void {} inst(): void {} }
+    export namespace Inner { export function viaNs(): void {} }
+}
+namespace Lib {
+    export namespace Inner2 { export function viaNs2(): void {} }
+}
+namespace Lib {
+    export class Inner2 { static run2(): void {} }
+}
+Lib.Inner.run();
+Lib.Inner.viaNs();
+Lib.Inner2.run2();
+Lib.Inner2.viaNs2();
+const i = new Lib.Inner();
+i.inst();
+"""
+    report = build_ts_bindings(source)
+    run = _member_bindings(report, "run", "associated_function")[0]
+    via_ns = _member_bindings(report, "viaNs", "function")[0]
+    inst_ids = {
+        b.id for b in _member_bindings(report, "inst", "associated_function")
+    }
+    kinds = {c.kind for c in report.calls}
+    assert "direct_local" in kinds
+    targets = {c.target for c in report.calls}
+    run2 = _member_bindings(report, "run2", "associated_function")[0]
+    via_ns2 = _member_bindings(report, "viaNs2", "function")[0]
+    assert run.id in targets
+    assert via_ns.id in targets
+    assert run2.id in targets
+    assert via_ns2.id in targets
+    assert inst_ids & targets
+    news = [c for c in report.calls if c.kind == "opaque_new"]
+    inner = _member_bindings(report, "Inner", "class")[0]
+    assert any(c.target == inner.id for c in news)
+
+
+def test_member_split_block_duplicate_classes_do_not_merge():
+    source = """
+class B { m(): void {} }
+namespace Lib { class C extends B { go(): void { this.m(); } } }
+namespace Lib { export class C { m(): void {} } }
+"""
+    report = build_ts_bindings(source)
+    base_m = _member_bindings(report, "m", "associated_function")[0]
+    calls = [
+        c for c in report.calls
+        if c.kind == "opaque_virtual" and c.target == base_m.id
+    ]
+    assert len(calls) == 1
+
+
+def test_member_ambient_class_namespace_merge():
+    source = """
+declare namespace C { export function f(): void; }
+declare class C { m(): void; }
+const c = new C();
+c.m();
+C.f();
+"""
+    report = build_ts_bindings(source)
+    ambient_c = [
+        b for b in report.bindings if b.name == "C" and b.kind == "ambient"
+    ][0]
+    m = _member_bindings(report, "m", "associated_function")[0]
+    new_calls = [c for c in report.calls if c.kind == "opaque_ambient"]
+    assert any(c.target == ambient_c.id for c in new_calls)
+    assert any(
+        c.kind == "opaque_bodyless" and c.target == m.id
+        for c in report.calls
+    )
+
+
+def test_member_split_block_enums_merge():
+    # Split `enum E` declarations merge (only one may omit the first
+    # initializer) — a member from either block must resolve.
+    source = """
+enum E { A = 0 }
+enum E { B }
+const x: E = E.B;
+const y: E = E.A;
+namespace Lib { export enum Inner { P = 0 } }
+namespace Lib { export enum Inner { Q } }
+const z = Lib.Inner.Q;
+"""
+    report = build_ts_bindings(source)
+    members = {
+        b.name: b.id
+        for b in report.bindings
+        if b.kind == "enum_member"
+    }
+    read_targets = {
+        ref.binding_id for ref in report.references if ref.kind == "read"
+    }
+    assert members["A"] in read_targets
+    assert members["B"] in read_targets
+    assert members["Q"] in read_targets
+
+
+def test_member_enum_does_not_merge_with_class():
+    # `enum` can only merge with `namespace` or another `enum` —
+    # `class E` + `enum E` is a duplicate-identifier error, so the
+    # enum's members must not leak into the class's member lookup.
+    source = """
+class E { b(): void {} static s(): void {} }
+enum E { B }
+const x = E.B;
+E.s();
+"""
+    report = build_ts_bindings(source)
+    member_b = _member_bindings(report, "B", "enum_member")[0]
+    read_targets = {
+        ref.binding_id for ref in report.references if ref.kind == "read"
+    }
+    assert member_b.id in read_targets
+    # The class-only static member must not resolve through the enum:
+    # `class E` + `enum E` is a duplicate identifier, not a merge.
+    s = _member_bindings(report, "s", "associated_function")[0]
+    assert s.id not in read_targets
+    assert not any(c.target == s.id for c in report.calls)
+
+
+def test_member_new_on_local_var_keeps_variable_reference():
+    # A `local` is not a declaration-merging participant: `new C()`
+    # on the exported const in one `Lib` block must not be repointed
+    # at the duplicate `class C` in the sibling block.
+    source = """
+namespace Lib { export const C = { n: 1 }; const v = new C(); }
+namespace Lib { export class C { m(): void {} } }
+"""
+    report = build_ts_bindings(source)
+    local_c = [
+        b for b in report.bindings
+        if b.name == "C" and b.kind == "local"
+    ][0]
+    call_refs = [r for r in report.references if r.kind == "call"]
+    assert any(r.binding_id == local_c.id for r in call_refs)
+    cls = [
+        b for b in report.bindings
+        if b.name == "C" and b.kind == "class"
+    ][0]
+    assert not any(r.binding_id == cls.id for r in call_refs)
+
+
+def test_member_ambient_class_function_merge():
+    # `declare class C` + `declare function C` and `declare class D` +
+    # bodied `function D` are legal merges (functions may only merge
+    # with ambient classes). `new C()` must name the class and the
+    # instance-side member must resolve through the merge.
+    source = """
+declare class C { m(): void; }
+declare function C(): void;
+const c = new C();
+c.m();
+declare class D { n(): void; }
+function D() {}
+const d = new D();
+d.n();
+"""
+    report = build_ts_bindings(source)
+    classes = [
+        b for b in report.bindings
+        if b.name in {"C", "D"} and b.kind == "ambient"
+    ]
+    ambient = {b.name: b.id for b in classes}
+    # The ambient class records are the first declared C/D.
+    c_cls = _member_bindings(report, "m", "associated_function")[0]
+    d_cls = _member_bindings(report, "n", "associated_function")[0]
+    ambient_new = [c for c in report.calls if c.kind == "opaque_ambient"]
+    assert len(ambient_new) == 2
+    bodyless = {
+        c.target for c in report.calls if c.kind == "opaque_bodyless"
+    }
+    assert c_cls.id in bodyless
+    assert d_cls.id in bodyless
+    # `new C()`/`new D()` name the ambient classes specifically —
+    # `opaque_ambient` alone could not tell class from function here.
+    call_refs = [r for r in report.references if r.kind == "call"]
+    c_ambient = [b for b in classes if b.name == "C"][0]
+    d_ambient = [b for b in classes if b.name == "D"][0]
+    c_fn = [
+        b for b in report.bindings
+        if b.name == "C" and b.id != c_ambient.id
+    ][0]
+    assert any(r.binding_id == c_ambient.id for r in call_refs)
+    assert any(r.binding_id == d_ambient.id for r in call_refs)
+    assert not any(r.binding_id == c_fn.id for r in call_refs)
+
+
+def test_member_ambient_var_interface_merge():
+    # `interface I` (type side) + `declare const I` (value side, with a
+    # construct signature) merge across spaces: `new I()` calls the
+    # ambient const and `i.m()` resolves through the interface.
+    source = """
+interface I { m(): void }
+declare const I: { new(): I }
+const i = new I();
+i.m();
+"""
+    report = build_ts_bindings(source)
+    ambient = _member_bindings(report, "I", "ambient")[0]
+    method = _member_bindings(report, "m", "associated_function")[0]
+    call_refs = [r for r in report.references if r.kind == "call"]
+    assert any(r.binding_id == ambient.id for r in call_refs)
+    assert {
+        c.target for c in report.calls if c.kind == "opaque_bodyless"
+    } == {method.id}
+
+
+def test_member_new_on_type_only_name_falls_back_to_value():
+    # `declare const K` + `namespace K` can't legally merge (a
+    # redeclaration per tsc), but for `new K()` the value-side const —
+    # the only callable declaration — is the honest referent even when
+    # the type-only namespace shadows the name.
+    source = """
+declare const K: { new(): K }
+namespace K { export const q = 1 }
+const k = new K();
+"""
+    report = build_ts_bindings(source)
+    ambient = _member_bindings(report, "K", "ambient")[0]
+    call_refs = [r for r in report.references if r.kind == "call"]
+    assert call_refs and all(
+        r.binding_id == ambient.id for r in call_refs
+    )
+
+
+def test_member_new_prefers_exported_over_private_duplicate():
+    # Split-namespace blocks can hold a block-private duplicate of an
+    # exported name: `new N.C()` must name the exported constructor
+    # (`export const C`) and `c.m()` the exported interface, not the
+    # private const/interface siblings in the later block.
+    source = """
+namespace N {
+    export interface C { m(): void }
+    export const C: { new(): C } = {} as any;
+}
+namespace N {
+    const C = {} as any;
+    interface C { n(): void }
+}
+const c = new N.C();
+c.m();
+"""
+    report = build_ts_bindings(source)
+    exported_const = [
+        b for b in report.bindings
+        if b.name == "C" and b.kind == "local"
+    ]
+    assert len(exported_const) == 2
+    call_refs = [r for r in report.references if r.kind == "call"]
+    # The exported const is the first `local C` (declared first).
+    assert any(r.binding_id == exported_const[0].id for r in call_refs)
+    assert not any(r.binding_id == exported_const[1].id for r in call_refs)
+    method = _member_bindings(report, "m", "associated_function")[0]
+    assert {
+        c.target for c in report.calls if c.kind == "opaque_bodyless"
+    } == {method.id}
+
+
+def test_member_type_only_namespace_merges_with_var():
+    # A namespace that exports only types coexists with a same-named
+    # const (tsc accepts the pair); `new K()` names the const.
+    source = """
+const K: { new(): K } = {} as any;
+namespace K { export interface I { im(): void } }
+interface K { m(): void }
+const k = new K();
+k.m();
+"""
+    report = build_ts_bindings(source)
+    var = _member_bindings(report, "K", "local")[0]
+    call_refs = [r for r in report.references if r.kind == "call"]
+    assert any(r.binding_id == var.id for r in call_refs)
+    method = _member_bindings(report, "m", "associated_function")[0]
+    assert any(
+        c.target == method.id
+        for c in report.calls if c.kind == "opaque_bodyless"
+    )
+
+
+def test_member_new_on_type_alias_falls_back_to_value():
+    # `type T` + `const T` is a legal cross-space pair: `new T()`
+    # names the const (a type alias can't be called).
+    source = """
+type T = { m(): void }
+const T: { new(): T } = {} as any;
+const t = new T();
+"""
+    report = build_ts_bindings(source)
+    var = _member_bindings(report, "T", "local")[0]
+    call_refs = [r for r in report.references if r.kind == "call"]
+    assert call_refs and all(
+        r.binding_id == var.id for r in call_refs
+    )
+
+
+def test_member_nested_ambient_namespace_implicit_exports():
+    # Inside `declare namespace` every member is implicitly exported
+    # at any depth, and bare `function f(): void` declarations parse
+    # as function_signature nodes — both must be reachable through
+    # qualified `N.Inner.x` access.
+    source = """
+declare namespace N {
+    export namespace Inner {
+        function f(): void;
+        const v: number;
+    }
+    class C { m(): void }
+}
+N.Inner.f();
+const x = N.Inner.v;
+const c = new N.C();
+c.m();
+"""
+    report = build_ts_bindings(source)
+    f = _member_bindings(report, "f", "ambient")[0]
+    v = _member_bindings(report, "v", "ambient")[0]
+    m = _member_bindings(report, "m", "associated_function")[0]
+    call_refs = {r.binding_id for r in report.references if r.kind == "call"}
+    read_refs = {r.binding_id for r in report.references if r.kind == "read"}
+    assert {f.id, m.id} & call_refs
+    assert v.id in read_refs
+    kinds = {(c.kind, c.target) for c in report.calls}
+    assert ("opaque_bodyless", f.id) in kinds
+    assert ("opaque_bodyless", m.id) in kinds
+    assert any(
+        c.kind == "opaque_ambient"
+        for c in report.calls if c.target
+    )
+
+
+def test_member_ambient_export_clause_disables_implicit_export():
+    # `export {}` inside `declare namespace` turns off the implicit
+    # export of the remaining members: `N.C` is a private member
+    # (tsc TS2339) and must not resolve through qualified access.
+    # A named `export {D}` clause still exports the named member.
+    source = """
+declare namespace N {
+    export {};
+    class C { m(): void }
+}
+declare namespace M {
+    export {D};
+    class D { m(): void }
+    class E { m(): void }
+}
+new N.C();
+new M.D();
+new M.E();
+"""
+    report = build_ts_bindings(source)
+    c_rec = _member_bindings(report, "C", "ambient")
+    d_rec = _member_bindings(report, "D", "ambient")
+    e_rec = _member_bindings(report, "E", "ambient")
+    assert c_rec and d_rec and e_rec
+    call_targets = {c.target for c in report.calls if c.target}
+    assert c_rec[0].id not in call_targets
+    assert e_rec[0].id not in call_targets
+    assert d_rec[0].id in call_targets
+
+
+def test_member_alias_export_resolves_under_exported_name():
+    # `export {A as B}` makes the member reachable only as `N.B` —
+    # `N.A` is private and a same-named sibling must not shadow it.
+    source = """
+declare namespace M {
+    export {Other as Inner};
+    class Other { m(): void }
+    class Inner { n(): void }
+}
+new M.Inner();
+new M.Other();
+"""
+    report = build_ts_bindings(source)
+    other = _member_bindings(report, "Other", "ambient")[0]
+    inner = _member_bindings(report, "Inner", "ambient")[0]
+    call_targets = {c.target for c in report.calls if c.target}
+    assert other.id in call_targets
+    assert inner.id not in call_targets
+
+
+def test_member_type_only_export_stays_private_for_values():
+    # `export type {Inner}` / `export {type Inner}` export no value:
+    # `N.Inner.f()` is a TS2339 error and must not resolve.
+    source = """
+declare namespace M {
+    export type {Inner};
+    namespace Inner { function f(): void; }
+}
+declare namespace K {
+    export {type Inner};
+    namespace Inner { function f(): void; }
+}
+M.Inner.f();
+K.Inner.f();
+"""
+    report = build_ts_bindings(source)
+    assert not [r for r in report.references if r.kind == "call"]
+
+
+def test_member_private_split_block_does_not_merge():
+    # A non-exported `namespace Inner` is a distinct symbol — its
+    # members do not merge into the public same-named namespace.
+    source = """
+namespace N { namespace Inner { export function f(): void {} } }
+namespace N { export namespace Inner { export function g(): void {} } }
+N.Inner.f();
+N.Inner.g();
+"""
+    report = build_ts_bindings(source)
+    g_rec = _member_bindings(report, "g", "function")
+    assert g_rec
+    call_targets = {c.target for c in report.calls if c.target}
+    assert call_targets == {g_rec[0].id}
+
+
+def test_member_bare_inner_namespace_in_ambient():
+    # A bare `namespace Inner` inside `declare namespace` parses as
+    # an expression_statement-wrapped internal_module and is still
+    # implicitly exported (tsc resolves `N.Inner.f`).
+    source = """
+declare namespace N {
+    namespace Inner {
+        function f(): void;
+    }
+}
+N.Inner.f();
+"""
+    report = build_ts_bindings(source)
+    f = _member_bindings(report, "f", "ambient")[0]
+    call_refs = {r.binding_id for r in report.references if r.kind == "call"}
+    assert f.id in call_refs
+
+
+def test_member_ambient_declarations_have_no_tdz():
+    # `declare class`/`declare namespace` initialize nothing at
+    # runtime: `new A()` textually before the declarations is not a
+    # temporal-dead-zone access.
+    source = """
+const c = new A();
+declare class A { m(): void; }
+declare namespace A { export function f(): void; }
+"""
+    report = build_ts_bindings(source)
+    assert not any(
+        gap.reason == "temporal_dead_zone" for gap in report.gaps
+    )
+    ambient = [
+        b for b in report.bindings
+        if b.name == "A" and b.kind == "ambient"
+    ][0]
+    assert any(
+        c.kind == "opaque_ambient" and c.target == ambient.id
+        for c in report.calls
+    )
+
+
+def test_member_new_reference_lands_on_merged_class():
+    # `class C` + `namespace C` merge: the `new C()` call target and the
+    # constructor identifier's reference must both name the class.
+    source = """
+class C { m(): void {} }
+namespace C { export const z = 1 }
+const c = new C();
+"""
+    report = build_ts_bindings(source)
+    cls = [
+        b for b in report.bindings
+        if b.name == "C" and b.kind == "class"
+    ][0]
+    new_calls = [c for c in report.calls if c.kind == "opaque_new"]
+    assert any(c.target == cls.id for c in new_calls)
+    call_refs = [r for r in report.references if r.kind == "call"]
+    assert any(r.binding_id == cls.id for r in call_refs)
+
+
+def test_member_alias_does_not_merge_into_same_named_namespace():
+    # `export {A as B}` exports the class only as `B` — it must not
+    # merge into the same-named `namespace A` from a sibling block.
+    source = """
+declare namespace N { export {A as B}; class A { static s(): void; } }
+declare namespace N { export namespace A { export function s(): void; } }
+N.B.s();
+N.A.s();
+"""
+    report = build_ts_bindings(source)
+    s_bindings = [
+        b for b in report.bindings if b.name == "s"
+    ]
+    assert len(s_bindings) == 2
+    call_targets = {c.target for c in report.calls if c.target}
+    assert call_targets == {b.id for b in s_bindings}
+
+
+def test_member_type_only_export_resolves_on_type_side():
+    # `export type {A}` keeps A value-private but type-visible:
+    # `interface B extends N.A` is legal and `b.a()` must resolve.
+    source = """
+declare namespace N { export type {A}; interface A { a(): void } }
+interface B extends N.A {}
+declare const b: B;
+b.a();
+"""
+    report = build_ts_bindings(source)
+    a_method = _member_bindings(report, "a", "associated_function")
+    assert a_method
+    assert any(
+        c.target == a_method[0].id for c in report.calls
+    )
+
+
+def test_member_multiple_export_names_all_resolve():
+    # `export {A as B, A as C, A}` publishes the member under A, B and C.
+    source = """
+declare namespace M { export {A as B, A as C, A}; class A {} }
+new M.A(); new M.B(); new M.C();
+"""
+    report = build_ts_bindings(source)
+    a_rec = _member_bindings(report, "A", "ambient")[0]
+    for spelling in ("new M.A()", "new M.B()", "new M.C()"):
+        call = next(
+            c
+            for c in report.calls
+            if source[c.span.start : c.span.end] == spelling
+        )
+        assert call.target == a_rec.id, spelling
+
+
+def test_member_quoted_export_alias_resolves():
+    # `export {A as "Q"}` exports under the literal name Q.
+    source = """
+declare namespace M { export {A as "Q"}; class A {} }
+new M.Q();
+"""
+    report = build_ts_bindings(source)
+    a_rec = _member_bindings(report, "A", "ambient")[0]
+    assert any(c.target == a_rec.id for c in report.calls)
+
+
+def test_member_type_only_alias_export_resolves_on_type_side():
+    # `export type {A as Public}` publishes A's type under Public.
+    source = """
+declare namespace N {
+  interface A { f(): void }
+  export type { A as Public }
+}
+interface D extends N.Public {}
+declare const d: D;
+d.f();
+"""
+    report = build_ts_bindings(source)
+    f_rec = _member_bindings(report, "f", "associated_function")[0]
+    call = next(
+        c for c in report.calls
+        if source[c.span.start : c.span.end] == "d.f()"
+    )
+    assert call.target == f_rec.id
+
+
+def test_member_type_only_alias_hides_declared_name_on_type_side():
+    # `export type {A as Public}` removes N.A — only Public is public.
+    source = """
+declare namespace N {
+  interface A { f(): void }
+  export type { A as Public }
+}
+interface D extends N.A {}
+declare const d: D;
+d.f();
+"""
+    report = build_ts_bindings(source)
+    call = next(
+        c for c in report.calls
+        if source[c.span.start : c.span.end] == "d.f()"
+    )
+    assert not call.target
+
+
+def test_member_split_block_reexport_alias_resolves():
+    # A later same-named block's `export {f as g}` re-exports the
+    # merged symbol — both spellings resolve.
+    source = """
+declare namespace N {
+  export function f() {}
+}
+declare namespace N {
+  export { f as g, f }
+}
+N.f();
+N.g();
+"""
+    report = build_ts_bindings(source)
+    f_rec = _member_bindings(report, "f", "function")[0]
+    for spelling in ("N.f()", "N.g()"):
+        call = next(
+            c for c in report.calls
+            if source[c.span.start : c.span.end] == spelling
+        )
+        assert call.target == f_rec.id, spelling
+
+
+def test_member_class_extends_prefers_value_over_type_only_export():
+    # `class D extends N.A` is a value position — the type-only
+    # `export type {T as A}` export is not a valid base.
+    source = """
+declare namespace N {
+  class A { m() {} }
+  interface T { n(): void }
+}
+declare namespace N {
+  export { A }
+  export type { T as A }
+}
+class D extends N.A { }
+const d = new D();
+d.m();
+"""
+    report = build_ts_bindings(source)
+    m_rec = _member_bindings(report, "m", "associated_function")[0]
+    call = next(
+        c for c in report.calls
+        if source[c.span.start : c.span.end] == "d.m()"
+    )
+    assert call.target == m_rec.id
+
+
+def test_member_inline_export_survives_type_clause():
+    # `export class A` keeps `N.A` reachable on the value side even
+    # when a sibling clause exports the type under another name.
+    source = """
+declare namespace N {
+  export class A { m() {} }
+  export type { A as Public }
+}
+const a = new N.A();
+a.m();
+"""
+    report = build_ts_bindings(source)
+    m_rec = _member_bindings(report, "m", "associated_function")[0]
+    calls = {
+        source[c.span.start : c.span.end]: c for c in report.calls
+    }
+    assert calls["new N.A()"].target
+    assert calls["a.m()"].target == m_rec.id
+
+
+def test_member_alias_clause_does_not_shadow_declared_class():
+    # `export {B as A}` publishes the merged B only under "A" — a
+    # class member in the clause's block must not answer `new N.B()`.
+    source = """
+declare namespace N {
+  interface B { i: number }
+  class B { n() {} }
+  export { B as A }
+}
+declare namespace N {
+  export class B { m() {} }
+}
+const x = new N.B();
+x.m();
+const y = new N.A();
+y.n();
+"""
+    report = build_ts_bindings(source)
+    b_public = next(
+        b for b in report.bindings
+        if b.name == "B" and "export class B" in source
+        and source[b.span.start - 20 : b.span.start].find("export") >= 0
+    )
+    n_rec = _member_bindings(report, "n", "associated_function")[0]
+    m_rec = _member_bindings(report, "m", "associated_function")[0]
+    calls = {
+        source[c.span.start : c.span.end]: c for c in report.calls
+    }
+    # `N.B` names the inline-exported class; `N.A` the clause block's.
+    assert calls["new N.B()"].target == b_public.id
+    assert calls["x.m()"].target == m_rec.id
+    assert calls["new N.A()"].target != calls["new N.B()"].target
+    assert calls["y.n()"].target == n_rec.id
+
+
+def test_member_alias_prefers_clause_block_declaration():
+    # `export {f as g}` exports the merged `f` symbol; when the same
+    # block also declares an `f`, `N.g` binds that declaration.
+    source = """
+declare namespace N {
+  function f(): string { return "" }
+}
+declare namespace N {
+  function f(x: number): number { return x }
+  export { f as g }
+}
+N.g();
+"""
+    report = build_ts_bindings(source)
+    clause_block_f = next(
+        b for b in report.bindings
+        if b.name == "f" and b.span.start == source.index("f(x")
+    )
+    call = next(
+        c for c in report.calls
+        if source[c.span.start : c.span.end] == "N.g()"
+    )
+    assert call.target == clause_block_f.id
+
+
+def test_member_lookup_cyclic_extends_does_not_recurse():
+    # `Outer`/`Middle`/`Outer.Base` form a base-clause cycle: the lookup
+    # must terminate and still bind `m` through the acyclic edge.
+    source = """
+namespace Outer { export class Base { m(): void {} } }
+class Middle extends Outer.Base {}
+class Outer extends Middle {}
+const o = new Outer(); o.m();
+"""
+    report = build_ts_bindings(source)
+    base_m = _member_bindings(report, "m", "associated_function")[0]
+    call = next(
+        c
+        for c in _calls(report)
+        if source[c.span.start : c.span.end] == "o.m()"
+    )
+    assert call.target == base_m.id
+
+
+def test_member_clause_alias_and_declared_name_both_resolve_as_base():
+    source = """
+namespace N { export class A { m(): void {} } export {A as Public} }
+class X extends N.A { }
+class Y extends N.Public { }
+const x = new X(); const y = new Y(); x.m(); y.m();
+"""
+    report = build_ts_bindings(source)
+    base_m = _member_bindings(report, "m", "associated_function")[0]
+    calls = {
+        source[c.span.start : c.span.end]: c for c in _calls(report)
+    }
+    assert calls["x.m()"].target == base_m.id
+    assert calls["y.m()"].target == base_m.id
+
+
+def test_member_clause_aliased_namespace_resolves_on_type_side():
+    # `export {Inner as Public}` publishes the namespace on the type
+    # side too — qualified base paths reach `N.Public.B`, while the
+    # un-exported `N.Inner` spelling stays unreachable.
+    source = """
+namespace N { namespace Inner { export class B { m(): void {} } } export {Inner as Public} }
+class X extends N.Public.B { }
+class Y extends N.Inner.B { }
+const x = new X(); const y = new Y(); x.m(); y.m();
+"""
+    report = build_ts_bindings(source)
+    base_m = _member_bindings(report, "m", "associated_function")[0]
+    calls = {source[c.span.start : c.span.end]: c for c in _calls(report)}
+    assert calls["x.m()"].target == base_m.id
+    assert calls["y.m()"].target is None or calls["y.m()"].target != base_m.id
+
+
+def test_member_interface_extends_picks_class_like_over_namespace_alias():
+    # `export {I as Public}; export {M as Public}` collides on the
+    # exported name; a type-side `extends` must reach the interface
+    # member so its methods are inherited.
+    source = """
+namespace N { interface I { m(): void } namespace M { } export {I as Public}; export {M as Public} }
+interface X extends N.Public {}
+const x: X = null as any; x.m();
+"""
+    report = build_ts_bindings(source)
+    base_m = _member_bindings(report, "m", "associated_function")[0]
+    call = next(
+        c
+        for c in _calls(report)
+        if source[c.span.start : c.span.end] == "x.m()"
+    )
+    assert call.target == base_m.id
+
+
+def test_member_export_clause_resolves_type_only_local_names():
+    # `export {I as Public}` on an interface resolves `I` on the
+    # type side — a plain clause publishes type-only names too.
+    source = """
+namespace N { interface I { m(): void } export {I as Public} }
+"""
+    report = build_ts_bindings(source)
+    assert not [
+        item
+        for item in report.unresolved
+        if item.reason == "unknown_name"
+    ]
+    interface_i = next(
+        b
+        for b in report.bindings
+        if b.name == "I" and b.kind == "interface"
+    )
+    # The clause name itself must reference the interface
+    # declaration — a silently skipped clause would pass the
+    # unresolved check above.
+    clause_i = next(
+        r
+        for r in report.references
+        if source[r.span.start : r.span.end] == "I"
+        and r.span.start > source.index("export {")
+    )
+    assert clause_i.binding_id == interface_i.id
+
+
+def test_member_alias_collision_extra_does_not_leak_into_declared_name():
+    # Duplicate `export {... as Public}` is a tsc error but must not
+    # let a declared-name spelling reach the losing member: `N.I`
+    # names the interface only, never the namespace's members — while
+    # the aliased `N.Public.B` still resolves in the same input.
+    source = """
+namespace N { interface I { m(): void } namespace M { export class B { n(): void {} } } export {I as Public}; export {M as Public} }
+interface X extends N.Public.B {}
+const x: X = null as any; x.n();
+interface Y extends N.I {}
+const y: Y = null as any; y.m();
+"""
+    report = build_ts_bindings(source)
+    member_n = _member_bindings(report, "n", "associated_function")[0]
+    aliased_call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == "x.n()"
+    )
+    assert aliased_call.target == member_n.id
+    declared_call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == "y.m()"
+    )
+    assert declared_call.target == ""
+
+
+def test_member_alias_collision_extra_still_descends_path():
+    # `N.Public.B` descends into the namespace's B even when the
+    # interface wins the `Public` segment.
+    source = """
+namespace N { interface I { m(): void } namespace M { export class B { n(): void {} } } export {I as Public}; export {M as Public} }
+interface X extends N.Public.B {}
+const x: X = null as any; x.n();
+"""
+    report = build_ts_bindings(source)
+    member_n = _member_bindings(report, "n", "associated_function")[0]
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == "x.n()"
+    )
+    assert call.target == member_n.id
+
+
+def test_instance_member_does_not_pick_merged_namespace_function():
+    # class C and namespace C merge — instance member wins; the
+    # namespace's same-named function is a static facet.
+    source = """
+namespace N { export class C { m(): void {} } export namespace C { export function m(): void {} } }
+const x = new N.C(); x.m();
+"""
+    report = build_ts_bindings(source)
+    class_m = _member_bindings(report, "m", "associated_function")[0]
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == "x.m()"
+    )
+    assert call.target == class_m.id
+
+
+def test_member_alias_collision_value_side_prefers_winner_member():
+    # Class and namespace share the export alias `Public`. When both
+    # provide `f`, the winning class's static member applies; the
+    # namespace member only fills in when the class lacks the name.
+    # Parenthesized receivers take the same path.
+    source = """
+namespace N { export class C { static f(): void {} } namespace M { export function f(): void {} } export {C as Public}; export {M as Public} }
+N.Public.f();
+(N.Public).f();
+"""
+    report = build_ts_bindings(source)
+    static_f = _member_bindings(report, "f", "associated_function")[0]
+    calls = _calls(report)
+    assert len(calls) == 2
+    assert all(c.target == static_f.id for c in calls)
+
+
+def test_member_alias_collision_value_side_falls_back_to_loser():
+    source = """
+namespace N { export class C { } namespace M { export function f(): void {} } export {C as Public}; export {M as Public} }
+N.Public.f();
+(N.Public).f();
+"""
+    report = build_ts_bindings(source)
+    ns_f = _member_bindings(report, "f", "function")[0]
+    calls = _calls(report)
+    assert len(calls) == 2
+    assert all(c.target == ns_f.id for c in calls)
+
+
+def test_member_alias_collision_deeper_segments_fall_back_to_loser():
+    # Both `Public` candidates provide `B`; the rest of the path
+    # exists only under the losing namespace's `B` — the inherited
+    # member still resolves.
+    source = """
+namespace N { namespace A { export class B { } } namespace M { export class B { } } namespace M { export namespace B { export class D { k(): void {} } } } export {A as Public}; export {M as Public} }
+interface X extends N.Public.B.D {}
+const x: X = null as any; x.k();
+"""
+    report = build_ts_bindings(source)
+    member_k = _member_bindings(report, "k", "associated_function")[0]
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == "x.k()"
+    )
+    assert call.target == member_k.id
+
+
+def test_member_alias_collision_shared_base_keeps_winner_inheritance():
+    # C1 and C2 collide on the alias `Public` and share a base class:
+    # the winner's inherited static member beats the loser's
+    # overriding member — the shared base must not be demoted to a
+    # seeded candidate.
+    source = """
+class Base { static f(): void {} }
+namespace N { class C1 extends Base { } class C2 extends Base { static f(): void {} } export {C1 as Public}; export {C2 as Public} }
+N.Public.f();
+"""
+    report = build_ts_bindings(source)
+    base_f = _member_bindings(report, "f", "associated_function")[0]
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == "N.Public.f()"
+    )
+    assert call.target == base_f.id
+
+
+def test_member_alias_collision_value_side_deep_loser_path():
+    # `N.Public.B.D.k()` — the loser's intermediate members carry the
+    # rest of the path on the value side too.
+    source = """
+namespace N { namespace A { export class B { } } namespace M { export class B { } } namespace M { export namespace B { export class D { static k(): void {} } } } export {A as Public}; export {M as Public} }
+N.Public.B.D.k();
+"""
+    report = build_ts_bindings(source)
+    member_k = _member_bindings(report, "k", "associated_function")[0]
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == "N.Public.B.D.k()"
+    )
+    assert call.target == member_k.id
