@@ -1627,12 +1627,15 @@ class _RustBindings:
                 return None, None
             elem_args = elem_args.strip()
             index = children[1] if len(children) > 1 else None
-            if index is not None and (
-                index.type in {"range_expression", "range_pattern"}
-                or ".." in self.text(index)
-            ):
-                # `v[a..b]` is a slice of the element, not the element.
-                return None, f"[{elem_args}]"
+            if index is not None and index.type in {
+                "range_expression",
+                "range_pattern",
+            }:
+                # `v[a..b]` is a slice of the element, not the element
+                # — encoded as an anonymous collection whose element
+                # the next index can still unwrap. A call like
+                # `v[f(0..10)]` keeps its integer index.
+                return None, elem_args
             # A resolved container whose `Index::Output` is not its
             # generic argument (a custom `Wrapper<P>`) stays opaque —
             # only the known element-indexing collections apply.
