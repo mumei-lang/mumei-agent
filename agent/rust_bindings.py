@@ -2195,6 +2195,40 @@ class _RustBindings:
                 )
                 if ret is not None:
                     spelled_pos = ret.start_byte
+                    container = (
+                        None
+                        if receiver[0] is None
+                        else self.records.get(receiver[0])
+                    )
+                    param_map = (
+                        {}
+                        if container is None
+                        else self._pattern_param_map(
+                            container, receiver[1]
+                        )
+                    )
+                    member_text = (
+                        self.text(member.type_node)
+                    )
+                    if param_map and any(
+                        re.search(
+                            rf"\b{re.escape(param)}\b",
+                            member_text,
+                        )
+                        for param in param_map
+                    ):
+                        # The method's return spells the
+                        # container's own param — the arg was
+                        # substituted from the receiver's
+                        # annotation, so resolve it there, not
+                        # in the method's declaring scope.
+                        inner_pos = (
+                            self._receiver_annotation_position(
+                                callee.child_by_field_name("value")
+                            )
+                        )
+                        if inner_pos is not None:
+                            spelled_pos = inner_pos
         args = self._type_arg_list(value_args or "")
         if len(args) <= index:
             return None, None
