@@ -98,6 +98,13 @@ def _assert_rejected(envelope, source, *, raw=None):
             "block_scope_shadowing",
             ["agree"] * 8,
         ),
+        (
+            "member_access",
+            ["agree"] * 6
+            + ["builtin"]
+            + ["agree"] * 4
+            + ["builtin"],
+        ),
     ],
 )
 def test_captured_references_have_exact_lexical_comparison_statuses(name, statuses):
@@ -572,3 +579,76 @@ def test_compiler_references_use_lexical_byte_spans():
     assert builtin.span == ByteSpan(require_start, require_start + len("require"))
     assert builtin.builtin is True
     assert builtin.declaration is None
+
+
+def test_member_access_declarations_match_lexical_member_bindings():
+    source = _source("member_access")
+    envelope = _envelope("member_access")
+    snapshot = load_sol_compiler_snapshot(_payload(envelope), source)
+    report = build_sol_bindings(source)
+    comparison = compare_with_lexical(snapshot, report)
+
+    bindings_by_id = {binding.id: binding for binding in report.bindings}
+    lexical_by_span = {
+        (ref.span.start, ref.span.end): ref for ref in report.references
+    }
+    member_items = [
+        item
+        for item in comparison["references"]
+        if item["name"] in {"transfer", "supply"}
+    ]
+    assert [item["status"] for item in member_items] == [
+        "agree",
+        "agree",
+    ]
+    for item in member_items:
+        span = item["span"]
+        lexical = lexical_by_span[(span["start"], span["end"])]
+        binding = bindings_by_id[lexical.binding_id]
+        assert item["declaration"] == binding.span.to_dict()
+    transfer = next(
+        binding
+        for binding in report.bindings
+        if binding.name == "transfer"
+    )
+    call = next(
+        call for call in report.calls if call.target == transfer.id
+    )
+    assert call.kind == "direct_local"
+    builtins = [
+        item
+        for item in comparison["references"]
+        if item["name"] in {"push", "length"}
+    ]
+    assert all(item["status"] == "builtin" for item in builtins)
+
+
+def test_member_access_without_analysis_output_is_rejected():
+    # A `stopAfter: "parsing"` envelope leaves MemberAccess nodes with
+    # empty `typeDescriptions`; without the check every member would be
+    # miscounted as a builtin reference.
+    source = _source("member_access")
+    envelope = _envelope("member_access")
+    ast = _ast(envelope, "member_access.sol")
+    for node in _nodes(ast):
+        if node.get("nodeType") == "MemberAccess":
+            node.pop("referencedDeclaration", None)
+            node["typeDescriptions"] = {}
+    with pytest.raises(SolCompilerSnapshotError):
+        load_sol_compiler_snapshot(_payload(envelope), source)
+
+
+def test_member_access_loads_without_contract_outputs():
+    # Contract outputs (`output.contracts`) are optional for the member
+    # slice: an analyzed AST produced without them carries the same
+    # member references.
+    source = _source("member_access")
+    envelope = _envelope("member_access")
+    envelope["output"].pop("contracts")
+    snapshot = load_sol_compiler_snapshot(_payload(envelope), source)
+    assert [ref.name for ref in snapshot.references] == [
+        ref.name
+        for ref in load_sol_compiler_snapshot(
+            _payload(_envelope("member_access")), source
+        ).references
+    ]
