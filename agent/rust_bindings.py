@@ -142,6 +142,11 @@ _OPTION_HEAD_METHODS = {
     # post-processed below to peel the wrapper.
     "as_deref": ("&", {"Option"}, 0),
     "as_deref_mut": ("&mut ", {"Option"}, 0),
+    # `Option<&P>::cloned()`/`copied()` yield `Option<P>` — the
+    # payload's borrow peels off below; a non-borrowed payload
+    # stays opaque.
+    "cloned": ("", {"Option"}, 0),
+    "copied": ("", {"Option"}, 0),
 }
 
 _PRELUDE_NAMES = frozenset(
@@ -3141,6 +3146,24 @@ class _RustBindings:
                                         # than bind the wrong
                                         # record.
                                         return None, None
+                    if (
+                        element is not None
+                        and self.text(field).strip()
+                        in {"cloned", "copied"}
+                    ):
+                        # `Option<&P>::cloned()` yields `Option<P>`
+                        # — the payload's borrow peels off; a
+                        # non-borrowed payload stays opaque.
+                        peeled = re.sub(
+                            r"^&\s*(?:'\w+\s+)?(?:mut\s+)?",
+                            "",
+                            element.strip(),
+                        )
+                        element = (
+                            peeled
+                            if peeled != element.strip()
+                            else None
+                        )
                     if (
                         element is not None
                         and self.text(field).strip()
