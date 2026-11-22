@@ -114,6 +114,36 @@ def _plan_fingerprint(plan: VerificationPlan) -> str:
 
 
 @dataclass(frozen=True)
+class DispatchEnforcement:
+    environment: str
+    network: str
+    memory_bound_mb: int | None
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.environment) is not str
+            or self.environment not in {"inherited", "minimal"}
+            or type(self.network) is not str
+            or self.network not in {"permitted", "isolated", "unenforced"}
+            or (
+                self.memory_bound_mb is not None
+                and (
+                    type(self.memory_bound_mb) is not int
+                    or self.memory_bound_mb < 1
+                )
+            )
+        ):
+            raise ValueError("invalid dispatch enforcement")
+
+    def to_dict(self) -> dict:
+        return {
+            "environment": self.environment,
+            "network": self.network,
+            "memory_bound_mb": self.memory_bound_mb,
+        }
+
+
+@dataclass(frozen=True)
 class ScheduledAttemptEntry:
     """One scheduled round: which adapter was tried and what terminal state
     the attempt reached — `not_dispatched` when the host declared no argv
@@ -126,6 +156,7 @@ class ScheduledAttemptEntry:
     terminal_state: str
     exit_code: int | None
     reported_outcome: str | None = None
+    enforcement: DispatchEnforcement | None = None
 
     def __post_init__(self) -> None:
         if type(self.ordinal) is not int or not 1 <= self.ordinal <= MAX_SCHEDULE_ATTEMPTS:
@@ -158,6 +189,12 @@ class ScheduledAttemptEntry:
             or self.reported_outcome not in VERDICT_OUTCOMES
         ):
             raise ValueError("invalid schedule entry reported outcome")
+        if self.enforcement is not None and not isinstance(
+            self.enforcement, DispatchEnforcement
+        ):
+            raise ValueError("invalid schedule entry enforcement")
+        if self.terminal_state == NOT_DISPATCHED and self.enforcement is not None:
+            raise ValueError("not-dispatched schedule entry has enforcement")
 
     def to_dict(self) -> dict:
         return {
@@ -168,6 +205,11 @@ class ScheduledAttemptEntry:
             "terminal_state": self.terminal_state,
             "exit_code": self.exit_code,
             "reported_outcome": self.reported_outcome,
+            "enforcement": (
+                self.enforcement.to_dict()
+                if self.enforcement is not None
+                else None
+            ),
         }
 
 
@@ -514,6 +556,32 @@ def run_attempt_schedule(
             if feed is not None and type(feed) is not bytes:
                 raise ValueError("attempt stdin must be bytes or absent")
             descriptor = registry.descriptor(adapter_id)
+            environment_arg = _adapter_environment(plan)
+            memory_arg = (
+                memory_bound_mb
+                if memory_bound_mb is not None
+                else (
+                    selected.memory_mb if memory_bound_enforceable() else None
+                )
+            )
+            network_isolation_required = _network_isolated(plan)
+            isolate = (
+                network_isolation_required
+                and network_isolation_enforceable()
+            )
+            enforcement = DispatchEnforcement(
+                environment=(
+                    "inherited" if environment_arg is None else "minimal"
+                ),
+                network=(
+                    "permitted"
+                    if not network_isolation_required
+                    else "isolated"
+                    if isolate
+                    else "unenforced"
+                ),
+                memory_bound_mb=memory_arg,
+            )
             dispatch = dispatch_attempt(
                 sequence,
                 argv,
@@ -524,25 +592,14 @@ def run_attempt_schedule(
                 # max_memory_mb) is the child's ceiling. On a platform with
                 # no POSIX bound mechanism the fallback stays unenforced;
                 # an explicit host bound still fails statically there.
-                memory_bound_mb=(
-                    memory_bound_mb
-                    if memory_bound_mb is not None
-                    else (
-                        selected.memory_mb
-                        if memory_bound_enforceable()
-                        else None
-                    )
-                ),
+                memory_bound_mb=memory_arg,
                 # Without a host namespace boundary this remains
                 # unenforced, like the memory-budget fallback.
-                isolate_network=(
-                    _network_isolated(plan)
-                    and network_isolation_enforceable()
-                ),
+                isolate_network=isolate,
                 # No declared feed means a closed pipe — a scheduled child
                 # must never inherit the parent's stdin and block on it.
                 feed_bytes=feed if feed is not None else b"",
-                environment=_adapter_environment(plan),
+                environment=environment_arg,
             )
             sequences.append(dispatch.sequence)
             record = dispatch.run.record
@@ -570,6 +627,7 @@ def run_attempt_schedule(
                     record.state,
                     exit_code,
                     reported,
+                    enforcement,
                 )
             )
             terminal = record.state

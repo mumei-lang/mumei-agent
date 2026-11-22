@@ -209,6 +209,16 @@ selected when the adapter's first matching manifest verdict marker reports
 withhold selection: they are adapter self-reports, not Evidence, and Core
 acceptance is unchanged.
 
+### C04 effective dispatch enforcement in schedule records
+
+Each dispatched schedule entry has an additive `enforcement` object with
+`environment` (`inherited` or `minimal`), `network` (`permitted`,
+`isolated` or `unenforced`) and `memory_bound_mb` (an integer or `null`).
+It reports what the runner was asked to apply; `unenforced` means the host
+lacks the network namespace boundary. `filesystem.*` and `process.spawn`
+are omitted because they are not enforced. This is not a sandbox or
+Evidence and does not change selection.
+
 ### C11 declared memory bounds for attempted executions
 
 `AttemptRunner.run(request, argv, cancel_event=None, memory_bound_mb=None)`
