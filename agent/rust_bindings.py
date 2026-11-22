@@ -1939,45 +1939,8 @@ class _RustBindings:
                 # the next index can still unwrap. A call like
                 # `v[f(0..10)]` keeps its integer index.
                 return None, elem_args
-            # A resolved container whose `Index::Output` is not its
-            # generic argument (a custom `Wrapper<P>`) stays opaque —
-            # only the known element-indexing collections apply.
-            if container_id is not None:
-                container_name = next(
-                    (
-                        b.name
-                        for b in self.bindings
-                        if b.id == container_id
-                    ),
-                    None,
-                )
-                if container_name not in _INDEX_ELEMENT_CONTAINERS:
-                    return None, None
-            # A slice or array element exposes its own element type —
-            # `&[[P; 2]]` indexes first to `[P; 2]`, then to `P`.
-            bracket = re.fullmatch(
-                r"\[(.+?)(?:\s*;.+)?\]", elem_args
-            )
-            if bracket is not None:
-                # The element is an anonymous slice/array — `v[i]` has
-                # that anonymous type, indexed further by its own
-                # element (`[P; 2]` → `P`), not `P` itself.
-                return None, bracket.group(1).strip()
-            match = re.fullmatch(
-                r"([A-Za-z_][\w:]*)\s*(?:<(.+)>)?", elem_args
-            )
-            if match is None:
-                # The element is a reference or composite type —
-                # keep its text so deeper indexing still reads args.
-                return None, elem_args
-            elem = self._lookup(
-                self._normalize_identifier(match.group(1)),
-                node.start_byte,
-                "type",
-            )
-            return (
-                None if elem is None else elem.binding.id,
-                match.group(2),
+            return self._element_of(
+                container_id, elem_args, node.start_byte
             )
         if node.type == "field_expression":
             member = self._field_member(
@@ -2052,6 +2015,89 @@ class _RustBindings:
             if len(children) == 1:
                 return self._receiver_type(children[0])
         return None, None
+
+    def _element_of(
+        self,
+        container_id: str | None,
+        elem_args: str,
+        position: int,
+    ) -> tuple[str | None, str | None]:
+        """(type id, generic-args key) one collection step in —
+        `Vec<P>`/`[P; N]`/`&Vec<P>` yield `P`; a resolved container
+        whose element is not its generic argument (a custom
+        `Wrapper<P>`) stays opaque."""
+        # A resolved container whose `Index::Output` is not its
+        # generic argument (a custom `Wrapper<P>`) stays opaque —
+        # only the known element-indexing collections apply.
+        if container_id is not None:
+            container_name = next(
+                (
+                    b.name
+                    for b in self.bindings
+                    if b.id == container_id
+                ),
+                None,
+            )
+            if container_name not in _INDEX_ELEMENT_CONTAINERS:
+                return None, None
+        # A slice or array element exposes its own element type —
+        # `&[[P; 2]]` reads first to `[P; 2]`, then to `P`.
+        bracket = re.fullmatch(
+            r"\[(.+?)(?:\s*;.+)?\]", elem_args
+        )
+        if bracket is not None:
+            # The element is an anonymous slice/array — it is indexed
+            # further by its own element (`[P; 2]` → `P`), not `P`.
+            return None, bracket.group(1).strip()
+        match = re.fullmatch(
+            r"([A-Za-z_][\w:]*)\s*(?:<(.+)>)?", elem_args
+        )
+        if match is None:
+            # The element is a reference or composite type — keep its
+            # text so deeper indexing still reads args.
+            return None, elem_args
+        elem = self._lookup(
+            self._normalize_identifier(match.group(1)),
+            position,
+            "type",
+        )
+        return (
+            None if elem is None else elem.binding.id,
+            match.group(2),
+        )
+
+    def _for_element(
+        self, iterator: Any | None
+    ) -> "tuple[TypeFact, str | None]":
+        """(TypeFact, element-args) bound by `for <pat> in <iterator>`
+        — `Vec<P>`, `[P; N]` and their `&`/`&mut` forms yield `P`; a
+        range, an iterator method call or anything else unpinned stays
+        `_UNKNOWN`. The args carry the element's own generics
+        (`Vec<Vec<P>>` binds `inner : Vec<P>`) so a nested loop keeps
+        unwrapping."""
+        if iterator is None:
+            return _UNKNOWN, None
+        while iterator.type == "reference_expression":
+            iterator = next(iter(iterator.named_children), None)
+            if iterator is None:
+                return _UNKNOWN, None
+        if iterator.type == "parenthesized_expression":
+            children = self._children(iterator)
+            if len(children) != 1:
+                return _UNKNOWN, None
+            iterator = children[0]
+        container_id, elem_args = self._receiver_type(iterator)
+        if elem_args is None or "," in elem_args:
+            return _UNKNOWN, None
+        elem_id, rest = self._element_of(
+            container_id, elem_args.strip(), iterator.start_byte
+        )
+        if elem_id is None:
+            return _UNKNOWN, rest
+        name = next(
+            (b.name for b in self.bindings if b.id == elem_id), ""
+        )
+        return TypeFact("named", name, 0, None, elem_id), rest
 
     def _receiver_type_node(self, node: Any | None) -> Any | None:
         """Annotation node of the receiver's declared type, if any."""
@@ -3245,7 +3291,14 @@ class _RustBindings:
         if body is not None:
             scope = _Scope(body, self.module_depth, self.current_function)
             self.scopes.append(scope)
-            self._bind_pattern(pattern, scope, self.span(body), _UNKNOWN)
+            element_fact, element_args = self._for_element(iterator)
+            self._bind_pattern(
+                pattern,
+                scope,
+                self.span(body),
+                element_fact,
+                element_args,
+            )
             self._expr(body)
             self.scopes.pop()
 
@@ -3634,9 +3687,20 @@ class _RustBindings:
             self._add_to_scope(scope, record)
 
     def _bind_pattern(
-        self, pattern: Any, scope: _Scope, binding_scope: ByteSpan, type_fact: TypeFact
+        self,
+        pattern: Any,
+        scope: _Scope,
+        binding_scope: ByteSpan,
+        type_fact: TypeFact,
+        type_args: str | None = None,
     ) -> None:
-        self._bind_pattern_names(self._pattern_names(pattern, scope), scope, binding_scope, type_fact)
+        self._bind_pattern_names(
+            self._pattern_names(pattern, scope),
+            scope,
+            binding_scope,
+            type_fact,
+            type_args,
+        )
 
     def _closure(self, node: Any) -> None:
         params = node.child_by_field_name("parameters")

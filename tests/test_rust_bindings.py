@@ -3562,3 +3562,78 @@ fn f(w: m::W) {
         if source[c.span.start:c.span.end] == "f.m()"
     )
     assert call.target == method.id
+
+
+def test_for_loop_binds_element_type_from_container_args():
+    # `for p in v` types `p` as the container's element — `Vec<P>`
+    # yields `P`, so `p.m()` binds.
+    source = """
+struct P { x: i32 }
+impl P { fn m(&self) {} }
+fn f(v: Vec<P>) {
+    for p in v { p.m(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = next(b for b in report.bindings if b.name == "m")
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "p.m()"
+    )
+    assert call.target == method.id
+
+
+def test_for_loop_binds_element_type_through_reference():
+    source = """
+struct P { x: i32 }
+impl P { fn m(&self) {} }
+fn f(v: Vec<P>) {
+    for p in &v { p.m(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = next(b for b in report.bindings if b.name == "m")
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "p.m()"
+    )
+    assert call.target == method.id
+
+
+def test_for_loop_binds_nested_container_elements():
+    # `Vec<Vec<P>>` binds the inner loop variable to `Vec<P>` whose
+    # own args still unwrap — `p2` is `P`.
+    source = """
+struct P { x: i32 }
+impl P { fn m(&self) {} }
+fn f(w: Vec<Vec<P>>) {
+    for inner in w {
+        for p2 in inner { p2.m(); }
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = next(b for b in report.bindings if b.name == "m")
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "p2.m()"
+    )
+    assert call.target == method.id
+
+
+def test_for_loop_stays_opaque_on_ranges_and_undeclared_iterables():
+    source = """
+struct P { x: i32 }
+impl P { fn m(&self) {} }
+fn f() {
+    for i in 0..10 { i.m(); }
+    for s in ps { s.m(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    for text in ("i.m()", "s.m()"):
+        call = next(
+            c for c in report.calls
+            if source[c.span.start:c.span.end] == text
+        )
+        assert call.target == ""
