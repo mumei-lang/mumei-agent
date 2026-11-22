@@ -2853,10 +2853,13 @@ contract Vault {
 
 def test_member_call_on_loosely_spaced_composite_types_binds():
     source = """
+library L {
+    function take(mapping(uint   =>   uint) storage m, uint256 x)
+        internal returns (uint256) { return m[x]; }
+}
 contract C {
-    mapping(uint   =>   uint) m;
-    function take(mapping(uint=>uint) storage v) external {}
-    function run() external { this.take(m); }
+    mapping(uint => uint) m;
+    function run() external returns (uint256) { return L.take(m, 0); }
 }
 """
     report = build_sol_bindings(source)
