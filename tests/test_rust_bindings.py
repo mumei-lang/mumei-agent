@@ -2397,3 +2397,41 @@ fn f() { let p = mk(); p.n(); }
     n = _bindings(report, "n", "associated_function")[0]
     call = _call(report, source, "p.n()")
     assert call.target == n.id
+
+
+def test_member_scoped_module_type_annotation_resolves():
+    source = """
+mod m { pub struct P { pub x: i32 } }
+fn f(p: m::P) { p.x; }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    field = _bindings(report, "x", "struct_field")[0]
+    read = next(
+        r
+        for r in report.references
+        if source[r.span.start - 1 : r.span.end] == ".x"
+    )
+    assert read.binding_id == field.id
+
+
+def test_member_scoped_module_path_call_resolves():
+    source = """
+mod m { pub struct P; impl P { pub fn new() -> P { P } } }
+fn f() { let p = m::P::new(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    new = _bindings(report, "new", "associated_function")[0]
+    call = _call(report, source, "m::P::new()")
+    assert call.target == new.id
+    assert call.kind == "direct_local"
+
+
+def test_member_nested_module_type_annotation_resolves():
+    source = """
+mod a { pub mod b { pub struct P; impl P { pub fn n(&self) {} } } }
+fn f(p: a::b::P) { p.n(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    n = _bindings(report, "n", "associated_function")[0]
+    call = _call(report, source, "p.n()")
+    assert call.target == n.id

@@ -159,6 +159,8 @@ class _Record:
     # A `let` initializer node — used to infer the binding's type
     # when no annotation is present.
     value_node: Any = None
+    # A `mod` item's body scope — lets `m::T` annotations resolve.
+    module_scope: Any = None
 
 
 class _RustBindings:
@@ -785,6 +787,9 @@ class _RustBindings:
             if body is not None:
                 self.module_depth += 1
                 child_scope = _Scope(body, self.module_depth, self.current_function)
+                record = self._find_item_record(scope, node)
+                if record is not None:
+                    record.module_scope = child_scope
                 self.scopes.append(child_scope)
                 self._predeclare(body, child_scope)
                 self._scan_container(body, child_scope)
@@ -1062,6 +1067,9 @@ class _RustBindings:
                 if key is not None:
                     args = key
             node = node.child_by_field_name("type")
+        if node is not None and node.type == "scoped_type_identifier":
+            record = self._scoped_type(node)
+            return (None if record is None else record.binding.id), None
         if node is None or node.type != "type_identifier":
             return None, None
         record = self._lookup(
@@ -1070,6 +1078,59 @@ class _RustBindings:
             "type",
         )
         return (None if record is None else record.binding.id), args
+
+    def _lookup_module(self, name: str, position: int) -> "_Record | None":
+        name = self._normalize_identifier(name)
+        for scope in reversed(self.scopes):
+            for record in reversed(scope.bindings.get(name, ())):
+                if record.binding.kind != "module":
+                    continue
+                if (
+                    record.binding.scope is not None
+                    and record.binding.scope != ByteSpan(0, 0)
+                    and not (
+                        record.binding.scope.start
+                        <= position
+                        < record.binding.scope.end
+                    )
+                ):
+                    continue
+                return record
+        return None
+
+    def _scoped_type(self, node: Any) -> "_Record | None":
+        """Record for `m::T` — walks each module segment's body scope."""
+        path = node.child_by_field_name("path")
+        name = node.child_by_field_name("name")
+        if path is None or name is None or name.type not in {
+            "identifier",
+            "type_identifier",
+        }:
+            return None
+        module = None
+        if path.type in {"identifier", "type_identifier"}:
+            module = self._lookup_module(self.text(path), path.start_byte)
+        elif path.type in {"scoped_identifier", "scoped_type_identifier"}:
+            nested = self._scoped_type(path)
+            if nested is not None and nested.binding.kind == "module":
+                module = nested
+        if module is None or module.module_scope is None:
+            return None
+        for record in reversed(
+            module.module_scope.bindings.get(
+                self._normalize_identifier(self.text(name)), ()
+            )
+        ):
+            if record.binding.kind in {
+                "struct",
+                "enum",
+                "union",
+                "type_alias",
+                "trait",
+                "module",
+            }:
+                return record
+        return None
 
     def _link_fields(self, node: Any, scope: _Scope) -> None:
         """Attach named struct/union fields as member bindings."""
@@ -1122,6 +1183,9 @@ class _RustBindings:
                 path.start_byte,
                 "type",
             )
+            type_id, args = (None if record is None else record.binding.id), None
+        elif path.type in {"scoped_identifier", "scoped_type_identifier"}:
+            record = self._scoped_type(path)
             type_id, args = (None if record is None else record.binding.id), None
         else:
             return None, name
