@@ -33317,6 +33317,28 @@ def test_named_pointer_param_deref_copy_reseated(go_types_helper):
     assert result.return_dependencies == frozenset({1})
 
 
+def test_named_pointer_param_deref_copy_reseated_write_targets_alias(
+    go_types_helper,
+):
+    # `p = q; r := *p; r.F[0] = x` — the copy's collection member
+    # aliases the pointee the deref actually reads (q's entry), so
+    # the element store's caller-backing keys on q, not p.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "type S3 struct { F []int64 }\n"
+        "func F(p *S3, q *S3, x int64) int64 {"
+        " p = q; r := *p; r.F[0] = x; return r.F[0] }\n",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({1, 2})
+    imported = {c.target for c in result.calls if c.imported}
+    q_id = next(
+        b.id for b in snapshot.bindings if b.name == "q"
+    )
+    assert f"{q_id}/caller-backing" in imported
+
+
 @pytest.mark.parametrize(
     "declarations",
     [

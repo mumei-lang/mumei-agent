@@ -4182,9 +4182,19 @@ class _Builder:
             # `q := *p` copies a `*S` parameter's pointee: the
             # collection members alias the pointee's backing the way
             # `q := o` aliases `o`'s — a snapshot of the pointer's
-            # own container tokens.
+            # own container tokens. An aliased pointer (`p = q`)
+            # copies the TARGET's tokens — the pointee the deref
+            # actually reads — so writes through `r` land in `q`'s
+            # caller-backing like a store through `p` does.
             deref_ref = self.references.get(self.node_key(deref_operand))
-            pointee_id = deref_ref.binding_id
+            aliased_ref = self._param_pointer_aliases.get(
+                deref_ref.binding_id
+            )
+            pointee_id = (
+                aliased_ref.binding_id
+                if aliased_ref is not None
+                else deref_ref.binding_id
+            )
             tokens = self._opaque_container_tokens.get(pointee_id)
             if not tokens:
                 tokens = frozenset({pointee_id})
