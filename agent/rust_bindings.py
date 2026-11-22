@@ -991,11 +991,16 @@ class _RustBindings:
         parts: list[str] = []
         depth = 0
         current: list[str] = []
-        for ch in args:
-            if ch in "([{":
+        for index, ch in enumerate(args):
+            if ch in "([{<":
                 depth += 1
             elif ch in ")]}":
                 depth -= 1
+            elif ch == ">":
+                # `>` also spells `->` in `dyn Fn(A) -> B` — only a
+                # `>` not closing a function type's arrow counts.
+                if index == 0 or args[index - 1] != "-":
+                    depth -= 1
             if ch == "," and depth <= 0:
                 parts.append("".join(current))
                 current = []
@@ -1053,6 +1058,19 @@ class _RustBindings:
             return len(sub_a) == len(sub_b) and all(
                 self._type_arg_match(x, y, params, bindings)
                 for x, y in zip(sub_a, sub_b)
+            )
+        if a.startswith("[") and a.endswith("]"):
+            if not (b.startswith("[") and b.endswith("]")):
+                return False
+            # `[A; N]` — element and length are both arg positions;
+            # a const parameter binds the length (`N` = `4`).
+            parts_a = a[1:-1].split(";", 1)
+            parts_b = b[1:-1].split(";", 1)
+            if len(parts_a) != len(parts_b):
+                return False
+            return all(
+                self._type_arg_match(x, y, params, bindings)
+                for x, y in zip(parts_a, parts_b)
             )
         match_a = re.fullmatch(r"(.+?)\s*<(.+)>", a)
         match_b = re.fullmatch(r"(.+?)\s*<(.+)>", b)
@@ -1489,6 +1507,32 @@ class _RustBindings:
                 return None
         return first
 
+    def _concrete_type(
+        self, type_id: str | None, args: str | None
+    ) -> tuple[str | None, str | None]:
+        """(type id, args) after following `type` alias chains — the
+        alias target's own arguments win (`type A = W<u8>` spells
+        `W<u8>` for an `<A as T>::m` receiver)."""
+        seen: set[str] = set()
+        while type_id is not None and type_id not in seen:
+            seen.add(type_id)
+            record = self.records.get(type_id)
+            if (
+                record is None
+                or record.binding.kind != "type_alias"
+                or record.alias_node is None
+            ):
+                break
+            resolved, resolved_args = self._annotation_type(
+                record.alias_node
+            )
+            if resolved is None or resolved == type_id:
+                break
+            type_id = resolved
+            if resolved_args is not None:
+                args = resolved_args
+        return type_id, args
+
     def _concrete_type_id(self, type_id: str | None) -> str | None:
         """Unwrap `type A = B` aliases to the aliased type's id."""
         seen = set()
@@ -1545,7 +1589,7 @@ class _RustBindings:
             return None
         # `<A as T>::m` with `type A = P` looks up the impl on the
         # concrete type P — the alias only spells the receiver.
-        type_id = self._concrete_type_id(type_id)
+        type_id, impl_args = self._concrete_type(type_id, impl_args)
         if type_id is None:
             return None
         if trait_node is None:
@@ -1572,6 +1616,17 @@ class _RustBindings:
                 record.member_trait_args, trait_args, params, bindings
             ):
                 return False
+            if impl_args is None and record.member_impl_args is not None:
+                # `<W as T>::m` omits the receiver's arguments — only
+                # an impl whose every arg is a parameter still applies
+                # (`impl<A> T for W<A>`); a concrete `impl T for
+                # W<i32>` cannot be decided, so it stays out.
+                return all(
+                    part in params
+                    for part in self._type_arg_list(
+                        record.member_impl_args
+                    )
+                )
             return self._type_args_match(
                 record.member_impl_args, impl_args, params, bindings
             )

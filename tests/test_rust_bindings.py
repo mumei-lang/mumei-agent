@@ -2994,3 +2994,77 @@ fn f() { <W<V<u16>> as T<u8>>::m(&W(V(0u16))); }
     call = _call(report, source, "<W<V<u16>> as T<u8>>::m(&W(V(0u16)))")
     assert call.target == right_m.id
     assert call.target != wrong_m.id
+
+
+def test_ufcs_alias_receiver_carries_impl_args():
+    # `type Alias = W<u8>` — `<Alias as T>::m` reads `W<u8>` for the
+    # impl match, so `impl<A> T for W<A>` answers with A = u8.
+    source = """
+trait T { fn m(&self) {} }
+struct W<A>(A);
+impl<A> T for W<A> { fn m(&self) {} }
+type Alias = W<u8>;
+fn f() { <Alias as T>::m(&W(0u8)); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    impl_m = next(
+        b for b in report.bindings
+        if b.name == "m" and b.span.start == source.rindex("fn m") + 3
+    )
+    call = _call(report, source, "<Alias as T>::m(&W(0u8))")
+    assert call.target == impl_m.id
+
+
+def test_ufcs_omitted_receiver_args_still_matches_generic_impl():
+    # `<W as T>::m` spells no receiver args — `impl<A> T for W<A>`
+    # still applies (every impl arg is a parameter).
+    source = """
+trait T { fn m(&self) {} }
+struct W<A = u8>(A);
+impl<A> T for W<A> { fn m(&self) {} }
+fn f() { <W as T>::m(&W(0u8)); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    impl_m = next(
+        b for b in report.bindings
+        if b.name == "m" and b.span.start == source.rindex("fn m") + 3
+    )
+    call = _call(report, source, "<W as T>::m(&W(0u8))")
+    assert call.target == impl_m.id
+
+
+def test_ufcs_nested_generic_impl_arg_matches():
+    # `Result<A, B>` — the comma inside `<>` is nested and does not
+    # split the impl's arg list.
+    source = """
+trait T { fn m(&self) {} }
+struct W<A>(A);
+struct R<A, B>(A, B);
+impl<A, B> T for W<R<A, B>> { fn m(&self) {} }
+fn f() { <W<R<u8, u16>> as T>::m(&W(R(0u8, 0u16))); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    impl_m = next(
+        b for b in report.bindings
+        if b.name == "m" and b.span.start == source.rindex("fn m") + 3
+    )
+    call = _call(report, source, "<W<R<u8, u16>> as T>::m(&W(R(0u8, 0u16)))")
+    assert call.target == impl_m.id
+
+
+def test_ufcs_array_impl_arg_matches_element_and_length():
+    # `impl<A, const N: usize> T for W<[A; N]>` — the receiver's
+    # `[u8; 4]` binds `A = u8` and `N = 4`.
+    source = """
+trait T { fn m(&self) {} }
+struct W<A>(A);
+impl<A, const N: usize> T for W<[A; N]> { fn m(&self) {} }
+fn f() { <W<[u8; 4]> as T>::m(&W([0u8; 4])); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    impl_m = next(
+        b for b in report.bindings
+        if b.name == "m" and b.span.start == source.rindex("fn m") + 3
+    )
+    call = _call(report, source, "<W<[u8; 4]> as T>::m(&W([0u8; 4]))")
+    assert call.target == impl_m.id
