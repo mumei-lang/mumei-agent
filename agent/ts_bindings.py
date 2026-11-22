@@ -523,7 +523,15 @@ class _TypeScriptBindings:
             "generator_function_declaration", "generator_function",
         } or bool(
             re.search(r"\bfunction\s*\*", self.text(node))
-            or (method and re.search(r"(?:^|\s)\*", self.text(node)))
+            or (
+                method
+                and re.search(
+                    r"(?:^|\s)\*",
+                    # Only the signature head — a `*` in the body is
+                    # multiplication, not the generator marker.
+                    self.text(node).split("(", 1)[0],
+                )
+            )
         )
         record = self.add_binding(
             name,
