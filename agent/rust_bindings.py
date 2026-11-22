@@ -2699,6 +2699,73 @@ class _RustBindings:
             return None
         return record.type_node.start_byte
 
+    def _iterator_spelling(
+        self, call: Any, _depth: int = 0
+    ) -> "str | None":
+        """Element spelling of an iterator chain — `v.iter()` on
+        `Vec<P>` spells `P`, `v.iter().zip(u.iter())` spells
+        `(P, Q)`, `enumerate` spells `(usize, P)`. Only undeclared
+        std adaptors apply; a declared method's real return type is
+        what `_iterator_method_element` types instead."""
+        if _depth > 8:
+            return None
+        callee = call.child_by_field_name("function")
+        if callee is None or callee.type != "field_expression":
+            return None
+        if (
+            self._field_member(callee, ("associated_function",))
+            is not None
+        ):
+            return None
+        method_node = callee.child_by_field_name("field")
+        receiver = callee.child_by_field_name("value")
+        if method_node is None or receiver is None:
+            return None
+        method = self._normalize_identifier(self.text(method_node))
+        if method in _ITER_ELEMENT_METHODS:
+            container_id, args = self._receiver_type(receiver)
+            if args is None:
+                return None
+            if self._is_map_container(container_id, receiver):
+                # `m.iter()` yields `(K, V)` — recover both halves
+                # from the annotation since index typing keeps V.
+                spelled = self._map_spelled_args(receiver)
+                return None if spelled is None else f"({spelled})"
+            return args.strip() or None
+        if method in _ITER_PRESERVING_METHODS or method in _ITER_SLICE_METHODS:
+            if receiver.type != "call_expression":
+                return None
+            return self._iterator_spelling(receiver, _depth + 1)
+        if method == "enumerate":
+            if receiver.type != "call_expression":
+                return None
+            inner = self._iterator_spelling(receiver, _depth + 1)
+            return None if inner is None else f"(usize, {inner})"
+        if method == "zip":
+            if receiver.type != "call_expression":
+                return None
+            args_node = call.child_by_field_name("arguments")
+            zipped = (
+                None
+                if args_node is None
+                else next(
+                    (
+                        child
+                        for child in self._children(args_node)
+                        if child.type == "call_expression"
+                    ),
+                    None,
+                )
+            )
+            if zipped is None:
+                return None
+            left = self._iterator_spelling(receiver, _depth + 1)
+            right = self._iterator_spelling(zipped, _depth + 1)
+            if left is None or right is None:
+                return None
+            return f"({left}, {right})"
+        return None
+
     def _iterator_method_element(
         self, call: Any
     ) -> "tuple[TypeFact, str | None]":
@@ -2737,6 +2804,7 @@ class _RustBindings:
             or method in _ITER_PRESERVING_METHODS
             or method in _ITER_SLICE_METHODS
             or method == "enumerate"
+            or method == "zip"
         ) and self._field_member(
             callee, ("associated_function",)
         ) is not None:
@@ -2814,6 +2882,15 @@ class _RustBindings:
             elem_id = None
             rest = f"(usize, {spelled})"
             return _UNKNOWN, rest
+        if method == "zip":
+            # `a.iter().zip(b.iter())` yields the spelled pair
+            # `(A, B)` — it feeds the tuple-pattern path the same
+            # way a `(P, Q)` element does; either side unresolvable
+            # stays unpinned.
+            if receiver.type != "call_expression":
+                return _UNKNOWN, None
+            spelled = self._iterator_spelling(call)
+            return _UNKNOWN, spelled
         container_id, args = self._receiver_type(receiver)
         if args is None:
             return _UNKNOWN, None

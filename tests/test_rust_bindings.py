@@ -5335,3 +5335,44 @@ fn h() {
         if source[c.span.start : c.span.end].endswith(("m()", "q()"))
     ]
     assert [c.target for c in calls] == [m.id, m.id, m.id, m.id, q.id]
+
+
+def test_for_tuple_pattern_binds_zipped_elements() -> None:
+    source = """
+struct P;
+struct Q;
+impl P { fn p(&self) {} }
+impl Q { fn q(&self) {} }
+fn f(v: Vec<P>, u: Vec<Q>, w: Vec<Vec<P>>) {
+    for (a, b) in v.iter().zip(u.iter()) { a.p(); b.q(); }
+    for (x, y) in w.iter().zip(u.iter()) { x[0].p(); }
+    for (a, b) in v.iter().rev().zip(u.iter().take(2)) { a.p(); b.q(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    p = _bindings(report, "p", "associated_function")[0]
+    q = _bindings(report, "q", "associated_function")[0]
+    assert _call(report, source, "a.p()").target == p.id
+    assert _call(report, source, "b.q()").target == q.id
+    assert _call(report, source, "x[0].p()").target == p.id
+
+
+def test_for_tuple_pattern_binds_zipped_map_pair() -> None:
+    source = """
+struct P;
+struct Q;
+impl P { fn p(&self) {} }
+impl Q { fn q(&self) {} }
+use std::collections::HashMap;
+fn f(m: HashMap<Q, P>, v: Vec<P>) {
+    for ((k, val), o) in m.iter().zip(v.iter()) {
+        k.q(); val.p(); o.p();
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    p = _bindings(report, "p", "associated_function")[0]
+    q = _bindings(report, "q", "associated_function")[0]
+    assert _call(report, source, "k.q()").target == q.id
+    assert _call(report, source, "val.p()").target == p.id
+    assert _call(report, source, "o.p()").target == p.id
