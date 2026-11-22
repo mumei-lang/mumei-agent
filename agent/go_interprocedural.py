@@ -3230,11 +3230,12 @@ class _Builder:
                 ):
                     return None
         member = members[-1]
-        if (
-            member.type.kind != "array"
-            or getattr(member.type, "elem", None) is None
-            or not self._scalar_value_fact(member.type.elem)
-        ):
+        if member.type.kind != "array":
+            return None
+        element = member.type
+        while element is not None and element.kind == "array":
+            element = getattr(element, "elem", None)
+        if not self._scalar_value_fact(element):
             return None
         self._pin_fact_identities(root_binding.type)
         for field_member in members:
@@ -3271,14 +3272,19 @@ class _Builder:
                     ),
                     None,
                 )
-        if len(indexes) != 1:
-            return None
         field_target = self._value_struct_scalar_array_field_target(
             current, params
         )
         if field_target is None:
             return None
         root_ref, member, field_selector = field_target
+        depth = 0
+        element = member.type
+        while element is not None and element.kind == "array":
+            depth += 1
+            element = getattr(element, "elem", None)
+        if len(indexes) != depth:
+            return None
         return root_ref, member, field_selector, indexes
 
     def _opaque_container_struct_element_field_target(
@@ -8512,28 +8518,26 @@ class _Builder:
                 break
             indexes.append(inner.child_by_field_name("index"))
             inner = inner.child_by_field_name("operand")
-        if len(indexes) == 1:
-            value_array_field = (
-                self._value_struct_scalar_array_field_target(
-                    inner, params
-                )
+        value_array_elem = self._value_struct_scalar_array_index_target(
+            node, params
+        )
+        if value_array_elem is not None:
+            _, _, field_selector, value_array_indexes = value_array_elem
+            base_deps = self.expression(
+                field_selector, fn, params, locals_, transfers, count,
+                depth + 1,
             )
-            if value_array_field is not None:
-                base_deps = self.expression(
-                    inner, fn, params, locals_, transfers, count,
-                    depth + 1,
-                )
-                index_node = indexes[0]
-                index_deps = (
-                    self.expression(
+            index_deps = frozenset()
+            for index_node in reversed(value_array_indexes):
+                if (
+                    index_node is not None
+                    and index_node.type not in _INDEX_LITERALS
+                ):
+                    index_deps |= self.expression(
                         index_node, fn, params, locals_, transfers, count,
                         depth + 1,
                     )
-                    if index_node is not None
-                    and index_node.type not in _INDEX_LITERALS
-                    else frozenset()
-                )
-                return base_deps | index_deps
+            return base_deps | index_deps
         member = None
         package_var = None
         package_field = None
