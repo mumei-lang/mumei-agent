@@ -150,6 +150,9 @@ class _Record:
     # The impl block itself is generic (`impl<T> Wrap<T>`) — its
     # members apply to every instantiation.
     member_impl_generic: bool = False
+    # Binding id of the trait an `impl Tr for T` member belongs to;
+    # None for inherent impl members.
+    member_trait: str | None = None
     # The impl block's own `type` node — the declared type `self`
     # parameters inside it refer to (keeps generic args).
     self_type_node: Any = None
@@ -170,6 +173,9 @@ class _RustBindings:
         self.gaps: list[Gap] = []
         self.scopes: list[_Scope] = []
         self.records: dict[str, _Record] = {}
+        self._type_impl_traits: dict[
+            str, list[tuple[str, str | None, bool, frozenset[str]]]
+        ] = {}
         self.current_function = ""
         self.call_owner = ""
         self.module_depth = 0
@@ -794,18 +800,79 @@ class _RustBindings:
                 member_of = None
                 member_args = None
                 member_generic = False
+                member_trait = None
                 member_type_node = None
-                if node.type == "impl_item":
+                if node.type == "trait_item":
+                    # Key a trait's own members to the trait so impls
+                    # without an override fall back to the trait's
+                    # default member (`trait T { fn m(&self) {} }`).
+                    trait_record = self._find_item_record(scope, node)
+                    if trait_record is not None:
+                        member_of = trait_record.binding.id
+                        member_trait = trait_record.binding.id
+                elif node.type == "impl_item":
                     self._generic_references(node.child_by_field_name("type"))
-                    if node.child_by_field_name("trait") is None:
-                        member_type_node = node.child_by_field_name("type")
-                        member_of, member_args = self._annotation_type(
-                            member_type_node
-                        )
-                        member_generic = (
-                            node.child_by_field_name("type_parameters")
-                            is not None
-                        )
+                    trait_node = node.child_by_field_name("trait")
+                    member_type_node = node.child_by_field_name("type")
+                    member_of, member_args = self._annotation_type(
+                        member_type_node
+                    )
+                    member_generic = (
+                        node.child_by_field_name("type_parameters")
+                        is not None
+                    )
+                    if trait_node is not None:
+                        member_trait, _ = self._annotation_type(trait_node)
+                        if member_trait is None:
+                            # `impl path::Tr for T` — the scoped trait is
+                            # not resolvable here; its members attach to
+                            # the type but never resolve as methods.
+                            member_trait = "<unresolved>"
+                        elif member_of is not None:
+                            # Record the `impl T for <type>` edge even
+                            # when the impl block is empty, so the
+                            # trait's default members can apply. The
+                            # specialization args matter: `impl T for
+                            # W<i32>` does not implement T for `W<u32>`,
+                            # and a generic `impl<A> T for W<A, i32>`
+                            # only covers receivers whose concrete args
+                            # match every non-parameter position.
+                            type_params = node.child_by_field_name(
+                                "type_parameters"
+                            )
+                            self._type_impl_traits.setdefault(
+                                member_of, []
+                            ).append(
+                                (
+                                    member_trait,
+                                    member_args,
+                                    member_generic,
+                                    frozenset(
+                                        self._normalize_identifier(
+                                            self.text(
+                                                child.child_by_field_name(
+                                                    "name"
+                                                )
+                                            )
+                                        )
+                                        for child in (
+                                            ()
+                                            if type_params is None
+                                            else type_params.named_children
+                                        )
+                                        if child.type
+                                        in {
+                                            "type_parameter",
+                                            "const_parameter",
+                                            "lifetime_parameter",
+                                        }
+                                        and child.child_by_field_name(
+                                            "name"
+                                        )
+                                        is not None
+                                    ),
+                                )
+                            )
                 if body is not None:
                     self._scan_associated_container(
                         body,
@@ -814,9 +881,8 @@ class _RustBindings:
                         member_of,
                         member_args,
                         member_generic,
-                        member_type_node
-                        if node.type == "impl_item"
-                        else None,
+                        member_trait,
+                        member_type_node,
                     )
             finally:
                 self.in_extern = old_extern
@@ -858,12 +924,116 @@ class _RustBindings:
             None,
         )
 
+    @staticmethod
+    def _type_arg_list(args: str) -> list[str]:
+        """Top-level comma split of a type-argument key — commas
+        inside `(...)`, `[...]` or `<...>` stay inside their arg."""
+        parts: list[str] = []
+        depth = 0
+        current: list[str] = []
+        for ch in args:
+            if ch in "([{":
+                depth += 1
+            elif ch in ")]}":
+                depth -= 1
+            if ch == "," and depth <= 0:
+                parts.append("".join(current))
+                current = []
+            else:
+                current.append(ch)
+        parts.append("".join(current))
+        return [part.strip() for part in parts]
+
+    def _type_arg_match(
+        self,
+        pattern: str,
+        concrete: str,
+        params: frozenset[str],
+        bindings: dict[str, str],
+    ) -> bool:
+        """Does impl-side arg `pattern` cover receiver arg `concrete`?
+
+        Positions spelled with an impl parameter are wildcards —
+        every occurrence of one parameter must bind the same arg, so
+        `W<(A,A)>` covers `W<(u8,u8)>` but not `W<(u8,u16)>`. Other
+        positions must match structurally — `Vec<A>` covers `Vec<u8>`.
+        Reference mutability is significant (`&mut u8` is not `&u8`);
+        lifetimes are ignored: they never change which methods a type
+        provides."""
+        a = pattern.strip().strip("{}").strip()
+        b = concrete.strip().strip("{}").strip()
+        if a in params:
+            bound = bindings.get(a)
+            # Lifetimes are erased for consistency — `&'a u8` and
+            # `&'b u8` bind the same parameter.
+            normalized = re.sub(r"'\w+(?!')", "", b).replace(" ", "")
+            if bound is None:
+                bindings[a] = normalized
+                return True
+            return bound == normalized
+        ref_a = re.fullmatch(
+            r"&\s*(?:'\w+\s*)?(mut(?![\w']))?\s*(.+)", a
+        )
+        ref_b = re.fullmatch(
+            r"&\s*(?:'\w+\s*)?(mut(?![\w']))?\s*(.+)", b
+        )
+        if (ref_a is None) != (ref_b is None):
+            return False
+        if ref_a is not None:
+            if bool(ref_a.group(1)) != bool(ref_b.group(1)):
+                return False
+            return self._type_arg_match(
+                ref_a.group(2), ref_b.group(2), params, bindings
+            )
+        if a.startswith("(") and a.endswith(")"):
+            if not (b.startswith("(") and b.endswith(")")):
+                return False
+            sub_a = self._type_arg_list(a[1:-1])
+            sub_b = self._type_arg_list(b[1:-1])
+            return len(sub_a) == len(sub_b) and all(
+                self._type_arg_match(x, y, params, bindings)
+                for x, y in zip(sub_a, sub_b)
+            )
+        match_a = re.fullmatch(r"(.+?)\s*<(.+)>", a)
+        match_b = re.fullmatch(r"(.+?)\s*<(.+)>", b)
+        if (match_a is None) != (match_b is None):
+            return False
+        if match_a is not None:
+            if match_a.group(1).replace(" ", "") != match_b.group(
+                1
+            ).replace(" ", ""):
+                return False
+            sub_a = self._type_arg_list(match_a.group(2))
+            sub_b = self._type_arg_list(match_b.group(2))
+            return len(sub_a) == len(sub_b) and all(
+                self._type_arg_match(x, y, params, bindings)
+                for x, y in zip(sub_a, sub_b)
+            )
+        return a.replace(" ", "") == b.replace(" ", "")
+
+    def _type_args_match(
+        self, a: str | None, b: str | None, params: frozenset[str]
+    ) -> bool:
+        """Positional structural equality of two type-argument keys
+        — `W<(u8,u16)>` and `W<(u8, u16)>` are the same type."""
+        if (a is None) != (b is None):
+            return False
+        if a is None:
+            return True
+        parts_a = self._type_arg_list(a)
+        parts_b = self._type_arg_list(b)
+        bindings: dict[str, str] = {}
+        return len(parts_a) == len(parts_b) and all(
+            self._type_arg_match(x, y, params, bindings)
+            for x, y in zip(parts_a, parts_b)
+        )
+
     def _type_args_key(self, args_node: Any | None) -> str | None:
         """Normalized `Wrap<i32>`-style type-argument text."""
         if args_node is None:
             return None
         return ",".join(
-            self.text(child).replace(" ", "")
+            re.sub(r"\s+", " ", self.text(child)).strip()
             for child in self._children(args_node)
         )
 
@@ -930,49 +1100,134 @@ class _RustBindings:
                 type_node=annotation,
             )
             member.member_of = record.binding.id
-
     def _member_record(
         self,
         type_id: str | None,
         name: str,
         kinds: tuple[str, ...] = (),
         impl_args: str | None = None,
+        position: int | None = None,
     ) -> _Record | None:
         """Member `name` of the type `type_id`.
 
         `kinds` prefers e.g. `struct_field` for field access or
         `associated_function` for calls when both spellings exist.
         Members of a concrete specialization impl (`impl Wrap<i32>`)
-        only apply to receivers annotated with the same arguments."""
+        only apply to receivers annotated with the same arguments.
+        Inherent impl members win; trait-impl members apply only when
+        the trait itself resolves at the access site — an out-of-scope
+        trait's methods do not."""
         if type_id is None:
             return None
 
-        def matches(record: _Record) -> bool:
+        def args_match(record: _Record) -> bool:
             if (
                 record.member_impl_args is not None
                 and not record.member_impl_generic
-                and record.member_impl_args != impl_args
+                and not self._type_args_match(
+                    record.member_impl_args, impl_args, frozenset()
+                )
             ):
                 return False
             return True
 
-        pool = (
+        def trait_in_scope(record: _Record) -> bool:
+            if record.member_trait is None or position is None:
+                return record.member_trait is None
+            trait = self.records.get(record.member_trait)
+            if trait is None:
+                return False
+            resolved = self._lookup(
+                trait.binding.name, position, "type"
+            )
+            return resolved is trait
+
+        pool = [
             record
             for record in self.records.values()
-            if record.member_of == type_id and record.binding.name == name
+            if record.member_of == type_id
+            and record.binding.name == name
+            and args_match(record)
+            and trait_in_scope(record)
+        ]
+        # Trait-declared defaults apply when an `impl T for <type>`
+        # exists but does not spell `name` — they rank below both
+        # inherent and trait-impl members of the type itself.
+        impl_traits = self._type_impl_traits.get(type_id, ())
+        if impl_traits:
+            for (
+                trait_id,
+                edge_args,
+                edge_generic,
+                edge_params,
+            ) in impl_traits:
+                if edge_args is not None:
+                    if not edge_generic:
+                        if not self._type_args_match(
+                            edge_args, impl_args, frozenset()
+                        ):
+                            continue
+                    elif impl_args is not None:
+                        # Generic impl (`impl<A> T for W<A, i32>`):
+                        # parameter positions are wildcards, concrete
+                        # positions must structurally equal the
+                        # receiver's args — `W<(u8,u16)>` still matches
+                        # `impl<A> T for W<A>` since the comma is
+                        # nested inside the tuple.
+                        edge_parts = self._type_arg_list(edge_args)
+                        impl_parts = self._type_arg_list(impl_args)
+                        bindings: dict[str, str] = {}
+                        if len(edge_parts) != len(impl_parts) or any(
+                            not self._type_arg_match(
+                                edge, concrete, edge_params, bindings
+                            )
+                            for edge, concrete in zip(
+                                edge_parts, impl_parts
+                            )
+                        ):
+                            continue
+                trait = self.records.get(trait_id)
+                if trait is None:
+                    continue
+                resolved = self._lookup(
+                    trait.binding.name, position, "type"
+                )
+                if resolved is not trait:
+                    continue
+                pool.extend(
+                    record
+                    for record in self.records.values()
+                    if record.member_of == trait_id
+                    and record.member_of != type_id
+                    and record.binding.name == name
+                    and args_match(record)
+                )
+        def tier(record: _Record) -> int:
+            if record.member_trait is None:
+                return 0
+            if record.member_of == type_id:
+                return 1
+            return 2
+        pool.sort(key=tier)
+        candidates = (
+            [record for record in pool if record.binding.kind in kinds]
+            if kinds
+            else pool
         )
-        if kinds:
-            for record in pool:
-                if record.binding.kind in kinds and matches(record):
-                    return record
-        for record in self.records.values():
-            if (
-                record.member_of == type_id
-                and record.binding.name == name
-                and matches(record)
-            ):
-                return record
-        return None
+        if not candidates:
+            return None
+        first = candidates[0]
+        if tier(first) == 1:
+            # More than one trait impl can spell `name` — Rust reports
+            # ambiguity, so no single implementation is picked.
+            if sum(1 for record in candidates if tier(record) == 1) > 1:
+                return None
+        elif tier(first) == 2:
+            # Defaults from several in-scope traits are equally
+            # ambiguous — and an impl member would have shadowed them.
+            if sum(1 for record in candidates if tier(record) == 2) > 1:
+                return None
+        return first
 
     def _field_member(
         self, node: Any, kinds: tuple[str, ...] = ()
@@ -987,7 +1242,9 @@ class _RustBindings:
             # Tuple fields are positional; honest opaque.
             return None
         type_id, impl_args = self._receiver_type(value)
-        return self._member_record(type_id, name, kinds, impl_args)
+        return self._member_record(
+            type_id, name, kinds, impl_args, node.start_byte
+        )
 
     def _record_type(
         self, record: _Record, position: int
@@ -1119,6 +1376,7 @@ class _RustBindings:
         member_of: str | None = None,
         member_impl_args: str | None = None,
         member_impl_generic: bool = False,
+        member_trait: str | None = None,
         member_type_node: Any = None,
     ) -> None:
         children = self._children(body)
@@ -1149,6 +1407,7 @@ class _RustBindings:
                 record.member_of = member_of
                 record.member_impl_args = member_impl_args
                 record.member_impl_generic = member_impl_generic
+                record.member_trait = member_trait
                 record.self_type_node = member_type_node
                 self._function_records[record.binding.id] = record
                 predeclared[node.id] = record
@@ -1169,6 +1428,7 @@ class _RustBindings:
                 const_record.member_of = member_of
                 const_record.member_impl_args = member_impl_args
                 const_record.member_impl_generic = member_impl_generic
+                const_record.member_trait = member_trait
         for node in children:
             if node.type in {"function_item", "function_signature_item"}:
                 record = predeclared.get(node.id)
@@ -2190,6 +2450,13 @@ class _RustBindings:
         arguments_node = node.child_by_field_name("arguments")
         arguments = () if arguments_node is None else self._children(arguments_node)
         args = tuple(self.span(arg) for arg in arguments)
+        # `(p.f)()` calls the field value while `p.f()` prefers a
+        # method — remember whether parens wrapped the callee before
+        # _callee unwraps them.
+        paren_wrapped = (
+            callee is not None
+            and callee.type == "parenthesized_expression"
+        )
         callee = None if callee is None else self._callee(callee)
         span = self.span(node)
         kind = "opaque_expression"
@@ -2216,9 +2483,12 @@ class _RustBindings:
                 receiver = inner.child_by_field_name("value")
                 if receiver is not None:
                     self._expr(receiver)
+                # Method-call spelling prefers methods; when none is
+                # named `field`, a same-named field can still be the
+                # callee — `(p.callback)()` reads the `fn()` field.
                 member = self._field_member(
                     inner, ("associated_function", "associated_const")
-                )
+                ) or self._field_member(inner, ("struct_field",))
                 field_node = inner.child_by_field_name("field")
                 if member is not None and member.binding.kind == "associated_function":
                     self.references.append(
@@ -2270,8 +2540,16 @@ class _RustBindings:
             value = callee.child_by_field_name("value")
             if value is not None:
                 self._expr(value)
-            member = self._field_member(
-                callee, ("associated_function", "associated_const")
+            member = (
+                self._field_member(callee, ("struct_field",))
+                or self._field_member(
+                    callee, ("associated_function", "associated_const")
+                )
+                if paren_wrapped
+                else self._field_member(
+                    callee, ("associated_function", "associated_const")
+                )
+                or self._field_member(callee, ("struct_field",))
             )
             field_node = callee.child_by_field_name("field")
             if member is not None and member.binding.kind == "associated_function":
@@ -2325,6 +2603,7 @@ class _RustBindings:
                 self._normalize_identifier(self.text(name_node)),
                 ("associated_function", "associated_const"),
                 recv_args,
+                node.start_byte,
             )
         )
         args_node = node.child_by_field_name("arguments")

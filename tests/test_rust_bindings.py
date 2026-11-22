@@ -1614,7 +1614,7 @@ fn f(p: &mut P, w: i32) { p.v = w; }
     assert len(writes) == 1
 
 
-def test_member_call_on_trait_impl_stays_opaque():
+def test_member_call_on_trait_impl_resolves_when_trait_in_scope():
     source = """
 struct P {}
 trait T { fn t(&self) -> i32; }
@@ -1622,8 +1622,14 @@ impl T for P { fn t(&self) -> i32 { 1 } }
 fn f(p: P) { p.t(); }
 """
     report = build_rust_bindings(source, pointer_width=64)
-    assert _call(report, source, "p.t()").kind == "opaque_method"
-    assert _call(report, source, "p.t()").target == ""
+    impl_member = next(
+        b
+        for b in _bindings(report, "t", "associated_function")
+        if b.span.start > source.index("impl T")
+    )
+    call = _call(report, source, "p.t()")
+    assert call.kind == "direct_local"
+    assert call.target == impl_member.id
 
 
 def test_member_tuple_positional_field_stays_unresolved():
@@ -1913,3 +1919,409 @@ fn f<'a>(t: &'a mut (i32, P), u: &'static (i32, P)) { t.1.get(); u.1.get(); }
     calls = {source[c.span.start : c.span.end]: c for c in report.calls}
     assert calls["t.1.get()"].target == get.id
     assert calls["u.1.get()"].target == get.id
+
+
+
+def test_member_trait_impl_resolves_when_trait_in_scope():
+    source = """
+trait Greet { fn hi(&self); }
+struct P;
+impl Greet for P { fn hi(&self) {} }
+fn f(p: &P) { p.hi(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    hi = next(
+        b
+        for b in _bindings(report, "hi", "associated_function")
+        if b.span.start > source.index("impl Greet")
+    )
+    call = _call(report, source, "p.hi()")
+    assert call.target == hi.id
+    assert call.kind == "direct_local"
+
+
+def test_member_trait_impl_via_imported_trait_resolves():
+    source = """
+mod inner { pub trait Greet { fn hi(&self); } }
+use inner::Greet;
+struct P;
+impl Greet for P { fn hi(&self) {} }
+fn f(p: &P) { p.hi(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    call = _call(report, source, "p.hi()")
+    assert call.kind == "direct_local"
+    assert call.target
+
+
+def test_member_scoped_trait_impl_stays_opaque():
+    # `impl inner::Greet` — the scoped trait is not resolvable here,
+    # so its members must not resolve as methods.
+    source = """
+mod inner { pub trait Greet { fn hi(&self); } }
+struct P;
+impl inner::Greet for P { fn hi(&self) {} }
+fn f(p: &P) { p.hi(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    call = _call(report, source, "p.hi()")
+    assert call.kind == "opaque_method"
+
+
+def test_member_inherent_impl_shadows_trait_impl():
+    source = """
+trait Greet { fn hi(&self); }
+struct P;
+impl P { fn hi(&self) {} }
+impl Greet for P { fn hi(&self) {} }
+fn f(p: &P) { p.hi(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    inherent = next(
+        b
+        for b in _bindings(report, "hi", "associated_function")
+        if source.index("impl P") < b.span.start < source.index("impl Greet")
+    )
+    call = _call(report, source, "p.hi()")
+    assert call.target == inherent.id
+
+
+def test_member_ambiguous_trait_impls_stay_opaque():
+    # `p.get()` could call T::get or U::get — Rust reports ambiguity,
+    # so no single implementation is bound.
+    source = """
+struct P { x: i32 }
+trait T { fn get(&self) -> i32; }
+trait U { fn get(&self) -> i32; }
+impl T for P { fn get(&self) -> i32 { self.x } }
+impl U for P { fn get(&self) -> i32 { 2 } }
+fn f(p: P) { p.get(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    call = _call(report, source, "p.get()")
+    assert call.kind == "opaque_method"
+    assert not call.target
+
+
+def test_member_single_trait_impl_still_resolves():
+    source = """
+struct Q { y: i32 }
+trait V { fn only(&self) -> i32; }
+impl V for Q { fn only(&self) -> i32 { self.y } }
+fn f(q: Q) { q.only(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    only = next(
+        b
+        for b in _bindings(report, "only", "associated_function")
+        if b.span.start > source.index("impl V")
+    )
+    call = _call(report, source, "q.only()")
+    assert call.target == only.id
+
+
+def test_trait_default_method_resolves_through_empty_impl():
+    source = """
+trait T { fn m(&self) {} }
+struct P {}
+impl T for P {}
+fn f() { let p: P; p.m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    default_m = next(
+        b
+        for b in report.bindings
+        if b.name == "m" and b.span.start == source.index("fn m") + 3
+    )
+    call = _call(report, source, "p.m()")
+    assert call.kind == "direct_local"
+    assert call.target == default_m.id
+
+
+def test_impl_member_shadows_trait_default():
+    source = """
+trait T { fn m(&self) {} }
+struct P {}
+impl T for P { fn m(&self) {} }
+fn f() { let p: P; p.m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    impl_m = next(
+        b
+        for b in report.bindings
+        if b.name == "m" and b.span.start == source.rindex("fn m") + 3
+    )
+    call = _call(report, source, "p.m()")
+    assert call.target == impl_m.id
+
+
+def test_two_trait_defaults_stay_ambiguous():
+    source = """
+trait T { fn m(&self) {} }
+trait U { fn m(&self) {} }
+struct P {}
+impl T for P {}
+impl U for P {}
+fn f() { let p: P; p.m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    call = _call(report, source, "p.m()")
+    assert call.kind == "opaque_method"
+    assert call.target == ""
+
+
+def test_trait_default_does_not_apply_to_other_specialization():
+    source = """
+trait T { fn m(&self) {} }
+struct W<T>(T);
+impl T for W<i32> {}
+fn f(w: W<u32>) { w.m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    call = _call(report, source, "w.m()")
+    assert call.kind == "opaque_method"
+    assert call.target == ""
+
+
+def test_trait_default_applies_to_matching_specialization():
+    source = """
+trait T { fn m(&self) {} }
+struct W<T>(T);
+impl T for W<i32> {}
+fn f(w: W<i32>) { w.m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    default_m = next(
+        b
+        for b in report.bindings
+        if b.name == "m" and b.span.start == source.index("fn m") + 3
+    )
+    call = _call(report, source, "w.m()")
+    assert call.target == default_m.id
+
+
+def test_generic_impl_default_matches_concrete_positions():
+    # impl<A> T for W<A, i32> covers W<u8, i32> — the parameter
+    # position is a wildcard, concrete positions must match.
+    source = """
+trait T { fn m(&self) {} }
+struct W<A, B>(A, B);
+impl<A> T for W<A, i32> {}
+impl<A> T for W<A, u32> {}
+fn f(w: W<u8, i32>) { w.m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    default_m = next(
+        b
+        for b in report.bindings
+        if b.name == "m" and b.span.start == source.index("fn m") + 3
+    )
+    call = _call(report, source, "w.m()")
+    assert call.target == default_m.id
+
+
+def test_generic_impl_default_misses_other_concrete_position():
+    source = """
+trait T { fn m(&self) {} }
+struct W<A, B>(A, B);
+impl<A> T for W<A, i32> {}
+impl<A> T for W<A, u32> {}
+fn f(w: W<u8, u16>) { w.m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    call = _call(report, source, "w.m()")
+    assert call.kind == "opaque_method"
+    assert call.target == ""
+
+
+def test_member_generic_impl_covers_composite_args():
+    # A generic impl covers receivers whose args contain commas or
+    # generics of their own — parameter positions stay wildcards at
+    # any nesting depth.
+    source = """
+trait T { fn m(&self) {} }
+struct W<X>(X);
+impl<A> T for W<A> { }
+fn f(w: W<(u8, u16)>) { w.m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    member_m = _bindings(report, "m", "associated_function")[0]
+    call = _call(report, source, "w.m()")
+    assert call.target == member_m.id
+
+
+def test_member_generic_impl_nested_generic_arg():
+    source = """
+trait T { fn m(&self) {} }
+struct W<X>(X);
+impl<A> T for W<Vec<A>> { }
+fn f(w: W<Vec<u8>>) { w.m(); }
+fn g(w: W<Box<u8>>) { g_unchecked(w); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    member_m = _bindings(report, "m", "associated_function")[0]
+    call = _call(report, source, "w.m()")
+    assert call.target == member_m.id
+    # `Box<u8>` does not match `Vec<A>` — m() stays opaque there.
+    assert _call(report, source, "w.m()").target == member_m.id
+    source2 = """
+trait T { fn m(&self) {} }
+struct W<X>(X);
+impl<A> T for W<Vec<A>> { }
+fn g(w: W<Box<u8>>) { w.m(); }
+"""
+    report2 = build_rust_bindings(source2, pointer_width=64)
+    assert _call(report2, source2, "w.m()").target == ""
+
+
+def test_member_generic_impl_const_and_lifetime_params():
+    source = """
+trait T { fn m(&self) {} fn n(&self) {} }
+struct W<const N: usize>([u8; N]);
+impl<const N: usize> T for W<N> { }
+struct R<'a>(&'a u8);
+trait U { fn p(&self) {} }
+impl<'a> U for R<'a> { }
+fn f(w: W<4>, r: R<'static>) { w.m(); r.p(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    member_m = _bindings(report, "m", "associated_function")[0]
+    member_p = _bindings(report, "p", "associated_function")[0]
+    assert _call(report, source, "w.m()").target == member_m.id
+    assert _call(report, source, "r.p()").target == member_p.id
+
+
+def test_member_generic_impl_repeated_param_binds_consistently():
+    # Every occurrence of a pattern parameter must bind the same
+    # receiver arg: `impl<A> T for W<(A,A)>` covers `W<(u8,u8)>` but
+    # not `W<(u8,u16)>`, and likewise for const parameters.
+    source = """
+trait T { fn m(&self) {} }
+struct W<X>(X);
+impl<A> T for W<(A, A)> { }
+fn f(w: W<(u8, u8)>) { w.m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    member_m = _bindings(report, "m", "associated_function")[0]
+    assert _call(report, source, "w.m()").target == member_m.id
+    source2 = """
+trait T { fn m(&self) {} }
+struct W<X>(X);
+impl<A> T for W<(A, A)> { }
+fn f(w: W<(u8, u16)>) { w.m(); }
+"""
+    report2 = build_rust_bindings(source2, pointer_width=64)
+    assert _call(report2, source2, "w.m()").target == ""
+
+
+def test_member_generic_impl_reference_mutability_matters():
+    # Shared and mutable references are distinct types: each impl
+    # covers only its own mutability side.
+    for impl_args, hit, miss in (
+        ("&A", "W<&u8>", "W<&mut u8>"),
+        ("&mut A", "W<&mut u8>", "W<&u8>"),
+    ):
+        source = f"""
+trait T {{ fn m(&self) {{}} }}
+struct W<X>(X);
+impl<A> T for W<{impl_args}> {{ }}
+fn f(w: {hit}) {{ w.m(); }}
+fn g(u: {miss}) {{ u.m(); }}
+"""
+        report = build_rust_bindings(source, pointer_width=64)
+        member_m = _bindings(report, "m", "associated_function")[0]
+        assert _call(report, source, "w.m()").target == member_m.id
+        assert _call(report, source, "u.m()").target == ""
+
+
+def test_member_generic_impl_whitespace_independent_concrete_args():
+    # `W<(u8,u16)>` and `W<(u8, u16)>` spell the same type — concrete
+    # impl-arg keys compare structurally, not by raw text.
+    source = """
+struct W<A, B> { a: A, b: B }
+trait T { fn m(&self) {} }
+impl T for W<(u8,u16), u8> {}
+fn f(w: W<(u8, u16), u8>) { w.m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    member_m = _bindings(report, "m", "associated_function")[0]
+    assert _call(report, source, "w.m()").target == member_m.id
+
+
+def test_member_generic_impl_repeated_const_param_must_bind_same_value():
+    # `impl<const A: usize> T for W<A, A>` covers `W<3, 3>` but not
+    # `W<3, 4>` — repeated parameters bind consistently.
+    source = """
+struct W<A, B> { a: A, b: B }
+trait T { fn m(&self) {} }
+impl<const A: usize> T for W<A, A> {}
+fn f(w: W<3, 4>) { w.m(); }
+fn g(w: W<3, 3>) { w.m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    member_m = _bindings(report, "m", "associated_function")[0]
+    calls = [
+        c
+        for c in report.calls
+        if source[c.span.start : c.span.end] == "w.m()"
+    ]
+    assert calls[0].target == ""
+    assert calls[1].target == member_m.id
+
+
+def test_member_generic_impl_spaceless_reference_syntax():
+    # `&mut&u8` and `&'b[u8]` are valid Rust — optional whitespace
+    # after `mut` and lifetimes must not break the reference match.
+    source = """
+struct W<A, B> { a: A, b: B }
+trait T { fn m(&self) {} }
+impl<A> T for W<&mut A, u8> {}
+impl<'b> T for W<&'b [u8], i8> {}
+fn f(w: W<&mut&u8, u8>, g: W<&'b[u8], i8>) { w.m(); g.m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    member_m = _bindings(report, "m", "associated_function")[0]
+    assert _call(report, source, "w.m()").target == member_m.id
+    assert _call(report, source, "g.m()").target == member_m.id
+
+
+def test_member_generic_impl_mut_prefixed_type_name_not_mut_ref():
+    # `&mutable::Value` is a shared reference to a type named
+    # `mutable` — the leading `mut` must not be read as `&mut`, so a
+    # `&mut A` impl does not apply, while a shared `&A` impl does.
+    source = """
+struct W<A, B> { a: A, b: B }
+trait T { fn m(&self) {} }
+impl<A> T for W<&mut A, u8> {}
+mod mutable { pub struct Value {} }
+fn f(w: W<&mutable::Value, u8>) { w.m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    assert _call(report, source, "w.m()").target == ""
+
+    source = """
+struct W<A, B> { a: A, b: B }
+trait T { fn m(&self) {} }
+impl<A> T for W<&A, u8> {}
+mod mutable { pub struct Value {} }
+fn f(w: W<&mutable::Value, u8>) { w.m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    member_m = _bindings(report, "m", "associated_function")[0]
+    assert _call(report, source, "w.m()").target == member_m.id
+
+
+def test_function_pointer_field_call_reads_the_field():
+    # `(p.callback)()` reads field `callback` (type `fn()`) — the read
+    # reference must be recorded even though no function is called.
+    source = """
+struct P { callback: fn() }
+fn go(p: P) { (p.callback)(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    field = _bindings(report, "callback", "struct_field")[0]
+    read = next(
+        r for r in report.references
+        if r.kind == "read" and source[r.span.start : r.span.end] == "callback"
+    )
+    assert read.binding_id == field.id
