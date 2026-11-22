@@ -1332,18 +1332,15 @@ class _RustBindings:
     def _path_name_equal(a: str, b: str) -> bool:
         """Structural equality of two written type names — a
         scope-qualified `crate::m::P` spelled into concrete args is
-        the same type the impl side wrote as `m::P`/`P`… the
-        `crate::`/`self::`/`super::` leading anchor carries no
-        distinguishing information here."""
+        the same type the impl side wrote as `m::P`; a relative
+        `m::P` and a bare `P` stay distinct (different types can
+        share a final segment)."""
         norm = (
             lambda s: re.sub(
                 r"^(?:crate|self|super)::", "", s.replace(" ", "")
             )
         )
-        na, nb = norm(a), norm(b)
-        return na == nb or na.split("::")[-1] == nb.split("::")[-1] and (
-            "::" not in na or "::" not in nb
-        )
+        return norm(a) == norm(b)
 
     def _type_args_match(
         self,

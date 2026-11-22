@@ -6425,3 +6425,31 @@ fn f(o: Option<m::P>, u: Option<m::P>) {
     report = build_rust_bindings(source, pointer_width=64)
     pm = _bindings(report, "pm", "associated_function")[0]
     assert _call(report, source, "p.pm()").target == pm.id
+
+
+def test_impl_args_keep_relative_paths_distinct_from_bare_names():
+    # `W<m::P>` and `W<P>` are different specializations — a
+    # receiver spelled `W<P>` must not match the `W<m::P>` impl
+    # just because the final segments coincide.
+    source = """
+mod m {
+    pub struct P;
+}
+struct P;
+struct W<T>;
+impl W<m::P> {
+    fn other(&self) {}
+}
+impl W<P> {
+    fn pm(&self) {}
+}
+fn f(o: Option<W<P>>, u: Option<W<P>>) {
+    match o.and(u) {
+        Some(w) => w.pm(),
+        _ => {}
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    assert _call(report, source, "w.pm()").target == pm.id
