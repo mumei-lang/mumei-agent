@@ -915,6 +915,31 @@ def test_export_evidence_acceptance_refuses_declared_collisions(
         ))
 
 
+def test_export_evidence_acceptance_refuses_overlay_collision(
+    inputs, tmp_path
+):
+    req = _requirement_list(tmp_path)
+    core = _accept_list_core(tmp_path, "accepted")
+    export = tmp_path / "promotable"
+    export.mkdir()
+    overlay = export / "evidence.json"
+    overlay.write_text(json.dumps([manifest("alpha")]), encoding="utf-8")
+    original = overlay.read_bytes()
+
+    with pytest.raises(
+        ValueError, match="must not overwrite a declared input"
+    ):
+        run_schedule(args_for(
+            inputs,
+            core=str(core),
+            core_requirement_list=str(req),
+            export_evidence_acceptance=str(export),
+            adapter_overlay=str(overlay),
+        ))
+
+    assert overlay.read_bytes() == original
+
+
 def test_export_evidence_acceptance_refuses_foreign_files(
     inputs, tmp_path
 ):

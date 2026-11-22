@@ -384,6 +384,7 @@ def run_schedule(args: argparse.Namespace) -> dict:
             requirement or "",
             requirement_list,
         ]
+        declared_inputs.extend(getattr(args, "adapter_overlay", None) or ())
         if args.observations is not None:
             declared_inputs.append(args.observations)
         for name in (
