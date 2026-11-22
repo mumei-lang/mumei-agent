@@ -3142,14 +3142,48 @@ class _Builder:
         field_key, _root_id, container_member, tokens, root_ref = target
         container_fact = container_member.type
         element_fact = getattr(container_fact, "elem", None)
+        # `p.A[i].W.V` — a pointer member mid-chain: the leaf lives
+        # in the member's pointee, which is caller memory for a
+        # param pointer root (`*S`/`**S`, or the alias's target —
+        # `root_ref` already resolved the substitution) whose read
+        # the caller unions `indirect_writes` into. A local
+        # composite's pointer member escapes the slot model, so the
+        # chain stays closed there.
+        _mid_root_binding = self.bindings.get(root_ref.binding_id)
+        mid_pointer_root = (
+            params is not None
+            and root_ref.binding_id in params
+            and root_ref.binding_id not in self._pointer_param_reseats
+            and root_ref.binding_id not in self._param_pointer_aliases
+            and root_ref.binding_id not in self._double_pointer_dirty
+            and _mid_root_binding is not None
+            and getattr(_mid_root_binding.type, "kind", None)
+            == "pointer"
+        )
+
+        def _elem_struct_ok(fact):
+            if self._named_value_struct_supported(fact):
+                return True
+            # Under a param pointer root an element carrying pointer
+            # members is still resolvable: scalar leaves slot on the
+            # group, pointer-member leaves read pointee memory the
+            # caller's `indirect_writes` union covers. The element's
+            # named type identity is what `stale_dependents` needs.
+            struct_fact = self._struct_value_fact(fact)
+            return (
+                mid_pointer_root
+                and struct_fact is not None
+                and bool(struct_fact.type_id)
+            )
+
         if (
             container_fact is None
             or container_fact.kind not in {"slice", "array", "map"}
             or not (
-                self._named_value_struct_supported(element_fact)
+                _elem_struct_ok(element_fact)
                 or (
                     getattr(element_fact, "kind", None) == "pointer"
-                    and self._named_value_struct_supported(
+                    and _elem_struct_ok(
                         getattr(element_fact, "elem", None)
                     )
                 )
@@ -3160,9 +3194,7 @@ class _Builder:
         field_fact = element_fact
         if (
             getattr(field_fact, "kind", None) == "pointer"
-            and self._named_value_struct_supported(
-                getattr(field_fact, "elem", None)
-            )
+            and _elem_struct_ok(getattr(field_fact, "elem", None))
         ):
             # `a[i]` yields `*E` — `.V` reads through the element
             # pointer the way `a[i].F` reads through a struct
@@ -3170,9 +3202,7 @@ class _Builder:
             # group, so the field's slot is the group's.
             field_fact = field_fact.elem
         for field_node in reversed(fields):
-            if (
-                not self._named_value_struct_supported(field_fact)
-            ):
+            if not _elem_struct_ok(field_fact):
                 return None
             field_ref = self.references.get(
                 self.node_key(field_node)
@@ -3184,6 +3214,16 @@ class _Builder:
             self._pin_fact_identities(field_fact)
             self._pin_fact_identities(field_member.type)
             field_fact = field_member.type
+            if (
+                mid_pointer_root
+                and getattr(field_fact, "kind", None) == "pointer"
+                and self._named_value_struct_supported(
+                    getattr(field_fact, "elem", None)
+                )
+            ):
+                # `p.A[i].W` yields `*E` — the next field resolves
+                # on the member's pointee like the element pointer.
+                field_fact = field_fact.elem
         if not self._scalar_value_fact(field_fact):
             return None
         self._pin_fact_identities(container_fact)
