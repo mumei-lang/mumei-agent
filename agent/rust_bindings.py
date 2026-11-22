@@ -4033,6 +4033,33 @@ class _RustBindings:
                         # by the prelude recipe above.
                         return None, "&[" + receiver[1] + "]"
                     if (
+                        method_name
+                        in {
+                            "get_or_insert",
+                            "get_or_insert_owned",
+                            "get_or_insert_with",
+                        }
+                        and receiver[1] is not None
+                        and self._container_head_name(
+                            callee.child_by_field_name("value")
+                        )
+                        in _SET_CONTAINER_NAMES
+                    ):
+                        # `s.get_or_insert(d)`/`get_or_insert_owned`/
+                        # `get_or_insert_with` yield `&P` — the set's
+                        # element resolved at its own annotation.
+                        parts = self._type_arg_list(receiver[1])
+                        if len(parts) == 1:
+                            return self._spelled_type(
+                                "&" + parts[0].strip(),
+                                self._receiver_annotation_position(
+                                    callee.child_by_field_name(
+                                        "value"
+                                    )
+                                )
+                                or node.start_byte,
+                            )
+                    if (
                         method_name in _OPTION_MUT_PAYLOAD_METHODS
                         and receiver[1] is not None
                         and (
