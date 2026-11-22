@@ -3178,9 +3178,9 @@ class _Builder:
             )
             if share_extract is not None:
                 indexes.append(
-                    share_extract.child_by_field_name("index")
+                    share_extract[0].child_by_field_name("index")
                 )
-                current = share_extract.child_by_field_name("operand")
+                current = share_extract[0].child_by_field_name("operand")
         if (
             not fields
             or len(indexes) != 1
@@ -16150,9 +16150,42 @@ class _Builder:
                 ):
                     # `x := p.B[i]` — the copy still shares each
                     # pointer member's pointee with the element.
-                    self._element_share[binding.id] = extract_rhs
+                    # An effectful index (`p.B[f()]`) stays out —
+                    # injecting its node would re-run the call per
+                    # use — and an identifier index freezes the
+                    # deps the extraction saw so `i = 0` later
+                    # cannot re-seat the share.
+                    share_index = extract_rhs.child_by_field_name(
+                        "index"
+                    )
+                    if share_index is None or share_index.type in {
+                        "identifier",
+                        *_INDEX_LITERALS,
+                    }:
+                        share_key = (
+                            self.node_key(share_index)
+                            if share_index is not None
+                            else ""
+                        )
+                        if (
+                            share_index is not None
+                            and share_index.type == "identifier"
+                        ):
+                            self._frozen_index_deps[share_key] = (
+                                self.expression(
+                                    share_index, fn, params,
+                                    locals_, transfers, count, 0,
+                                )
+                            )
+                        self._drop_element_share(binding.id)
+                        self._element_share[binding.id] = (
+                            extract_rhs,
+                            share_key,
+                        )
+                    else:
+                        self._drop_element_share(binding.id)
                 else:
-                    self._element_share.pop(binding.id, None)
+                    self._drop_element_share(binding.id)
                 self._bind_struct_container_value(
                     binding.id,
                     (
@@ -25947,6 +25980,16 @@ class _Builder:
         count: list[int],
         depth: int,
     ) -> frozenset[int]:
+        frozen = (
+            self._frozen_index_deps.get(self.node_key(node))
+            if node is not None
+            else None
+        )
+        if frozen is not None:
+            # The index an `x := p.B[i]` extraction picked names
+            # the element at extraction time — `i = 0` afterwards
+            # must not re-seat the share onto another slot.
+            return frozen
         count[0] += 1
         if depth + len(self.active) >= MAX_DEPTH or count[0] > MAX_EXPRESSION_NODES:
             raise _Unsupported("analysis_limit", _span(node))
