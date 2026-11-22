@@ -6408,6 +6408,29 @@ def test_interface_element_store_literal_impl(
     assert result.effects == "unknown"
 
 
+def test_interface_element_store_evaluates_chain_index_calls(
+    go_types_helper,
+):
+    # `s.A[Set(v, x)].F[0] = e` — an index below the field level
+    # sits inside the field chain, so the synthesized element-store
+    # deps must run it like the general LHS walk: `Set`'s write to
+    # `*v` and its argument deps still reach the caller.
+    declarations = (
+        "type I interface{ M() int64 }\n"
+        "type Elem struct{ F []I }\n"
+        "type S struct{ A []Elem }\n"
+        "func Set(p *int64, x int64) int64 { *p = x; return 0 }\n"
+        "func F(s *S, e I, v *int64, x int64) int64 {\n"
+        "\ts.A[Set(v, x)].F[0] = e\n"
+        "\treturn *v\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1, 2, 3})
+    assert result.effects == "unknown"
+
+
 @pytest.mark.parametrize(
     "declarations",
     [
@@ -6416,6 +6439,15 @@ def test_interface_element_store_literal_impl(
             "type I interface{ M() int64 }\n"
             "type S struct{ A [][]I }\n"
             "func F(p *S, e I) { p.A[0][0] = e }\n"
+        ),
+        # `map[K]I` fields stay closed — the element-read path
+        # rejects map elements for the same signature reason.
+        (
+            "type I interface{ M() int64 }\n"
+            "type S struct{ M map[string]I }\n"
+            "func F(p *S, k string, e I) {\n"
+            "\tp.M[k] = e\n"
+            "}\n"
         ),
         # A bare `[]I` parameter is an unmodelled signature shape —
         # the element store stays closed with the read.

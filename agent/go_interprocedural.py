@@ -19277,6 +19277,68 @@ class _Builder:
                                     field_key, locals_
                                 )
                             )
+                        # `s.A[Set(&v,x)].F[0] = e` — the indexes
+                        # below the field level live inside
+                        # `field_selector`'s operand chain, so the
+                        # synthesized path must evaluate them
+                        # itself: a call in one writes like the
+                        # general `expression` walk would run it.
+                        # Every member's declared type pins along
+                        # the way — the field's own named slice
+                        # type included — so redeclaring one
+                        # stales the caller's summary.
+                        cur = field_selector
+                        chain_indexes: list[Any] = []
+                        while cur is not None:
+                            cur = self._strip_parens(cur)
+                            if cur is None:
+                                break
+                            if cur.type == "index_expression":
+                                chain_indexes.append(
+                                    cur.child_by_field_name("index")
+                                )
+                                cur = cur.child_by_field_name(
+                                    "operand"
+                                )
+                                continue
+                            if cur.type != "selector_expression":
+                                break
+                            field_node = cur.child_by_field_name(
+                                "field"
+                            )
+                            field_ref = (
+                                self.references.get(
+                                    self.node_key(field_node)
+                                )
+                                if field_node is not None
+                                else None
+                            )
+                            chain_member = self._field_identity(
+                                field_ref
+                            )
+                            if (
+                                chain_member is not None
+                                and chain_member.type is not None
+                            ):
+                                self._pin_fact_identities(
+                                    chain_member.type
+                                )
+                            cur = cur.child_by_field_name(
+                                "operand"
+                            )
+                        for chain_index in reversed(chain_indexes):
+                            if (
+                                chain_index is not None
+                                and chain_index.type
+                                not in _INDEX_LITERALS
+                            ):
+                                opaque_elem_index_deps[ri] |= (
+                                    self.expression(
+                                        chain_index, fn, params,
+                                        locals_, transfers, count,
+                                        0,
+                                    )
+                                )
                     else:
                         self._for_write_target = True
                         try:
