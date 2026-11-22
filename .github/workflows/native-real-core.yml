@@ -1,8 +1,8 @@
 name: Native real-Core integration
 
 # The main CI job excludes integration tests; this workflow runs the bounded
-# real-Core native subset against Core develop to detect contract drift. It is
-# a consumption check and makes no ABI, runtime, or object-TV claim.
+# real-Core contract subset against Core develop to detect contract drift. It
+# is a consumption check and makes no ABI, runtime, or object-TV claim.
 
 on:
   schedule:
@@ -14,7 +14,11 @@ on:
     paths:
       - agent/native_*.py
       - agent/core_evidence*.py
+      - agent/verify_recheck*.py
+      - agent/mumei_client.py
       - tests/test_native_*.py
+      - tests/test_verify_recheck.py
+      - tests/test_controls_gate.py
       - .github/workflows/native-real-core.yml
 
 jobs:
@@ -90,10 +94,23 @@ jobs:
         run: |
           MUMEI_BIN="$GITHUB_WORKSPACE/mumei/target/release/mumei" \
             uv run pytest \
+              tests/test_native_accept.py \
+              tests/test_native_evidence_accept.py \
+              tests/test_native_evidence_recheck.py \
+              tests/test_native_exit_status_accept.py \
               tests/test_native_machine_tv_recheck.py \
               tests/test_native_object_accept.py \
               tests/test_native_object_recheck.py \
-              -m integration -k real_core --run-integration \
+              tests/test_native_observations_accept.py \
+              tests/test_native_observations_recheck.py \
+              tests/test_native_recheck.py \
+              tests/test_native_stderr_accept.py \
+              tests/test_native_stderr_recheck.py \
+              tests/test_native_stdout_accept.py \
+              tests/test_native_stdout_recheck.py \
+              tests/test_verify_recheck.py \
+              tests/test_controls_gate.py \
+              -m integration --run-integration \
               -v --tb=short --junitxml=real-core-junit.xml
 
       - name: Reject skipped or missing real-Core tests
@@ -123,9 +140,9 @@ jobs:
           print(summary, end="")
           with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as stream:
               stream.write(summary)
-          if total < 20 or skipped > 0 or failures + errors > 0:
+          if total < 45 or skipped > 0 or failures + errors > 0:
               print(
-                  "Real-Core native tests must include at least 20 tests with no skips, failures, or errors.",
+                  "Real-Core tests must include at least 45 tests with no skips, failures, or errors.",
                   file=sys.stderr,
               )
               sys.exit(1)
