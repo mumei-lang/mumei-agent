@@ -4743,3 +4743,41 @@ fn f(m: M) {
 """
     report = build_rust_bindings(source, pointer_width=64)
     assert _call(report, source, "v.v()").target == ""
+
+
+def test_for_tuple_pattern_substitutes_generic_map_alias() -> None:
+    source = """
+struct K;
+struct V;
+impl K { fn k(&self) {} }
+impl V { fn v(&self) {} }
+type Flip<A, B> = HashMap<B, A>;
+fn f(m: Flip<K, V>) {
+    for (k, v) in m { v.k(); k.v(); k.k(); v.v(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    k = _bindings(report, "k", "associated_function")[0]
+    v = _bindings(report, "v", "associated_function")[0]
+    # Flip<K, V> iterates (V, K) pairs — the alias's args swap.
+    assert _call(report, source, "v.k()").target == k.id
+    assert _call(report, source, "k.v()").target == v.id
+    assert _call(report, source, "k.k()").target == ""
+    assert _call(report, source, "v.v()").target == ""
+
+
+def test_for_tuple_pattern_binds_mut_borrowed_map() -> None:
+    source = """
+struct K;
+struct V;
+impl K { fn k(&self) {} }
+impl V { fn v(&self) {} }
+fn f(m: HashMap<K, V>) {
+    for (k, v) in &mut m { k.k(); v.v(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    k = _bindings(report, "k", "associated_function")[0]
+    v = _bindings(report, "v", "associated_function")[0]
+    assert _call(report, source, "k.k()").target == k.id
+    assert _call(report, source, "v.v()").target == v.id
