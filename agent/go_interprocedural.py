@@ -4462,7 +4462,39 @@ class _Builder:
         self, literal: Any
     ) -> tuple[Any, Any] | None:
         type_node = literal.child_by_field_name("type")
-        if type_node is None or type_node.type != "type_identifier":
+        if type_node is None:
+            if literal.type == "literal_value":
+                current = literal
+                while (
+                    current.parent is not None
+                    and current.parent.type
+                    in {
+                        "keyed_element",
+                        "literal_element",
+                        "literal_value",
+                        "parenthesized_expression",
+                    }
+                ):
+                    current = current.parent
+                outer = current.parent
+                if outer is None or outer.type != "composite_literal":
+                    return None
+                container_type = outer.child_by_field_name("type")
+                if container_type is None:
+                    return None
+                if container_type.type in {"slice_type", "array_type"}:
+                    type_node = container_type.child_by_field_name(
+                        "element"
+                    )
+                elif container_type.type == "map_type":
+                    type_node = container_type.child_by_field_name(
+                        "value"
+                    )
+                else:
+                    return None
+            if type_node is None or type_node.type != "type_identifier":
+                return None
+        if type_node.type != "type_identifier":
             return None
         ref = self.references.get(self.node_key(type_node))
         if (
@@ -4495,7 +4527,16 @@ class _Builder:
                 continue
             while value is not None and value.type == "literal_element":
                 value = next(iter(value.named_children), None)
-            if self._strip_parens(value) == node:
+            nested_struct = (
+                self._local_struct_literal_fact(value)
+                if value is not None and value.type == "literal_value"
+                else None
+            )
+            if self._strip_parens(value) == node or (
+                nested_struct is not None
+                and value.start_byte <= node.start_byte
+                and node.end_byte <= value.end_byte
+            ):
                 element = candidate
                 break
         if element is None:
@@ -4516,6 +4557,49 @@ class _Builder:
     def _func_literal_struct_element_member(
         self, literal: Any, element: Any, node: Any
     ) -> tuple[bool, Any | None]:
+        element_value = (
+            element.child_by_field_name("value")
+            if element.type == "keyed_element"
+            else next(iter(element.named_children), None)
+            if element.type == "literal_element"
+            else None
+        )
+        while (
+            element_value is not None
+            and element_value.type == "literal_element"
+        ):
+            element_value = next(
+                iter(element_value.named_children), None
+            )
+        if (
+            element_value is not None
+            and element_value.type == "literal_value"
+            and element_value.start_byte <= node.start_byte
+            and node.end_byte <= element_value.end_byte
+        ):
+            inferred = self._local_struct_literal_fact(element_value)
+            if inferred is not None:
+                fact, anchor = inferred
+                field_values = self._struct_literal_field_values(
+                    element_value, fact, anchor
+                )
+                if field_values is not None:
+                    for member, value in field_values:
+                        if self._strip_parens(value) == node:
+                            return True, member
+                return True, None
+        if literal.type == "literal_value":
+            inferred = self._local_struct_literal_fact(literal)
+            if inferred is not None:
+                fact, anchor = inferred
+                field_values = self._struct_literal_field_values(
+                    literal, fact, anchor
+                )
+                if field_values is not None:
+                    for member, value in field_values:
+                        if self._strip_parens(value) == node:
+                            return True, member
+                return True, None
         type_node = literal.child_by_field_name("type")
         type_id = self._struct_literal_type_id(type_node)
         if type_id is None:
@@ -4593,6 +4677,8 @@ class _Builder:
         records_before: dict[str, Any] | None = None,
     ) -> None:
         body = literal.child_by_field_name("body")
+        if body is None and literal.type == "literal_value":
+            body = literal
         if body is None:
             return
         captures = (
@@ -4655,7 +4741,17 @@ class _Builder:
             while value is not None and value.type == "literal_element":
                 value = next(iter(value.named_children), None)
             value = self._strip_parens(value)
-            if value is None or value.type != "identifier":
+            if value is None:
+                continue
+            if (
+                value.type == "literal_value"
+                and self._local_struct_literal_fact(value) is not None
+            ):
+                self._adopt_struct_composite_closure_records(
+                    value, params, records_before
+                )
+                continue
+            if value.type != "identifier":
                 continue
             ref = self.references.get(self.node_key(value))
             src_id = ref.binding_id if ref is not None else None
@@ -12898,6 +12994,68 @@ class _Builder:
             and not self._package_level(binding)
         )
 
+    def _struct_collection_element_field_record_ids(
+        self, fact: Any, anchor: Any | None = None
+    ) -> tuple[str, ...]:
+        if (
+            fact is None
+            or fact.kind not in {"slice", "array", "map", "chan"}
+            or getattr(fact, "elem", None) is None
+        ):
+            return ()
+        element_fact = fact.elem
+        if element_fact.kind == "pointer":
+            element_fact = getattr(element_fact, "elem", None)
+        struct_fact = self._struct_value_fact(element_fact)
+        if struct_fact is None:
+            return ()
+        return self._struct_field_closure_record_ids(
+            struct_fact, anchor
+        )
+
+    def _slice_array_struct_element_parts(
+        self,
+        node: Any,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+    ) -> tuple[Any, Any] | None:
+        value = self._strip_parens(node)
+        if value is None or value.type != "index_expression":
+            return None
+        container = self._strip_parens(
+            value.child_by_field_name("operand")
+        )
+        if container is None or container.type not in {
+            "identifier",
+            "selector_expression",
+        }:
+            return None
+        root_ref = self._receiver_root_ref(container)
+        if (
+            root_ref is None
+            or root_ref.kind == "import"
+            or root_ref.binding_id not in params
+            and root_ref.binding_id not in locals_
+        ):
+            return None
+        container_fact = self._deferred_expression_type(container)
+        if (
+            container_fact is None
+            or container_fact.kind not in {"slice", "array"}
+            or getattr(container_fact, "elem", None) is None
+            or container_fact.elem.kind == "pointer"
+        ):
+            return None
+        element_struct = self._struct_value_fact(container_fact.elem)
+        if (
+            element_struct is None
+            or not element_struct.type_id
+            or self._type_fact_has_type_args(container_fact.elem)
+        ):
+            return None
+        index = value.child_by_field_name("index")
+        return (container, index) if index is not None else None
+
     def _struct_argument_field_record_ids(
         self, node: Any
     ) -> tuple[str, ...]:
@@ -12956,9 +13114,46 @@ class _Builder:
                             anchor = self.bindings.get(ref.binding_id)
                     elif container.type == "selector_expression":
                         anchor = self._field_member(container)
-        struct_fact = self._struct_value_fact(fact)
+        collection_element = False
+        if fact is not None and fact.kind in {
+            "slice",
+            "array",
+            "map",
+            "chan",
+        }:
+            collection_records = (
+                self._struct_collection_element_field_record_ids(
+                    fact, anchor
+                )
+            )
+            element_fact = getattr(fact, "elem", None)
+            if (
+                fact.kind not in {"slice", "array"}
+                or element_fact is None
+                or element_fact.kind == "pointer"
+            ):
+                if collection_records:
+                    raise _Unsupported(
+                        "unsupported_expression", _span(node)
+                    )
+                return ()
+            struct_fact = self._struct_value_fact(element_fact)
+            if (
+                struct_fact is None
+                or not struct_fact.type_id
+                or self._type_fact_has_type_args(element_fact)
+            ):
+                if collection_records:
+                    raise _Unsupported(
+                        "unsupported_expression", _span(node)
+                    )
+                return ()
+            collection_element = True
+        else:
+            struct_fact = self._struct_value_fact(fact)
         if (
-            struct_fact is None
+            not collection_element
+            and struct_fact is None
             and fact is not None
             and fact.kind == "pointer"
             and getattr(fact, "elem", None) is not None
@@ -36781,6 +36976,7 @@ class _Builder:
         resolves to neither stays closed."""
         target_id: str | None = None
         nested_record_ids: set[str] | None = None
+        indexed_struct_record_id: str | None = None
         pin_fact: Any = None
         callee_deps: frozenset[int] = frozenset()
         operand = callee_node.child_by_field_name("operand")
@@ -36831,13 +37027,55 @@ class _Builder:
                     )
                 )
             elif operand is not None:
-                # `s.f` reads `s` — the operand's deps are the
-                # callee's own read set (a `func` field itself has
-                # no dep model).
-                callee_deps = self.expression(
-                    operand, fn, params, locals_, transfers, count,
-                    depth + 1,
+                indexed_struct_parts = (
+                    self._slice_array_struct_element_parts(
+                        operand, params, locals_
+                    )
+                    if (
+                        member is not None
+                        and member.kind in {"var", "variable"}
+                        and member.type is not None
+                        and member.type.kind == "function"
+                    )
+                    else None
                 )
+                if indexed_struct_parts is not None:
+                    container, element_index = indexed_struct_parts
+                    container_member = self._field_member(container)
+                    container_ref = (
+                        self._receiver_root_ref(container)
+                        if container_member is None
+                        else None
+                    )
+                    indexed_struct_record_id = (
+                        container_member.id
+                        if container_member is not None
+                        else container_ref.binding_id
+                        if container_ref is not None
+                        else None
+                    )
+                    callee_deps = self.expression(
+                        container, fn, params, locals_, transfers,
+                        count, depth + 1,
+                    )
+                    if element_index.type not in {
+                        "int_literal",
+                        "rune_literal",
+                        "interpreted_string_literal",
+                        "raw_string_literal",
+                    }:
+                        callee_deps |= self.expression(
+                            element_index, fn, params, locals_,
+                            transfers, count, depth + 1,
+                        )
+                else:
+                    # `s.f` reads `s` — the operand's deps are the
+                    # callee's own read set (a `func` field itself has
+                    # no dep model).
+                    callee_deps = self.expression(
+                        operand, fn, params, locals_, transfers, count,
+                        depth + 1,
+                    )
         elif callee_node.type == "index_expression":
             index = callee_node.child_by_field_name("index")
             if operand_member_import is not None:
@@ -37050,6 +37288,16 @@ class _Builder:
                 callee_node, locals_, params
             )
             target_id = self._immediate_span_id(callee_node)
+        if (
+            indexed_struct_record_id is not None
+            and target_id is not None
+            and indexed_struct_record_id != target_id
+            and self._has_closure_records(indexed_struct_record_id)
+        ):
+            nested_record_ids = {
+                target_id,
+                indexed_struct_record_id,
+            }
         if target_id is None:
             raise _Unsupported("unsupported_expression", _span(node))
         deps = callee_deps | self.indirect_writes
