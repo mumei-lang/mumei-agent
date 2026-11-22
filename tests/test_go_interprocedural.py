@@ -33713,6 +33713,24 @@ def test_named_pointer_element_field_local_read(go_types_helper):
     assert result.return_dependencies == frozenset({0})
 
 
+def test_named_pointer_element_read_observes_late_pointee_store(
+    go_types_helper,
+):
+    # `o.A = []*E{e}` hands the element pointer `e` to the group —
+    # a later `e.V = x` store through the bound pointer must reach
+    # the `o.A[0].V` read like a bare `*p` deref observes it.
+    declarations = (
+        "type E struct { V int64 }\n"
+        "type S struct { A []*E }\n"
+        "func F(x int64) int64 { "
+        "var o S; e := &E{}; o.A = []*E{e}; e.V = x; "
+        "return o.A[0].V }\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+
 def test_named_pointer_element_field_write_emit_caller_backing(
     go_types_helper,
 ):
@@ -33742,6 +33760,11 @@ def test_named_pointer_element_field_write_emit_caller_backing(
         "type E struct { V int64 }\n"
         "type S struct { M map[string]*E }\n"
         "func F(p *S, k string) int64 { return p.M[k].V }\n",
+        # An array of pointer elements stays closed — the `[N]*E`
+        # copy detaches the names like an `[N]chan` does.
+        "type E struct { V int64 }\n"
+        "type S struct { A [1]*E }\n"
+        "func F(p *S) int64 { return p.A[0].V }\n",
     ],
 )
 def test_named_pointer_element_field_unsupported_stays_closed(

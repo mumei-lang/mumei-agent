@@ -26410,6 +26410,26 @@ class _Builder:
                     deps |= self._opaque_container_deps(
                         field_key, locals_
                     )
+                    if (
+                        getattr(
+                            _container_member.type, "elem", None
+                        )
+                        is not None
+                        and _container_member.type.elem.kind
+                        == "pointer"
+                    ):
+                        # `a[i]` is a `*E` element pointer that may
+                        # aim at any escaped or bound memory — like a
+                        # bare `*p` deref the read unions every
+                        # indirect store and the escaped bindings'
+                        # live slots, so `a[0] = &e; e.V = x` still
+                        # reports the later update.
+                        deps |= self.indirect_writes
+                        for escaped_id in self.escaped:
+                            if escaped_id in locals_:
+                                deps |= locals_[escaped_id]
+                            elif escaped_id in params:
+                                deps |= {params[escaped_id]}
                     return deps
                 sel_operand = node.child_by_field_name("operand")
                 while (
