@@ -62,6 +62,14 @@ _ITER_SLICE_METHODS = frozenset({"as_slice", "as_mut_slice"})
 _ITER_CHUNK_METHODS = frozenset(
     {"chunks", "windows", "rchunks", "split", "split_inclusive"}
 )
+# The `_mut` counterparts iterate `&mut [T]` slices —
+# `v.chunks_mut(n)`/`v.split_mut(p)` spell `&mut P`.
+_ITER_CHUNK_MUT_METHODS = frozenset(
+    {
+        "chunks_mut", "rchunks_mut", "split_mut",
+        "split_inclusive_mut", "splitn_mut", "rsplitn_mut",
+    }
+)
 # Map entry points and the key they read — `m.keys()` yields `K`,
 # `m.values()` yields `V` of `HashMap<K, V>`/`BTreeMap<K, V>`.
 _MAP_ELEMENT_METHODS = {"keys": 0, "values": 1}
@@ -86,6 +94,8 @@ _SLICE_OPTION_METHODS = frozenset(
         "last_mut",
         "split_first",
         "split_last",
+        "split_first_mut",
+        "split_last_mut",
     }
 )
 
@@ -93,6 +103,11 @@ _SLICE_OPTION_METHODS = frozenset(
 # `Option<(&T, &[T])>` — the payload is the pair (element,
 # rest-slice), spelled `(P, &P)` so tuple patterns bind `f`/`rest`.
 _SPLIT_PAIR_METHODS = frozenset({"split_first", "split_last"})
+# `v.split_first_mut()`/`split_last_mut()` yield
+# `Option<(&mut T, &mut [T])>` — the same pair spelled mutable.
+_SPLIT_PAIR_MUT_METHODS = frozenset(
+    {"split_first_mut", "split_last_mut"}
+)
 
 # Prelude container methods that hand back `Option` — `v.get(i)`,
 # `v.first()` and `v.last()` yield `Option<&T>` while `v.pop()`
@@ -144,6 +159,10 @@ _OPTION_HEAD_METHODS = {
     # `(element, rest-slice)` pair; `_SPLIT_PAIR_METHODS` spells it.
     "split_first": ("", {"Vec"}, -1),
     "split_last": ("", {"Vec"}, -1),
+    # `split_first_mut`/`split_last_mut` — `_SPLIT_PAIR_MUT_METHODS`
+    # spells the `(&mut T, &mut [T])` pair.
+    "split_first_mut": ("", {"Vec"}, -1),
+    "split_last_mut": ("", {"Vec"}, -1),
     # `o.as_deref()`/`o.as_deref_mut()` deref the payload —
     # `Option<Box<P>>` yields `Option<&P>`; the element is
     # post-processed below to peel the wrapper.
@@ -3189,17 +3208,24 @@ class _RustBindings:
                             # `s.get(0..1)` yields `Option<&[P]>`,
                             # not `Option<&P>`.
                             element = "[" + element + "]"
+                    method_text = self.text(field).strip()
                     if (
                         element is not None
-                        and self.text(field).strip()
-                        in _SPLIT_PAIR_METHODS
+                        and method_text
+                        in _SPLIT_PAIR_METHODS | _SPLIT_PAIR_MUT_METHODS
                     ):
                         # `split_first()`/`split_last()` yield
                         # `Option<(&T, &[T])>` — the tuple payload
                         # spells `(P, &[P])` so `Some((f, rest))`
                         # binds `f: P` and `rest: &[P]` (indexing
                         # `rest` still reads the slice element).
-                        element = f"({element}, &[{element}])"
+                        # The `_mut` variants spell the same pair
+                        # borrowed mutable.
+                        element = (
+                            f"({element}, &[{element}])"
+                            if method_text in _SPLIT_PAIR_METHODS
+                            else f"(&mut {element}, &mut [{element}])"
+                        )
                     if self.text(field).strip() == "and":
                         # `Option::and<U>(self, optb: Option<U>)`
                         # yields the ARGUMENT's payload, not the
@@ -4237,7 +4263,7 @@ class _RustBindings:
             return spelled, self._receiver_annotation_position(
                 receiver
             )
-        if method == "split_at":
+        if method in {"split_at", "split_at_mut"}:
             container_id, args = self._receiver_type(receiver)
             if args is None:
                 return None, None
@@ -4265,18 +4291,20 @@ class _RustBindings:
                 return None, None
             # `v.split_at(i)` yields `(&[P], &[P])` — a pair of
             # borrowed slices that feeds the tuple-pattern path.
-            # Re-splitting a `&[P]` keeps the same slice — the
-            # spelling is not wrapped a second time.
+            # `split_at_mut` spells the same pair `&mut`.
+            # Re-splitting a `&[P]`/`&mut [P]` keeps the same
+            # slice — the spelling is not wrapped a second time.
+            prefix = "&mut " if method == "split_at_mut" else "&"
             pair = (
                 spelled
-                if spelled.startswith("&[")
-                else f"&[{spelled}]"
+                if spelled.startswith(prefix + "[")
+                else f"{prefix}[{spelled}]"
             )
             return (
                 f"({pair}, {pair})",
                 self._receiver_annotation_position(receiver),
             )
-        if method in _ITER_CHUNK_METHODS:
+        if method in _ITER_CHUNK_METHODS | _ITER_CHUNK_MUT_METHODS:
             container_id, args = self._receiver_type(receiver)
             if args is None:
                 return None, None
@@ -4303,10 +4331,15 @@ class _RustBindings:
             spelled = args.strip() or None
             if spelled is None:
                 return None, None
-            # The element is a borrowed slice — `&[P]` reads `P`
-            # at the index/iter sites that consume it.
+            # The element is a borrowed slice — `&[P]`/`&mut [P]`
+            # reads `P` at the index/iter sites that consume it.
+            prefix = (
+                "&mut "
+                if method in _ITER_CHUNK_MUT_METHODS
+                else "&"
+            )
             return (
-                f"&[{spelled}]",
+                f"{prefix}[{spelled}]",
                 self._receiver_annotation_position(receiver),
             )
         if method == "flatten":
@@ -4359,11 +4392,18 @@ class _RustBindings:
                     and inner_callee.type == "field_expression"
                     else None
                 )
-                if inner_method in _ITER_CHUNK_METHODS:
+                if inner_method in (
+                    _ITER_CHUNK_METHODS | _ITER_CHUNK_MUT_METHODS
+                ):
                     # `v.chunks(n)`/`windows(n)` spell their `&[P]`
                     # item as `&P` — flatten yields the slice's
-                    # `&P` elements.
-                    return "&" + body, pos
+                    # `&P` elements; the `_mut` variants keep the
+                    # mutable borrow.
+                    return (
+                        "&mut " + body
+                        if inner_method in _ITER_CHUNK_MUT_METHODS
+                        else "&" + body
+                    ), pos
                 # `&Vec<P>`/`&Option<P>` — fall through to the
                 # generic head path on the un-borrowed spelling.
                 stripped = body
@@ -5039,6 +5079,7 @@ class _RustBindings:
             or method in _ITER_PRESERVING_METHODS
             or method in _ITER_SLICE_METHODS
             or method in _ITER_CHUNK_METHODS
+            or method in _ITER_CHUNK_MUT_METHODS
             or method == "enumerate"
             or method == "zip"
             or method == "flatten"
@@ -5065,9 +5106,10 @@ class _RustBindings:
                 (b.name for b in self.bindings if b.id == elem_id), ""
             )
             return TypeFact("named", name, 0, None, elem_id), rest
-        if method in _ITER_CHUNK_METHODS:
-            # `v.chunks(n)` yields `&[P]` slices — spell `&P`, which
-            # index/iter sites unwrap to `P`.
+        if method in _ITER_CHUNK_METHODS | _ITER_CHUNK_MUT_METHODS:
+            # `v.chunks(n)` yields `&[P]` slices — spell `&P`,
+            # which index/iter sites unwrap to `P`; the `_mut`
+            # variants spell `&mut P`.
             container_id, args = self._receiver_type(receiver)
             if args is None:
                 return _UNKNOWN, None
@@ -5092,7 +5134,15 @@ class _RustBindings:
                 # not `&[P]`.
                 return _UNKNOWN, None
             spelled = args.strip() or None
-            return _UNKNOWN, None if spelled is None else "&" + spelled
+            prefix = (
+                "&mut "
+                if method in _ITER_CHUNK_MUT_METHODS
+                else "&"
+            )
+            return (
+                _UNKNOWN,
+                None if spelled is None else prefix + spelled,
+            )
         if method == "flatten":
             # `v.iter().flatten()` unwraps the element's own args —
             # `Vec<Vec<P>>` iterates `Vec<P>`, flatten yields `P`
