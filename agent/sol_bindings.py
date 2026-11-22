@@ -982,6 +982,16 @@ class _SolBindings:
             base = self._unwrap(obj.child_by_field_name("base"))
             base_record = self._object_record(base)
             type_record = self._array_element_type_record(base_record)
+            if type_record is None:
+                # `nested[k1][k2]` — the base indexes into a mapping's
+                # mapping value, so no binding record exists; its type
+                # still peels through declared-type text.
+                text = self._object_declared_type_text(base)
+                if text is not None:
+                    element = self._index_value_type_text(text)
+                    type_record = self._user_type_record(
+                        element, self.current_contract, member.start_byte
+                    )
         elif obj.type == "call_expression":
             type_record = self._call_return_type_record(obj)
         if contract is None and type_record is not None and (
@@ -1097,26 +1107,26 @@ class _SolBindings:
         if obj.type == "array_access":
             base = self._unwrap(obj.child_by_field_name("base"))
             base_record = self._object_record(base)
-            if base_record is None or base_record.type_node is None:
+            if base_record is not None and base_record.type_node is not None:
+                owner = base_record.owner
+                text = re.sub(
+                    r"\b(memory|calldata|storage)\b",
+                    "",
+                    self.text(base_record.type_node),
+                )
+            else:
+                # `nested[k1]` carries no binding record, but its type
+                # text still comes from the same peel — a nested
+                # mapping value indexes to its own value type.
+                declared = self._object_declared_type(base)
+                if declared is None:
+                    return None
+                text, owner = declared
+            # `mapping(K => V)` indexes to V and `bytes` to `bytes1`.
+            element = self._index_value_type_text(text)
+            if element is None:
                 return None
-            type_node = base_record.type_node
-            text = re.sub(
-                r"\b(memory|calldata|storage)\b",
-                "",
-                self.text(type_node),
-            )
-            # `mapping(K => V)` indexes to V (a nested mapping still
-            # has no member surface downstream).
-            mapping_value = self._mapping_value_type_text(text)
-            if mapping_value is not None:
-                return mapping_value
-            if text.strip() == "bytes":
-                # `b[i]` on dynamic bytes yields a `bytes1`.
-                return "bytes1"
-            element = re.sub(r"\[[^\]]*\]\s*$", "", text).strip()
-            if element == text.strip() or "[" in element:
-                return None
-            return element, base_record.owner
+            return element, owner
         if obj.type == "call_expression":
             callee = self._unwrap(obj.child_by_field_name("function"))
             record = self._object_record(callee)
@@ -1672,6 +1682,21 @@ class _SolBindings:
                         value = named.group(1).strip()
                 return value
         return None
+
+    def _index_value_type_text(self, text: str) -> str | None:
+        """One index level peeled off a declared-type text: the mapping
+        value, the array element type or `bytes1` for dynamic `bytes`.
+        None when the text is not indexable (a nested array peels one
+        dimension but stays unnamed downstream)."""
+        mapping_value = self._mapping_value_type_text(text)
+        if mapping_value is not None:
+            return mapping_value
+        if text.strip() == "bytes":
+            return "bytes1"
+        element = re.sub(r"\[[^\]]*\]\s*$", "", text).strip()
+        if element == text.strip():
+            return None
+        return element
 
     def _array_element_type_record(
         self, record: _Record | None

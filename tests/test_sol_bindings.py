@@ -2045,7 +2045,7 @@ contract Vault {
     assert report.calls[0].kind == "direct_local"
 
 
-def test_using_on_nested_mapping_value_stays_opaque():
+def test_using_on_nested_mapping_value_binds():
     source = """
 library SafeMath {
     function add(uint256 a, uint256 b) internal pure returns (uint256) {}
@@ -2057,14 +2057,13 @@ contract Vault {
 }
 """
     report = build_sol_bindings(source)
-    # `nested[k1]` is itself a mapping — the second index has no
-    # named type text, so the position keeps its opaque treatment.
+    # `nested[k1][k2]` peels twice: the inner index yields `uint256`,
+    # so the extension binds as solc does.
     add = next(b for b in report.bindings if b.name == "add")
-    assert not any(
+    assert any(
         ref.binding_id == add.id and ref.kind == "call"
         for ref in report.references
     )
-    assert report.calls[0].kind == "opaque_member"
 
 
 def test_using_on_named_mapping_value_binds():
@@ -2287,7 +2286,7 @@ contract Vault {{
     assert len(add_calls) == depth
 
 
-def test_using_on_nested_array_stays_opaque():
+def test_using_on_nested_array_binds():
     source = """
 library SafeMath {
     function add(uint256 a, uint256 b) internal pure returns (uint256) {}
@@ -2299,12 +2298,14 @@ contract Vault {
 }
 """
     report = build_sol_bindings(source)
+    # `grid[0][0]` peels twice to `uint256` — the extension binds as
+    # solc resolves it; `grid[0]` alone is `uint256[]` and only a
+    # `for uint256[]`/`*` extension could apply.
     add = next(b for b in report.bindings if b.name == "add")
-    assert not any(
+    assert any(
         ref.binding_id == add.id and ref.kind == "call"
         for ref in report.references
     )
-    assert report.calls[0].kind == "opaque_member"
 
 
 def test_member_call_on_array_element_resolves():
