@@ -14848,12 +14848,6 @@ class _Builder:
         saved_caller_visible = getattr(
             self, "_caller_visible_params", None
         )
-        saved_array_field_param_writes = getattr(
-            self, "_value_struct_scalar_array_param_writes", None
-        )
-        saved_array_field_nonarray_writes = getattr(
-            self, "_value_struct_scalar_array_nonarray_writes", None
-        )
         saved_pointer_param_reseats = getattr(
             self, "_pointer_param_reseats", frozenset()
         )
@@ -14895,8 +14889,6 @@ class _Builder:
         # flag dep-free writes on a caller-visible param — dep
         # growth cannot see a `clear(m)` or `delete(m, 1)` store.
         self._caller_visible_params = caller_visible_params
-        self._value_struct_scalar_array_param_writes = {}
-        self._value_struct_scalar_array_nonarray_writes = set()
         for p in sig_params:
             if (
                 p.binding_id
@@ -14950,19 +14942,7 @@ class _Builder:
                 changed = locals_.get(
                     pid, frozenset({ordinal})
                 ) - frozenset({ordinal})
-                array_field_writes = (
-                    self._value_struct_scalar_array_param_writes.get(
-                        pid, frozenset()
-                    )
-                )
-                only_value_array_field_write = (
-                    bool(changed)
-                    and changed <= array_field_writes
-                    and pid
-                    not in self._value_struct_scalar_array_nonarray_writes
-                    and not (changed & self.indirect_writes)
-                )
-                if changed and not only_value_array_field_write:
+                if changed:
                     transfers.append(
                         CallTransfer(
                             FileSpan(
@@ -15013,12 +14993,6 @@ class _Builder:
                 saved_chan_chan_container_call_deps
             )
             self._caller_visible_params = saved_caller_visible
-            self._value_struct_scalar_array_param_writes = (
-                saved_array_field_param_writes
-            )
-            self._value_struct_scalar_array_nonarray_writes = (
-                saved_array_field_nonarray_writes
-            )
             self._pointer_param_reseats = saved_pointer_param_reseats
             self._pending_param_reseats = saved_pending_param_reseats
             self._param_pointer_aliases = saved_pointer_param_aliases
@@ -18237,7 +18211,7 @@ class _Builder:
             opaque_elem_slot_ids: dict[int, str] = {}
             opaque_elem_root_slots: dict[int, str] = {}
             value_struct_array_field_writes: dict[
-                int, tuple[str, frozenset[int]]
+                int, frozenset[int]
             ] = {}
             # `p.A[i].W = q` — the pointer-member store folds
             # opaquely into the root's set and `indirect_writes`;
@@ -18425,10 +18399,7 @@ class _Builder:
                                 transfers, count, 0,
                             )
                     self._record_read(index_deps)
-                    value_struct_array_field_writes[ri] = (
-                        root_ref.binding_id,
-                        index_deps,
-                    )
+                    value_struct_array_field_writes[ri] = index_deps
                     continue
                 value_array_field_lhs = (
                     self._value_struct_scalar_array_field_target(
@@ -18440,10 +18411,9 @@ class _Builder:
                         value_array_field_lhs
                     )
                     refs.append((root_ref, True, False, False))
-                    value_struct_array_field_writes[len(refs) - 1] = (
-                        root_ref.binding_id,
-                        frozenset(),
-                    )
+                    value_struct_array_field_writes[
+                        len(refs) - 1
+                    ] = frozenset()
                     continue
                 write_target = self._opaque_write_target(
                     lhs, locals_, params
@@ -19906,24 +19876,9 @@ class _Builder:
                     # field reads observe it.
                     broadcast = len(ref) >= 3 and ref[2]
                     ref, accumulating = ref[0], ref[1]
-                array_field_write = value_struct_array_field_writes.get(i)
-                if array_field_write is not None:
-                    root_id, array_index_deps = array_field_write
+                array_index_deps = value_struct_array_field_writes.get(i)
+                if array_index_deps is not None:
                     value = value | array_index_deps
-                    if root_id in params:
-                        param_writes = (
-                            self._value_struct_scalar_array_param_writes
-                        )
-                        param_writes[root_id] = (
-                            param_writes.get(root_id, frozenset())
-                            | value
-                        )
-                elif ref.binding_id in getattr(
-                    self, "_caller_visible_params", {}
-                ):
-                    self._value_struct_scalar_array_nonarray_writes.add(
-                        ref.binding_id
-                    )
                 if accumulating:
                     # `x op= e` reads the old value too — the result unions
                     # the binding's current dependencies with the RHS's.
@@ -24427,14 +24382,6 @@ class _Builder:
                     else frozenset({params[root_id]})
                 )
                 locals_[root_id] = old | index_deps
-                if root_id in params:
-                    param_writes = (
-                        self._value_struct_scalar_array_param_writes
-                    )
-                    param_writes[root_id] = (
-                        param_writes.get(root_id, frozenset())
-                        | index_deps
-                    )
                 return
             # `t.F++` — an increment through a bound field mutates the
             # pointee's caller memory like `t.F = v`, and records the

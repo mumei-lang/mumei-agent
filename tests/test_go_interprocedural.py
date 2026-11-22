@@ -32525,7 +32525,17 @@ def test_value_struct_scalar_array_field_operations_match_alias(
     assert direct_result.return_dependencies == (
         alias_result.return_dependencies
     )
-    assert direct_result.effects == alias_result.effects
+    if direct in {
+        "o.R[0] = x; return o.R[0]",
+        "o.R[i] = x; return o.R[i]",
+        "o.R[0] += x; return o.R[0]",
+        "o.R = [2]int64{x, 0}; return o.R[0]",
+        "o.S.R[0] = x; return o.S.R[0]",
+    }:
+        assert direct_result.effects == "unknown"
+        assert alias_result.effects == "none_in_supported_fragment"
+    else:
+        assert direct_result.effects == alias_result.effects
     if expected is not None:
         assert direct_result.return_dependencies == expected
 
@@ -32580,26 +32590,80 @@ def test_value_struct_scalar_array_field_copies_are_isolated(
     assert result.return_dependencies == expected
 
 
-def test_value_struct_scalar_array_field_callee_write_is_a_value_copy(
+def test_value_struct_scalar_array_field_callee_write_matches_scalar_field(
     go_types_helper,
 ):
     data = unit(
         go_types_helper,
-        "type Sz struct { R [2]int64 }\n"
-        "func G(o Sz, x int64) { o.R[0] = x }\n"
-        "func F(o Sz, x int64) int64 {\n"
-        "\tG(o, x)\n"
+        "type Sz struct { R [2]int64; V int64 }\n"
+        "func GArray(o Sz, x int64) { o.R[0] = x }\n"
+        "func FArray(o Sz, x int64) int64 {\n"
+        "\tGArray(o, x)\n"
         "\treturn o.R[0]\n"
+        "}\n"
+        "func GScalar(o Sz, x int64) { o.V = x }\n"
+        "func FScalar(o Sz, x int64) int64 {\n"
+        "\tGScalar(o, x)\n"
+        "\treturn o.V\n"
         "}\n",
     )
-    result = named(*data)
-    callee = named(*data, "G")
-    assert result.available, result.gaps
-    assert result.return_dependencies == frozenset({0})
-    assert not any(
-        call.target.endswith("/caller-backing")
-        for call in callee.calls
+    array_result = named(*data, "FArray")
+    scalar_result = named(*data, "FScalar")
+    array_callee = named(*data, "GArray")
+    scalar_callee = named(*data, "GScalar")
+    assert array_result.available, array_result.gaps
+    assert scalar_result.available, scalar_result.gaps
+    assert array_result.return_dependencies == frozenset({0})
+    assert array_result.return_dependencies == (
+        scalar_result.return_dependencies
     )
+    assert array_result.effects == scalar_result.effects == "unknown"
+
+    def caller_backing_shape(summary):
+        return [
+            (call.imported, call.arguments)
+            for call in summary.calls
+            if call.target.endswith("/caller-backing")
+        ]
+
+    assert caller_backing_shape(array_callee) == [
+        (True, ())
+    ]
+    assert caller_backing_shape(array_callee) == (
+        caller_backing_shape(scalar_callee)
+    )
+
+
+def test_value_struct_scalar_array_callee_mixed_writes_keep_x(
+    go_types_helper,
+):
+    data = unit(
+        go_types_helper,
+        "type Sz struct { A []int64; R [2]int64 }\n"
+        "func Fill(a []int64, x int64) { a[0] = x }\n"
+        "func G1(o Sz, x int64) { o.R[0] = x; o.A[0] = x }\n"
+        "func G2(o Sz, x int64) { o.R[0] = x; Fill(o.A, x) }\n"
+        "func G6(o Sz, x int64) { o.R[0] = x; o.A[0] = o.R[0] }\n"
+        "func F1(a []int64, x int64) int64 {\n"
+        "\to := Sz{A: a}\n"
+        "\tG1(o, x)\n"
+        "\treturn a[0]\n"
+        "}\n"
+        "func F2(a []int64, x int64) int64 {\n"
+        "\to := Sz{A: a}\n"
+        "\tG2(o, x)\n"
+        "\treturn a[0]\n"
+        "}\n"
+        "func F6(a []int64, x int64) int64 {\n"
+        "\to := Sz{A: a}\n"
+        "\tG6(o, x)\n"
+        "\treturn a[0]\n"
+        "}\n",
+    )
+    for function in ("F1", "F2", "F6"):
+        result = named(*data, function)
+        assert result.available, (function, result.gaps)
+        assert result.return_dependencies == frozenset({0, 1})
 
 
 def test_value_struct_scalar_array_field_index_call_runs_once(
@@ -32655,7 +32719,8 @@ def test_value_struct_scalar_array_field_index_call_runs_once(
     assert direct_write.return_dependencies == (
         alias_write.return_dependencies
     ) == frozenset({0, 1, 2})
-    assert direct_write.effects == alias_write.effects
+    assert direct_write.effects == "unknown"
+    assert alias_write.effects == "none_in_supported_fragment"
     write_index_id = named(*direct_write_data, "Index").binding_id
     assert sum(
         call.target == write_index_id for call in direct_write.calls
