@@ -2783,3 +2783,24 @@ contract C {
         ref.binding_id == take.id and ref.kind == "call"
         for ref in report.references
     )
+
+
+def test_nested_mapping_value_type_resolves_in_declaring_scope():
+    source = """
+contract A {
+    struct S { uint256 x; }
+    mapping(uint256 => mapping(uint256 => S)) m;
+}
+contract B {
+    struct S { uint256 y; }
+    A a;
+    function run() external returns (uint256) { return a.m[0][0].x; }
+}
+"""
+    report = build_sol_bindings(source)
+    # `a.m[k1][k2]` peels to `S` spelled inside A — `A.S.x` binds,
+    # not B.S (whose field is `y`).
+    x = next(b for b in report.bindings if b.name == "x")
+    assert any(ref.binding_id == x.id for ref in report.references)
+    y = next(b for b in report.bindings if b.name == "y")
+    assert not any(ref.binding_id == y.id for ref in report.references)

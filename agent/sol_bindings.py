@@ -985,12 +985,13 @@ class _SolBindings:
             if type_record is None:
                 # `nested[k1][k2]` — the base indexes into a mapping's
                 # mapping value, so no binding record exists; its type
-                # still peels through declared-type text.
-                text = self._object_declared_type_text(base)
-                if text is not None:
-                    element = self._index_value_type_text(text)
+                # still peels through declared-type text, in the scope
+                # that spelled it.
+                declared = self._object_declared_type(base)
+                if declared is not None:
+                    element = self._index_value_type_text(declared[0])
                     type_record = self._user_type_record(
-                        element, self.current_contract, member.start_byte
+                        element, declared[1], member.start_byte
                     )
         elif obj.type == "call_expression":
             type_record = self._call_return_type_record(obj)
