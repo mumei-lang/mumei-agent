@@ -5104,3 +5104,82 @@ fn g(arr: [P; 1]) {
     # The element resolves the spelled P at arr's annotation, not the
     # inner block's shadow.
     assert _call(report, source, "p.m()").target == outer.id
+
+
+def test_unwrap_receivers_yield_option_result_payload() -> None:
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+struct E;
+impl E { fn e(&self) {} }
+fn f(opt: Option<P>, res: Result<P, E>, v: Vec<P>) {
+    opt.unwrap().m();
+    res.unwrap_or(P).m();
+    res.expect("x").m();
+    res.unwrap_err().e();
+    v.unwrap().m();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = _bindings(report, "m", "associated_function")[0]
+    e = _bindings(report, "e", "associated_function")[0]
+    assert _call(report, source, "opt.unwrap().m()").target == m.id
+    assert _call(report, source, "res.unwrap_or(P).m()").target == m.id
+    assert _call(report, source, 'res.expect("x").m()').target == m.id
+    assert _call(report, source, "res.unwrap_err().e()").target == e.id
+    # Vec<P> exposes no `unwrap` — stays opaque.
+    assert _call(report, source, "v.unwrap().m()").target == ""
+
+
+def test_try_operator_receiver_yields_payload() -> None:
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+struct W { opt: Option<P> }
+fn g(res: Result<P, E>) -> Result<(), E> {
+    res?.m();
+    Ok(())
+}
+fn h(w: W) {
+    w.opt?.m();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = _bindings(report, "m", "associated_function")[0]
+    assert _call(report, source, "res?.m()").target == m.id
+    assert _call(report, source, "w.opt?.m()").target == m.id
+
+
+def test_unwrap_receiver_of_array_payload_indexes_the_element() -> None:
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+struct W;
+impl W {
+    fn pick(&self) -> Option<[P; 2]> { None }
+    fn res(&self) -> Result<[P; 2], u8> { Err(0) }
+}
+fn f(w: W, o: Option<[P; 2]>, r: Result<[P; 2], u8>) -> u8 {
+    o.unwrap()[0].m();
+    r.unwrap()[1].m();
+    o?[0].m();
+    match w.pick() {
+        Some(a) => { a[0].m(); }
+        _ => {}
+    }
+    if let Ok(a) = w.res() {
+        a[1].m();
+    }
+    0
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = _bindings(report, "m", "associated_function")[0]
+    raw = source.encode()
+    calls = [
+        call
+        for call in report.calls
+        if raw[call.span.start : call.span.end].decode().endswith(".m()")
+    ]
+    assert len(calls) == 5
+    assert all(c.target == m.id for c in calls)
