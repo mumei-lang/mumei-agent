@@ -2384,8 +2384,8 @@ C02/C05/C06 work.
 
 A deferred immediate function literal (`defer func(...) { ... }(args)`)
 uses the same capture and exit-state fold as a bound literal. Immediate
-`go` function literals and nested `go`/`defer` inside a literal remain
-unsupported.
+`go` function literals use the same capture model when their CFG gaps begin
+with `go` or `defer`; nested `go`/`defer` inside a literal remain unsupported.
 
 The existing Go walker still owns must/may facts and resource findings.
 `FunctionDataflow.cfg` and `cfg_gaps` expose the structural boundary;
@@ -3179,8 +3179,9 @@ origins admits a literal send only when every enclosing-function
 reference is a send-channel, receive, builtin
 `close`/`len`/`cap` argument, or range operand, and the literal is
 invoked synchronously as a direct call of its bound name or an
-immediately invoked literal; `go`, `defer`, and callback invocations
-stay closed. Synchronous literals also admit queue/container sends
+immediately invoked literal; `defer` and callback invocations stay closed.
+`go` invocations use the queue-union and race-checked path below.
+Synchronous literals also admit queue/container sends
 (`cc <- d`, `s[i] <- v`, and `(<-cc) <- v`), receives (`<-cc`,
 `<-s[i]`, including nested receives), and `close`/`len`/`cap` of
 those operands. Queue groups must remain local and unescaped; plain
@@ -3190,7 +3191,10 @@ a supported indexed channel operation. Aliases, enclosing channel
 values sent into a queue,
 non-operation uses (including call arguments, returns, assignments,
 composite values, range, address-of, and comparisons), `select`, and
-asynchronous, deferred, or callback invocations stay closed. A function name
+deferred or callback invocations stay closed. Goroutine-invoked bound and
+immediate func literals admit captured local-channel sends with the same
+queue-union effect as `go send(ch, x)`; the later-store race gate still
+rejects captured values that may be changed afterward. A function name
 read in a call's argument list admits dep-free (the
 possible invocation folds through the call's own record); a
 func literal passed directly as an argument folds its

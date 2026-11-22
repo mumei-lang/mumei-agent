@@ -77,6 +77,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import re
 import sys
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, replace
@@ -12404,6 +12405,24 @@ class _Builder:
         captured, writes, roots, star = self._deferred_exit_shape(
             call_node, call, params, locals_
         )
+        function_node = self._strip_parens(
+            call_node.child_by_field_name("function")
+        )
+        if function_node is not None and function_node.type == "func_literal":
+            (
+                _,
+                literal_captured,
+                captures_pointer,
+                literal_writes,
+                star_write,
+                has_call,
+            ) = self._func_literal_capture(
+                function_node, params, locals_
+            )
+            captured = frozenset(literal_captured)
+            writes = frozenset(literal_writes)
+            roots = frozenset()
+            star = captures_pointer or star_write or has_call
         local_param_ids = set(locals_) | set(params)
         touched = (
             set(captured | writes | roots) & local_param_ids
@@ -12537,6 +12556,14 @@ class _Builder:
                         written.add(binding_id)
                 if lhs.type != "identifier":
                     nonplain = True
+            if current.type == "send_statement":
+                root = root_identifier(
+                    current.child_by_field_name("channel")
+                )
+                if root is not None:
+                    binding_id = identifier_binding_id(root)
+                    if binding_id is not None:
+                        written.add(binding_id)
             if current.type == "call_expression":
                 arguments = current.child_by_field_name("arguments")
                 if arguments is None:
@@ -15331,7 +15358,7 @@ class _Builder:
                 if raw_body is not None
                 else ""
             )
-            deferred_closures_only = (
+            go_defer_closures_only = (
                 not unsupported_switch
                 and bool(cfg.gaps)
                 and all(
@@ -15341,13 +15368,16 @@ class _Builder:
                     <= gap.span.start
                     <= gap.span.end
                     <= len(body_source)
-                    and body_source[gap.span.start : gap.span.end]
-                    .lstrip()
-                    .startswith("defer")
+                    and re.match(
+                        r"(defer|go)\b",
+                        body_source[
+                            gap.span.start : gap.span.end
+                        ].lstrip(),
+                    ) is not None
                     for gap in cfg.gaps
                 )
             )
-            if not deferred_closures_only:
+            if not go_defer_closures_only:
                 raise _Unsupported("cfg_unavailable", fn.body)
         statements = _children(block)
         if len(statements) == 1 and statements[0].type == "statement_list":
@@ -32132,7 +32162,9 @@ class _Builder:
             current = current.parent
         return None
 
-    def _literal_invoked_synchronously(self, literal_node: Any) -> bool:
+    def _literal_invoked_synchronously(
+        self, literal_node: Any, *, allow_go: bool = False
+    ) -> bool:
         def synchronous_call(call: Any) -> bool:
             parent = call.parent
             while (
@@ -32141,10 +32173,11 @@ class _Builder:
                 and self._strip_parens(parent) == call
             ):
                 parent = parent.parent
-            return parent is None or parent.type not in {
-                "go_statement",
-                "defer_statement",
-            }
+            if parent is not None and parent.type == "defer_statement":
+                return False
+            if parent is not None and parent.type == "go_statement":
+                return allow_go
+            return True
 
         parent = literal_node.parent
         while (
@@ -32326,9 +32359,9 @@ class _Builder:
         (`x = e`, `p.V = e`, `*p = e`) and the inner-call flag ride
         out in the returned record. A send to a literal-local channel
         can fold at the call site; captured scalar channels and
-        scalar-leaf queue/container operations fold only when their
-        literal is invoked synchronously. Other sends, `go` and
-        `defer` stay closed."""
+        scalar-leaf queue/container operations fold when their literal
+        is invoked synchronously or by a goroutine. Other sends and
+        nested `go`/`defer` statements stay closed."""
         deps: frozenset[int] = frozenset()
         captured: set[str] = set()
         captures_pointer = False
@@ -32735,7 +32768,9 @@ class _Builder:
             if (
                 target is None
                 or not current_literal_context(current)
-                or not self._literal_invoked_synchronously(node)
+                or not self._literal_invoked_synchronously(
+                    node, allow_go=True
+                )
                 or not local_channel_root(target[1], target[0])
                 or self._inside_select_operation(current)
             ):
@@ -32783,7 +32818,9 @@ class _Builder:
             kind, root = target
             if (
                 not current_literal_context(current)
-                or not self._literal_invoked_synchronously(node)
+                or not self._literal_invoked_synchronously(
+                    node, allow_go=True
+                )
                 or not local_channel_root(root, kind)
             ):
                 continue
@@ -32899,7 +32936,9 @@ class _Builder:
                         and self._chan_only_operations(
                             ref.binding_id, node
                         )
-                        and self._literal_invoked_synchronously(node)
+                        and self._literal_invoked_synchronously(
+                            node, allow_go=True
+                        )
                     )
                     if literal_internal:
                         pass
