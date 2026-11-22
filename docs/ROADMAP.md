@@ -3207,6 +3207,12 @@ function-valued fields and recursively embedded value-struct fields into
 the callee's argument deps and callback-write fold. Other struct-valued
 argument expressions with recorded function fields fail closed; structs
 without such records retain the existing behavior.
+Resolved local method calls on value structs carry recorded
+function-field closures through the receiver and callback-write fold,
+including value embeds. Pointer-local receivers and method values with
+recorded fields fail closed; promoted selectors not resolved through that
+path remain closed, while receivers without records and interface
+dispatch keep their existing behavior.
 A package-level `var Alias = Id` call
 admits as an opaque external call — the callee is
 reassignable by any caller, so `Alias(args)` is dep-free

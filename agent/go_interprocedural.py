@@ -12860,6 +12860,42 @@ class _Builder:
                 )
         return tuple(dict.fromkeys(record_ids))
 
+    def _method_receiver_field_record_ids(
+        self, node: Any
+    ) -> tuple[str, ...]:
+        record_ids = self._struct_argument_field_record_ids(node)
+        if record_ids:
+            return record_ids
+        value = self._strip_parens(node)
+        if value is None:
+            return ()
+        fact = self._deferred_expression_type(value)
+        pointee_fact = None
+        if fact is not None and fact.kind == "pointer":
+            pointee_fact = fact.elem
+        elif value.type == "unary_expression":
+            operator = value.child_by_field_name("operator")
+            if operator is not None and operator.text == b"&":
+                pointee_fact = self._deferred_expression_type(
+                    value.child_by_field_name("operand")
+                )
+        struct_fact = self._struct_value_fact(pointee_fact)
+        if struct_fact is None:
+            return ()
+        anchor = None
+        if value.type == "identifier":
+            ref = self.references.get(self.node_key(value))
+            if ref is not None:
+                anchor = self.bindings.get(ref.binding_id)
+        elif value.type == "selector_expression":
+            anchor = self._field_member(value)
+        record_ids = self._struct_field_closure_record_ids(
+            struct_fact, anchor
+        )
+        if record_ids:
+            raise _Unsupported("unsupported_expression", _span(node))
+        return ()
+
     def _captured_current_deps(
         self,
         captured: frozenset[str],
@@ -13279,6 +13315,23 @@ class _Builder:
             ):
                 star_or_external = True
         if call is not None and call.kind == "direct_local":
+            if call.method and function_node is not None:
+                receiver_node = function_node.child_by_field_name(
+                    "operand"
+                )
+                if receiver_node is not None:
+                    for field_binding_id in (
+                        self._method_receiver_field_record_ids(
+                            receiver_node
+                        )
+                    ):
+                        captured |= self.closure_captures.get(
+                            field_binding_id, frozenset()
+                        )
+                        writes |= self.closure_writes.get(
+                            field_binding_id, frozenset()
+                        )
+                        star_or_external = True
             arguments = node.child_by_field_name("arguments")
             if arguments is not None:
                 for argument in _children(arguments):
@@ -29689,6 +29742,10 @@ class _Builder:
                         # value: nothing evaluates. The binding site
                         # still records the (method, None) pair.
                         return frozenset()
+                    if self._method_receiver_field_record_ids(operand):
+                        raise _Unsupported(
+                            "unsupported_expression", _span(node)
+                        )
                     return self.expression(
                         operand, fn, params, locals_,
                         transfers, count, depth + 1,
@@ -33147,6 +33204,20 @@ class _Builder:
                 receiver_node, fn, params, locals_,
                 transfers, count, depth + 1,
             )
+            for field_binding_id in (
+                self._method_receiver_field_record_ids(receiver_node)
+            ):
+                if receiver_deps is not None:
+                    receiver_deps |= self._captured_current_deps(
+                        self.closure_captures.get(
+                            field_binding_id, frozenset()
+                        ),
+                        params,
+                        locals_,
+                    )
+                self._queue_struct_field_invocation(
+                    node, receiver_node, field_binding_id
+                )
             if (
                 target.receiver is not None
                 and target.receiver.type.kind != "pointer"

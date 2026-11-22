@@ -44718,6 +44718,150 @@ def test_method_call_pointer_operand_value_receiver_reads_pointee(
     assert result.return_dependencies == frozenset({0, 1})
 
 
+def test_method_receiver_propagates_struct_field_closure_records(
+    go_types_helper,
+):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "type R struct { F func() int64 }\n"
+        "func (s R) Run() int64 { return s.F() }\n"
+        "func useR(s R) int64 { return s.F() }\n"
+        "func ReadMethod(x, y int64) int64 { v := y; var s R; "
+        "s.F = func() int64 { return v }; v = x; return s.Run() }\n"
+        "func ReadArgument(x, y int64) int64 { v := y; var s R; "
+        "s.F = func() int64 { return v }; v = x; return useR(s) }\n"
+        "type W struct { F func() }\n"
+        "func (s W) Run() { s.F() }\n"
+        "func useW(s W) { s.F() }\n"
+        "func WriteMethod(x int64) int64 { w := int64(0); g := "
+        "func() { w = x }; var s W; s.F = g; s.Run(); return w }\n"
+        "func WriteArgument(x int64) int64 { w := int64(0); g := "
+        "func() { w = x }; var s W; s.F = g; useW(s); return w }\n"
+        "type P struct { F func() }\n"
+        "func (s *P) Run() { s.F() }\n"
+        "func PointerReceiver(x int64) int64 { w := int64(0); var s P; "
+        "s.F = func() { w = x }; s.Run(); return w }\n"
+        "type C struct { F func() }\n"
+        "func (s C) Run() { s.F() }\n"
+        "func CompositeReceiver(x int64) int64 { w := int64(0); "
+        "g := func() { w = x }; C{F: g}.Run(); return w }\n"
+        "type E struct { F func() }\n"
+        "func (s E) Run() { s.F() }\n"
+        "type O struct { E }\n"
+        "func (o O) Own() { o.E.F() }\n"
+        "func EmbeddedReceiver(x int64) int64 { w := int64(0); "
+        "var o O; o.E.F = func() { w = x }; o.Own(); return w }\n"
+        "func PromotedReceiver(x int64) int64 { w := int64(0); "
+        "var o O; o.E.F = func() { w = x }; o.Run(); return w }\n",
+    )
+    read_method = named(source, snapshot, summaries, "ReadMethod")
+    read_argument = named(source, snapshot, summaries, "ReadArgument")
+    assert read_method.available and read_argument.available
+    assert (
+        read_method.return_dependencies
+        == read_argument.return_dependencies
+    )
+    assert read_method.return_dependencies == frozenset({0, 1})
+    write_method = named(source, snapshot, summaries, "WriteMethod")
+    write_argument = named(source, snapshot, summaries, "WriteArgument")
+    assert write_method.available and write_argument.available
+    assert (
+        write_method.return_dependencies
+        == write_argument.return_dependencies
+    )
+    assert write_method.return_dependencies == frozenset({0})
+    for function in (
+        "PointerReceiver",
+        "CompositeReceiver",
+        "EmbeddedReceiver",
+    ):
+        result = named(source, snapshot, summaries, function)
+        assert result.available, result.gaps
+        assert result.return_dependencies == frozenset({0})
+    promoted = named(source, snapshot, summaries, "PromotedReceiver")
+    assert not promoted.available
+    assert promoted.gaps
+
+
+def test_method_receiver_controls_without_field_records(
+    go_types_helper,
+):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "type Plain struct { V int64; F func() }\n"
+        "func (s Plain) Get() int64 { return s.V }\n"
+        "func NoRecords(x int64) int64 { var s Plain; s.V = x; "
+        "return s.Get() }\n"
+        "type I interface { M(int64) int64 }\n"
+        "func InterfaceCall(i I, x int64) int64 { return i.M(x) }\n",
+    )
+    no_records = named(source, snapshot, summaries, "NoRecords")
+    assert no_records.available
+    assert no_records.return_dependencies == frozenset({0})
+    interface_call = named(source, snapshot, summaries, "InterfaceCall")
+    assert interface_call.available
+    assert interface_call.return_dependencies == frozenset({0, 1})
+    assert interface_call.effects == "unknown"
+
+
+def test_pointer_local_and_method_values_with_field_records_fail_closed(
+    go_types_helper,
+):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "type P struct { F func() }\n"
+        "func (s *P) Run() { s.F() }\n"
+        "func PointerLocal(x int64) int64 { w := int64(0); var s P; "
+        "s.F = func() { w = x }; p := &s; p.Run(); return w }\n"
+        "func BoundMethodValue(x int64) int64 { w := int64(0); var s P; "
+        "s.F = func() { w = x }; f := s.Run; f(); return w }\n"
+        "func ap(func()) {}\n"
+        "func PassedMethodValue(x int64) int64 { w := int64(0); var s P; "
+        "s.F = func() { w = x }; ap(s.Run); return w }\n",
+    )
+    pointer_local = named(source, snapshot, summaries, "PointerLocal")
+    assert not pointer_local.available
+    for function in (
+        "BoundMethodValue",
+        "PassedMethodValue",
+    ):
+        result = named(source, snapshot, summaries, function)
+        assert not result.available
+        assert any(
+            gap.reason == "unsupported_expression"
+            for gap in result.gaps
+        ), (function, result.gaps)
+
+
+def test_deferred_and_go_method_receivers_use_field_closure_records(
+    go_types_helper,
+):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "type D struct { F func() }\n"
+        "func (s D) Run() { s.F() }\n"
+        "func DeferMethod(x, z int64) (r int64) { v := x; var s D; "
+        "s.F = func() { r = v }; defer s.Run(); v = z; return 0 }\n"
+        "func DeferClosure(x, z int64) (r int64) { v := x; "
+        "g := func() { r = v }; defer g(); v = z; return 0 }\n"
+        "func GoMethod(x, z int64) int64 { w := int64(0); var s D; "
+        "s.F = func() { w = x }; go s.Run(); x = z; return w }\n",
+    )
+    deferred_method = named(source, snapshot, summaries, "DeferMethod")
+    deferred_closure = named(source, snapshot, summaries, "DeferClosure")
+    assert deferred_method.available and deferred_closure.available
+    assert (
+        deferred_method.return_dependencies
+        == deferred_closure.return_dependencies
+    )
+    assert 1 in deferred_method.return_dependencies
+    go_method = named(source, snapshot, summaries, "GoMethod")
+    assert not go_method.available
+    assert any(
+        gap.reason == "unsupported_statement" for gap in go_method.gaps
+    )
+
+
 def test_range_over_method_result_reads_receiver(go_types_helper):
     # `for range s.Items()` — the receiver operand evaluates like the
     # `s.M()` call path, so the elements inherit `s`'s deps.
