@@ -2389,6 +2389,29 @@ def test_run_filesystem_read_isolation_denies_tmp_and_allows_usr(tmp_path):
     assert result.stdout == b"tmp=denied\nusr=readable\n"
 
 
+def test_filesystem_read_allowed_roots_use_real_executable_entry_directory(
+    tmp_path,
+):
+    real_root = tmp_path / "srv"
+    (real_root / "x").mkdir(parents=True)
+    real_entry_dir = real_root / "bin"
+    real_entry_dir.mkdir()
+    (real_entry_dir / "tool").write_text("#!/bin/sh\n")
+    lexical_parent = tmp_path / "a"
+    (lexical_parent / "bin").mkdir(parents=True)
+    (lexical_parent / "link").symlink_to(real_root / "x", target_is_directory=True)
+    resolved_executable = os.path.join(
+        str(lexical_parent), "link", "..", "bin", "tool"
+    )
+
+    roots = attempt_runner._filesystem_read_allowed_roots(
+        resolved_executable
+    )
+
+    assert str(real_entry_dir) in roots
+    assert str(lexical_parent / "bin") not in roots
+
+
 def test_run_without_filesystem_read_isolation_can_read_tmp(tmp_path):
     private_file = tmp_path / "private"
     private_file.write_text("readable")

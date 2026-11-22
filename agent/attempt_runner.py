@@ -269,10 +269,10 @@ def _resolved_spawn_target(
 def _filesystem_read_allowed_roots(
     resolved_executable: str,
 ) -> tuple[str, ...]:
-    resolved = os.path.abspath(resolved_executable)
+    resolved = resolved_executable
     roots = [
         *_FILESYSTEM_READ_BASE_ROOTS,
-        os.path.dirname(os.path.abspath(resolved)),
+        os.path.realpath(os.path.dirname(resolved) or os.curdir),
         os.path.dirname(os.path.realpath(resolved)),
     ]
     return tuple(dict.fromkeys(roots))
