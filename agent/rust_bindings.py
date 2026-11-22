@@ -152,7 +152,28 @@ _OPTION_HEAD_METHODS = {
     "zip": ("", {"Option"}, 0),
     # `m.insert(k, v)` yields `Option<V>` — the pair's value arg.
     "insert": ("", {"HashMap", "BTreeMap"}, -1),
+    # `o.replace(v)` yields `Option<P>` — the old payload.
+    "replace": ("", {"Option"}, 0),
+    # `m.remove_entry(k)`/`m.pop_first()`/`m.pop_last()` yield
+    # `Option<(K, V)>` — `_MAP_PAIR_METHODS` spells the pair.
+    "remove_entry": ("", {"HashMap", "BTreeMap"}, 0),
+    "pop_first": ("", {"BTreeMap"}, 0),
+    "pop_last": ("", {"BTreeMap"}, 0),
+    # `q.swap_remove_front(i)`/`swap_remove_back(i)` yield
+    # `Option<P>`.
+    "swap_remove_front": ("", {"VecDeque"}, -1),
+    "swap_remove_back": ("", {"VecDeque"}, -1),
 }
+
+# Methods that yield `Option<(K, V)>` — the pair of the map's two
+# type args, spelled so `Some((k, v))` binds each name.
+_MAP_PAIR_METHODS = frozenset(
+    {"remove_entry", "pop_first", "pop_last"}
+)
+
+# `v.swap_remove(i)` yields `T` outright — a receiver payload, not
+# an Option.
+_SWAP_REMOVE_METHODS = frozenset({"swap_remove"})
 
 # `o.insert(p)`/`o.get_or_insert(..)`/`o.or_insert(..)` yield
 # `&mut P` — the mutable borrow carries `Option`'s own payload.
@@ -3085,6 +3106,41 @@ class _RustBindings:
                             if -len(elements) <= index < len(elements)
                             else None
                         )
+                        if (
+                            self.text(field).strip()
+                            in _MAP_PAIR_METHODS
+                            and self._container_head_name(
+                                callee.child_by_field_name("value")
+                            )
+                            in _MAP_CONTAINER_NAMES
+                        ):
+                            # `m.pop_first()` yields
+                            # `Option<(K, V)>` — the map's raw args
+                            # spell the pair (`receiver[1]` already
+                            # reduced them to the value `V`), so
+                            # `Some((k, v))` binds each name.
+                            type_node = self._receiver_type_node(
+                                callee.child_by_field_name("value")
+                            )
+                            head_args = (
+                                self._generic_head_args(
+                                    type_node, node.start_byte
+                                )
+                                if type_node is not None
+                                else None
+                            )
+                            pair_args = (
+                                self._type_arg_list(head_args[0])
+                                if head_args is not None
+                                and head_args[0] is not None
+                                else []
+                            )
+                            element = (
+                                f"({pair_args[0].strip()},"
+                                f" {pair_args[1].strip()})"
+                                if len(pair_args) >= 2
+                                else None
+                            )
                     if (
                         self.text(field).strip() in {"get", "get_mut"}
                         and element
@@ -3457,6 +3513,27 @@ class _RustBindings:
                         if len(parts) == 1:
                             return self._spelled_type(
                                 "&mut " + parts[0].strip(),
+                                self._receiver_annotation_position(
+                                    callee.child_by_field_name(
+                                        "value"
+                                    )
+                                )
+                                or node.start_byte,
+                            )
+                    if (
+                        method_name in _SWAP_REMOVE_METHODS
+                        and receiver[1] is not None
+                        and self._container_head_name(
+                            callee.child_by_field_name("value")
+                        )
+                        in {"Vec", "VecDeque"}
+                    ):
+                        # `v.swap_remove(i)` yields `T` — the
+                        # container's last type arg.
+                        parts = self._type_arg_list(receiver[1])
+                        if parts:
+                            return self._spelled_type(
+                                parts[-1].strip(),
                                 self._receiver_annotation_position(
                                     callee.child_by_field_name(
                                         "value"
