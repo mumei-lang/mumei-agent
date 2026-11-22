@@ -94,6 +94,10 @@ def _assert_rejected(envelope, source, *, raw=None):
             "state_write_operators",
             ["agree", "agree"],
         ),
+        (
+            "block_scope_shadowing",
+            ["agree"] * 8,
+        ),
     ],
 )
 def test_captured_references_have_exact_lexical_comparison_statuses(name, statuses):
@@ -161,6 +165,47 @@ def test_inheritance_call_resolves_to_the_override_declaration():
         "start": override_start,
         "end": override_start + len("hook"),
     }
+
+
+def test_block_scope_shadowing_resolves_each_declared_binding():
+    # The inner `count` shadows the state variable inside the block:
+    # reads/writes there bind to the inner declaration, while `count`
+    # outside the block binds to the state variable — and `local`
+    # reassignments keep one declaration identity.
+    source = _source("block_scope_shadowing")
+    envelope = _envelope("block_scope_shadowing")
+    snapshot = load_sol_compiler_snapshot(_payload(envelope), source)
+    comparison = compare_with_lexical(snapshot, build_sol_bindings(source))
+
+    state_decl = {
+        "start": source.index("count"),
+        "end": source.index("count") + len("count"),
+    }
+    inner_decl_start = source.index("count", source.index("{", source.index("local = count")))
+    inner_decl = {"start": inner_decl_start, "end": inner_decl_start + len("count")}
+    local_decl_start = source.index("local", source.index("uint256 local"))
+    local_decl = {"start": local_decl_start, "end": local_decl_start + len("local")}
+
+    by_span = {
+        (item["span"]["start"], item["name"]): item
+        for item in comparison["references"]
+    }
+    # `count` before and after the block → the state variable.
+    for start in (
+        source.index("count + 1"),
+        source.index("count;", source.index("return")),
+    ):
+        assert by_span[(start, "count")]["declaration"] == state_decl
+    # Inside the block both the read and the write bind to the inner `count`.
+    for start in (
+        source.index("count = count"),
+        source.index("count + 10"),
+    ):
+        assert by_span[(start, "count")]["declaration"] == inner_decl
+    # Every `local` reference binds to the single local declaration.
+    local_refs = [item for item in comparison["references"] if item["name"] == "local"]
+    assert len(local_refs) == 4
+    assert all(item["declaration"] == local_decl for item in local_refs)
 
 
 def test_inheritance_specifier_path_agrees_with_the_base_declaration():
