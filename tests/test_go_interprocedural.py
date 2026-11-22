@@ -6425,9 +6425,35 @@ def test_interface_element_store_evaluates_chain_index_calls(
         "\treturn *v\n"
         "}\n"
     )
-    result = named(*unit(go_types_helper, declarations))
+    data = unit(go_types_helper, declarations)
+    result = named(*data)
     assert result.available, result.gaps
     assert result.return_dependencies == frozenset({0, 1, 2, 3})
+    assert result.effects == "unknown"
+    # The index call runs exactly once — not skipped, not duplicated.
+    set_id = named(*data, "Set").binding_id
+    assert [t.target for t in result.calls].count(set_id) == 1
+
+
+def test_interface_element_store_map_field(
+    go_types_helper,
+):
+    # `p.M[k] = e` on a `map[int64]I` field — map element reads are
+    # already admitted (`p.M[k].M()` dispatches), so the element
+    # store follows: the write records `unknown` effects and a
+    # callee reading the same element observes the stored deps.
+    declarations = (
+        "type I interface{ M() int64 }\n"
+        "type S struct{ M map[int64]I }\n"
+        "func callee(s *S, k int64) int64 { return s.M[k].M() }\n"
+        "func F(p *S, k int64, e I) int64 {\n"
+        "\tp.M[k] = e\n"
+        "\treturn callee(p, k)\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1, 2})
     assert result.effects == "unknown"
 
 
@@ -6440,8 +6466,9 @@ def test_interface_element_store_evaluates_chain_index_calls(
             "type S struct{ A [][]I }\n"
             "func F(p *S, e I) { p.A[0][0] = e }\n"
         ),
-        # `map[K]I` fields stay closed — the element-read path
-        # rejects map elements for the same signature reason.
+        # `map[K]I` fields stay closed on the element-read path for
+        # unsupported map shapes — a string key is rejected at the
+        # signature gate before the store is reached.
         (
             "type I interface{ M() int64 }\n"
             "type S struct{ M map[string]I }\n"
