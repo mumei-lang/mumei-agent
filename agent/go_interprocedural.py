@@ -18007,6 +18007,12 @@ class _Builder:
             opaque_elem_old_deps: dict[int, frozenset[int]] = {}
             opaque_elem_slot_ids: dict[int, str] = {}
             opaque_elem_root_slots: dict[int, str] = {}
+            # `p.A[i].W = q` — the pointer-member store folds
+            # opaquely into the root's set and `indirect_writes`;
+            # the index's deps join that value too — whether the
+            # write landed on the element a later `p.A[k].W` read
+            # observes depended on `i`.
+            pointer_member_index_deps: dict[int, frozenset[int]] = {}
             # `a, a[0] = arr, x` — assigning an ARRAY copies the
             # value into the variable's own storage, which keeps
             # naming the element the LHS pointer was computed
@@ -18557,17 +18563,23 @@ class _Builder:
                         )
                     finally:
                         self._for_write_target = False
+                    pointer_member_index_deps[
+                        len(refs)
+                    ] = frozenset()
                     for index in reversed(indexes):
                         if (
                             index is not None
                             and index.type not in _INDEX_LITERALS
                         ):
-                            self._record_read(
-                                self.expression(
-                                    index, fn, params, locals_,
-                                    transfers, count, 0,
-                                )
+                            pointer_member_index_deps[
+                                len(refs)
+                            ] |= self.expression(
+                                index, fn, params, locals_,
+                                transfers, count, 0,
                             )
+                    self._record_read(
+                        pointer_member_index_deps[len(refs)]
+                    )
                     refs.append((oref, True, True, True))
                     continue
                 if (
@@ -20686,6 +20698,11 @@ class _Builder:
                                 )
                 if broadcast:
                     self.indirect_writes |= value
+                    self.indirect_writes |= (
+                        pointer_member_index_deps.get(
+                            i, frozenset()
+                        )
+                    )
                 member = field_chan_lhs.get(i)
                 if (
                     member is not None
