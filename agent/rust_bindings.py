@@ -1155,7 +1155,7 @@ class _RustBindings:
         )
 
     def _annotation_type(
-        self, node: Any
+        self, node: Any, _seen: frozenset = frozenset()
     ) -> tuple[str | None, str | None]:
         """(binding id, generic-args key) a type annotation refers to.
 
@@ -1203,6 +1203,36 @@ class _RustBindings:
                 ) or record
             if (
                 record is not None
+                and record.binding.kind == "type_alias"
+                and record.binding.id not in _seen
+                and record.alias_node is not None
+            ):
+                resolved, resolved_args = self._annotation_type(
+                    record.alias_node, _seen | {record.binding.id}
+                )
+                if resolved_args is not None and args is not None:
+                    params_node = record.alias_node.parent
+                    param_names = (
+                        []
+                        if params_node is None
+                        else self._type_param_names(
+                            params_node.child_by_field_name("type_parameters")
+                        )
+                    )
+                    if param_names:
+                        mapping = dict(
+                            zip(param_names, self._type_arg_list(args))
+                        )
+                        resolved_args = re.sub(
+                            r"\b(" + "|".join(
+                                re.escape(name) for name in mapping
+                            ) + r")\b",
+                            lambda m: mapping[m.group(1)],
+                            resolved_args,
+                        )
+                return resolved, resolved_args
+            if (
+                record is not None
                 and record.binding.name in {"HashMap", "BTreeMap"}
                 and args is not None
             ):
@@ -1217,6 +1247,41 @@ class _RustBindings:
             "type",
         )
         name = self._normalize_identifier(self.text(node))
+        if (
+            record is not None
+            and record.binding.kind == "type_alias"
+            and record.binding.id not in _seen
+            and record.alias_node is not None
+        ):
+            # `type A = B` — the alias spells the same type, so a
+            # receiver typed by `A` resolves `B`'s members.
+            resolved, resolved_args = self._annotation_type(
+                record.alias_node, _seen | {record.binding.id}
+            )
+            if resolved_args is not None and args is not None:
+                # `type Alias<B> = W<B>` at `Alias<u8>` reads
+                # `W<u8>` — substitute the alias's declared params
+                # with the spelled args.
+                params_node = record.alias_node.parent
+                param_names = (
+                    []
+                    if params_node is None
+                    else self._type_param_names(
+                        params_node.child_by_field_name("type_parameters")
+                    )
+                )
+                if param_names:
+                    mapping = dict(
+                        zip(param_names, self._type_arg_list(args))
+                    )
+                    resolved_args = re.sub(
+                        r"\b(" + "|".join(
+                            re.escape(name) for name in mapping
+                        ) + r")\b",
+                        lambda m: mapping[m.group(1)],
+                        resolved_args,
+                    )
+            return resolved, resolved_args
         if name in {"HashMap", "BTreeMap"} and args is not None:
             # A std map indexes to its value type — `m[k]` : V, not
             # the key-value pair. Applies whether the name resolves
