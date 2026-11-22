@@ -163,6 +163,36 @@ def test_run_memory_bound_spawns_with_scrubbed_environment():
     assert result.stdout == b"ok\n"
 
 
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux")
+    or not attempt_runner.memory_bound_spawn_thread_safe(),
+    reason="target PATH bound test requires Linux with prlimit or POSIX sh",
+)
+def test_run_memory_bound_resolves_target_from_child_path(tmp_path):
+    memory_bound_mb = 256
+    script_name = "memory-bound-probe"
+    script = tmp_path / script_name
+    script.write_text(
+        f"#!{sys.executable}\n"
+        "import resource\n"
+        "print(resource.getrlimit(resource.RLIMIT_AS)[0])\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    assert str(tmp_path) not in os.environ.get("PATH", "").split(os.pathsep)
+
+    result = AttemptRunner().run(
+        request(),
+        (script_name,),
+        memory_bound_mb=memory_bound_mb,
+        environment={"PATH": str(tmp_path)},
+    )
+
+    assert result.record.state == "exited"
+    assert result.record.events[-1].exit_code == 0
+    assert result.stdout == f"{memory_bound_mb * 1_048_576}\n".encode()
+
+
 def test_run_captures_bounded_stdout_without_interpreting_it():
     body = b"FAKE_PRIVATE_RUNNER_STDOUT"
     result = AttemptRunner().run(

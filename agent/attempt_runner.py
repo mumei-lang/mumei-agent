@@ -218,15 +218,25 @@ def memory_bound_spawn_thread_safe() -> bool:
     return _PRLIMIT is not None or _SH is not None
 
 
-def _spawn_target_resolvable(name: str) -> bool:
-    """Whether execvp would locate `name` under the current PATH.
+def _spawn_target_resolvable(
+    name: str, environment: dict[str, str] | None = None
+) -> bool:
+    """Whether execvp would locate `name` under the child PATH.
 
     `shutil.which` treats an empty PATH as no directories, while
     execvp searches the working directory for it — mirror that one
     case so resolution agrees with the spawn the runner performs."""
-    if shutil.which(name) is not None:
+    if environment is None:
+        if shutil.which(name) is not None:
+            return True
+        path = os.environ.get("PATH")
+        if path == "":
+            return shutil.which(name, path=".") is not None
+        return False
+    path = environment.get("PATH", os.defpath)
+    if shutil.which(name, path=path) is not None:
         return True
-    if os.environ.get("PATH") == "":
+    if path == "":
         return shutil.which(name, path=".") is not None
     return False
 
@@ -417,7 +427,7 @@ class AttemptRunner:
         preexec = None
         if memory_bound_mb is not None:
             if _PRLIMIT is not None:
-                if _spawn_target_resolvable(spawn_argv[0]):
+                if _spawn_target_resolvable(spawn_argv[0], child_environment):
                     spawn_argv = [
                         _PRLIMIT,
                         f"--as={memory_bound_mb * 1_048_576}",
@@ -429,7 +439,7 @@ class AttemptRunner:
                 # Leave argv unwrapped so a missing target still
                 # reports a spawn failure.
             elif _SH is not None:
-                if _spawn_target_resolvable(spawn_argv[0]):
+                if _spawn_target_resolvable(spawn_argv[0], child_environment):
                     # `ulimit -v` is RLIMIT_AS in KiB; `exec` carries
                     # the limit into the target. The `&&` keeps a
                     # rejected bound from running the target
