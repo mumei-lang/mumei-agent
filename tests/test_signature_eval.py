@@ -61,6 +61,7 @@ def test_well_formed_envelope_matches():
         "key_authenticity",
         "envelope_freshness",
         "key_revocation",
+        "revocation_list_rollback",
         "registry_authenticity",
         "revocation_list_authenticity",
         "producer_time_authenticity",
@@ -826,3 +827,134 @@ def test_route_registry_signature_requires_registry(tmp_path, capsys):
     assert "--registry-signature requires --key-registry" in (
         capsys.readouterr().err
     )
+
+
+_V2_LIST = {
+    "schema_version": "mumei.key-revocation-list/v2",
+    "list_version": 3,
+    "issued_at": "2026-11-01T00:00:00Z",
+    "revoked_keys": ["other-key"],
+}
+
+
+def test_revocation_list_v2_performs_key_revocation():
+    # A v2 list folds the same key set; its metadata carries the
+    # version and window the rollback check pins.
+    from agent.core_evidence import (
+        revocation_key_set,
+        revocation_list_metadata,
+    )
+
+    meta = revocation_list_metadata(_V2_LIST)
+    assert meta["list_version"] == 3
+    evaluation = evaluate_signature_envelope(
+        _envelope(), revoked_keys=revocation_key_set(_V2_LIST)
+    )
+    assert evaluation["key_not_revoked"] is True
+    # No minimum declared — the rollback check stays unperformed.
+    assert "revocation_list_rollback" in evaluation[
+        "checks_not_performed"
+    ]
+
+
+def test_revocation_list_v2_shape_rejects_foreign_documents():
+    from agent.core_evidence import revocation_key_set
+
+    for bad in (
+        # v2 missing a required field
+        {k: v for k, v in _V2_LIST.items() if k != "list_version"},
+        {k: v for k, v in _V2_LIST.items() if k != "issued_at"},
+        # v2 plus a foreign field
+        {**_V2_LIST, "surprise": True},
+        # malformed version / timestamp
+        {**_V2_LIST, "list_version": 0},
+        {**_V2_LIST, "list_version": "3"},
+        {**_V2_LIST, "issued_at": "soon"},
+        {**_V2_LIST, "not_after": "later"},
+        # inverted window
+        {**_V2_LIST, "not_after": "2020-01-01T00:00:00Z"},
+        # v1 schema on a v2-shaped document
+        {**_V2_LIST, "schema_version": "mumei.key-revocation-list/v1"},
+    ):
+        try:
+            revocation_key_set(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"accepted malformed list: {bad}")
+
+
+def test_revocation_list_rollback_check():
+    # `min_revocation_version` + a v2 list + a declared reference
+    # discharges `revocation_list_rollback`; the emitted verdict
+    # follows the conservative window rules.
+    from agent.core_evidence import revocation_list_metadata
+
+    meta = revocation_list_metadata(_V2_LIST)
+    base = dict(
+        revoked_keys=frozenset(_V2_LIST["revoked_keys"]),
+        revocation_list_meta=meta,
+        reference_time="2026-11-10T00:00:00Z",
+    )
+    evaluation = evaluate_signature_envelope(
+        _envelope(), min_revocation_version=3, **base
+    )
+    assert evaluation["revocation_list_current"] is True
+    assert "revocation_list_rollback" not in evaluation[
+        "checks_not_performed"
+    ]
+    # A higher required minimum fails the same check.
+    evaluation = evaluate_signature_envelope(
+        _envelope(), min_revocation_version=4, **base
+    )
+    assert evaluation["revocation_list_current"] is False
+    # A reference before the list's issue also fails.
+    evaluation = evaluate_signature_envelope(
+        _envelope(),
+        min_revocation_version=3,
+        **{**base, "reference_time": "2026-10-01T00:00:00Z"},
+    )
+    assert evaluation["revocation_list_current"] is False
+    # `not_after` before the reference fails too.
+    stale = revocation_list_metadata(
+        {**_V2_LIST, "not_after": "2026-11-05T00:00:00Z"}
+    )
+    evaluation = evaluate_signature_envelope(
+        _envelope(),
+        min_revocation_version=3,
+        **{**base, "revocation_list_meta": stale},
+    )
+    assert evaluation["revocation_list_current"] is False
+
+
+def test_revocation_list_rollback_dependencies():
+    # The minimum pin without its prerequisites is a caller error.
+    from agent.core_evidence import revocation_list_metadata
+
+    meta = revocation_list_metadata(_V2_LIST)
+    for kwargs in (
+        {"min_revocation_version": 3},  # no list at all
+        {
+            "min_revocation_version": 3,
+            "revoked_keys": frozenset(_V2_LIST["revoked_keys"]),
+            # v1-style: no metadata
+        },
+        {
+            "min_revocation_version": 3,
+            "revoked_keys": frozenset(_V2_LIST["revoked_keys"]),
+            "revocation_list_meta": meta,
+            # no reference_time
+        },
+        {
+            "min_revocation_version": -1,
+            "revoked_keys": frozenset(_V2_LIST["revoked_keys"]),
+            "revocation_list_meta": meta,
+            "reference_time": "2026-11-10T00:00:00Z",
+        },
+    ):
+        try:
+            evaluate_signature_envelope(_envelope(), **kwargs)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"accepted bad combo: {kwargs}")

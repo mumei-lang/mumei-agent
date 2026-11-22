@@ -17,7 +17,7 @@ FFI: the message is `subject_digest`'s ASCII bytes. A signature that
 verifies binds the declared key to the declared digest — nothing more:
 `checks_not_performed` keeps `key_authenticity` and
 `envelope_freshness` honest (`key_revocation` too, unless the caller
-supplies a declared `mumei.key-revocation-list/v1` document with
+supplies a declared `mumei.key-revocation-list/v1` (or /v2) document with
 `--revocation-list`, which performs it and emits `key_not_revoked`).
 The declared anchors themselves are authenticatable too:
 `--registry-signature`/`--registry-key` and
@@ -42,6 +42,7 @@ from pathlib import Path
 from agent.core_evidence import (
     producer_key_registry,
     revocation_key_set,
+    revocation_list_metadata,
     verify_signature_envelope,
 )
 
@@ -125,6 +126,16 @@ def build_verify_parser(parser: argparse.ArgumentParser) -> None:
         "document's exact bytes. Requires --revocation-list and "
         "--revocation-key. When supplied the verification emits "
         "revocation_list_authentic and ANDs it into key_not_revoked.",
+    )
+    parser.add_argument(
+        "--min-revocation-version",
+        metavar="N",
+        type=int,
+        help="Declared minimum list_version the revocation list must "
+        "clear. Requires --revocation-list naming a "
+        "mumei.key-revocation-list/v2 document and --reference-time. "
+        "When supplied the evaluation emits revocation_list_current "
+        "checking the list's declared window and version.",
     )
     parser.add_argument(
         "--revocation-key",
@@ -237,10 +248,12 @@ def run_verify(args: argparse.Namespace) -> dict:
                 pass
     revoked_keys = None
     revocation_digest = None
+    revocation_list_meta = None
     revocation_path = getattr(args, "revocation_list", None)
     if revocation_path is not None:
         raw, declared = _load_declared(revocation_path)
         revoked_keys = revocation_key_set(declared)
+        revocation_list_meta = revocation_list_metadata(declared)
         revocation_digest = hashlib.sha256(raw).hexdigest()
     key_registry = None
     registry_digest = None
@@ -293,7 +306,9 @@ def run_verify(args: argparse.Namespace) -> dict:
         registry_digest,
         revocation_signature,
         getattr(args, "revocation_key", None),
-        revocation_digest,
+                revocation_digest,
+        revocation_list_meta,
+        getattr(args, "min_revocation_version", None),
     )
 
 
