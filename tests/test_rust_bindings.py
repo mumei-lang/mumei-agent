@@ -5462,3 +5462,23 @@ fn f(arg: Vec<P>, v: Vec<u8>) {
     # `arg`'s `P` was written in the signature — the inner block's
     # `struct P` must not shadow the spelled element.
     assert _call(report, source, "a.pm()").target == pm.id
+
+
+def test_index_receiver_element_through_import_and_scope() -> None:
+    source = """
+mod m {
+    pub struct P;
+    impl P { pub fn p(&self) {} }
+}
+use m::P;
+fn f(items: Vec<P>, v: Vec<m::P>, nested: Vec<Vec<P>>) {
+    items[0].p();
+    v[0].p();
+    nested[0][1].p();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    p = _bindings(report, "p", "associated_function")[0]
+    assert _call(report, source, "items[0].p()").target == p.id
+    assert _call(report, source, "v[0].p()").target == p.id
+    assert _call(report, source, "nested[0][1].p()").target == p.id

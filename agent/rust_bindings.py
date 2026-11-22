@@ -2528,15 +2528,9 @@ class _RustBindings:
             # The element is a reference or composite type — keep its
             # text so deeper indexing still reads args.
             return None, elem_args
-        elem = self._lookup(
-            self._normalize_identifier(match.group(1)),
-            position,
-            "type",
-        )
-        return (
-            None if elem is None else elem.binding.id,
-            match.group(2),
-        )
+        # `_spelled_type` follows `use m::P` imports and scoped
+        # `m::P` spellings — a bare `_lookup` would miss both.
+        return self._spelled_type(elem_args, position)
 
     def _is_map_container(
         self, container_id: str | None, node: Any | None
