@@ -2650,17 +2650,35 @@ class _Builder:
                     # A `*S` function parameter shares its pointee
                     # with the caller the way a slice shares its
                     # backing, so `p.A[i].V` slots on `(p, A)` and
-                    # carries `p`'s dep. Only the bare parameter is
-                    # admitted: local pointer bindings (`q := p`),
-                    # reseats, double pointers and explicit derefs
-                    # stay closed because their aliasing cannot be
-                    # resolved in this slot model.
+                    # carries `p`'s dep. The bare parameter and a
+                    # `q := p` local alias whose target still names
+                    # its entry pointee are admitted — `q.A[i]` is
+                    # `p.A[i]` under one hop. Other local pointer
+                    # bindings, reseats, double pointers and
+                    # explicit derefs stay closed because their
+                    # aliasing cannot be resolved in this slot
+                    # model.
                     elem = getattr(binding.type, "elem", None)
-                    return not (
-                        params is not None
-                        and ref.binding_id in params
-                        and elem is not None
+                    if not (
+                        elem is not None
                         and elem.kind == "struct"
+                        and params is not None
+                    ):
+                        return True
+                    if ref.binding_id in params:
+                        return False
+                    alias = self._param_pointer_aliases.get(
+                        ref.binding_id
+                    )
+                    return not (
+                        alias is not None
+                        and alias.binding_id in params
+                        and alias.binding_id
+                        not in self._pointer_param_reseats
+                        and alias.binding_id
+                        not in self._param_pointer_aliases
+                        and alias.binding_id
+                        not in self._double_pointer_dirty
                     )
                 return False
             return False
@@ -2739,16 +2757,24 @@ class _Builder:
         """`p` where `p` is a `*S` function parameter with a struct
         pointee — the pointer shares its pointee with the caller the
         way a slice shares its backing, so fields reached through it
-        slot on the parameter. Local pointer bindings (`q := p`),
-        reseats and `**S` roots stay closed because their aliasing
-        cannot be resolved in this slot model."""
+        slot on the parameter. A `q := p` alias resolves one hop to
+        the entry it names. Reseats and `**S` roots stay closed
+        because their aliasing cannot be resolved in this slot
+        model."""
         if params is None or node is None or node.type != "identifier":
             return False
         ref = self.references.get(self.node_key(node))
+        if ref is None or ref.binding_id is None:
+            return False
+        if ref.binding_id not in params:
+            # `q := p` names p's entry pointee — resolve the alias
+            # before the params check (one hop: the map's values are
+            # already entry refs, never further aliases).
+            ref = self._param_pointer_aliases.get(ref.binding_id)
+            if ref is None or ref.binding_id is None:
+                return False
         if (
-            ref is None
-            or ref.binding_id is None
-            or ref.binding_id not in params
+            ref.binding_id not in params
             or ref.binding_id in self._pointer_param_reseats
         ):
             return False
@@ -14007,6 +14033,40 @@ class _Builder:
                 # parameter's own dependencies, like `p.V` does for
                 # one member. A `q := *p` copy binds its member
                 # slots separately in _bind_struct_container_value.
+                # Through a `q := p` alias the pointee is p's entry
+                # slot — p's deps carry the stores (`p.V = x`) that
+                # q's own slot never observed.
+                alias = (
+                    self._param_pointer_aliases.get(bound_ref.binding_id)
+                    if bound_ref is not None
+                    else None
+                )
+                if alias is not None:
+                    if (
+                        alias.binding_id
+                        in self._pointer_param_reseats
+                        or alias.binding_id
+                        in self._param_pointer_aliases
+                    ):
+                        # The target's entry slot is gone — `*p`
+                        # still reads the pointee `p` captured when
+                        # it was bound, which is p's own slot.
+                        deps = locals_.get(bound_ref.binding_id)
+                        if deps is None:
+                            deps = (
+                                frozenset(
+                                    {params[bound_ref.binding_id]}
+                                )
+                                if bound_ref.binding_id in params
+                                else frozenset()
+                            )
+                        return deps
+                    deps = locals_.get(alias.binding_id)
+                    return (
+                        deps
+                        if deps is not None
+                        else frozenset({params[alias.binding_id]})
+                    )
                 return self.expression(
                     inner, fn, params, locals_, transfers, count,
                     depth + 1,
@@ -15156,6 +15216,28 @@ class _Builder:
                     if src_ref is not None
                     else None
                 )
+            # `q := p` alias resolution reads the same pre-state —
+            # `q, r := s, q` hands r the pointee q named BEFORE this
+            # statement reseated q itself onto s.
+            decl_alias_refs: list = []
+            for i in range(len(lefts)):
+                a_src_ref = (
+                    self.references.get(self.node_key(rights[i]))
+                    if len(lefts) == len(rights)
+                    and rights[i].type == "identifier"
+                    else None
+                )
+                if a_src_ref is not None:
+                    if (
+                        a_src_ref.binding_id
+                        in self._pointer_param_reseats
+                    ):
+                        a_src_ref = None
+                    else:
+                        a_src_ref = self._param_pointer_aliases.get(
+                            a_src_ref.binding_id, a_src_ref
+                        )
+                decl_alias_refs.append(a_src_ref)
             # Channel alias/passthrough binds resolve the pre-state
             # too — `a, c := g(a, b)` where `g` returns `q, p` hands
             # `c` the queue `a` named BEFORE slot 0 reseated `a` to
@@ -15828,6 +15910,58 @@ class _Builder:
                         )
                     )
                 self._store(locals_, params, binding.id, value, conditional)
+                # `q := p` hands q the caller-shared pointee p's
+                # entry names — register it like the `p = q`
+                # assignment alias so `q.V` / `q.A[i]` resolve
+                # through p's slots. Pre-state resolution copies
+                # the `p = q` rules: a reseated name is opaque, and
+                # a single alias lookup lands `r := q` on the same
+                # entry p held. A `**S` source whose `*pp` slot was
+                # overwritten stays opaque too — the copy sees the
+                # new middle pointer, not the entry one.
+                q_alias_ref = (
+                    decl_alias_refs[i]
+                    if i < len(decl_alias_refs)
+                    else None
+                )
+                q_alias_binding = (
+                    self.bindings.get(q_alias_ref.binding_id)
+                    if q_alias_ref is not None
+                    else None
+                )
+                q_alias_elem = getattr(
+                    q_alias_binding.type, "elem", None
+                ) if q_alias_binding is not None else None
+                if (
+                    q_alias_ref is not None
+                    and q_alias_ref.binding_id != binding.id
+                    and q_alias_ref.binding_id in params
+                    and q_alias_ref.binding_id
+                    not in self._double_pointer_dirty
+                    and q_alias_binding is not None
+                    and q_alias_binding.type is not None
+                    and q_alias_binding.type.kind == "pointer"
+                    and q_alias_elem is not None
+                    and (
+                        q_alias_elem.kind == "struct"
+                        or (
+                            q_alias_elem.kind == "pointer"
+                            and getattr(
+                                q_alias_elem, "elem", None
+                            ) is not None
+                            and q_alias_elem.elem.kind == "struct"
+                        )
+                    )
+                ):
+                    self._param_pointer_aliases[
+                        binding.id
+                    ] = q_alias_ref
+                else:
+                    # A reused name re-declared onto a non-alias
+                    # value drops a stale entry.
+                    self._param_pointer_aliases.pop(
+                        binding.id, None
+                    )
                 self._bind_struct_container_value(
                     binding.id,
                     (
@@ -17496,6 +17630,17 @@ class _Builder:
                     and lhs_elem is not None
                     and (lhs_elem.kind == "struct" or lhs_double)
                 ):
+                    # A bare `q = …` on a LOCAL previously handed a
+                    # param's pointee (`q := p`) reseats it away —
+                    # the alias no longer names the caller's slot.
+                    if (
+                        lhs_ref is not None
+                        and lhs_ref.binding_id
+                        in self._param_pointer_aliases
+                    ):
+                        self._param_pointer_aliases.pop(
+                            lhs_ref.binding_id, None
+                        )
                     continue
                 # `p = q` reseats the `*S` param onto `q`'s pointee.
                 # When `q` is itself a `*S` parameter the copy is
@@ -25439,6 +25584,19 @@ class _Builder:
         binding an `&x` may have aimed the pointer at, and every
         earlier indirect store — the union the `*p` read path
         builds."""
+        # `*q` through a `q := p` alias reads the TARGET's entry
+        # pointee — deps land on p's slot, which carries stores
+        # like `p.V = x` that q's own slot never sees. A target that
+        # was itself reseated or re-aliased lost its entry slot:
+        # `*q` then reads the pointee q captured, which is q's own
+        # slot — keep the unsubstituted binding_id.
+        alias = self._param_pointer_aliases.get(binding_id)
+        if (
+            alias is not None
+            and alias.binding_id not in self._pointer_param_reseats
+            and alias.binding_id not in self._param_pointer_aliases
+        ):
+            binding_id = alias.binding_id
         deps = locals_.get(binding_id)
         if deps is None:
             deps = (

@@ -33463,26 +33463,23 @@ def test_named_struct_element_pointer_param_root_scalar_collection_field(
     assert result.return_dependencies == frozenset({0, 1})
 
 
-@pytest.mark.parametrize(
-    "declarations",
-    [
-        (
+def test_named_struct_element_pointer_param_root_local_pointer_alias(
+    go_types_helper,
+):
+    # `q.A[i].V` is `p.A[i].V` under one hop — the `q := p` alias
+    # resolves the container root to the param's entry pointee.
+    result = named(
+        *unit(
+            go_types_helper,
             "type E struct { V int64 }\n"
             "type S2 struct { A []E }\n"
             "func F(p *S2, i int64) int64 {\n"
             "\tq := p\n"
-            "\treturn q.A[i].V\n}\n"
-        ),
-    ],
-    ids=[
-        "local-pointer-alias",
-    ],
-)
-def test_named_struct_element_pointer_param_root_unsupported_shapes_stay_closed(
-    go_types_helper, declarations
-):
-    result = named(*unit(go_types_helper, declarations))
-    assert not result.available
+            "\treturn q.A[i].V\n}\n",
+        )
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
 
 
 def test_named_struct_element_double_pointer_param_root(go_types_helper):
@@ -33788,6 +33785,133 @@ def test_named_pointer_element_param_observes_late_pointee_store(
     result = named(*unit(go_types_helper, declarations))
     assert result.available, result.gaps
     assert result.return_dependencies == frozenset({1})
+
+
+@pytest.mark.parametrize(
+    ("declarations", "expected"),
+    [
+        # `q := p` hands q the caller-shared pointee — a scalar
+        # field read through it slots on `p`.
+        (
+            "type S struct { V int64 }\n"
+            "func F(p *S) int64 { q := p; return q.V }\n",
+            frozenset({0}),
+        ),
+        # The alias resolves through another local — `r := q`
+        # lands on the same entry pointee.
+        (
+            "type S struct { V int64 }\n"
+            "func F(p *S) int64 { q := p; r := q; return r.V }\n",
+            frozenset({0}),
+        ),
+        # `q = r` reseats the local away — the read now names r's
+        # pointee, not p's entry.
+        (
+            "type S struct { V int64 }\n"
+            "func F(p *S, r *S) int64 { q := p; q = r; return q.V }\n",
+            frozenset({1}),
+        ),
+        # A store through p lands in the entry pointee `*q` names —
+        # `s := *q` sees the write like `s := *p` does.
+        (
+            "type S struct { V int64 }\n"
+            "func F(p *S, x int64) int64 { "
+            "q := p; p.V = x; s := *q; return s.V }\n",
+            frozenset({0, 1}),
+        ),
+        # `q, r := s, q` reads the pre-state: r keeps the pointee q
+        # held (p's entry) even as q itself reseats onto s.
+        (
+            "type S struct { V int64 }\n"
+            "func F(p *S, s *S) int64 { "
+            "q := p; q, r := s, q; return (*r).V }\n",
+            frozenset({0}),
+        ),
+        # `p = q; q = r` — `*p` still reads the pointee p captured
+        # (q's old pointee), not r's.
+        (
+            "type S struct { V int64 }\n"
+            "func F(p *S, q *S, r *S) int64 { "
+            "p = q; q = r; s := *p; return s.V }\n",
+            frozenset({1}),
+        ),
+    ],
+)
+def test_named_local_pointer_alias_reads(
+    go_types_helper, declarations, expected
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == expected
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        # `q.A[i]` is `p.A[i]` under one hop — the slice field's
+        # element read sees the index and the caller-shared
+        # pointee.
+        "type S struct { A []int64 }\n"
+        "func F(p *S, i int64) int64 { q := p; return q.A[i] }\n",
+        # Same through the chained local.
+        "type S struct { A []int64 }\n"
+        "func F(p *S, i int64) int64 { q := p; r := q; return r.A[i] }\n",
+        # Map-typed container fields resolve the same way.
+        "type S struct { M map[int]int64 }\n"
+        "func F(p *S, k int) int64 { q := p; return q.M[k] }\n",
+    ],
+)
+def test_named_local_pointer_alias_container_field_reads(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_named_local_pointer_alias_container_field_write(
+    go_types_helper,
+):
+    # `q.A[i] = x` reports the same external effect as the direct
+    # `p.A[i] = x` — caller-backing through the entry pointee.
+    declarations = (
+        "type S struct { A []int64 }\n"
+        "func F(p *S, i int64, x int64) int64 { "
+        "q := p; q.A[i] = x; return 0 }\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.gaps
+    assert result.effects == "unknown"
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        # `p = s` reseats the target — q keeps p's captured
+        # pointee, which the alias can no longer name; the
+        # container read closes.
+        "type S struct { A []int64 }\n"
+        "func F(p *S, s *S, i int64) int64 { "
+        "q := p; p = s; return q.A[i] }\n",
+        # `q = r` reseats the local — the alias is gone and a
+        # bare local pointer's container read stays closed.
+        "type S struct { A []int64 }\n"
+        "func F(p *S, r *S, i int64) int64 { "
+        "q := p; q = r; return q.A[i] }\n",
+        # `[N]` array fields stay closed exactly like the direct
+        # `p.F[0]` — parity, not a regression.
+        "type S struct { F [4]int64 }\n"
+        "func F(p *S) int64 { q := p; return q.F[0] }\n",
+    ],
+)
+def test_named_local_pointer_alias_container_field_stays_closed(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.gaps
+    assert any(
+        g.reason == "non_parameter_reference" for g in result.gaps
+    )
 
 
 def test_named_pointer_element_field_write_emit_caller_backing(
