@@ -17128,7 +17128,26 @@ class _Builder:
                     if lhs.type == "identifier"
                     else None
                 )
-                if not self._param_pointer_struct_root(lhs, params):
+                lhs_binding = (
+                    self.bindings.get(lhs_ref.binding_id)
+                    if lhs_ref is not None
+                    else None
+                )
+                # Any `*S` param can take a reseat — including one a
+                # branch merge already closed (`switch { p = q }; p = r`
+                # still reseats `p` deterministically), so unlike the
+                # read root this does not reject reseated names.
+                if not (
+                    lhs_ref is not None
+                    and params is not None
+                    and lhs_ref.binding_id in params
+                    and lhs_binding is not None
+                    and lhs_binding.type is not None
+                    and lhs_binding.type.kind == "pointer"
+                    and getattr(lhs_binding.type, "elem", None)
+                    is not None
+                    and lhs_binding.type.elem.kind == "struct"
+                ):
                     continue
                 # `p = q` reseats the `*S` param onto `q`'s pointee.
                 # When `q` is itself a `*S` parameter the copy is
