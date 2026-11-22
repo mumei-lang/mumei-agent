@@ -2345,6 +2345,35 @@ class _RustBindings:
             tnode = tnode.child_by_field_name("type")
         return None
 
+    def _receiver_annotation_position(
+        self, receiver: Any | None
+    ) -> "int | None":
+        """Start byte of the annotation that typed this receiver —
+        spelled element names resolve against the names visible
+        there, not at the call site."""
+        node = receiver
+        while node is not None and node.type == "reference_expression":
+            node = next(iter(node.named_children), None)
+        if node is None:
+            return None
+        if node.type == "field_expression":
+            member = self._field_member(
+                node, ("struct_field", "associated_const")
+            )
+            if member is None or member.type_node is None:
+                return None
+            return member.type_node.start_byte
+        if node.type != "identifier":
+            return None
+        record = self._lookup(
+            self._normalize_identifier(self.text(node)),
+            node.start_byte,
+            "value",
+        )
+        if record is None or record.type_node is None:
+            return None
+        return record.type_node.start_byte
+
     def _iterator_method_element(
         self, call: Any
     ) -> "tuple[TypeFact, str | None]":
@@ -2356,22 +2385,66 @@ class _RustBindings:
         `_UNKNOWN`."""
         callee = call.child_by_field_name("function")
         if callee is None or callee.type != "field_expression":
-            return _UNKNOWN, None
+            # Not a method call — `for p in make()` iterates whatever
+            # the call's own declared return type yields.
+            container_id, args = self._receiver_type(call)
+            if self._is_map_container(container_id, call):
+                return _UNKNOWN, None
+            elem_id, rest = self._element_of(
+                container_id,
+                None if args is None else args.strip(),
+                call.start_byte,
+            )
+            if elem_id is None:
+                return _UNKNOWN, rest
+            name = next(
+                (b.name for b in self.bindings if b.id == elem_id), ""
+            )
+            return TypeFact("named", name, 0, None, elem_id), rest
         method_node = callee.child_by_field_name("field")
         receiver = callee.child_by_field_name("value")
         if method_node is None or receiver is None:
             return _UNKNOWN, None
         method = self._normalize_identifier(self.text(method_node))
+        if (
+            method in _ITER_ELEMENT_METHODS
+            or method in _MAP_ELEMENT_METHODS
+        ) and self._field_member(
+            callee, ("associated_function",)
+        ) is not None:
+            # The call resolves to a declared method — a user
+            # `iter()` need not yield the container's element, so
+            # iterate its declared return type instead of the std
+            # recipe.
+            container_id, args = self._receiver_type(call)
+            if self._is_map_container(container_id, call):
+                return _UNKNOWN, None
+            elem_id, rest = self._element_of(
+                container_id,
+                None if args is None else args.strip(),
+                call.start_byte,
+            )
+            if elem_id is None:
+                return _UNKNOWN, rest
+            name = next(
+                (b.name for b in self.bindings if b.id == elem_id), ""
+            )
+            return TypeFact("named", name, 0, None, elem_id), rest
         container_id, args = self._receiver_type(receiver)
         if args is None:
             return _UNKNOWN, None
+        # Spelled element names refer to the types the receiver's
+        # annotation wrote — resolve them there, not at the call.
+        position = self._receiver_annotation_position(receiver)
+        if position is None:
+            position = call.start_byte
         if method in _ITER_ELEMENT_METHODS:
             if "," in args or self._is_map_container(
                 container_id, receiver
             ):
                 return _UNKNOWN, None
             elem_id, rest = self._element_of(
-                container_id, args.strip(), call.start_byte
+                container_id, args.strip(), position
             )
         elif (index := _MAP_ELEMENT_METHODS.get(method)) is not None:
             if not self._is_map_container(container_id, receiver):
@@ -2390,7 +2463,7 @@ class _RustBindings:
                 arg = args
             if arg is None:
                 return _UNKNOWN, None
-            elem_id, rest = self._spelled_type(arg, call.start_byte)
+            elem_id, rest = self._spelled_type(arg, position)
         else:
             return _UNKNOWN, None
         if elem_id is None:

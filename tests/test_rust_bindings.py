@@ -4241,3 +4241,70 @@ fn f(v: Vec<P>) {
             if source[c.span.start:c.span.end] == text
         )
         assert call.target == ""
+
+
+def test_for_loop_over_call_return_binds_element() -> None:
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn make() -> Vec<P> { Vec::new() }
+fn f() {
+    for p in make() { p.m(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = _bindings(report, "m", "associated_function")[0]
+    assert _call(report, source, "p.m()").target == method.id
+
+
+def test_for_loop_declared_iter_method_stays_opaque() -> None:
+    # A user-defined `iter()` need not yield the container's element —
+    # the std recipe does not apply once the call resolves.
+    source = """
+struct P;
+struct Q;
+impl Q { fn m(&self) {} }
+struct MyVec<T> { t: T }
+impl MyVec<P> {
+    fn iter(&self) -> Q { Q }
+}
+fn f(v: MyVec<P>) {
+    for x in v.iter() { x.m(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    assert _call(report, source, "x.m()").target == ""
+
+
+def test_for_loop_iter_element_resolves_at_annotation_scope() -> None:
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn f(v: Vec<P>) {
+    struct P;
+    impl P { fn n(&self) {} }
+    for x in v.iter() { x.m(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = _bindings(report, "m", "associated_function")[0]
+    call = _call(report, source, "x.m()")
+    # The bound `m` is the outer `P`'s — the inner `P` only has `n`.
+    assert call.target == m.id
+
+
+def test_for_loop_declared_values_return_type_binds_element() -> None:
+    source = """
+struct V;
+impl V { fn m(&self) {} }
+struct MyMap;
+impl MyMap {
+    fn values(&self) -> Vec<V> { Vec::new() }
+}
+fn f(m: MyMap) {
+    for v in m.values() { v.m(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = _bindings(report, "m", "associated_function")[0]
+    assert _call(report, source, "v.m()").target == method.id
