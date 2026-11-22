@@ -152,6 +152,12 @@ class _SolBindings:
         self.contracts: dict[str, _Contract] = {}
         self.type_records: dict[int, _Record] = {}
         self.current_contract: _Contract | None = None
+        # `_resolve_member` results keyed by node span: a member
+        # chain resolves its prefix once and shares it between the
+        # contract path and the `using` fallback.
+        self._member_resolution: dict[
+            tuple[int, int], tuple[Any, Any, Any]
+        ] = {}
         self.file_usings: list[_Using] = []
         self.call_owner = ""
         self.glob_imports: list[Any] = []
@@ -785,6 +791,20 @@ class _SolBindings:
     def _resolve_member(
         self, node: Any
     ) -> tuple[Any | None, _Record | None, str | None]:
+        cached = self._member_resolution.get(
+            (node.start_byte, node.end_byte)
+        )
+        if cached is not None:
+            return cached
+        result = self._resolve_member_uncached(node)
+        self._member_resolution[
+            (node.start_byte, node.end_byte)
+        ] = result
+        return result
+
+    def _resolve_member_uncached(
+        self, node: Any
+    ) -> tuple[Any | None, _Record | None, str | None]:
         """Resolve `object.property` when the object has a declared
         contract/interface/library type or names one directly.
 
@@ -984,25 +1004,141 @@ class _SolBindings:
             return member, using_record, using_reason
         return member, None, reason
 
+    def _object_declared_type_text(self, obj: Any) -> str | None:
+        """Declared-type text of a member-call receiver, or None when the
+        object's type cannot be named statically. Identifier objects keep
+        the original variable lookup; member chains (`coin.v.f()`), array
+        elements (`totals[0].f()`), calls returning a named type
+        (`getTotal().f()`, `total.add(1).sub(2)`) and type conversions
+        (`Token(addr).f()`) reuse the same type-node machinery as the
+        contract path.
+        """
+        obj = self._unwrap(obj)
+        if obj is None:
+            return None
+        if obj.type == "identifier":
+            if self.text(obj) in {"this", "super"}:
+                return None
+            record, _reason = self._lookup(
+                self.text(obj), obj.start_byte, "value"
+            )
+            if (
+                record is None
+                or record.type_node is None
+                or record.binding.kind
+                in {"contract", "interface", "library"}
+            ):
+                return None
+            return self.text(record.type_node)
+        if obj.type == "member_expression":
+            _member, inner, _reason = self._resolve_member(obj)
+            if inner is None or inner.type_node is None:
+                return None
+            return self.text(inner.type_node)
+        if obj.type == "array_access":
+            base = self._unwrap(obj.child_by_field_name("base"))
+            base_record = self._object_record(base)
+            if base_record is None or base_record.type_node is None:
+                return None
+            text = re.sub(
+                r"\b(memory|calldata|storage)\b",
+                "",
+                self.text(base_record.type_node),
+            )
+            element = re.sub(r"\[[^\]]*\]\s*$", "", text).strip()
+            if element == text.strip() or "[" in element:
+                return None
+            return element
+        if obj.type == "call_expression":
+            callee = self._unwrap(obj.child_by_field_name("function"))
+            record = self._object_record(callee)
+            if record is None:
+                return None
+            if record.binding.kind in {
+                "contract",
+                "interface",
+                "library",
+                "struct",
+                "enum",
+            }:
+                # `Token(addr)` / `Coin(...)` — the value is typed by
+                # the declared type itself. A qualified callee keeps
+                # its dotted name (`Container.Coin(1)`): using targets
+                # spell the type the same way.
+                if callee.type == "member_expression":
+                    return self.text(callee)
+                return record.binding.name
+            if record.binding.kind != "function":
+                if record.type_node is None or re.match(
+                    r"\s*function\b", self.text(record.type_node)
+                ):
+                    return None
+                text = self.text(record.type_node)
+                if callee.type == "member_expression":
+                    # A public getter on an indexable member peels one
+                    # level per index argument: `this.values(0)` is a
+                    # `uint256`, `this.grid(0, 0)` on `uint256[][]` a
+                    # `uint256`, `this.b(0)` on `bytes` a `bytes1`. The
+                    # no-argument getter returns the whole value.
+                    args = sum(
+                        1
+                        for child in self.children(obj)
+                        if child.type == "call_argument"
+                    )
+                    for _ in range(args):
+                        stripped = re.sub(
+                            r"\[[^\]]*\]\s*$", "", text
+                        ).strip()
+                        if stripped == text:
+                            if text == "bytes":
+                                stripped = "bytes1"
+                            else:
+                                break
+                        text = stripped
+                # A public getter on a struct/enum-typed member returns
+                # the exploded fields, not the type — no extension
+                # target exists for the tuple.
+                resolved = self._type_record_for_type_node(
+                    record.type_node, record.owner
+                )
+                if resolved is None:
+                    resolved, _reason = self._lookup(
+                        text, record.node.start_byte, "type"
+                    )
+                if resolved is not None and resolved.binding.kind in {
+                    "struct",
+                    "enum",
+                }:
+                    return None
+                return text
+            function_node = record.node.parent
+            if function_node is None:
+                return None
+            returns = self._return_parameters(function_node)
+            if not returns:
+                return None
+            type_node = returns[0].child_by_field_name("type")
+            if type_node is None or re.match(
+                r"\s*function\b", self.text(type_node)
+            ):
+                return None
+            return self.text(type_node)
+        return None
+
     def _lookup_using(
         self, name: str, obj: Any, position: int
     ) -> tuple[_Record | None, str | None]:
         """Resolve `x.f` through `using Lib for T` directives when the
         contract-type path found no member: the object's declared type
         text must equal the directive's `for` target, or the directive
-        must be `for *`. Identifier objects only — a member call on an
-        expression (`arr[i].f()`) keeps its opaque treatment.
+        must be `for *`. Objects whose type cannot be named statically
+        (mappings, nested arrays, function-typed returns) keep their
+        opaque treatment.
         """
-        if obj.type != "identifier" or self.text(obj) in {"this", "super"}:
+        raw_text = self._object_declared_type_text(obj)
+        if raw_text is None:
             return None, None
-        record, _reason = self._lookup(self.text(obj), obj.start_byte, "value")
-        if (
-            record is None
-            or record.type_node is None
-            or record.binding.kind in {"contract", "interface", "library"}
-        ):
-            return None, None
-        type_text = self._canonical_type_text(self.text(record.type_node))
+        type_text = self._canonical_type_text(raw_text)
         directives = list(self.file_usings)
         if self.current_contract is not None:
             directives.extend(self.current_contract.usings)

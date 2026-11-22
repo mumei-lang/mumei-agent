@@ -1825,6 +1825,263 @@ contract Vault {
     )
 
 
+def test_using_resolves_on_non_identifier_receivers():
+    source = """
+library SafeMath {
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {}
+    function sub(uint256 a, uint256 b) internal pure returns (uint256) {}
+}
+struct Coin { uint256 v; }
+contract Vault {
+    using SafeMath for uint256;
+    uint256[] values;
+    uint256 total;
+    Coin coin;
+    function run() external {
+        values[0].add(1);
+        coin.v.add(1);
+        getTotal().add(1);
+        total.add(1).sub(2);
+    }
+    function getTotal() internal returns (uint256) { return total; }
+}
+"""
+    report = build_sol_bindings(source)
+    add = next(b for b in report.bindings if b.name == "add")
+    sub = next(b for b in report.bindings if b.name == "sub")
+    add_calls = [
+        ref
+        for ref in report.references
+        if ref.binding_id == add.id and ref.kind == "call"
+    ]
+    sub_calls = [
+        ref
+        for ref in report.references
+        if ref.binding_id == sub.id and ref.kind == "call"
+    ]
+    assert len(add_calls) == 4
+    assert len(sub_calls) == 1
+    assert _text(source, sub_calls[0].span) == "sub"
+
+
+def test_using_on_mapping_index_stays_opaque():
+    source = """
+library SafeMath {
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {}
+}
+contract Vault {
+    using SafeMath for uint256;
+    mapping(address => uint256) balances;
+    function run() external { balances[msg.sender].add(1); }
+}
+"""
+    report = build_sol_bindings(source)
+    add = next(b for b in report.bindings if b.name == "add")
+    assert not any(
+        ref.binding_id == add.id and ref.kind == "call"
+        for ref in report.references
+    )
+    assert report.calls[0].kind == "opaque_member"
+
+
+def test_using_not_applied_to_struct_getter_tuple():
+    source = """
+library SafeMath {
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {}
+}
+struct Coin { uint256 v; }
+contract Vault {
+    using SafeMath for uint256;
+    Coin public coin;
+    function run() external { this.coin().v.add(1); }
+}
+"""
+    # `this.coin()` returns the exploded fields — no `uint256`
+    # receiver exists for the extension to bind.
+    report = build_sol_bindings(source)
+    add = next(b for b in report.bindings if b.name == "add")
+    assert not any(
+        ref.binding_id == add.id for ref in report.references
+    )
+    assert report.calls[-1].kind == "opaque_member"
+
+
+def test_using_on_array_getter_binds_element_type():
+    source = """
+library SafeMath {
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {}
+}
+contract Vault {
+    using SafeMath for uint256;
+    uint256[] public values;
+    function run() external { this.values(0).add(1); }
+}
+"""
+    # `this.values(0)` returns the element — the `uint256` extension
+    # applies.
+    report = build_sol_bindings(source)
+    add = next(b for b in report.bindings if b.name == "add")
+    assert any(
+        ref.binding_id == add.id and ref.kind == "call"
+        for ref in report.references
+    )
+
+
+def test_using_on_nested_array_getter_peels_per_index():
+    source = """
+library SafeMath {
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {}
+}
+library Rows {
+    function fold(uint256[] memory row) internal pure returns (uint256) {}
+}
+contract Vault {
+    using SafeMath for uint256;
+    using Rows for uint256[];
+    uint256[][] public grid;
+    function run() external { this.grid(0, 0).add(1); this.grid(0).fold(); }
+}
+"""
+    # `this.grid(0, 0)` returns `uint256`; `this.grid(0)` returns
+    # `uint256[]` — the extension tracks the index count.
+    report = build_sol_bindings(source)
+    add = next(b for b in report.bindings if b.name == "add")
+    fold = next(b for b in report.bindings if b.name == "fold")
+    assert any(
+        ref.binding_id == add.id and ref.kind == "call"
+        for ref in report.references
+    )
+    assert any(
+        ref.binding_id == fold.id and ref.kind == "call"
+        for ref in report.references
+    )
+
+
+def test_using_on_bytes_getter_depends_on_index():
+    source = """
+library BytesLib {
+    function read(bytes memory b) internal pure returns (bytes1) {}
+}
+library ByteLib {
+    function bit(bytes1 b) internal pure returns (uint256) {}
+}
+contract Vault {
+    using BytesLib for bytes;
+    using ByteLib for bytes1;
+    bytes public payload;
+    function run() external { this.payload().read(); this.payload(0).bit(); }
+}
+"""
+    # `this.payload()` returns the whole `bytes`; `this.payload(0)`
+    # returns `bytes1` — each binds its own extension.
+    report = build_sol_bindings(source)
+    read = next(b for b in report.bindings if b.name == "read")
+    bit = next(b for b in report.bindings if b.name == "bit")
+    assert any(
+        ref.binding_id == read.id and ref.kind == "call"
+        for ref in report.references
+    )
+    assert any(
+        ref.binding_id == bit.id and ref.kind == "call"
+        for ref in report.references
+    )
+
+
+def test_using_on_bytes_array_getter_stays_bytes():
+    source = """
+library BytesLib {
+    function read(bytes memory b) internal pure returns (bytes1) {}
+}
+library ByteLib {
+    function bit(bytes1 b) internal pure returns (uint256) {}
+}
+contract Vault {
+    using BytesLib for bytes;
+    using ByteLib for bytes1;
+    bytes[][] public payload;
+    function run() external { this.payload(0, 0).read(); }
+}
+"""
+    # `this.payload(0, 0)` returns `bytes`, not `bytes1`.
+    report = build_sol_bindings(source)
+    read = next(b for b in report.bindings if b.name == "read")
+    bit = next(b for b in report.bindings if b.name == "bit")
+    assert any(
+        ref.binding_id == read.id and ref.kind == "call"
+        for ref in report.references
+    )
+    assert not any(
+        ref.binding_id == bit.id for ref in report.references
+    )
+
+
+def test_using_respects_qualified_ctor_name():
+    source = """
+struct Coin { uint256 v; }
+contract Container {
+    struct Coin { uint256 w; }
+}
+library Stamps {
+    function stamp(Container.Coin memory c) internal pure {}
+}
+contract Vault {
+    using Stamps for Container.Coin;
+    function run() external { Container.Coin(1).stamp(); }
+}
+"""
+    # `Container.Coin(1)` must not match `using ... for Coin` — the
+    # target spells the qualified name.
+    report = build_sol_bindings(source)
+    stamp = next(b for b in report.bindings if b.name == "stamp")
+    assert any(
+        ref.binding_id == stamp.id and ref.kind == "call"
+        for ref in report.references
+    )
+
+
+def test_using_chain_does_not_reexamine_prefixes():
+    depth = 40
+    chain = "".join(f".add({i})" for i in range(depth))
+    source = f"""
+library SafeMath {{
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {{}}
+}}
+contract Vault {{
+    using SafeMath for uint256;
+    uint256 total;
+    function run() external {{ total{chain}; }}
+}}
+"""
+    report = build_sol_bindings(source)
+    add = next(b for b in report.bindings if b.name == "add")
+    add_calls = [
+        ref
+        for ref in report.references
+        if ref.binding_id == add.id and ref.kind == "call"
+    ]
+    assert len(add_calls) == depth
+
+
+def test_using_on_nested_array_stays_opaque():
+    source = """
+library SafeMath {
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {}
+}
+contract Vault {
+    using SafeMath for uint256;
+    uint256[][] grid;
+    function run() external { grid[0][0].add(1); }
+}
+"""
+    report = build_sol_bindings(source)
+    add = next(b for b in report.bindings if b.name == "add")
+    assert not any(
+        ref.binding_id == add.id and ref.kind == "call"
+        for ref in report.references
+    )
+    assert report.calls[0].kind == "opaque_member"
+
+
 def test_member_call_on_array_element_resolves():
     source = """
 contract Token {

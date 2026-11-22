@@ -9749,7 +9749,13 @@ elements of contract arrays (`tokens[0].transfer`), call returns and
 constructors/casts (`getToken().transfer`, `Token(addr).transfer`)
 resolve against the value's declared contract type (`new Token().f`
 via the `new_expression` type name, `this.token().f` via the public
-getter's declared variable type). solc picks among
+getter's declared variable type). The `using` fallback names the
+receiver's declared type the same way, so directives also apply to
+array elements (`values[0].add`), member chains (`coin.v.add`), call
+returns (`getTotal().add`) and chained library calls
+(`total.add(1).sub(2)`); receivers whose type cannot be named
+statically (mappings, nested arrays, function-typed returns) keep
+their opaque treatment. solc picks among
 several applicable directives by implicit argument types, which the
 lexical side does not model, so a name declared by more than one
 matching library reports `ambiguous_overload` rather than binding the

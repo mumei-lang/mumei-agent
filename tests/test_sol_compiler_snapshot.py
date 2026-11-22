@@ -112,7 +112,10 @@ def _assert_rejected(envelope, source, *, raw=None):
             + ["builtin"]
             + ["agree"] * 18
             + ["lexical_missing"]
-            + ["agree"] * 6,
+            + ["agree"] * 18
+            + ["builtin"] * 2
+            + ["lexical_missing"]
+            + ["agree"] * 4,
         ),
     ],
 )
@@ -617,8 +620,12 @@ def test_member_access_declarations_match_lexical_member_bindings():
             "v",
         }
     ]
-    assert [item["status"] for item in member_items] == ["agree"] * 17
+    assert [item["status"] for item in member_items] == ["agree"] * 23 + [
+        "lexical_missing"
+    ]
     for item in member_items:
+        if item["status"] != "agree":
+            continue
         span = item["span"]
         lexical = lexical_by_span[(span["start"], span["end"])]
         binding = bindings_by_id[lexical.binding_id]
