@@ -2793,20 +2793,19 @@ contract C {
     assert len(call_refs) == 1
 
 
-def test_nested_mapping_value_type_resolves_in_declaring_scope():
+def test_library_element_type_resolves_in_declaring_scope():
     source = """
-contract A {
+library L {
     struct S { uint256 x; }
-    mapping(uint256 => mapping(uint256 => S)) m;
+    function get() internal pure returns (S[] memory) {}
 }
 contract B {
     struct S { uint256 y; }
-    A a;
-    function run() external returns (uint256) { return a.m[0][0].x; }
+    function run() external returns (uint256) { return L.get()[0].x; }
 }
 """
     report = build_sol_bindings(source)
-    # `a.m[k1][k2]` peels to `S` spelled inside A — `A.S.x` binds,
+    # `L.get()[0]` peels to `S` spelled inside L — `L.S.x` binds,
     # not B.S (whose field is `y`).
     x = next(b for b in report.bindings if b.name == "x")
     assert any(ref.binding_id == x.id for ref in report.references)
@@ -2848,5 +2847,22 @@ contract Vault {
     f = next(b for b in report.bindings if b.name == "f")
     assert any(
         ref.binding_id == f.id and ref.kind == "call"
+        for ref in report.references
+    )
+
+
+def test_member_call_on_loosely_spaced_composite_types_binds():
+    source = """
+contract C {
+    mapping(uint   =>   uint) m;
+    function take(mapping(uint=>uint) storage v) external {}
+    function run() external { this.take(m); }
+}
+"""
+    report = build_sol_bindings(source)
+    # `=>` written with and without spaces is one spelling.
+    take = next(b for b in report.bindings if b.name == "take")
+    assert any(
+        ref.binding_id == take.id and ref.kind == "call"
         for ref in report.references
     )
