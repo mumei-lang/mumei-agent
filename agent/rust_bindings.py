@@ -912,6 +912,8 @@ class _RustBindings:
             self._generic_references(node)
             if node.type in {"struct_item", "union_item"}:
                 self._link_fields(node, scope)
+            elif node.type == "enum_item":
+                self._link_variants(node, scope)
             return
         if node.type == "trait_item":
             return
@@ -1164,6 +1166,31 @@ class _RustBindings:
                 type_node=annotation,
             )
             member.member_of = record.binding.id
+
+    def _link_variants(self, node: Any, scope: _Scope) -> None:
+        """Attach enum variants as member bindings."""
+        record = self._find_item_record(scope, node)
+        body = node.child_by_field_name("body")
+        if record is None or body is None:
+            return
+        for variant in self._children(body):
+            if variant.type != "enum_variant":
+                continue
+            name_node = variant.child_by_field_name("name")
+            if name_node is None:
+                continue
+            member = self._make_record(
+                name_node,
+                "enum_member",
+                self.span(node),
+                scope.function_id,
+                scope.module_depth,
+                item=True,
+            )
+            member.member_of = record.binding.id
+            value = variant.child_by_field_name("value")
+            if value is not None:
+                self._expr(value)
 
     def _scoped_member(self, node: Any) -> tuple[Any | None, Any | None]:
         """Member record + name node of a `Path::name` segment pair.

@@ -2435,3 +2435,28 @@ fn f(p: a::b::P) { p.n(); }
     n = _bindings(report, "n", "associated_function")[0]
     call = _call(report, source, "p.n()")
     assert call.target == n.id
+
+
+def test_member_enum_variant_path_resolves():
+    source = """
+enum E { A, B(i32), C = 3 }
+fn f() { let e = E::A; let g = E::B; }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    variants = {
+        b.name: b for b in report.bindings if b.kind == "enum_member"
+    }
+    assert set(variants) == {"A", "B", "C"}
+    a_ref = next(
+        r
+        for r in report.references
+        if source[r.span.start - 2 : r.span.end] == "::A"
+    )
+    b_ref = next(
+        r
+        for r in report.references
+        if source[r.span.start - 2 : r.span.end] == "::B"
+    )
+    assert a_ref.binding_id == variants["A"].id
+    assert b_ref.binding_id == variants["B"].id
+    assert not [u for u in report.unresolved if u.name == "E::A"]
