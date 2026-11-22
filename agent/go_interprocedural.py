@@ -3562,10 +3562,7 @@ class _Builder:
                             is not None
                         )
                     )
-                    or (
-                        for_pointer_leaf
-                        and _leaf_kind == "interface"
-                    )
+                    or _leaf_kind == "interface"
                 )
             ):
                 return None
@@ -16308,6 +16305,27 @@ class _Builder:
                         is not None
                         and _iface_field[1].type is not None
                         and _iface_field[1].type.kind == "interface"
+                    )
+                    and not (
+                        # `v := p.B[i].J` — an interface member
+                        # inside a struct element binds the member
+                        # slot's interface deps the same way.
+                        len(lefts) == len(rights)
+                        and (
+                            _iface_elem_member := (
+                                self._opaque_container_struct_element_field_target(
+                                    rights[i], params
+                                )
+                            )
+                        )
+                        is not None
+                        and _iface_elem_member[6]
+                        and getattr(
+                            _iface_elem_member[6][-1].type,
+                            "kind",
+                            None,
+                        )
+                        == "interface"
                     )
                 ):
                     raise _Unsupported("binding_unavailable", _span(node))
