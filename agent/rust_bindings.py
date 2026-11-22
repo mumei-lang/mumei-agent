@@ -2734,6 +2734,13 @@ class _RustBindings:
         if bracket is not None:
             # The element is an anonymous slice/array — it is indexed
             # further by its own element (`[P; 2]` → `P`), not `P`.
+            # A slice element `[P]` resolves to `P` so member calls
+            # on `a[0]` reach `P`'s members; an array `[P; N]` keeps
+            # the spelled element for deeper indexing (`a[0][1]`).
+            if ";" not in bracket.group(0):
+                return self._spelled_type(
+                    bracket.group(1).strip(), position
+                )
             return None, bracket.group(1).strip()
         match = re.fullmatch(
             r"([A-Za-z_][\w:]*)\s*(?:<(.+)>)?", elem_args
@@ -3141,7 +3148,7 @@ class _RustBindings:
             # `v.split_at(i)` yields `(&[P], &[P])` — a pair of
             # borrowed slices that feeds the tuple-pattern path.
             return (
-                f"(&{spelled}, &{spelled})",
+                f"(&[{spelled}], &[{spelled}])",
                 self._receiver_annotation_position(receiver),
             )
         if method in _ITER_CHUNK_METHODS:
@@ -5944,10 +5951,14 @@ class _RustBindings:
                         else pattern.start_byte
                     ),
                 )
-                if borrowed:
-                    # `&P` is a spelled borrow, not the payload
-                    # itself — keep it as the bound name's args so
-                    # `a[0]`/`a.iter()` read through the borrow.
+                if borrowed and re.match(
+                    r"^&\s*(?:mut\s+)?\[", element.strip()
+                ):
+                    # `&[P]` is a spelled borrow of a slice, not the
+                    # payload itself — keep it as the bound name's
+                    # args so `a[0]`/`a.iter()` read through the
+                    # borrow. `&P`/`&mut P` keep the resolved `P`:
+                    # member calls auto-deref to it.
                     tid = None
                     fargs = element.strip()
                 # The container head is the element's own spelling —
