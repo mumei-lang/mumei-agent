@@ -705,3 +705,51 @@ def test_real_core_verdict_descriptors_fold(tmp_path, capsys):
             )
         )
         assert evaluation["descriptor_match"] is True
+
+
+def test_route_emits_descriptor_digest(capsys):
+    # The route pins the assessed descriptor's raw bytes by
+    # `descriptor_digest` — the carrier a signed-descriptor
+    # verification binds to recover `descriptor_authenticity`.
+    import argparse
+    import hashlib
+
+    fixture = (
+        Path(__file__).parent
+        / "fixtures"
+        / "evidence_acceptance_single_requirement.json"
+    )
+    evaluation = run_eval(
+        argparse.Namespace(
+            descriptor=str(fixture),
+            expected_fingerprint=None,
+            output=None,
+        )
+    )
+    assert evaluation["descriptor_digest"] == hashlib.sha256(
+        fixture.read_bytes()
+    ).hexdigest()
+
+
+def test_eval_doc_binds_to_descriptor_bytes():
+    # `binding-eval` treats the eval doc's `descriptor_digest` as its
+    # carrier: the eval doc binds to the descriptor it assessed, not
+    # to its own bytes.
+    import hashlib
+
+    from agent.core_evidence import evaluate_evidence_binding
+
+    descriptor_bytes = b'{"schema_version":"mumei.example/v1"}'
+    descriptor_digest = hashlib.sha256(descriptor_bytes).hexdigest()
+    eval_doc = {
+        "schema_version": "mumei.core-acceptance-evaluation/v1",
+        "descriptor_digest": descriptor_digest,
+    }
+    binding = evaluate_evidence_binding(descriptor_bytes, eval_doc)
+    assert binding["carrier_match"] is True
+    assert binding["bound"] is True
+    # Its own bytes never bind — the carrier names the descriptor.
+    eval_bytes = json.dumps(eval_doc).encode()
+    assert (
+        evaluate_evidence_binding(eval_bytes, eval_doc)["bound"] is False
+    )

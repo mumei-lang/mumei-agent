@@ -907,7 +907,9 @@ _VERDICT_ACCEPTANCE_MATCHERS = {
 
 
 def evaluate_core_acceptance(
-    descriptor: dict, expected_fingerprint: str | None = None
+    descriptor: dict,
+    expected_fingerprint: str | None = None,
+    descriptor_bytes: bytes | None = None,
 ) -> dict:
     """Fold a restored Core acceptance descriptor into an evaluation.
 
@@ -941,6 +943,16 @@ def evaluate_core_acceptance(
     same record bytes, not that the descriptor was produced for this
     attempt (`descriptor_authenticity` and
     `unperformed_check_recovery` stay unperformed).
+
+    When `descriptor_bytes` is supplied (the route reads the declared
+    file's raw bytes), the evaluation also emits `descriptor_digest` —
+    the recomputed SHA-256 of those bytes. The field is the eval
+    doc's declared carrier: it names the assessed descriptor, not the
+    eval doc's own bytes, so a producer signature over the descriptor
+    (verified by `signature-verify` and bound through its
+    `subject_digest` carrier) can recover the eval's declared
+    `descriptor_authenticity` — while a signature over the eval doc
+    itself cannot.
 
     Three requirement-evaluated verdict shapes form a second family —
     `mumei.evidence-acceptance/v1` (`evidence accept --requirement`
@@ -1009,6 +1021,10 @@ def evaluate_core_acceptance(
             "unperformed_check_recovery",
         ],
     }
+    if type(descriptor_bytes) is bytes:
+        evaluation["descriptor_digest"] = hashlib.sha256(
+            descriptor_bytes
+        ).hexdigest()
     if expected_fingerprint is not None:
         evaluation["attempt_bound"] = (
             match
@@ -1784,6 +1800,9 @@ _BINDING_CARRIERS: dict[str, tuple[str, ...]] = {
     # `key_not_revoked` observation names the record the signature
     # covers, not just an unscoped envelope.
     SIGNATURE_ENVELOPE_EVALUATION_SCHEMA: ("subject_digest",),
+    # The acceptance evaluation pins the descriptor it assessed — the
+    # digest the promotable pipeline signs and verifies.
+    "mumei.core-acceptance-evaluation/v1": ("descriptor_digest",),
 }
 
 
@@ -2239,12 +2258,23 @@ def _record_bound_digest(record: dict, record_digest: str | None) -> str | None:
 
     A Core descriptor declares the artifact it evaluated — its
     `evidence_fingerprint` (or `subject_digest`/`record_digest`) names
-    the underlying record's bytes, not the descriptor's own. Folding
-    such a descriptor as the record recovers its declared checks
-    against documents bound to the same artifact, so the declared
-    carrier wins over the record's own byte digest. A record with no
-    declared carrier binds documents to its own bytes."""
-    for field in ("evidence_fingerprint", "subject_digest", "record_digest"):
+    the underlying record's bytes, not the descriptor's own. An
+    acceptance evaluation names the descriptor it assessed by
+    `descriptor_digest`. Folding such a descriptor as the record
+    recovers its declared checks against documents bound to the same
+    artifact, so the declared carrier wins over the record's own byte
+    digest. A record with no declared carrier binds documents to its
+    own bytes."""
+    for field in (
+        "evidence_fingerprint",
+        "subject_digest",
+        "record_digest",
+        # An acceptance evaluation names the descriptor it assessed
+        # rather than its own bytes — bound documents recover the
+        # descriptor's declared checks (e.g. `descriptor_authenticity`
+        # via a signature over the descriptor).
+        "descriptor_digest",
+    ):
         value = record.get(field)
         if _is_fingerprint(value):
             return value
@@ -2348,8 +2378,9 @@ def evaluate_unperformed_check_recovery(
     documents — each carrying the dotted `bind_path` its entry
     declares — count only when that carrier equals the record's bound
     digest: the record's own declared carrier
-    (`evidence_fingerprint`/`subject_digest`/`record_digest`) when it
-    pins another artifact, else `record_digest`. So a Core acceptance
+    (`evidence_fingerprint`/`subject_digest`/`record_digest`/
+    `descriptor_digest`) when it pins another artifact, else
+    `record_digest`. So a Core acceptance
     descriptor folded as the record is recovered by a recheck doc
     bound to the *same evidence*, and a verify-attempt report counts
     for the record its `normalized.stdout.sha256` produced, while
