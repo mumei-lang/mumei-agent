@@ -33691,6 +33691,13 @@ def test_named_double_pointer_deep_store_keeps_root(
         # A pointer-slice parameter root directly: `ss[i].F[0]`.
         "type E struct { F []int64 }\n"
         "func F(ss []*E, i int) int64 { return ss[i].F[0] }\n",
+        # A map field of pointer elements reads the same way.
+        "type E struct { V int64 }\n"
+        "type S struct { M map[int]*E }\n"
+        "func F(p *S, k int) int64 { return p.M[k].V }\n",
+        "type E struct { V int64 }\n"
+        "type S struct { M map[int]*E }\n"
+        "func F(o S, k int) int64 { return o.M[k].V }\n",
     ],
 )
 def test_named_pointer_element_field_reads(
@@ -33789,7 +33796,8 @@ def test_named_pointer_element_field_write_emit_caller_backing(
         "type E struct { V int64; W *E }\n"
         "type S struct { A []*E }\n"
         "func F(p *S, i int64) int64 { return p.A[i].W.V }\n",
-        # Map-of-pointer-element fields stay closed.
+        # `map[string]` closes on the key's side — string indices
+        # sit outside the scalar fragment (any element type).
         "type E struct { V int64 }\n"
         "type S struct { M map[string]*E }\n"
         "func F(p *S, k string) int64 { return p.M[k].V }\n",
@@ -33798,6 +33806,11 @@ def test_named_pointer_element_field_write_emit_caller_backing(
         "type E struct { V int64 }\n"
         "type S struct { A [1]*E }\n"
         "func F(p *S) int64 { return p.A[0].V }\n",
+        # A map element's field write stays closed — the element
+        # is not addressable.
+        "type E struct { V int64 }\n"
+        "type S struct { M map[int]*E }\n"
+        "func F(p *S, k int, x int64) int64 { p.M[k].V = x; return 0 }\n",
     ],
 )
 def test_named_pointer_element_field_unsupported_stays_closed(
