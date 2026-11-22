@@ -18331,6 +18331,49 @@ class _Builder:
                 )
                 if write_target is not None:
                     type_id, ref, nested = write_target
+                    # `x.W = q` on a copy `x := p.B[i]` marked
+                    # replaces the SLOT of the copy's pointer
+                    # member — x's W no longer names the
+                    # element's member, so the share ends. A
+                    # scalar-field store (`x.V = 1`) leaves the
+                    # pointer members sharing the element's
+                    # memory, and a nested store (`x.W.V = v`)
+                    # writes through the shared pointee — only
+                    # a bare pointer-member slot write clears.
+                    if (
+                        ref is not None
+                        and ref.binding_id in self._element_share
+                    ):
+                        _lhs_fields = []
+                        _lhs_probe = lhs
+                        while _lhs_probe is not None and (
+                            _lhs_probe.type
+                            in {"selector_expression", "field_expression"}
+                        ):
+                            _lhs_field = (
+                                _lhs_probe.child_by_field_name("field")
+                            )
+                            if _lhs_field is None:
+                                break
+                            _lhs_fields.append(_lhs_field)
+                            _lhs_probe = (
+                                _lhs_probe.child_by_field_name("operand")
+                            )
+                        if len(_lhs_fields) == 1:
+                            _lhs_member = self._field_identity(
+                                self.references.get(
+                                    self.node_key(_lhs_fields[0])
+                                )
+                            )
+                            if _lhs_member is not None and (
+                                getattr(
+                                    _lhs_member.type, "kind", None
+                                )
+                                == "pointer"
+                            ):
+                                self._pending_lhs_pops.append(
+                                    ref.binding_id
+                                )
                     # A local composite's field store reports no
                     # external mutation — the empty identity skips
                     # the transfer; only the dep fold applies.
