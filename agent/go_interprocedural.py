@@ -9368,6 +9368,13 @@ class _Builder:
                         copy_root=True,
                     )
                     continue
+                if pos == 1 and binding.type.kind == "interface":
+                    # `for _, v := range p.A` on `A []I` — the
+                    # element name binds like `v := p.A[i]`: an
+                    # interface-typed local whose method calls
+                    # dispatch through `_interface_value_binding`.
+                    scope[binding.id] = deps
+                    continue
                 if binding.type.kind not in {
                     "integer",
                     "boolean",
@@ -27806,6 +27813,91 @@ class _Builder:
                                         params[escaped_id]
                                     }
                         return deps
+            iface_collection = self._opaque_container_field_target(
+                node, params, allow_struct_elements=True
+            )
+            if iface_collection is not None:
+                field_key, root_id, iface_member, _, _ = iface_collection
+                iface_type = iface_member.type
+                if (
+                    iface_type is not None
+                    and iface_type.kind in {"slice", "array", "map"}
+                    and getattr(iface_type, "elem", None) is not None
+                    and iface_type.elem.kind == "interface"
+                ):
+                    # `p.A` on a `*S` root with `A []I` — reading the
+                    # collection itself (range iterable, `append`
+                    # argument, a plain `x := p.A` bind) names caller
+                    # memory exactly like `p.A[i]` does: the root's
+                    # own deps plus the field slot's.
+                    self._pin_member_type(iface_member)
+                    coll_deps = self._opaque_container_deps(
+                        field_key, locals_
+                    )
+                    root_binding = self.bindings.get(root_id)
+                    if (
+                        root_binding is not None
+                        and root_binding.type is not None
+                        and root_binding.type.kind == "pointer"
+                    ):
+                        coll_deps |= self._pointer_deps(
+                            root_id, params, locals_
+                        )
+                    elif root_id in locals_:
+                        coll_deps |= locals_[root_id]
+                    elif root_id in params:
+                        coll_deps |= {params[root_id]}
+                    # `p.A[i].F` — indexes below the field level
+                    # live inside the operand chain, so the
+                    # synthesized read must evaluate them itself
+                    # (each intermediate member's declared type
+                    # pins alongside).
+                    cur = node
+                    chain_indexes: list[Any] = []
+                    while cur is not None:
+                        cur = self._strip_parens(cur)
+                        if cur is None:
+                            break
+                        if cur.type == "index_expression":
+                            chain_indexes.append(
+                                cur.child_by_field_name("index")
+                            )
+                            cur = cur.child_by_field_name("operand")
+                            continue
+                        if cur.type != "selector_expression":
+                            break
+                        chain_field = cur.child_by_field_name("field")
+                        chain_ref = (
+                            self.references.get(
+                                self.node_key(chain_field)
+                            )
+                            if chain_field is not None
+                            else None
+                        )
+                        chain_member = self._field_identity(chain_ref)
+                        if (
+                            chain_member is not None
+                            and chain_member.type is not None
+                        ):
+                            self._pin_fact_identities(
+                                chain_member.type
+                            )
+                        cur = cur.child_by_field_name("operand")
+                    for chain_index in reversed(chain_indexes):
+                        if (
+                            chain_index is not None
+                            and chain_index.type not in _INDEX_LITERALS
+                        ):
+                            coll_deps |= self.expression(
+                                chain_index,
+                                fn,
+                                params,
+                                locals_,
+                                transfers,
+                                count,
+                                0,
+                            )
+                    return coll_deps
             if (
                 member is None
                 or member.kind != "const"
@@ -29161,14 +29253,27 @@ class _Builder:
                         scalar_cont = append_cont is not None
                     if append_cont is None:
                         field_target = self._opaque_container_field_target(
-                            arguments[0], params
+                            arguments[0], params,
+                            allow_struct_elements=True,
                         )
-                        if (
-                            field_target is not None
-                            and self._scalar_elem_collection(
+                        if field_target is not None and (
+                            self._scalar_elem_collection(
                                 field_target[2].type
                             )
+                            or (
+                                field_target[2].type is not None
+                                and getattr(
+                                    field_target[2].type, "elem",
+                                    None,
+                                ) is not None
+                                and field_target[2].type.elem.kind
+                                == "interface"
+                            )
                         ):
+                            # `append(p.A, e)` on `A []I` — each
+                            # extra evaluates plainly and the result
+                            # reseats the field slot like a scalar
+                            # container does.
                             append_cont = field_target[0]
                             scalar_cont = True
                     if append_cont is None:
@@ -29791,9 +29896,26 @@ class _Builder:
                                 )
                                 return frozenset()
                         field_target = self._opaque_container_field_target(
-                            arguments[0], params
+                            arguments[0], params,
+                            allow_struct_elements=True,
                         )
-                        if field_target is not None:
+                        if field_target is not None and (
+                            self._scalar_elem_collection(
+                                field_target[2].type
+                            )
+                            or self._scalar_elem_nested_collection(
+                                field_target[2].type
+                            )
+                            or (
+                                field_target[2].type is not None
+                                and getattr(
+                                    field_target[2].type, "elem",
+                                    None,
+                                ) is not None
+                                and field_target[2].type.elem.kind
+                                == "interface"
+                            )
+                        ):
                             field_key = field_target[0]
                             self._pin_fact_identities(
                                 field_target[2].type
