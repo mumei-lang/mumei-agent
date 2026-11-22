@@ -9700,6 +9700,25 @@ no compiler counterpart yet — the honest next slice captures
 the member declarations.
 
 **回帰ゲート**: `uv run pytest tests/test_sol_bindings.py tests/test_lexical_bindings.py -q`
+### C06 lexical member access — `using Lib for T` directives
+
+`agent/sol_bindings.py` `_resolve_member` now falls back to
+`using`-directive resolution when the contract-type path finds no
+member: contract-body and file-level `using Lib for T` / `for *`
+directives are collected per contract and the member is looked up in
+the named library's scope when the object's declared type text equals
+the `for` target (bare `uint`/`int`/`bytes` spellings normalize to
+their canonical widths). The first matching directive whose library
+declares the member wins; a member that exists but is private reports
+`private_base_member`, and the library identifier inside the directive
+emits a `read` reference like any other type name. Declared members
+still win over directives, matching solc's lookup order. The aliased
+form `using {f as g} for T` fails parse at the grammar level, so the
+whole source stays fail-closed rather than resolving half of it.
+Non-identifier objects (`arr[i].f()`), member chains and overloaded
+library functions keep their opaque treatment.
+
+**回帰ゲート**: `uv run pytest tests/test_sol_bindings.py tests/test_sol_compiler_snapshot.py -q`
 ### C06 second compiler-backed Solidity binding slice — MemberAccess
 
 `agent/sol_compiler_snapshot.py` now captures `MemberAccess` member
@@ -9709,9 +9728,9 @@ declaration for contract members (`token.transfer`, `token.supply`),
 while builtins (`.length`, `.push`, `msg.sender`) carry no
 `referencedDeclaration` and record as builtin references. The
 `member_access.sol` fixture exercises member calls, a public getter,
-builtin members, reassignment, and `this.`/`super.`/inherited member
-calls: 15 `agree` and 5 `builtin` statuses against the lexical
-report's member resolution. Envelope shape, pinned-version allowlist
+builtin members, reassignment, `this.`/`super.`/inherited member
+calls, and a `using SafeMath for uint256` member call: 19 `agree` and
+5 `builtin` statuses against the lexical report's member resolution. Envelope shape, pinned-version allowlist
 and fail-closed boundary are unchanged. Metadata comparison only — no
 new capture surface, route or claim.
 
