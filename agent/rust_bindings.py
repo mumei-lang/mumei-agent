@@ -3189,9 +3189,47 @@ class _RustBindings:
                             element = None
                         else:
                             pair = self._type_arg_list(other_args)
+                            # Each half keeps the scope its own
+                            # annotation was written in — qualify
+                            # both before joining the tuple.
+                            receiver = callee.child_by_field_name(
+                                "value"
+                            )
+                            left_args = (
+                                self._receiver_type(receiver)[1]
+                                if receiver is not None
+                                else None
+                            )
+                            left_arg = next(
+                                iter(
+                                    self._type_arg_list(
+                                        left_args or ""
+                                    )
+                                ),
+                                None,
+                            )
+                            left_pos = (
+                                self._receiver_annotation_position(
+                                    receiver
+                                )
+                                or node.start_byte
+                            )
+                            right_pos = (
+                                self._receiver_annotation_position(
+                                    other
+                                )
+                                or node.start_byte
+                            )
                             element = (
-                                f"({element}, {pair[0].strip()})"
-                                if pair
+                                "({left}, {right})".format(
+                                    left=self._qualified_spelling(
+                                        left_arg.strip(), left_pos
+                                    ),
+                                    right=self._qualified_spelling(
+                                        pair[0].strip(), right_pos
+                                    ),
+                                )
+                                if pair and left_arg is not None
                                 else None
                             )
                     if (
