@@ -216,9 +216,11 @@ _OPTION_HEAD_METHODS = {
     # `m.remove_entry(k)`/`m.pop_first()`/`m.pop_last()` yield
     # `Option<(K, V)>` — `_MAP_PAIR_METHODS` spells the pair.
     "remove_entry": ("", {"HashMap", "BTreeMap"}, 0),
-    # `m.get_key_value(k)` yields `Option<(&K, &V)>` — the
-    # borrowed pair spelled below.
+    # `m.get_key_value(k)`/`first_key_value`/`last_key_value`
+    # yield `Option<(&K, &V)>` — the borrowed pair spelled below.
     "get_key_value": ("", {"HashMap", "BTreeMap"}, 0),
+    "first_key_value": ("", {"BTreeMap"}, 0),
+    "last_key_value": ("", {"BTreeMap"}, 0),
     # `pop_first`/`pop_last` on `BTreeMap` yield `Option<(K, V)>`
     # (the `_MAP_PAIR_METHODS` pair below); on `BTreeSet` plain
     # `Option<P>`.
@@ -238,7 +240,9 @@ _MAP_PAIR_METHODS = frozenset(
 
 # `m.get_key_value(k)` yields `Option<(&K, &V)>` — the borrowed
 # variant of the `_MAP_PAIR_METHODS` pair.
-_MAP_BORROWED_PAIR_METHODS = frozenset({"get_key_value"})
+_MAP_BORROWED_PAIR_METHODS = frozenset(
+    {"get_key_value", "first_key_value", "last_key_value"}
+)
 
 # `v.swap_remove(i)` yields `T` outright — a receiver payload, not
 # an Option.
