@@ -1183,3 +1183,31 @@ class B extends Lib.Inner.Base { run(): void { this.m(); } }
         if c.kind == "opaque_virtual" and c.target == m.id
     ]
     assert len(calls) == 2
+
+
+def test_member_declaration_merging_namespace_and_class():
+    source = """
+namespace Lib {
+    export namespace Inner { export function viaNs(): void {} }
+    export class Inner { static run(): void {} inst(): void {} }
+}
+Lib.Inner.run();
+Lib.Inner.viaNs();
+const i = new Lib.Inner();
+i.inst();
+"""
+    report = build_ts_bindings(source)
+    run = _member_bindings(report, "run", "associated_function")[0]
+    via_ns = _member_bindings(report, "viaNs", "function")[0]
+    inst_ids = {
+        b.id for b in _member_bindings(report, "inst", "associated_function")
+    }
+    kinds = {c.kind for c in report.calls}
+    assert "direct_local" in kinds
+    targets = {c.target for c in report.calls}
+    assert run.id in targets
+    assert via_ns.id in targets
+    assert inst_ids & targets
+    news = [c for c in report.calls if c.kind == "opaque_new"]
+    inner = _member_bindings(report, "Inner", "class")[0]
+    assert any(c.target == inner.id for c in news)

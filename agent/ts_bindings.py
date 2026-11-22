@@ -1083,13 +1083,28 @@ class _TypeScriptBindings:
     ) -> _Record | None:
         """BFS over the declaring type and its bases for member `name`."""
         queue = [type_record]
+        # Declaration merging: a namespace may merge with a class,
+        # interface or enum of the same name in the same container, so
+        # the siblings' members merge into a single type.
+        for sibling in self.records:
+            if (
+                sibling is not type_record
+                and sibling.member_of == type_record.member_of
+                and sibling.binding.name == type_record.binding.name
+                and (
+                    sibling.member_of is not None
+                    or sibling.binding.scope == type_record.binding.scope
+                )
+            ):
+                queue.append(sibling)
         visited: set[str] = set()
-        first = True
+        seed_ids = {record.binding.id for record in queue}
         while queue:
             current = queue.pop(0)
             if current.binding.id in visited:
                 continue
             visited.add(current.binding.id)
+            first = current.binding.id in seed_ids
             decl = current.node.parent
             decl_id = None if decl is None else decl.id
             namespace_member = current.binding.kind == "namespace"
@@ -1123,7 +1138,6 @@ class _TypeScriptBindings:
                     )
                     if base_record is not None:
                         queue.append(base_record)
-            first = False
         return None
 
     def _base_type_record(
@@ -1238,11 +1252,42 @@ class _TypeScriptBindings:
         if value is None or value.type != "new_expression":
             return None
         constructor = value.child_by_field_name("constructor")
-        if constructor is None or constructor.type not in {
-            "identifier", "type_identifier",
-        }:
+        if constructor is None:
             return None
-        return self._lookup(self.text(constructor), position, "type")
+        if constructor.type in {"identifier", "type_identifier"}:
+            return self._lookup(self.text(constructor), position, "type")
+        if constructor.type == "member_expression":
+            property_node = constructor.child_by_field_name("property")
+            if property_node is None:
+                return None
+            record = self._resolve_member(
+                constructor.child_by_field_name("object"),
+                self.text(property_node),
+                position,
+            )
+            return (
+                self._merged_constructible(record)
+                if record is not None
+                else None
+            )
+        return None
+
+    def _merged_constructible(self, record: _Record) -> _Record:
+        """Prefer the class-like sibling of a merged declaration."""
+        if record.class_like:
+            return record
+        for sibling in self.records:
+            if (
+                sibling.class_like
+                and sibling.member_of == record.member_of
+                and sibling.binding.name == record.binding.name
+                and (
+                    sibling.member_of is not None
+                    or sibling.binding.scope == record.binding.scope
+                )
+            ):
+                return sibling
+        return record
 
     def _object_type(
         self, node: Any | None, position: int
@@ -1323,6 +1368,20 @@ class _TypeScriptBindings:
                     False,
                     False,
                 )
+            if constructor is not None and constructor.type == "member_expression":
+                property_node = constructor.child_by_field_name("property")
+                if property_node is not None:
+                    record = self._resolve_member(
+                        constructor.child_by_field_name("object"),
+                        self.text(property_node),
+                        position,
+                    )
+                    if record is not None:
+                        return (
+                            self._merged_constructible(record),
+                            False,
+                            False,
+                        )
             return None, False, False
         if node.type in {
             "parenthesized_expression", "non_null_expression",
@@ -1849,6 +1908,8 @@ class _TypeScriptBindings:
                     self.text(property_node),
                     node.start_byte,
                 )
+                if new and member is not None:
+                    member = self._merged_constructible(member)
                 if member is not None:
                     self.add_reference(property_node, member, "call")
             kind = "opaque_method"
@@ -1856,6 +1917,12 @@ class _TypeScriptBindings:
                 kind = "opaque_optional"
             elif receiver is not None and receiver.type == "super":
                 kind = "opaque_super"
+            elif (
+                new
+                and member is not None
+                and member.binding.kind == "class"
+            ):
+                kind = "opaque_new"
             elif member is not None and member.binding.kind in {
                 "function", "associated_function",
             }:
@@ -1885,7 +1952,7 @@ class _TypeScriptBindings:
                 in {
                     "direct_local", "opaque_generic", "opaque_async",
                     "opaque_bodyless", "opaque_virtual",
-                    "opaque_generator",
+                    "opaque_generator", "opaque_new",
                 }
                 else ""
             )
