@@ -33790,6 +33790,45 @@ def test_named_pointer_element_param_observes_late_pointee_store(
     assert result.return_dependencies == frozenset({1})
 
 
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        # `q := p` hands q the caller-shared pointee — a scalar
+        # field read through it slots on `p`.
+        "type S struct { V int64 }\n"
+        "func F(p *S) int64 { q := p; return q.V }\n",
+        # The alias resolves through another local — `r := q`
+        # lands on the same entry pointee.
+        "type S struct { V int64 }\n"
+        "func F(p *S) int64 { q := p; r := q; return r.V }\n",
+        # `q = r` reseats the local away — the read now names r's
+        # pointee, not p's entry.
+        "type S struct { V int64 }\n"
+        "func F(p *S, r *S) int64 { q := p; q = r; return q.V }\n",
+        # Container fields through the local alias stay closed —
+        # `q.A[i]` needs a deeper root resolution the slot model
+        # does not have.
+        "type S struct { A []int64 }\n"
+        "func F(p *S, i int64) int64 { q := p; return q.A[i] }\n",
+    ],
+)
+def test_named_local_pointer_alias_reads(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    if "q.A[i]" in declarations:
+        assert result.gaps
+        assert any(
+            g.reason == "non_parameter_reference" for g in result.gaps
+        )
+    else:
+        assert result.available, result.gaps
+        assert result.return_dependencies in (
+            frozenset({0}),
+            frozenset({1}),
+        )
+
+
 def test_named_pointer_element_field_write_emit_caller_backing(
     go_types_helper,
 ):
