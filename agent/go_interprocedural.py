@@ -27337,6 +27337,30 @@ class _Builder:
             return None
         return self.references.get(self.node_key(cur))
 
+    def _param_pointer_call_root(
+        self,
+        node: Any,
+        params: dict[str, int],
+    ) -> bool:
+        """Whether `node`'s root binding is a parameter pointer root —
+        `p` on `*S`, `(*pp)` on `**S`, or a `q := p` alias — whose
+        pointee stores broadcast into `indirect_writes` rather than
+        the name's own dep set. A callee taking that pointer reads
+        caller-shared memory those stores reached."""
+        root_ref = self._receiver_root_ref(node)
+        if root_ref is None:
+            return False
+        binding_id = root_ref.binding_id
+        if binding_id in self._param_pointer_aliases:
+            return True
+        binding = self.bindings.get(binding_id)
+        return (
+            binding is not None
+            and binding.type is not None
+            and binding.type.kind == "pointer"
+            and binding_id in params
+        )
+
     def _type_slot_ref_deps(
         self,
         node: Any,
@@ -31173,6 +31197,16 @@ class _Builder:
                     # memory, and a `*p = x` store broadcasts
                     # into `indirect_writes`, not `p`'s own set.
                     receiver_deps |= self.indirect_writes
+            elif (
+                target.receiver is not None
+                and target.receiver.type.kind == "pointer"
+                and self._param_pointer_call_root(receiver_node, params)
+            ):
+                # `p.Get()` on a `*T` receiver rooted at a
+                # parameter pointer — the callee reads
+                # caller-shared pointee memory whose stores
+                # broadcast into `indirect_writes`.
+                receiver_deps |= self.indirect_writes
             if isinstance(receiver_deps, frozenset):
                 # A receiver's value can reach an argument-position
                 # callback too — `st.M(G)` calling `g(st.V)` — so
@@ -31202,6 +31236,15 @@ class _Builder:
             )
             for arg in arguments
         ]
+        for index, argument in enumerate(arguments):
+            if self._param_pointer_call_root(argument, params):
+                # `get(p)` after `*p = x` — the callee reads
+                # caller-shared pointee memory whose stores
+                # broadcast into `indirect_writes`, not the
+                # argument's own dep set.
+                actual_values[index] = (
+                    actual_values[index] | self.indirect_writes
+                )
         if local_chan_chan_roots is not None:
             for index, argument in enumerate(arguments):
                 root_id = self._local_chan_chan_id(argument)
@@ -35676,6 +35719,12 @@ class _Builder:
                 arg, fn, params, locals_, transfers, count,
                 depth + 1,
             )
+            if self._param_pointer_call_root(arg, params):
+                # `lib.Get(p)` after `*p = x` — the callee
+                # reads caller-shared pointee memory whose
+                # stores broadcast into `indirect_writes`,
+                # not `p`'s own dep set.
+                arg_deps |= self.indirect_writes
             root = local_chan_chan_roots.get(i)
             if root is not None:
                 group = self._chan_group_read_deps(root, locals_)

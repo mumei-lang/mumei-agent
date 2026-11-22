@@ -6671,6 +6671,56 @@ def test_range_struct_element_unsupported_members(
     assert not result.available
 
 
+def test_callee_pointee_read_observes_prior_writes(
+    go_types_helper,
+):
+    # `get(p)` after `*p = x` — the callee reads caller-shared
+    # pointee memory whose stores broadcast into indirect_writes,
+    # so the call's deps fold them in.
+    declarations = (
+        "func get(p *int64) int64 { return *p }\n"
+        "func F(p *int64, x int64) int64 {\n"
+        "\t*p = x\n"
+        "\treturn get(p)\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, declarations), "F")
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+    # A whole-pointee store is observed the same way.
+    declarations = (
+        "type S struct{ V int64 }\n"
+        "func readV(s *S) int64 { return s.V }\n"
+        "func F(p *S, s S) int64 {\n"
+        "\t*p = s\n"
+        "\treturn readV(p)\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, declarations), "F")
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+    # A pointer-receiver method reads the same shared memory.
+    declarations = (
+        "type S struct{ V int64 }\n"
+        "func (s *S) Get() int64 { return s.V }\n"
+        "func F(p *S, s S) int64 {\n"
+        "\t*p = s\n"
+        "\treturn p.Get()\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, declarations), "F")
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+    # Without a pre-call store nothing extra is folded.
+    declarations = (
+        "func get(p *int64) int64 { return *p }\n"
+        "func F(p *int64) int64 { return get(p) }\n"
+    )
+    result = named(*unit(go_types_helper, declarations), "F")
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+
 def test_interface_member_method_value_inside_element(
     go_types_helper,
 ):
