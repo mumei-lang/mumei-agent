@@ -995,6 +995,9 @@ class _Builder:
         self.bound_method_receiver_deps: dict[
             str, frozenset[int]
         ] = {}
+        self.bound_method_field_records: dict[
+            str, tuple[str, ...]
+        ] = {}
         # Bound name → the enclosing-scope bindings its literal's
         # body WRITES (`x = e`, `s.V = e`, `p[i] = e`). `h()` folds
         # the write's value deps into each target's dep set — the
@@ -7134,7 +7137,7 @@ class _Builder:
         method = self._method_value_parts(node)
         if method is not None:
             self._record_bound_method(
-                bid, method, params, locals_
+                bid, method, params, locals_, node
             )
             return
         self._record_bound_interface_method(
@@ -12743,6 +12746,153 @@ class _Builder:
                 return member.id
         return None
 
+    def _method_value_field_record_ids(
+        self, node: Any
+    ) -> tuple[str, ...]:
+        value = self._strip_parens(node)
+        if value is None:
+            return ()
+        if value.type == "identifier":
+            ref = self.references.get(self.node_key(value))
+            return (
+                self.bound_method_field_records.get(
+                    ref.binding_id, ()
+                )
+                if ref is not None
+                else ()
+            )
+        if value.type == "selector_expression":
+            method = self._method_value_parts(value)
+            if method is None or method[1] is None:
+                return ()
+            receiver = value.child_by_field_name("operand")
+            if receiver is None:
+                raise _Unsupported(
+                    "unsupported_expression", _span(value)
+                )
+            return self._struct_argument_field_record_ids(receiver)
+        return ()
+
+    def _method_value_consumer_is_supported(
+        self, node: Any
+    ) -> bool:
+        value = self._strip_parens(node)
+        if value is None:
+            return False
+        current = node
+        while (
+            current.parent is not None
+            and current.parent.type == "parenthesized_expression"
+        ):
+            current = current.parent
+        parent = current.parent
+        if parent is None:
+            return False
+        if parent.type == "call_expression":
+            function_node = parent.child_by_field_name("function")
+            call = self.calls.get(self.node_key(parent))
+            if (
+                function_node is not None
+                and function_node.start_byte <= value.start_byte
+                and value.end_byte <= function_node.end_byte
+                and call is not None
+            ):
+                if (
+                    value.type == "identifier"
+                    and call.kind == "indirect_or_selector"
+                ):
+                    ref = self.references.get(self.node_key(value))
+                    return (
+                        ref is not None
+                        and ref.binding_id
+                        in self.bound_method_field_records
+                    )
+                return (
+                    value.type == "selector_expression"
+                    and call.method
+                    and self._method_value_parts(value) is not None
+                )
+        if parent.type == "argument_list":
+            call_node = parent.parent
+            call = (
+                self.calls.get(self.node_key(call_node))
+                if call_node is not None
+                and call_node.type == "call_expression"
+                else None
+            )
+            if call is None or call.kind != "direct_local":
+                return False
+            target = self.functions.get(call.target)
+            if target is None:
+                return False
+            arguments = _children(parent)
+            index = next(
+                (
+                    i
+                    for i, argument in enumerate(arguments)
+                    if argument.start_byte <= value.start_byte
+                    and value.end_byte <= argument.end_byte
+                ),
+                None,
+            )
+            return (
+                index is not None
+                and index < len(target.parameters)
+                and target.parameters[index].type.kind == "function"
+            )
+        if parent.type != "expression_list":
+            return False
+        container = parent.parent
+        if container is None:
+            return False
+        if container.type in {
+            "assignment_statement",
+            "short_var_declaration",
+        }:
+            lefts = _children(container.child_by_field_name("left"))
+            rights = _children(container.child_by_field_name("right"))
+        elif container.type == "var_spec":
+            lefts = []
+            rights = []
+            for index, child in enumerate(container.children):
+                field = container.field_name_for_child(index)
+                if field == "name":
+                    lefts.append(child)
+                elif field == "value":
+                    rights.extend(_children(child))
+        else:
+            return False
+        index = next(
+            (
+                i
+                for i, right in enumerate(rights)
+                if right.start_byte <= value.start_byte
+                and value.end_byte <= right.end_byte
+            ),
+            None,
+        )
+        if (
+            index is None
+            or index >= len(lefts)
+            or lefts[index].type != "identifier"
+        ):
+            return False
+        left = lefts[index]
+        binding = self.bindings_by_span.get(self.node_key(left))
+        if binding is None:
+            ref = self.references.get(self.node_key(left))
+            binding = (
+                self.bindings.get(ref.binding_id)
+                if ref is not None
+                else None
+            )
+        return (
+            binding is not None
+            and binding.type is not None
+            and binding.type.kind == "function"
+            and not self._package_level(binding)
+        )
+
     def _struct_argument_field_record_ids(
         self, node: Any
     ) -> tuple[str, ...]:
@@ -13223,6 +13373,18 @@ class _Builder:
         writes = frozenset(
             self.closure_writes.get(callee_id, frozenset())
         )
+        method_field_records = (
+            self.bound_method_field_records.get(callee_id, ())
+            if callee_id is not None
+            else ()
+        )
+        for field_binding_id in method_field_records:
+            captured |= self.closure_captures.get(
+                field_binding_id, frozenset()
+            )
+            writes |= self.closure_writes.get(
+                field_binding_id, frozenset()
+            )
         roots: set[str] = set()
         if (
             function_node is not None
@@ -13242,6 +13404,7 @@ class _Builder:
             or callee_id in self.opaque_callees
             or callee_id in params
             or field_callee
+            or bool(method_field_records)
         )
         target_id = None
         if callee_id_override is None:
@@ -13330,8 +13493,16 @@ class _Builder:
                         star_or_external |= (
                             captures_pointer or star_write or has_call
                         )
-                    for field_binding_id in (
-                        self._struct_argument_field_record_ids(argument)
+                    field_records = (
+                        self._struct_argument_field_record_ids(
+                            argument
+                        )
+                        + self._method_value_field_record_ids(
+                            argument
+                        )
+                    )
+                    for field_binding_id in dict.fromkeys(
+                        field_records
                     ):
                         captured |= self.closure_captures.get(
                             field_binding_id, frozenset()
@@ -17638,6 +17809,9 @@ class _Builder:
             mv_before = dict(self.bound_method_values)
             imv_before = dict(self.bound_interface_methods)
             mv_deps_before = dict(self.bound_method_receiver_deps)
+            mv_fields_before = dict(
+                self.bound_method_field_records
+            )
             writes_before = dict(self.closure_writes)
             star_before = set(self.closure_star_writes)
             calls_before = set(self.closure_inner_calls)
@@ -18661,6 +18835,19 @@ class _Builder:
                             )
                     else:
                         self._drop_bound_method(binding.id)
+                    src_fields = (
+                        mv_fields_before.get(src_id, ())
+                        if src_id is not None
+                        else ()
+                    )
+                    if src_fields:
+                        self.bound_method_field_records[
+                            binding.id
+                        ] = tuple(src_fields)
+                    else:
+                        self.bound_method_field_records.pop(
+                            binding.id, None
+                        )
                     if src_id is not None and src_id in writes_before:
                         self.closure_writes[binding.id] = (
                             writes_before[src_id]
@@ -19005,6 +19192,9 @@ class _Builder:
                 mv_before = dict(self.bound_method_values)
                 imv_before = dict(self.bound_interface_methods)
                 mv_deps_before = dict(self.bound_method_receiver_deps)
+                mv_fields_before = dict(
+                    self.bound_method_field_records
+                )
                 writes_before = dict(self.closure_writes)
                 star_before = set(self.closure_star_writes)
                 calls_before = set(self.closure_inner_calls)
@@ -19914,6 +20104,19 @@ class _Builder:
                                 )
                         else:
                             self._drop_bound_method(binding.id)
+                        src_fields = (
+                            mv_fields_before.get(src_id, ())
+                            if src_id is not None
+                            else ()
+                        )
+                        if src_fields:
+                            self.bound_method_field_records[
+                                binding.id
+                            ] = tuple(src_fields)
+                        else:
+                            self.bound_method_field_records.pop(
+                                binding.id, None
+                            )
                         if (
                             src_id is not None
                             and src_id in pointee_before
@@ -22251,6 +22454,9 @@ class _Builder:
             mv_before = dict(self.bound_method_values)
             imv_before = dict(self.bound_interface_methods)
             mv_deps_before = dict(self.bound_method_receiver_deps)
+            mv_fields_before = dict(
+                self.bound_method_field_records
+            )
             writes_before = dict(self.closure_writes)
             star_before = set(self.closure_star_writes)
             calls_before = set(self.closure_inner_calls)
@@ -24470,6 +24676,28 @@ class _Builder:
                             ] = self.bound_method_receiver_deps.get(
                                 ref.binding_id, frozenset()
                             ) | mv_deps_before[src_id]
+                        field_records = tuple(
+                            dict.fromkeys(
+                                (
+                                    *mv_fields_before.get(
+                                        ref.binding_id, ()
+                                    ),
+                                    *(
+                                        mv_fields_before.get(src_id, ())
+                                        if src_id is not None
+                                        else ()
+                                    ),
+                                )
+                            )
+                        )
+                        if field_records:
+                            self.bound_method_field_records[
+                                ref.binding_id
+                            ] = field_records
+                        else:
+                            self.bound_method_field_records.pop(
+                                ref.binding_id, None
+                            )
                     else:
                         # A func-element container that stayed on
                         # its backing (a self-backing copy like
@@ -24554,6 +24782,19 @@ class _Builder:
                                 )
                         elif not elem_keep:
                             self._drop_bound_method(ref.binding_id)
+                        src_fields = (
+                            mv_fields_before.get(src_id, ())
+                            if src_id is not None
+                            else ()
+                        )
+                        if src_fields:
+                            self.bound_method_field_records[
+                                ref.binding_id
+                            ] = tuple(src_fields)
+                        else:
+                            self.bound_method_field_records.pop(
+                                ref.binding_id, None
+                            )
                         if (
                             src_id is not None
                             and src_id in pointee_before
@@ -24741,6 +24982,7 @@ class _Builder:
                         if mv is not None:
                             self._record_bound_method(
                                 ref.binding_id, mv, params, locals_,
+                                rights[i],
                             )
                         else:
                             self._record_bound_interface_method(
@@ -24760,6 +25002,31 @@ class _Builder:
                             ref.binding_id,
                             conditional or self._may_skip > 0,
                         )
+                        if conditional or self._may_skip > 0:
+                            field_records = tuple(
+                                dict.fromkeys(
+                                    (
+                                        *mv_fields_before.get(
+                                            ref.binding_id, ()
+                                        ),
+                                        *(
+                                            self._method_value_field_record_ids(
+                                                rights[i]
+                                            )
+                                            if mv is not None
+                                            else ()
+                                        ),
+                                    )
+                                )
+                            )
+                            if field_records:
+                                self.bound_method_field_records[
+                                    ref.binding_id
+                                ] = field_records
+                            else:
+                                self.bound_method_field_records.pop(
+                                    ref.binding_id, None
+                                )
                 elif (
                     not compound
                     and ref is not None
@@ -24769,6 +25036,14 @@ class _Builder:
                         ref.binding_id,
                         conditional or self._may_skip > 0,
                     )
+                    if conditional or self._may_skip > 0:
+                        old_field_records = mv_fields_before.get(
+                            ref.binding_id, ()
+                        )
+                        if old_field_records:
+                            self.bound_method_field_records[
+                                ref.binding_id
+                            ] = tuple(old_field_records)
                     self.func_aliases.pop(ref.binding_id, None)
                     rhs_node = (
                         rights[i]
@@ -28204,6 +28479,10 @@ class _Builder:
             value = node.child_by_field_name("value")
             if channel is None or value is None:
                 raise _Unsupported("unsupported_statement", _span(node))
+            if self._method_value_field_record_ids(value):
+                raise _Unsupported(
+                    "unsupported_expression", _span(value)
+                )
             external_queue_elem = self._external_chan_chan_elem_index(
                 channel, params
             )
@@ -28922,6 +29201,13 @@ class _Builder:
         count: list[int],
         depth: int,
     ) -> frozenset[int]:
+        field_records = self._method_value_field_record_ids(node)
+        if field_records and not self._method_value_consumer_is_supported(
+            node
+        ):
+            raise _Unsupported(
+                "unsupported_expression", _span(node)
+            )
         result = self._expression(
             node, fn, params, locals_, transfers, count, depth
         )
@@ -33273,9 +33559,11 @@ class _Builder:
                     )
                 if value.type == "selector_expression":
                     self._queue_func_arg_invocation(value, binding_id)
-            for field_binding_id in self._struct_argument_field_record_ids(
-                argument
-            ):
+            field_records = (
+                self._struct_argument_field_record_ids(argument)
+                + self._method_value_field_record_ids(argument)
+            )
+            for field_binding_id in dict.fromkeys(field_records):
                 actual_values[index] |= self._captured_current_deps(
                     self.closure_captures.get(
                         field_binding_id, frozenset()
@@ -33568,6 +33856,7 @@ class _Builder:
         mv: tuple[str, str | None] | None,
         params: dict[str, int],
         locals_: dict[str, frozenset[int]],
+        method_value_node: Any | None = None,
     ) -> None:
         """Record (or clear) a bound-method record under `bid` and
         FREEZE the receiver's current dep set: a Go method value
@@ -33577,8 +33866,25 @@ class _Builder:
             self._drop_bound_method(bid)
             return
         self.bound_interface_methods.pop(bid, None)
+        self.bound_method_field_records.pop(bid, None)
         self.bound_method_values[bid] = mv
         recv_id = mv[1]
+        if method_value_node is not None:
+            method_value = self._strip_parens(method_value_node)
+            receiver = (
+                method_value.child_by_field_name("operand")
+                if method_value is not None
+                and method_value.type == "selector_expression"
+                else None
+            )
+            if receiver is not None:
+                field_records = (
+                    self._struct_argument_field_record_ids(receiver)
+                )
+                if field_records:
+                    self.bound_method_field_records[bid] = (
+                        tuple(field_records)
+                    )
         if recv_id is None:
             self.bound_method_receiver_deps.pop(bid, None)
             return
@@ -33618,6 +33924,7 @@ class _Builder:
             self._drop_bound_method(bid)
             return
         self.bound_method_values.pop(bid, None)
+        self.bound_method_field_records.pop(bid, None)
         self.bound_interface_methods[bid] = method
         receiver_id = method[0]
         if receiver_id is None:
@@ -33642,6 +33949,7 @@ class _Builder:
         possible writes back into it."""
         old = self.bound_method_values.pop(bid, None)
         old_interface = self.bound_interface_methods.pop(bid, None)
+        self.bound_method_field_records.pop(bid, None)
         self.bound_method_receiver_deps.pop(bid, None)
         if conditional and old is not None and old[1] is not None:
             self.escaped.add(old[1])
@@ -33668,8 +33976,13 @@ class _Builder:
         rebind-time ones, and a captured binding read-only by the old
         literal never becomes a write candidate."""
         if conditional:
+            field_records = self.bound_method_field_records.get(
+                bid, ()
+            )
             self.opaque_callees.add(bid)
             self._drop_bound_method(bid, True)
+            if field_records:
+                self.bound_method_field_records[bid] = field_records
             self.func_aliases.pop(bid, None)
             return
         self.opaque_callees.discard(bid)
@@ -35809,6 +36122,7 @@ class _Builder:
                 and member.type.kind == "function"
             ):
                 bound_id = member.id
+                in_composite = True
         elif (
             name_node is not None
             and name_node.type == "index_expression"
@@ -36171,6 +36485,9 @@ class _Builder:
                 frozen_recv=self.bound_method_receiver_deps.get(
                     ref.binding_id
                 ),
+                field_records=self.bound_method_field_records.get(
+                    ref.binding_id, ()
+                ),
             )
         bound_interface_method = self.bound_interface_methods.get(
             ref.binding_id
@@ -36206,6 +36523,15 @@ class _Builder:
                 transfers, count, depth,
             )
         captured = self.closure_captures.get(ref.binding_id)
+        method_field_records = self.bound_method_field_records.get(
+            ref.binding_id, ()
+        )
+        method_field_captures = frozenset().union(
+            *(
+                self.closure_captures.get(field_binding_id, frozenset())
+                for field_binding_id in method_field_records
+            )
+        )
         # The callee is opaque when it has no captured literal OR when
         # it is a parameter: a branch-bound literal under a param
         # (`if b { f = func()... }`) still leaves the caller's own
@@ -36218,6 +36544,7 @@ class _Builder:
             captured is None
             or ref.binding_id in params
             or ref.binding_id in self.opaque_callees
+            or bool(method_field_records)
         )
         if captured is not None:
             # Resolve each captured binding's deps at the call site —
@@ -36262,7 +36589,8 @@ class _Builder:
                     )
                 )
             )
-            for cbid in (captured or ())
+            for cbid in (captured or frozenset())
+            | method_field_captures
         )
         if ref.binding_id in self.pointee_closures or external:
             # The call may read caller memory — a pointer-captured
@@ -36281,6 +36609,16 @@ class _Builder:
         )
         star_write = ref.binding_id in self.closure_star_writes
         inner_calls = ref.binding_id in self.closure_inner_calls
+        for field_binding_id in method_field_records:
+            writes |= self.closure_writes.get(
+                field_binding_id, frozenset()
+            )
+            star_write |= (
+                field_binding_id in self.closure_star_writes
+            )
+            inner_calls |= (
+                field_binding_id in self.closure_inner_calls
+            )
         if (
             ref.binding_id in self.pointee_closures
             or chan_captured_external
@@ -36317,6 +36655,17 @@ class _Builder:
                 arg, fn, params, locals_, transfers, count, depth + 1
             )
         deps |= arg_deps
+        for field_binding_id in method_field_records:
+            deps |= self._captured_current_deps(
+                self.closure_captures.get(
+                    field_binding_id, frozenset()
+                ),
+                params,
+                locals_,
+            )
+            self._queue_struct_field_invocation(
+                node, node, field_binding_id
+            )
         if captured is not None:
             deps |= self._captured_current_deps(
                 captured, params, locals_
@@ -37572,6 +37921,7 @@ class _Builder:
         count: list[int],
         depth: int,
         frozen_recv: frozenset[int] | None = None,
+        field_records: tuple[str, ...] = (),
     ) -> frozenset[int]:
         """`f(args)` where `f := s.M` / `f := St.M` bound a method.
 
@@ -37665,16 +38015,25 @@ class _Builder:
                 # reads pointee memory, which broadcasts through
                 # `indirect_writes`, not `p`'s own set.
                 recv_deps |= self.indirect_writes
-        actual = (
-            recv_deps,
-            *(
-                self.expression(
-                    arg, fn, params, locals_,
-                    transfers, count, depth + 1,
-                )
-                for arg in arg_args
-            ),
-        )
+        argument_deps = [
+            self.expression(
+                arg, fn, params, locals_,
+                transfers, count, depth + 1,
+            )
+            for arg in arg_args
+        ]
+        for field_binding_id in field_records:
+            recv_deps |= self._captured_current_deps(
+                self.closure_captures.get(
+                    field_binding_id, frozenset()
+                ),
+                params,
+                locals_,
+            )
+            self._queue_struct_field_invocation(
+                node, node, field_binding_id
+            )
+        actual = (recv_deps, *argument_deps)
         callee = self.summarize(method_id)
         if not callee.available:
             reason = (
