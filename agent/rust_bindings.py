@@ -5724,10 +5724,11 @@ class _RustBindings:
                 element,
                 self._receiver_annotation_position(receiver),
             )
-        if method in _SET_ALGEBRA_METHODS:
+        if method in _SET_ALGEBRA_METHODS | _MAP_RANGE_METHODS:
             # `a.union(&b)`/`intersection`/`difference`/
-            # `symmetric_difference` iterate `&P` elements of the
-            # left set — the same element `a.iter()` spells.
+            # `symmetric_difference` and `s.range(..)`/`range_mut`
+            # iterate `&P` elements of the left set — the same
+            # element `a.iter()` spells.
             container_id, args = self._receiver_type(receiver)
             if args is None:
                 return None, None
@@ -6589,6 +6590,7 @@ class _RustBindings:
             or method in _ITER_CHUNK_METHODS
             or method in _ITER_CHUNK_MUT_METHODS
             or method in _SET_ALGEBRA_METHODS
+            or method in _MAP_RANGE_METHODS
             or method in _EXTRACT_IF_METHODS
             or method == "enumerate"
             or method == "zip"
@@ -6653,10 +6655,11 @@ class _RustBindings:
                 _UNKNOWN,
                 None if spelled is None else prefix + spelled,
             )
-        if method in _SET_ALGEBRA_METHODS:
+        if method in _SET_ALGEBRA_METHODS | _MAP_RANGE_METHODS:
             # `a.union(&b)`/`intersection`/`difference`/
-            # `symmetric_difference` yield `&P` elements of the
-            # left set — bind `P` like `a.iter()` does.
+            # `symmetric_difference` and `s.range(..)`/`range_mut`
+            # yield `&P` elements of the left set — bind `P` like
+            # `a.iter()` does.
             container_id, args = self._receiver_type(receiver)
             if args is None:
                 # `type S = HashSet<P>` — the spelled args come
