@@ -35682,6 +35682,13 @@ class _Builder:
                     receiver_deps |= locals_[binding_id]
                 elif binding_id in params:
                     receiver_deps |= frozenset({params[binding_id]})
+        if receiver is not None and self._param_pointer_call_root(
+            receiver, params
+        ):
+            # `p.Get()` on `*lib.S` after `*p = s` — the imported
+            # callee reads caller-shared pointee memory whose
+            # stores broadcast into `indirect_writes`.
+            receiver_deps |= self.indirect_writes
         # A method expression `lib.T.M(recv, args)` carries the
         # receiver as its leading argument — a composite imported var
         # in that slot reads external state like `lib.VS.PF()` does:

@@ -6721,6 +6721,27 @@ def test_callee_pointee_read_observes_prior_writes(
     assert result.return_dependencies == frozenset({0})
 
 
+def test_imported_pointer_receiver_observes_prior_pointee_write(
+    go_types_helper,
+):
+    # `p.PF()` on `*lib.S` after `*p = s` — the imported callee
+    # reads caller-shared pointee memory whose stores broadcast
+    # into `indirect_writes`, so `s` joins the receiver deps.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(p *lib.S, s lib.S) int64 {\n"
+        "\t*p = s\n"
+        "\treturn p.PF()\n"
+        "}\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+
+
 def test_interface_member_method_value_inside_element(
     go_types_helper,
 ):
