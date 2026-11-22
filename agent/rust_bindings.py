@@ -66,6 +66,14 @@ _PRELUDE_TYPE_NAMES = frozenset(
     }
 )
 _PRELUDE_PATTERN_PATHS = frozenset({"Some", "None", "Ok", "Err"})
+# Prelude constructors whose tuple payload position is fixed by the
+# container type — `Some(x)` binds `Option<T>`'s first arg, `Err(e)`
+# binds `Result<T, E>`'s second.
+_PRELUDE_CONTAINER_PAYLOAD = {
+    "Some": ("Option", 0),
+    "Ok": ("Result", 0),
+    "Err": ("Result", 1),
+}
 _INERT_ATTRIBUTES = frozenset(
     {
         "allow",
@@ -3121,10 +3129,15 @@ class _RustBindings:
             if value is None
             else self._receiver_type(value)
         )
+        scrut_name, scrut_position = self._scrutinee_shape(
+            value, scrut_id
+        )
         type_map = (
             {}
             if whole_names
-            else self._pattern_type_map(pattern, scrut_id, scrut_args)
+            else self._pattern_type_map(
+                pattern, scrut_id, scrut_args, scrut_name, scrut_position
+            )
         )
         for name_node, name_mutable in names:
             whole = name_node.id in whole_names
@@ -3412,9 +3425,15 @@ class _RustBindings:
                 if value is None
                 else self._receiver_type(value)
             )
+            scrut_name, scrut_position = self._scrutinee_shape(
+                value, scrut_id
+            )
             return (
                 self._pattern_names(pattern, scope),
-                self._pattern_type_map(pattern, scrut_id, scrut_args),
+                self._pattern_type_map(
+                    pattern, scrut_id, scrut_args,
+                    scrut_name, scrut_position,
+                ),
             )
         if any(node.type == "let_condition" for node in self._descendants(condition)):
             self.gaps.append(Gap("unsupported_syntax", self.span(condition)))
@@ -3549,7 +3568,8 @@ class _RustBindings:
             )
             names = self._pattern_names(pattern, arm_scope)
             type_map = self._pattern_type_map(
-                pattern, scrut_id, scrut_args
+                pattern, scrut_id, scrut_args,
+                *self._scrutinee_shape(value, scrut_id),
             )
             self._bind_pattern_names(
                 names, arm_scope, self.span(arm), type_map=type_map
@@ -3716,13 +3736,25 @@ class _RustBindings:
         return fields
 
     def _pattern_head_payload(
-        self, head: Any | None, scrut_id: str, scrut_args: str | None
+        self,
+        head: Any | None,
+        scrut_id: str | None,
+        scrut_args: str | None,
+        scrut_name: str | None = None,
+        scrut_position: int | None = None,
     ) -> "list[tuple[str | None, str | None]] | None":
         """Positional [(type id, args)] for `W(..)` / `E::V(..)`
         heads — None when the head does not name the scrutinee."""
         record = self._pattern_head_record(head, scrut_id)
         if record is None:
-            return None
+            if scrut_id is not None or scrut_position is None:
+                # A resolved scrutinee (a user `enum Option`) does
+                # not reach the prelude path, and prelude payloads
+                # need the annotation position to resolve args.
+                return None
+            return self._prelude_pattern_payload(
+                head, scrut_name, scrut_args, scrut_position
+            )
         container = (
             record
             if record.binding.id == scrut_id
@@ -3743,27 +3775,130 @@ class _RustBindings:
             if child.type != "visibility_modifier"
         ]
 
+    def _annotation_head_name(self, node: Any | None) -> str | None:
+        """Head type name of an annotation — `Option<P>` gives
+        "Option"; a scoped `m::Option` returns None (prelude gating
+        needs the unqualified name)."""
+        while node is not None and node.type in {
+            "reference_type",
+            "generic_type",
+            "generic_type_with_turbofish",
+            "return_type",
+        }:
+            node = node.child_by_field_name("type")
+        if node is not None and node.type in {
+            "identifier",
+            "type_identifier",
+        }:
+            return self._normalize_identifier(self.text(node))
+        return None
+
+    def _type_head_name(
+        self, type_id: str | None, args: str | None
+    ) -> str | None:
+        """Head name of a (type id, args) pair — the record's name,
+        or the spelled head when the type stayed unresolvable
+        (`Vec<P>`'s args carry "Option<P>" for nesting)."""
+        if type_id is not None:
+            record = self.records.get(type_id)
+            if record is not None:
+                return record.binding.name
+            return None
+        if args is None:
+            return None
+        match = re.match(r"[A-Za-z_]\w*", args.strip())
+        return None if match is None else match.group(0)
+
+    def _scrutinee_shape(
+        self, value: Any | None, scrut_id: str | None
+    ) -> "tuple[str | None, int | None]":
+        """(head name, annotation position) of the scrutinee's
+        declared type — `opt` in `match opt` reads `opt`'s
+        annotation (`Option<P>` → ("Option", <pos>)). The position
+        is where the type was written, so spelled args resolve
+        against the names visible there, not the pattern's scope."""
+        if scrut_id is not None:
+            record = self.records.get(scrut_id)
+            return (
+                (None, None)
+                if record is None
+                else (record.binding.name, None)
+            )
+        node = value
+        while node is not None and node.type == "reference_expression":
+            node = next(iter(node.named_children), None)
+        if node is None or node.type != "identifier":
+            return None, None
+        record = self._lookup(
+            self._normalize_identifier(self.text(node)),
+            node.start_byte,
+            "value",
+        )
+        if record is None:
+            return None, None
+        position = (
+            None
+            if record.type_node is None
+            else record.type_node.start_byte
+        )
+        return self._annotation_head_name(record.type_node), position
+
+    def _prelude_pattern_payload(
+        self,
+        head: Any | None,
+        scrut_name: str | None,
+        scrut_args: str | None,
+        scrut_position: int,
+    ) -> "list[tuple[str | None, str | None]] | None":
+        """Positional payload for a prelude constructor
+        (`Some(x)`/`Ok(x)`/`Err(e)`) when the scrutinee's declared
+        container is the matching prelude type — `Option<P>` lets
+        `Some(p)` bind `p` to `P`. A head that resolves to a real
+        record or names a different container stays unpinned."""
+        if head is None or head.type not in {"identifier", "type_identifier"}:
+            return None
+        entry = _PRELUDE_CONTAINER_PAYLOAD.get(
+            self._normalize_identifier(self.text(head))
+        )
+        if entry is None or scrut_name != entry[0]:
+            return None
+        args = self._type_arg_list(scrut_args or "")
+        if entry[1] >= len(args):
+            return None
+        # The spelled arg refers to names visible where the
+        # scrutinee's type was annotated — resolving at the pattern
+        # position would pick up a same-named shadow.
+        type_id, fargs = self._spelled_type(
+            args[entry[1]], scrut_position
+        )
+        return [(type_id, fargs)]
+
     def _pattern_type_map(
         self,
         pattern: Any | None,
         scrut_id: str | None,
         scrut_args: str | None,
+        scrut_name: str | None = None,
+        scrut_position: int | None = None,
     ) -> dict:
         """start_byte -> (TypeFact, args) for the names a destructuring
         pattern binds, resolved against the scrutinee's declared
         type — `match e { E::V(p) => ... }` types `p` by V's payload;
         a name the shape cannot pin is simply absent."""
-        if pattern is None or scrut_id is None:
+        if pattern is None or (scrut_id is None and scrut_name is None):
             return {}
         kind = pattern.type
         if kind in {"identifier", "self"}:
             name = self._normalize_identifier(self.text(pattern))
-            return {
-                pattern.start_byte: (
-                    TypeFact("named", name, 0, None, scrut_id),
-                    scrut_args,
-                )
-            }
+            # An unresolvable scrutinee (`Option<P>` has no record)
+            # still carries its args — the fact stays `unknown` so
+            # no null type_id is emitted.
+            fact = (
+                TypeFact("named", name, 0, None, scrut_id)
+                if scrut_id is not None
+                else _UNKNOWN
+            )
+            return {pattern.start_byte: (fact, scrut_args)}
         if kind in {"ref_pattern", "mut_pattern"}:
             inner = next(
                 (
@@ -3773,26 +3908,36 @@ class _RustBindings:
                 ),
                 None,
             )
-            return self._pattern_type_map(inner, scrut_id, scrut_args)
+            return self._pattern_type_map(
+                inner, scrut_id, scrut_args, scrut_name, scrut_position
+            )
         if kind == "captured_pattern":
             mapping: dict = {}
             for child in self._children(pattern):
                 mapping.update(
-                    self._pattern_type_map(child, scrut_id, scrut_args)
+                    self._pattern_type_map(
+                        child, scrut_id, scrut_args,
+                        scrut_name, scrut_position,
+                    )
                 )
             return mapping
         if kind == "or_pattern":
             # Each alternative binds the same names — typing the
             # first one covers the arm.
             inner = next(iter(self._children(pattern)), None)
-            return self._pattern_type_map(inner, scrut_id, scrut_args)
+            return self._pattern_type_map(
+                inner, scrut_id, scrut_args, scrut_name, scrut_position
+            )
         if kind in {"match_pattern", "condition"}:
             mapping = {}
             for child in self._children(pattern):
                 if child.type in {"binary_expression", "call_expression"}:
                     continue
                 mapping.update(
-                    self._pattern_type_map(child, scrut_id, scrut_args)
+                    self._pattern_type_map(
+                        child, scrut_id, scrut_args,
+                        scrut_name, scrut_position,
+                    )
                 )
             return mapping
         if kind == "struct_pattern":
@@ -3823,7 +3968,11 @@ class _RustBindings:
                         else (None, None)
                     )
                     mapping.update(
-                        self._pattern_type_map(bound, tid, fargs)
+                        self._pattern_type_map(
+                            bound, tid, fargs,
+                            self._type_head_name(tid, fargs),
+                            scrut_position,
+                        )
                     )
                     continue
                 if fname_node is not None and field_type is not None:
@@ -3839,7 +3988,7 @@ class _RustBindings:
         if kind == "tuple_struct_pattern":
             head = pattern.child_by_field_name("type")
             payload = self._pattern_head_payload(
-                head, scrut_id, scrut_args
+                head, scrut_id, scrut_args, scrut_name, scrut_position
             )
             if payload is None:
                 return {}
@@ -3870,7 +4019,11 @@ class _RustBindings:
                     continue
                 tid, fargs = payload[position]
                 mapping.update(
-                    self._pattern_type_map(child, tid, fargs)
+                    self._pattern_type_map(
+                        child, tid, fargs,
+                        self._type_head_name(tid, fargs),
+                        scrut_position,
+                    )
                 )
             return mapping
         return {}

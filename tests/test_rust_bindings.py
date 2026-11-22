@@ -3446,13 +3446,14 @@ fn f(w: W<P>) {
     assert _call(report, source, "f.m()").target == method.id
 
 
-def test_prelude_variant_payload_stays_opaque():
-    # `Option`'s variants are prelude names — `Some(p)` leaves `p`
-    # unpinned rather than guessing a payload type.
+def test_prelude_variant_payload_stays_opaque_through_alias():
+    # Prelude gating needs the spelled container name — `type O =
+    # Option<P>` hides it, so `Some(p)` on `O` stays unpinned.
     source = """
 struct P;
+type O = Option<P>;
 impl P { fn m(&self) {} }
-fn f(o: Option<P>) {
+fn f(o: O) {
     match o { Some(p) => p.m(), None => {} }
 }
 """
@@ -3927,3 +3928,157 @@ mod outer {
         if source[c.span.start:c.span.end] == "p.m()"
     )
     assert call.target == method.id
+
+
+def test_prelude_some_pattern_binds_option_element():
+    # `match opt { Some(p) => p.m() }` types `p` as Option's element —
+    # the prelude constructor's payload is pinned by the scrutinee's
+    # declared container.
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn f(opt: Option<P>) {
+    match opt { Some(p) => p.m(), None => {} }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = next(b for b in report.bindings if b.name == "m")
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "p.m()"
+    )
+    assert call.target == method.id
+
+
+def test_prelude_ok_err_patterns_bind_result_args():
+    # `Ok(p)` binds Result's first arg, `Err(e)` its second — each
+    # element keeps its declared position.
+    source = """
+struct P;
+struct E;
+impl P { fn m(&self) {} }
+impl E { fn n(&self) {} }
+fn f(r: Result<P, E>) {
+    match r { Ok(p) => p.m(), Err(e) => e.n() }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = next(b for b in report.bindings if b.name == "m")
+    n = next(b for b in report.bindings if b.name == "n")
+    by_text = {
+        source[c.span.start:c.span.end]: c for c in report.calls
+    }
+    assert by_text["p.m()"].target == m.id
+    assert by_text["e.n()"].target == n.id
+
+
+def test_prelude_pattern_in_let_while_and_let_else():
+    # `if let Some(p)`, `while let Ok(p)` and `let Some(p) = ... else`
+    # all pin the payload through the same scrutinee typing.
+    source = """
+struct P;
+struct E;
+impl P { fn m(&self) {} }
+fn f(opt: Option<P>, r: Result<P, E>) {
+    if let Some(p) = opt { p.m(); }
+    while let Ok(q) = r { q.m(); }
+    let Some(s) = opt else { return };
+    s.m();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = next(b for b in report.bindings if b.name == "m")
+    for text in ("p.m()", "q.m()", "s.m()"):
+        call = next(
+            c for c in report.calls
+            if source[c.span.start:c.span.end] == text
+        )
+        assert call.target == method.id
+
+
+def test_prelude_pattern_stays_opaque_on_wrong_container():
+    # `Some(x)` only pins Option's element — on `Vec<P>` (or an
+    # undeclared scrutinee) the payload name stays untyped.
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn f(v: Vec<P>, mystery: Undeclared) {
+    match v { Some(bad) => bad.m(), _ => {} }
+    match mystery { Some(unknown) => unknown.m(), _ => {} }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    for text in ("bad.m()", "unknown.m()"):
+        call = next(
+            c for c in report.calls
+            if source[c.span.start:c.span.end] == text
+        )
+        assert call.target == ""
+
+
+def test_bare_match_arm_on_prelude_container_keeps_valid_type_fact():
+    # `match opt { x => }` on `Option<P>` binds `x` with an `unknown`
+    # fact (no record exists for Option) — never a null type_id.
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn f(o: Option<P>) {
+    match o { x => x.m(), _ => {} }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "x.m()"
+    )
+    assert call.target == ""
+    assert all(
+        isinstance(b.to_dict()["type"]["type_id"], str)
+        for b in report.bindings
+        if isinstance(b.to_dict().get("type"), dict)
+        and "type_id" in b.to_dict()["type"]
+    )
+
+
+def test_user_defined_option_keeps_payload_unpinned():
+    # A user `enum Option` whose `Some` doesn't resolve at the
+    # pattern must not be typed by the std prelude payload.
+    source = """
+struct P;
+struct Q;
+impl Q { fn m(&self) {} }
+enum Option<T> { Some(Q, T), None }
+fn f(o: Option<P>) {
+    match o { Some(q, _) => q.m(), None => {} }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "q.m()"
+    )
+    assert call.target == ""
+
+
+def test_prelude_payload_args_resolve_at_annotation_scope():
+    # `o: Option<P>`'s `P` is the outer declaration — a `struct P`
+    # shadowing it inside the body must not capture `Some(p)`'s
+    # payload type.
+    source = """
+struct P;
+impl P { fn outer(&self) {} }
+fn f(o: Option<P>) {
+    struct P;
+    impl P { fn inner(&self) {} }
+    match o { Some(p) => p.outer(), None => {} }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    outer = next(b for b in report.bindings if b.name == "outer")
+    inner = next(b for b in report.bindings if b.name == "inner")
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "p.outer()"
+    )
+    assert call.target == outer.id
+    assert call.target != inner.id
