@@ -9754,8 +9754,12 @@ receiver's declared type the same way, so directives also apply to
 array elements (`values[0].add`), member chains (`coin.v.add`), call
 returns (`getTotal().add`) and chained library calls
 (`total.add(1).sub(2)`); receivers whose type cannot be named
-statically (mappings, nested arrays, function-typed returns) keep
-their opaque treatment. When `x.f(...)` is a
+statically (nested mappings, nested arrays, function-typed returns)
+keep their opaque treatment. `mapping(K => V)` index access is
+V-typed — `balances[msg.sender].add(1)` binds the extension and a
+public mapping getter (`this.balances(k).add(1)`) peels the same
+way; a mapping value that is itself a mapping or otherwise unnamed
+keeps the position opaque. When `x.f(...)` is a
 call, member overloads and all applicable `using` extensions form a
 single candidate set resolved by argument types — the extension's
 first (receiver) parameter is skipped, literal ints/bools/strings
@@ -9774,7 +9778,7 @@ reports
 emits a `read` reference like any other type name. The aliased
 form `using {f as g} for T` fails parse at the grammar level, so the
 whole source stays fail-closed rather than resolving half of it.
-Nested arrays, mappings, member objects on non-contract types,
+Nested arrays, nested mappings, member objects on non-contract types,
 function-typed returns (`returns (function() ...)`), function-typed
 variables, array `new` expressions and non-call member positions
 (`x.f` as a value, where a lone candidate binds by name only) keep

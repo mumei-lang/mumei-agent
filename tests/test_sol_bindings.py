@@ -2023,7 +2023,7 @@ contract Vault {
     assert _text(source, sub_calls[0].span) == "sub"
 
 
-def test_using_on_mapping_index_stays_opaque():
+def test_using_on_mapping_index_value_binds():
     source = """
 library SafeMath {
     function add(uint256 a, uint256 b) internal pure returns (uint256) {}
@@ -2035,12 +2035,57 @@ contract Vault {
 }
 """
     report = build_sol_bindings(source)
+    # `balances[k]` is uint256-typed, so the `using` extension applies
+    # — solc binds `add` to SafeMath.add.
+    add = next(b for b in report.bindings if b.name == "add")
+    assert any(
+        ref.binding_id == add.id and ref.kind == "call"
+        for ref in report.references
+    )
+    assert report.calls[0].kind == "direct_local"
+
+
+def test_using_on_nested_mapping_value_stays_opaque():
+    source = """
+library SafeMath {
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {}
+}
+contract Vault {
+    using SafeMath for uint256;
+    mapping(address => mapping(uint256 => uint256)) nested;
+    function run() external { nested[msg.sender][0].add(1); }
+}
+"""
+    report = build_sol_bindings(source)
+    # `nested[k1]` is itself a mapping — the second index has no
+    # named type text, so the position keeps its opaque treatment.
     add = next(b for b in report.bindings if b.name == "add")
     assert not any(
         ref.binding_id == add.id and ref.kind == "call"
         for ref in report.references
     )
     assert report.calls[0].kind == "opaque_member"
+
+
+def test_using_on_public_mapping_getter_binds_value_type():
+    source = """
+library SafeMath {
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {}
+}
+contract Vault {
+    using SafeMath for uint256;
+    mapping(address => uint256) public balances;
+    function run() external { this.balances(msg.sender).add(1); }
+}
+"""
+    # `this.balances(k)` returns the mapping's value type — the
+    # `uint256` extension applies.
+    report = build_sol_bindings(source)
+    add = next(b for b in report.bindings if b.name == "add")
+    assert any(
+        ref.binding_id == add.id and ref.kind == "call"
+        for ref in report.references
+    )
 
 
 def test_using_not_applied_to_struct_getter_tuple():
@@ -2517,7 +2562,7 @@ contract Vault {
     )
 
 
-def test_member_call_on_mapping_index_stays_opaque():
+def test_member_call_on_mapping_index_value_binds():
     source = """
 contract Token {
     function transfer(address to, uint256 amount) external {}
@@ -2530,13 +2575,42 @@ contract Vault {
 }
 """
     report = build_sol_bindings(source)
+    # `byId[k]` is Token-typed — the member call binds like an array
+    # element's.
     transfer = next(
         binding
         for binding in report.bindings
         if binding.name == "transfer"
     )
-    assert not any(
-        ref.binding_id == transfer.id for ref in report.references
+    assert any(
+        ref.binding_id == transfer.id and ref.kind == "call"
+        for ref in report.references
+    )
+    assert any(
+        call.kind == "direct_local" and call.target == transfer.id
+        for call in report.calls
+    )
+
+
+def test_member_call_on_mapping_struct_field_binds():
+    source = """
+struct Coin { uint256 v; }
+contract Vault {
+    mapping(uint256 => Coin) coins;
+    function run() external returns (uint256) {
+        return coins[0].v;
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    field = next(
+        binding
+        for binding in report.bindings
+        if binding.name == "v"
+    )
+    assert any(
+        ref.binding_id == field.id and ref.kind == "read"
+        for ref in report.references
     )
 
 

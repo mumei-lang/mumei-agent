@@ -114,8 +114,7 @@ def _assert_rejected(envelope, source, *, raw=None):
             + ["lexical_missing"]
             + ["agree"] * 18
             + ["builtin"] * 2
-            + ["lexical_missing"]
-            + ["agree"] * 4,
+            + ["agree"] * 5,
         ),
     ],
 )
@@ -621,9 +620,7 @@ def test_member_access_declarations_match_lexical_member_bindings():
             "v",
         }
     ]
-    assert [item["status"] for item in member_items] == ["agree"] * 24 + [
-        "lexical_missing"
-    ]
+    assert [item["status"] for item in member_items] == ["agree"] * 25
     for item in member_items:
         if item["status"] != "agree":
             continue

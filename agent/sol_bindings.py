@@ -1099,11 +1099,20 @@ class _SolBindings:
             base_record = self._object_record(base)
             if base_record is None or base_record.type_node is None:
                 return None
+            type_node = base_record.type_node
             text = re.sub(
                 r"\b(memory|calldata|storage)\b",
                 "",
-                self.text(base_record.type_node),
+                self.text(type_node),
             )
+            # `mapping(K => V)` indexes to V (a nested mapping still
+            # has no member surface downstream).
+            mapping_value = self._mapping_value_type_text(text)
+            if mapping_value is not None:
+                return mapping_value
+            if text.strip() == "bytes":
+                # `b[i]` on dynamic bytes yields a `bytes1`.
+                return "bytes1"
             element = re.sub(r"\[[^\]]*\]\s*$", "", text).strip()
             if element == text.strip() or "[" in element:
                 return None
@@ -1147,6 +1156,14 @@ class _SolBindings:
                         if child.type == "call_argument"
                     )
                     for _ in range(args):
+                        mapping_value = self._mapping_value_type_text(
+                            text
+                        )
+                        if mapping_value is not None:
+                            # `this.balances(k)` returns the mapping's
+                            # value type.
+                            text = mapping_value
+                            continue
                         stripped = re.sub(
                             r"\[[^\]]*\]\s*$", "", text
                         ).strip()
@@ -1195,8 +1212,8 @@ class _SolBindings:
         """`using Lib for T` candidates for `obj.name`: the object's
         declared type text must equal the directive's `for` target, or
         the directive must be `for *`. Objects whose type cannot be
-        named statically (mappings, nested arrays, function-typed
-        returns) keep their opaque treatment.
+        named statically (nested mappings, nested arrays,
+        function-typed returns) keep their opaque treatment.
         """
         declared = self._object_declared_type(obj)
         if declared is None:
@@ -1616,16 +1633,64 @@ class _SolBindings:
                 return self._lookup_type_record(root, obj.start_byte, None)
         return None
 
+    @staticmethod
+    def _mapping_value_type_text(text: str) -> str | None:
+        """`mapping(K => V)` → `V`; the `=>` separator is found at
+        paren depth one. Anything else returns None.
+        """
+        text = text.strip()
+        if not text.startswith("mapping"):
+            return None
+        depth = 0
+        for index, char in enumerate(text):
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+            elif (
+                char == "="
+                and depth == 1
+                and text[index : index + 2] == "=>"
+            ):
+                return text[index + 2 :].rstrip(")").strip()
+        return None
+
     def _array_element_type_record(
         self, record: _Record | None
     ) -> _Record | None:
         if record is None or record.type_node is None:
             return None
+        if self.text(record.type_node).lstrip().startswith("mapping"):
+            # `m[k]` on `mapping(K => V)` is V-typed; the value type is
+            # the `type_name` child after `=>`. A nested mapping value
+            # has no member surface.
+            value_node = next(
+                (
+                    child
+                    for child in self.children(record.type_node)
+                    if child.type == "type_name"
+                ),
+                None,
+            )
+            if value_node is None:
+                return None
+            resolved = self._type_record_for_type_node(
+                value_node, record.owner
+            )
+            if resolved is not None and resolved.binding.kind in {
+                "contract",
+                "interface",
+                "library",
+                "struct",
+                "enum",
+            }:
+                return resolved
+            return None
         text = re.sub(
             r"\b(memory|calldata|storage)\b", "", self.text(record.type_node)
         )
         # Strip one array dimension; anything left that still indexes
-        # (nested arrays, mappings) has no member surface.
+        # (nested arrays) has no member surface.
         element = re.sub(r"\[[^\]]*\]\s*$", "", text).strip()
         if element == text.strip() or "[" in element:
             return None
