@@ -33216,22 +33216,6 @@ class _Builder:
                 # caller-shared pointee memory whose stores
                 # broadcast into `indirect_writes`.
                 receiver_deps |= self.indirect_writes
-            for field_binding_id in self._struct_argument_field_record_ids(
-                receiver_node
-            ):
-                # `s.Run()` runs the callee's `s.F()` — the receiver's
-                # func-typed fields carry their closure records like a
-                # struct passed as an argument (#1212).
-                receiver_deps |= self._captured_current_deps(
-                    self.closure_captures.get(
-                        field_binding_id, frozenset()
-                    ),
-                    params,
-                    locals_,
-                )
-                self._queue_struct_field_invocation(
-                    node, receiver_node, field_binding_id
-                )
             if isinstance(receiver_deps, frozenset):
                 # A receiver's value can reach an argument-position
                 # callback too — `st.M(G)` calling `g(st.V)` — so
@@ -33309,6 +33293,25 @@ class _Builder:
                     actual_values[index] = self._chan_group_read_deps(
                         root_id, locals_
                     )
+        if receiver_node is not None:
+            for field_binding_id in self._struct_argument_field_record_ids(
+                receiver_node
+            ):
+                # `s.Run()` runs the callee's `s.F()` — the receiver's
+                # func-typed fields carry their closure records like a
+                # struct passed as an argument (#1212). Resolving the
+                # captures AFTER the arguments keeps a captured binding
+                # an argument updated (`s.Run(bump(&v, x))`) current.
+                receiver_deps |= self._captured_current_deps(
+                    self.closure_captures.get(
+                        field_binding_id, frozenset()
+                    ),
+                    params,
+                    locals_,
+                )
+                self._queue_struct_field_invocation(
+                    node, receiver_node, field_binding_id
+                )
         actual = tuple(actual_values)
         if receiver_deps is not None:
             actual = (receiver_deps, *actual)

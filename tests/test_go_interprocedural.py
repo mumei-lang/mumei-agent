@@ -54450,3 +54450,40 @@ def test_receiver_struct_field_closure_records(
     result = named(*unit(go_types_helper, declarations))
     assert result.available, result.gaps
     assert result.return_dependencies == expected
+
+
+def test_receiver_field_captures_see_post_argument_updates(go_types_helper):
+    # `s.Run(bump(&v, x))` — the closure reads `v` when the callee
+    # runs it, i.e. AFTER the argument evaluated, so the receiver's
+    # field captures resolve past the argument's write.
+    declarations = (
+        "func bump(p *int64, x int64) int64 { *p = x; return 0 }\n"
+        "type S struct { F func() int64 }\n"
+        "func (s S) Run(_ int64) int64 { return s.F() }\n"
+        "func F(s S, x int64, y int64) int64 {\n"
+        "\tv := y\n"
+        "\ts.F = func() int64 { return v }\n"
+        "\treturn s.Run(bump(&v, x))\n}\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1, 2})
+
+
+def test_deferred_method_named_result_observes_exit_writes(go_types_helper):
+    # `defer s.Run()` runs at exit, after `return` fixed the named
+    # result — the deferred field write still lands on `w`.
+    declarations = (
+        "type S struct { F func(); V int64 }\n"
+        "func (s S) Run() { s.F() }\n"
+        "func F(x int64, y int64) (w int64) {\n"
+        "\tvar s S\n"
+        "\tv := y\n"
+        "\ts.F = func() { w = v }\n"
+        "\tdefer s.Run()\n"
+        "\tv = x\n"
+        "\treturn\n}\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
