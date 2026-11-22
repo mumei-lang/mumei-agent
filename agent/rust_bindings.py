@@ -2518,6 +2518,32 @@ class _RustBindings:
                         if -len(elements) <= index < len(elements)
                         else None
                     )
+                    if self.text(field).strip() == "and":
+                        # `Option::and<U>(self, optb: Option<U>)`
+                        # yields the ARGUMENT's payload, not the
+                        # receiver's — spell `u`'s args instead.
+                        arg_list = node.child_by_field_name(
+                            "arguments"
+                        )
+                        named = (
+                            []
+                            if arg_list is None
+                            else [
+                                c
+                                for c in arg_list.named_children
+                            ]
+                        )
+                        if not named:
+                            element = None
+                        else:
+                            _, arg_args = self._receiver_type(
+                                named[0]
+                            )
+                            element = (
+                                None
+                                if arg_args is None
+                                else arg_args.strip()
+                            )
                     if element:
                         return None, prefix + element
                 if (
