@@ -1019,9 +1019,13 @@ class _RustBindings:
             member = self._field_member(
                 node, ("struct_field", "associated_const")
             )
-            if member is None:
-                return None, None
-            return self._record_type(member, node.start_byte)
+            if member is not None:
+                return self._record_type(member, node.start_byte)
+            element = self._tuple_element_node(
+                node.child_by_field_name("value"),
+                node.child_by_field_name("field"),
+            )
+            return self._annotation_type(element)
         if node.type == "call_expression":
             callee = node.child_by_field_name("function")
             callee = None if callee is None else self._callee(callee)
@@ -1050,6 +1054,52 @@ class _RustBindings:
                 return function.result.type_id, None
             return self._annotation_type(member.type_node)
         return None, None
+
+    def _receiver_type_node(self, node: Any | None) -> Any | None:
+        """Annotation node of the receiver's declared type, if any."""
+        if node is None:
+            return None
+        if node.type in {"identifier", "self"}:
+            record = self._lookup(
+                self._normalize_identifier(self.text(node)),
+                node.start_byte,
+                "value",
+            )
+            return None if record is None else record.type_node
+        if node.type == "field_expression":
+            member = self._field_member(
+                node, ("struct_field", "associated_const")
+            )
+            if member is not None:
+                return member.type_node
+            return self._tuple_element_node(
+                node.child_by_field_name("value"),
+                node.child_by_field_name("field"),
+            )
+        return None
+
+    def _tuple_element_node(
+        self, value_node: Any | None, field_node: Any | None
+    ) -> Any | None:
+        """Element annotation node of `value.index` on a tuple type.
+
+        Tuple fields have no named member to bind, but the element's
+        declared type still types member chains (`t.1.m()`)."""
+        if field_node is None:
+            return None
+        text = self.text(field_node).strip()
+        if not text.isdigit():
+            return None
+        type_node = self._receiver_type_node(value_node)
+        while type_node is not None and type_node.type == "reference_type":
+            type_node = type_node.child_by_field_name("type")
+        if type_node is None or type_node.type != "tuple_type":
+            return None
+        elements = self._children(type_node)
+        index = int(text)
+        if index >= len(elements):
+            return None
+        return elements[index]
 
     @staticmethod
     def _member_call_kind(record: _Record) -> str:
