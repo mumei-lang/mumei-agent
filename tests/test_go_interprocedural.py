@@ -52814,6 +52814,50 @@ def test_reslice_bind_negative_controls(go_types_helper, declarations, expected)
             "\treturn 0\n}\n",
             frozenset({0, 1, 2}),
         ),
+        # A struct element bound by the comma-ok pair keeps the
+        # element share: a write into the map element's collection
+        # after the read is observed through the bound name —
+        # like the single-name `e := p.M[k]` bind.
+        (
+            "type E struct { V int64; A []int64 }\n"
+            "type S struct { M map[int64]E }\n"
+            "func F(p *S, k int64, x int64) int64 {\n"
+            "\te, _ := p.M[k]\n"
+            "\tp.M[k].A[0] = x\n"
+            "\treturn e.A[0]\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # Same share through the `var` and assignment forms.
+        (
+            "type E struct { V int64; A []int64 }\n"
+            "type S struct { M map[int64]E }\n"
+            "func F(p *S, k int64, x int64) int64 {\n"
+            "\tvar e, _ = p.M[k]\n"
+            "\tp.M[k].A[0] = x\n"
+            "\treturn e.A[0]\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        (
+            "type E struct { V int64; A []int64 }\n"
+            "type S struct { M map[int64]E }\n"
+            "func F(p *S, k int64, x int64) int64 {\n"
+            "\te := E{}\n"
+            "\te, _ = p.M[k]\n"
+            "\tp.M[k].A[0] = x\n"
+            "\treturn e.A[0]\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # The reverse direction — a write through the bound name
+        # is observed reading the map element afterwards.
+        (
+            "type E struct { V int64; A []int64 }\n"
+            "type S struct { M map[int64]E }\n"
+            "func F(p *S, k int64, x int64) int64 {\n"
+            "\te, _ := p.M[k]\n"
+            "\te.A[0] = x\n"
+            "\treturn p.M[k].A[0]\n}\n",
+            frozenset({0, 1, 2}),
+        ),
     ],
 )
 def test_map_field_comma_ok_read(go_types_helper, declarations, expected):

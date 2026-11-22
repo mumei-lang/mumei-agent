@@ -17058,6 +17058,20 @@ class _Builder:
                 )
                 for i in range(len(lefts))
             ]
+            # A comma-ok pair `e, ok := p.M[k]` binds the element
+            # value to the FIRST name — it takes the same
+            # element-extraction share and container-field binding
+            # the single-name `e := p.M[k]` does; the flag name
+            # carries only the read's deps.
+            comma_ok_rhs = (
+                rights[0]
+                if len(lefts) != len(rights)
+                and len(rights) == 1
+                and self._comma_ok_container_field_map(
+                    rights[0], len(lefts), params
+                )
+                else None
+            )
             for i, (lhs, value) in enumerate(zip(lefts, values)):
                 # `_` discards its value — the RHS was still evaluated.
                 if lhs.text == b"_":
@@ -17086,9 +17100,15 @@ class _Builder:
                 )
                 element_snapshot = (
                     self._struct_element_container_snapshot(
-                        rights[i], params
+                        (
+                            rights[i]
+                            if len(lefts) == len(rights)
+                            else comma_ok_rhs
+                        ),
+                        params,
                     )
                     if len(lefts) == len(rights)
+                    or (i == 0 and comma_ok_rhs is not None)
                     else None
                 )
                 target_struct = self._struct_value_fact(binding.type)
@@ -17782,7 +17802,9 @@ class _Builder:
                         binding.id, None
                     )
                 extract_rhs = (
-                    rights[i] if len(lefts) == len(rights) else None
+                    rights[i]
+                    if len(lefts) == len(rights)
+                    else (comma_ok_rhs if i == 0 else None)
                 )
                 if (
                     extract_rhs is not None
@@ -17842,7 +17864,7 @@ class _Builder:
                     (
                         rights[i]
                         if len(lefts) == len(rights)
-                        else None
+                        else (comma_ok_rhs if i == 0 else None)
                     ),
                     params,
                     conditional=conditional,
@@ -18204,6 +18226,19 @@ class _Builder:
                     ]
                 else:
                     values = [frozenset() for _ in names]
+                # See the short-declaration store loop: a comma-ok
+                # `var e, ok = p.M[k]` binds the element value to
+                # the FIRST name — it takes the container-field
+                # binding the single-name form does.
+                comma_ok_rhs = (
+                    value_nodes[0]
+                    if len(names) != len(value_nodes)
+                    and len(value_nodes) == 1
+                    and self._comma_ok_container_field_map(
+                        value_nodes[0], len(names), params
+                    )
+                    else None
+                )
                 # See the short-declaration store loop: tuple values
                 # evaluate against the pre-state, so copies read the
                 # capture maps as they were before any store.
@@ -19004,7 +19039,7 @@ class _Builder:
                         (
                             value_nodes[i]
                             if len(names) == len(value_nodes)
-                            else None
+                            else (comma_ok_rhs if i == 0 else None)
                         ),
                         params,
                         conditional=conditional,
@@ -21603,7 +21638,20 @@ class _Builder:
                 int, tuple[frozenset, dict[str, frozenset]]
             ] = {}
             struct_rhs_element_snapshots: set[int] = set()
-            if not compound and len(lefts) == len(rights):
+            # `e, ok = p.M[k]` binds the element value to the FIRST
+            # LHS name — its struct snapshot comes from the single
+            # RHS the same way `e = p.M[k]` does.
+            comma_ok_multi = (
+                not compound
+                and len(lefts) != len(rights)
+                and len(rights) == 1
+                and self._comma_ok_container_field_map(
+                    rights[0], len(lefts), params
+                )
+            )
+            if not compound and (
+                len(lefts) == len(rights) or comma_ok_multi
+            ):
                 for rhs_index, rhs in enumerate(rights):
                     snapshot_rhs = rhs
                     while (
@@ -22793,7 +22841,11 @@ class _Builder:
                                 (
                                     rights[i]
                                     if len(lefts) == len(rights)
-                                    else None
+                                    else (
+                                        rights[0]
+                                        if i == 0 and comma_ok_multi
+                                        else None
+                                    )
                                 ),
                                 params,
                                 conditional=(
