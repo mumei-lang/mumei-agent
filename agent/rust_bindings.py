@@ -3321,9 +3321,27 @@ class _RustBindings:
             scope = _Scope(body, self.module_depth, self.current_function)
             self.scopes.append(scope)
             names = self._pattern_names(pattern, scope)
+            single = pattern
+            # `for mut p in v` still binds one identifier — `mut` only
+            # marks the binding writable. `ref p` binds `&T`, not `T`,
+            # so it stays unpinned here.
+            while (
+                single is not None
+                and single.type == "mut_pattern"
+            ):
+                # `mutable_specifier` is also a named child — pick the
+                # nested pattern node.
+                single = next(
+                    (
+                        child
+                        for child in self._children(single)
+                        if child.type != "mutable_specifier"
+                    ),
+                    None,
+                )
             if (
-                pattern is not None
-                and pattern.type == "identifier"
+                single is not None
+                and single.type == "identifier"
                 and len(names) == 1
             ):
                 element_fact, element_args = self._for_element(iterator)

@@ -3698,3 +3698,40 @@ fn f(v: Vec<W<u8>>) {
         if source[c.span.start:c.span.end] == "w.m()"
     )
     assert call.target == method.id
+
+
+def test_for_loop_mutable_binding_keeps_element_type():
+    # `for mut p in v` still binds one identifier — `mut` only marks
+    # it writable, so `p.m()` resolves.
+    source = """
+struct P { x: i32 }
+impl P { fn m(&self) {} }
+fn f(v: Vec<P>) {
+    for mut p in v { p.m(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = next(b for b in report.bindings if b.name == "m")
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "p.m()"
+    )
+    assert call.target == method.id
+
+
+def test_for_loop_ref_binding_stays_opaque():
+    # `for ref p in v` binds `&P`, not `P` — the pattern is left
+    # unpinned rather than guessing the reference's target.
+    source = """
+struct P { x: i32 }
+impl P { fn m(&self) {} }
+fn f(v: Vec<P>) {
+    for ref p in v { p.m(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "p.m()"
+    )
+    assert call.target == ""
