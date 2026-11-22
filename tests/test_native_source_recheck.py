@@ -121,6 +121,7 @@ def test_rechecked_run_selects_output(tmp_path, capsys):
     assert "candidate" not in report
     assert "recheck" not in report
 
+
 def test_exit_one_publishes_lineage_without_claimed_outcome(
     tmp_path, capsys
 ):

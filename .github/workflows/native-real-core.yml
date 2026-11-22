@@ -21,7 +21,7 @@ on:
       - agent/metrics.py
       - agent/observe_tests.py
       - agent/proliferate*.py
-      - agent/strategies.py
+      - agent/strategies/**
       - agent/test_harvest.py
       - agent/verify_recheck*.py
       - agent/verify_schedule.py
