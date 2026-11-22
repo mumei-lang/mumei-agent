@@ -1,14 +1,16 @@
 """C11 Core-acceptance fold route: evaluate a Core acceptance descriptor.
 
 `evidence-acceptance-eval` is a consumer route: it restores one declared
-Core acceptance descriptor (`mumei.source-evidence-acceptance/v1`,
-`mumei.native-evidence-acceptance/v1`, or the conjunctive
-`mumei.evidence-requirement-list-acceptance/v1`, emitted by the Core
-`accept-*` commands) and emits `mumei.core-acceptance-evaluation/v1` —
+Core acceptance descriptor — `mumei.source-evidence-acceptance/v1`,
+`mumei.native-evidence-acceptance/v1`, or a requirement-evaluated
+verdict shape (`mumei.evidence-acceptance/v1`,
+`mumei.evidence-list-acceptance/v1`,
+`mumei.evidence-requirement-list-acceptance/v1`), emitted by the Core
+`accept*` commands — and emits `mumei.core-acceptance-evaluation/v1`:
 whether the document is a closed-shape member of the known descriptor
 family (`descriptor_match`) and whether it is `accepted` (matching AND
 the descriptor itself declared `accepted: true`, or
-`verdict: "accepted"` on the conjunctive shape).
+`verdict: "accepted"` on a verdict shape).
 
 Representation-level evaluation only: the route performs no Core check,
 no fresh query and no semantic evaluation — `checks_not_performed` names
@@ -47,7 +49,9 @@ def build_eval_parser(parser: argparse.ArgumentParser) -> None:
         metavar="PATH",
         help="Declared Core acceptance descriptor JSON "
         "(mumei.source-evidence-acceptance/v1, "
-        "mumei.native-evidence-acceptance/v1 or "
+        "mumei.native-evidence-acceptance/v1, "
+        "mumei.evidence-acceptance/v1, "
+        "mumei.evidence-list-acceptance/v1 or "
         "mumei.evidence-requirement-list-acceptance/v1)."
     )
     parser.add_argument(

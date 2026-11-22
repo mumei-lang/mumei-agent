@@ -680,6 +680,50 @@ _REQUIREMENT_LIST_ACCEPTANCE_PIN_SCHEMAS = {
 
 _ACCEPTANCE_VERDICTS = frozenset({"accepted", "rejected", "inconclusive"})
 
+# The single-requirement descriptor `evidence accept --requirement`
+# emits over one record: a flat verdict document pinning the record by
+# `evidence_fingerprint`.
+EVIDENCE_ACCEPTANCE_SCHEMA = "mumei.evidence-acceptance/v1"
+
+_EVIDENCE_ACCEPTANCE_REQUIRED_FIELDS = frozenset(
+    {
+        "schema_version",
+        "acceptance",
+        "verdict",
+        "requirement_schema_version",
+        "requirement_fingerprint",
+        "evidence_schema_version",
+        "evidence_fingerprint",
+        "checks",
+        "checks_performed",
+        "checks_not_performed",
+    }
+)
+
+# The record-list variant `evidence accept-list --requirement` emits:
+# per-record verdicts plus the consistency report, pinning the list
+# bytes by `list_fingerprint`.
+EVIDENCE_LIST_ACCEPTANCE_SCHEMA = "mumei.evidence-list-acceptance/v1"
+
+_EVIDENCE_LIST_ACCEPTANCE_REQUIRED_FIELDS = frozenset(
+    {
+        "schema_version",
+        "acceptance",
+        "verdict",
+        "requirement_schema_version",
+        "requirement_fingerprint",
+        "evidence_schema_version",
+        "list_fingerprint",
+        "consistent",
+        "conflict_count",
+        "conflicts",
+        "records_evaluated",
+        "records",
+        "checks_performed",
+        "checks_not_performed",
+    }
+)
+
 
 def _string_list(value: object) -> bool:
     return type(value) is list and all(type(item) is str for item in value)
@@ -751,6 +795,63 @@ def _consistency_conflict_match(value: object) -> bool:
     )
 
 
+def _evidence_acceptance_match(descriptor: dict) -> bool:
+    """Closed-shape membership for `mumei.evidence-acceptance/v1` —
+    `evidence accept --requirement` over a single record."""
+    return (
+        frozenset(descriptor) == _EVIDENCE_ACCEPTANCE_REQUIRED_FIELDS
+        and descriptor["schema_version"] == EVIDENCE_ACCEPTANCE_SCHEMA
+        and descriptor["acceptance"] == "evaluated"
+        and _verdict(descriptor["verdict"])
+        and descriptor["requirement_schema_version"]
+        == "mumei.evidence-requirement/v1"
+        and _is_fingerprint(descriptor["requirement_fingerprint"])
+        and descriptor["evidence_schema_version"]
+        == "mumei.verification-evidence/v1"
+        and _is_fingerprint(descriptor["evidence_fingerprint"])
+        and type(descriptor["checks"]) is list
+        and all(
+            _acceptance_check_match(check)
+            for check in descriptor["checks"]
+        )
+        and _string_list(descriptor["checks_performed"])
+        and _string_list(descriptor["checks_not_performed"])
+    )
+
+
+def _evidence_list_acceptance_match(descriptor: dict) -> bool:
+    """Closed-shape membership for `mumei.evidence-list-acceptance/v1` —
+    `evidence accept-list --requirement` over a record-list envelope."""
+    return (
+        frozenset(descriptor) == _EVIDENCE_LIST_ACCEPTANCE_REQUIRED_FIELDS
+        and descriptor["schema_version"] == EVIDENCE_LIST_ACCEPTANCE_SCHEMA
+        and descriptor["acceptance"] == "evaluated"
+        and _verdict(descriptor["verdict"])
+        and descriptor["requirement_schema_version"]
+        == "mumei.evidence-requirement/v1"
+        and _is_fingerprint(descriptor["requirement_fingerprint"])
+        and descriptor["evidence_schema_version"]
+        == "mumei.verification-evidence-list/v1"
+        and _is_fingerprint(descriptor["list_fingerprint"])
+        and type(descriptor["consistent"]) is bool
+        and _nonnegative_int(descriptor["conflict_count"])
+        and type(descriptor["conflicts"]) is list
+        and all(
+            _consistency_conflict_match(conflict)
+            for conflict in descriptor["conflicts"]
+        )
+        and _nonnegative_int(descriptor["records_evaluated"])
+        and type(descriptor["records"]) is list
+        and all(
+            _acceptance_record_match(record)
+            for record in descriptor["records"]
+        )
+        and _string_list(descriptor["checks_performed"])
+        and _string_list(descriptor["checks_not_performed"])
+    )
+
+
+
 def _requirement_list_acceptance_match(descriptor: dict) -> bool:
     """Closed-shape membership for the conjunctive acceptance descriptor.
 
@@ -796,6 +897,15 @@ def _requirement_list_acceptance_match(descriptor: dict) -> bool:
     )
 
 
+# Verdict-shaped acceptance descriptors (requirement-evaluated), keyed
+# by schema so the flat source/native shapes stay the default family.
+_VERDICT_ACCEPTANCE_MATCHERS = {
+    EVIDENCE_ACCEPTANCE_SCHEMA: _evidence_acceptance_match,
+    EVIDENCE_LIST_ACCEPTANCE_SCHEMA: _evidence_list_acceptance_match,
+    REQUIREMENT_LIST_ACCEPTANCE_SCHEMA: _requirement_list_acceptance_match,
+}
+
+
 def evaluate_core_acceptance(
     descriptor: dict, expected_fingerprint: str | None = None
 ) -> dict:
@@ -832,29 +942,38 @@ def evaluate_core_acceptance(
     attempt (`descriptor_authenticity` and
     `unperformed_check_recovery` stay unperformed).
 
-    The conjunctive `mumei.evidence-requirement-list-acceptance/v1`
-    descriptor (Core `evidence accept --requirement-list`, exported by
-    `evidence-check-schedule --promote`) is a second member of the
-    family with its own closed shape: `verdict` replaces the Boolean
-    `accepted` (`accepted` in the evaluation holds only for
-    `verdict == "accepted"`), and exactly one pin field names the
-    evaluated input — `evidence_fingerprint` pairs with
+    Three requirement-evaluated verdict shapes form a second family —
+    `mumei.evidence-acceptance/v1` (`evidence accept --requirement`
+    over one record), `mumei.evidence-list-acceptance/v1`
+    (`evidence accept-list --requirement` over a record-list envelope)
+    and the conjunctive
+    `mumei.evidence-requirement-list-acceptance/v1`
+    (`evidence accept --requirement-list`, exported by
+    `evidence-check-schedule --promote`). Each has its own closed
+    shape: `verdict` replaces the Boolean `accepted` (`accepted` in
+    the evaluation holds only for `verdict == "accepted"`), and the
+    pin naming the evaluated input must pair with the matching
+    `evidence_schema_version` — `evidence_fingerprint` with
     `mumei.verification-evidence/v1`, `list_fingerprint` with
-    `mumei.verification-evidence-list/v1`. `attempt_bound` still
-    compares `expected_fingerprint` to `evidence_fingerprint`, so a
-    list-pinned descriptor honestly reports `attempt_bound: false` —
-    it pins record-list bytes, not one record."""
+    `mumei.verification-evidence-list/v1` (the conjunctive shape admits
+    exactly one of the two). `attempt_bound` still compares
+    `expected_fingerprint` to `evidence_fingerprint`, so a list-pinned
+    descriptor honestly reports `attempt_bound: false` — it pins
+    record-list bytes, not one record."""
     if type(descriptor) is not dict:
         raise ValueError("unsupported core acceptance evaluation request")
     if expected_fingerprint is not None and not _is_fingerprint(
         expected_fingerprint
     ):
         raise ValueError("invalid expected evidence fingerprint")
-    conjunctive = descriptor.get("schema_version") == (
-        REQUIREMENT_LIST_ACCEPTANCE_SCHEMA
+    schema = descriptor.get("schema_version")
+    verdict_matcher = (
+        _VERDICT_ACCEPTANCE_MATCHERS.get(schema)
+        if type(schema) is str
+        else None
     )
-    if conjunctive:
-        match = _requirement_list_acceptance_match(descriptor)
+    if verdict_matcher is not None:
+        match = verdict_matcher(descriptor)
     else:
         fields = frozenset(descriptor)
         match = (
@@ -876,7 +995,7 @@ def evaluate_core_acceptance(
         )
     declared_accepted = (
         descriptor.get("verdict") == "accepted"
-        if conjunctive
+        if verdict_matcher is not None
         else descriptor.get("accepted") is True
     )
     evaluation = {
@@ -1637,6 +1756,11 @@ _BINDING_CARRIERS: dict = {
     # carries `list_fingerprint` instead and so binds no single record —
     # a missing carrier is an honest miss, never an error.
     REQUIREMENT_LIST_ACCEPTANCE_SCHEMA: "evidence_fingerprint",
+    # The single-requirement accept descriptor pins the record it
+    # evaluated by the same `evidence_fingerprint` convention; the
+    # record-list variant (`mumei.evidence-list-acceptance/v1`) carries
+    # only `list_fingerprint` and so is deliberately not a carrier.
+    EVIDENCE_ACCEPTANCE_SCHEMA: "evidence_fingerprint",
     # `recheck-source --json` emits the same binding convention — the
     # diagnostic stays anonymous and non-reusable, but its fingerprint
     # pins the consistency verdict to the record it was derived from.

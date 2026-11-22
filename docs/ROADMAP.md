@@ -9462,3 +9462,35 @@ canonical 上位ロードマップは mumei `docs/CROSS_PROJECT_ROADMAP.md` の 
    の拡張であり、`checks_not_performed` は不変。
 
 **回帰ゲート**: `uv run pytest tests/test_evidence_acceptance_eval.py tests/test_binding_eval.py tests/test_contract_vocabulary.py tests/test_mcp_evidence_tools.py -q`
+
+## C11 evidence-acceptance-eval: requirement-evaluated verdict 記述子 family 完結 — ✅ Implemented
+
+canonical 上位ロードマップは mumei `docs/CROSS_PROJECT_ROADMAP.md` の C11。
+前スライスの conjunctive 記述子に続き、Core `accept*` が emit する残りの
+verdict 形状を family に追加して coverage を完結させた。
+
+**実装エビデンス**:
+
+1. **`mumei.evidence-acceptance/v1`** — `evidence accept --requirement` が
+   単一レコードに対して emit する verdict 記述子。閉じた形状（pin は
+   `evidence_fingerprint` 固定、`evidence_schema_version` は
+   `mumei.verification-evidence/v1` 固定、flat `checks` リスト）を
+   `_evidence_acceptance_match` で判定。`_BINDING_CARRIERS` にも登録し
+   `binding-eval` の `shared:` bind-path が解決する。
+2. **`mumei.evidence-list-acceptance/v1`** — `evidence accept-list
+   --requirement` が record-list envelope に対して emit。pin は
+   `list_fingerprint` 固定、`records` は conjunctive と同じ閉じた
+   `{index, verdict, checks}` 形状、consistency 報告（`consistent` /
+   `conflict_count` / `conflicts`）を内包。record pin を持たないため
+   carrier には登録しない（`attempt_bound: false` を正直に報告）。
+3. **dispatch の一般化** — `evaluate_core_acceptance` は `schema_version`
+   で verdict-matcher テーブル（`_VERDICT_ACCEPTANCE_MATCHERS`）に分岐し、
+   flat source/native pair は従来経路のまま。評価の `accepted` は verdict
+   形状では `verdict == "accepted"`、flat 形状では `accepted is True`。
+   verdict 語彙 `{accepted, rejected, inconclusive}` の厳密判定は family
+   全体で共有（`_verdict`）。
+4. **実出力 golden fixture** — 実 mumei（debug build）が emit した
+   `accept --requirement` / `accept-list --requirement` の記述子を
+   `tests/fixtures/` に保存し、手書き fixture との drift を防ぐ回帰面にした。
+
+**回帰ゲート**: `uv run pytest tests/test_evidence_acceptance_eval.py tests/test_binding_eval.py tests/test_contract_vocabulary.py tests/test_mcp_evidence_tools.py -q`
