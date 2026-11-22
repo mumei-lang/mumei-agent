@@ -3237,6 +3237,38 @@ class _RustBindings:
             return spelled, self._receiver_annotation_position(
                 receiver
             )
+        if method == "split_at":
+            container_id, args = self._receiver_type(receiver)
+            if args is None:
+                return None, None
+            container_name = (
+                next(
+                    (
+                        b.name
+                        for b in self.bindings
+                        if b.id == container_id
+                    ),
+                    None,
+                )
+                if container_id is not None
+                else None
+            )
+            if (
+                container_id is not None
+                and container_name not in _INDEX_ELEMENT_CONTAINERS
+            ):
+                # A custom `W<P>` can `Deref` to a different
+                # element — `w.split_at(i)` yields `&[Q]` there.
+                return None, None
+            spelled = args.strip() or None
+            if spelled is None:
+                return None, None
+            # `v.split_at(i)` yields `(&[P], &[P])` — a pair of
+            # borrowed slices that feeds the tuple-pattern path.
+            return (
+                f"(&{spelled}, &{spelled})",
+                self._receiver_annotation_position(receiver),
+            )
         if method in _ITER_CHUNK_METHODS:
             container_id, args = self._receiver_type(receiver)
             if args is None:
@@ -3599,10 +3631,7 @@ class _RustBindings:
                 elem_id, rest = None, "&" + args.strip()
             else:
                 elem_id, rest = self._element_of(
-                    container_id,
-                    args.strip(),
-                    position,
-                    self._literal_element_args(receiver),
+                    container_id, args.strip(), position
                 )
         elif (index := _MAP_ELEMENT_METHODS.get(method)) is not None:
             if not self._is_map_container(container_id, receiver):
@@ -6134,14 +6163,10 @@ class _RustBindings:
                         else pattern.start_byte
                     ),
                 )
-                if borrowed and re.match(
-                    r"^&\s*(?:mut\s+)?\[", element.strip()
-                ):
-                    # `&[P]` is a spelled borrow of a slice, not the
-                    # payload itself — keep it as the bound name's
-                    # args so `a[0]`/`a.iter()` read through the
-                    # borrow. `&P`/`&mut P` keep the resolved `P`:
-                    # member calls auto-deref to it.
+                if borrowed:
+                    # `&P` is a spelled borrow, not the payload
+                    # itself — keep it as the bound name's args so
+                    # `a[0]`/`a.iter()` read through the borrow.
                     tid = None
                     fargs = element.strip()
                 # The container head is the element's own spelling —
