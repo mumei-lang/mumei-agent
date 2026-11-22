@@ -32573,10 +32573,11 @@ def test_nonreference_struct_arguments_with_records_stay_closed(
         "\treturn x\n"
         "}\n",
     )
-    for name in ("FromCall", "FromIndex"):
-        result = named(*data, name=name)
-        assert not result.available
-        assert result.gaps
+    call_result = named(*data, name="FromCall")
+    assert not call_result.available
+    index_result = named(*data, name="FromIndex")
+    assert index_result.available, index_result.gaps
+    assert index_result.return_dependencies == frozenset({0})
 
 
 def test_struct_arguments_without_recorded_func_fields_keep_behavior(
@@ -54916,12 +54917,18 @@ def test_slice_array_function_field_argument_boundaries(go_types_helper):
     indexed_result = named_package(
         files, snapshot, summaries, "FIndexedArg"
     )
-    assert not indexed_result.available
-    for function_name in ("FMapCall", "FMapStore", "FElementCopy"):
+    assert indexed_result.available, indexed_result.gaps
+    assert indexed_result.return_dependencies == frozenset({0, 1})
+    for function_name in ("FMapCall", "FMapStore"):
         result = named_package(
             files, snapshot, summaries, function_name
         )
         assert not result.available, function_name
+    element_copy = named_package(
+        files, snapshot, summaries, "FElementCopy"
+    )
+    assert element_copy.available, element_copy.gaps
+    assert element_copy.return_dependencies == frozenset({0, 1})
     pointer_call = named_package(
         files, snapshot, summaries, "FPointerCall"
     )
@@ -54933,6 +54940,230 @@ def test_slice_array_function_field_argument_boundaries(go_types_helper):
     param = named_package(files, snapshot, summaries, "FParam")
     assert param.available, param.gaps
     assert param.return_dependencies == frozenset({0})
+
+
+def test_alias_free_slice_array_struct_element_copies(go_types_helper):
+    declarations = (
+        "type S struct { F func() int64; V int64 }\n"
+        "type W struct { F func() }\n"
+        "type SS []S\n"
+        "type A struct { B []int64; F func() int64 }\n"
+        "type P struct { B *int64; F func() int64 }\n"
+        "type N struct { V int64 }\n"
+        "func ap(cb func() int64) int64 { return cb() }\n"
+        "func use(s S) int64 { return s.F() }\n"
+        "func (s S) Run() int64 { return s.F() }\n"
+        "func FCall(x, y int64) int64 {\n"
+        "\tv := y; ss := make([]S, 1)\n"
+        "\tss[0].F = func() int64 { return v }; e := ss[0]\n"
+        "\tv = x; return e.F()\n"
+        "}\n"
+        "func FLiteral(x, y int64) int64 {\n"
+        "\tv := y; ss := []S{{F: func() int64 { return v }}}\n"
+        "\te := ss[0]; v = x; return e.F()\n"
+        "}\n"
+        "func FVar(x, y int64) int64 {\n"
+        "\tv := y; ss := make([]S, 1)\n"
+        "\tss[0].F = func() int64 { return v }; var e S = ss[0]\n"
+        "\tv = x; return e.F()\n"
+        "}\n"
+        "func FAssign(x, y int64) int64 {\n"
+        "\tv := y; ss := make([]S, 1); var e S\n"
+        "\tss[0].F = func() int64 { return v }; e = ss[0]\n"
+        "\tv = x; return e.F()\n"
+        "}\n"
+        "func FSimultaneous(x, y int64) int64 {\n"
+        "\tv := y; ss := make([]S, 1); var e, e2 S\n"
+        "\tss[0].F = func() int64 { return v }\n"
+        "\te, e2 = ss[0], ss[0]; v = x\n"
+        "\treturn e.F() + e2.F()\n"
+        "}\n"
+        "func FIndex(x, y int64, i int) int64 {\n"
+        "\tv := y; ss := make([]S, 2)\n"
+        "\tss[i].F = func() int64 { return v }; e := ss[i]\n"
+        "\tv = x; return e.F()\n"
+        "}\n"
+        "func FExtract(x, y int64) int64 {\n"
+        "\tv := y; ss := make([]S, 1)\n"
+        "\tss[0].F = func() int64 { return v }; e := ss[0]\n"
+        "\tf := e.F; v = x; return f()\n"
+        "}\n"
+        "func FCallback(x, y int64) int64 {\n"
+        "\tv := y; ss := make([]S, 1)\n"
+        "\tss[0].F = func() int64 { return v }; e := ss[0]\n"
+        "\tv = x; return ap(e.F)\n"
+        "}\n"
+        "func FArgument(x, y int64) int64 {\n"
+        "\tv := y; ss := make([]S, 1)\n"
+        "\tss[0].F = func() int64 { return v }; e := ss[0]\n"
+        "\tv = x; return use(e)\n"
+        "}\n"
+        "func FMethod(x, y int64) int64 {\n"
+        "\tv := y; ss := make([]S, 1)\n"
+        "\tss[0].F = func() int64 { return v }; e := ss[0]\n"
+        "\tv = x; return e.Run()\n"
+        "}\n"
+        "func FWrite(x int64) int64 {\n"
+        "\tw := int64(0); ws := make([]W, 1)\n"
+        "\tws[0].F = func() { w = x }; e := ws[0]\n"
+        "\te.F(); return w\n"
+        "}\n"
+        "func FDefer(x int64) (r int64) {\n"
+        "\tws := make([]W, 1); ws[0].F = func() { r = x }\n"
+        "\te := ws[0]; defer e.F(); return 0\n"
+        "}\n"
+        "func FArray(x, y int64) int64 {\n"
+        "\tv := y; var a [2]S\n"
+        "\ta[0].F = func() int64 { return v }; e := a[0]\n"
+        "\tv = x; return e.F()\n"
+        "}\n"
+        "func FNamed(x, y int64) int64 {\n"
+        "\tv := y; ss := SS{{F: func() int64 { return v }}}\n"
+        "\te := ss[0]; v = x; return e.F()\n"
+        "}\n"
+        "func FParameterCopy(ss []S) int64 {\n"
+        "\te := ss[0]; return e.F()\n"
+        "}\n"
+        "func FParameterUse(ss []S) int64 { return use(ss[0]) }\n"
+        "func FParameterReturn(ss []S) S { return ss[0] }\n"
+        "func FValue(x, y int64) int64 {\n"
+        "\tv := y; ss := make([]S, 1)\n"
+        "\tss[0].V = x; ss[0].F = func() int64 { return v }\n"
+        "\te := ss[0]; return e.V\n"
+        "}\n"
+        "func FReseat(x, y int64) int64 {\n"
+        "\tv := y; ss := make([]S, 1)\n"
+        "\tss[0].F = func() int64 { return v }; e := ss[0]\n"
+        "\tss[0].F = func() int64 { return x }; return e.F()\n"
+        "}\n"
+        "func FRange(x, y int64) int64 {\n"
+        "\tv := y; ss := make([]S, 1)\n"
+        "\tss[0].F = func() int64 { return v }; r := int64(0)\n"
+        "\tfor _, e := range ss { v = x; r = e.F() }; return r\n"
+        "}\n"
+        "func FPointerElement(x, y int64) int64 {\n"
+        "\tv := y; ps := []*S{&S{}}\n"
+        "\tps[0].F = func() int64 { return v }; v = x\n"
+        "\treturn ps[0].F()\n"
+        "}\n"
+        "func FMapElement(x, y int64) int64 {\n"
+        "\tv := y; m := map[int]S{0: {F: func() int64 { return v }}}\n"
+        "\te := m[0]; v = x; return e.F()\n"
+        "}\n"
+        "func FNoFunction(x, y int64) int64 {\n"
+        "\tns := make([]N, 1); ns[0].V = x\n"
+        "\te := ns[0]; return e.V + y\n"
+        "}\n"
+        "func FAliasField(x int64) int64 {\n"
+        "\tas := []A{{B: []int64{0}}}; e := as[0]\n"
+        "\te.B[0] = x; return as[0].B[0]\n"
+        "}\n"
+        "func FPointerField(ps []P) int64 {\n"
+        "\te := ps[0]; return e.F()\n"
+        "}\n"
+        "func FMultiIndex(ss [][]S) int64 {\n"
+        "\te := ss[0][0]; return e.F()\n"
+        "}\n"
+    )
+    files = {"a.go": "package p\n" + declarations}
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    expected = {
+        "FCall": frozenset({0, 1}),
+        "FLiteral": frozenset({0, 1}),
+        "FVar": frozenset({0, 1}),
+        "FAssign": frozenset({0, 1}),
+        "FSimultaneous": frozenset({0, 1}),
+        "FIndex": frozenset({0, 1, 2}),
+        "FExtract": frozenset({0, 1}),
+        "FCallback": frozenset({0, 1}),
+        "FArgument": frozenset({0, 1}),
+        "FMethod": frozenset({0, 1}),
+        "FWrite": frozenset({0}),
+        "FDefer": frozenset({0}),
+        "FArray": frozenset({0, 1}),
+        "FNamed": frozenset({0, 1}),
+        "FParameterCopy": frozenset({0}),
+        "FParameterUse": frozenset({0}),
+        "FParameterReturn": frozenset({0}),
+        "FNoFunction": frozenset({0, 1}),
+        "FRange": frozenset({0, 1}),
+        "FPointerElement": frozenset({0, 1}),
+    }
+    for function_name, dependencies in expected.items():
+        result = named_package(
+            files, snapshot, summaries, function_name
+        )
+        assert result.available, (function_name, result.gaps)
+        assert result.return_dependencies == dependencies, function_name
+    value = named_package(files, snapshot, summaries, "FValue")
+    assert value.available, value.gaps
+    assert 0 in value.return_dependencies
+    reseat = named_package(files, snapshot, summaries, "FReseat")
+    assert reseat.available, reseat.gaps
+    assert 1 in reseat.return_dependencies
+    for function_name in (
+        "FMapElement",
+        "FAliasField",
+        "FPointerField",
+        "FMultiIndex",
+    ):
+        result = named_package(
+            files, snapshot, summaries, function_name
+        )
+        assert not result.available, (function_name, result.gaps)
+
+
+def test_returned_structs_resolve_current_func_field_captures(
+    go_types_helper,
+):
+    files = {
+        "a.go": (
+            "package p\n"
+            "type S struct { F func() int64 }\n"
+            "func RetElem(x, y int64) S {\n"
+            "\tv := y; ss := make([]S, 1)\n"
+            "\tss[0].F = func() int64 { return v }; v = x\n"
+            "\treturn ss[0]\n"
+            "}\n"
+            "func RetLocal(x, y int64) S {\n"
+            "\tv := y; var s S\n"
+            "\ts.F = func() int64 { return v }; v = x\n"
+            "\treturn s\n"
+            "}\n"
+            "func RetCopy(x, y int64) S {\n"
+            "\tv := y; ss := make([]S, 1)\n"
+            "\tss[0].F = func() int64 { return v }; e := ss[0]\n"
+            "\tv = x; return e\n"
+            "}\n"
+            "func RetSlice(x, y int64) []S {\n"
+            "\tv := y; ss := make([]S, 1)\n"
+            "\tss[0].F = func() int64 { return v }; v = x\n"
+            "\treturn ss\n"
+            "}\n"
+            "func RetNamed(x, y int64) (r S) {\n"
+            "\tv := y; r.F = func() int64 { return v }; v = x\n"
+            "\treturn\n"
+            "}\n"
+        )
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    for function_name in (
+        "RetElem",
+        "RetLocal",
+        "RetCopy",
+        "RetSlice",
+        "RetNamed",
+    ):
+        result = named_package(
+            files, snapshot, summaries, function_name
+        )
+        assert result.available, (function_name, result.gaps)
+        assert result.return_dependencies == frozenset({0, 1}), (
+            function_name,
+            result.return_dependencies,
+        )
 
 
 def test_named_collection_elided_struct_function_fields(go_types_helper):
