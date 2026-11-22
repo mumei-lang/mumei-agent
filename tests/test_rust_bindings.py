@@ -3798,3 +3798,87 @@ fn f() { let x = P::new(); }
     report = build_rust_bindings(source, pointer_width=64)
     call = _call(report, source, "P::new()")
     assert call.kind == "opaque_path"
+
+
+def test_use_target_resolves_at_declaration_scope():
+    # `use m::P` resolves `m` where the import is declared — an
+    # inner same-named `mod m` at the call site does not redirect.
+    source = """
+mod m { pub struct P; impl P { pub fn new() -> P { P } } }
+use m::P;
+fn main() { mod m { pub struct P; } let x = P::new(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    p = next(
+        b for b in report.bindings
+        if b.name == "new" and b.kind == "associated_function"
+    )
+    call = _call(report, source, "P::new()")
+    assert call.target == p.id
+
+
+def test_use_target_trait_alias_resolves_impl_members_and_ufcs():
+    source = """
+mod m { pub trait Tr { fn m(&self); } }
+use m::Tr as Q;
+struct P;
+impl Q for P { fn m(&self) {} }
+fn f(p: P) { p.m(); <P as Q>::m(&p); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    impl_m = next(
+        b for b in report.bindings
+        if b.name == "m"
+        and b.span.start == source.rindex("fn m(&self) {}") + 3
+    )
+    assert _call(report, source, "p.m()").target == impl_m.id
+    assert _call(report, source, "<P as Q>::m(&p)").target == impl_m.id
+
+
+def test_use_target_trait_default_via_alias():
+    source = """
+mod m { pub trait Tr { fn m(&self) {} } }
+use m::Tr as Q;
+struct P;
+impl Q for P {}
+fn f(p: P) { p.m(); <P as Q>::m(&p); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    default_m = next(
+        b for b in report.bindings
+        if b.name == "m"
+        and b.span.start == source.index("fn m(&self) {}") + 3
+    )
+    assert _call(report, source, "p.m()").target == default_m.id
+    assert (
+        _call(report, source, "<P as Q>::m(&p)").target == default_m.id
+    )
+
+
+def test_use_target_unresolvable_external_trait_keeps_impl_members():
+    # `use ext::Trait` — `ext` cannot be resolved, but the imported
+    # name is still the trait the impl matches against.
+    source = """
+use ext::Trait;
+struct P;
+impl Trait for P { fn m(&self) {} }
+fn f(p: P) { p.m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = next(b for b in report.bindings if b.name == "m")
+    assert _call(report, source, "p.m()").target == m.id
+
+
+def test_use_target_prefers_the_type_namespace_for_annotations():
+    source = """
+mod m {
+    pub struct P;
+    impl P { pub fn new() -> P { P } }
+    pub const P: i32 = 0;
+}
+use m::P;
+fn f() { let x: P = P::new(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    new = next(b for b in report.bindings if b.name == "new")
+    assert _call(report, source, "P::new()").target == new.id
