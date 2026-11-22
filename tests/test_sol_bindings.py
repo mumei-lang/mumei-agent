@@ -1659,6 +1659,49 @@ contract Vault {
     )
 
 
+def test_member_call_on_function_pointer_stays_opaque():
+    source = """
+contract Token {
+    function transfer(address to, uint256 amount) external {}
+}
+contract Vault {
+    function(Token) external returns (Token) cb;
+    function run(Token t) external {
+        cb(t).transfer(address(0), 1);
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    transfer = next(
+        binding
+        for binding in report.bindings
+        if binding.name == "transfer"
+    )
+    assert not any(
+        ref.binding_id == transfer.id for ref in report.references
+    )
+
+
+def test_member_on_new_dynamic_array_stays_opaque():
+    source = """
+contract Token {
+    function length() external {}
+}
+contract Vault {
+    function run() external {
+        new Token[](1).length;
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    length = next(
+        binding for binding in report.bindings if binding.name == "length"
+    )
+    assert not any(
+        ref.binding_id == length.id for ref in report.references
+    )
+
+
 def test_member_call_on_mapping_index_stays_opaque():
     source = """
 contract Token {

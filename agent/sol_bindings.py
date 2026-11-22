@@ -949,6 +949,9 @@ class _SolBindings:
                 ),
                 None,
             )
+            if type_name is not None and "[" in self.text(type_name):
+                # `new Token[](1)` yields an array, not a contract.
+                return None
             root = self._root_type_name(type_name)
             if root:
                 return self._lookup_type_record(root, obj.start_byte, None)
@@ -986,10 +989,13 @@ class _SolBindings:
             # contract itself.
             return self.contracts.get(record.binding.name)
         if record.binding.kind != "function":
-            if record.type_node is not None:
+            if record.type_node is not None and not re.match(
+                r"\s*function\b", self.text(record.type_node)
+            ):
                 # Getter-style call on a declared variable, e.g.
                 # `this.token().f()` — the value has the variable's
-                # declared type.
+                # declared type. Function-typed variables (`cb(t)`)
+                # would root at the signature's first identifier.
                 return self._contract_for_type_node(
                     record.type_node, record.owner
                 )
