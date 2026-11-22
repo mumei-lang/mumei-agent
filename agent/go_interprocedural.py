@@ -30544,8 +30544,11 @@ class _Builder:
                 )
                 if (
                     receiver_binding is not None
-                    and self._struct_collection_members(
-                        receiver_binding.type, receiver_binding
+                    and (
+                        receiver_binding.type.kind in {"slice", "map"}
+                        or self._struct_collection_members(
+                            receiver_binding.type, receiver_binding
+                        )
                     )
                 ):
                     write_args.append(receiver_node)

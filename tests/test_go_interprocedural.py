@@ -50324,6 +50324,32 @@ def test_imported_opaque_call_writes_through_addressable_operands(
         assert all(call.receiver_pointer is True for call in method_calls)
 
 
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        (
+            "type B []int64\n"
+            "func (b B) Set(v int64) { b[0] = v }\n"
+            "func F(x int64) int64 { b := B{0}; b.Set(x); return b[0] }\n",
+            {0},
+        ),
+        (
+            "type B []int64\n"
+            "func (b B) Set(v int64) { b[0] = v }\n"
+            "func F(b B, x int64) int64 { b.Set(x); return b[0] }\n",
+            {0, 1},
+        ),
+    ],
+    ids=["local", "parameter"],
+)
+def test_local_named_slice_value_receiver_write_propagates(
+    go_types_helper, body, expected
+):
+    result = named(*unit(go_types_helper, body))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset(expected)
+
+
 def test_imported_value_receiver_does_not_write_its_receiver(go_types_helper):
     body = (
         "func F(z, x int64) int64 { t := lib.T{V: z}; "
