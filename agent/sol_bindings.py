@@ -865,6 +865,7 @@ class _SolBindings:
         enum_via_type_name = False
         via_type_name = False
         inside_owner = False
+        reason = None
         if obj.type == "identifier" and text == "this":
             contract = self.current_contract
             inside_owner = True
@@ -960,7 +961,10 @@ class _SolBindings:
                 allow_private_own=inside_owner,
                 exclude_type_members=not via_type_name,
             )
-            if record is not None or reason is not None:
+            # A lookup that ended on an invisible private member does
+            # not close the position: solc treats the member as absent,
+            # so a `using` extension still owns the call.
+            if record is not None:
                 return member, record, reason
         if type_record is not None:
             # Enum constants only resolve through the type name
@@ -970,8 +974,12 @@ class _SolBindings:
                 found = type_record.members.get(name)
                 if found is not None:
                     return member, found, None
-        record, reason = self._lookup_using(name, obj, member.start_byte)
-        return member, record, reason
+        using_record, using_reason = self._lookup_using(
+            name, obj, member.start_byte
+        )
+        if using_record is not None or using_reason is not None:
+            return member, using_record, using_reason
+        return member, None, reason
 
     def _lookup_using(
         self, name: str, obj: Any, position: int

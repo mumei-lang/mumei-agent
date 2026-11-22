@@ -1707,25 +1707,33 @@ contract Vault {
     )
 
 
-def test_instance_member_finds_inherited_function_past_type_decl():
+def test_instance_member_past_type_decl_and_private_base():
+    # solc 0.8.39 compiles this and references the extension: the
+    # derived struct declaration and the private base function are both
+    # unreachable through an instance.
     source = """
-contract Base { function S(uint256 x) public {} }
+library L {
+    function S(Vault c, uint256 x) internal pure returns (uint256) {}
+}
+contract Base { function S(uint256 x) private {} }
 contract Vault is Base {
+    using L for Vault;
     struct S { uint256 v; }
     Vault inst;
     function run() external { inst.S(1); }
 }
 """
-    # `inst.S` skips the nested type declaration and keeps looking —
-    # the inherited function wins.
     report = build_sol_bindings(source)
-    base_fn = next(
-        binding
-        for binding in report.bindings
-        if binding.name == "S" and binding.kind == "function"
+    lib_fn = min(
+        (
+            binding
+            for binding in report.bindings
+            if binding.name == "S" and binding.kind == "function"
+        ),
+        key=lambda binding: binding.span.start,
     )
     assert any(
-        ref.binding_id == base_fn.id and ref.kind == "call"
+        ref.binding_id == lib_fn.id and ref.kind == "call"
         for ref in report.references
     )
 
