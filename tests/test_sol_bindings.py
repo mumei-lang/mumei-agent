@@ -1927,6 +1927,36 @@ contract Vault {
     )
 
 
+def test_using_on_bytes_getter_depends_on_index():
+    source = """
+library BytesLib {
+    function read(bytes memory b) internal pure returns (bytes1) {}
+}
+library ByteLib {
+    function bit(bytes1 b) internal pure returns (uint256) {}
+}
+contract Vault {
+    using BytesLib for bytes;
+    using ByteLib for bytes1;
+    bytes public payload;
+    function run() external { this.payload().read(); this.payload(0).bit(); }
+}
+"""
+    # `this.payload()` returns the whole `bytes`; `this.payload(0)`
+    # returns `bytes1` — each binds its own extension.
+    report = build_sol_bindings(source)
+    read = next(b for b in report.bindings if b.name == "read")
+    bit = next(b for b in report.bindings if b.name == "bit")
+    assert any(
+        ref.binding_id == read.id and ref.kind == "call"
+        for ref in report.references
+    )
+    assert any(
+        ref.binding_id == bit.id and ref.kind == "call"
+        for ref in report.references
+    )
+
+
 def test_using_respects_qualified_ctor_name():
     source = """
 struct Coin { uint256 v; }
