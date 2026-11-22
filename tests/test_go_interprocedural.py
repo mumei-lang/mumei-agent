@@ -34086,6 +34086,21 @@ def test_named_struct_value_element_pointer_member_read(
             "\treturn x.W.V\n}\n",
             frozenset({0}),
         ),
+        (
+            # `_, x := g(i), p.B[j]` — analyzing the unanalyzed `g`
+            # mid-declaration must not clobber the statement's own
+            # `_pre_locals`; the index still resolves the local `j`.
+            "type E2 struct { V int64 }\n"
+            "type Elem struct { V int64; W *E2 }\n"
+            "type S struct { B []Elem }\n"
+            "func F(p *S, i int64) int64 {\n"
+            "\tj := i\n"
+            "\t_, x := g(i), p.B[j]\n"
+            "\treturn x.W.V\n}\n"
+            "func g(i int64) int64 {\n"
+            "\treturn i\n}\n",
+            frozenset({0, 1}),
+        ),
     ],
 )
 def test_named_struct_value_element_extract_share(

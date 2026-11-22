@@ -14769,6 +14769,12 @@ class _Builder:
         saved_pending_lhs_pops = getattr(
             self, "_pending_lhs_pops", []
         )
+        # A mid-expression callee's own statements overwrite these
+        # per-statement fields (`_, x := f(0), p.B[j]` — `g`'s body
+        # resets `_pre_locals`, dropping the caller statement's
+        # snapshot of the local index).
+        saved_pre_locals = getattr(self, "_pre_locals", {})
+        saved_conditional = getattr(self, "_conditional", False)
         self._pending_labels = []
         self._goto_seen = False
         self._seen_labels = set()
@@ -14912,6 +14918,8 @@ class _Builder:
             self._param_pointer_aliases = saved_pointer_param_aliases
             self._element_share = saved_element_share
             self._pending_lhs_pops = saved_pending_lhs_pops
+            self._pre_locals = saved_pre_locals
+            self._conditional = saved_conditional
             self._defer_result_deps = saved_defer_result_deps
             self._deferred_exits = saved_deferred_exits
             self._func_arg_invocations = saved_func_args
