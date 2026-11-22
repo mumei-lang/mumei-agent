@@ -5060,6 +5060,11 @@ closure-valued elided literals through imported, generic or otherwise
 unresolved collection shapes fail closed; elided values without function
 fields retain ordinary analysis.
 
+Copies of named, alias-free value structs from local or parameter slices and
+arrays preserve their function-field closure records. Pointer, slice, map,
+channel and interface fields, map elements and nested-index copies remain
+fail-closed.
+
 ### C06 imported method calls on concrete named types
 
 A method call `recv.M(args)` now classifies as `direct_import` when

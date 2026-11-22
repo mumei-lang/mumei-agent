@@ -1915,6 +1915,79 @@ class _Builder:
         if src in pointee_before:
             self.pointee_closures.add(bound_id)
 
+    def _adopt_struct_copy_records_from_snapshot(
+        self,
+        bound_id: str,
+        source: Any,
+        captures_before: dict[str, frozenset[str]],
+        writes_before: dict[str, frozenset[str]],
+        star_before: set[str],
+        calls_before: set[str],
+        pointee_before: set[str],
+        opaque_before: set[str],
+        conditional: bool,
+    ) -> None:
+        binding = self.bindings.get(bound_id)
+        source_id = self._local_struct_value_record_source_id(source)
+        if (
+            binding is None
+            or self._package_level(binding)
+            or binding.type is None
+            or not self._alias_free_value_struct_supported(
+                binding.type
+            )
+            or source_id is None
+        ):
+            return
+        record_ids = tuple(
+            dict.fromkeys(
+                (
+                    *self._struct_argument_field_record_ids(source),
+                    source_id,
+                )
+            )
+        )
+        captured = frozenset().union(
+            *(
+                captures_before.get(record_id, frozenset())
+                for record_id in record_ids
+            )
+        )
+        writes = frozenset().union(
+            *(
+                writes_before.get(record_id, frozenset())
+                for record_id in record_ids
+            )
+        )
+        keep_existing = conditional or self._may_skip > 0
+        if keep_existing:
+            captured |= self.closure_captures.get(
+                bound_id, frozenset()
+            )
+            writes |= self.closure_writes.get(
+                bound_id, frozenset()
+            )
+        if captured:
+            self.closure_captures[bound_id] = captured
+        else:
+            self.closure_captures.pop(bound_id, None)
+        if writes:
+            self.closure_writes[bound_id] = writes
+        else:
+            self.closure_writes.pop(bound_id, None)
+        for source_flags, target_flags in (
+            (star_before, self.closure_star_writes),
+            (calls_before, self.closure_inner_calls),
+            (pointee_before, self.pointee_closures),
+            (opaque_before, self.opaque_callees),
+        ):
+            if any(record_id in source_flags for record_id in record_ids) or (
+                keep_existing and bound_id in target_flags
+            ):
+                target_flags.add(bound_id)
+            else:
+                target_flags.discard(bound_id)
+
     def _bind_struct_field_func_value(
         self,
         bound_id: str,
@@ -1945,34 +2018,38 @@ class _Builder:
         ):
             return False
         member_id = member.id
-        if not (
-            member_id in captures_before
-            or member_id in writes_before
-            or member_id in star_before
-            or member_id in calls_before
-            or member_id in pointee_before
+        receiver = selector.child_by_field_name("operand")
+        receiver_record_id = (
+            self._local_struct_value_record_source_id(receiver)
+            if receiver is not None
+            else None
+        )
+        source_ids = [member_id]
+        if receiver_record_id is not None:
+            source_ids.append(receiver_record_id)
+        if not any(
+            source_id in records
+            for source_id in source_ids
+            for records in (
+                captures_before,
+                writes_before,
+                star_before,
+                calls_before,
+                pointee_before,
+            )
         ):
             return False
         self._drop_func_value_records(bound_id, conditional)
         self.closure_factory_literals.pop(bound_id, None)
-        self._adopt_element_records_from_snapshot(
-            member_id,
-            bound_id,
-            captures_before,
-            writes_before,
-            star_before,
-            calls_before,
-            pointee_before,
-        )
-        if member_id in captures_before:
-            self.closure_captures[bound_id] = (
-                self.closure_captures.get(bound_id, frozenset())
-                | captures_before[member_id]
-            )
-        if member_id in writes_before:
-            self.closure_writes[bound_id] = (
-                self.closure_writes.get(bound_id, frozenset())
-                | writes_before[member_id]
+        for source_id in dict.fromkeys(source_ids):
+            self._adopt_element_records_from_snapshot(
+                source_id,
+                bound_id,
+                captures_before,
+                writes_before,
+                star_before,
+                calls_before,
+                pointee_before,
             )
         self.opaque_callees.add(bound_id)
         return True
@@ -3964,6 +4041,77 @@ class _Builder:
                 return False
         return True
 
+    def _alias_free_value_struct_supported(
+        self,
+        fact: Any,
+        anchor: Any | None = None,
+        seen: frozenset[str] = frozenset(),
+    ) -> bool:
+        struct_fact = self._struct_value_fact(fact)
+        if (
+            struct_fact is None
+            or not struct_fact.type_id
+            or self._type_fact_has_type_args(fact)
+            or self._pointee_type(struct_fact.type_id) is None
+            or struct_fact.type_id in seen
+        ):
+            return False
+        type_binding = self._pointee_type(struct_fact.type_id)
+        if getattr(type_binding.type, "kind", None) != "struct":
+            return False
+        seen = seen | {struct_fact.type_id}
+        for member in self._struct_fields_for_fact(
+            struct_fact, anchor
+        ):
+            field_type = getattr(member, "type", None)
+            if self._alias_free_value_field_supported(
+                field_type, member, seen
+            ):
+                continue
+            return False
+        return True
+
+    def _alias_free_value_field_supported(
+        self,
+        fact: Any,
+        anchor: Any | None,
+        seen: frozenset[str],
+    ) -> bool:
+        if self._scalar_value_fact(fact):
+            return True
+        if fact is None or self._type_fact_has_type_args(fact):
+            return False
+        if fact.kind == "function":
+            return True
+        if fact.kind == "array":
+            return self._alias_free_value_field_supported(
+                getattr(fact, "elem", None), anchor, seen
+            )
+        nested = self._struct_value_fact(fact)
+        if nested is None:
+            return False
+        marker = nested.type_id or (
+            getattr(anchor, "id", "") if anchor is not None else ""
+        )
+        if marker and marker in seen:
+            return False
+        if marker:
+            seen = seen | {marker}
+        if nested.type_id:
+            nested_binding = self._pointee_type(nested.type_id)
+            if (
+                nested_binding is None
+                or getattr(nested_binding.type, "kind", None)
+                != "struct"
+            ):
+                return False
+        return all(
+            self._alias_free_value_field_supported(
+                getattr(member, "type", None), member, seen
+            )
+            for member in self._struct_fields_for_fact(nested, anchor)
+        )
+
     def _pin_named_value_struct(
         self,
         fact: Any,
@@ -4042,6 +4190,7 @@ class _Builder:
         params: dict | None = None,
         *,
         range_container: bool = False,
+        allow_alias_free_value: bool = False,
     ) -> tuple[Any, Any, str, frozenset, frozenset] | None:
         current = node
         while (
@@ -4226,8 +4375,14 @@ class _Builder:
             or container_fact is None
             or container_fact.kind not in {"slice", "array", "map"}
             or container_fact.elem is None
-            or not self._named_value_struct_supported(
-                container_fact.elem
+            or not (
+                self._named_value_struct_supported(container_fact.elem)
+                or (
+                    allow_alias_free_value
+                    and self._alias_free_value_struct_supported(
+                        container_fact.elem
+                    )
+                )
             )
         ):
             return None
@@ -9863,6 +10018,32 @@ class _Builder:
             and opaque_field is not None
         ):
             struct_element_container_fact = opaque_field[2].type
+        struct_element_root_ref = (
+            self.references.get(self.node_key(inner))
+            if inner is not None and inner.type == "identifier"
+            else None
+        )
+        struct_element_root_binding = (
+            self.bindings.get(struct_element_root_ref.binding_id)
+            if struct_element_root_ref is not None
+            else None
+        )
+        alias_free_value_copy = (
+            len(indexes) == 1
+            and inner is not None
+            and inner.type == "identifier"
+            and struct_element_root_ref is not None
+            and struct_element_root_ref.kind != "import"
+            and struct_element_root_binding is not None
+            and not self._package_level(struct_element_root_binding)
+            and struct_element_root_binding.type is not None
+            and struct_element_root_binding.type.kind
+            in {"slice", "array"}
+            and struct_element_root_binding.type.elem is not None
+            and self._alias_free_value_struct_supported(
+                struct_element_root_binding.type.elem
+            )
+        )
         struct_element_candidate = (
             (
                 len(indexes) == 1
@@ -9881,8 +10062,11 @@ class _Builder:
             and struct_element_container_fact is not None
             and struct_element_container_fact.kind in container_kinds
             and struct_element_container_fact.elem is not None
-            and self._named_value_struct_supported(
-                struct_element_container_fact.elem
+            and (
+                self._named_value_struct_supported(
+                    struct_element_container_fact.elem
+                )
+                or alias_free_value_copy
             )
         )
         struct_element_index_deps = None
@@ -9916,7 +10100,11 @@ class _Builder:
                         depth + 1,
                     )
             struct_element_target = (
-                self._struct_element_container_target(node, params)
+                self._struct_element_container_target(
+                    node,
+                    params,
+                    allow_alias_free_value=alias_free_value_copy,
+                )
             )
         if struct_element_target is not None:
             fact = struct_element_target[0]
@@ -13280,6 +13468,56 @@ class _Builder:
             struct_fact, anchor
         )
 
+    def _local_struct_value_record_source_id(
+        self, node: Any
+    ) -> str | None:
+        value = self._strip_parens(node)
+        if value is None:
+            return None
+        binding_node = value
+        if value.type == "index_expression":
+            binding_node = self._strip_parens(
+                value.child_by_field_name("operand")
+            )
+            if (
+                binding_node is None
+                or binding_node.type != "identifier"
+            ):
+                return None
+        elif value.type != "identifier":
+            return None
+        ref = self.references.get(self.node_key(binding_node))
+        binding = (
+            self.bindings.get(ref.binding_id)
+            if ref is not None
+            else None
+        )
+        if (
+            ref is None
+            or ref.kind == "import"
+            or binding is None
+            or self._package_level(binding)
+            or binding.type is None
+        ):
+            return None
+        if value.type == "identifier":
+            return (
+                ref.binding_id
+                if self._alias_free_value_struct_supported(
+                    binding.type
+                )
+                else None
+            )
+        if (
+            binding.type.kind not in {"slice", "array"}
+            or binding.type.elem is None
+            or not self._alias_free_value_struct_supported(
+                binding.type.elem
+            )
+        ):
+            return None
+        return ref.binding_id
+
     def _slice_array_struct_element_parts(
         self,
         node: Any,
@@ -13433,9 +13671,20 @@ class _Builder:
         record_ids = self._struct_field_closure_record_ids(
             struct_fact, anchor
         )
+        record_source_id = (
+            self._local_struct_value_record_source_id(value)
+        )
+        if (
+            record_source_id is not None
+            and self._has_closure_records(record_source_id)
+        ):
+            record_ids = tuple(
+                dict.fromkeys((*record_ids, record_source_id))
+            )
         if not record_ids:
             return ()
         is_reference = value.type == "identifier"
+        is_reference |= record_source_id is not None
         if value.type == "composite_literal":
             is_reference = literal_fact is not None
         if value.type == "selector_expression":
@@ -19546,6 +19795,23 @@ class _Builder:
                         self.anon_struct_field_names.pop(
                             binding.id, None
                         )
+            if len(lefts) == len(rights):
+                for i, left in enumerate(lefts):
+                    binding = self.bindings_by_span.get(
+                        self.node_key(left)
+                    )
+                    if binding is not None:
+                        self._adopt_struct_copy_records_from_snapshot(
+                            binding.id,
+                            rights[i],
+                            captures_before,
+                            writes_before,
+                            star_before,
+                            calls_before,
+                            pointee_before,
+                            opaque_before,
+                            conditional,
+                        )
             return
         if kind == "var_declaration":
             # Grouped `var (...)` declarations never reach here — the
@@ -20857,6 +21123,23 @@ class _Builder:
                                 self.anon_struct_anchor[
                                     binding.id
                                 ] = last_span
+                if not multi and len(names) == len(value_nodes):
+                    for i, name in enumerate(names):
+                        binding = self.bindings_by_span.get(
+                            self.node_key(name)
+                        )
+                        if binding is not None:
+                            self._adopt_struct_copy_records_from_snapshot(
+                                binding.id,
+                                value_nodes[i],
+                                captures_before,
+                                writes_before,
+                                star_before,
+                                calls_before,
+                                pointee_before,
+                                opaque_before,
+                                conditional,
+                            )
             return
         if kind == "const_declaration":
             # Grouped `const (...)` declarations never reach here — like
@@ -25748,6 +26031,23 @@ class _Builder:
                         ref.binding_id,
                         conditional or self._may_skip > 0,
                     )
+            if not compound and len(lefts) == len(rights):
+                for i, lhs in enumerate(lefts):
+                    if lhs.type != "identifier":
+                        continue
+                    ref = self.references.get(self.node_key(lhs))
+                    if ref is not None and ref.binding_id is not None:
+                        self._adopt_struct_copy_records_from_snapshot(
+                            ref.binding_id,
+                            rights[i],
+                            captures_before,
+                            writes_before,
+                            star_before,
+                            calls_before,
+                            pointee_before,
+                            opaque_before,
+                            conditional,
+                        )
             return
         if kind == "for_statement":
             body_node = node.child_by_field_name("body")
@@ -37455,7 +37755,17 @@ class _Builder:
                             root_ref is not None
                             and root_ref.binding_id
                         ):
-                            target_id = root_ref.binding_id
+                            if (
+                                target_id is not None
+                                and self._has_closure_records(
+                                    root_ref.binding_id
+                                )
+                            ):
+                                indexed_struct_record_id = (
+                                    root_ref.binding_id
+                                )
+                            elif target_id is None:
+                                target_id = root_ref.binding_id
                 if operand is not None:
                     callee_deps |= self.expression(
                         operand, fn, params, locals_, transfers,
