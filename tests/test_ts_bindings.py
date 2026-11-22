@@ -1496,7 +1496,7 @@ declare namespace N {
         function f(): void;
         const v: number;
     }
-    export declare class C { m(): void }
+    class C { m(): void }
 }
 N.Inner.f();
 const x = N.Inner.v;
