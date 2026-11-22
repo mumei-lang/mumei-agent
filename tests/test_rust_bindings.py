@@ -4014,3 +4014,71 @@ fn f(v: Vec<P>, mystery: Undeclared) {
             if source[c.span.start:c.span.end] == text
         )
         assert call.target == ""
+
+
+def test_bare_match_arm_on_prelude_container_keeps_valid_type_fact():
+    # `match opt { x => }` on `Option<P>` binds `x` with an `unknown`
+    # fact (no record exists for Option) — never a null type_id.
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn f(o: Option<P>) {
+    match o { x => x.m(), _ => {} }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "x.m()"
+    )
+    assert call.target == ""
+    assert all(
+        isinstance(b.to_dict()["type"]["type_id"], str)
+        for b in report.bindings
+        if isinstance(b.to_dict().get("type"), dict)
+        and "type_id" in b.to_dict()["type"]
+    )
+
+
+def test_user_defined_option_keeps_payload_unpinned():
+    # A user `enum Option` whose `Some` doesn't resolve at the
+    # pattern must not be typed by the std prelude payload.
+    source = """
+struct P;
+struct Q;
+impl Q { fn m(&self) {} }
+enum Option<T> { Some(Q, T), None }
+fn f(o: Option<P>) {
+    match o { Some(q, _) => q.m(), None => {} }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "q.m()"
+    )
+    assert call.target == ""
+
+
+def test_prelude_payload_args_resolve_at_annotation_scope():
+    # `o: Option<P>`'s `P` is the outer declaration — a `struct P`
+    # shadowing it inside the body must not capture `Some(p)`'s
+    # payload type.
+    source = """
+struct P;
+impl P { fn outer(&self) {} }
+fn f(o: Option<P>) {
+    struct P;
+    impl P { fn inner(&self) {} }
+    match o { Some(p) => p.outer(), None => {} }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    outer = next(b for b in report.bindings if b.name == "outer")
+    inner = next(b for b in report.bindings if b.name == "inner")
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "p.outer()"
+    )
+    assert call.target == outer.id
+    assert call.target != inner.id
