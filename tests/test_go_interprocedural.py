@@ -33656,6 +33656,42 @@ def test_named_struct_element_pointer_param_root_element_store_read_back(
     assert result.return_dependencies == frozenset({0, 1, 2, 3})
 
 
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        # An inline array member's whole-element store lands in the
+        # field's slot — a later element read observes it.
+        "type E struct { V int64 }\n"
+        "type S struct { R [4]E }\n"
+        "func F(o S, x int64) int64 {\n"
+        "\to.R[0] = E{V: x}\n"
+        "\treturn o.R[0].V\n}\n",
+        # Index deps join too — which slot the write reached
+        # depended on `i`.
+        "type E struct { V int64 }\n"
+        "type S struct { R [4]E }\n"
+        "func F(o S, i int64, x int64) int64 {\n"
+        "\to.R[i] = E{V: x}\n"
+        "\treturn o.R[0].V\n}\n",
+        # The same through a param pointer root (already covered by
+        # indirect_writes — the field slot now carries it too).
+        "type E struct { V int64 }\n"
+        "type S struct { R [4]E }\n"
+        "func F(p *S, x int64) int64 {\n"
+        "\tp.R[0] = E{V: x}\n"
+        "\treturn p.R[0].V\n}\n",
+    ],
+)
+def test_named_struct_element_array_member_store_read_back(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == (
+        {0, 1, 2} if "i int64" in declarations else {0, 1}
+    )
+
+
 def test_named_struct_element_pointer_param_root_member_pointee_write(
     go_types_helper,
 ):

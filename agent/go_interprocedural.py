@@ -18528,6 +18528,19 @@ class _Builder:
                     ri = len(refs) - 1
                     opaque_elem_targets[ri] = frozenset(field_tokens)
                     opaque_elem_slot_ids[ri] = field_key
+                    if (
+                        getattr(
+                            _field_member.type, "kind", None
+                        )
+                        == "array"
+                    ):
+                        # `o.R[i] = e` on an inline array member:
+                        # the field's tokens name no share-group
+                        # holder (slices/maps register a backing),
+                        # so the store would only reach
+                        # `indirect_writes` and the field's slot —
+                        # which `o.R[i].V` reads — never sees it.
+                        opaque_elem_root_slots[ri] = field_key
                     self._for_write_target = True
                     try:
                         opaque_elem_index_deps[ri] = self.expression(
