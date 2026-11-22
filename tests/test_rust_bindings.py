@@ -6474,3 +6474,61 @@ fn f(w: W<m::P>) {
     report = build_rust_bindings(source, pointer_width=64)
     pm = _bindings(report, "pm", "associated_function")[0]
     assert _call(report, source, "w.pm()").target == pm.id
+
+
+def test_call_site_alias_does_not_rebind_impl_specialization():
+    source = """
+mod m {
+    pub struct P;
+    pub struct Q;
+}
+use m::P;
+struct W<T>;
+impl W<P> {
+    fn pm(&self) {}
+}
+impl W<m::Q> {
+    fn qm(&self) {}
+}
+fn f() {
+    use m::Q as P;
+    let w: W<P>;
+    w.qm();
+    w.pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    qm = _bindings(report, "qm", "associated_function")[0]
+    # The receiver's `P` is `m::Q` — `w.qm()` picks the W<m::Q>
+    # impl, and `w.pm()` must not resolve to the W<P> impl.
+    assert _call(report, source, "w.qm()").target == qm.id
+    assert _call(report, source, "w.pm()").target != pm.id
+
+
+def test_raw_pointer_args_distinguish_specializations():
+    source = """
+struct P;
+struct W<T>;
+impl W<*const P> {
+    fn cm(&self) {}
+}
+impl W<*mut P> {
+    fn mm(&self) {}
+}
+impl W<P> {
+    fn pm(&self) {}
+}
+fn f(w: W<*mut P>) {
+    w.mm();
+    w.cm();
+    w.pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    mm = _bindings(report, "mm", "associated_function")[0]
+    cm = _bindings(report, "cm", "associated_function")[0]
+    pm = _bindings(report, "pm", "associated_function")[0]
+    assert _call(report, source, "w.mm()").target == mm.id
+    assert _call(report, source, "w.cm()").target != cm.id
+    assert _call(report, source, "w.pm()").target != pm.id

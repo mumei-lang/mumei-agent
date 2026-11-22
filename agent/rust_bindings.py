@@ -241,6 +241,11 @@ class _Scope:
     # `pub` (only re-exports carry names onward).
     glob_imports: list[tuple[str, int, bool]] = field(default_factory=list)
     ambiguous_names: dict[str, tuple[int, int]] = field(default_factory=dict)
+    # The scope that was on top when this one was pushed — the
+    # lexical ancestor chain a declaration resolves names in. Kept
+    # on the scope so a declaration's home scope can be resolved
+    # without the call-site stack leaking in.
+    parent: "_Scope | None" = None
 
 
 @dataclass
@@ -339,6 +344,14 @@ class _RustBindings:
         # flush the memo on every line.
         self._resolution_epoch = 0
 
+    def _push_scope(self, scope: "_Scope") -> None:
+        # The scope on top when a scope is first pushed is its
+        # lexical parent; later re-pushes (temporary resolution
+        # scopes) keep the original parent.
+        if scope.parent is None and self.scopes:
+            scope.parent = self.scopes[-1]
+        self.scopes.append(scope)
+
     def span(self, node: Any) -> ByteSpan:
         return ByteSpan(node.start_byte, node.end_byte)
 
@@ -356,7 +369,7 @@ class _RustBindings:
 
     def build(self) -> LexicalBindingReport:
         root_scope = _Scope(self.root, 0, "")
-        self.scopes.append(root_scope)
+        self._push_scope(root_scope)
         self._scan_attributes()
         self._predeclare(self.root, root_scope)
         self._scan_container(self.root, root_scope)
@@ -557,7 +570,7 @@ class _RustBindings:
                         body, scope.module_depth + 1, scope.function_id
                     )
                     record.module_scope = child_scope
-                    self.scopes.append(child_scope)
+                    self._push_scope(child_scope)
                     self._predeclare(body, child_scope)
                     self.scopes.pop()
                 self._add_generic_parameters(
@@ -1050,7 +1063,7 @@ class _RustBindings:
                 )
                 if record is not None:
                     record.module_scope = child_scope
-                self.scopes.append(child_scope)
+                self._push_scope(child_scope)
                 # Items inside were already predeclared with the
                 # module's own record — only expressions need the walk.
                 self._scan_container(body, child_scope)
@@ -1253,15 +1266,23 @@ class _RustBindings:
     ) -> "str | None":
         """Resolve a written type name inside `scope` (the impl's
         declaring scope) — `use m::P` aliases and module members
-        resolve exactly as the impl side wrote them."""
-        pushed = scope is not None and scope not in self.scopes
-        if pushed:
-            self.scopes.append(scope)
+        resolve exactly as the impl side wrote them. Resolves on the
+        declaration's own ancestor chain so a call-site `use` alias
+        cannot shadow the impl's spelling."""
+        if scope is None:
+            type_id, _ = self._spelled_type(spelled, position)
+            return type_id
+        chain = []
+        cursor = scope
+        while cursor is not None and cursor not in chain:
+            chain.append(cursor)
+            cursor = cursor.parent
+        saved = self.scopes
+        self.scopes = list(reversed(chain))
         try:
             type_id, _ = self._spelled_type(spelled, position)
         finally:
-            if pushed:
-                self.scopes.pop()
+            self.scopes = saved
         return type_id
 
     def _type_arg_match(
@@ -1355,9 +1376,34 @@ class _RustBindings:
                 )
                 for x, y in zip(sub_a, sub_b)
             )
+        path_re = r"[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*"
         if self._path_name_equal(a, b):
-            return True
-        if position is None:
+            if (
+                position is None
+                or pattern_scope is None
+                or re.fullmatch(path_re, a.strip()) is None
+            ):
+                return True
+            # The same spelling can name different types — a
+            # call-site `use m::Q as P` rebinds what the impl side
+            # wrote as `P`. Compare resolved identities; fall back
+            # to the spelling match when either side is unresolved.
+            pattern_id = self._resolve_spelled_in_scope(
+                a, pattern_scope, position
+            )
+            if pattern_id is None:
+                return True
+            concrete_id, _ = self._spelled_type(b, position)
+            if concrete_id is None:
+                return True
+            return concrete_id == pattern_id
+        if (
+            position is None
+            or re.fullmatch(path_re, a.strip()) is None
+            or re.fullmatch(path_re, b.strip()) is None
+        ):
+            # Only pure path spellings resolve to a type identity —
+            # `*const P`/`&P`/`dyn T` decorations would be lost.
             return False
         # `use m::P` makes the impl-side `P` and the receiver's
         # `m::P` the same type — compare resolved identities when
@@ -2129,7 +2175,7 @@ class _RustBindings:
         scope = record.home_scope
         push = scope is not None and scope not in self.scopes
         if push:
-            self.scopes.append(scope)
+            self._push_scope(scope)
         try:
             return self._annotation_type(
                 record.alias_node, _seen | {record.binding.id}
@@ -2600,7 +2646,7 @@ class _RustBindings:
             # A fixed arg (`E` in `Result<T, E>`) resolves in the
             # member's declaring scope — a call-site `struct E`
             # must not shadow it.
-            self.scopes.append(decl_scope)
+            self._push_scope(decl_scope)
             try:
                 return self._spelled_type(args[index].strip(), arg_pos)
             finally:
@@ -2736,7 +2782,7 @@ class _RustBindings:
             )
             push = home_scope is not None and home_scope not in self.scopes
             if push:
-                self.scopes.append(home_scope)
+                self._push_scope(home_scope)
             try:
                 return self._element_of(
                     container_id,
@@ -4278,6 +4324,7 @@ class _RustBindings:
                 record.member_trait_args = member_trait_args
                 record.member_impl_type_params = member_impl_type_params
                 record.self_type_node = member_type_node
+                record.home_scope = parent_scope
                 self._function_records[record.binding.id] = record
                 predeclared[node.id] = record
             elif node.type == "const_item":
@@ -4299,6 +4346,7 @@ class _RustBindings:
                 const_record.member_impl_generic = member_impl_generic
                 const_record.member_trait = member_trait
                 const_record.member_trait_args = member_trait_args
+                const_record.home_scope = parent_scope
                 const_record.member_impl_type_params = (
                     member_impl_type_params
                 )
@@ -4378,7 +4426,7 @@ class _RustBindings:
             self.module_depth,
             record.binding.id,
         )
-        self.scopes.append(fn_scope)
+        self._push_scope(fn_scope)
         inherited_generics: set[str] = set()
         for outer_scope in self.scopes[:-1]:
             for records in outer_scope.bindings.values():
@@ -5342,7 +5390,7 @@ class _RustBindings:
 
     def _block(self, node: Any) -> None:
         scope = _Scope(node, self.module_depth, self.current_function)
-        self.scopes.append(scope)
+        self._push_scope(scope)
         self._predeclare(node, scope)
         self._scan_container(node, scope)
         self.scopes.pop()
@@ -5385,7 +5433,7 @@ class _RustBindings:
         alternative = node.child_by_field_name("alternative")
         if consequence is not None:
             scope = _Scope(consequence, self.module_depth, self.current_function)
-            self.scopes.append(scope)
+            self._push_scope(scope)
             names, type_map = (
                 ([], {})
                 if condition is None
@@ -5406,7 +5454,7 @@ class _RustBindings:
         body = node.child_by_field_name("body")
         if body is not None:
             scope = _Scope(body, self.module_depth, self.current_function)
-            self.scopes.append(scope)
+            self._push_scope(scope)
             names, type_map = (
                 ([], {})
                 if condition is None
@@ -5428,7 +5476,7 @@ class _RustBindings:
             self._expr(iterator)
         if body is not None:
             scope = _Scope(body, self.module_depth, self.current_function)
-            self.scopes.append(scope)
+            self._push_scope(scope)
             names = self._pattern_names(pattern, scope)
             single = pattern
             # `for mut p in v` still binds one identifier — `mut` only
@@ -5557,7 +5605,7 @@ class _RustBindings:
                 self.gaps.append(Gap("unsupported_syntax", self.span(arm)))
                 continue
             arm_scope = _Scope(arm, self.module_depth, self.current_function)
-            self.scopes.append(arm_scope)
+            self._push_scope(arm_scope)
             match_pattern = arm.child_by_field_name("pattern")
             guard = (
                 None
@@ -5773,7 +5821,7 @@ class _RustBindings:
                 home = member.home_scope
                 pushed = home is not None and home not in self.scopes
                 if pushed:
-                    self.scopes.append(home)
+                    self._push_scope(home)
                 resolved = self._spelled_type(spelled, pos)
                 if pushed:
                     self.scopes.pop()
@@ -5905,7 +5953,7 @@ class _RustBindings:
         scope = None if container is None else container.home_scope
         push = scope is not None and scope not in self.scopes
         if push:
-            self.scopes.append(scope)
+            self._push_scope(scope)
         try:
             type_id, args = self._annotation_type(type_node)
         finally:
@@ -6661,7 +6709,7 @@ class _RustBindings:
         a name the shape cannot pin is simply absent."""
         push = scrut_scope is not None and scrut_scope not in self.scopes
         if push:
-            self.scopes.append(scrut_scope)
+            self._push_scope(scrut_scope)
         try:
             return self._pattern_type_map_body(
                 pattern, scrut_id, scrut_args,
@@ -7034,7 +7082,7 @@ class _RustBindings:
         if body is None:
             return
         closure_scope = _Scope(body, self.module_depth, self.current_function)
-        self.scopes.append(closure_scope)
+        self._push_scope(closure_scope)
         old_owner = self.call_owner
         self.call_owner = ""
         if params is not None:
