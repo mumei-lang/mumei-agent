@@ -7776,7 +7776,12 @@ class _Builder:
         method = self._method_value_parts(node)
         if method is not None:
             self._record_bound_method(
-                bid, method, params, locals_, node
+                bid,
+                method,
+                params,
+                locals_,
+                node,
+                receiver_deps,
             )
             return
         self._record_bound_interface_method(
@@ -26123,6 +26128,7 @@ class _Builder:
                             self._record_bound_method(
                                 ref.binding_id, mv, params, locals_,
                                 rights[i],
+                                values[i] if len(lefts) > 1 else None,
                             )
                         else:
                             self._record_bound_interface_method(
@@ -35032,6 +35038,7 @@ class _Builder:
         params: dict[str, int],
         locals_: dict[str, frozenset[int]],
         method_value_node: Any | None = None,
+        receiver_deps: frozenset[int] | None = None,
     ) -> None:
         """Record (or clear) a bound-method record under `bid` and
         FREEZE the receiver's current dep set: a Go method value
@@ -35076,7 +35083,9 @@ class _Builder:
             and recv_binding.type.kind == "pointer"
             and recv_id in params
         )
-        if recv_id in locals_:
+        if receiver_deps is not None:
+            deps = receiver_deps
+        elif recv_id in locals_:
             deps = locals_[recv_id]
         elif recv_id in params:
             deps = frozenset({params[recv_id]})
@@ -35095,6 +35104,8 @@ class _Builder:
                 else None
             )
         if (
+            receiver_deps is None
+            and
             receiver_value is not None
             and receiver_value.type == "index_expression"
         ):

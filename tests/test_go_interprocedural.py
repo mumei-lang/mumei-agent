@@ -55190,6 +55190,17 @@ def test_slice_array_element_method_values(go_types_helper):
         "func FValueReseat(x, y int64) int64 {\n"
         "\tss := []S{{V: y}}; f := ss[0].Get; ss = nil; return f()\n"
         "}\n"
+        "func FIndexSimul(x, y int64, i int) int64 {\n"
+        "\tss := []S{{V: y}, {V: x}}; var f func() int64\n"
+        "\ti, f = 0, ss[i].Get; return f() + int64(i)\n"
+        "}\n"
+        "func FIdentifierSimul(x, y int64) int64 {\n"
+        "\ts := S{V: y}; var f func() int64\n"
+        "\ts, f = S{V: x}, s.Get; return f()\n"
+        "}\n"
+        "func FShortSimul(x, y int64) int64 {\n"
+        "\ts := S{V: y}; s, f := S{V: x}, s.Get; return f()\n"
+        "}\n"
         "func FPointerCallback(x, y int64) int64 {\n"
         "\ts := S{V: y}; f := s.PGet; s.V = x; return ap(f)\n"
         "}\n"
@@ -55275,6 +55286,9 @@ def test_slice_array_element_method_values(go_types_helper):
         "FNamed": frozenset({0, 1}),
         "FParameter": frozenset({0}),
         "FValueReseat": frozenset({1}),
+        "FIndexSimul": frozenset({0, 1, 2}),
+        "FIdentifierSimul": frozenset({1}),
+        "FShortSimul": frozenset({1}),
     }
     for function_name, dependencies in expected.items():
         result = named_package(files, snapshot, summaries, function_name)
