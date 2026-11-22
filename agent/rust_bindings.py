@@ -2679,13 +2679,14 @@ class _RustBindings:
                                     # argument's own scope — at the
                                     # receiver's annotation a
                                     # same-named type is another
-                                    # record.
-                                    tid = self._spelled_type(
+                                    # record. Spell it
+                                    # `crate::`-qualified so the
+                                    # Option head survives while the
+                                    # payload still lands on `u`'s
+                                    # own `Q`.
+                                    element = self._qualified_spelling(
                                         element, arg_pos
-                                    )[0]
-                                    if tid is not None:
-                                        return tid, None
-                                    element = None
+                                    )
                     if element:
                         return None, prefix + element
                 if (
