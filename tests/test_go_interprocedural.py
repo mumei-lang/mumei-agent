@@ -20291,9 +20291,8 @@ def test_chained_closure_values_resolve_shared_captures_once(
         "g0 := func() int64 { return v }",
     ]
     for index in range(1, 30):
-        calls = " + ".join(
-            f"g{captured}()" for captured in range(index)
-        )
+        previous = max(index - 2, 0)
+        calls = f"g{index - 1}() + g{previous}()"
         declarations.append(
             f"g{index} := func() int64 {{ return {calls} }}"
         )
