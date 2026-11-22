@@ -51,7 +51,8 @@ _ITER_ELEMENT_METHODS = frozenset({"iter", "iter_mut", "into_iter", "drain"})
 # Iterator adaptors that keep the same element type — `map`/`flat_map`
 # change it through a closure and stay opaque.
 _ITER_PRESERVING_METHODS = frozenset(
-    {"rev", "skip", "take", "filter", "step_by", "chain"}
+    {"rev", "skip", "take", "filter", "step_by", "chain",
+     "cloned", "copied"}
 )
 # Vec/slice accessors that iterate the same element as `iter()`.
 _ITER_SLICE_METHODS = frozenset({"as_slice", "as_mut_slice"})
@@ -64,17 +65,23 @@ _MAP_CONTAINER_NAMES = frozenset({"HashMap", "BTreeMap"})
 # `v.first()` and `v.last()` yield `Option<&T>` while `v.pop()`
 # yields `Option<T>`. Each maps to its payload prefix and the
 # container heads the method actually exists on.
+# (payload prefix, container heads, arg index) — index picks the
+# type arg that becomes Option's payload (`ok` reads P of
+# `Result<P, E>`, `err` reads E); -1 is the last arg.
 _OPTION_HEAD_METHODS = {
-    "get": ("&", {"Vec", "VecDeque", "HashMap", "BTreeMap"}),
-    "first": ("&", {"Vec"}),
-    "last": ("&", {"Vec"}),
-    "pop": ("", {"Vec"}),
-    "front": ("&", {"VecDeque"}),
-    "back": ("&", {"VecDeque"}),
-    "pop_front": ("", {"VecDeque"}),
-    "pop_back": ("", {"VecDeque"}),
-    "remove": ("", {"HashMap", "BTreeMap", "VecDeque"}),
-    "next": ("&", None),
+    "get": ("&", {"Vec", "VecDeque", "HashMap", "BTreeMap"}, -1),
+    "first": ("&", {"Vec"}, -1),
+    "last": ("&", {"Vec"}, -1),
+    "pop": ("", {"Vec"}, -1),
+    "front": ("&", {"VecDeque"}, -1),
+    "back": ("&", {"VecDeque"}, -1),
+    "pop_front": ("", {"VecDeque"}, -1),
+    "pop_back": ("", {"VecDeque"}, -1),
+    "remove": ("", {"HashMap", "BTreeMap", "VecDeque"}, -1),
+    "next": ("&", None, -1),
+    "ok": ("", {"Option", "Result"}, 0),
+    "err": ("", {"Result"}, -1),
+    "take": ("", {"Option"}, 0),
 }
 
 _PRELUDE_NAMES = frozenset(
@@ -2487,14 +2494,13 @@ class _RustBindings:
                     # spelling is carried; the head stays for
                     # `_scrutinee_shape` to declare.
                     elements = self._type_arg_list(receiver[1])
+                    index = option_head[2]
                     element = (
-                        elements[-1].strip()
-                        if len(elements) == 2
-                        else elements[0].strip()
-                        if len(elements) == 1
+                        elements[index].strip()
+                        if -len(elements) <= index < len(elements)
                         else None
                     )
-                    if element is not None:
+                    if element:
                         return None, prefix + element
                 if (
                     callee is not None
