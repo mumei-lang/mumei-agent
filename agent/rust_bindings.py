@@ -3088,6 +3088,56 @@ class _RustBindings:
                     spelled = self._iterator_spelling(node)
                     if spelled is not None:
                         return None, spelled
+                    method_name = self.text(
+                        callee.child_by_field_name("field")
+                    ).strip()
+                    if (
+                        method_name == "deref"
+                        and receiver[1] is not None
+                        and (
+                            (
+                                head_name := self._container_head_name(
+                                    callee.child_by_field_name("value")
+                                )
+                            )
+                            is not None
+                            and head_name.rsplit("::", 1)[-1]
+                            in _DEREF_WRAPPER_NAMES
+                        )
+                    ):
+                        # `b.deref()` on `Box`/`Rc`/`Arc` yields
+                        # the payload — resolve it at the receiver's
+                        # annotation so `d` binds the real record.
+                        return self._spelled_type(
+                            receiver[1],
+                            self._receiver_annotation_position(
+                                callee.child_by_field_name("value")
+                            )
+                            or node.start_byte,
+                        )
+                    if method_name in {"clone", "to_owned"}:
+                        # `o.clone()`/`s.to_owned()` keep the
+                        # receiver's whole type — forwarding it
+                        # preserves the container id so
+                        # `w.clone()[0]` reads `W`'s declared
+                        # `Index::Output`, not the arg `P`.
+                        return receiver
+                    if (
+                        method_name in {"as_ref", "as_mut"}
+                        and receiver[1] is not None
+                        and (
+                            self._is_slice_receiver(
+                                callee.child_by_field_name("value")
+                            )
+                            or self._container_head_name(
+                                callee.child_by_field_name("value")
+                            ) in _INDEX_ELEMENT_CONTAINERS
+                        )
+                    ):
+                        # `s.as_ref()` on a slice/`Vec` yields the
+                        # same `&[P]` — the Option case is handled
+                        # by the prelude recipe above.
+                        return None, "&[" + receiver[1] + "]"
                     return self._unwrapped(
                         callee, node.start_byte, receiver
                     )
@@ -3980,6 +4030,7 @@ class _RustBindings:
                             pre_head = re.match(
                                 r"[A-Za-z_][\w:]*", target_args
                             )
+                            pre_target_args = target_args
                             if param_names:
                                 mapping = dict(
                                     zip(
@@ -4000,16 +4051,33 @@ class _RustBindings:
                                     target_args,
                                 )
                             emitted = re.match(
-                                r"[A-Za-z_][\w:]*", target_args
+                                r"[A-Za-z_][\w:]*", pre_target_args
+                            )
+                            check_heads = [emitted.group(0)] if (
+                                emitted is not None
+                            ) else (
+                                [
+                                    h.group(0)
+                                    for part in self._type_arg_list(
+                                        pre_target_args[1:-1]
+                                    )
+                                    if (
+                                        h := re.match(
+                                            r"[A-Za-z_][\w:]*",
+                                            part.strip().lstrip("&")
+                                            .strip().lstrip("mut ")
+                                            .strip(),
+                                        )
+                                    )
+                                ]
+                                if pre_target_args.startswith("(")
+                                and pre_target_args.endswith(")")
+                                else []
                             )
                             mismatch = False
-                            if (
-                                emitted is not None
-                                and pre_head is not None
-                                and pre_head.group(0)
-                                not in param_names
-                            ):
-                                head_text = emitted.group(0)
+                            for head_text in check_heads:
+                                if head_text in param_names:
+                                    continue
                                 alias_side = (
                                     self._scoped_spelled_type(
                                         head_text,
@@ -4041,6 +4109,8 @@ class _RustBindings:
                                     alias_side is not None
                                     and alias_side is not use_side
                                 )
+                                if mismatch:
+                                    break
                         finally:
                             if pushed:
                                 self.scopes.pop()
@@ -4056,14 +4126,27 @@ class _RustBindings:
                     ),
                     None,
                 )
-                if (
-                    head is not None
-                    and head not in _INDEX_ELEMENT_CONTAINERS
-                    and head != "Option"
-                ):
-                    # `Vec<W<P>>` — a declared `W` can
-                    # `IntoIterator` to a different element;
-                    # guessing `P` would misbind calls.
+                elem_record = self.records.get(_elem_id)
+                if elem_record is not None:
+                    elem_record = (
+                        self._through_import(elem_record, pos)
+                        or elem_record
+                    )
+                std_reexport = (
+                    elem_record is not None
+                    and elem_record.binding.kind == "import"
+                    and elem_record.import_path is not None
+                    and elem_record.import_path.split("::", 1)[0]
+                    in {"std", "core", "alloc"}
+                    and head in _INDEX_ELEMENT_CONTAINERS | {"Option"}
+                )
+                if head is not None and not std_reexport:
+                    # `Vec<W<P>>`/`Vec<m::Vec<P>>` — a declared
+                    # type (even named `Vec`) can `IntoIterator`
+                    # to a different element; guessing `P` would
+                    # misbind calls. Only a real std re-export
+                    # (`use std::vec::Vec`) keeps the prelude
+                    # container's own args.
                     return None, None
             return (
                 "&" + inner_args if borrow else inner_args
@@ -6661,6 +6744,7 @@ class _RustBindings:
 
         return re.sub(r"[A-Za-z_][\w:]*", replace, spelled)
 
+
     def _pattern_head_fields(
         self,
         head: Any | None,
@@ -7074,6 +7158,20 @@ class _RustBindings:
                     if field is not None
                     else None
                 )
+                if (
+                    option_head is None
+                    and callee is not None
+                    and callee.type == "field_expression"
+                    and field is not None
+                    and self._normalize_identifier(self.text(field))
+                    in {"clone", "to_owned", "as_ref", "as_mut"}
+                ):
+                    # `match o.clone()` — a transparent call keeps
+                    # the receiver's head, so `Some(y)` still
+                    # reads `o`'s `Option<P>` shape.
+                    return self._scrutinee_shape(
+                        callee.child_by_field_name("value"), None
+                    )
                 if (
                     option_head is not None
                     and (
