@@ -34135,9 +34135,15 @@ class _Builder:
             # the element read's deps are the root's own provenance
             # plus every index's, which is what a representable
             # `o.A[i]` read yields for the value-struct root too.
-            receiver_deps = self._pointer_deps(
-                root_id, params, locals_
-            ) | self._opaque_container_deps(field_key, locals_)
+            # `locals_[root_id]` carries the local composite's
+            # conflated contents: a `w.I = e` store folds `e` there,
+            # and a param's folded pointee contents are already the
+            # field slot's `indirect_writes` share.
+            receiver_deps = (
+                self._pointer_deps(root_id, params, locals_)
+                | locals_.get(root_id, frozenset())
+                | self._opaque_container_deps(field_key, locals_)
+            )
             # Innermost index first (Go's order) — `s.A[i].F[0]`
             # evaluates `i` before `0`, so an index-position call
             # sees the post-state of every earlier index's calls.

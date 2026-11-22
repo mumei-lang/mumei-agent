@@ -6141,6 +6141,24 @@ def test_interface_field_store_then_dispatch(go_types_helper):
     assert result.return_dependencies == frozenset({0, 1})
 
 
+def test_interface_field_store_local_composite(go_types_helper):
+    # `w.I = e` on a local composite folds `e` into w's conflated
+    # set — the `w.I.M()` receiver reads that set, so `e` reaches
+    # the result.
+    declarations = (
+        "type I interface{ M() int64 }\n"
+        "type S struct{ I I }\n"
+        "func F(e I) int64 {\n"
+        "\tw := S{}\n"
+        "\tw.I = e\n"
+        "\treturn w.I.M()\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+
 @pytest.mark.parametrize(
     ("declarations", "expected"),
     [
