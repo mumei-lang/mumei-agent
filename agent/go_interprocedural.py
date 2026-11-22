@@ -3553,6 +3553,16 @@ class _Builder:
                         _leaf_kind == "pointer"
                         and (
                             for_pointer_leaf
+                            or getattr(
+                                getattr(
+                                    path_members[-1].type,
+                                    "elem",
+                                    None,
+                                ),
+                                "kind",
+                                None,
+                            )
+                            in {"integer", "boolean", "pointer"}
                             or self._struct_value_fact(
                                 getattr(
                                     path_members[-1].type,
@@ -15453,12 +15463,9 @@ class _Builder:
                 ):
                     leaf_member = elem_target[6][-1]
                     pointee_fact = leaf_member.type.elem
-                    if pointee_fact is None:
-                        raise _Unsupported(
-                            "non_parameter_reference", _span(node)
-                        )
                     self._pin_fact_identities(leaf_member.type)
-                    self._pin_fact_identities(pointee_fact)
+                    if pointee_fact is not None:
+                        self._pin_fact_identities(pointee_fact)
                     pointee_id = leaf_member.type.type_id or (
                         f"{leaf_member.id}/pointee"
                     )
@@ -15505,17 +15512,26 @@ class _Builder:
                 # shallow kind — `*lib.PU` reads an `int64`, `*lib.PPV`
                 # a `*T` — provided the pointee tree is fully
                 # pinnable (`pointee_type_ids` present), which a
-                # `*struct{ F T }` member fails. Non-scalar shapes
-                # (`*[4]int64`, `*[]T`, `*struct`) stay closed like a
-                # named struct pointee does.
-                if member.pointee_type_ids is None or (
-                    member.pointee_kind
-                    not in {"integer", "boolean", "pointer"}
+                # `*struct{ F T }` member fails. A scalar pointee
+                # (`*int64`) names no identity at all, so nothing
+                # pins and it admits the same way — the synthetic
+                # `<member>/pointee` id records the read. Non-scalar
+                # shapes (`*[4]int64`, `*[]T`, `*struct`) stay closed
+                # like a named struct pointee does.
+                if member.pointee_kind not in {
+                    "integer",
+                    "boolean",
+                    "pointer",
+                } or (
+                    member.pointee_type_ids is None
+                    and member.pointee_kind == "pointer"
                 ):
                     raise _Unsupported(
                         "non_parameter_reference", _span(node)
                     )
-                self.pinned.update(member.pointee_type_ids)
+                if member.pointee_type_ids is not None:
+                    self.pinned.update(member.pointee_type_ids)
+                pointee_id = f"{member.id}/pointee"
         else:
             # `*t` — a dereference read of a bound pointer. The
             # pointee is memory the dep model never tracks, so the
@@ -20518,12 +20534,9 @@ class _Builder:
                 ):
                     _leaf_member = deref_elem_target[6][-1]
                     _pointee_fact = _leaf_member.type.elem
-                    if _pointee_fact is None:
-                        raise _Unsupported(
-                            "unsupported_statement", _span(lhs)
-                        )
                     self._pin_fact_identities(_leaf_member.type)
-                    self._pin_fact_identities(_pointee_fact)
+                    if _pointee_fact is not None:
+                        self._pin_fact_identities(_pointee_fact)
                     _pointee_id = _leaf_member.type.type_id or (
                         f"{_leaf_member.id}/pointee"
                     )
