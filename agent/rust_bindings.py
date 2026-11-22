@@ -3952,10 +3952,27 @@ class _RustBindings:
         container = (
             None if type_id is None else self.records.get(type_id)
         )
-        if container is not None and self._pattern_param_map(
-            container, impl_args
-        ):
-            return None
+        param_map = (
+            {}
+            if container is None
+            else self._pattern_param_map(container, impl_args)
+        )
+        if param_map:
+            # Substituted args were spelled at the receiver's
+            # annotation — but only a member whose own annotation
+            # spells a param needs that scope; a fixed member type
+            # (`Option<Q>` on `W<A>` at `W<P>`) keeps its declaring
+            # scope or a same-named local type would shadow it.
+            member_text = (
+                ""
+                if member.type_node is None
+                else self.text(member.type_node)
+            )
+            if any(
+                re.search(rf"\b{re.escape(param)}\b", member_text)
+                for param in param_map
+            ):
+                return None
         if member.home_scope is not None:
             return member.home_scope
         owner = self.records.get(member.member_of)
@@ -3971,11 +3988,17 @@ class _RustBindings:
         used = self._type_arg_list(impl_args or "")
         if not spelled or len(used) < len(spelled):
             return {}
-        return {
-            name: arg
-            for name, arg in zip(spelled, used)
-            if name in member.member_impl_type_params
-        }
+        pairs = {}
+        for name, arg in zip(spelled, used):
+            # `impl<const N: usize> W<{N}>` spells the arg `{N}` and a
+            # raw ident `r#T` keeps its prefix — normalize both before
+            # matching the declared param names.
+            key = self._normalize_identifier(name.strip())
+            if key.startswith("{") and key.endswith("}"):
+                key = self._normalize_identifier(key[1:-1].strip())
+            if key in member.member_impl_type_params:
+                pairs[key] = arg
+        return pairs
 
     def _pattern_param_map(
         self, container: "_Record | None", scrut_args: str | None
@@ -4215,7 +4238,11 @@ class _RustBindings:
             if args_scope is None:
                 # Substituted args were spelled at the receiver's
                 # annotation — a fn-local `Q` is invisible at the
-                # field's declaration site.
+                # field's declaration site. Only annotations that
+                # actually spell a substituted param move the
+                # position; a fixed field type (no param mention)
+                # still resolves where the field was declared, or a
+                # same-named local type would shadow it.
                 receiver = node.child_by_field_name("value")
                 if receiver is not None and receiver.type == "identifier":
                     record = self._lookup(

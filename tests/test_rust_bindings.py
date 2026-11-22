@@ -4477,7 +4477,7 @@ struct B;
 impl B { fn bm(&self) {} }
 struct P;
 impl P { fn pm(&self) {} }
-struct W<A, B2> { res: Result<A, B2> }
+struct W<A, B> { res: Result<A, B> }
 fn f(w: W<B, P>) {
     match w.res {
         Ok(x) => x.bm(),
@@ -4489,8 +4489,8 @@ fn f(w: W<B, P>) {
     report = build_rust_bindings(source, pointer_width=64)
     bm = _bindings(report, "bm", "associated_function")[0]
     pm = _bindings(report, "pm", "associated_function")[0]
-    # W<B, P> reads Result<A, B2> as Result<B, P> — A→B must not then
-    # get rewritten by B2→P.
+    # W<B, P> reads Result<A, B> as Result<B, P> — a sequential
+    # rewrite would chain A→B then B→P into Result<P, P>.
     assert _call(report, source, "x.bm()").target == bm.id
     assert _call(report, source, "e.pm()").target == pm.id
 
@@ -4513,3 +4513,48 @@ fn f() {
     # Q is fn-local — invisible at the field's declaration site, so
     # substituted args resolve at the receiver's annotation.
     assert _call(report, source, "p.qm()").target == qm.id
+
+
+def test_field_scrutinee_fixed_type_keeps_declaring_scope() -> None:
+    source = """
+mod m {
+    pub struct Q;
+    pub struct W<A> { pub opt: Option<Q>, pub tag: A }
+}
+use m::W;
+struct P;
+struct Q;
+impl m::Q { fn qm(&self) {} }
+impl Q { fn lm(&self) {} }
+fn f(w: W<P>) {
+    match w.opt {
+        Some(q) => { q.qm(); q.lm(); }
+        _ => {}
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    qm = _bindings(report, "qm", "associated_function")[0]
+    # `opt`'s `Option<Q>` mentions no substituted param — it resolves
+    # in the field's declaring scope, so q binds to m::Q, not the
+    # shadowing local Q.
+    assert _call(report, source, "q.qm()").target == qm.id
+    assert _call(report, source, "q.lm()").target == ""
+
+
+def test_impl_const_generic_braced_param_substitutes() -> None:
+    source = """
+struct R<const N: usize>;
+impl<const N: usize> R<N> { fn rn(&self) {} }
+struct W<const N: usize>;
+impl<const N: usize> W<{N}> {
+    fn get(&self) -> R<N> { panic!() }
+}
+fn f(w: W<4>) {
+    w.get().rn();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    rn = _bindings(report, "rn", "associated_function")[0]
+    # impl<const N> W<{N}> maps N→4 — the {N} spelling still matches.
+    assert _call(report, source, "w.get().rn()").target == rn.id
