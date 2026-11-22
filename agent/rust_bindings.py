@@ -2177,6 +2177,8 @@ class _RustBindings:
             # — walk the declaration to recover one, or the spelled
             # args would resolve at the call site and hit shadows.
             _, spelled_pos, _ = self._scrutinee_shape(value, None)
+        decl_scope = None
+        ret = None
         if value.type == "call_expression":
             # `o.unwrap()` reads the args the method's return
             # annotation wrote (`fn get(&self) -> Option<Q>`) —
@@ -2195,6 +2197,16 @@ class _RustBindings:
                 )
                 if ret is not None:
                     spelled_pos = ret.start_byte
+                    owner = (
+                        self.records.get(member.member_of)
+                        if member.member_of
+                        else None
+                    )
+                    decl_scope = (
+                        owner.home_scope
+                        if owner is not None
+                        else None
+                    )
                     # The substitution map comes from the
                     # receiver's declared container (`w: W<Q>`),
                     # not the call's own return head (`Option`
@@ -2218,21 +2230,37 @@ class _RustBindings:
                             container, receiver[1]
                         )
                     )
-                    member_text = (
-                        self.text(member.type_node)
+                    member_text = self.text(member.type_node)
+                    ret_args = []
+                    ret_generics = re.search(
+                        r"<([\s\S]*)>",
+                        self.text(ret),
                     )
-                    if param_map and any(
-                        re.search(
-                            rf"\b{re.escape(param)}\b",
-                            member_text,
+                    if ret_generics is not None:
+                        ret_args = [
+                            a.strip()
+                            for a in self._type_arg_list(
+                                ret_generics.group(1)
+                            )
+                        ]
+                    if (
+                        param_map
+                        and index < len(ret_args)
+                        and ret_args[index] in param_map
+                        and any(
+                            re.search(
+                                rf"\b{re.escape(param)}\b",
+                                member_text,
+                            )
+                            for param in param_map
                         )
-                        for param in param_map
                     ):
-                        # The method's return spells the
-                        # container's own param — the arg was
-                        # substituted from the receiver's
-                        # annotation, so resolve it there, not
-                        # in the method's declaring scope.
+                        # The payload arg spells the container's
+                        # own param — it was substituted from the
+                        # receiver's annotation, so resolve it
+                        # there. A fixed sibling arg (`E` in
+                        # `Result<T, E>`) stays in the method's
+                        # declaring scope.
                         inner_pos = (
                             self._receiver_annotation_position(
                                 callee.child_by_field_name("value")
@@ -2259,10 +2287,21 @@ class _RustBindings:
         # annotated — resolving at the call site picks up a same-named
         # shadow, and the import's record id must not gate on
         # index-element containers.
-        return self._spelled_type(
-            args[index].strip(),
-            position if spelled_pos is None else spelled_pos,
-        )
+        arg_pos = position if spelled_pos is None else spelled_pos
+        if (
+            decl_scope is not None
+            and ret is not None
+            and arg_pos == ret.start_byte
+        ):
+            # A fixed arg (`E` in `Result<T, E>`) resolves in the
+            # member's declaring scope — a call-site `struct E`
+            # must not shadow it.
+            self.scopes.append(decl_scope)
+            try:
+                return self._spelled_type(args[index].strip(), arg_pos)
+            finally:
+                self.scopes.pop()
+        return self._spelled_type(args[index].strip(), arg_pos)
 
     def _field_member(
         self, node: Any, kinds: tuple[str, ...] = ()
@@ -4934,6 +4973,22 @@ class _RustBindings:
                 re.search(rf"\b{re.escape(param)}\b", member_text)
                 for param in param_map
             ):
+                # A fixed sibling arg (`E` in `Result<T, E>`)
+                # still wants the declaring scope — hand it back
+                # when it shadows none of the substituted
+                # spellings.
+                decl = member.home_scope
+                if decl is None:
+                    owner = self.records.get(member.member_of)
+                    decl = None if owner is None else owner.home_scope
+                if decl is not None and not any(
+                    (m := re.match(r"[A-Za-z_][\w:]*", s.strip()))
+                    is not None
+                    and m.group(0).rsplit("::", 1)[-1]
+                    in decl.bindings
+                    for s in param_map.values()
+                ):
+                    return decl
                 return None
         if member.home_scope is not None:
             return member.home_scope
