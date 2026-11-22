@@ -5933,3 +5933,49 @@ fn f(b: Box<P>, r: std::rc::Rc<P>, w: W<P>, m: std::sync::Mutex<P>) {
     # not Deref straight to `P`.
     assert not resolved["w.pm()"]
     assert not resolved["m.pm()"]
+
+
+def test_slice_and_array_option_heads():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(s: &[P], a: [P; 4]) {
+    if let Some(p) = s.first() { p.pm(); }
+    if let Some(p) = a.last() { p.pm(); }
+    if let Some(p) = s.get(0) { p.pm(); }
+    match s.first() { Some(p) => p.pm(), None => {} }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    calls = [
+        call for call in report.calls
+        if raw[call.span.start:call.span.end].decode() == "p.pm()"
+    ]
+    assert len(calls) == 4
+    for call in calls:
+        assert call.target == pm.id
+
+
+def test_get_mut_and_option_filter_heads():
+    source = """
+use std::collections::HashMap;
+struct P;
+impl P { fn pm(&self) {} }
+fn f(v: Vec<P>, m: HashMap<i32, P>, o: Option<P>) {
+    if let Some(p) = v.get_mut(0) { p.pm(); }
+    if let Some(p) = m.get_mut(&1) { p.pm(); }
+    if let Some(p) = o.filter(|x| true) { p.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    calls = [
+        call for call in report.calls
+        if raw[call.span.start:call.span.end].decode() == "p.pm()"
+    ]
+    assert len(calls) == 3
+    for call in calls:
+        assert call.target == pm.id
