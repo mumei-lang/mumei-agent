@@ -3202,6 +3202,11 @@ Passing a recorded field value as a callback argument also re-resolves
 its captures and writes while retaining the opaque external fold.
 Deferred and goroutine calls through recorded field members use those
 records at exit, preserving the existing race fail-closed behavior.
+Passing a named value struct argument carries records from its
+function-valued fields and recursively embedded value-struct fields into
+the callee's argument deps and callback-write fold. Other struct-valued
+argument expressions with recorded function fields fail closed; structs
+without such records retain the existing behavior.
 A package-level `var Alias = Id` call
 admits as an opaque external call — the callee is
 reassignable by any caller, so `Alias(args)` is dep-free
