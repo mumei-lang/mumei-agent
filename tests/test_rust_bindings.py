@@ -4341,4 +4341,5 @@ fn g(w: W) {
         c for c in report.calls
         if source[c.span.start:c.span.end] == "p.m()"
     ]
+    assert len(calls) == 2
     assert all(c.target == "" for c in calls)
