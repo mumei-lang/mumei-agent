@@ -3064,7 +3064,11 @@ class _Builder:
         ):
             return None
         target = self._opaque_container_field_target(
-            current, params, for_write=True
+            current,
+            params,
+            allow_struct_elements=True,
+            allow_struct_element_arrays=True,
+            for_write=True,
         )
         if target is None:
             return None

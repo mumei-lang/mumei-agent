@@ -33583,6 +33583,79 @@ def test_named_struct_element_pointer_param_root_member_pointee_closed(
     )
 
 
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        # `p.A[i] = e` — a whole-element store into the caller's
+        # backing on a `*S` root.
+        "type E struct { V int64 }\n"
+        "type S struct { A []E }\n"
+        "func F(p *S, i int64, e E) {\n"
+        "\tp.A[i] = e\n}\n",
+        # `q.A[i] = e` — the `q := p` alias keeps the store open.
+        "type E struct { V int64 }\n"
+        "type S struct { A []E }\n"
+        "func F(p *S, i int64, e E) {\n"
+        "\tq := p\n"
+        "\tq.A[i] = e\n}\n",
+        # `o.A[i] = e` — the same store on a local composite root.
+        "type E struct { V int64 }\n"
+        "type S struct { A []E }\n"
+        "func F(o S, i int64, e E) {\n"
+        "\to.A[i] = e\n}\n",
+        # `p.M[k] = e` — the map field's element store.
+        "type E struct { V int64 }\n"
+        "type S struct { M map[int64]E }\n"
+        "func F(p *S, k int64, e E) {\n"
+        "\tp.M[k] = e\n}\n",
+        # `p.A[i] = x` — a pointer element store (`[]*E`).
+        "type E struct { V int64 }\n"
+        "type S struct { A []*E }\n"
+        "func F(p *S, i int64, x *E) {\n"
+        "\tp.A[i] = x\n}\n",
+        # `p.A[i][j] = e` — the nested level conflates under the
+        # field's slot like the read path does.
+        "type E struct { V int64 }\n"
+        "type S struct { A [][]E }\n"
+        "func F(p *S, i int64, j int64, e E) {\n"
+        "\tp.A[i][j] = e\n}\n",
+    ],
+)
+def test_named_struct_element_pointer_param_root_element_store(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.effects == "unknown"
+    assert not [
+        gap for gap in result.gaps if gap.reason != "summary_effects"
+    ]
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        # A later element read observes the stored element's deps.
+        "type E struct { V int64 }\n"
+        "type S struct { A []E }\n"
+        "func F(p *S, i int64, j int64, e E) int64 {\n"
+        "\tp.A[i] = e\n"
+        "\treturn p.A[j].V\n}\n",
+        # The same through a local composite root.
+        "type E struct { V int64 }\n"
+        "type S struct { A []E }\n"
+        "func F(o S, i int64, j int64, e E) int64 {\n"
+        "\to.A[i] = e\n"
+        "\treturn o.A[j].V\n}\n",
+    ],
+)
+def test_named_struct_element_pointer_param_root_element_store_read_back(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1, 2, 3})
+
+
 def test_named_struct_element_pointer_param_root_member_pointee_write(
     go_types_helper,
 ):
