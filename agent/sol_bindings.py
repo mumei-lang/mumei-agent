@@ -984,25 +984,100 @@ class _SolBindings:
             return member, using_record, using_reason
         return member, None, reason
 
+    def _object_declared_type_text(self, obj: Any) -> str | None:
+        """Declared-type text of a member-call receiver, or None when the
+        object's type cannot be named statically. Identifier objects keep
+        the original variable lookup; member chains (`coin.v.f()`), array
+        elements (`totals[0].f()`), calls returning a named type
+        (`getTotal().f()`, `total.add(1).sub(2)`) and type conversions
+        (`Token(addr).f()`) reuse the same type-node machinery as the
+        contract path.
+        """
+        obj = self._unwrap(obj)
+        if obj is None:
+            return None
+        if obj.type == "identifier":
+            if self.text(obj) in {"this", "super"}:
+                return None
+            record, _reason = self._lookup(
+                self.text(obj), obj.start_byte, "value"
+            )
+            if (
+                record is None
+                or record.type_node is None
+                or record.binding.kind
+                in {"contract", "interface", "library"}
+            ):
+                return None
+            return self.text(record.type_node)
+        if obj.type == "member_expression":
+            _member, inner, _reason = self._resolve_member(obj)
+            if inner is None or inner.type_node is None:
+                return None
+            return self.text(inner.type_node)
+        if obj.type == "array_access":
+            base = self._unwrap(obj.child_by_field_name("base"))
+            base_record = self._object_record(base)
+            if base_record is None or base_record.type_node is None:
+                return None
+            text = re.sub(
+                r"\b(memory|calldata|storage)\b",
+                "",
+                self.text(base_record.type_node),
+            )
+            element = re.sub(r"\[[^\]]*\]\s*$", "", text).strip()
+            if element == text.strip() or "[" in element:
+                return None
+            return element
+        if obj.type == "call_expression":
+            callee = self._unwrap(obj.child_by_field_name("function"))
+            record = self._object_record(callee)
+            if record is None:
+                return None
+            if record.binding.kind in {
+                "contract",
+                "interface",
+                "library",
+                "struct",
+                "enum",
+            }:
+                # `Token(addr)` / `Coin(...)` — the value is typed by
+                # the declared type itself.
+                return record.binding.name
+            if record.binding.kind != "function":
+                if record.type_node is not None and not re.match(
+                    r"\s*function\b", self.text(record.type_node)
+                ):
+                    return self.text(record.type_node)
+                return None
+            function_node = record.node.parent
+            if function_node is None:
+                return None
+            returns = self._return_parameters(function_node)
+            if not returns:
+                return None
+            type_node = returns[0].child_by_field_name("type")
+            if type_node is None or re.match(
+                r"\s*function\b", self.text(type_node)
+            ):
+                return None
+            return self.text(type_node)
+        return None
+
     def _lookup_using(
         self, name: str, obj: Any, position: int
     ) -> tuple[_Record | None, str | None]:
         """Resolve `x.f` through `using Lib for T` directives when the
         contract-type path found no member: the object's declared type
         text must equal the directive's `for` target, or the directive
-        must be `for *`. Identifier objects only — a member call on an
-        expression (`arr[i].f()`) keeps its opaque treatment.
+        must be `for *`. Objects whose type cannot be named statically
+        (mappings, nested arrays, function-typed returns) keep their
+        opaque treatment.
         """
-        if obj.type != "identifier" or self.text(obj) in {"this", "super"}:
+        raw_text = self._object_declared_type_text(obj)
+        if raw_text is None:
             return None, None
-        record, _reason = self._lookup(self.text(obj), obj.start_byte, "value")
-        if (
-            record is None
-            or record.type_node is None
-            or record.binding.kind in {"contract", "interface", "library"}
-        ):
-            return None, None
-        type_text = self._canonical_type_text(self.text(record.type_node))
+        type_text = self._canonical_type_text(raw_text)
         directives = list(self.file_usings)
         if self.current_contract is not None:
             directives.extend(self.current_contract.usings)

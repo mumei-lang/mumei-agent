@@ -9,6 +9,7 @@ contract Base {
 }
 library SafeMath {
     function add(uint256 a, uint256 b) internal pure returns (uint256) {}
+    function sub(uint256 a, uint256 b) internal pure returns (uint256) {}
 }
 struct Coin {
     Token t;
@@ -34,6 +35,7 @@ contract Vault is Base {
     Token[] tokens;
     Coin[] coins;
     Status status;
+    mapping(address => uint256) balances;
     function run() external {
         token.transfer(address(0), 1);
         uint256 s = token.supply();
@@ -55,7 +57,15 @@ contract Vault is Base {
         s = Coin(Token(address(0)), 1).v;
         Container.State cst = Container.State.On;
         coin.v += 1;
+        values[0].add(1);
+        coin.v.add(1);
+        getTotal().add(1);
+        total.add(1).sub(2);
+        getCoin().stamp();
+        balances[msg.sender].add(1);
     }
     function vaultFn() public {}
     function getToken() internal returns (Token) {}
+    function getTotal() internal returns (uint256) { return total; }
+    function getCoin() internal returns (Coin memory) { return coin; }
 }

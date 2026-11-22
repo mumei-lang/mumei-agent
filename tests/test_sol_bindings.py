@@ -1825,6 +1825,85 @@ contract Vault {
     )
 
 
+def test_using_resolves_on_non_identifier_receivers():
+    source = """
+library SafeMath {
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {}
+    function sub(uint256 a, uint256 b) internal pure returns (uint256) {}
+}
+struct Coin { uint256 v; }
+contract Vault {
+    using SafeMath for uint256;
+    uint256[] values;
+    uint256 total;
+    Coin coin;
+    function run() external {
+        values[0].add(1);
+        coin.v.add(1);
+        getTotal().add(1);
+        total.add(1).sub(2);
+    }
+    function getTotal() internal returns (uint256) { return total; }
+}
+"""
+    report = build_sol_bindings(source)
+    add = next(b for b in report.bindings if b.name == "add")
+    sub = next(b for b in report.bindings if b.name == "sub")
+    add_calls = [
+        ref
+        for ref in report.references
+        if ref.binding_id == add.id and ref.kind == "call"
+    ]
+    sub_calls = [
+        ref
+        for ref in report.references
+        if ref.binding_id == sub.id and ref.kind == "call"
+    ]
+    assert len(add_calls) == 4
+    assert len(sub_calls) == 1
+    assert _text(source, sub_calls[0].span) == "sub"
+
+
+def test_using_on_mapping_index_stays_opaque():
+    source = """
+library SafeMath {
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {}
+}
+contract Vault {
+    using SafeMath for uint256;
+    mapping(address => uint256) balances;
+    function run() external { balances[msg.sender].add(1); }
+}
+"""
+    report = build_sol_bindings(source)
+    add = next(b for b in report.bindings if b.name == "add")
+    assert not any(
+        ref.binding_id == add.id and ref.kind == "call"
+        for ref in report.references
+    )
+    assert report.calls[0].kind == "opaque_member"
+
+
+def test_using_on_nested_array_stays_opaque():
+    source = """
+library SafeMath {
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {}
+}
+contract Vault {
+    using SafeMath for uint256;
+    uint256[][] grid;
+    function run() external { grid[0][0].add(1); }
+}
+"""
+    report = build_sol_bindings(source)
+    add = next(b for b in report.bindings if b.name == "add")
+    assert not any(
+        ref.binding_id == add.id and ref.kind == "call"
+        for ref in report.references
+    )
+    assert report.calls[0].kind == "opaque_member"
+
+
 def test_member_call_on_array_element_resolves():
     source = """
 contract Token {
