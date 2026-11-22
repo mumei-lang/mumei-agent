@@ -1223,3 +1223,39 @@ i.inst();
     news = [c for c in report.calls if c.kind == "opaque_new"]
     inner = _member_bindings(report, "Inner", "class")[0]
     assert any(c.target == inner.id for c in news)
+
+
+def test_member_split_block_duplicate_classes_do_not_merge():
+    source = """
+class B { m(): void {} }
+namespace Lib { class C extends B { go(): void { this.m(); } } }
+namespace Lib { export class C { m(): void {} } }
+"""
+    report = build_ts_bindings(source)
+    base_m = _member_bindings(report, "m", "associated_function")[0]
+    calls = [
+        c for c in report.calls
+        if c.kind == "opaque_virtual" and c.target == base_m.id
+    ]
+    assert len(calls) == 1
+
+
+def test_member_ambient_class_namespace_merge():
+    source = """
+declare namespace C { export function f(): void; }
+declare class C { m(): void; }
+const c = new C();
+c.m();
+C.f();
+"""
+    report = build_ts_bindings(source)
+    ambient_c = [
+        b for b in report.bindings if b.name == "C" and b.kind == "ambient"
+    ][0]
+    m = _member_bindings(report, "m", "associated_function")[0]
+    new_calls = [c for c in report.calls if c.kind == "opaque_ambient"]
+    assert any(c.target == ambient_c.id for c in new_calls)
+    assert any(
+        c.kind == "opaque_bodyless" and c.target == m.id
+        for c in report.calls
+    )

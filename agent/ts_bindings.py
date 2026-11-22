@@ -1265,8 +1265,13 @@ class _TypeScriptBindings:
         self._initializer_active.add(record.binding.id)
         try:
             if constructor.type in {"identifier", "type_identifier"}:
-                return self._lookup(
+                resolved = self._lookup(
                     self.text(constructor), init_position, "type"
+                )
+                return (
+                    self._merged_constructible(resolved)
+                    if resolved is not None
+                    else None
                 )
             if constructor.type == "member_expression":
                 property_node = constructor.child_by_field_name("property")
@@ -1316,6 +1321,14 @@ class _TypeScriptBindings:
                 or sibling.binding.name != record.binding.name
             ):
                 continue
+            # `class C` + `class C` (and `enum`/`enum`) in one container
+            # is a duplicate-identifier error, not a merge — keep them
+            # distinct so a sibling's methods don't shadow the base's.
+            if (
+                record.binding.kind in {"class", "enum"}
+                and sibling.binding.kind == record.binding.kind
+            ):
+                continue
             if (
                 sibling.member_of is not None
                 and sibling.member_of == record.member_of
@@ -1332,12 +1345,13 @@ class _TypeScriptBindings:
         return siblings
 
     def _merged_constructible(self, record: _Record) -> _Record:
-        """Prefer the `class` sibling of a merged declaration."""
-        if record.binding.kind == "class":
+        """Prefer the class (or ambient class) of a merged declaration."""
+        if record.binding.kind in {"class", "ambient"}:
             return record
-        for sibling in self._merge_siblings(record):
-            if sibling.binding.kind == "class":
-                return sibling
+        for preferred in ("class", "ambient"):
+            for sibling in self._merge_siblings(record):
+                if sibling.binding.kind == preferred:
+                    return sibling
         return record
 
     def _object_type(
@@ -1414,8 +1428,15 @@ class _TypeScriptBindings:
             if constructor is not None and constructor.type in {
                 "identifier", "type_identifier",
             }:
+                resolved = self._lookup(
+                    self.text(constructor), position, "type"
+                )
                 return (
-                    self._lookup(self.text(constructor), position, "type"),
+                    (
+                        self._merged_constructible(resolved)
+                        if resolved is not None
+                        else None
+                    ),
                     False,
                     False,
                 )
@@ -2043,6 +2064,7 @@ class _TypeScriptBindings:
             )
             return
         if new:
+            record = self._merged_constructible(record)
             if record.binding.kind == "import":
                 kind = "opaque_import"
             elif record.binding.kind == "ambient":
