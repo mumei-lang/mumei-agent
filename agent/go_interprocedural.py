@@ -23868,6 +23868,10 @@ class _Builder:
                     self._restore_param_pointer_state(
                         ptr_entry_state
                     )
+                    # Each clause is a fresh alternative — a `break`
+                    # in an earlier clause must not mark this one's
+                    # statements conditional.
+                    frame["exited"] = False
                     if receive is not None:
                         lefts, recv, recv_deps = receive
                         self._select_receive_store(
