@@ -34266,7 +34266,7 @@ class _Builder:
                             if child.type != "comment"
                         ]
                     if len(expressions) != 1:
-                        return False
+                        return None
                     returned = self._strip_parens(expressions[0])
                     if (
                         returned is None
