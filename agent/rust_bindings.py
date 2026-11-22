@@ -147,6 +147,9 @@ _OPTION_HEAD_METHODS = {
     # stays opaque.
     "cloned": ("", {"Option"}, 0),
     "copied": ("", {"Option"}, 0),
+    # `o1.zip(o2)` yields `Option<(P, Q)>` — the payload pairs the
+    # receiver's arg with the argument's, spelled below.
+    "zip": ("", {"Option"}, 0),
 }
 
 _PRELUDE_NAMES = frozenset(
@@ -3146,6 +3149,51 @@ class _RustBindings:
                                         # than bind the wrong
                                         # record.
                                         return None, None
+                    if (
+                        element is not None
+                        and self.text(field).strip() == "zip"
+                    ):
+                        # `o1.zip(o2)` yields `Option<(P, Q)>` —
+                        # `o2` must read as another `Option` so its
+                        # first arg spells the pair's second half.
+                        arg_list = node.child_by_field_name(
+                            "arguments"
+                        )
+                        other = (
+                            None
+                            if arg_list is None
+                            else next(
+                                (
+                                    c
+                                    for c in arg_list.named_children
+                                    if "comment" not in c.type
+                                ),
+                                None,
+                            )
+                        )
+                        _other_id, other_args = (
+                            (None, None)
+                            if other is None
+                            else self._receiver_type(other)
+                        )
+                        other_args = (
+                            None
+                            if other_args is None
+                            else other_args.strip()
+                        )
+                        if (
+                            other_args is None
+                            or self._container_head_name(other)
+                            != "Option"
+                        ):
+                            element = None
+                        else:
+                            pair = self._type_arg_list(other_args)
+                            element = (
+                                f"({element}, {pair[0].strip()})"
+                                if pair
+                                else None
+                            )
                     if (
                         element is not None
                         and self.text(field).strip()
