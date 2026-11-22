@@ -2443,6 +2443,17 @@ _CHECK_PERFORMERS: dict = {
         ("mumei.signature-verification/v1", "revocation_list_authentic",
          True, "shared:revocation_digest"),
     ],
+    # `revocation_list_rollback` recovers through either signature
+    # fold's `revocation_list_current` — a v2 list pinned against a
+    # caller-declared minimum version and freshness window. `shared:`
+    # binds both docs to the declared revocation-list digest each
+    # assessed, like `revocation_list_authenticity`.
+    "revocation_list_rollback": [
+        ("mumei.signature-envelope-evaluation/v1",
+         "revocation_list_current", True, "shared:revocation_digest"),
+        ("mumei.signature-verification/v1", "revocation_list_current",
+         True, "shared:revocation_digest"),
+    ],
     "descriptor_freshness": [
         ("mumei.freshness-evaluation/v1", "within_window", True, None),
     ],
