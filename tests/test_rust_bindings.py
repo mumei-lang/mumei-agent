@@ -8047,3 +8047,45 @@ fn f(s: std::collections::BTreeSet<P>, m: std::collections::BTreeMap<K, P>) {
     # A map's `range` yields `(K, V)` pairs, not `P` — a single
     # loop name stays opaque.
     assert not bound.get("d.pm()")
+def test_split_entry_leak_and_intersperse_bind_payloads():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct K;
+fn f(v: Vec<P>, m: std::collections::HashMap<K, P>, b: std::collections::BTreeMap<K, P>) {
+    let s = v.leak();
+    s[0].pm();
+    let e = m.entry(K);
+    let r = e.or_insert(P);
+    r.pm();
+    let e2 = e.and_modify(|x| {});
+    let r2 = e2.or_insert(P);
+    r2.pm();
+    let eb = b.entry(K);
+    let r3 = eb.into_mut();
+    r3.pm();
+    let eh = m.entry(K);
+    let r4 = eh.into_mut();
+    r4.pm();
+    for i in v.iter().intersperse(&P) { i.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `v.leak()` yields `&mut [P]` — the index reads `P`.
+    assert bound.get("s[0].pm()") == pm.id
+    # `let e = m.entry(k)` — the name resolves back to its
+    # `entry`/`and_modify` initializer.
+    assert bound.get("r.pm()") == pm.id
+    assert bound.get("r2.pm()") == pm.id
+    # `Entry::into_mut` is `BTreeMap`-only — `HashMap` stays
+    # opaque.
+    assert bound.get("r3.pm()") == pm.id
+    assert not bound.get("r4.pm()")
+    # `intersperse` keeps the element.
+    assert bound.get("i.pm()") == pm.id
