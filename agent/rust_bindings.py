@@ -72,7 +72,13 @@ _ITER_CHUNK_MUT_METHODS = frozenset(
 )
 # Map entry points and the key they read — `m.keys()` yields `K`,
 # `m.values()` yields `V` of `HashMap<K, V>`/`BTreeMap<K, V>`.
-_MAP_ELEMENT_METHODS = {"keys": 0, "values": 1}
+_MAP_ELEMENT_METHODS = {
+    "keys": 0,
+    "values": 1,
+    "into_keys": 0,
+    "into_values": 1,
+    "values_mut": 1,
+}
 _MAP_CONTAINER_NAMES = frozenset({"HashMap", "BTreeMap"})
 # `BTreeMap::range(r)`/`range_mut(r)` iterate `(&K, &V)` pairs —
 # `HashMap` exposes no range view.
@@ -192,6 +198,9 @@ _OPTION_HEAD_METHODS = {
     # `m.remove_entry(k)`/`m.pop_first()`/`m.pop_last()` yield
     # `Option<(K, V)>` — `_MAP_PAIR_METHODS` spells the pair.
     "remove_entry": ("", {"HashMap", "BTreeMap"}, 0),
+    # `m.get_key_value(k)` yields `Option<(&K, &V)>` — the
+    # borrowed pair spelled below.
+    "get_key_value": ("", {"HashMap", "BTreeMap"}, 0),
     # `pop_first`/`pop_last` on `BTreeMap` yield `Option<(K, V)>`
     # (the `_MAP_PAIR_METHODS` pair below); on `BTreeSet` plain
     # `Option<P>`.
@@ -208,6 +217,10 @@ _OPTION_HEAD_METHODS = {
 _MAP_PAIR_METHODS = frozenset(
     {"remove_entry", "pop_first", "pop_last"}
 )
+
+# `m.get_key_value(k)` yields `Option<(&K, &V)>` — the borrowed
+# variant of the `_MAP_PAIR_METHODS` pair.
+_MAP_BORROWED_PAIR_METHODS = frozenset({"get_key_value"})
 
 # `v.swap_remove(i)` yields `T` outright — a receiver payload, not
 # an Option.
@@ -3159,6 +3172,7 @@ class _RustBindings:
                         if (
                             self.text(field).strip()
                             in _MAP_PAIR_METHODS
+                            | _MAP_BORROWED_PAIR_METHODS
                             and self._container_head_name(
                                 callee.child_by_field_name("value")
                             )
@@ -3169,6 +3183,8 @@ class _RustBindings:
                             # spell the pair (`receiver[1]` already
                             # reduced them to the value `V`), so
                             # `Some((k, v))` binds each name.
+                            # `get_key_value` borrows both halves:
+                            # `Option<(&K, &V)>`.
                             type_node = self._receiver_type_node(
                                 callee.child_by_field_name("value")
                             )
@@ -3185,9 +3201,18 @@ class _RustBindings:
                                 and head_args[0] is not None
                                 else []
                             )
+                            borrowed = (
+                                self.text(field).strip()
+                                in _MAP_BORROWED_PAIR_METHODS
+                            )
                             element = (
-                                f"({pair_args[0].strip()},"
-                                f" {pair_args[1].strip()})"
+                                (
+                                    f"(&{pair_args[0].strip()},"
+                                    f" &{pair_args[1].strip()})"
+                                    if borrowed
+                                    else f"({pair_args[0].strip()},"
+                                    f" {pair_args[1].strip()})"
+                                )
                                 if len(pair_args) >= 2
                                 else None
                             )
@@ -4445,6 +4470,35 @@ class _RustBindings:
                 )
             return spelled, self._receiver_annotation_position(
                 receiver
+            )
+        if (
+            index := _MAP_ELEMENT_METHODS.get(method)
+        ) is not None:
+            container_id, args = self._receiver_type(receiver)
+            if args is None or not self._is_map_container(
+                container_id, receiver
+            ):
+                return None, None
+            if index == 0:
+                # `keys()`/`into_keys()` — `args` already reduced
+                # to `V`, so recover `K` from the spelled
+                # annotation.
+                spelled = self._map_spelled_args(receiver)
+                if spelled is None:
+                    return None, None
+                element = next(
+                    iter(self._type_arg_list(spelled)), None
+                )
+            else:
+                element = args.strip()
+            if element is None:
+                return None, None
+            # The element spelling drops the borrow — the same
+            # convention `_for_element` uses for `for x in
+            # m.values()` so let-bound and direct loops agree.
+            return (
+                element,
+                self._receiver_annotation_position(receiver),
             )
         if method in _SET_ALGEBRA_METHODS:
             # `a.union(&b)`/`intersection`/`difference`/

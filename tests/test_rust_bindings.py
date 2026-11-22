@@ -7413,3 +7413,37 @@ fn f(o: Option<u8>) {
     assert bound.get("e.em()") == em.id
     assert not bound.get("e2.em2()")
 
+
+
+def test_map_key_value_views_bind_elements_through_let():
+    source = """
+struct K;
+impl K { fn km(&self) {} }
+struct P;
+impl P { fn pm(&self) {} }
+fn f(m: HashMap<K, P>, b: BTreeMap<K, P>, w: W<K, P>) {
+    let a = m.values(); for p in a { p.pm(); }
+    let c = m.keys(); for k in c { k.km(); }
+    let d = m.values_mut(); for p in d { p.pm(); }
+    let g = b.into_values(); for p in g { p.pm(); }
+    let h = b.into_keys(); for k in h { k.km(); }
+    for p in m.values_mut() { p.pm(); }
+    let e = m.get_key_value(&K); if let Some((k, val)) = e { val.pm(); }
+    let e2 = b.get_key_value(&K); if let Some((k2, val2)) = e2 { val2.pm(); }
+    let e3 = w.get_key_value(&K); if let Some((k3, val3)) = e3 { val3.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    km = _bindings(report, "km", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    assert bound.get("p.pm()") == pm.id
+    assert bound.get("k.km()") == km.id
+    assert bound.get("val.pm()") == pm.id
+    assert bound.get("val2.pm()") == pm.id
+    # A custom `W` map keeps `get_key_value` opaque.
+    assert not bound.get("val3.pm()")
