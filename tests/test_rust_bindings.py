@@ -8724,3 +8724,40 @@ fn f(s: m::S, r: Result<&P, i32>, hs: std::collections::HashSet<P>) {
     # `HashSet` has no `into_boxed_slice` — the Vec recipe does not
     # apply to other containers.
     assert not bound.get("bs[0].pm()")
+
+def test_heap_into_vec_and_into_flattened_bind_elements():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(h: std::collections::BinaryHeap<P>, v: Vec<[P; 2]>, w: Vec<P>, s: std::collections::HashSet<P>) {
+    let a = h.into_sorted_vec();
+    for x in a { x.pm(); }
+    let t = h.into_vec();
+    t[0].pm();
+    for c in h.drain_sorted() { c.pm(); }
+    let fl = v.into_flattened();
+    for d in fl { d.pm(); }
+    let g = w.into_flattened();
+    for e in g { e.pm(); }
+    let hs = s.into_vec();
+    hs[0].pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `h.into_sorted_vec()`/`into_vec()` yield `Vec<P>`;
+    # `drain_sorted` drains `P`.
+    assert bound.get("x.pm()") == pm.id
+    assert bound.get("t[0].pm()") == pm.id
+    assert bound.get("c.pm()") == pm.id
+    # `Vec<[P; N]>::into_flattened()` yields `Vec<P>`.
+    assert bound.get("d.pm()") == pm.id
+    # `Vec<P>` names no `into_flattened`; `HashSet` names no
+    # `into_vec` — both stay opaque.
+    assert not bound.get("e.pm()")
+    assert not bound.get("hs[0].pm()")

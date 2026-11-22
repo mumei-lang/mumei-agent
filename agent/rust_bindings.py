@@ -49,7 +49,7 @@ _INDEX_ELEMENT_CONTAINERS = frozenset(
 # `keys`/`values` entry points below.
 _ITER_ELEMENT_METHODS = frozenset(
     {"iter", "iter_mut", "into_iter", "drain", "split_off",
-     "splice"}
+     "splice", "drain_sorted"}
 )
 # Iterator adaptors that keep the same element type — `map`/`flat_map`
 # change it through a closure and stay opaque.
@@ -4364,6 +4364,55 @@ class _RustBindings:
                             "Box<[" + receiver[1] + "]>",
                             annotated,
                         )
+                    if (
+                        method_name in {"into_vec", "into_sorted_vec"}
+                        and receiver[1] is not None
+                        and self._container_head_name(
+                            callee.child_by_field_name("value")
+                        )
+                        == "BinaryHeap"
+                    ):
+                        # `h.into_vec()`/`into_sorted_vec()` yield
+                        # `Vec<P>` — the spelled Vec feeds `for`/
+                        # `iter` element paths.
+                        return self._spelled_type(
+                            "Vec<" + receiver[1] + ">",
+                            self._receiver_annotation_position(
+                                callee.child_by_field_name("value")
+                            )
+                            or node.start_byte,
+                        )
+                    if (
+                        method_name == "into_flattened"
+                        and receiver[1] is not None
+                        and self._container_head_name(
+                            callee.child_by_field_name("value")
+                        )
+                        == "Vec"
+                    ):
+                        # `Vec<[P; N]>::into_flattened()` yields
+                        # `Vec<P>` — the array's element spelling;
+                        # a non-array `Vec` names no such method
+                        # and stays opaque.
+                        flat_args = receiver[1].strip()
+                        if (
+                            flat_args.startswith("[")
+                            and flat_args.endswith("]")
+                        ):
+                            return self._spelled_type(
+                                "Vec<"
+                                + self._array_elem(
+                                    flat_args[1:-1]
+                                )
+                                + ">",
+                                self._receiver_annotation_position(
+                                    callee.child_by_field_name(
+                                        "value"
+                                    )
+                                )
+                                or node.start_byte,
+                            )
+                        return None, None
                     if (
                         method_name in {"cloned", "copied"}
                         and receiver[1] is not None
