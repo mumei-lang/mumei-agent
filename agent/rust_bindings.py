@@ -4262,6 +4262,33 @@ class _RustBindings:
                 position,
                 args_scope,
             )
+        if node.type == "call_expression":
+            # `match m.get(k)` — the scrutinee's spelled head is the
+            # callee's declared return annotation, whose args
+            # resolve in the method's declaring scope. A turbofish
+            # (`m.get::<u8>()`) wraps the callee in generic_function.
+            callee = node.child_by_field_name("function")
+            callee = None if callee is None else self._callee(callee)
+            if (
+                callee is not None
+                and callee.type == "generic_function"
+            ):
+                callee = callee.child_by_field_name("function")
+            member = (
+                self._field_member(callee, ("associated_function",))
+                if callee is not None
+                and callee.type == "field_expression"
+                else None
+            )
+            if member is None or member.type_node is None:
+                return None, None, None
+            return (
+                self._annotation_head_name(member.type_node),
+                member.type_node.start_byte,
+                self._member_scope_for_args(
+                    callee.child_by_field_name("value"), member
+                ),
+            )
         if node.type != "identifier":
             return None, None, None
         record = self._lookup(

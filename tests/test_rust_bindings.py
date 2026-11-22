@@ -4514,7 +4514,6 @@ fn f() {
     # substituted args resolve at the receiver's annotation.
     assert _call(report, source, "p.qm()").target == qm.id
 
-
 def test_field_scrutinee_fixed_type_keeps_declaring_scope() -> None:
     source = """
 mod m {
@@ -4560,3 +4559,56 @@ fn f(w: W<4>) {
     # `rn` lives only on `impl R<4>` so a missed substitution leaves
     # the return as R<N> and the call opaque.
     assert _call(report, source, "w.get().rn()").target == rn.id
+
+
+
+def test_prelude_pattern_on_method_call_scrutinee() -> None:
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+struct MyMap;
+impl MyMap {
+    fn get(&self) -> Option<P> { None }
+}
+fn f(m: MyMap) {
+    match m.get() { Some(p) => p.m(), _ => {} }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = _bindings(report, "m", "associated_function")[0]
+    assert _call(report, source, "p.m()").target == method.id
+
+
+def test_prelude_pattern_on_result_returning_call() -> None:
+    source = """
+struct P;
+struct E;
+impl P { fn m(&self) {} }
+impl E { fn e(&self) {} }
+struct O;
+impl O {
+    fn try_get(&self) -> Result<P, E> { Err(E) }
+}
+fn f(o: O) {
+    if let Err(e) = o.try_get() { e.e(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = _bindings(report, "e", "associated_function")[0]
+    assert _call(report, source, "e.e()").target == method.id
+
+
+def test_prelude_pattern_on_wrong_call_return_stays_opaque() -> None:
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+struct MyMap;
+impl MyMap {
+    fn get(&self) -> Vec<P> { Vec::new() }
+}
+fn f(m: MyMap) {
+    match m.get() { Some(p) => p.m(), _ => {} }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    assert _call(report, source, "p.m()").target == ""
