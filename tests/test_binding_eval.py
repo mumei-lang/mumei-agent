@@ -108,6 +108,104 @@ def test_bound_recheck_diagnostic():
     )
 
 
+def test_bound_single_requirement_accept_descriptor():
+    # `accept --requirement` pins the record it evaluated by
+    # `evidence_fingerprint`.
+    descriptor = {
+        "schema_version": "mumei.evidence-acceptance/v1",
+        "acceptance": "evaluated",
+        "verdict": "accepted",
+        "requirement_schema_version": "mumei.evidence-requirement/v1",
+        "requirement_fingerprint": _OTHER,
+        "evidence_schema_version": "mumei.verification-evidence/v1",
+        "evidence_fingerprint": _DIGEST,
+        "checks": [],
+        "checks_performed": [],
+        "checks_not_performed": [],
+    }
+    binding = evaluate_evidence_binding(_RECORD, descriptor)
+    assert binding["carrier_match"] is True
+    assert binding["subject_declared"] is True
+    assert binding["bound"] is True
+
+
+def _conjunctive(**pin):
+    descriptor = {
+        "schema_version": (
+            "mumei.evidence-requirement-list-acceptance/v1"
+        ),
+        "acceptance": "evaluated",
+        "verdict": "accepted",
+        "requirement_schema_version": (
+            "mumei.evidence-requirement-list/v1"
+        ),
+        "requirement_list_fingerprint": _OTHER,
+        "evidence_schema_version": pin.pop(
+            "evidence_schema_version", "mumei.verification-evidence/v1"
+        ),
+        "consistent": True,
+        "conflict_count": 0,
+        "conflicts": [],
+        "requirements_evaluated": 1,
+        "records_evaluated": 1,
+        "requirements": [],
+        "checks_performed": [],
+        "checks_not_performed": [],
+    }
+    descriptor.update(pin)
+    return descriptor
+
+
+def test_bound_conjunctive_record_and_list_pins():
+    # `accept --requirement-list` over one record pins
+    # `evidence_fingerprint`; over a record list it pins
+    # `list_fingerprint` — both bind to the bytes they cover.
+    record_pin = _conjunctive(evidence_fingerprint=_DIGEST)
+    binding = evaluate_evidence_binding(_RECORD, record_pin)
+    assert binding["carrier_match"] is True
+    assert binding["bound"] is True
+
+    list_pin = _conjunctive(
+        evidence_schema_version="mumei.verification-evidence-list/v1",
+        list_fingerprint=_DIGEST,
+    )
+    binding = evaluate_evidence_binding(_RECORD, list_pin)
+    assert binding["carrier_match"] is True
+    assert binding["subject_declared"] is True
+    assert binding["bound"] is True
+
+
+def test_bound_evidence_list_acceptance():
+    # `accept-list --requirement` pins the evaluated list by
+    # `list_fingerprint`; binding the list bytes uses the list pin.
+    descriptor = {
+        "schema_version": "mumei.evidence-list-acceptance/v1",
+        "acceptance": "evaluated",
+        "verdict": "accepted",
+        "requirement_schema_version": "mumei.evidence-requirement/v1",
+        "requirement_fingerprint": _OTHER,
+        "evidence_schema_version": (
+            "mumei.verification-evidence-list/v1"
+        ),
+        "list_fingerprint": _DIGEST,
+        "consistent": True,
+        "conflict_count": 0,
+        "conflicts": [],
+        "records_evaluated": 1,
+        "records": [],
+        "checks_performed": [],
+        "checks_not_performed": [],
+    }
+    binding = evaluate_evidence_binding(_RECORD, descriptor)
+    assert binding["carrier_match"] is True
+    assert binding["subject_declared"] is True
+    assert binding["bound"] is True
+    descriptor["list_fingerprint"] = _OTHER
+    assert (
+        evaluate_evidence_binding(_RECORD, descriptor)["bound"] is False
+    )
+
+
 def test_digest_mismatch_is_an_observation_not_an_error():
     binding = evaluate_evidence_binding(_RECORD, _envelope(_OTHER))
     assert binding["carrier_match"] is True
@@ -275,6 +373,35 @@ def test_route_emits_binding(tmp_path, capsys):
     emitted = json.loads(capsys.readouterr().out)
     assert emitted["bound"] is True
     assert emitted["record_digest"] == _DIGEST
+
+
+def test_route_binds_real_core_list_descriptors(capsys):
+    import argparse
+
+    fixtures = Path(__file__).parent / "fixtures"
+    list_bytes = fixtures / "evidence_list.json"
+    parser = argparse.ArgumentParser()
+    build_eval_parser(parser)
+    # Golden fixtures emitted by the real Core binary: the
+    # `accept-list --requirement` descriptor and the conjunctive
+    # `accept --requirement-list` list-pinned descriptor both pin the
+    # list envelope by `list_fingerprint`.
+    for descriptor in (
+        "evidence_list_acceptance.json",
+        "evidence_requirement_list_acceptance_list_pin.json",
+    ):
+        assert (
+            main_eval(
+                _args(
+                    parser, list_bytes, fixtures / descriptor
+                )
+            )
+            == 0
+        )
+        emitted = json.loads(capsys.readouterr().out)
+        assert emitted["carrier_match"] is True
+        assert emitted["subject_declared"] is True
+        assert emitted["bound"] is True
 
 
 def test_route_output_file_and_overwrite_guard(tmp_path, capsys):

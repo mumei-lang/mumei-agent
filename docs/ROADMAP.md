@@ -9494,3 +9494,35 @@ verdict 形状を family に追加して coverage を完結させた。
    `tests/fixtures/` に保存し、手書き fixture との drift を防ぐ回帰面にした。
 
 **回帰ゲート**: `uv run pytest tests/test_evidence_acceptance_eval.py tests/test_binding_eval.py tests/test_contract_vocabulary.py tests/test_mcp_evidence_tools.py -q`
+
+## C11 binding-eval: list-pinned acceptance descriptors の carrier 化 — ✅ Implemented
+
+`binding-eval` が promotable gate triple の list 側を bind できるように、
+`_BINDING_CARRIERS` を複数候補 subject field に一般化し、list pin carrier を
+追加した。
+
+- `mumei.evidence-list-acceptance/v1`（`accept-list --requirement` 出力）→
+  `list_fingerprint` を carrier として登録 — 評価対象の list envelope bytes を
+  pin する。
+- `mumei.evidence-requirement-list-acceptance/v1`（conjunctive）→
+  `evidence_fingerprint` と `list_fingerprint` の2候補 — descriptor 自身の
+  schema が XOR を強制するため、record pin と list pin のどちらが来ても bind
+  できる（`verify-schedule --export-evidence-acceptance` が書く triple の
+  `acceptance.json` ↔ `evidence.json` の list 形を検査可能）。
+- `mumei.evidence-acceptance/v1` → `evidence_fingerprint`（#1106 で carrier
+  登録済みだったが binding-eval の回帰テストが未整備だったため併せて追加）。
+- `subject_declared` は「候補のいずれかが well-formed digest」、`bound` は
+  「declared subject のいずれかが `record_digest` と一致」。XOR schema では
+  実質一意なので曖昧さなし。`carrier_authenticity` / `binding_enforcement`
+  は従来どおり unperformed。
+- 実 mumei（debug build）が emit した evidence list envelope
+  （`tests/fixtures/evidence_list.json`）を golden fixture として追加し、
+  既存の golden descriptor（`evidence_list_acceptance.json`・
+  `evidence_requirement_list_acceptance_list_pin.json`）と route レベルで
+  bind する回帰を追加。
+
+representation-level のみ — verdict 昇格・grade promotion・Core check の
+新規クレームなし。`binding-eval` は観測を出すだけで gating は host 側の
+`mumei claims --require-evidence-acceptance` に委ねる設計のまま。
+
+**回帰ゲート**: `uv run pytest tests/test_binding_eval.py tests/test_evidence_acceptance_eval.py tests/test_contract_vocabulary.py -q`
