@@ -4320,15 +4320,18 @@ member — `p.A[i].W = q` — lands in caller memory the slot
 model does not track, so it folds opaquely like `p.P = q`:
 an external-mutation transfer on the pointee identity, and
 the stored value plus the index's dependencies unioned into
-the root's set and `indirect_writes`. Whole-element stores
-admit the same way on every supported root — `p.A[i] = e`,
+the root's set and `indirect_writes`. A value-struct element's
+pointer member resolves the same way once the field admits a
+named element type — `p.B[i].W.V` and `p.B[i].W = q` on
+`B []Elem` (and `ss[i].W` on a `[]Elem` parameter) fold into
+the collection's group like the `[]*Elem` forms. Whole-element
+stores admit the same way on every supported root — `p.A[i] = e`,
 `o.A[i] = e`, `p.M[k] = e`, `p.A[i][j] = e` — and an inline
 *array* member (`o.R[i] = e` on `R [N]E`) folds into the
 field's own slot too, since its tokens name no share-group
 holder a `o.R[i].V` read could observe the store through.
 A pointer member read with no deeper field (`p.A[i].W`), a
-value-struct element's pointer member (`p.B[i].W` on
-`B []Elem`), a local root's member store (`o.A[i].W = q`),
+local root's member store (`o.A[i].W = q`, `o.B[i].W = q`),
 a nested array member's element (`o.R[i][j]`), and a `&x`
 escape into an element (`p.A[i] = &e`) stay closed.
 An explicit `(*p)` deref of a

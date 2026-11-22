@@ -2380,13 +2380,16 @@ class _Builder:
         params: dict | None = None,
         *,
         for_write: bool = False,
+        allow_struct_elements: bool = False,
     ) -> tuple[str | None, Any]:
         """`s.F` (or a nested `s.W.F`) naming a scalar-element
         collection field — or its one-level nested form — on a
         local-composite root — returns (root binding id, member),
         else (None, None). An array member is included: callers
         decide whether its copy semantics admit a shared backing
-        token."""
+        token. With `allow_struct_elements`, a slice/map member
+        whose elements are a named value struct admits too — the
+        caller walks the element's members itself."""
         field = sel.child_by_field_name("field")
         f_ref = (
             self.references.get(self.node_key(field))
@@ -2524,6 +2527,27 @@ class _Builder:
             or not (
                 self._scalar_elem_collection(member.type)
                 or self._scalar_elem_nested_collection(member.type)
+                or (
+                    allow_struct_elements
+                    and member.type.kind in {"slice", "map"}
+                    and getattr(member.type, "elem", None)
+                    is not None
+                    and (
+                        self._named_value_struct_supported(
+                            member.type.elem
+                        )
+                        or (
+                            (
+                                _elem_struct := (
+                                    self._struct_value_fact(
+                                        member.type.elem
+                                    )
+                                )
+                            ) is not None
+                            and bool(_elem_struct.type_id)
+                        )
+                    )
+                )
             )
             or root_ref is None
             or root_ref.binding_id is None
@@ -2871,7 +2895,8 @@ class _Builder:
         for_write: bool = False,
     ) -> tuple[str, str, Any, frozenset, Any] | None:
         root_id, member = self._scalar_container_field(
-                sel, params, for_write=for_write
+                sel, params, for_write=for_write,
+                allow_struct_elements=allow_struct_elements,
             )
         if root_id is None or member is None:
             return None
@@ -2993,7 +3018,17 @@ class _Builder:
             and fact is not None
             and fact.kind in {"slice", "array", "map"}
             and getattr(fact, "elem", None) is not None
-            and self._named_value_struct_supported(fact.elem)
+            and (
+                self._named_value_struct_supported(fact.elem)
+                or (
+                    (
+                        _elem_struct := self._struct_value_fact(
+                            fact.elem
+                        )
+                    ) is not None
+                    and bool(_elem_struct.type_id)
+                )
+            )
         )
         if (
             root_ref.kind == "import"
@@ -5328,7 +5363,8 @@ class _Builder:
             if imported is not None:
                 return imported
             root_id, member = self._scalar_container_field(
-                rhs, params, for_write=True
+                rhs, params, for_write=True,
+                allow_struct_elements=True,
             )
             if root_id is None:
                 return None

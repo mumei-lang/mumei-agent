@@ -33769,23 +33769,107 @@ def test_named_struct_element_pointer_member_store_read_back(
     assert result.return_dependencies == frozenset({0, 1, 2})
 
 
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        "type E2 struct { V int64 }\n"
+        "type Elem struct { W *E2 }\n"
+        "type S struct { A []*Elem }\n"
+        "func F(o S, i int64, q *E2) {\n"
+        "\to.A[i].W = q\n}\n",
+        "type E2 struct { V int64 }\n"
+        "type Elem struct { W *E2 }\n"
+        "type S struct { B []Elem }\n"
+        "func F(o S, i int64, q *E2) {\n"
+        "\to.B[i].W = q\n}\n",
+    ],
+)
 def test_named_struct_element_pointer_member_store_local_root_closed(
-    go_types_helper,
+    go_types_helper, declarations
 ):
     # `o.A[i].W = q` — a local composite's pointer member escapes
     # the slot model; the store stays closed.
-    result = named(
-        *unit(
-            go_types_helper,
-            "type E2 struct { V int64 }\n"
-            "type Elem struct { W *E2 }\n"
-            "type S struct { A []*Elem }\n"
-            "func F(o S, i int64, q *E2) {\n"
-            "\to.A[i].W = q\n}\n",
-        )
-    )
+    result = named(*unit(go_types_helper, declarations))
     assert result.effects == "unknown"
     assert result.gaps
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        # `B []Elem` — a value-struct element's pointer member
+        # resolves like `A []*Elem` does.
+        "type E2 struct { V int64 }\n"
+        "type Elem struct { W *E2 }\n"
+        "type S struct { B []Elem }\n"
+        "func F(p *S, i int64, q *E2) {\n"
+        "\tp.B[i].W = q\n}\n",
+        # Through a `**S` root's explicit dereference.
+        "type E2 struct { V int64 }\n"
+        "type Elem struct { W *E2 }\n"
+        "type S struct { B []Elem }\n"
+        "func F(pp **S, i int64, q *E2) {\n"
+        "\t(*pp).B[i].W = q\n}\n",
+        # Through a `q := p` local bind's alias to the pointee.
+        "type E2 struct { V int64 }\n"
+        "type Elem struct { W *E2 }\n"
+        "type S struct { B []Elem }\n"
+        "func F(p *S, i int64, q *E2) {\n"
+        "\tr := p\n"
+        "\tr.B[i].W = q\n}\n",
+    ],
+)
+def test_named_struct_value_element_pointer_member_store(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.effects == "unknown"
+    assert not [
+        gap for gap in result.gaps if gap.reason != "summary_effects"
+    ]
+
+
+@pytest.mark.parametrize(
+    "declarations, expected",
+    [
+        # A read through a value element's pointer member names
+        # the root's group plus the index's deps.
+        (
+            "type E2 struct { V int64 }\n"
+            "type Elem struct { W *E2 }\n"
+            "type S struct { B []Elem }\n"
+            "func F(p *S, i int64) int64 {\n"
+            "\treturn p.B[i].W.V\n}\n",
+            frozenset({0, 1}),
+        ),
+        # The stored pointer's deps reach a read through the same
+        # member.
+        (
+            "type E2 struct { V int64 }\n"
+            "type Elem struct { W *E2 }\n"
+            "type S struct { B []Elem }\n"
+            "func F(p *S, i int64, q *E2) int64 {\n"
+            "\tp.B[i].W = q\n"
+            "\treturn p.B[0].W.V\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # The same shape on a `[]Elem` parameter's own group.
+        (
+            "type E2 struct { V int64 }\n"
+            "type Elem struct { W *E2 }\n"
+            "func F(ss []Elem, i int64, q *E2) int64 {\n"
+            "\tss[i].W = q\n"
+            "\treturn ss[0].W.V\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+    ],
+)
+def test_named_struct_value_element_pointer_member_read(
+    go_types_helper, declarations, expected
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == expected
 
 
 def test_named_struct_element_double_pointer_param_root_collection(
