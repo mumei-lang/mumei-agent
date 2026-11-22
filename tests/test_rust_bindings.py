@@ -5796,3 +5796,25 @@ fn f(v: Vec<P>) {
     assert len(calls) == 5
     for call in calls:
         assert call.target == pm.id
+
+
+def test_option_combinators_keep_the_payload():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(o: Option<P>, u: Option<P>) {
+    if let Some(p) = o.and(u) { p.pm(); }
+    if let Some(p) = o.or(u) { p.pm(); }
+    if let Some(p) = o.xor(u) { p.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    calls = [
+        call for call in report.calls
+        if raw[call.span.start:call.span.end].decode() == "p.pm()"
+    ]
+    assert len(calls) == 3
+    for call in calls:
+        assert call.target == pm.id

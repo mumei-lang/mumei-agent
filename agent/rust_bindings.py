@@ -95,6 +95,11 @@ _OPTION_HEAD_METHODS = {
     # payload — spelled `&P`/`&mut P`.
     "as_ref": ("&", {"Option"}, 0),
     "as_mut": ("&mut ", {"Option"}, 0),
+    # `o.and(o2)`/`o.or(o2)`/`o.xor(o2)` still yield `Option<P>` —
+    # the payload index keeps the receiver's own first arg.
+    "and": ("", {"Option"}, 0),
+    "or": ("", {"Option"}, 0),
+    "xor": ("", {"Option"}, 0),
 }
 
 _PRELUDE_NAMES = frozenset(
