@@ -14243,31 +14243,6 @@ class _Builder:
             and member.type.kind == "function"
         )
 
-    def _multi_index_method_selector(self, node: Any) -> bool:
-        current = self._strip_parens(node)
-        while current is not None:
-            parent = current.parent
-            while (
-                parent is not None
-                and parent.type == "parenthesized_expression"
-            ):
-                current = parent
-                parent = current.parent
-            if (
-                parent is not None
-                and parent.type == "index_expression"
-                and parent.child_by_field_name("operand") == current
-            ):
-                current = parent
-                continue
-            return (
-                parent is not None
-                and parent.type == "selector_expression"
-                and parent.child_by_field_name("operand") == current
-                and self._field_member(parent) is None
-            )
-        return False
-
     def _multi_index_struct_element_has_field_records(
         self, node: Any
     ) -> bool:
