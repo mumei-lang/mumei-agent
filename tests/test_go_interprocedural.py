@@ -19042,6 +19042,218 @@ def test_stable_named_func_alias_writer_still_closes_shared_go_race(
 
 
 @pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(
+            "func pipe(in chan int64, out chan int64) { "
+            "out <- <-in }\n"
+            "func F(x int64) int64 { "
+            "ch := make(chan int64, 1); out := make(chan int64, 1); "
+            "go pipe(ch, out); ch <- x; return <-out }",
+            id="named-pipe",
+        ),
+        pytest.param(
+            "func pipe(in chan int64, out chan int64) { "
+            "v := <-in; out <- v }\n"
+            "func F(x int64) int64 { "
+            "ch := make(chan int64, 1); out := make(chan int64, 1); "
+            "go pipe(ch, out); ch <- x; return <-out }",
+            id="named-pipe-temporary",
+        ),
+        pytest.param(
+            "func pipe(in chan int64, out chan int64, k int64) { "
+            "out <- <-in + k }\n"
+            "func F(x, z int64) int64 { "
+            "ch := make(chan int64, 1); out := make(chan int64, 1); "
+            "go pipe(ch, out, z); ch <- x; return <-out }",
+            id="named-pipe-extra-argument",
+        ),
+        pytest.param(
+            "func pipe(in chan int64, out chan int64) { "
+            "out <- <-in }\n"
+            "func F(ch chan int64, x int64) int64 { "
+            "out := make(chan int64, 1); go pipe(ch, out); "
+            "ch <- x; return <-out }",
+            id="channel-parameter",
+        ),
+        pytest.param(
+            "func pipe(in <-chan int64, out chan<- int64) { "
+            "out <- <-in }\n"
+            "func F(x int64) int64 { "
+            "ch := make(chan int64, 1); out := make(chan int64, 1); "
+            "go pipe(ch, out); ch <- x; return <-out }",
+            id="receive-only-parameter",
+        ),
+        pytest.param(
+            "type P struct{}\n"
+            "func (P) pipe(in chan int64, out chan int64) { "
+            "out <- <-in }\n"
+            "func F(x int64) int64 { "
+            "var p P; ch := make(chan int64, 1); "
+            "out := make(chan int64, 1); go p.pipe(ch, out); "
+            "ch <- x; return <-out }",
+            id="method",
+        ),
+        pytest.param(
+            "type P struct{}\n"
+            "func (P) pipe(in chan int64, out chan int64) { "
+            "out <- <-in }\n"
+            "func F(x int64) int64 { "
+            "var p P; ch := make(chan int64, 1); "
+            "out := make(chan int64, 1); "
+            "go P.pipe(p, ch, out); ch <- x; return <-out }",
+            id="method-expression",
+        ),
+        pytest.param(
+            "func inner(in chan int64, out chan int64) { "
+            "out <- <-in }\n"
+            "func pipe(in chan int64, out chan int64) { "
+            "inner(in, out) }\n"
+            "func F(x int64) int64 { "
+            "ch := make(chan int64, 1); out := make(chan int64, 1); "
+            "go pipe(ch, out); ch <- x; return <-out }",
+            id="nested-call",
+        ),
+        pytest.param(
+            "func pipeS(cs []chan int64, out chan int64) { "
+            "out <- <-cs[0] }\n"
+            "func F(x int64) int64 { "
+            "cs := []chan int64{make(chan int64, 1)}; "
+            "out := make(chan int64, 1); go pipeS(cs, out); "
+            "cs[0] <- x; return <-out }",
+            id="slice-of-channels",
+        ),
+        pytest.param(
+            "func pipe(in chan int64, out chan int64) { "
+            "out <- <-in }\n"
+            "func F(x int64) int64 { "
+            "ch := make(chan int64, 1); out := make(chan int64, 1); "
+            "h := pipe; go h(ch, out); ch <- x; return <-out }",
+            id="function-alias",
+        ),
+    ],
+)
+def test_go_channel_argument_receive_closes_later_send(
+    go_types_helper, source
+):
+    result = named(*unit(go_types_helper, source))
+    assert not result.available
+    assert result.gaps[0].reason == "unsupported_statement"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(
+            "func hold(m map[string]chan int64) {}\n"
+            "func later(m map[string]chan int64) {}\n"
+            "func F(m map[string]chan int64, x int64) int64 { "
+            "go hold(m); later(m); return x }",
+            id="map-value",
+        ),
+        pytest.param(
+            "func hold(cs [1]chan int64) {}\n"
+            "func F(x int64) int64 { "
+            "cs := [1]chan int64{make(chan int64, 1)}; "
+            "go hold(cs); cs[0] <- x; return <-cs[0] }",
+            id="array-element",
+        ),
+        pytest.param(
+            "type W struct{ C chan int64 }\n"
+            "func hold(w W) {}\n"
+            "func F(x int64) int64 { "
+            "w := W{C: make(chan int64, 1)}; "
+            "go hold(w); w.C <- x; return <-w.C }",
+            id="struct-field",
+        ),
+        pytest.param(
+            "type W struct{ C chan int64 }\n"
+            "func hold(w *W) {}\n"
+            "func F(x int64) int64 { "
+            "w := new(W); go hold(w); w = nil; return x }",
+            id="pointer-element",
+        ),
+        pytest.param(
+            "func hold(m map[chan int64]bool) {}\n"
+            "func F(x int64) int64 { "
+            "m := map[chan int64]bool{}; ch := make(chan int64, 1); "
+            "go hold(m); m[ch] = true; return x }",
+            id="map-key",
+        ),
+    ],
+)
+def test_go_channel_containing_composite_argument_closes_later_write(
+    go_types_helper, source
+):
+    result = named(*unit(go_types_helper, source))
+    assert not result.available
+    assert result.gaps[0].reason == "unsupported_statement"
+
+
+@pytest.mark.parametrize(
+    ("source", "dependencies"),
+    [
+        pytest.param(
+            "func send(ch chan int64, v int64) { ch <- v }\n"
+            "func F(x int64) int64 { "
+            "ch := make(chan int64, 1); go send(ch, x); return <-ch }",
+            frozenset({0}),
+            id="send-named",
+        ),
+        pytest.param(
+            "func pipe(in chan int64, out chan int64) { "
+            "out <- <-in }\n"
+            "func F(x int64) int64 { "
+            "ch := make(chan int64, 1); out := make(chan int64, 1); "
+            "ch <- x; go pipe(ch, out); return <-out }",
+            frozenset({0}),
+            id="pipe-before-send",
+        ),
+        pytest.param(
+            "func send(ch chan int64, v int64) { ch <- v }\n"
+            "func F(x, y int64) int64 { "
+            "ch := make(chan int64, 2); go send(ch, x); "
+            "ch <- y; return <-ch }",
+            frozenset({0, 1}),
+            id="send-then-send",
+        ),
+        pytest.param(
+            "func send(ch chan<- int64, v int64) { ch <- v }\n"
+            "func F(x, y int64) int64 { "
+            "ch := make(chan int64, 2); go send(ch, x); "
+            "ch <- y; return <-ch }",
+            frozenset({0, 1}),
+            id="declared-send-only",
+        ),
+        pytest.param(
+            "func rcv(ch chan int64, out chan int64) { "
+            "out <- <-ch }\n"
+            "func F(x, y int64) int64 { "
+            "ch := make(chan int64, 2); out := make(chan int64, 1); "
+            "ch <- x; ch <- y; go rcv(ch, out); <-ch; return <-out }",
+            frozenset({0, 1}),
+            id="main-goroutine-receive",
+        ),
+        pytest.param(
+            "func pipe(in chan int64, out chan int64) { "
+            "out <- <-in }\n"
+            "func F(x, z int64) int64 { "
+            "ch := make(chan int64, 1); out := make(chan int64, 2); "
+            "ch <- x; go pipe(ch, out); out <- z; return <-out }",
+            frozenset({0, 1}),
+            id="later-output-send",
+        ),
+    ],
+)
+def test_go_channel_argument_send_only_controls_remain_available(
+    go_types_helper, source, dependencies
+):
+    result = named(*unit(go_types_helper, source))
+    assert result.available, result.gaps
+    assert result.return_dependencies == dependencies
+
+
+@pytest.mark.parametrize(
     "body",
     [
         "g := func() { ch <- x }; g(); return <-ch",

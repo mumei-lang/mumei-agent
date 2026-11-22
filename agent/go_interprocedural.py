@@ -12474,6 +12474,194 @@ class _Builder:
             roots = frozenset()
             star = captures_pointer or star_write or has_call
         local_param_ids = set(locals_) | set(params)
+
+        def fact_may_contain_channel(
+            fact: Any,
+            anchor: Any | None = None,
+            seen: frozenset[str] = frozenset(),
+        ) -> bool:
+            if fact is None:
+                return True
+            if fact.kind == "chan":
+                return True
+            if fact.kind in {"slice", "array", "pointer"}:
+                return fact_may_contain_channel(
+                    fact.elem, anchor, seen
+                )
+            if fact.kind == "map":
+                return fact_may_contain_channel(
+                    fact.key, anchor, seen
+                ) or fact_may_contain_channel(fact.elem, anchor, seen)
+            if self._scalar_value_fact(fact):
+                return False
+            struct_fact = self._struct_value_fact(fact)
+            if struct_fact is not None:
+                type_id = struct_fact.type_id
+                if type_id and type_id in seen:
+                    return False
+                fields = self._struct_fields_for_fact(
+                    struct_fact, anchor
+                )
+                if fields:
+                    next_seen = seen | {type_id} if type_id else seen
+                    return any(
+                        fact_may_contain_channel(
+                            field.type, field, next_seen
+                        )
+                        for field in fields
+                    )
+                if type_id:
+                    return type_id not in self.bindings
+                return anchor is None or getattr(anchor, "span", None) is None
+            return True
+
+        def direct_send_only_parameter_indexes() -> set[int]:
+            if call is None or call.kind != "direct_local":
+                return set()
+            target = self.functions.get(call.target)
+            if target is None or target.variadic:
+                return set()
+            call_arguments = (
+                _children(arguments) if arguments is not None else []
+            )
+            argument_offset = 1 if call.method_expr else 0
+            if (
+                len(call_arguments) - argument_offset
+                != len(target.parameters)
+            ):
+                return set()
+            target_binding = self.bindings.get(target.binding_id)
+            if target_binding is None or target_binding.span is None:
+                return set()
+            target_file = (
+                target_binding.span.file
+                if isinstance(target_binding.span, FileSpan)
+                else 0
+            )
+            raw = self.raws.get(target_file)
+            if raw is None:
+                return set()
+            syntax = _syntax(raw)
+            if syntax is None:
+                return set()
+            declaration = next(
+                (
+                    candidate
+                    for candidate in _children(syntax)
+                    if candidate.type
+                    in {"function_declaration", "method_declaration"}
+                    and (
+                        (name := candidate.child_by_field_name("name"))
+                        is not None
+                    )
+                    and name.start_byte == target_binding.span.start
+                    and name.end_byte == target_binding.span.end
+                ),
+                None,
+            )
+            if declaration is None:
+                return set()
+            parameter_list = declaration.child_by_field_name(
+                "parameters"
+            )
+            if parameter_list is None:
+                return set()
+            formal_types: list[Any | None] = []
+            for formal in _children(parameter_list):
+                if formal.type != "parameter_declaration":
+                    return set()
+                formal_type = formal.child_by_field_name("type")
+                names = [
+                    child
+                    for child in _children(formal)
+                    if child.type == "identifier"
+                ]
+                formal_types.extend(
+                    formal_type for _ in (names or [None])
+                )
+            if len(formal_types) != len(target.parameters):
+                return set()
+
+            body = declaration.child_by_field_name("body")
+
+            def references_only_send(binding_id: str) -> bool:
+                if not binding_id or body is None:
+                    return False
+                pending = [body]
+                while pending:
+                    current = pending.pop()
+                    pending.extend(_children(current))
+                    if current.type != "identifier":
+                        continue
+                    reference = self.references.get(
+                        (
+                            target_file,
+                            current.start_byte,
+                            current.end_byte,
+                        )
+                    )
+                    if (
+                        reference is None
+                        or reference.binding_id != binding_id
+                    ):
+                        continue
+                    parent = current.parent
+                    if (
+                        parent is None
+                        or parent.type != "send_statement"
+                        or parent.child_by_field_name("channel") != current
+                    ):
+                        return False
+                return True
+
+            send_only: set[int] = set()
+            for index, (parameter, formal_type) in enumerate(
+                zip(target.parameters, formal_types)
+            ):
+                if parameter.type.kind != "chan":
+                    continue
+                declared_send_only = (
+                    formal_type is not None
+                    and formal_type.type == "channel_type"
+                    and formal_type.child_count >= 2
+                    and formal_type.child(0).type == "chan"
+                    and formal_type.child(1).type == "<-"
+                )
+                if declared_send_only or references_only_send(
+                    parameter.binding_id
+                ):
+                    send_only.add(index)
+            return send_only
+
+        send_only_parameter_indexes = (
+            direct_send_only_parameter_indexes()
+        )
+        received_roots: set[str] = set()
+        if arguments is not None:
+            argument_offset = (
+                1 if call is not None and call.method_expr else 0
+            )
+            for argument_index, argument in enumerate(
+                _children(arguments)
+            ):
+                fact = self._deferred_expression_type(argument)
+                root_id = self._deferred_root_binding(
+                    argument, params, locals_
+                )
+                if root_id is None or root_id not in local_param_ids:
+                    continue
+                root_binding = self.bindings.get(root_id)
+                if not fact_may_contain_channel(fact, root_binding):
+                    continue
+                parameter_index = argument_index - argument_offset
+                if (
+                    fact is not None
+                    and fact.kind == "chan"
+                    and parameter_index in send_only_parameter_indexes
+                ):
+                    continue
+                received_roots.add(root_id)
+
         argument_roots: set[str] = set()
         if arguments is not None:
             for argument in _children(arguments):
@@ -12489,7 +12677,7 @@ class _Builder:
                         argument_roots.add(root_id)
         touched = (
             set(captured | writes | roots) & local_param_ids
-        )
+        ) | received_roots
         opaque_touched = touched | (argument_roots & local_param_ids)
         reference_involved = star or bool(roots)
         if arguments is not None:
