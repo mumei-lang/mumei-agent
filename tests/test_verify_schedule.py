@@ -118,6 +118,15 @@ def test_schedule_runs_fallback_and_emits_descriptor(inputs, capsys):
     assert doc["outcome"] == "selected"
     assert doc["selected_adapter_id"] == "beta"
     assert [a["adapter_id"] for a in doc["attempts"]] == ["alpha", "beta"]
+    assert doc["attempts"][0]["enforcement"] is not None
+    assert set(doc["attempts"][0]["enforcement"]) == {
+        "environment",
+        "network",
+        "filesystem_write",
+        "filesystem_read",
+        "process_spawn",
+        "memory_bound_mb",
+    }
     assert "FAKE_PRIVATE" not in capsys.readouterr().out + repr(doc)
     assert SOURCE.decode() not in json.dumps(doc)
 
@@ -250,6 +259,7 @@ def test_undeclared_argv_adapter_is_not_dispatched(inputs, capsys, tmp_path):
     assert doc["outcome"] == "selected"
     assert doc["attempts"][0]["terminal_state"] == "not_dispatched"
     assert doc["attempts"][0]["adapter_id"] == "alpha"
+    assert doc["attempts"][0]["enforcement"] is None
 
 
 def test_cli_subcommand_dispatches(tmp_path):

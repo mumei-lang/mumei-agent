@@ -10,13 +10,17 @@ import pytest
 
 import agent.attempt_schedule as attempt_schedule
 from agent.attempt_runner import (
+    AttemptRunner,
     memory_bound_enforceable,
     network_isolation_enforceable,
 )
 from agent.attempt_schedule import (
     MAX_SCHEDULE_ATTEMPTS,
+    NOT_DISPATCHED,
     SCHEDULE_SCHEMA_VERSION,
     AttemptScheduleResult,
+    DispatchEnforcement,
+    ScheduledAttemptEntry,
     _adapter_environment,
     run_attempt_schedule,
 )
@@ -123,6 +127,31 @@ def schedule(registry, ids, argv_map, **kwargs):
     )
 
 
+def schedule_with_runner_stub(monkeypatch, registry, ids, argv_map, **kwargs):
+    runner = AttemptRunner()
+    actual_run = runner.run
+    received = []
+
+    def run_stub(request, child_argv, **run_kwargs):
+        received.append(dict(run_kwargs))
+        run_kwargs["memory_bound_mb"] = None
+        run_kwargs["isolate_network"] = False
+        run_kwargs["isolate_filesystem_write"] = False
+        run_kwargs["isolate_filesystem_read"] = False
+        run_kwargs["isolate_process_spawn"] = False
+        return actual_run(request, child_argv, **run_kwargs)
+
+    monkeypatch.setattr(runner, "run", run_stub)
+    result = schedule(
+        registry,
+        ids,
+        argv_map,
+        runner=runner,
+        **kwargs,
+    )
+    return result, received
+
+
 def test_first_adapter_success_selects_without_fallback():
     registry = registry_with("alpha", "beta")
     result = schedule(registry, ("alpha", "beta"), {"alpha": argv(0), "beta": argv(0)})
@@ -197,33 +226,86 @@ def test_schedule_helper_scrubs_environment_when_permissions_are_undeclared(
     (
         "required_permissions",
         "allowed_permissions",
-        "enforceable",
-        "expected_isolation",
+        "network_enforceable",
+        "filesystem_enforceable",
+        "expected_environment",
+        "expected_network",
+        "expected_filesystem",
     ),
     [
         (
-            frozenset({"network.connect"}),
+            frozenset(),
+            frozenset(),
+            True,
+            True,
+            "minimal",
+            "isolated",
+            "isolated",
+        ),
+        (
+            frozenset(),
+            frozenset(),
+            False,
+            False,
+            "minimal",
+            "unenforced",
+            "unenforced",
+        ),
+        (
+            frozenset({"environment.read", "network.connect"}),
+            frozenset({"environment.read", "network.connect"}),
+            True,
+            True,
+            "inherited",
+            "permitted",
+            "isolated",
+        ),
+        (
+            frozenset(),
             frozenset({"network.connect"}),
             True,
-            False,
+            True,
+            "minimal",
+            "isolated",
+            "isolated",
         ),
-        (frozenset(), frozenset({"network.connect"}), True, True),
-        (frozenset(), frozenset(), True, True),
-        (frozenset(), frozenset(), False, False),
+        (
+            frozenset(),
+            frozenset({"filesystem.write"}),
+            True,
+            True,
+            "minimal",
+            "isolated",
+            "isolated",
+        ),
+        (
+            frozenset({"filesystem.write"}),
+            frozenset({"filesystem.write"}),
+            True,
+            True,
+            "minimal",
+            "isolated",
+            "permitted",
+        ),
     ],
     ids=[
-        "declared-and-allowed",
-        "allowed-not-declared",
-        "no-permissions",
-        "boundary-unavailable",
+        "undeclared-and-enforceable",
+        "undeclared-and-unenforceable",
+        "environment-and-network-declared-and-allowed",
+        "network-allowed-but-not-declared",
+        "filesystem-allowed-but-not-declared",
+        "filesystem-declared-and-allowed",
     ],
 )
-def test_schedule_computes_network_isolation_from_permissions(
+def test_schedule_records_and_dispatches_effective_enforcement(
     monkeypatch,
     required_permissions,
     allowed_permissions,
-    enforceable,
-    expected_isolation,
+    network_enforceable,
+    filesystem_enforceable,
+    expected_environment,
+    expected_network,
+    expected_filesystem,
 ):
     registry = AdapterRegistry()
     registry.register(
@@ -233,7 +315,14 @@ def test_schedule_computes_network_isolation_from_permissions(
     real_dispatch = attempt_schedule.dispatch_attempt
 
     def record_dispatch(sequence, child_argv, **kwargs):
-        requested_isolation.append(kwargs["isolate_network"])
+        requested_isolation.append(
+            (
+                kwargs["isolate_network"],
+                kwargs["isolate_filesystem_write"],
+                kwargs["isolate_process_spawn"],
+                kwargs["isolate_filesystem_read"],
+            )
+        )
         kwargs["isolate_network"] = False
         kwargs["isolate_filesystem_write"] = False
         kwargs["isolate_process_spawn"] = False
@@ -244,9 +333,30 @@ def test_schedule_computes_network_isolation_from_permissions(
     monkeypatch.setattr(
         attempt_schedule,
         "network_isolation_enforceable",
-        lambda: enforceable,
+        lambda: network_enforceable,
     )
-    result = schedule(
+    monkeypatch.setattr(
+        attempt_schedule,
+        "filesystem_write_isolation_enforceable",
+        lambda: filesystem_enforceable,
+    )
+    monkeypatch.setattr(
+        attempt_schedule,
+        "filesystem_read_isolation_enforceable",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        attempt_schedule,
+        "process_spawn_isolation_enforceable",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        attempt_schedule,
+        "memory_bound_enforceable",
+        lambda: False,
+    )
+    result, runner_calls = schedule_with_runner_stub(
+        monkeypatch,
         registry,
         ("alpha",),
         {"alpha": argv(0)},
@@ -254,7 +364,222 @@ def test_schedule_computes_network_isolation_from_permissions(
     )
 
     assert result.outcome == "selected"
-    assert requested_isolation == [expected_isolation]
+    enforcement = result.entries[0].to_dict()["enforcement"]
+    assert enforcement == {
+        "environment": expected_environment,
+        "network": expected_network,
+        "filesystem_write": expected_filesystem,
+        "filesystem_read": "isolated",
+        "process_spawn": "isolated",
+        "memory_bound_mb": None,
+    }
+    assert requested_isolation == [
+        (
+            enforcement["network"] == "isolated",
+            enforcement["filesystem_write"] == "isolated",
+            enforcement["process_spawn"] == "isolated",
+            enforcement["filesystem_read"] == "isolated",
+        )
+    ]
+    assert len(runner_calls) == 1
+    assert runner_calls[0]["memory_bound_mb"] == enforcement["memory_bound_mb"]
+    if enforcement["environment"] == "inherited":
+        assert runner_calls[0]["environment"] is None
+    else:
+        assert runner_calls[0]["environment"] is not None
+        assert set(runner_calls[0]["environment"]) <= {"PATH", "SYSTEMROOT"}
+
+
+@pytest.mark.parametrize(
+    ("required_permissions", "allowed_permissions", "enforceable", "expected"),
+    [
+        (
+            frozenset({"process.spawn"}),
+            frozenset({"process.spawn"}),
+            True,
+            "permitted",
+        ),
+        (frozenset(), frozenset(), True, "isolated"),
+        (frozenset(), frozenset(), False, "unenforced"),
+    ],
+    ids=["declared-and-allowed", "isolated", "unenforced"],
+)
+def test_schedule_records_process_spawn_enforcement(
+    monkeypatch,
+    required_permissions,
+    allowed_permissions,
+    enforceable,
+    expected,
+):
+    registry = AdapterRegistry()
+    registry.register(
+        descriptor("alpha", required_permissions=required_permissions)
+    )
+    monkeypatch.setattr(
+        attempt_schedule, "network_isolation_enforceable", lambda: True
+    )
+    monkeypatch.setattr(
+        attempt_schedule,
+        "filesystem_write_isolation_enforceable",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        attempt_schedule,
+        "filesystem_read_isolation_enforceable",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        attempt_schedule,
+        "process_spawn_isolation_enforceable",
+        lambda: enforceable,
+    )
+    monkeypatch.setattr(
+        attempt_schedule,
+        "memory_bound_enforceable",
+        lambda: False,
+    )
+    result, runner_calls = schedule_with_runner_stub(
+        monkeypatch,
+        registry,
+        ("alpha",),
+        {"alpha": argv(0)},
+        policy=policy(allowed_permissions=allowed_permissions),
+    )
+
+    enforcement = result.entries[0].to_dict()["enforcement"]
+    forwarded_isolation = runner_calls[0]["isolate_process_spawn"]
+    assert enforcement["process_spawn"] == expected
+    assert forwarded_isolation is (expected == "isolated")
+    assert enforcement == {
+        "environment": "minimal",
+        "network": "isolated",
+        "filesystem_write": "isolated",
+        "filesystem_read": "isolated",
+        "process_spawn": expected,
+        "memory_bound_mb": None,
+    }
+
+
+@pytest.mark.parametrize(
+    ("required_permissions", "allowed_permissions", "enforceable", "expected"),
+    [
+        (
+            frozenset({"filesystem.read"}),
+            frozenset({"filesystem.read"}),
+            True,
+            "permitted",
+        ),
+        (
+            frozenset(),
+            frozenset(),
+            True,
+            "isolated",
+        ),
+        (
+            frozenset(),
+            frozenset(),
+            False,
+            "unenforced",
+        ),
+    ],
+    ids=["permitted", "isolated", "unenforced"],
+)
+def test_schedule_records_filesystem_read_enforcement(
+    monkeypatch,
+    required_permissions,
+    allowed_permissions,
+    enforceable,
+    expected,
+):
+    registry = AdapterRegistry()
+    registry.register(
+        descriptor("alpha", required_permissions=required_permissions)
+    )
+    monkeypatch.setattr(
+        attempt_schedule, "network_isolation_enforceable", lambda: True
+    )
+    monkeypatch.setattr(
+        attempt_schedule,
+        "filesystem_write_isolation_enforceable",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        attempt_schedule,
+        "filesystem_read_isolation_enforceable",
+        lambda: enforceable,
+    )
+    monkeypatch.setattr(
+        attempt_schedule,
+        "process_spawn_isolation_enforceable",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        attempt_schedule,
+        "memory_bound_enforceable",
+        lambda: False,
+    )
+    result, runner_calls = schedule_with_runner_stub(
+        monkeypatch,
+        registry,
+        ("alpha",),
+        {"alpha": argv(0)},
+        policy=policy(allowed_permissions=allowed_permissions),
+    )
+
+    enforcement = result.entries[0].to_dict()["enforcement"]
+    forwarded_isolation = runner_calls[0]["isolate_filesystem_read"]
+    assert enforcement["filesystem_read"] == expected
+    assert forwarded_isolation is (expected == "isolated")
+    assert enforcement == {
+        "environment": "minimal",
+        "network": "isolated",
+        "filesystem_write": "isolated",
+        "filesystem_read": expected,
+        "process_spawn": "isolated",
+        "memory_bound_mb": None,
+    }
+
+
+@pytest.mark.parametrize(
+    ("host_bound", "memory_enforceable", "expected"),
+    [
+        (64, False, 64),
+        (None, True, "plan"),
+        (None, False, None),
+    ],
+    ids=["host-bound", "plan-bound", "memory-unavailable"],
+)
+def test_schedule_records_and_dispatches_memory_bound(
+    monkeypatch, host_bound, memory_enforceable, expected
+):
+    registry = registry_with("alpha")
+    monkeypatch.setattr(
+        attempt_schedule,
+        "network_isolation_enforceable",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        attempt_schedule,
+        "memory_bound_enforceable",
+        lambda: memory_enforceable,
+    )
+    result, runner_calls = schedule_with_runner_stub(
+        monkeypatch,
+        registry,
+        ("alpha",),
+        {"alpha": argv(0)},
+        policy=policy(memory_mb=128),
+        memory_bound_mb=host_bound,
+    )
+
+    expected_bound = (
+        result.plans[0].selected.memory_mb if expected == "plan" else expected
+    )
+    enforcement = result.entries[0].to_dict()["enforcement"]
+    if expected == "plan":
+        assert expected_bound is not None
+    assert enforcement["memory_bound_mb"] == expected_bound
+    assert runner_calls[0]["memory_bound_mb"] == enforcement["memory_bound_mb"]
 
 
 @pytest.mark.parametrize(
@@ -341,6 +666,8 @@ def test_network_isolation_predicate_treats_unspecified_policy_as_denied():
 
 
 def test_filesystem_write_isolation_predicate_rejects_disallowed_permission():
+    # Explicit permission mismatches are filtered before dispatch, so
+    # exercise the enforcement predicate with a plan snapshot.
     registry = AdapterRegistry()
     registry.register(
         descriptor("alpha", required_permissions=frozenset())
@@ -628,6 +955,108 @@ def test_network_isolation_predicate_rejects_disallowed_permission():
     assert attempt_schedule._network_isolated(plan) is True
 
 
+@pytest.mark.parametrize(
+    (
+        "environment",
+        "network",
+        "filesystem_write",
+        "filesystem_read",
+        "process_spawn",
+        "memory_bound_mb",
+    ),
+    [
+        ("scrubbed", "isolated", "isolated", "isolated", "isolated", None),
+        ("minimal", "missing", "isolated", "isolated", "isolated", None),
+        ("minimal", "isolated", "missing", "isolated", "isolated", None),
+        ("minimal", "isolated", "isolated", "missing", "isolated", None),
+        ("minimal", "isolated", "isolated", "isolated", "missing", None),
+        ("minimal", "isolated", "isolated", "isolated", "isolated", 0),
+        ("minimal", "isolated", "isolated", "isolated", "isolated", True),
+        ("minimal", "isolated", "isolated", "isolated", "isolated", 1.0),
+        (None, "isolated", "isolated", "isolated", "isolated", None),
+    ],
+)
+def test_dispatch_enforcement_rejects_invalid_values(
+    environment,
+    network,
+    filesystem_write,
+    filesystem_read,
+    process_spawn,
+    memory_bound_mb,
+):
+    with pytest.raises(ValueError, match="invalid dispatch enforcement"):
+        DispatchEnforcement(
+            environment,
+            network,
+            filesystem_write,
+            filesystem_read,
+            process_spawn,
+            memory_bound_mb,
+        )
+
+
+def test_schedule_entry_validates_and_serializes_enforcement():
+    enforcement = DispatchEnforcement(
+        "minimal", "isolated", "isolated", "isolated", "isolated", 64
+    )
+    entry = ScheduledAttemptEntry(
+        ordinal=1,
+        adapter_id="alpha",
+        plan_fingerprint="a" * 64,
+        request_fingerprint=None,
+        terminal_state="exited",
+        exit_code=0,
+        enforcement=enforcement,
+    )
+
+    assert entry.to_dict()["enforcement"] == {
+        "environment": "minimal",
+        "network": "isolated",
+        "filesystem_write": "isolated",
+        "filesystem_read": "isolated",
+        "process_spawn": "isolated",
+        "memory_bound_mb": 64,
+    }
+    assert list(enforcement.to_dict()) == [
+        "environment",
+        "network",
+        "filesystem_write",
+        "filesystem_read",
+        "process_spawn",
+        "memory_bound_mb",
+    ]
+    with pytest.raises(ValueError, match="invalid schedule entry enforcement"):
+        ScheduledAttemptEntry(
+            ordinal=1,
+            adapter_id="alpha",
+            plan_fingerprint="a" * 64,
+            request_fingerprint=None,
+            terminal_state="exited",
+            exit_code=0,
+            enforcement={},
+        )
+    not_dispatched = ScheduledAttemptEntry(
+        ordinal=1,
+        adapter_id="alpha",
+        plan_fingerprint="a" * 64,
+        request_fingerprint=None,
+        terminal_state=NOT_DISPATCHED,
+        exit_code=None,
+        enforcement=None,
+    )
+    assert not_dispatched.to_dict()["enforcement"] is None
+    with pytest.raises(ValueError, match="not-dispatched"):
+        ScheduledAttemptEntry(
+            ordinal=1,
+            adapter_id="alpha",
+            plan_fingerprint="a" * 64,
+            request_fingerprint=None,
+            terminal_state=NOT_DISPATCHED,
+            exit_code=None,
+            enforcement=enforcement,
+        )
+
+
 @pytest.mark.skipif(
     not network_isolation_enforceable(),
     reason="network isolation requires an unprivileged network namespace",
@@ -780,6 +1209,7 @@ def test_undeclared_argv_records_not_dispatched_and_falls_back():
     assert result.selected_adapter_id == "beta"
     assert result.entries[0].terminal_state == "not_dispatched"
     assert result.entries[0].request_fingerprint is None
+    assert result.entries[0].to_dict()["enforcement"] is None
     # No argv → nothing was ever reserved, so no sequence exists for it.
     assert len(result.sequences) == 1
 
