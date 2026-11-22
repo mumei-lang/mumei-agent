@@ -2572,6 +2572,7 @@ class _Builder:
         params: dict | None = None,
         *,
         allow_struct_elements: bool = False,
+        allow_struct_element_arrays: bool = False,
     ) -> tuple[str, str, Any, frozenset, Any] | None:
         root_id, member = self._scalar_container_field(sel)
         if root_id is None or member is None:
@@ -2691,6 +2692,12 @@ class _Builder:
             or (
                 fact.kind == "array"
                 and not self._type_embeds_collection(fact)
+                and not (
+                    allow_struct_elements
+                    and allow_struct_element_arrays
+                    and getattr(fact, "elem", None) is not None
+                    and self._named_value_struct_supported(fact.elem)
+                )
             )
         ):
             return None
@@ -2734,6 +2741,149 @@ class _Builder:
         return (
             root_ref, indexes[0], indexes[1:], field_key, member,
             tokens, current,
+        )
+
+    def _opaque_container_struct_element_field_target(
+        self, node: Any, params: dict | None = None
+    ) -> tuple[
+        Any, list[Any], str, Any, frozenset, Any, tuple[Any, ...]
+    ] | None:
+        fields = []
+        current = node
+        while current is not None:
+            while current.type == "parenthesized_expression":
+                current = next(
+                    (
+                        child
+                        for child in current.named_children
+                        if child.type != "comment"
+                    ),
+                    None,
+                )
+                if current is None:
+                    return None
+            if current.type not in {
+                "selector_expression",
+                "field_expression",
+            }:
+                break
+            field = current.child_by_field_name("field")
+            if field is None:
+                return None
+            fields.append(field)
+            current = current.child_by_field_name("operand")
+        indexes = []
+        while current is not None:
+            while current.type == "parenthesized_expression":
+                current = next(
+                    (
+                        child
+                        for child in current.named_children
+                        if child.type != "comment"
+                    ),
+                    None,
+                )
+                if current is None:
+                    return None
+            if current.type != "index_expression":
+                break
+            indexes.append(current.child_by_field_name("index"))
+            current = current.child_by_field_name("operand")
+        if (
+            not fields
+            or len(indexes) != 1
+            or current is None
+            or current.type not in {
+                "selector_expression",
+                "field_expression",
+            }
+        ):
+            return None
+        target = self._opaque_container_field_target(
+            current,
+            params,
+            allow_struct_elements=True,
+            allow_struct_element_arrays=True,
+        )
+        if target is None:
+            return None
+        field_key, _root_id, container_member, tokens, root_ref = target
+        container_fact = container_member.type
+        element_fact = getattr(container_fact, "elem", None)
+        if (
+            container_fact is None
+            or container_fact.kind not in {"slice", "array", "map"}
+            or not self._named_value_struct_supported(element_fact)
+        ):
+            return None
+        path_members = []
+        field_fact = element_fact
+        for field_node in reversed(fields):
+            if (
+                not self._named_value_struct_supported(field_fact)
+            ):
+                return None
+            field_ref = self.references.get(
+                self.node_key(field_node)
+            )
+            field_member = self._field_identity(field_ref)
+            if field_member is None or field_member.type is None:
+                return None
+            path_members.append(field_member)
+            self._pin_fact_identities(field_fact)
+            self._pin_fact_identities(field_member.type)
+            field_fact = field_member.type
+        if not self._scalar_value_fact(field_fact):
+            return None
+        self._pin_fact_identities(container_fact)
+        if (
+            container_fact.kind == "array"
+            and not self._type_embeds_collection(container_fact)
+        ):
+            # A pure-array field keeps value-copy semantics in its own
+            # slot — but only when the container sits directly on the
+            # root (`o.R[0].V`). When the container is reached through
+            # an index (`o.A[0].R[0].V`), the field lives inside a
+            # shared-backing element, so an isolated slot would drop
+            # writes an alias (`a := o.A`) must observe. Stay closed.
+            probe = current
+            while probe is not None:
+                while probe.type == "parenthesized_expression":
+                    probe = next(
+                        (
+                            child
+                            for child in probe.named_children
+                            if child.type != "comment"
+                        ),
+                        None,
+                    )
+                    if probe is None:
+                        break
+                if probe is None:
+                    break
+                if probe.type == "index_expression":
+                    raise _Unsupported(
+                        "unsupported_expression", _span(current)
+                    )
+                if probe.type in {
+                    "selector_expression",
+                    "field_expression",
+                }:
+                    probe = probe.child_by_field_name("operand")
+                    continue
+                break
+            tokens = self._opaque_container_tokens.get(field_key)
+            if not tokens:
+                tokens = frozenset({field_key})
+                self._opaque_container_tokens[field_key] = tokens
+        return (
+            root_ref,
+            indexes,
+            field_key,
+            container_member,
+            tokens,
+            current,
+            tuple(path_members),
         )
 
     def _opaque_container_field_key(
@@ -16844,7 +16994,9 @@ class _Builder:
             # like a read's.
             opaque_elem_targets: dict[int, frozenset] = {}
             opaque_elem_index_deps: dict[int, frozenset[int]] = {}
+            opaque_elem_old_deps: dict[int, frozenset[int]] = {}
             opaque_elem_slot_ids: dict[int, str] = {}
+            opaque_elem_root_slots: dict[int, str] = {}
             # `a, a[0] = arr, x` — assigning an ARRAY copies the
             # value into the variable's own storage, which keeps
             # naming the element the LHS pointer was computed
@@ -17316,6 +17468,48 @@ class _Builder:
                 # resolves every element through the one slot. A
                 # param container's elements live in caller memory —
                 # that external mutation stays closed here.
+                scalar_field_elem_lhs = (
+                    self._opaque_container_struct_element_field_target(
+                        lhs, params
+                    )
+                )
+                if (
+                    scalar_field_elem_lhs is not None
+                    and scalar_field_elem_lhs[3].type.kind != "map"
+                ):
+                    (
+                        oref, indexes, field_key, _container_member,
+                        field_tokens, field_selector, _path_members,
+                    ) = scalar_field_elem_lhs
+                    refs.append(oref)
+                    ri = len(refs) - 1
+                    opaque_elem_targets[ri] = frozenset(field_tokens)
+                    opaque_elem_slot_ids[ri] = field_key
+                    container_fact = _container_member.type
+                    if container_fact.kind == "array":
+                        opaque_elem_root_slots[ri] = oref.binding_id
+                    opaque_elem_index_deps[ri] = self.expression(
+                        field_selector, fn, params, locals_,
+                        transfers, count, 0,
+                    )
+                    self._record_read(opaque_elem_index_deps[ri])
+                    for index in reversed(indexes):
+                        if (
+                            index is not None
+                            and index.type not in _INDEX_LITERALS
+                        ):
+                            index_deps = self.expression(
+                                index, fn, params, locals_,
+                                transfers, count, 0,
+                            )
+                            opaque_elem_index_deps[ri] |= index_deps
+                            self._record_read(index_deps)
+                    opaque_elem_old_deps[ri] = (
+                        self._opaque_container_deps(
+                            field_key, locals_
+                        )
+                    )
+                    continue
                 field_elem_lhs = (
                     self._opaque_container_field_index_target(
                         lhs, params
@@ -17711,6 +17905,10 @@ class _Builder:
                             if tgt.binding_id in params
                             else frozenset(),
                         )
+                if compound and i in opaque_elem_old_deps:
+                    dest = (
+                        dest or frozenset()
+                    ) | opaque_elem_old_deps[i]
                 dest_reads.append(dest)
                 if (
                     len(rights) == len(refs)
@@ -19420,6 +19618,11 @@ class _Builder:
                         self._store(
                             locals_, params, holder_id, elem_value,
                             True,
+                        )
+                    root_slot = opaque_elem_root_slots.get(i)
+                    if root_slot is not None:
+                        self._store(
+                            locals_, params, root_slot, elem_value, True
                         )
                     self.indirect_writes |= elem_value
                     # `a[i] = s` storing an inner container — the
@@ -22698,6 +22901,49 @@ class _Builder:
                         )
                     )
                 return
+            scalar_field_elem = (
+                self._opaque_container_struct_element_field_target(
+                    operand, params
+                )
+            )
+            if (
+                scalar_field_elem is not None
+                and scalar_field_elem[3].type.kind != "map"
+            ):
+                (
+                    root_ref, indexes, field_key, container_member,
+                    field_tokens, field_selector, _path_members,
+                ) = scalar_field_elem
+                elem_value = self.expression(
+                    field_selector, fn, params, locals_,
+                    transfers, count, 0,
+                )
+                for index in reversed(indexes):
+                    if (
+                        index is not None
+                        and index.type not in _INDEX_LITERALS
+                    ):
+                        elem_value |= self.expression(
+                            index, fn, params, locals_,
+                            transfers, count, 0,
+                        )
+                elem_value |= self._opaque_container_deps(
+                    field_key, locals_
+                )
+                for holder_id in self._opaque_container_holders(
+                    field_tokens
+                ):
+                    self._store(
+                        locals_, params, holder_id, elem_value, True
+                    )
+                if container_member.type.kind == "array":
+                    self._store(
+                        locals_, params, root_ref.binding_id,
+                        elem_value, True,
+                    )
+                self.indirect_writes |= elem_value
+                self._record_read(elem_value)
+                return
             field_elem = self._opaque_container_field_index_target(
                 operand, params
             )
@@ -24617,6 +24863,16 @@ class _Builder:
                 # additionally carries the indexes' own dependencies —
                 # a literal index carries none, like the read's own
                 # `lib.VM["k"]` rule.
+                scalar_field_elem_error = None
+                try:
+                    scalar_field_elem = (
+                        self._opaque_container_struct_element_field_target(
+                            node, params
+                        )
+                    )
+                except _Unsupported as exc:
+                    scalar_field_elem = None
+                    scalar_field_elem_error = exc
                 field_index_deps = frozenset()
                 field_index_nodes: set[Any] = set()
                 operand = node.child_by_field_name("operand")
@@ -24632,7 +24888,11 @@ class _Builder:
                         ),
                         None,
                     )
-                if operand is not None and operand.type == "index_expression":
+                if (
+                    operand is not None
+                    and operand.type == "index_expression"
+                    and scalar_field_elem is None
+                ):
                     indexes = [operand.child_by_field_name("index")]
                     inner = operand.child_by_field_name("operand")
                     while True:
@@ -25171,6 +25431,33 @@ class _Builder:
             # (`s[i].A.V`) escapes the pre-scan's index evaluation,
             # so any index the pre-scan never evaluated runs here.
             if member is None:
+                if scalar_field_elem_error is not None:
+                    raise scalar_field_elem_error
+                if scalar_field_elem is not None:
+                    (
+                        _root_ref, indexes, field_key,
+                        _container_member, _field_tokens,
+                        field_selector, _path_members,
+                    ) = scalar_field_elem
+                    deps = field_index_deps | self.expression(
+                        field_selector, fn, params, locals_,
+                        transfers, count, depth + 1,
+                    )
+                    for index in reversed(indexes):
+                        if (
+                            index is None
+                            or index.type in _INDEX_LITERALS
+                            or self.node_key(index) in field_index_nodes
+                        ):
+                            continue
+                        deps |= self.expression(
+                            index, fn, params, locals_,
+                            transfers, count, depth + 1,
+                        )
+                    deps |= self._opaque_container_deps(
+                        field_key, locals_
+                    )
+                    return deps
                 sel_operand = node.child_by_field_name("operand")
                 while (
                     sel_operand is not None
