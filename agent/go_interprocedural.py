@@ -12802,6 +12802,15 @@ class _Builder:
                     elif container.type == "selector_expression":
                         anchor = self._field_member(container)
         struct_fact = self._struct_value_fact(fact)
+        if (
+            struct_fact is None
+            and fact is not None
+            and fact.kind == "pointer"
+            and getattr(fact, "elem", None) is not None
+        ):
+            # `s *S` — the callee's `s.F()` reads the same `S.F`
+            # member records a value struct carries.
+            struct_fact = self._struct_value_fact(fact.elem)
         if struct_fact is None:
             return ()
         record_ids = self._struct_field_closure_record_ids(
@@ -13331,6 +13340,37 @@ class _Builder:
                             field_binding_id, frozenset()
                         )
                         star_or_external = True
+            if call is not None and call.method:
+                # `go s.Run()` / `defer s.Run()` — the receiver's
+                # func-typed fields carry their closure records too.
+                function_node = node.child_by_field_name("function")
+                while (
+                    function_node is not None
+                    and function_node.type == "parenthesized_expression"
+                ):
+                    function_node = next(
+                        iter(function_node.named_children), None
+                    )
+                if (
+                    function_node is not None
+                    and function_node.type == "selector_expression"
+                ):
+                    receiver_node = function_node.child_by_field_name(
+                        "operand"
+                    )
+                    if receiver_node is not None:
+                        for field_binding_id in (
+                            self._struct_argument_field_record_ids(
+                                receiver_node
+                            )
+                        ):
+                            captured |= self.closure_captures.get(
+                                field_binding_id, frozenset()
+                            )
+                            writes |= self.closure_writes.get(
+                                field_binding_id, frozenset()
+                            )
+                            star_or_external = True
         arguments = node.child_by_field_name("arguments")
         if arguments is not None:
             for argument in _children(arguments):
@@ -33176,6 +33216,22 @@ class _Builder:
                 # caller-shared pointee memory whose stores
                 # broadcast into `indirect_writes`.
                 receiver_deps |= self.indirect_writes
+            for field_binding_id in self._struct_argument_field_record_ids(
+                receiver_node
+            ):
+                # `s.Run()` runs the callee's `s.F()` — the receiver's
+                # func-typed fields carry their closure records like a
+                # struct passed as an argument (#1212).
+                receiver_deps |= self._captured_current_deps(
+                    self.closure_captures.get(
+                        field_binding_id, frozenset()
+                    ),
+                    params,
+                    locals_,
+                )
+                self._queue_struct_field_invocation(
+                    node, receiver_node, field_binding_id
+                )
             if isinstance(receiver_deps, frozenset):
                 # A receiver's value can reach an argument-position
                 # callback too — `st.M(G)` calling `g(st.V)` — so
