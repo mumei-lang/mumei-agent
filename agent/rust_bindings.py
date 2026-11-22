@@ -2110,6 +2110,12 @@ class _RustBindings:
                 node, ("struct_field", "associated_const")
             )
             if member is not None:
+                declared = self._member_declared_type(
+                    node.child_by_field_name("value"), member,
+                    node.start_byte,
+                )
+                if declared is not None:
+                    return declared
                 return self._record_type(member, node.start_byte)
             element = self._tuple_element_node(
                 node.child_by_field_name("value"),
@@ -2157,7 +2163,15 @@ class _RustBindings:
                 return None, None
             # The declaration's return annotation carries generic args
             # (`fn mk() -> W<i32>`) that the summary's type id drops.
-            annotated = self._annotation_type(member.type_node)
+            annotated = self._member_declared_type(
+                callee.child_by_field_name("value")
+                if callee is not None and callee.type == "field_expression"
+                else None,
+                member,
+                node.start_byte,
+            )
+            if annotated is None:
+                annotated = self._annotation_type(member.type_node)
             if annotated[0] is not None or annotated[1] is not None:
                 return annotated
             if function.result.type_id:
@@ -3129,14 +3143,15 @@ class _RustBindings:
             if value is None
             else self._receiver_type(value)
         )
-        scrut_name, scrut_position = self._scrutinee_shape(
-            value, scrut_id
+        scrut_name, scrut_position, scrut_scope = (
+            self._scrutinee_shape(value, scrut_id)
         )
         type_map = (
             {}
             if whole_names
             else self._pattern_type_map(
-                pattern, scrut_id, scrut_args, scrut_name, scrut_position
+                pattern, scrut_id, scrut_args, scrut_name,
+                scrut_position, scrut_scope,
             )
         )
         for name_node, name_mutable in names:
@@ -3425,14 +3440,14 @@ class _RustBindings:
                 if value is None
                 else self._receiver_type(value)
             )
-            scrut_name, scrut_position = self._scrutinee_shape(
-                value, scrut_id
+            scrut_name, scrut_position, scrut_scope = (
+                self._scrutinee_shape(value, scrut_id)
             )
             return (
                 self._pattern_names(pattern, scope),
                 self._pattern_type_map(
                     pattern, scrut_id, scrut_args,
-                    scrut_name, scrut_position,
+                    scrut_name, scrut_position, scrut_scope,
                 ),
             )
         if any(node.type == "let_condition" for node in self._descendants(condition)):
@@ -3611,6 +3626,67 @@ class _RustBindings:
         ):
             return record
         return None
+
+    def _member_declared_type(
+        self,
+        value_node: Any | None,
+        member: _Record,
+        position: int,
+    ) -> "tuple[str | None, str | None] | None":
+        """(type id, args) of a member's declared annotation with the
+        receiver's generic arguments substituted — `W<T>` at `W<P>`
+        reads `opt: Option<T>` as `Option<P>`, and `m::W`'s `P` is
+        `m::P`, never a root-level `P` of the same spelling."""
+        type_id, impl_args = (
+            (None, None)
+            if value_node is None
+            else self._receiver_type(value_node)
+        )
+        container = (
+            None if type_id is None else self.records.get(type_id)
+        )
+        pos = position
+        if value_node is not None and value_node.type == "identifier":
+            record = self._lookup(
+                self._normalize_identifier(self.text(value_node)),
+                value_node.start_byte,
+                "value",
+            )
+            if record is not None and record.type_node is not None:
+                pos = record.type_node.start_byte
+        type_id, args = self._field_annotation(
+            member.type_node,
+            self._pattern_param_map(container, impl_args),
+            pos,
+            container,
+        )
+        if type_id is None and args is None:
+            return None
+        return type_id, args
+
+    def _member_scope_for_args(
+        self, value_node: Any | None, member: _Record
+    ) -> "_Scope | None":
+        """Scope the member's spelled args resolve in — its own
+        declaration scope when the receiver adds no generic
+        substitution (`m::W`'s `P` stays `m::P`), or the pattern's
+        site when substituted args were spelled there."""
+        type_id, impl_args = (
+            (None, None)
+            if value_node is None
+            else self._receiver_type(value_node)
+        )
+        container = (
+            None if type_id is None else self.records.get(type_id)
+        )
+        if container is not None and self._pattern_param_map(
+            container, impl_args
+        ):
+            return None
+        if member.home_scope is not None:
+            return member.home_scope
+        owner = self.records.get(member.member_of)
+        return None if owner is None else owner.home_scope
 
     def _pattern_param_map(
         self, container: "_Record | None", scrut_args: str | None
@@ -3811,51 +3887,59 @@ class _RustBindings:
 
     def _scrutinee_shape(
         self, value: Any | None, scrut_id: str | None
-    ) -> "tuple[str | None, int | None]":
-        """(head name, annotation position) of the scrutinee's
-        declared type — `opt` in `match opt` reads `opt`'s
-        annotation (`Option<P>` → ("Option", <pos>)). The position
-        is where the type was written, so spelled args resolve
-        against the names visible there, not the pattern's scope."""
+    ) -> "tuple[str | None, int | None, _Scope | None]":
+        """(head name, annotation position, args scope) of the
+        scrutinee's declared type — `opt` in `match opt` reads
+        `opt`'s annotation (`Option<P>` → ("Option", <pos>)). The
+        scope is where the written args belong, so `m::W`'s `P`
+        resolves to `m::P`, never a root `P` of the same spelling."""
         if scrut_id is not None:
             record = self.records.get(scrut_id)
             return (
-                (None, None)
+                (None, None, None)
                 if record is None
-                else (record.binding.name, None)
+                else (record.binding.name, None, None)
             )
         node = value
         while node is not None and node.type == "reference_expression":
             node = next(iter(node.named_children), None)
         if node is None:
-            return None, None
+            return None, None, None
         if node.type == "field_expression":
             # `match w.opt` / `if let Some(p) = self.opt` — the
-            # scrutinee's spelled head is the field's annotation.
+            # scrutinee's spelled head is the field's annotation,
+            # whose args resolve in the field's declaring scope.
             field = self._field_member(
                 node, ("struct_field", "associated_const")
             )
             if field is None or field.type_node is None:
-                return None, None
+                return None, None, None
             return (
                 self._annotation_head_name(field.type_node),
                 field.type_node.start_byte,
+                self._member_scope_for_args(
+                    node.child_by_field_name("value"), field
+                ),
             )
         if node.type != "identifier":
-            return None, None
+            return None, None, None
         record = self._lookup(
             self._normalize_identifier(self.text(node)),
             node.start_byte,
             "value",
         )
         if record is None:
-            return None, None
+            return None, None, None
         position = (
             None
             if record.type_node is None
             else record.type_node.start_byte
         )
-        return self._annotation_head_name(record.type_node), position
+        return (
+            self._annotation_head_name(record.type_node),
+            position,
+            record.home_scope,
+        )
 
     def _prelude_pattern_payload(
         self,
@@ -3894,11 +3978,32 @@ class _RustBindings:
         scrut_args: str | None,
         scrut_name: str | None = None,
         scrut_position: int | None = None,
+        scrut_scope: "_Scope | None" = None,
     ) -> dict:
         """start_byte -> (TypeFact, args) for the names a destructuring
         pattern binds, resolved against the scrutinee's declared
         type — `match e { E::V(p) => ... }` types `p` by V's payload;
         a name the shape cannot pin is simply absent."""
+        push = scrut_scope is not None and scrut_scope not in self.scopes
+        if push:
+            self.scopes.append(scrut_scope)
+        try:
+            return self._pattern_type_map_body(
+                pattern, scrut_id, scrut_args,
+                scrut_name, scrut_position,
+            )
+        finally:
+            if push:
+                self.scopes.pop()
+
+    def _pattern_type_map_body(
+        self,
+        pattern: Any | None,
+        scrut_id: str | None,
+        scrut_args: str | None,
+        scrut_name: str | None = None,
+        scrut_position: int | None = None,
+    ) -> dict:
         if pattern is None or (scrut_id is None and scrut_name is None):
             return {}
         kind = pattern.type
