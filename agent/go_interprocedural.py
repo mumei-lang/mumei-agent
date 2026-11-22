@@ -1010,6 +1010,9 @@ class _Builder:
         # opaque effectful callee — args + captured deps into escaped
         # bindings and indirect_writes, imported transfer recorded.
         self.closure_inner_calls: set[str] = set()
+        self._active_assignment_closure_records: tuple[
+            Any, dict[str, Any]
+        ] | None = None
         # Function-name aliases — `h := G` / `h = G` / `var h = G`
         # binds the name to a DECLARED function: `h(x)` resolves
         # through G's own summary exactly like a `direct_local`
@@ -1856,6 +1859,94 @@ class _Builder:
             self.closure_star_writes.add(bound_id)
         if src in self.closure_inner_calls:
             self.closure_inner_calls.add(bound_id)
+
+    def _is_prestate_tracked_local_closure(
+        self,
+        binding_id: str,
+        params: dict[str, int],
+        captures_before: dict[str, frozenset[str]],
+        opaque_before: set[str],
+        aliases_before: dict[str, str],
+        mv_before: dict[str, Any],
+        imv_before: dict[str, Any],
+    ) -> bool:
+        binding = self.bindings.get(binding_id)
+        return (
+            binding is not None
+            and binding.kind == "variable"
+            and binding.type is not None
+            and binding.type.kind == "function"
+            and binding_id not in params
+            and binding_id in captures_before
+            and binding_id not in opaque_before
+            and binding_id not in aliases_before
+            and binding_id not in mv_before
+            and binding_id not in imv_before
+        )
+
+    def _adopt_element_records_from_snapshot(
+        self,
+        src: str,
+        bound_id: str,
+        captures_before: dict[str, frozenset[str]],
+        writes_before: dict[str, frozenset[str]],
+        star_before: set[str],
+        calls_before: set[str],
+        pointee_before: set[str],
+    ) -> None:
+        captured = captures_before.get(src)
+        if captured:
+            self.closure_captures[bound_id] = (
+                self.closure_captures.get(bound_id, frozenset())
+                | captured
+            )
+        writes = writes_before.get(src)
+        if writes:
+            self.closure_writes[bound_id] = (
+                self.closure_writes.get(bound_id, frozenset()) | writes
+            )
+        if src in star_before:
+            self.closure_star_writes.add(bound_id)
+        if src in calls_before:
+            self.closure_inner_calls.add(bound_id)
+        if src in pointee_before:
+            self.pointee_closures.add(bound_id)
+
+    def _assignment_composite_record_snapshot(
+        self, literal: Any
+    ) -> dict[str, Any] | None:
+        active = self._active_assignment_closure_records
+        if active is None:
+            return None
+        statement, records = active
+        right = statement.child_by_field_name("right")
+        if right is None:
+            return None
+        rhs_values = (
+            _children(right)
+            if right.type == "expression_list"
+            else [right]
+        )
+        for rhs in rhs_values:
+            composite = self._strip_parens(rhs)
+            if (
+                composite is None
+                or composite.type != "composite_literal"
+                or not (
+                    composite.start_byte
+                    <= literal.start_byte
+                    and literal.end_byte <= composite.end_byte
+                )
+            ):
+                continue
+            current = literal
+            while current is not None and current != composite:
+                if current.type == "func_literal":
+                    break
+                current = current.parent
+            if current == composite:
+                return records
+        return None
 
     def _opaque_container_index_target(
         self, lhs: Any
@@ -4431,11 +4522,64 @@ class _Builder:
         return True, None
 
     def _adopt_struct_composite_closure_records(
-        self, literal: Any, params: dict[str, int]
+        self,
+        literal: Any,
+        params: dict[str, int],
+        records_before: dict[str, Any] | None = None,
     ) -> None:
         body = literal.child_by_field_name("body")
         if body is None:
             return
+        captures = (
+            records_before["captures"]
+            if records_before is not None
+            else self.closure_captures
+        )
+        writes = (
+            records_before["writes"]
+            if records_before is not None
+            else self.closure_writes
+        )
+        star = (
+            records_before["star"]
+            if records_before is not None
+            else self.closure_star_writes
+        )
+        calls = (
+            records_before["calls"]
+            if records_before is not None
+            else self.closure_inner_calls
+        )
+        pointee = (
+            records_before["pointee"]
+            if records_before is not None
+            else self.pointee_closures
+        )
+        factory_results = (
+            records_before["factory_results"]
+            if records_before is not None
+            else self.closure_factory_results
+        )
+        opaque = (
+            records_before["opaque"]
+            if records_before is not None
+            else self.opaque_callees
+        )
+        aliases = (
+            records_before["aliases"]
+            if records_before is not None
+            else self.func_aliases
+        )
+        methods = (
+            records_before["methods"]
+            if records_before is not None
+            else self.bound_method_values
+        )
+        interface_methods = (
+            records_before["interface_methods"]
+            if records_before is not None
+            else self.bound_interface_methods
+        )
         for element in _children(body):
             if element.type == "keyed_element":
                 value = element.child_by_field_name("value")
@@ -4452,8 +4596,20 @@ class _Builder:
             src_id = ref.binding_id if ref is not None else None
             if src_id is None:
                 continue
-            tracked = self._is_tracked_literal_value(src_id, params)
-            factory_result = src_id in self.closure_factory_results
+            tracked = (
+                self._is_prestate_tracked_local_closure(
+                    src_id,
+                    params,
+                    captures,
+                    opaque,
+                    aliases,
+                    methods,
+                    interface_methods,
+                )
+                if records_before is not None
+                else self._is_tracked_literal_value(src_id, params)
+            )
+            factory_result = src_id in factory_results
             if not tracked and not factory_result:
                 continue
             is_struct, member = (
@@ -4472,9 +4628,15 @@ class _Builder:
                     )
                 if not tracked:
                     continue
-                self._adopt_element_records(src_id, member.id)
-                if src_id in self.pointee_closures:
-                    self.pointee_closures.add(member.id)
+                self._adopt_element_records_from_snapshot(
+                    src_id,
+                    member.id,
+                    captures,
+                    writes,
+                    star,
+                    calls,
+                    pointee,
+                )
                 continue
             raise _Unsupported("unsupported_expression", _span(value))
 
@@ -21720,21 +21882,50 @@ class _Builder:
             factory_results_before = set(
                 self.closure_factory_results
             )
-            values = (
-                [
-                    self.expression(
-                        rights[0], fn, params, locals_, transfers, count, 0
-                    )
-                ]
-                * len(lefts)
-                if multi
-                else [
-                    self._func_value_rhs_deps(
-                        rhs, fn, params, locals_, transfers, count
-                    )
-                    for rhs in rights
-                ]
+            previous_assignment_records = (
+                self._active_assignment_closure_records
             )
+            self._active_assignment_closure_records = (
+                node,
+                {
+                    "captures": captures_before,
+                    "writes": writes_before,
+                    "star": star_before,
+                    "calls": calls_before,
+                    "pointee": pointee_before,
+                    "factory_results": factory_results_before,
+                    "opaque": opaque_before,
+                    "aliases": aliases_before,
+                    "methods": mv_before,
+                    "interface_methods": imv_before,
+                },
+            )
+            try:
+                values = (
+                    [
+                        self.expression(
+                            rights[0],
+                            fn,
+                            params,
+                            locals_,
+                            transfers,
+                            count,
+                            0,
+                        )
+                    ]
+                    * len(lefts)
+                    if multi
+                    else [
+                        self._func_value_rhs_deps(
+                            rhs, fn, params, locals_, transfers, count
+                        )
+                        for rhs in rights
+                    ]
+                )
+            finally:
+                self._active_assignment_closure_records = (
+                    previous_assignment_records
+                )
             factory_sources: list[
                 tuple[
                     frozenset[str],
@@ -22222,12 +22413,27 @@ class _Builder:
                         raise _Unsupported(
                             "unsupported_expression", _span(rhs)
                         )
-                    if src_id is not None and self._is_tracked_literal_value(
-                        src_id, params
+                    if (
+                        src_id is not None
+                        and self._is_prestate_tracked_local_closure(
+                            src_id,
+                            params,
+                            captures_before,
+                            opaque_before,
+                            aliases_before,
+                            mv_before,
+                            imv_before,
+                        )
                     ):
-                        self._adopt_element_records(src_id, member_id)
-                        if src_id in pointee_before:
-                            self.pointee_closures.add(member_id)
+                        self._adopt_element_records_from_snapshot(
+                            src_id,
+                            member_id,
+                            captures_before,
+                            writes_before,
+                            star_before,
+                            calls_before,
+                            pointee_before,
+                        )
             for i, (ref, value) in enumerate(zip(refs, values)):
                 if (
                     (conditional or self._may_skip > 0)
@@ -30035,7 +30241,11 @@ class _Builder:
             body = node.child_by_field_name("body")
             if body is None:
                 raise _Unsupported("unsupported_expression", _span(node))
-            self._adopt_struct_composite_closure_records(node, params)
+            self._adopt_struct_composite_closure_records(
+                node,
+                params,
+                self._assignment_composite_record_snapshot(node),
+            )
             return self.expression(
                 body, fn, params, locals_, transfers, count, depth + 1
             )

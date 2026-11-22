@@ -19060,6 +19060,34 @@ def test_named_closures_stored_in_struct_fields_match_literals(
         assert named_result.effects == literal_result.effects == "unknown"
 
 
+def test_struct_field_closure_copies_use_parallel_assignment_prestate(
+    go_types_helper,
+):
+    declarations = (
+        "type W struct{ F func() }\n"
+        "func NewBeforeField(x, y int64) int64 { w := int64(0); "
+        "g := func() { w = x }; var s W; "
+        "g, s.F = func() { w = y }, g; s.F(); return w }\n"
+        "func FieldBeforeNew(x, y int64) int64 { w := int64(0); "
+        "g := func() { w = x }; var s W; "
+        "s.F, g = g, func() { w = y }; s.F(); return w }\n"
+        "func CompositeBeforeStore(x, y int64) int64 { "
+        "w := int64(0); g := func() { w = x }; var s W; "
+        "g, s = func() { w = y }, W{F: g}; "
+        "s.F(); return w }\n"
+    )
+    source, snapshot, summaries = unit(go_types_helper, declarations)
+    for function_name in (
+        "NewBeforeField",
+        "FieldBeforeNew",
+        "CompositeBeforeStore",
+    ):
+        result = named(source, snapshot, summaries, function_name)
+        assert result.available, (function_name, result.gaps)
+        assert 0 in result.return_dependencies
+        assert result.effects == "unknown"
+
+
 def test_struct_field_factory_results_fail_closed(
     go_types_helper,
 ):
