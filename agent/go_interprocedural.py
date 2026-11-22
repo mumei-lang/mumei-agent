@@ -2371,7 +2371,11 @@ class _Builder:
         }
 
     def _scalar_container_field(
-        self, sel: Any, params: dict | None = None
+        self,
+        sel: Any,
+        params: dict | None = None,
+        *,
+        for_write: bool = False,
     ) -> tuple[str | None, Any]:
         """`s.F` (or a nested `s.W.F`) naming a scalar-element
         collection field — or its one-level nested form — on a
@@ -2452,8 +2456,14 @@ class _Builder:
                 root_ref.binding_id
             ]
             if (
-                root_ref.binding_id in self._pointer_param_reseats
-                or root_ref.binding_id in self._param_pointer_aliases
+                not (
+                    for_write
+                    or getattr(self, "_for_write_target", False)
+                )
+                and (
+                    root_ref.binding_id in self._pointer_param_reseats
+                    or root_ref.binding_id in self._param_pointer_aliases
+                )
             ):
                 # The target's name was itself reseated or re-seated
                 # onto another entry — its slot no longer names the
@@ -2461,7 +2471,11 @@ class _Builder:
                 # both: `p.A[i]` reads q's entry, whose slot now
                 # tracks p's). The model has no separate entry slot
                 # to fall back to, so the read closes rather than
-                # mis-attribute the dependency.
+                # mis-attribute the dependency. A write still lands
+                # in the target's entry pointee — `p = q; q = r;
+                # p.F[0] = x` mutates what the caller passed as `q`
+                # — so the store keeps the substituted root and
+                # over-reports instead (sound).
                 raise _Unsupported(
                     "non_parameter_reference", _span(sel)
                 )
@@ -2709,9 +2723,10 @@ class _Builder:
         *,
         allow_struct_elements: bool = False,
         allow_struct_element_arrays: bool = False,
+        for_write: bool = False,
     ) -> tuple[str, str, Any, frozenset, Any] | None:
         root_id, member = self._scalar_container_field(
-                sel, params
+                sel, params, for_write=for_write
             )
         if root_id is None or member is None:
             return None
@@ -2903,7 +2918,9 @@ class _Builder:
             or not indexes
         ):
             return None
-        target = self._opaque_container_field_target(current, params)
+        target = self._opaque_container_field_target(
+            current, params, for_write=True
+        )
         if target is None:
             return None
         field_key, _root_id, member, tokens, root_ref = target
@@ -2973,6 +2990,7 @@ class _Builder:
             params,
             allow_struct_elements=True,
             allow_struct_element_arrays=True,
+            for_write=True,
         )
         if target is None:
             return None
@@ -5033,7 +5051,7 @@ class _Builder:
             if imported is not None:
                 return imported
             root_id, member = self._scalar_container_field(
-                rhs, params
+                rhs, params, for_write=True
             )
             if root_id is None:
                 return None
@@ -14574,6 +14592,7 @@ class _Builder:
         # cleared here like the branch joins below expect.
         self._param_pointer_aliases = {}
         self._pointer_param_reseats = set()
+        self._for_write_target = False
         self._pending_param_reseats = []
         for pid, value in state.items():
             if value is None:
@@ -17930,10 +17949,14 @@ class _Builder:
                     container_fact = _container_member.type
                     if container_fact.kind == "array":
                         opaque_elem_root_slots[ri] = oref.binding_id
-                    opaque_elem_index_deps[ri] = self.expression(
-                        field_selector, fn, params, locals_,
-                        transfers, count, 0,
-                    )
+                    self._for_write_target = True
+                    try:
+                        opaque_elem_index_deps[ri] = self.expression(
+                            field_selector, fn, params, locals_,
+                            transfers, count, 0,
+                        )
+                    finally:
+                        self._for_write_target = False
                     self._record_read(opaque_elem_index_deps[ri])
                     for index in reversed(indexes):
                         if (
@@ -17966,10 +17989,14 @@ class _Builder:
                     ri = len(refs) - 1
                     opaque_elem_targets[ri] = frozenset(field_tokens)
                     opaque_elem_slot_ids[ri] = field_key
-                    opaque_elem_index_deps[ri] = self.expression(
-                        field_selector, fn, params, locals_,
-                        transfers, count, 0,
-                    )
+                    self._for_write_target = True
+                    try:
+                        opaque_elem_index_deps[ri] = self.expression(
+                            field_selector, fn, params, locals_,
+                            transfers, count, 0,
+                        )
+                    finally:
+                        self._for_write_target = False
                     self._record_read(opaque_elem_index_deps[ri])
                     for inner_index in reversed(inner_indexes or ()):
                         if (
