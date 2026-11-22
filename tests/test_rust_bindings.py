@@ -1984,3 +1984,37 @@ fn f(p: &P) { p.hi(); }
     )
     call = _call(report, source, "p.hi()")
     assert call.target == inherent.id
+
+
+def test_member_ambiguous_trait_impls_stay_opaque():
+    # `p.get()` could call T::get or U::get — Rust reports ambiguity,
+    # so no single implementation is bound.
+    source = """
+struct P { x: i32 }
+trait T { fn get(&self) -> i32; }
+trait U { fn get(&self) -> i32; }
+impl T for P { fn get(&self) -> i32 { self.x } }
+impl U for P { fn get(&self) -> i32 { 2 } }
+fn f(p: P) { p.get(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    call = _call(report, source, "p.get()")
+    assert call.kind == "opaque_method"
+    assert not call.target
+
+
+def test_member_single_trait_impl_still_resolves():
+    source = """
+struct Q { y: i32 }
+trait V { fn only(&self) -> i32; }
+impl V for Q { fn only(&self) -> i32 { self.y } }
+fn f(q: Q) { q.only(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    only = next(
+        b
+        for b in _bindings(report, "only", "associated_function")
+        if b.span.start > source.index("impl V")
+    )
+    call = _call(report, source, "q.only()")
+    assert call.target == only.id

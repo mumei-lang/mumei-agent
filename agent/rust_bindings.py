@@ -990,11 +990,22 @@ class _RustBindings:
         ]
         # Inherent members shadow trait-impl members of the same name.
         pool.sort(key=lambda record: record.member_trait is not None)
-        if kinds:
-            for record in pool:
-                if record.binding.kind in kinds:
-                    return record
-        return pool[0] if pool else None
+        candidates = (
+            [record for record in pool if record.binding.kind in kinds]
+            if kinds
+            else pool
+        )
+        if not candidates:
+            return None
+        first = candidates[0]
+        if first.member_trait is not None:
+            # More than one trait impl can spell `name` — Rust reports
+            # ambiguity, so no single implementation is picked.
+            if sum(
+                1 for record in candidates if record.member_trait is not None
+            ) > 1:
+                return None
+        return first
 
     def _field_member(
         self, node: Any, kinds: tuple[str, ...] = ()
