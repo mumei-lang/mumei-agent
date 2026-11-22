@@ -48,7 +48,8 @@ _INDEX_ELEMENT_CONTAINERS = frozenset(
 # here (they iterate (K, V) pairs) and handled by their own
 # `keys`/`values` entry points below.
 _ITER_ELEMENT_METHODS = frozenset(
-    {"iter", "iter_mut", "into_iter", "drain", "split_off"}
+    {"iter", "iter_mut", "into_iter", "drain", "split_off",
+     "splice"}
 )
 # Iterator adaptors that keep the same element type — `map`/`flat_map`
 # change it through a closure and stay opaque.
@@ -91,10 +92,14 @@ _MAP_RANGE_METHODS = frozenset({"range", "range_mut"})
 _SET_ALGEBRA_METHODS = frozenset(
     {"union", "intersection", "difference", "symmetric_difference"}
 )
-# `s.extract_if(f)` drains matching elements — sets yield `P`;
-# the maps yield `(K, V)` pairs spelled at the pair-pattern site.
-_EXTRACT_IF_METHODS = frozenset({"extract_if"})
 _SET_CONTAINER_NAMES = frozenset({"HashSet", "BTreeSet"})
+# `s.extract_if(f)` drains matching elements — sets and
+# `LinkedList` yield `P`; the maps yield `(K, V)` pairs spelled
+# at the pair-pattern site.
+_EXTRACT_IF_METHODS = frozenset({"extract_if"})
+_EXTRACT_IF_ELEMENT_CONTAINERS = _SET_CONTAINER_NAMES | {
+    "LinkedList"
+}
 
 # Smart pointers that `Deref` straight to their payload — `b.pm()`
 # on `Box<P>`/`Rc<P>`/`Arc<P>` calls `P`'s members. `Mutex`/`Cell`/
@@ -5059,14 +5064,14 @@ class _RustBindings:
                 receiver
             )
         if method in _EXTRACT_IF_METHODS:
-            # `s.extract_if(f)` yields the set's `P` elements; the
-            # map variant yields `(K, V)` pairs handled at the
-            # pair-pattern site.
+            # `s.extract_if(f)` yields the `P` elements of a set
+            # or `LinkedList`; the map variant yields `(K, V)`
+            # pairs handled at the pair-pattern site.
             container_id, args = self._receiver_type(receiver)
             if args is None:
                 return None, None
             if self._container_head_name(receiver) not in (
-                _SET_CONTAINER_NAMES
+                _EXTRACT_IF_ELEMENT_CONTAINERS
             ):
                 return None, None
             spelled = args.strip() or None
@@ -5999,12 +6004,13 @@ class _RustBindings:
             )
             return TypeFact("named", name, 0, None, elem_id), rest
         if method in _EXTRACT_IF_METHODS:
-            # `s.extract_if(f)` yields the set's `P` elements.
+            # `s.extract_if(f)` yields the `P` elements of a set
+            # or `LinkedList`.
             container_id, args = self._receiver_type(receiver)
             if args is None:
                 return _UNKNOWN, None
             if self._container_head_name(receiver) not in (
-                _SET_CONTAINER_NAMES
+                _EXTRACT_IF_ELEMENT_CONTAINERS
             ):
                 return _UNKNOWN, None
             elem_id, rest = self._element_of(
