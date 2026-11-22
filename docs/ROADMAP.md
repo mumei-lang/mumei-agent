@@ -4315,9 +4315,12 @@ statement's entry), and a for body's may-not-run path all join
 pointwise on the entry state, so an alias only survives when every
 path agrees and a may-alias or may-reseat closes the root
 afterwards. A clause whose tail statement unconditionally leaves
-the function (return/goto/continue/break) contributes no exit
-state — `switch { case 1: p = q; return 0 }` keeps `p` on its
-entry pointee after the switch. The alias target's name is only
+the construct's post-state contributes no exit state —
+return/continue always leave it, and `break L` only leaves it
+when the label names an outer construct; a plain `break` exits
+the switch/select itself and a `goto` may land after it, so both
+keep their end state. `switch { case 1: p = q; return 0 }` keeps
+`p` on its entry pointee after the switch. The alias target's name is only
 its entry pointee
 while it is clean — if the target is itself reseated or re-seated
 (`p = q; q = r`, `p, q = q, p`), its slot tracks the new pointee,
