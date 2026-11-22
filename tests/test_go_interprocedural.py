@@ -52665,3 +52665,46 @@ def test_collection_field_reslice_bind(go_types_helper, declarations, expected):
 def test_collection_field_reslice_bind_closed(go_types_helper, declarations):
     result = named(*unit(go_types_helper, declarations))
     assert not result.available or result.gaps
+
+
+@pytest.mark.parametrize(
+    "declarations, expected",
+    [
+        # `a, c := b, a[:]` — the reslice binds `a`'s group as it
+        # was BEFORE `b` reseats `a` in the same statement.
+        (
+            "type E struct { V int64 }\n"
+            "func F(a []E, b []E, x int64) int64 {\n"
+            "\ta, c := b, a[:]\n"
+            "\tc[0].V = x\n"
+            "\treturn b[0].V\n}\n",
+            frozenset({0, 1, 2}),
+        ),
+        # `s := a[:]` on an array VIEWS the backing — `s[j]`
+        # writes land on `a`'s elements, unlike the `s = a` copy.
+        (
+            "type E struct { V int64 }\n"
+            "func F(a [4]E, x int64) int64 {\n"
+            "\ts := a[:]\n"
+            "\ts[0].V = x\n"
+            "\treturn a[0].V\n}\n",
+            frozenset({0, 1}),
+        ),
+        # A bound's callback writes fold like the operand's.
+        (
+            "type E struct { V int64 }\n"
+            "type S struct { A []E }\n"
+            "func H(f func()) int64 { f(); return 1 }\n"
+            "func F(p *S, x int64, w int64) int64 {\n"
+            "\ty := x\n"
+            "\ts := p.A[:H(func() { y = w })]\n"
+            "\t_ = s\n"
+            "\treturn y\n}\n",
+            frozenset({1, 2}),
+        ),
+    ],
+)
+def test_reslice_bind_negative_controls(go_types_helper, declarations, expected):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == expected
