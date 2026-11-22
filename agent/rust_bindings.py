@@ -2929,6 +2929,46 @@ class _RustBindings:
             )
         return None
 
+    def _field_args_position(
+        self, field_expr: Any | None
+    ) -> "int | None":
+        """Scope position resolving a field access's spelled args —
+        the receiver's annotation when the field type spells the
+        container's own params (substituted args were written at the
+        use site), else the field's declaration (a fixed `Vec<Q>`
+        keeps `Q` in the field's scope, not a same-named local)."""
+        if field_expr is None or field_expr.type != "field_expression":
+            return self._receiver_annotation_position(field_expr)
+        member = self._field_member(
+            field_expr, ("struct_field", "associated_const")
+        )
+        if member is None or member.type_node is None:
+            return None
+        value = field_expr.child_by_field_name("value")
+        type_id, impl_args = (
+            (None, None) if value is None
+            else self._receiver_type(value)
+        )
+        container = (
+            None if type_id is None else self.records.get(type_id)
+        )
+        param_map = (
+            {}
+            if container is None
+            else self._pattern_param_map(container, impl_args)
+        )
+        if param_map:
+            member_text = self.text(member.type_node)
+            if any(
+                re.search(rf"\b{re.escape(param)}\b", member_text)
+                for param in param_map
+            ):
+                return (
+                    self._receiver_annotation_position(value)
+                    or field_expr.start_byte
+                )
+        return member.type_node.start_byte
+
     def _spelling_scope_stable(
         self, spelled: str, pos_a: int | None, pos_b: int | None
     ) -> bool:
@@ -3494,10 +3534,9 @@ class _RustBindings:
         if iterator.type == "field_expression":
             # `for q in w.xs` — `xs: Vec<T>` substitutes the receiver
             # `w`'s args, so the element name is spelled at `w`'s
-            # annotation, not the field's declaring scope.
-            position = self._receiver_annotation_position(
-                iterator.child_by_field_name("value")
-            ) or position
+            # annotation, not the field's declaring scope; a fixed
+            # `xs: Vec<Q>` keeps `Q` in the field's own scope.
+            position = self._field_args_position(iterator) or position
         if position is None:
             position = iterator.start_byte
         elem_id, rest = self._element_of(
