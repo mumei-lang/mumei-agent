@@ -1152,3 +1152,34 @@ function scope() {
         for c in report.calls
     )
     assert not any(c.target == other.id for c in report.calls)
+
+
+def test_method_body_multiplication_is_not_a_generator():
+    source = """
+class C {
+    make(): number { const y = 2 * 3; return y }
+}
+const c = new C(); c.make();
+"""
+    report = build_ts_bindings(source)
+    make = _member_bindings(report, "make", "associated_function")[0]
+    assert any(
+        c.kind == "opaque_virtual" and c.target == make.id
+        for c in report.calls
+    )
+    assert not any(c.kind == "opaque_generator" for c in report.calls)
+
+
+def test_member_base_with_spaces_and_multi_segment_chains():
+    source = """
+namespace Lib { export namespace Inner { export class Base { m(): void {} } } }
+class A extends Lib . Inner . Base { run(): void { this.m(); } }
+class B extends Lib.Inner.Base { run(): void { this.m(); } }
+"""
+    report = build_ts_bindings(source)
+    m = _member_bindings(report, "m", "associated_function")[0]
+    calls = [
+        c for c in report.calls
+        if c.kind == "opaque_virtual" and c.target == m.id
+    ]
+    assert len(calls) == 2

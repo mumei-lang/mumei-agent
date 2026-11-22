@@ -924,10 +924,14 @@ class _TypeScriptBindings:
                         for name_node in self.children(clause):
                             text = self.text(name_node).strip()
                             match = re.match(
-                                r"[A-Za-z_$][A-Za-z0-9_$.]*", text
+                                r"[A-Za-z_$][A-Za-z0-9_$]*"
+                                r"(?:\s*\.\s*[A-Za-z_$][A-Za-z0-9_$]*)*",
+                                text,
                             )
                             if match:
-                                bases.append(match.group(0))
+                                bases.append(
+                                    re.sub(r"\s+", "", match.group(0))
+                                )
                 self._type_bases[decl.id] = bases
                 for member in self.children(body):
                     name_node = member.child_by_field_name("name")
@@ -1009,7 +1013,13 @@ class _TypeScriptBindings:
                         and node.parent.id != body.id
                     ):
                         node = node.parent
-                        if node.type in {
+                        own_declaration = (
+                            node.type == "internal_module"
+                            and node.child_by_field_name("name") is not None
+                            and node.child_by_field_name("name").id
+                            == other.node.id
+                        )
+                        if not own_declaration and node.type in {
                             "internal_module", "class_body",
                             "interface_body", "enum_body",
                             "statement_block",
@@ -1120,7 +1130,7 @@ class _TypeScriptBindings:
         self, base: str, position: int
     ) -> _Record | None:
         """Resolve an extends/implements spelling, incl. `N.Base` chains."""
-        segments = base.split(".")
+        segments = [segment.strip() for segment in base.split(".")]
         record = self._lookup(segments[0], position, "type")
         if record is None:
             record = self._lookup(segments[0], position, "value")
