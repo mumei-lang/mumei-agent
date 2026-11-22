@@ -1806,10 +1806,10 @@ impl W<i32> { fn inner(&self) {} fn outer(&self) { self.inner(); } }
     assert call.kind == "direct_local"
 
 
-def test_member_ref_and_captured_patterns_keep_annotation():
+def test_member_captured_pattern_keeps_annotation():
     source = """
 struct P { x: i32 }
-fn f(ref p: P, q @ P{x}: P) { p.x; q.x; }
+fn f(q @ P{x}: P) { q.x; }
 """
     report = build_rust_bindings(source, pointer_width=64)
     field = _bindings(report, "x", "struct_field")[0]
@@ -1818,7 +1818,16 @@ fn f(ref p: P, q @ P{x}: P) { p.x; q.x; }
         for r in report.references
         if r.kind == "read" and source[r.span.start - 1 : r.span.end] == ".x"
     ]
-    assert [r.binding_id == field.id for r in reads] == [True, True]
+    assert [r.binding_id == field.id for r in reads] == [True]
+
+
+def test_ref_pattern_binding_is_not_the_annotated_type():
+    # `ref x: i32` binds `x: &i32` — the annotation must not be
+    # reported as `x`'s type.
+    source = "fn f(ref x: i32) {}"
+    report = build_rust_bindings(source, pointer_width=64)
+    x = _bindings(report, "x", "parameter")[0]
+    assert x.type.kind != "named"
 
 
 def test_member_captured_pattern_inner_name_stays_opaque():

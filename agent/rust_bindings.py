@@ -1374,9 +1374,10 @@ class _RustBindings:
     def _whole_pattern_names(self, pattern: Any | None) -> set[int]:
         """Name-node ids bound to the whole matched value.
 
-        `identifier`/`mut x`/`&x`/`ref x` bind the value under that
-        name; `x @ P { .. }` binds `x` to the whole value while nested
-        names only see their fields."""
+        `identifier`/`mut x`/`&x` bind the value under that name;
+        `x @ P { .. }` binds `x` to the whole value while nested
+        names only see their fields. `ref x` is excluded — it binds
+        `x` to a reference, so the written type is not `x`'s type."""
         if pattern is None:
             return set()
         if pattern.type == "identifier":
@@ -1384,7 +1385,6 @@ class _RustBindings:
         if pattern.type in {
             "mutable_specifier",
             "reference_pattern",
-            "ref_pattern",
             "captured_pattern",
         }:
             for child in self._children(pattern):
