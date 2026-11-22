@@ -2803,7 +2803,8 @@ class _RustBindings:
                         self.span(name_node), member.binding.id, "read"
                     )
                 )
-                kind = "opaque_method"
+                target = member.binding.id
+                kind = "opaque_value"
             else:
                 self.unresolved.append(Unresolved(self.span(callee), self.text(callee), "qualified_path"))
                 kind = "opaque_path"
@@ -2847,7 +2848,8 @@ class _RustBindings:
                             self.span(field_node), member.binding.id, "read"
                         )
                     )
-                    kind = "opaque_method"
+                    target = member.binding.id
+                    kind = "opaque_value"
                 elif field_node is not None:
                     field_member = self._field_member(
                         inner, ("struct_field",)
@@ -2888,7 +2890,8 @@ class _RustBindings:
                             self.span(name_node), member.binding.id, "read"
                         )
                     )
-                    kind = "opaque_method"
+                    target = member.binding.id
+                    kind = "opaque_value"
                 else:
                     self.unresolved.append(
                         Unresolved(
@@ -2955,7 +2958,8 @@ class _RustBindings:
                         self.span(field_node), member.binding.id, "read"
                     )
                 )
-                kind = "opaque_method"
+                target = member.binding.id
+                kind = "opaque_value"
             elif field_node is not None:
                 field_member = self._field_member(
                     callee, ("struct_field",)
