@@ -23109,7 +23109,11 @@ class _Builder:
                         branch_origins or chan_origin_entry
                     )
                     self._restore_param_pointer_state(
-                        ptr_branch_state or ptr_entry_state
+                        (
+                            ptr_branch_state
+                            if ptr_branch_state is not None
+                            else ptr_entry_state
+                        )
                     )
                     self._branch_sequence(
                         statements, fn, params, branch, transfers,
