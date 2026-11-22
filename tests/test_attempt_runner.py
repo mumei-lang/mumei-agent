@@ -1714,3 +1714,350 @@ def test_dispatch_and_publish_rejects_a_closed_lineage():
         ValueError, match="a selected result closes the attempt sequence"
     ):
         dispatch_and_publish(store, argv("pass"))
+
+
+@pytest.mark.parametrize("isolate_filesystem_write", [1, "true", None])
+def test_run_rejects_non_boolean_filesystem_write_isolation(
+    isolate_filesystem_write,
+):
+    with pytest.raises(
+        ValueError,
+        match="^invalid attempt run filesystem write isolation$",
+    ):
+        AttemptRunner().run(
+            request(),
+            argv("pass"),
+            isolate_filesystem_write=isolate_filesystem_write,
+        )
+
+
+def test_filesystem_write_detector_rejects_non_linux(monkeypatch):
+    monkeypatch.setattr(attempt_runner.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        attempt_runner.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail(
+            "non-Linux hosts do not probe filesystem isolation"
+        ),
+    )
+
+    assert attempt_runner._detect_filesystem_write_isolation() is False
+
+
+def test_filesystem_write_detector_does_not_require_unshare(monkeypatch):
+    monkeypatch.setattr(attempt_runner.sys, "platform", "linux")
+    monkeypatch.setattr(
+        attempt_runner.shutil,
+        "which",
+        lambda _name: pytest.fail("filesystem isolation does not use unshare"),
+    )
+    calls = []
+
+    def successful_probe(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return attempt_runner.subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(attempt_runner.subprocess, "run", successful_probe)
+
+    assert attempt_runner._detect_filesystem_write_isolation() is True
+    assert calls[0][0] == [
+        attempt_runner.sys.executable,
+        "-I",
+        "-c",
+        attempt_runner._FILESYSTEM_WRITE_PROBE_SCRIPT,
+    ]
+    assert calls[0][1]["timeout"] == 10
+
+
+@pytest.mark.parametrize(
+    "error", [OSError("probe failed"), RuntimeError("probe failed")]
+)
+def test_filesystem_write_detector_rejects_probe_errors(monkeypatch, error):
+    monkeypatch.setattr(attempt_runner.sys, "platform", "linux")
+
+    def fail_probe(*_args, **_kwargs):
+        raise error
+
+    monkeypatch.setattr(attempt_runner.subprocess, "run", fail_probe)
+    assert attempt_runner._detect_filesystem_write_isolation() is False
+
+
+def test_run_filesystem_write_isolation_requires_boundary_before_spawn(
+    monkeypatch,
+):
+    spawned = False
+
+    def fail_if_spawned(*args, **kwargs):
+        nonlocal spawned
+        spawned = True
+        pytest.fail("isolation validation must precede spawn")
+
+    monkeypatch.setattr(
+        attempt_runner,
+        "_FILESYSTEM_WRITE_ISOLATION_ENFORCEABLE",
+        False,
+    )
+    monkeypatch.setattr(attempt_runner.subprocess, "Popen", fail_if_spawned)
+    with pytest.raises(
+        ValueError,
+        match="^attempt run filesystem write isolation requires a read-only mount namespace boundary$",
+    ):
+        AttemptRunner().run(
+            request(),
+            argv("pass"),
+            isolate_filesystem_write=True,
+        )
+    assert spawned is False
+
+
+@pytest.mark.skipif(
+    not attempt_runner.filesystem_write_isolation_enforceable(),
+    reason="filesystem write isolation requires unprivileged mount namespaces",
+)
+def test_run_filesystem_write_isolation_blocks_writes_and_preserves_host(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(attempt_runner, "_UNSHARE", None)
+    child_path = tmp_path / "child-write.txt"
+    child_argv = (
+        PY,
+        "-c",
+        "import pathlib,sys; "
+        "print('capeff='+next(line.split()[1] "
+        "for line in pathlib.Path('/proc/self/status').read_text().splitlines() "
+        "if line.startswith('CapEff:')), flush=True); "
+        "print('attempting-write', flush=True); "
+        "pathlib.Path(sys.argv[1]).write_text('child')",
+        str(child_path),
+    )
+
+    isolated = AttemptRunner().run(
+        request(),
+        child_argv,
+        isolate_filesystem_write=True,
+    )
+    assert isolated.record.state == "exited"
+    assert isolated.record.events[-1].exit_code != 0
+    assert isolated.stdout == (
+        b"capeff=0000000000000000\nattempting-write\n"
+    )
+    assert not child_path.exists()
+
+    host_path = tmp_path / "host-write.txt"
+    host_path.write_text("host")
+    assert host_path.read_text() == "host"
+
+    direct = AttemptRunner().run(request(), child_argv)
+    assert direct.record.state == "exited"
+    assert direct.record.events[-1].exit_code == 0
+    assert child_path.read_text() == "child"
+
+
+def test_root_mapped_filesystem_isolation_drops_capabilities(tmp_path):
+    if not attempt_runner.filesystem_write_isolation_enforceable():
+        pytest.skip("filesystem write isolation is unavailable")
+    unshare = attempt_runner.shutil.which("unshare")
+    if unshare is None:
+        pytest.skip("unshare is unavailable")
+    try:
+        root_mapping = subprocess.run(
+            [unshare, "--user", "--map-root-user", "true"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pytest.skip("root-mapped user namespace is unavailable")
+    if root_mapping.returncode != 0:
+        pytest.skip("root-mapped user namespace is unavailable")
+
+    child_path = tmp_path / "root-child-write.txt"
+    target_script = """import ctypes, pathlib, sys
+status = pathlib.Path("/proc/self/status").read_text().splitlines()
+cap_eff = next(line.split()[1] for line in status if line.startswith("CapEff:"))
+print(f"capeff={cap_eff}", flush=True)
+class _MountAttr(ctypes.Structure):
+    _fields_ = [
+        ("attr_set", ctypes.c_uint64),
+        ("attr_clr", ctypes.c_uint64),
+        ("propagation", ctypes.c_uint64),
+        ("userns_fd", ctypes.c_uint64),
+    ]
+libc = ctypes.CDLL(None, use_errno=True)
+libc.syscall.restype = ctypes.c_long
+ctypes.set_errno(0)
+clear_result = libc.syscall(
+    ctypes.c_long(442),
+    ctypes.c_long(-100),
+    ctypes.c_char_p(b"/"),
+    ctypes.c_long(0x8000),
+    ctypes.byref(_MountAttr(0, 1, 0, 0)),
+    ctypes.c_size_t(ctypes.sizeof(_MountAttr)),
+)
+print(f"clear_result={clear_result} clear_errno={ctypes.get_errno()}", flush=True)
+try:
+    pathlib.Path(sys.argv[1]).write_text("child")
+except OSError as error:
+    print(f"write_errno={error.errno}", flush=True)
+else:
+    print("write_succeeded", flush=True)
+"""
+    outer_script = f"""import sys
+from agent.attempt_runner import AttemptRunner
+from agent.verification_attempt import AttemptExecutionRequest
+target_script = {target_script!r}
+result = AttemptRunner().run(
+    AttemptExecutionRequest("a" * 64, 1, 10000),
+    (sys.executable, "-c", target_script, sys.argv[1]),
+    isolate_filesystem_write=True,
+)
+sys.stdout.buffer.write(result.stdout)
+sys.exit(
+    0
+    if result.record.state == "exited"
+    and result.record.events[-1].exit_code == 0
+    else 1
+)
+"""
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__))
+    )
+    mapped = subprocess.run(
+        [
+            unshare,
+            "--user",
+            "--map-root-user",
+            "--",
+            PY,
+            "-c",
+            outer_script,
+            str(child_path),
+        ],
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=30,
+    )
+
+    assert mapped.returncode == 0
+    output = dict(
+        line.split("=", 1) for line in mapped.stdout.splitlines()
+    )
+    assert int(output["capeff"], 16) == 0
+    assert output["clear_result"] == "-1 clear_errno=1"
+    assert output["write_errno"] == "30"
+    assert not child_path.exists()
+
+    host_path = tmp_path / "root-host-write.txt"
+    host_path.write_text("host")
+    assert host_path.read_text() == "host"
+
+
+@pytest.mark.skipif(
+    not attempt_runner.filesystem_write_isolation_enforceable(),
+    reason="filesystem write isolation requires unprivileged mount namespaces",
+)
+def test_run_filesystem_write_isolation_keeps_dev_null_writable():
+    result = AttemptRunner().run(
+        request(),
+        argv(
+            "open('/dev/null', 'wb').write(b'x'); "
+            "print('stdout-captured')"
+        ),
+        isolate_filesystem_write=True,
+    )
+
+    assert result.record.state == "exited"
+    assert result.record.events[-1].exit_code == 0
+    assert result.stdout == b"stdout-captured\n"
+
+
+@pytest.mark.skipif(
+    not attempt_runner.filesystem_write_isolation_enforceable()
+    or not attempt_runner.network_isolation_enforceable(),
+    reason="requires mount and network namespace enforcement",
+)
+def test_run_filesystem_write_isolation_combines_with_network():
+    result = AttemptRunner().run(
+        request(),
+        argv("print('combined')"),
+        isolate_network=True,
+        isolate_filesystem_write=True,
+    )
+
+    assert result.record.state == "exited"
+    assert result.record.events[-1].exit_code == 0
+    assert result.stdout == b"combined\n"
+
+
+@pytest.mark.skipif(
+    not attempt_runner.filesystem_write_isolation_enforceable()
+    or not attempt_runner.memory_bound_enforceable(),
+    reason="requires mount namespace and memory-bound enforcement",
+)
+def test_run_filesystem_write_isolation_combines_with_memory_bound():
+    result = AttemptRunner().run(
+        request(),
+        argv(
+            "import resource; "
+            "print(resource.getrlimit(resource.RLIMIT_AS)[0])"
+        ),
+        memory_bound_mb=256,
+        isolate_filesystem_write=True,
+    )
+
+    assert result.record.state == "exited"
+    assert result.record.events[-1].exit_code == 0
+    assert int(result.stdout.strip()) == 256 * 1_048_576
+
+
+@pytest.mark.skipif(os.name != "posix", reason="namespace marker requires POSIX")
+def test_run_filesystem_write_isolation_setup_failure_is_failed(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        attempt_runner,
+        "_FILESYSTEM_WRITE_ISOLATION_ENFORCEABLE",
+        True,
+    )
+    monkeypatch.setattr(
+        attempt_runner,
+        "_NAMESPACE_MARKER_SCRIPT",
+        "import os; os._exit(126)",
+    )
+    result = AttemptRunner().run(
+        request(),
+        argv("print('unreached')"),
+        isolate_filesystem_write=True,
+    )
+
+    assert result.record.state == "failed"
+    assert [event.kind for event in result.record.events] == [
+        "started",
+        "failed",
+    ]
+    assert result.record.events[-1].exit_code is None
+    assert result.stdout == b""
+
+
+def test_dispatch_attempt_forwards_filesystem_write_isolation(monkeypatch):
+    calls = []
+    real_run = AttemptRunner.run
+
+    def record_run(self, execution_request, child_argv, **kwargs):
+        calls.append(kwargs["isolate_filesystem_write"])
+        kwargs["isolate_filesystem_write"] = False
+        return real_run(self, execution_request, child_argv, **kwargs)
+
+    monkeypatch.setattr(AttemptRunner, "run", record_run)
+    sequence = AttemptSequence(FINGERPRINT, 10_000).begin_attempt()
+    dispatch = dispatch_attempt(
+        sequence,
+        argv("pass"),
+        isolate_filesystem_write=True,
+    )
+
+    assert calls == [True]
+    assert dispatch.run.record.state == "exited"
+    assert dispatch.run.record.events[-1].exit_code == 0

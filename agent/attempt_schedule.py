@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from agent.attempt_runner import (
     AttemptRunner,
     dispatch_attempt,
+    filesystem_write_isolation_enforceable,
     memory_bound_enforceable,
     minimal_environment,
     network_isolation_enforceable,
@@ -85,6 +86,17 @@ def _network_isolated(plan: VerificationPlan) -> bool:
         and "network.connect" in required
         and allowed is not None
         and "network.connect" in allowed
+    )
+
+
+def _filesystem_write_isolated(plan: VerificationPlan) -> bool:
+    required = plan.selected.required_permissions
+    allowed = plan.policy.allowed_permissions
+    return not (
+        required is not None
+        and "filesystem.write" in required
+        and allowed is not None
+        and "filesystem.write" in allowed
     )
 
 
@@ -530,6 +542,10 @@ def run_attempt_schedule(
                 isolate_network=(
                     _network_isolated(plan)
                     and network_isolation_enforceable()
+                ),
+                isolate_filesystem_write=(
+                    _filesystem_write_isolated(plan)
+                    and filesystem_write_isolation_enforceable()
                 ),
                 # No declared feed means a closed pipe — a scheduled child
                 # must never inherit the parent's stdin and block on it.

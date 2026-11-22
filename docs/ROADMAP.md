@@ -171,8 +171,8 @@ Scheduled adapter attempts run with only `PATH` (and `SYSTEMROOT` on
 Windows) unless the selected adapter declares `environment.read` and the
 explicit policy permits it. Undeclared permissions fail closed. This
 enforces the environment category and, where available, `network.connect`;
-`filesystem.*` and `process.spawn` remain declared-only. Environment scrubbing
-is not a sandbox and is not Evidence.
+`filesystem.read` and `process.spawn` remain declared-only. Environment
+scrubbing is not a sandbox and is not Evidence.
 
 ### C04 declarative adapter overlay
 
@@ -198,7 +198,7 @@ Scheduled attempts whose adapter does not declare `network.connect` or whose
 policy does not permit it run in a fresh network namespace via
 `unshare --net --map-current-user` where the host supports unprivileged user
 namespaces; otherwise it remains unenforced as before. This is not a sandbox
-or Evidence; `filesystem.*` and `process.spawn` remain declared-only.
+or Evidence; `filesystem.read` and `process.spawn` remain declared-only.
 
 ### C04 self-reported failure is not a scheduling success
 
@@ -216,8 +216,20 @@ Windows) unless the adapter declares `environment.read` and policy allows it,
 and in a fresh network namespace unless `network.connect` is declared and
 allowed, where the host supports it; otherwise network remains unenforced.
 `probe_request_for` without policy fails closed. Command fingerprints and
-probe-history records are unchanged; `filesystem.*` and `process.spawn` remain
-declared-only. This is not a sandbox or Evidence.
+probe-history records are unchanged; `filesystem.read` and `process.spawn`
+remain declared-only. This is not a sandbox or Evidence.
+
+### C04 filesystem.write enforcement
+
+Scheduled attempts and availability probes run with a recursively read-only
+mount tree in a private user+mount namespace created by the launcher, unless
+the adapter declares `filesystem.write` and policy allows it, where the host
+supports unprivileged user and mount namespaces plus `mount_setattr`;
+otherwise it remains unenforced as before. `/dev` character devices and
+stdout/stderr pipes still work. `filesystem.read` and `process.spawn` remain
+declared-only. The launcher drops all capabilities and locks securebits before
+running the adapter, so even a root host cannot undo the read-only tree. This
+is not a sandbox or Evidence.
 
 ### C11 declared memory bounds for attempted executions
 
