@@ -1060,9 +1060,13 @@ class _TypeScriptBindings:
                     ancestor = ancestor.parent
                 export_clause = False
                 exported_names: set[str] = set()
-                exported_aliases: dict[str, str] = {}
+                # (exported, local) pairs — a list, not a dict: two
+                # specifiers may publish the same exported name
+                # (`export {I as Public}; export {M as Public}`), and a
+                # dict silently drops one local.
+                exported_aliases: list[tuple[str, str]] = []
                 exported_type_names: set[str] = set()
-                exported_type_aliases: dict[str, str] = {}
+                exported_type_aliases: list[tuple[str, str]] = []
                 for statement in body.named_children:
                     if statement.type != "export_statement":
                         continue
@@ -1091,16 +1095,18 @@ class _TypeScriptBindings:
                                 if alias_node is None:
                                     exported_type_names.add(local_text)
                                 else:
-                                    exported_type_aliases[alias_text] = (
-                                        local_text
+                                    exported_type_aliases.append(
+                                        (alias_text, local_text)
                                     )
                             elif alias_node is None:
                                 exported_names.add(local_text)
                             else:
-                                exported_aliases[alias_text] = local_text
+                                exported_aliases.append(
+                                    (alias_text, local_text)
+                                )
                 if ambient and export_clause:
                     ambient = False
-                type_alias_targets = set(exported_type_aliases.values())
+                type_alias_targets = {local for _, local in exported_type_aliases}
                 for other in self.records:
                     if other is record or other.member_of is not None:
                         continue
@@ -1164,7 +1170,7 @@ class _TypeScriptBindings:
                         member_name = self.text(other.node)
                         public_names = {
                             exported
-                            for exported, local in exported_aliases.items()
+                            for exported, local in exported_aliases
                             if local == member_name
                         }
                         if (
@@ -1176,7 +1182,7 @@ class _TypeScriptBindings:
                         other.member_authored_names = frozenset(
                             {
                                 exported
-                                for exported, local in exported_aliases.items()
+                                for exported, local in exported_aliases
                                 if local == member_name
                             }
                             | (
@@ -1194,7 +1200,7 @@ class _TypeScriptBindings:
                             )
                         type_names = {
                             exported
-                            for exported, local in exported_type_aliases.items()
+                            for exported, local in exported_type_aliases
                             if local == member_name
                         }
                         if member_name in exported_type_names:
@@ -1210,7 +1216,7 @@ class _TypeScriptBindings:
                         other.member_authored_type_names = frozenset(
                             {
                                 exported
-                                for exported, local in exported_type_aliases.items()
+                                for exported, local in exported_type_aliases
                                 if local == member_name
                             }
                             | (
@@ -1239,7 +1245,7 @@ class _TypeScriptBindings:
                         member_name = self.text(member.node)
                         added = {
                             exported
-                            for exported, local in exported_aliases.items()
+                            for exported, local in exported_aliases
                             if local == member_name
                         }
                         if member_name in exported_names:
@@ -1259,7 +1265,7 @@ class _TypeScriptBindings:
                                 )
                         added_types = {
                             exported
-                            for exported, local in exported_type_aliases.items()
+                            for exported, local in exported_type_aliases
                             if local == member_name
                         }
                         if member_name in exported_type_names:
@@ -1427,6 +1433,19 @@ class _TypeScriptBindings:
                         queue.append(base_record)
         if not matches:
             return None
+        if for_type:
+            # A namespace merges with a same-named class/interface/
+            # enum in the same container; the merged symbol's type
+            # facet is the class-like declaration, so it wins the
+            # type-side lookup. Namespace members stay reachable
+            # through merge siblings for path segments.
+            matches.sort(
+                key=lambda candidate: 0
+                if candidate.class_like
+                or candidate.binding.kind
+                in {"class", "interface", "enum", "type_alias"}
+                else 1
+            )
         # When sibling `namespace` blocks re-export each other's members
         # (`namespace N { export {f as g} }` publishes the merged `f`),
         # prefer the member whose own block authored the looked-up name —
@@ -2697,7 +2716,23 @@ class _TypeScriptBindings:
                 continue
             local = child.child_by_field_name("name")
             if local is not None:
-                self._resolve(local, namespace, "read", with_scopes)
+                if (
+                    namespace == "value"
+                    and self._lookup(
+                        self.text(local), local.start_byte, "value"
+                    )
+                    is None
+                    and self._lookup(
+                        self.text(local), local.start_byte, "type"
+                    )
+                    is not None
+                ):
+                    # A plain `export {X as Y}` publishes type-only
+                    # names (interfaces, aliases) too — fall back to
+                    # the type side when the value side misses.
+                    self._resolve(local, "type", "read", with_scopes)
+                else:
+                    self._resolve(local, namespace, "read", with_scopes)
 
     def _scan_jsx_tag(
         self,

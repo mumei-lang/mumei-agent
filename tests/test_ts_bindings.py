@@ -1945,3 +1945,36 @@ const x = new X(); const y = new Y(); x.m(); y.m();
     calls = {source[c.span.start : c.span.end]: c for c in _calls(report)}
     assert calls["x.m()"].target == base_m.id
     assert calls["y.m()"].target is None or calls["y.m()"].target != base_m.id
+
+
+def test_member_interface_extends_picks_class_like_over_namespace_alias():
+    # `export {I as Public}; export {M as Public}` collides on the
+    # exported name; a type-side `extends` must reach the interface
+    # member so its methods are inherited.
+    source = """
+namespace N { interface I { m(): void } namespace M { } export {I as Public}; export {M as Public} }
+interface X extends N.Public {}
+const x: X = null as any; x.m();
+"""
+    report = build_ts_bindings(source)
+    base_m = _member_bindings(report, "m", "associated_function")[0]
+    call = next(
+        c
+        for c in _calls(report)
+        if source[c.span.start : c.span.end] == "x.m()"
+    )
+    assert call.target == base_m.id
+
+
+def test_member_export_clause_resolves_type_only_local_names():
+    # `export {I as Public}` on an interface resolves `I` on the
+    # type side — a plain clause publishes type-only names too.
+    source = """
+namespace N { interface I { m(): void } export {I as Public} }
+"""
+    report = build_ts_bindings(source)
+    assert not [
+        item
+        for item in report.unresolved
+        if item.reason == "unknown_name"
+    ]
