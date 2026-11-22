@@ -1927,6 +1927,36 @@ contract Vault {
     )
 
 
+def test_using_on_nested_array_getter_peels_per_index():
+    source = """
+library SafeMath {
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {}
+}
+library Rows {
+    function fold(uint256[] memory row) internal pure returns (uint256) {}
+}
+contract Vault {
+    using SafeMath for uint256;
+    using Rows for uint256[];
+    uint256[][] public grid;
+    function run() external { this.grid(0, 0).add(1); this.grid(0).fold(); }
+}
+"""
+    # `this.grid(0, 0)` returns `uint256`; `this.grid(0)` returns
+    # `uint256[]` — the extension tracks the index count.
+    report = build_sol_bindings(source)
+    add = next(b for b in report.bindings if b.name == "add")
+    fold = next(b for b in report.bindings if b.name == "fold")
+    assert any(
+        ref.binding_id == add.id and ref.kind == "call"
+        for ref in report.references
+    )
+    assert any(
+        ref.binding_id == fold.id and ref.kind == "call"
+        for ref in report.references
+    )
+
+
 def test_using_on_bytes_getter_depends_on_index():
     source = """
 library BytesLib {

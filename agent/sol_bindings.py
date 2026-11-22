@@ -1074,20 +1074,25 @@ class _SolBindings:
                 ):
                     return None
                 text = self.text(record.type_node)
-                indexed_getter = callee.type == "member_expression" and any(
-                    child.type == "call_argument"
-                    for child in self.children(obj)
-                )
-                if indexed_getter:
-                    # A public getter on an indexable member returns
-                    # the element when it is called with an index:
-                    # `this.values(0)` is a `uint256`, `this.b(0)` on
-                    # `bytes` a `bytes1`. The no-argument getter
-                    # returns the whole value.
-                    text = re.sub(
-                        r"\[[^\]]*\]\s*$", "", text
-                    ).strip()
-                    if text == "bytes":
+                if callee.type == "member_expression":
+                    # A public getter on an indexable member peels one
+                    # level per index argument: `this.values(0)` is a
+                    # `uint256`, `this.grid(0, 0)` on `uint256[][]` a
+                    # `uint256`, `this.b(0)` on `bytes` a `bytes1`. The
+                    # no-argument getter returns the whole value.
+                    args = sum(
+                        1
+                        for child in self.children(obj)
+                        if child.type == "call_argument"
+                    )
+                    for _ in range(args):
+                        stripped = re.sub(
+                            r"\[[^\]]*\]\s*$", "", text
+                        ).strip()
+                        if stripped == text:
+                            break
+                        text = stripped
+                    if args and text == "bytes":
                         text = "bytes1"
                 # A public getter on a struct/enum-typed member returns
                 # the exploded fields, not the type — no extension
