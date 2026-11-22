@@ -1292,9 +1292,10 @@ def test_member_enum_does_not_merge_with_class():
     # `class E` + `enum E` is a duplicate-identifier error, so the
     # enum's members must not leak into the class's member lookup.
     source = """
-class E { b(): void {} }
+class E { b(): void {} static s(): void {} }
 enum E { B }
 const x = E.B;
+E.s();
 """
     report = build_ts_bindings(source)
     member_b = _member_bindings(report, "B", "enum_member")[0]
@@ -1302,6 +1303,56 @@ const x = E.B;
         ref.binding_id for ref in report.references if ref.kind == "read"
     }
     assert member_b.id in read_targets
+    # The class-only static member must not resolve through the enum:
+    # `class E` + `enum E` is a duplicate identifier, not a merge.
+    s = _member_bindings(report, "s", "associated_function")[0]
+    assert s.id not in read_targets
+    assert not any(c.target == s.id for c in report.calls)
+
+
+def test_member_new_on_local_var_keeps_variable_reference():
+    # A `local` is not a declaration-merging participant: `new C()`
+    # on the exported const in one `Lib` block must not be repointed
+    # at the duplicate `class C` in the sibling block.
+    source = """
+namespace Lib { export const C = { n: 1 }; const v = new C(); }
+namespace Lib { export class C { m(): void {} } }
+"""
+    report = build_ts_bindings(source)
+    local_c = [
+        b for b in report.bindings
+        if b.name == "C" and b.kind == "local"
+    ][0]
+    call_refs = [r for r in report.references if r.kind == "call"]
+    assert any(r.binding_id == local_c.id for r in call_refs)
+    cls = [
+        b for b in report.bindings
+        if b.name == "C" and b.kind == "class"
+    ][0]
+    assert not any(r.binding_id == cls.id for r in call_refs)
+
+
+def test_member_ambient_declarations_have_no_tdz():
+    # `declare class`/`declare namespace` initialize nothing at
+    # runtime: `new A()` textually before the declarations is not a
+    # temporal-dead-zone access.
+    source = """
+const c = new A();
+declare class A { m(): void; }
+declare namespace A { export function f(): void; }
+"""
+    report = build_ts_bindings(source)
+    assert not any(
+        gap.reason == "temporal_dead_zone" for gap in report.gaps
+    )
+    ambient = [
+        b for b in report.bindings
+        if b.name == "A" and b.kind == "ambient"
+    ][0]
+    assert any(
+        c.kind == "opaque_ambient" and c.target == ambient.id
+        for c in report.calls
+    )
 
 
 def test_member_new_reference_lands_on_merged_class():
