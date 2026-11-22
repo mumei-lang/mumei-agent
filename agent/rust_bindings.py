@@ -205,6 +205,13 @@ _ITER_OPTION_METHODS = frozenset(
         "reduce",
     }
 )
+# Iterator transforms whose element comes from a named callback's
+# return annotation — `it.map(f)` yields `f`'s return `U`,
+# `it.filter_map(f)` unwraps `f() -> Option<U>`/`Result`, and
+# `it.flat_map(f)` peels one iterable layer (`Vec<U>`/`Option<U>`/
+# `&[U]`/`[U; N]` → `U`). Closures stay opaque — their param and
+# return types are unwritten.
+_ITER_FN_ELEMENT_METHODS = frozenset({"map", "flat_map", "filter_map"})
 _UNWRAP_ERR_METHODS = frozenset({"unwrap_err", "expect_err"})
 _TRY_HEADS = frozenset({"Option", "Result"})
 # Prelude constructors whose tuple payload position is fixed by the
@@ -4452,7 +4459,140 @@ class _RustBindings:
                 # position could bind the wrong same-named type.
                 return None, None
             return f"({left}, {right})", position
+        if method in _ITER_FN_ELEMENT_METHODS:
+            return self._iter_fn_element_spelling(call, method)
         return None, None
+
+    def _iter_fn_element_spelling(
+        self, call: Any, method: str
+    ) -> "tuple[str | None, int | None]":
+        """Element spelling for `it.map(f)`/`it.filter_map(f)`/
+        `it.flat_map(f)` — `f` must name a function item whose
+        return annotation supplies the iterated element: `map`
+        yields `f`'s return `U`, `filter_map` unwraps
+        `f() -> Option<U>`/`Result<U, _>`, and `flat_map` peels one
+        iterable layer (`Vec<U>`/`Option<U>`/`&[U]`/`[U; N]` → `U`).
+        Closures and non-function args stay opaque."""
+        arguments = call.child_by_field_name("arguments")
+        target = (
+            None
+            if arguments is None
+            else next(
+                (
+                    c
+                    for c in arguments.named_children
+                    if "comment" not in c.type
+                ),
+                None,
+            )
+        )
+        if (
+            target is None
+            or target.type not in {"identifier", "scoped_identifier"}
+        ):
+            return None, None
+        if target.type == "scoped_identifier":
+            # `it.map(m::to_q)` — resolve the callee inside the
+            # named module's own scope.
+            record = self._scoped_value_member(target)
+        else:
+            record = self._through_import(
+                self._lookup(
+                    self._normalize_identifier(self.text(target)),
+                    target.start_byte,
+                    "value",
+                ),
+                target.start_byte,
+                "value",
+            )
+        if (
+            record is None
+            or record.binding.kind
+            not in {"function", "associated_function"}
+            or record.type_node is None
+        ):
+            return None, None
+        ret = (
+            record.type_node.child_by_field_name("return_type")
+            or record.type_node
+        )
+        text = self.text(ret).strip()
+        if method == "filter_map":
+            wrap = re.fullmatch(r"(?:Option|Result)\s*<(.+)>", text)
+            if wrap is None:
+                return None, None
+            text = self._type_arg_list(wrap.group(1))[0].strip()
+        elif method == "flat_map":
+            slice_ref = re.fullmatch(
+                r"&\s*(?:'\w+\s+)?(?:mut\s+)?\[(.+)\]", text
+            )
+            if slice_ref is not None:
+                text = slice_ref.group(1).strip()
+            elif re.fullmatch(r"\[.+\]", text):
+                text = self._array_elem(text[1:-1])
+            else:
+                wrap = re.fullmatch(
+                    r"(?:Vec|Option)\s*<(.+)>", text
+                )
+                if wrap is None:
+                    return None, None
+                text = self._type_arg_list(wrap.group(1))[0].strip()
+        home = record.home_scope
+        pushed = home is not None and home not in self.scopes
+        if pushed:
+            # `m::to_q`'s `-> Q` spells `Q` in `m`'s scope — qualify
+            # it there or a same-named root type steals the name.
+            self._push_scope(home)
+        qualified = self._qualified_spelling(text, ret.start_byte)
+        if pushed:
+            self.scopes.pop()
+        bare = re.sub(
+            r"\b(?:[A-Za-z_]\w*::)+[A-Za-z_]\w*", "", qualified
+        )
+        if not self._spelling_scope_stable(
+            bare, ret.start_byte, call.start_byte
+        ):
+            # An unqualifiable name (a generic parameter of `f`,
+            # a function-local type) would re-resolve to a
+            # same-named type at the call site — opaque instead.
+            return None, None
+        return qualified, ret.start_byte
+
+    def _scoped_value_member(self, node: Any) -> "_Record | None":
+        """`m::to_q` → the function/item record `to_q` declared in
+        module `m`'s own scope (through `pub use` re-exports)."""
+        path = node.child_by_field_name("path")
+        name = node.child_by_field_name("name")
+        if path is None or name is None:
+            return None
+        if path.type in {"identifier", "type_identifier"}:
+            module = self._lookup_module(
+                self.text(path), path.start_byte
+            )
+        elif path.type in {"scoped_identifier", "scoped_type_identifier"}:
+            module = self._scoped_type(path)
+        else:
+            module = None
+        if module is None or module.module_scope is None:
+            return None
+        member = next(
+            (
+                r
+                for r in reversed(
+                    module.module_scope.bindings.get(
+                        self._normalize_identifier(self.text(name)), ()
+                    )
+                )
+                if self._in_namespace(r, "value")
+            ),
+            None,
+        )
+        if member is None:
+            return None
+        return (
+            self._through_import(member, name.start_byte, "value")
+            or member
+        )
 
     def _field_args_scope(
         self, field_expr: Any | None
@@ -4560,6 +4700,7 @@ class _RustBindings:
             or method == "enumerate"
             or method == "zip"
             or method == "flatten"
+            or method in _ITER_FN_ELEMENT_METHODS
         ) and self._field_member(
             callee, ("associated_function",)
         ) is not None:
@@ -4703,6 +4844,29 @@ class _RustBindings:
                 return _UNKNOWN, None
             spelled = self._iterator_spelling(call)
             return _UNKNOWN, spelled
+        if method in _ITER_FN_ELEMENT_METHODS:
+            # `it.map(f)`/`it.filter_map(f)`/`it.flat_map(f)` — the
+            # element is spelled by the named callback's return
+            # annotation, not by the upstream container's args.
+            spelled, fn_pos = self._iter_fn_element_spelling(
+                call, method
+            )
+            if spelled is None:
+                return _UNKNOWN, None
+            position = (
+                fn_pos if fn_pos is not None else call.start_byte
+            )
+            elem_id, rest = self._element_of(
+                None, spelled.strip(), position
+            )
+            if elem_id is None:
+                return _UNKNOWN, (
+                    spelled.strip() if rest is None else rest
+                )
+            name = next(
+                (b.name for b in self.bindings if b.id == elem_id), ""
+            )
+            return TypeFact("named", name, 0, None, elem_id), rest
         container_id, args = self._receiver_type(receiver)
         if args is None:
             return _UNKNOWN, None
