@@ -1095,9 +1095,14 @@ class _TypeScriptBindings:
                 if candidate.member_visibility == "protected" and not via_this:
                     continue
                 return candidate
-            if decl_id is not None:
+            if decl_id is not None and decl is not None:
                 for base in self._type_bases.get(decl_id, ()):
-                    base_record = self._base_type_record(base, position)
+                    # Bases are resolved where the `extends`/`implements`
+                    # clause is spelled — a use-site scope may shadow the
+                    # base name with an unrelated declaration.
+                    base_record = self._base_type_record(
+                        base, decl.start_byte
+                    )
                     if base_record is not None:
                         queue.append(base_record)
             first = False
@@ -1221,7 +1226,9 @@ class _TypeScriptBindings:
             for base in self._type_bases.get(
                 None if decl is None else decl.id, ()
             )[:1]:
-                base_record = self._base_type_record(base, position)
+                base_record = self._base_type_record(
+                    base, decl.start_byte
+                )
                 if base_record is not None:
                     return base_record, False, True
             return None, False, True
