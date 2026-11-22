@@ -2734,6 +2734,9 @@ class _RustBindings:
         if (
             method in _ITER_ELEMENT_METHODS
             or method in _MAP_ELEMENT_METHODS
+            or method in _ITER_PRESERVING_METHODS
+            or method in _ITER_SLICE_METHODS
+            or method == "enumerate"
         ) and self._field_member(
             callee, ("associated_function",)
         ) is not None:
@@ -2780,11 +2783,31 @@ class _RustBindings:
                 not in _ITER_ELEMENT_METHODS
             ):
                 return _UNKNOWN, None
+            if (
+                self._field_member(
+                    inner_callee, ("associated_function",)
+                )
+                is not None
+            ):
+                # A declared `iter()` need not yield the container's
+                # element — its return type is opaque to the recipe.
+                return _UNKNOWN, None
             inner_container, inner_args = self._receiver_type(
                 inner_receiver
             )
             if inner_args is None:
                 return _UNKNOWN, None
+            if inner_container is not None:
+                container_name = next(
+                    (
+                        b.name
+                        for b in self.bindings
+                        if b.id == inner_container
+                    ),
+                    None,
+                )
+                if container_name not in _INDEX_ELEMENT_CONTAINERS:
+                    return _UNKNOWN, None
             spelled = inner_args.strip()
             if not spelled:
                 return _UNKNOWN, None
@@ -2805,7 +2828,20 @@ class _RustBindings:
             if "," in args:
                 # The element is a tuple spelling like `(P, Q)` — an
                 # identifier binding stays unpinned, but the spelled
-                # args feed the tuple-pattern path.
+                # args feed the tuple-pattern path. Only a genuine
+                # sequence container applies — `W<(P, Q)>` can
+                # `Deref` to a different element entirely.
+                if container_id is not None:
+                    container_name = next(
+                        (
+                            b.name
+                            for b in self.bindings
+                            if b.id == container_id
+                        ),
+                        None,
+                    )
+                    if container_name not in _INDEX_ELEMENT_CONTAINERS:
+                        return _UNKNOWN, None
                 return _UNKNOWN, args.strip()
             elem_id, rest = self._element_of(
                 container_id, args.strip(), position
