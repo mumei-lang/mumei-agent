@@ -5183,3 +5183,61 @@ fn f(w: W, o: Option<[P; 2]>, r: Result<[P; 2], u8>) -> u8 {
     ]
     assert len(calls) == 5
     assert all(c.target == m.id for c in calls)
+
+
+def test_for_element_through_preserving_iter_adaptors() -> None:
+    source = """\
+struct P;
+impl P { fn m(&self) {} }
+fn f(v: Vec<P>) {
+    for p in v.iter().rev() { p.m(); }
+    for p in v.iter().skip(1).take(2) { p.m(); }
+    for p in v.iter().filter(|x| true) { p.m(); }
+    for p in v.as_slice() { p.m(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = next(b for b in report.bindings if b.name == "m")
+    calls = [
+        c
+        for c in report.calls
+        if source[c.span.start : c.span.end].endswith("m()")
+    ]
+    assert [c.target for c in calls] == [m.id] * 4
+
+
+def test_for_element_map_adaptor_stays_unpinned() -> None:
+    source = """\
+struct P;
+impl P { fn m(&self) {} }
+fn f(v: Vec<P>) {
+    for p in v.iter().map(|x| x) { p.m(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    call = next(
+        c
+        for c in report.calls
+        if source[c.span.start : c.span.end].endswith("m()")
+    )
+    assert call.target == ""
+
+
+def test_for_enumerate_binds_value_by_element_type() -> None:
+    source = """\
+struct P;
+impl P { fn m(&self) {} }
+fn f(v: Vec<P>) {
+    for (i, p) in v.iter().enumerate() {
+        p.m();
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = next(b for b in report.bindings if b.name == "m")
+    call = next(
+        c
+        for c in report.calls
+        if source[c.span.start : c.span.end].endswith("m()")
+    )
+    assert call.target == m.id

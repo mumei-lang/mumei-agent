@@ -48,6 +48,13 @@ _INDEX_ELEMENT_CONTAINERS = frozenset(
 # here (they iterate (K, V) pairs) and handled by their own
 # `keys`/`values` entry points below.
 _ITER_ELEMENT_METHODS = frozenset({"iter", "iter_mut", "into_iter", "drain"})
+# Iterator adaptors that keep the same element type — `map`/`flat_map`
+# change it through a closure and stay opaque.
+_ITER_PRESERVING_METHODS = frozenset(
+    {"rev", "skip", "take", "filter", "step_by"}
+)
+# Vec/slice accessors that iterate the same element as `iter()`.
+_ITER_SLICE_METHODS = frozenset({"as_slice", "as_mut_slice"})
 # Map entry points and the key they read — `m.keys()` yields `K`,
 # `m.values()` yields `V` of `HashMap<K, V>`/`BTreeMap<K, V>`.
 _MAP_ELEMENT_METHODS = {"keys": 0, "values": 1}
@@ -2748,6 +2755,42 @@ class _RustBindings:
                 (b.name for b in self.bindings if b.id == elem_id), ""
             )
             return TypeFact("named", name, 0, None, elem_id), rest
+        if method in _ITER_PRESERVING_METHODS:
+            # `v.iter().rev()` yields the inner call's element —
+            # recurse into the chained receiver. A non-call receiver
+            # (`x.rev()` on a bare value) is not a std recipe — opaque.
+            if receiver.type != "call_expression":
+                return _UNKNOWN, None
+            return self._iterator_method_element(receiver)
+        if method == "enumerate":
+            # `v.iter().enumerate()` yields `(usize, E)` — the spelled
+            # pair feeds the tuple-pattern path so `(i, p)` binds `p`
+            # by the element type while `usize` stays unpinned.
+            if receiver.type != "call_expression":
+                return _UNKNOWN, None
+            inner_callee = receiver.child_by_field_name("function")
+            if inner_callee is None or inner_callee.type != "field_expression":
+                return _UNKNOWN, None
+            inner_method = inner_callee.child_by_field_name("field")
+            inner_receiver = inner_callee.child_by_field_name("value")
+            if inner_method is None or inner_receiver is None:
+                return _UNKNOWN, None
+            if (
+                self._normalize_identifier(self.text(inner_method))
+                not in _ITER_ELEMENT_METHODS
+            ):
+                return _UNKNOWN, None
+            inner_container, inner_args = self._receiver_type(
+                inner_receiver
+            )
+            if inner_args is None:
+                return _UNKNOWN, None
+            spelled = inner_args.strip()
+            if not spelled:
+                return _UNKNOWN, None
+            elem_id = None
+            rest = f"(usize, {spelled})"
+            return _UNKNOWN, rest
         container_id, args = self._receiver_type(receiver)
         if args is None:
             return _UNKNOWN, None
@@ -2757,10 +2800,13 @@ class _RustBindings:
         if position is None:
             position = call.start_byte
         if method in _ITER_ELEMENT_METHODS:
-            if "," in args or self._is_map_container(
-                container_id, receiver
-            ):
+            if self._is_map_container(container_id, receiver):
                 return _UNKNOWN, None
+            if "," in args:
+                # The element is a tuple spelling like `(P, Q)` — an
+                # identifier binding stays unpinned, but the spelled
+                # args feed the tuple-pattern path.
+                return _UNKNOWN, args.strip()
             elem_id, rest = self._element_of(
                 container_id, args.strip(), position
             )
@@ -2782,6 +2828,15 @@ class _RustBindings:
             if arg is None:
                 return _UNKNOWN, None
             elem_id, rest = self._spelled_type(arg, position)
+        elif method in _ITER_SLICE_METHODS:
+            # `v.as_slice()` iterates the same element as `iter()`.
+            if "," in args or self._is_map_container(
+                container_id, receiver
+            ):
+                return _UNKNOWN, None
+            elem_id, rest = self._element_of(
+                container_id, args.strip(), position
+            )
         else:
             return _UNKNOWN, None
         if elem_id is None:
@@ -4217,18 +4272,42 @@ class _RustBindings:
                 # `for (a, b) in v` over `Vec<(P, Q)>` binds the
                 # element's slots by position — same as the `let`
                 # destructure once the element is spelled.
-                container_id, container_args = self._receiver_type(
-                    iterator
-                )
-                if container_args is not None:
-                    elem_id, elem_args = self._element_of(
-                        container_id,
-                        container_args.strip(),
-                        iterator.start_byte,
+                node = iterator
+                while node is not None and node.type in {
+                    "reference_expression",
+                    "parenthesized_expression",
+                }:
+                    node = next(
+                        iter(
+                            [
+                                c
+                                for c in self._children(node)
+                                if c.type != "mutable_specifier"
+                            ]
+                        ),
+                        None,
                     )
-                    type_map = self._pattern_type_map(
-                        pattern, elem_id, elem_args
+                if node is not None and node.type == "call_expression":
+                    fact, spelled = self._iterator_method_element(node)
+                    if spelled is not None:
+                        type_map = self._pattern_type_map(
+                            pattern,
+                            None if fact is None else fact.type_id,
+                            spelled,
+                        )
+                else:
+                    container_id, container_args = self._receiver_type(
+                        iterator
                     )
+                    if container_args is not None:
+                        elem_id, elem_args = self._element_of(
+                            container_id,
+                            container_args.strip(),
+                            iterator.start_byte,
+                        )
+                        type_map = self._pattern_type_map(
+                            pattern, elem_id, elem_args
+                        )
             self._bind_pattern_names(
                 names,
                 scope,
