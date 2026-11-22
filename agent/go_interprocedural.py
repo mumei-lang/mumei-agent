@@ -3064,7 +3064,11 @@ class _Builder:
         ):
             return None
         target = self._opaque_container_field_target(
-            current, params, for_write=True
+            current,
+            params,
+            allow_struct_elements=True,
+            allow_struct_element_arrays=True,
+            for_write=True,
         )
         if target is None:
             return None
@@ -3075,7 +3079,10 @@ class _Builder:
         )
 
     def _opaque_container_struct_element_field_target(
-        self, node: Any, params: dict | None = None
+        self,
+        node: Any,
+        params: dict | None = None,
+        for_pointer_leaf: bool = False,
     ) -> tuple[
         Any, list[Any], str, Any, frozenset, Any, tuple[Any, ...]
     ] | None:
@@ -3142,14 +3149,48 @@ class _Builder:
         field_key, _root_id, container_member, tokens, root_ref = target
         container_fact = container_member.type
         element_fact = getattr(container_fact, "elem", None)
+        # `p.A[i].W.V` — a pointer member mid-chain: the leaf lives
+        # in the member's pointee, which is caller memory for a
+        # param pointer root (`*S`/`**S`, or the alias's target —
+        # `root_ref` already resolved the substitution) whose read
+        # the caller unions `indirect_writes` into. A local
+        # composite's pointer member escapes the slot model, so the
+        # chain stays closed there.
+        _mid_root_binding = self.bindings.get(root_ref.binding_id)
+        mid_pointer_root = (
+            params is not None
+            and root_ref.binding_id in params
+            and root_ref.binding_id not in self._pointer_param_reseats
+            and root_ref.binding_id not in self._param_pointer_aliases
+            and root_ref.binding_id not in self._double_pointer_dirty
+            and _mid_root_binding is not None
+            and getattr(_mid_root_binding.type, "kind", None)
+            == "pointer"
+        )
+
+        def _elem_struct_ok(fact):
+            if self._named_value_struct_supported(fact):
+                return True
+            # Under a param pointer root an element carrying pointer
+            # members is still resolvable: scalar leaves slot on the
+            # group, pointer-member leaves read pointee memory the
+            # caller's `indirect_writes` union covers. The element's
+            # named type identity is what `stale_dependents` needs.
+            struct_fact = self._struct_value_fact(fact)
+            return (
+                mid_pointer_root
+                and struct_fact is not None
+                and bool(struct_fact.type_id)
+            )
+
         if (
             container_fact is None
             or container_fact.kind not in {"slice", "array", "map"}
             or not (
-                self._named_value_struct_supported(element_fact)
+                _elem_struct_ok(element_fact)
                 or (
                     getattr(element_fact, "kind", None) == "pointer"
-                    and self._named_value_struct_supported(
+                    and _elem_struct_ok(
                         getattr(element_fact, "elem", None)
                     )
                 )
@@ -3160,9 +3201,7 @@ class _Builder:
         field_fact = element_fact
         if (
             getattr(field_fact, "kind", None) == "pointer"
-            and self._named_value_struct_supported(
-                getattr(field_fact, "elem", None)
-            )
+            and _elem_struct_ok(getattr(field_fact, "elem", None))
         ):
             # `a[i]` yields `*E` — `.V` reads through the element
             # pointer the way `a[i].F` reads through a struct
@@ -3170,9 +3209,7 @@ class _Builder:
             # group, so the field's slot is the group's.
             field_fact = field_fact.elem
         for field_node in reversed(fields):
-            if (
-                not self._named_value_struct_supported(field_fact)
-            ):
+            if not _elem_struct_ok(field_fact):
                 return None
             field_ref = self.references.get(
                 self.node_key(field_node)
@@ -3184,8 +3221,34 @@ class _Builder:
             self._pin_fact_identities(field_fact)
             self._pin_fact_identities(field_member.type)
             field_fact = field_member.type
+            if (
+                mid_pointer_root
+                and getattr(field_fact, "kind", None) == "pointer"
+                and self._named_value_struct_supported(
+                    getattr(field_fact, "elem", None)
+                )
+            ):
+                # `p.A[i].W` yields `*E` — the next field resolves
+                # on the member's pointee like the element pointer.
+                field_fact = field_fact.elem
         if not self._scalar_value_fact(field_fact):
-            return None
+            # A store into a pointer leaf (`p.A[i].W = q`) resolves
+            # the chain to the member's pointee — caller memory for
+            # a param pointer root. The LHS consumer folds the write
+            # opaquely like `p.P = q`, so admit the target shape;
+            # a pointer leaf read stays closed.
+            if not (
+                for_pointer_leaf
+                and mid_pointer_root
+                and path_members
+                and getattr(
+                    path_members[-1].type, "kind", None
+                )
+                == "pointer"
+                and getattr(field_fact, "kind", None) == "struct"
+                and self._struct_value_fact(field_fact) is not None
+            ):
+                return None
         self._pin_fact_identities(container_fact)
         if (
             container_fact.kind == "array"
@@ -17944,6 +18007,12 @@ class _Builder:
             opaque_elem_old_deps: dict[int, frozenset[int]] = {}
             opaque_elem_slot_ids: dict[int, str] = {}
             opaque_elem_root_slots: dict[int, str] = {}
+            # `p.A[i].W = q` — the pointer-member store folds
+            # opaquely into the root's set and `indirect_writes`;
+            # the index's deps join that value too — whether the
+            # write landed on the element a later `p.A[k].W` read
+            # observes depended on `i`.
+            pointer_member_index_deps: dict[int, frozenset[int]] = {}
             # `a, a[0] = arr, x` — assigning an ARRAY copies the
             # value into the variable's own storage, which keeps
             # naming the element the LHS pointer was computed
@@ -18426,9 +18495,93 @@ class _Builder:
                 # that external mutation stays closed here.
                 scalar_field_elem_lhs = (
                     self._opaque_container_struct_element_field_target(
-                        lhs, params
+                        lhs, params, for_pointer_leaf=True
                     )
                 )
+                if (
+                    scalar_field_elem_lhs is not None
+                    and scalar_field_elem_lhs[6]
+                    and getattr(
+                        scalar_field_elem_lhs[6][-1].type,
+                        "kind",
+                        None,
+                    )
+                    == "pointer"
+                ):
+                    (
+                        oref, indexes, field_key, _container_member,
+                        field_tokens, field_selector, _path_members,
+                    ) = scalar_field_elem_lhs
+                    # `p.A[i].W = q` — a store through an element's
+                    # pointer member lands in caller memory the slot
+                    # model does not track, exactly like `p.P = q`:
+                    # record the external mutation on the element's
+                    # pointee identity, read the destination (the
+                    # `p.A[i]` chain and its index) at pre-state, and
+                    # fold the stored value into the root's set plus
+                    # `indirect_writes` so other aliased reads see it.
+                    _ptr_leaf = _path_members[-1].type
+                    _leaf_target_id = getattr(
+                        getattr(_ptr_leaf, "elem", None),
+                        "type_id",
+                        "",
+                    )
+                    if not _leaf_target_id:
+                        _leaf_root = self.bindings.get(
+                            oref.binding_id
+                        )
+                        _leaf_target_id = getattr(
+                            getattr(
+                                getattr(_leaf_root, "type", None),
+                                "elem",
+                                None,
+                            ),
+                            "type_id",
+                            "",
+                        )
+                    if _leaf_target_id:
+                        transfers.append(
+                            CallTransfer(
+                                FileSpan(
+                                    self.current_file,
+                                    lhs.start_byte,
+                                    lhs.end_byte,
+                                ),
+                                _leaf_target_id,
+                                (),
+                                frozenset(),
+                                imported=True,
+                            )
+                        )
+                    self._for_write_target = True
+                    try:
+                        self._record_read(
+                            self.expression(
+                                field_selector, fn, params, locals_,
+                                transfers, count, 0,
+                            )
+                        )
+                    finally:
+                        self._for_write_target = False
+                    pointer_member_index_deps[
+                        len(refs)
+                    ] = frozenset()
+                    for index in reversed(indexes):
+                        if (
+                            index is not None
+                            and index.type not in _INDEX_LITERALS
+                        ):
+                            pointer_member_index_deps[
+                                len(refs)
+                            ] |= self.expression(
+                                index, fn, params, locals_,
+                                transfers, count, 0,
+                            )
+                    self._record_read(
+                        pointer_member_index_deps[len(refs)]
+                    )
+                    refs.append((oref, True, True, True))
+                    continue
                 if (
                     scalar_field_elem_lhs is not None
                     and scalar_field_elem_lhs[3].type.kind != "map"
@@ -18484,6 +18637,19 @@ class _Builder:
                     ri = len(refs) - 1
                     opaque_elem_targets[ri] = frozenset(field_tokens)
                     opaque_elem_slot_ids[ri] = field_key
+                    if (
+                        getattr(
+                            _field_member.type, "kind", None
+                        )
+                        == "array"
+                    ):
+                        # `o.R[i] = e` on an inline array member:
+                        # the field's tokens name no share-group
+                        # holder (slices/maps register a backing),
+                        # so the store would only reach
+                        # `indirect_writes` and the field's slot —
+                        # which `o.R[i].V` reads — never sees it.
+                        opaque_elem_root_slots[ri] = field_key
                     self._for_write_target = True
                     try:
                         opaque_elem_index_deps[ri] = self.expression(
@@ -20532,6 +20698,11 @@ class _Builder:
                                 )
                 if broadcast:
                     self.indirect_writes |= value
+                    self.indirect_writes |= (
+                        pointer_member_index_deps.get(
+                            i, frozenset()
+                        )
+                    )
                 member = field_chan_lhs.get(i)
                 if (
                     member is not None
