@@ -963,8 +963,11 @@ class _SolBindings:
             )
             # A lookup that ended on an invisible private member does
             # not close the position: solc treats the member as absent,
-            # so a `using` extension still owns the call.
-            if record is not None:
+            # so a `using` extension still owns the call. An overload
+            # set that failed resolution does close it — the member
+            # exists, and solc reports the ambiguity rather than
+            # reaching for an extension.
+            if record is not None or reason == "ambiguous_overload":
                 return member, record, reason
         if type_record is not None:
             # Enum constants only resolve through the type name

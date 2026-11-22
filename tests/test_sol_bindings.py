@@ -1738,6 +1738,33 @@ contract Vault is Base {
     )
 
 
+def test_ambiguous_overload_does_not_fall_through_to_using():
+    source = """
+library L { function f(Vault c, uint256 x) internal pure {} }
+contract Vault {
+    using L for Vault;
+    function f(uint256 x) public {}
+    function f(address a) public {}
+    Vault inst;
+    function run() external { inst.f(1); }
+}
+"""
+    # The member exists — a failed overload set is opaque, not an
+    # invitation to bind the same-named extension.
+    report = build_sol_bindings(source)
+    lib_fn = min(
+        (
+            binding
+            for binding in report.bindings
+            if binding.name == "f" and binding.kind == "function"
+        ),
+        key=lambda binding: binding.span.start,
+    )
+    assert not any(
+        ref.binding_id == lib_fn.id for ref in report.references
+    )
+
+
 def test_function_pointer_selector_does_not_bind_struct_field():
     source = """
 struct Coin { uint256 selector; }
