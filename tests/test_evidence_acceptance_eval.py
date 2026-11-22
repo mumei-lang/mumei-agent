@@ -13,6 +13,7 @@ from agent.core_evidence import evaluate_core_acceptance
 from agent.evidence_acceptance_eval import (
     build_eval_parser,
     main_eval,
+    run_eval,
 )
 
 
@@ -468,3 +469,35 @@ def test_conjunctive_attempt_binding_uses_evidence_fingerprint(
         == 0
     )
     assert json.loads(capsys.readouterr().out)["attempt_bound"] is True
+
+
+def test_real_core_conjunctive_descriptors_fold(tmp_path):
+    # Golden descriptors emitted by real Core
+    # `evidence accept --requirement-list --json` (record pin) and
+    # `evidence accept-list --requirement-list --json` (list pin) —
+    # regenerate with a built mumei when the descriptor shape changes.
+    fixtures = Path(__file__).parent / "fixtures"
+    for name, pin in (
+        ("evidence_requirement_list_acceptance.json", "evidence_fingerprint"),
+        ("evidence_requirement_list_acceptance_list_pin.json", "list_fingerprint"),
+    ):
+        descriptor = json.loads((fixtures / name).read_text())
+        evaluation = evaluate_core_acceptance(descriptor)
+        assert evaluation["descriptor_match"] is True, name
+        assert evaluation["accepted"] is True, name
+        assert pin in descriptor
+
+        bound = evaluate_core_acceptance(
+            descriptor, descriptor.get("evidence_fingerprint") or "0" * 64
+        )
+        assert bound["attempt_bound"] is (pin == "evidence_fingerprint")
+
+        # The route accepts the real descriptor end to end.
+        evaluation = run_eval(
+            __import__("argparse").Namespace(
+                descriptor=str(fixtures / name),
+                expected_fingerprint=None,
+                output=None,
+            )
+        )
+        assert evaluation["descriptor_match"] is True
