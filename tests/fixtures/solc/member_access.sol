@@ -11,7 +11,11 @@ library SafeMath {
     function add(uint256 a, uint256 b) internal pure returns (uint256) {}
 }
 struct Coin {
+    Token t;
     uint256 v;
+}
+contract Container {
+    enum State { On, Off }
 }
 enum Status {
     Ready,
@@ -47,6 +51,10 @@ contract Vault is Base {
         status = Status.Ready;
         coin.v = s;
         s = coins[0].v;
+        coin.t.transfer(address(0), 1);
+        s = Coin(Token(address(0)), 1).v;
+        Container.State cst = Container.State.On;
+        coin.v += 1;
     }
     function vaultFn() public {}
     function getToken() internal returns (Token) {}
