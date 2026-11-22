@@ -2469,9 +2469,10 @@ audit/CLI/MCP keys, grades and fallbacks are unchanged.
 
 `agent.control_flow.unassigned_uses(body, graph)` connects the fixed-point
 facts to reads: it reports `UnassignedUse(node_id, name, span)` when a
-simple identifier is textually assigned somewhere in the body yet absent
-from that node's `all_paths` pre-state — a possibly-unassigned read, e.g.
-a name assigned in only one branch or inside a loop and then returned.
+simple identifier is textually assigned or declared somewhere in the body
+yet absent from that node's `all_paths` pre-state — a possibly-unassigned
+read, e.g. a name assigned in only one branch or inside a loop and then
+returned.
 Checks run against the pre-state, so a statement's own targets never
 count as uses, and `if x := f(); x > 0` initializers flow correctly into
 their conditions.
@@ -2482,9 +2483,12 @@ uses = control_flow.unassigned_uses(body, graph)
 ```
 
 A finding is a **hint for the host's own analysis, not a defect verdict**:
-only recognized simple identifiers are considered — names never textually
-assigned anywhere are ignored, fields/elements, calls, shadowing and
-closures are not modelled, and the normal-flow profile's gaps still apply.
+only recognized simple identifiers are considered — names neither assigned
+nor declared in the body are ignored. The read scan excludes identifiers
+inside function literals and a direct `&x` operand; `&x.f` and `&a[i]`
+still read their roots. If parsing the read text fails, the hint falls back
+to its conservative identifier scan. Fields/elements, calls, shadowing and
+closures remain unmodelled, and the normal-flow profile's gaps still apply.
 Both directions still say nothing about memory truth or proof grades.
 The existing walker owns must/may resource facts; audit/CLI/MCP keys,
 grades and fallbacks are unchanged.
@@ -2492,8 +2496,8 @@ grades and fallbacks are unchanged.
 ### C05 definite unassigned-use classes over the same facts
 
 `UnassignedUse` gains a `definite` flag over the same fixed-point facts:
-a finding is definite when the name is textually assigned somewhere in
-the body yet absent from the node's `some_path` pre-state too — no
+a finding is definite when the name is textually assigned or declared
+somewhere in the body yet absent from the node's `some_path` pre-state too — no
 remaining path can deliver it (assignment only after the use, or only in
 a sibling the use's path never takes). `definite = False` keeps the
 earlier class: some path may deliver the value.
@@ -2515,8 +2519,9 @@ the previous slice's construction.
 `agent.control_flow.unused_assignments(body, graph)` reports
 `UnusedAssignment(node_id, name, span)` when a recognized assignment
 statement targets a simple identifier that appears in no use position
-anywhere in the body — the dead-store hint at name granularity, over the
-same conservative identifier scan `unassigned_uses` performs.
+anywhere in the body — the dead-store hint at name granularity. It keeps
+the conservative regex scan, so references inside function literals and
+address-taking still count as uses here.
 
 ```python
 unread = control_flow.unused_assignments(body, graph)
@@ -2763,15 +2768,17 @@ frames stay unanalysed.
 ### C05 labeled flow-hint corpus
 
 The labeled Go corpus measures per-family agreement: `unassigned`
-matched 0, missed 12, unexpected 2; `unused` matched 5, missed 2,
-unexpected 0; `unreachable` matched 4, missed 0, unexpected 0. Labels
-cover local names only: parameters, named results, and package-level
-names are assigned on entry; bare zero-value `var` declarations are not
-explicit assignments. All 12 `unassigned` misses are reads of a
-conditionally set pointer declared with a bare `var`: the hint counts
-the zero-value declaration as an assignment, so possible nil reads are
-not flagged. This is measurement only: it makes no analysis
-changes and is not a proof of soundness or completeness.
+matched 12, missed 0, unexpected 1; `unused` matched 5, missed 2,
+unexpected 0; `unreachable` matched 4, missed 0, unexpected 0. Bare
+zero-value `var` declarations kill prior assignment facts without
+generating an assignment. Entry seeding uses
+`go_entry_assigned_names(source, units, function)` for receivers,
+parameters, named results, and top-level `var`/`const` names in that
+single source file; declarations in other package files are unavailable.
+The remaining `unassigned` unexpected is the path-insensitive read of
+`value` after the backward-goto loop's nil check; backward `goto` support
+is unchanged. These results remain hints, not verdicts or proof of
+soundness or completeness.
 
 ### C06 first compiler-backed Go binding slice
 
