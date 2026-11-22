@@ -493,3 +493,16 @@ def test_new_parent_directories_are_fsynced(tmp_path, monkeypatch):
     append_plan_history(str(path), _plan("adapter-new-directories"))
 
     assert set(calls) == {tmp_path, tmp_path / "a", tmp_path / "a" / "b"}
+
+
+def test_empty_existing_log_directory_is_fsynced(tmp_path, monkeypatch):
+    path = tmp_path / "history.jsonl"
+    path.write_bytes(b"")
+    calls = []
+    monkeypatch.setattr(
+        plan_history_log, "_fsync_directory", lambda directory: calls.append(directory)
+    )
+
+    append_plan_history(str(path), _plan("adapter-empty-log"))
+
+    assert calls == [tmp_path]

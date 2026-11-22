@@ -230,10 +230,8 @@ def append_plan_history(path: str, plan: VerificationPlan) -> str:
             flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
             try:
                 file_fd = os.open(history_path, flags | os.O_EXCL, 0o600)
-                created = True
             except FileExistsError:
                 file_fd = os.open(history_path, flags, 0o600)
-                created = False
             try:
                 remaining = memoryview(line)
                 while remaining:
@@ -257,7 +255,7 @@ def append_plan_history(path: str, plan: VerificationPlan) -> str:
                 raise
             finally:
                 os.close(file_fd)
-            if created:
+            if current_size == 0:
                 _fsync_directory(history_path.parent)
             return digest
     except ValueError:
