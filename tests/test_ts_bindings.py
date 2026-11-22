@@ -1893,3 +1893,38 @@ N.g();
         if source[c.span.start : c.span.end] == "N.g()"
     )
     assert call.target == clause_block_f.id
+
+
+def test_member_lookup_cyclic_extends_does_not_recurse():
+    # `Outer`/`Middle`/`Outer.Base` form a base-clause cycle: the lookup
+    # must terminate and still bind `m` through the acyclic edge.
+    source = """
+namespace Outer { export class Base { m(): void {} } }
+class Middle extends Outer.Base {}
+class Outer extends Middle {}
+const o = new Outer(); o.m();
+"""
+    report = build_ts_bindings(source)
+    base_m = _member_bindings(report, "m", "associated_function")[0]
+    call = next(
+        c
+        for c in _calls(report)
+        if source[c.span.start : c.span.end] == "o.m()"
+    )
+    assert call.target == base_m.id
+
+
+def test_member_clause_alias_and_declared_name_both_resolve_as_base():
+    source = """
+namespace N { export class A { m(): void {} } export {A as Public} }
+class X extends N.A { }
+class Y extends N.Public { }
+const x = new X(); const y = new Y(); x.m(); y.m();
+"""
+    report = build_ts_bindings(source)
+    base_m = _member_bindings(report, "m", "associated_function")[0]
+    calls = {
+        source[c.span.start : c.span.end]: c for c in _calls(report)
+    }
+    assert calls["x.m()"].target == base_m.id
+    assert calls["y.m()"].target == base_m.id
