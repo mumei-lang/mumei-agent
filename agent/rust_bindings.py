@@ -4512,40 +4512,65 @@ class _RustBindings:
             or record.type_node is None
         ):
             return None, None
+        if record.is_async:
+            # `async fn f() -> U` returns a `Future<U>` — the
+            # adaptor's elements are futures, not `U`.
+            return None, None
         ret = (
             record.type_node.child_by_field_name("return_type")
             or record.type_node
         )
         text = self.text(ret).strip()
-        if method == "filter_map":
-            wrap = re.fullmatch(r"(?:Option|Result)\s*<(.+)>", text)
-            if wrap is None:
-                return None, None
-            text = self._type_arg_list(wrap.group(1))[0].strip()
-        elif method == "flat_map":
-            slice_ref = re.fullmatch(
-                r"&\s*(?:'\w+\s+)?(?:mut\s+)?\[(.+)\]", text
-            )
-            if slice_ref is not None:
-                text = slice_ref.group(1).strip()
-            elif re.fullmatch(r"\[.+\]", text):
-                text = self._array_elem(text[1:-1])
-            else:
-                wrap = re.fullmatch(
-                    r"(?:Vec|Option)\s*<(.+)>", text
-                )
-                if wrap is None:
-                    return None, None
-                text = self._type_arg_list(wrap.group(1))[0].strip()
         home = record.home_scope
         pushed = home is not None and home not in self.scopes
         if pushed:
             # `m::to_q`'s `-> Q` spells `Q` in `m`'s scope — qualify
             # it there or a same-named root type steals the name.
             self._push_scope(home)
-        qualified = self._qualified_spelling(text, ret.start_byte)
-        if pushed:
-            self.scopes.pop()
+        try:
+            if method == "filter_map":
+                wrap = re.fullmatch(r"(?:Option|Result)\s*<(.+)>", text)
+                if wrap is None:
+                    return None, None
+                text = self._type_arg_list(wrap.group(1))[0].strip()
+            elif method == "flat_map":
+                slice_ref = re.fullmatch(
+                    r"&\s*(?:'\w+\s+)?(?:mut\s+)?\[(.+)\]", text
+                )
+                if slice_ref is not None:
+                    text = slice_ref.group(1).strip()
+                elif re.fullmatch(r"\[.+\]", text):
+                    text = self._array_elem(text[1:-1])
+                else:
+                    wrap = re.fullmatch(
+                        r"(Vec|Option)\s*<(.+)>", text
+                    )
+                    if wrap is None:
+                        return None, None
+                    head = wrap.group(1)
+                    head_record = self._lookup(
+                        self._normalize_identifier(head),
+                        ret.start_byte,
+                        "type",
+                    )
+                    if head_record is not None:
+                        imported = (
+                            head_record.binding.kind == "import"
+                            and head_record.import_path is not None
+                            and head_record.import_path.split(
+                                "::"
+                            )[0].strip()
+                            in {"std", "core", "alloc"}
+                        )
+                        if not imported:
+                            # A custom `Vec`/`Option` is opaque —
+                            # its IntoIterator::Item may not be Q.
+                            return None, None
+                    text = self._type_arg_list(wrap.group(2))[0].strip()
+            qualified = self._qualified_spelling(text, ret.start_byte)
+        finally:
+            if pushed:
+                self.scopes.pop()
         bare = re.sub(
             r"\b(?:[A-Za-z_]\w*::)+[A-Za-z_]\w*", "", qualified
         )
@@ -4565,7 +4590,30 @@ class _RustBindings:
         name = node.child_by_field_name("name")
         if path is None or name is None:
             return None
-        if path.type in {"identifier", "type_identifier"}:
+        path_segments = self.text(path).split("::")
+        if path_segments[0] == "crate":
+            # `crate::m::to_q` — the module chain starts at the
+            # root scope, not at a visible local name.
+            module = None
+            scope = self.scopes[0] if self.scopes else None
+            for segment in path_segments[1:]:
+                if scope is None:
+                    module = None
+                    break
+                module = next(
+                    (
+                        candidate
+                        for candidate in reversed(
+                            scope.bindings.get(segment, ())
+                        )
+                        if candidate.binding.kind == "module"
+                    ),
+                    None,
+                )
+                scope = (
+                    module.module_scope if module is not None else None
+                )
+        elif path.type in {"identifier", "type_identifier"}:
             module = self._lookup_module(
                 self.text(path), path.start_byte
             )
