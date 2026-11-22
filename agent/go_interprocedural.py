@@ -2405,12 +2405,29 @@ class _Builder:
                     None,
                 )
             elif root.type == "unary_expression":
-                # `(*p)` — only a dereference unwraps; `&x`, `!b`,
-                # `-n` keep their computed operand closed.
+                # `(*p)` — only a dereference unwraps, and only onto
+                # a bare name: `(*p.A[i])` derefs an ELEMENT pointer,
+                # not the root's field chain, and `&x`, `!b`, `-n`
+                # keep their computed operand closed.
                 unary_op = root.child_by_field_name("operator")
-                if unary_op is None or unary_op.text != b"*":
+                inner = root.child_by_field_name("operand")
+                while inner is not None and inner.type == "parenthesized_expression":
+                    inner = next(
+                        (
+                            c
+                            for c in inner.named_children
+                            if c.type != "comment"
+                        ),
+                        None,
+                    )
+                if (
+                    unary_op is None
+                    or unary_op.text != b"*"
+                    or inner is None
+                    or inner.type != "identifier"
+                ):
                     break
-                root = root.child_by_field_name("operand")
+                root = inner
             else:
                 root = root.child_by_field_name("operand")
         root_ref = (
@@ -2695,9 +2712,24 @@ class _Builder:
                 continue
             if root.type == "unary_expression":
                 unary_op = root.child_by_field_name("operator")
-                if unary_op is None or unary_op.text != b"*":
+                inner = root.child_by_field_name("operand")
+                while inner is not None and inner.type == "parenthesized_expression":
+                    inner = next(
+                        (
+                            c
+                            for c in inner.named_children
+                            if c.type != "comment"
+                        ),
+                        None,
+                    )
+                if (
+                    unary_op is None
+                    or unary_op.text != b"*"
+                    or inner is None
+                    or inner.type != "identifier"
+                ):
                     break
-                root = root.child_by_field_name("operand")
+                root = inner
                 continue
             break
         root_ref = (
@@ -14450,6 +14482,17 @@ class _Builder:
             # union, never replace, so the record stays idempotent.
             entry[1] |= union
 
+    def _flush_pending_param_reseats(self) -> None:
+        # A `p = q` marks the reseat only AFTER its own statement's
+        # right-hand sides evaluate — `p, x = q, p.A[i].V` still
+        # reads the pre-update pointee — so it takes effect at the
+        # next statement boundary or control-flow condition.
+        if self._pending_param_reseats:
+            self._pointer_param_reseats |= set(
+                self._pending_param_reseats
+            )
+            self._pending_param_reseats = []
+
     def _statement(
         self,
         node: Any,
@@ -14466,14 +14509,7 @@ class _Builder:
         if count[0] > MAX_EXPRESSION_NODES:
             raise _Unsupported("analysis_limit", _span(node))
         self._conditional = conditional
-        if self._pending_param_reseats:
-            # A `p = q` marks the reseat only AFTER its own
-            # statement's right-hand sides evaluate — `p, x = q,
-            # p.A[i].V` still reads the pre-update pointee.
-            self._pointer_param_reseats |= set(
-                self._pending_param_reseats
-            )
-            self._pending_param_reseats = []
+        self._flush_pending_param_reseats()
         kind = node.type
         if kind in {"block", "statement_list"}:
             self._sequence(
@@ -16868,6 +16904,7 @@ class _Builder:
                     initializer, fn, params, scope, transfers, count,
                     deps, saw_return, conditional,
                 )
+                self._flush_pending_param_reseats()
             # The condition is evaluated but its dependencies cannot reach
             # the result: every fragment statement is effect-free.
             self.expression(
@@ -22318,6 +22355,7 @@ class _Builder:
                         init, fn, params, scope, transfers, count, deps,
                         saw_return, conditional,
                     )
+                    self._flush_pending_param_reseats()
                 condition = clause.child_by_field_name("condition")
                 if condition is not None:
                     self.expression(
@@ -22688,6 +22726,7 @@ class _Builder:
                     initializer, fn, params, scope, transfers, count,
                     deps, saw_return, conditional,
                 )
+                self._flush_pending_param_reseats()
             value = node.child_by_field_name("value")
             if value is not None:
                 # The tag is evaluated but its dependencies cannot reach the

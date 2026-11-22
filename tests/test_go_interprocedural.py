@@ -33081,6 +33081,18 @@ TYPES_E_S2 = (
             "p *S2, k int64",
             frozenset({0, 1}),
         ),
+        (
+            "return (*p).A[i].V",
+            "return o.A[i].V",
+            "p *S2, i int64",
+            frozenset({0, 1}),
+        ),
+        (
+            "return (*p).M[k].V",
+            "return o.M[k].V",
+            "p *S2, k int64",
+            frozenset({0, 1}),
+        ),
     ],
 )
 def test_named_struct_element_pointer_param_root_matches_value_control(
@@ -33104,6 +33116,25 @@ def test_named_struct_element_pointer_param_root_matches_value_control(
     assert result.available, result.gaps
     assert result.return_dependencies == direct.return_dependencies
     assert result.return_dependencies == expected
+
+
+def test_named_struct_element_pointer_param_explicit_deref_write(
+    go_types_helper,
+):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "type S3 struct { F []int64 }\n"
+        "func F(p *S3, x int64) int64 {"
+        " (*p).F[0] = x; return (*p).F[0] }\n",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+    imported = {c.target for c in result.calls if c.imported}
+    param_id = next(
+        b.id for b in snapshot.bindings if b.name == "p"
+    )
+    assert imported == {f"{param_id}/caller-backing"}
 
 
 def test_named_struct_element_pointer_param_root_scalar_collection_field(
