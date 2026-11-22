@@ -6732,6 +6732,20 @@ def test_callee_pointee_read_observes_prior_writes(
     result = named(*unit(go_types_helper, declarations), "F")
     assert result.available, result.gaps
     assert result.return_dependencies == frozenset({0, 1})
+    # A bound method value freezes the same receiver view:
+    # `f := p.Get` after `*p = s` folds the broadcast store.
+    declarations = (
+        "type S struct{ V int64 }\n"
+        "func (s *S) Get() int64 { return s.V }\n"
+        "func F(p *S, s S) int64 {\n"
+        "\t*p = s\n"
+        "\tf := p.Get\n"
+        "\treturn f()\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, declarations), "F")
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
 
 
 def test_imported_pointer_receiver_observes_prior_pointee_write(

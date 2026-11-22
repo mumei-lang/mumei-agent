@@ -31514,14 +31514,30 @@ class _Builder:
         recv_id = mv[1]
         if recv_id is None:
             self.bound_method_receiver_deps.pop(bid, None)
-        elif recv_id in locals_:
-            self.bound_method_receiver_deps[bid] = locals_[recv_id]
+            return
+        # `f := p.Get` (or `f := q.Get` through a `q := p` alias)
+        # — the method reads caller-shared pointee memory whose
+        # stores (`*p = s`) broadcast into `indirect_writes`, like
+        # the direct-call receiver path does. `p` may carry a
+        # locals_ slot after the store, so the param-pointer check
+        # precedes the slot lookup.
+        recv_binding = self.bindings.get(recv_id)
+        shared_pointee = recv_id in self._param_pointer_aliases or (
+            recv_binding is not None
+            and recv_binding.type is not None
+            and recv_binding.type.kind == "pointer"
+            and recv_id in params
+        )
+        if recv_id in locals_:
+            deps = locals_[recv_id]
         elif recv_id in params:
-            self.bound_method_receiver_deps[bid] = frozenset(
-                {params[recv_id]}
-            )
+            deps = frozenset({params[recv_id]})
         else:
             self.bound_method_receiver_deps.pop(bid, None)
+            return
+        if shared_pointee:
+            deps |= self.indirect_writes
+        self.bound_method_receiver_deps[bid] = deps
 
     def _record_bound_interface_method(
         self,
