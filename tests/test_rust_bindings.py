@@ -5777,3 +5777,28 @@ fn f(o: Option<P>) {
     # `Option` has no `ok()` — the unresolved extension call pins
     # no payload.
     assert calls == []
+
+def test_chunk_and_window_slice_elements():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(v: Vec<P>) {
+    for c in v.chunks(2) {
+        c[0].pm();
+        for x in c.iter() { x.pm(); }
+    }
+    for w in v.windows(3) { w[0].pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    calls = [
+        call
+        for call in report.calls
+        if call.target == pm.id
+    ]
+    # c[0], x (c.iter), w[0] — all P.
+    assert len(calls) == 3
+    assert _call(report, source, "c[0].pm()").target == pm.id
+    assert _call(report, source, "x.pm()").target == pm.id
+    assert _call(report, source, "w[0].pm()").target == pm.id
