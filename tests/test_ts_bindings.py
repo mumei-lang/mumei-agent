@@ -1520,6 +1520,54 @@ c.m();
     )
 
 
+def test_member_ambient_export_clause_disables_implicit_export():
+    # `export {}` inside `declare namespace` turns off the implicit
+    # export of the remaining members: `N.C` is a private member
+    # (tsc TS2339) and must not resolve through qualified access.
+    # A named `export {D}` clause still exports the named member.
+    source = """
+declare namespace N {
+    export {};
+    class C { m(): void }
+}
+declare namespace M {
+    export {D};
+    class D { m(): void }
+    class E { m(): void }
+}
+new N.C();
+new M.D();
+new M.E();
+"""
+    report = build_ts_bindings(source)
+    c_rec = _member_bindings(report, "C", "ambient")
+    d_rec = _member_bindings(report, "D", "ambient")
+    e_rec = _member_bindings(report, "E", "ambient")
+    assert c_rec and d_rec and e_rec
+    bound = {r.binding_id for r in report.references}
+    assert c_rec[0].id not in bound
+    assert e_rec[0].id not in bound
+    assert d_rec[0].id in bound
+
+
+def test_member_bare_inner_namespace_in_ambient():
+    # A bare `namespace Inner` inside `declare namespace` parses as
+    # an expression_statement-wrapped internal_module and is still
+    # implicitly exported (tsc resolves `N.Inner.f`).
+    source = """
+declare namespace N {
+    namespace Inner {
+        function f(): void;
+    }
+}
+N.Inner.f();
+"""
+    report = build_ts_bindings(source)
+    f = _member_bindings(report, "f", "ambient")[0]
+    call_refs = {r.binding_id for r in report.references if r.kind == "call"}
+    assert f.id in call_refs
+
+
 def test_member_ambient_declarations_have_no_tdz():
     # `declare class`/`declare namespace` initialize nothing at
     # runtime: `new A()` textually before the declarations is not a

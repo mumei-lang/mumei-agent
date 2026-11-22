@@ -1037,11 +1037,29 @@ class _TypeScriptBindings:
                         }:
                             boundary = True
                             break
+                    member_node = node
                     if (
                         not boundary
                         and node.parent is not None
                         and node.parent.id == body.id
-                        and node.type in self._MEMBER_DECLARATIONS
+                        and node.type == "expression_statement"
+                    ):
+                        # A bare `namespace Inner` / declaration
+                        # parses inside an `expression_statement`
+                        # wrapper — descend to the declaration
+                        # itself when that is all it holds.
+                        inner = [
+                            child
+                            for child in node.named_children
+                            if child.type in self._MEMBER_DECLARATIONS
+                        ]
+                        if len(node.named_children) == 1 and inner:
+                            member_node = inner[0]
+                    if (
+                        not boundary
+                        and node.parent is not None
+                        and node.parent.id == body.id
+                        and member_node.type in self._MEMBER_DECLARATIONS
                     ):
                         other.member_of = decl.id
                         # Namespace members sit on the namespace object —
@@ -1051,7 +1069,9 @@ class _TypeScriptBindings:
                         # qualified `N.x` access — a block-private
                         # declaration is module-local, like a class's
                         # private member. Ambient namespaces export
-                        # every member implicitly, at any depth.
+                        # every member implicitly, at any depth —
+                        # unless the body has an `export {…}` clause,
+                        # which disables the implicit export.
                         ambient = False
                         ancestor = decl.parent
                         while ancestor is not None:
@@ -1059,10 +1079,32 @@ class _TypeScriptBindings:
                                 ambient = True
                                 break
                             ancestor = ancestor.parent
+                        export_clause = False
+                        exported_names: set[str] = set()
+                        for statement in body.named_children:
+                            if statement.type != "export_statement":
+                                continue
+                            for child in statement.children:
+                                if child.type == "export_clause":
+                                    export_clause = True
+                                    for spec in child.named_children:
+                                        if spec.type == "export_specifier":
+                                            local_name = (
+                                                spec.child_by_field_name(
+                                                    "name"
+                                                )
+                                            )
+                                            if local_name is not None:
+                                                exported_names.add(
+                                                    self.text(local_name)
+                                                )
+                        if ambient and export_clause:
+                            ambient = False
                         other.member_visibility = (
                             "public"
                             if node.type == "export_statement"
                             or ambient
+                            or self.text(other.node) in exported_names
                             else "private"
                         )
                         other.member_container = (
