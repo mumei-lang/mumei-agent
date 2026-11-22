@@ -1878,6 +1878,7 @@ class _RustBindings:
                 const_record.member_impl_args = member_impl_args
                 const_record.member_impl_generic = member_impl_generic
                 const_record.member_trait = member_trait
+                const_record.member_trait_args = member_trait_args
         for node in children:
             if node.type in {"function_item", "function_signature_item"}:
                 record = predeclared.get(node.id)
