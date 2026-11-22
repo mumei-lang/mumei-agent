@@ -33264,6 +33264,32 @@ def test_named_pointer_param_alias_dirty_target_write(
     assert 1 in write_read.deps
 
 
+def test_named_select_clause_break_does_not_leak(
+    go_types_helper,
+):
+    # A plain `break` in an earlier select clause does not mark the
+    # later clause's statements conditional — `p = q` there still
+    # resolves `p.F[0]` through the alias.
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "type S3 struct { F []int64 }\n"
+        "func F(p *S3, q *S3, ch chan int64) int64 {\n"
+        "\tselect {\n"
+        "\tcase <-ch:\n"
+        "\t\tbreak\n"
+        "\tcase x := <-ch:\n"
+        "\t\t_ = x\n"
+        "\t\tp = q\n"
+        "\t\treturn p.F[0]\n"
+        "\t}\n"
+        "\treturn 0\n"
+        "}\n",
+    )
+    result = named(source, snapshot, summaries)
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({1})
+
+
 @pytest.mark.parametrize(
     "declarations",
     [
