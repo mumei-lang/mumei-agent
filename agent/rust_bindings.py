@@ -173,6 +173,7 @@ class _RustBindings:
         self.gaps: list[Gap] = []
         self.scopes: list[_Scope] = []
         self.records: dict[str, _Record] = {}
+        self._type_impl_traits: dict[str, set[str]] = {}
         self.current_function = ""
         self.call_owner = ""
         self.module_depth = 0
@@ -799,7 +800,15 @@ class _RustBindings:
                 member_generic = False
                 member_trait = None
                 member_type_node = None
-                if node.type == "impl_item":
+                if node.type == "trait_item":
+                    # Key a trait's own members to the trait so impls
+                    # without an override fall back to the trait's
+                    # default member (`trait T { fn m(&self) {} }`).
+                    trait_record = self._find_item_record(scope, node)
+                    if trait_record is not None:
+                        member_of = trait_record.binding.id
+                        member_trait = trait_record.binding.id
+                elif node.type == "impl_item":
                     self._generic_references(node.child_by_field_name("type"))
                     trait_node = node.child_by_field_name("trait")
                     member_type_node = node.child_by_field_name("type")
@@ -817,6 +826,13 @@ class _RustBindings:
                             # not resolvable here; its members attach to
                             # the type but never resolve as methods.
                             member_trait = "<unresolved>"
+                        elif member_of is not None:
+                            # Record the `impl T for <type>` edge even
+                            # when the impl block is empty, so the
+                            # trait's default members can apply.
+                            self._type_impl_traits.setdefault(
+                                member_of, set()
+                            ).add(member_trait)
                 if body is not None:
                     self._scan_associated_container(
                         body,
@@ -988,8 +1004,35 @@ class _RustBindings:
             and args_match(record)
             and trait_in_scope(record)
         ]
-        # Inherent members shadow trait-impl members of the same name.
-        pool.sort(key=lambda record: record.member_trait is not None)
+        # Trait-declared defaults apply when an `impl T for <type>`
+        # exists but does not spell `name` — they rank below both
+        # inherent and trait-impl members of the type itself.
+        impl_traits = set(self._type_impl_traits.get(type_id, ()))
+        if impl_traits:
+            for trait_id in impl_traits:
+                trait = self.records.get(trait_id)
+                if trait is None:
+                    continue
+                resolved = self._lookup(
+                    trait.binding.name, position, "type"
+                )
+                if resolved is not trait:
+                    continue
+                pool.extend(
+                    record
+                    for record in self.records.values()
+                    if record.member_of == trait_id
+                    and record.member_of != type_id
+                    and record.binding.name == name
+                    and args_match(record)
+                )
+        def tier(record: _Record) -> int:
+            if record.member_trait is None:
+                return 0
+            if record.member_of == type_id:
+                return 1
+            return 2
+        pool.sort(key=tier)
         candidates = (
             [record for record in pool if record.binding.kind in kinds]
             if kinds
@@ -998,12 +1041,15 @@ class _RustBindings:
         if not candidates:
             return None
         first = candidates[0]
-        if first.member_trait is not None:
+        if tier(first) == 1:
             # More than one trait impl can spell `name` — Rust reports
             # ambiguity, so no single implementation is picked.
-            if sum(
-                1 for record in candidates if record.member_trait is not None
-            ) > 1:
+            if sum(1 for record in candidates if tier(record) == 1) > 1:
+                return None
+        elif tier(first) == 2:
+            # Defaults from several in-scope traits are equally
+            # ambiguous — and an impl member would have shadowed them.
+            if sum(1 for record in candidates if tier(record) == 2) > 1:
                 return None
         return first
 

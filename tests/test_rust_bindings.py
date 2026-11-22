@@ -2018,3 +2018,53 @@ fn f(q: Q) { q.only(); }
     )
     call = _call(report, source, "q.only()")
     assert call.target == only.id
+
+
+def test_trait_default_method_resolves_through_empty_impl():
+    source = """
+trait T { fn m(&self) {} }
+struct P {}
+impl T for P {}
+fn f() { let p: P; p.m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    default_m = next(
+        b
+        for b in report.bindings
+        if b.name == "m" and b.span.start == source.index("fn m") + 3
+    )
+    call = _call(report, source, "p.m()")
+    assert call.kind == "direct_local"
+    assert call.target == default_m.id
+
+
+def test_impl_member_shadows_trait_default():
+    source = """
+trait T { fn m(&self) {} }
+struct P {}
+impl T for P { fn m(&self) {} }
+fn f() { let p: P; p.m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    impl_m = next(
+        b
+        for b in report.bindings
+        if b.name == "m" and b.span.start == source.rindex("fn m") + 3
+    )
+    call = _call(report, source, "p.m()")
+    assert call.target == impl_m.id
+
+
+def test_two_trait_defaults_stay_ambiguous():
+    source = """
+trait T { fn m(&self) {} }
+trait U { fn m(&self) {} }
+struct P {}
+impl T for P {}
+impl U for P {}
+fn f() { let p: P; p.m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    call = _call(report, source, "p.m()")
+    assert call.kind == "opaque_method"
+    assert call.target == ""
