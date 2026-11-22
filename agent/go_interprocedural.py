@@ -33409,7 +33409,10 @@ class _Builder:
             receiver_deps = self._pointer_deps(
                 root_id, params, locals_
             ) | self._opaque_container_deps(field_key, locals_)
-            for index_node in inner_indexes + index_nodes:
+            # Innermost index first (Go's order) — `s.A[i].F[0]`
+            # evaluates `i` before `0`, so an index-position call
+            # sees the post-state of every earlier index's calls.
+            for index_node in inner_indexes[::-1] + index_nodes[::-1]:
                 if (
                     index_node is not None
                     and index_node.type not in _INDEX_LITERALS

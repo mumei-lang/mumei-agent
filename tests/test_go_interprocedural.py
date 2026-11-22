@@ -6262,6 +6262,29 @@ def test_interface_dispatch_element_receiver_pins_mid_field_type(
     assert b_id in result.pinned
 
 
+def test_interface_dispatch_element_receiver_inner_index_order(
+    go_types_helper,
+):
+    # `s.A[Set(&v,x)].B[Get(v)].C[0].M(0)` — Go evaluates `Set`
+    # before `Get`, so `Get`'s argument reads `v`'s post-`Set`
+    # deps and `x` reaches the result.
+    declarations = (
+        "type I interface{ M(int64) int64 }\n"
+        "type E struct{ F []I }\n"
+        "type M0 struct{ B []E }\n"
+        "type S struct{ A []M0 }\n"
+        "func Set(v *int64, x int64) int64 { *v = x; return 0 }\n"
+        "func Get(v int64) int64 { return v }\n"
+        "func F(s *S, x int64) int64 {\n"
+        "\tvar v int64\n"
+        "\treturn s.A[Set(&v, x)].B[Get(v)].F[0].M(0)\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert 1 in result.return_dependencies
+
+
 def test_interface_dispatch_nested_element_receivers_stay_closed(
     go_types_helper,
 ):
