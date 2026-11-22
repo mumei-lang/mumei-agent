@@ -2098,3 +2098,37 @@ fn f(w: W<i32>) { w.m(); }
     )
     call = _call(report, source, "w.m()")
     assert call.target == default_m.id
+
+
+def test_generic_impl_default_matches_concrete_positions():
+    # impl<A> T for W<A, i32> covers W<u8, i32> — the parameter
+    # position is a wildcard, concrete positions must match.
+    source = """
+trait T { fn m(&self) {} }
+struct W<A, B>(A, B);
+impl<A> T for W<A, i32> {}
+impl<A> T for W<A, u32> {}
+fn f(w: W<u8, i32>) { w.m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    default_m = next(
+        b
+        for b in report.bindings
+        if b.name == "m" and b.span.start == source.index("fn m") + 3
+    )
+    call = _call(report, source, "w.m()")
+    assert call.target == default_m.id
+
+
+def test_generic_impl_default_misses_other_concrete_position():
+    source = """
+trait T { fn m(&self) {} }
+struct W<A, B>(A, B);
+impl<A> T for W<A, i32> {}
+impl<A> T for W<A, u32> {}
+fn f(w: W<u8, u16>) { w.m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    call = _call(report, source, "w.m()")
+    assert call.kind == "opaque_method"
+    assert call.target == ""

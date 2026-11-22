@@ -174,7 +174,7 @@ class _RustBindings:
         self.scopes: list[_Scope] = []
         self.records: dict[str, _Record] = {}
         self._type_impl_traits: dict[
-            str, list[tuple[str, str | None, bool]]
+            str, list[tuple[str, str | None, bool, frozenset[str]]]
         ] = {}
         self.current_function = ""
         self.call_owner = ""
@@ -833,11 +833,35 @@ class _RustBindings:
                             # when the impl block is empty, so the
                             # trait's default members can apply. The
                             # specialization args matter: `impl T for
-                            # W<i32>` does not implement T for `W<u32>`.
+                            # W<i32>` does not implement T for `W<u32>`,
+                            # and a generic `impl<A> T for W<A, i32>`
+                            # only covers receivers whose concrete args
+                            # match every non-parameter position.
+                            type_params = node.child_by_field_name(
+                                "type_parameters"
+                            )
                             self._type_impl_traits.setdefault(
                                 member_of, []
                             ).append(
-                                (member_trait, member_args, member_generic)
+                                (
+                                    member_trait,
+                                    member_args,
+                                    member_generic,
+                                    frozenset(
+                                        self._normalize_identifier(
+                                            self.text(child.children[0])
+                                        )
+                                        for child in (
+                                            ()
+                                            if type_params is None
+                                            else type_params.named_children
+                                        )
+                                        if child.type == "type_parameter"
+                                        and child.children
+                                        and child.children[0].type
+                                        == "type_identifier"
+                                    ),
+                                )
                             )
                 if body is not None:
                     self._scan_associated_container(
@@ -1015,13 +1039,29 @@ class _RustBindings:
         # inherent and trait-impl members of the type itself.
         impl_traits = self._type_impl_traits.get(type_id, ())
         if impl_traits:
-            for trait_id, edge_args, edge_generic in impl_traits:
-                if (
-                    edge_args is not None
-                    and not edge_generic
-                    and edge_args != impl_args
-                ):
-                    continue
+            for (
+                trait_id,
+                edge_args,
+                edge_generic,
+                edge_params,
+            ) in impl_traits:
+                if edge_args is not None:
+                    if not edge_generic:
+                        if edge_args != impl_args:
+                            continue
+                    elif impl_args is not None:
+                        # Generic impl (`impl<A> T for W<A, i32>`):
+                        # parameter positions are wildcards, concrete
+                        # positions must equal the receiver's args.
+                        edge_parts = edge_args.split(",")
+                        impl_parts = impl_args.split(",")
+                        if len(edge_parts) != len(impl_parts) or any(
+                            edge not in edge_params and edge != concrete
+                            for edge, concrete in zip(
+                                edge_parts, impl_parts
+                            )
+                        ):
+                            continue
                 trait = self.records.get(trait_id)
                 if trait is None:
                     continue
