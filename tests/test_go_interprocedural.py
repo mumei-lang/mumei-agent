@@ -33713,6 +33713,39 @@ def test_named_pointer_element_field_local_read(go_types_helper):
     assert result.return_dependencies == frozenset({0})
 
 
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        # `*p = s` overwrites the whole pointee — element reads
+        # through `p` must observe the store like `p.V` does.
+        "type S struct { V int64; A []int64 }\n"
+        "func F(p *S, s S) int64 { *p = s; return p.A[0] }\n",
+        # Struct-element field read — `p.A[0].V`.
+        "type E struct { V int64 }\n"
+        "type S struct { A []E }\n"
+        "func F(p *S, s S) int64 { *p = s; return p.A[0].V }\n",
+        # One level down — `**pp = s` writes `(*pp)`'s pointee.
+        "type S struct { V int64; A []int64 }\n"
+        "func F(pp **S, s S) int64 { **pp = s; return (*pp).A[0] }\n",
+        "type E struct { V int64 }\n"
+        "type S struct { A []E }\n"
+        "func F(pp **S, s S) int64 { **pp = s; return (*pp).A[0].V }\n",
+    ],
+    ids=[
+        "scalar-slice",
+        "struct-element-field",
+        "double-scalar-slice",
+        "double-struct-element-field",
+    ],
+)
+def test_named_pointee_overwrite_element_read(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+
+
 def test_named_pointer_element_read_observes_late_pointee_store(
     go_types_helper,
 ):
