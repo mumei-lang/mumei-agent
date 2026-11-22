@@ -3735,3 +3735,66 @@ fn f(v: Vec<P>) {
         if source[c.span.start:c.span.end] == "p.m()"
     )
     assert call.target == ""
+
+
+def test_use_target_resolves_scoped_calls():
+    # `use m::P` — `P::new()` resolves the module's `P`, then the
+    # associated function.
+    source = """
+mod m { pub struct P; impl P { pub fn new() -> P { P } pub fn v(&self) {} } }
+use m::P;
+fn f() { let x = P::new(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    new = next(
+        b for b in report.bindings
+        if b.name == "new" and b.span.start == source.rindex("fn new") + 3
+    )
+    call = _call(report, source, "P::new()")
+    assert call.target == new.id
+
+
+def test_use_alias_target_resolves_scoped_calls():
+    # `use m::P as Q` — `Q::new()` resolves through the alias's path.
+    source = """
+mod m { pub struct P; impl P { pub fn new() -> P { P } } }
+use m::P as Q;
+fn f() { let x = Q::new(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    new = next(
+        b for b in report.bindings
+        if b.name == "new" and b.span.start == source.rindex("fn new") + 3
+    )
+    call = _call(report, source, "Q::new()")
+    assert call.target == new.id
+
+
+def test_use_target_types_annotated_receivers():
+    # `let x: P` with `use m::P` — `x.v()` resolves the module
+    # type's methods.
+    source = """
+mod m { pub struct P; impl P { pub fn v(&self) {} } }
+use m::P;
+fn f() { let x: P = P; x.v(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    v = next(
+        b for b in report.bindings
+        if b.name == "v" and b.span.start == source.rindex("fn v") + 3
+    )
+    call = _call(report, source, "x.v()")
+    assert call.target == v.id
+
+
+def test_use_target_unresolvable_module_stays_opaque():
+    # A use whose module path does not resolve keeps scoped calls
+    # opaque rather than guessing.
+    source = """
+mod m { pub struct P; impl P { pub fn new() -> P { P } } }
+use other::P;
+fn f() { let x = P::new(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    call = _call(report, source, "P::new()")
+    assert call.kind == "opaque_path"
