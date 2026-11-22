@@ -4314,6 +4314,10 @@ def test_for_loop_over_extern_call_stays_opaque() -> None:
     source = """
 struct P;
 impl P { fn m(&self) {} }
+struct W;
+impl W {
+    fn iter(&self) -> impl Iterator<Item = P> { std::iter::empty() }
+}
 fn f() {
     for x in std::iter::once(1) {
         x.m();
@@ -4322,8 +4326,19 @@ fn f() {
         p.m();
     }
 }
+fn g(w: W) {
+    // `impl Iterator<Item = P>` hides the element inside an
+    // associated binding the model does not spell — opaque.
+    for p in w.iter() {
+        p.m();
+    }
+}
 """
     report = build_rust_bindings(source, pointer_width=64)
     assert _call(report, source, "x.m()").target == ""
     # An unresolved extern method's element also stays opaque.
-    assert _call(report, source, "p.m()").target == ""
+    calls = [
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "p.m()"
+    ]
+    assert all(c.target == "" for c in calls)
