@@ -945,25 +945,43 @@ class _RustBindings:
         return [part.strip() for part in parts]
 
     def _type_arg_match(
-        self, pattern: str, concrete: str, params: frozenset[str]
+        self,
+        pattern: str,
+        concrete: str,
+        params: frozenset[str],
+        bindings: dict[str, str],
     ) -> bool:
         """Does impl-side arg `pattern` cover receiver arg `concrete`?
 
-        Positions spelled with an impl parameter are wildcards; other
-        positions must match structurally — `Vec<A>` covers `Vec<u8>`
-        and `(A,B)` covers `(u8,u16)`. Lifetimes inside references are
-        ignored: they never change which methods a type provides."""
+        Positions spelled with an impl parameter are wildcards —
+        every occurrence of one parameter must bind the same arg, so
+        `W<(A,A)>` covers `W<(u8,u8)>` but not `W<(u8,u16)>`. Other
+        positions must match structurally — `Vec<A>` covers `Vec<u8>`.
+        Reference mutability is significant (`&mut u8` is not `&u8`);
+        lifetimes are ignored: they never change which methods a type
+        provides."""
         a = pattern.strip().strip("{}").strip()
         b = concrete.strip().strip("{}").strip()
         if a in params:
-            return True
-        ref_a = re.fullmatch(r"&\s*(?:'\w+\s+)?(?:mut\s+)?(.+)", a)
-        ref_b = re.fullmatch(r"&\s*(?:'\w+\s+)?(?:mut\s+)?(.+)", b)
+            bound = bindings.get(a)
+            normalized = b.replace(" ", "")
+            if bound is None:
+                bindings[a] = normalized
+                return True
+            return bound == normalized
+        # Normalized keys have no whitespace, so `&mut u8` arrives as
+        # `&mutu8` — `mut` counts as the keyword whenever it leads the
+        # inner type (a type literally named `mut…` cannot be told
+        # apart after stripping and is pathological).
+        ref_a = re.fullmatch(r"&\s*(?:'\w+\s*)?(mut)?(.+)", a)
+        ref_b = re.fullmatch(r"&\s*(?:'\w+\s*)?(mut)?(.+)", b)
         if (ref_a is None) != (ref_b is None):
             return False
         if ref_a is not None:
+            if bool(ref_a.group(1)) != bool(ref_b.group(1)):
+                return False
             return self._type_arg_match(
-                ref_a.group(1), ref_b.group(1), params
+                ref_a.group(2), ref_b.group(2), params, bindings
             )
         if a.startswith("(") and a.endswith(")"):
             if not (b.startswith("(") and b.endswith(")")):
@@ -971,7 +989,7 @@ class _RustBindings:
             sub_a = self._type_arg_list(a[1:-1])
             sub_b = self._type_arg_list(b[1:-1])
             return len(sub_a) == len(sub_b) and all(
-                self._type_arg_match(x, y, params)
+                self._type_arg_match(x, y, params, bindings)
                 for x, y in zip(sub_a, sub_b)
             )
         match_a = re.fullmatch(r"(.+?)\s*<(.+)>", a)
@@ -986,7 +1004,7 @@ class _RustBindings:
             sub_a = self._type_arg_list(match_a.group(2))
             sub_b = self._type_arg_list(match_b.group(2))
             return len(sub_a) == len(sub_b) and all(
-                self._type_arg_match(x, y, params)
+                self._type_arg_match(x, y, params, bindings)
                 for x, y in zip(sub_a, sub_b)
             )
         return a.replace(" ", "") == b.replace(" ", "")
@@ -1135,9 +1153,10 @@ class _RustBindings:
                         # nested inside the tuple.
                         edge_parts = self._type_arg_list(edge_args)
                         impl_parts = self._type_arg_list(impl_args)
+                        bindings: dict[str, str] = {}
                         if len(edge_parts) != len(impl_parts) or any(
                             not self._type_arg_match(
-                                edge, concrete, edge_params
+                                edge, concrete, edge_params, bindings
                             )
                             for edge, concrete in zip(
                                 edge_parts, impl_parts

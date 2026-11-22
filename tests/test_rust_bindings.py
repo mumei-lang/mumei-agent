@@ -2189,3 +2189,43 @@ fn f(w: W<4>, r: R<'static>) { w.m(); r.p(); }
     member_p = _bindings(report, "p", "associated_function")[0]
     assert _call(report, source, "w.m()").target == member_m.id
     assert _call(report, source, "r.p()").target == member_p.id
+
+
+def test_member_generic_impl_repeated_param_binds_consistently():
+    # Every occurrence of a pattern parameter must bind the same
+    # receiver arg: `impl<A> T for W<(A,A)>` covers `W<(u8,u8)>` but
+    # not `W<(u8,u16)>`, and likewise for const parameters.
+    source = """
+trait T { fn m(&self) {} }
+struct W<X>(X);
+impl<A> T for W<(A, A)> { }
+fn f(w: W<(u8, u8)>) { w.m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    member_m = _bindings(report, "m", "associated_function")[0]
+    assert _call(report, source, "w.m()").target == member_m.id
+    source2 = """
+trait T { fn m(&self) {} }
+struct W<X>(X);
+impl<A> T for W<(A, A)> { }
+fn f(w: W<(u8, u16)>) { w.m(); }
+"""
+    report2 = build_rust_bindings(source2, pointer_width=64)
+    assert _call(report2, source2, "w.m()").target == ""
+
+
+def test_member_generic_impl_reference_mutability_matters():
+    # `impl<A> T for W<&A>` does not cover `W<&mut u8>` — shared and
+    # mutable references are distinct types.
+    source = """
+trait T { fn m(&self) {} }
+struct W<X>(X);
+impl<A> T for W<&A> { }
+impl<A> T for W<&mut A> { }
+fn f(w: W<&mut u8>) { w.m(); }
+fn g(u: W<&u8>) { u.m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    member_m = _bindings(report, "m", "associated_function")[0]
+    assert _call(report, source, "w.m()").target == member_m.id
+    assert _call(report, source, "u.m()").target == member_m.id
