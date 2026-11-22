@@ -922,7 +922,7 @@ contract C {
         ),
         (
             "contract C { function h() public {} function f() public { this.h(); } }",
-            "opaque_member",
+            "direct_local",
         ),
         (
             "contract C { function f(function() external cb) public { cb(); } }",
@@ -1122,3 +1122,250 @@ def test_cli_fails_with_fixed_errors_and_no_json(tmp_path, contents, expected_er
     assert result.returncode == 2
     assert result.stdout == b""
     assert result.stderr == expected_error
+
+
+def test_member_call_resolves_through_declared_contract_type():
+    source = """
+contract Token {
+    function transfer(address to, uint256 amount) external {}
+    uint256 public supply;
+}
+contract Vault {
+    Token token;
+    function run() external {
+        token.transfer(address(0), 1);
+        uint256 s = token.supply;
+        s = s + 1;
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    token = next(
+        binding for binding in report.bindings if binding.name == "Token"
+    )
+    transfer = next(
+        binding
+        for binding in report.bindings
+        if binding.name == "transfer" and binding.scope is not None
+    )
+    supply = next(
+        binding
+        for binding in report.bindings
+        if binding.name == "supply" and binding.scope is not None
+    )
+    assert token.id
+    transfer_refs = [
+        ref for ref in report.references if ref.binding_id == transfer.id
+    ]
+    assert [ref.kind for ref in transfer_refs] == ["call"]
+    assert _text(source, transfer_refs[0].span) == "transfer"
+    supply_refs = [
+        ref for ref in report.references if ref.binding_id == supply.id
+    ]
+    assert [ref.kind for ref in supply_refs] == ["read"]
+    assert _text(source, supply_refs[0].span) == "supply"
+    call = next(
+        call for call in report.calls if call.target == transfer.id
+    )
+    assert call.kind == "direct_local"
+
+
+def test_member_call_through_this_and_super_resolves():
+    source = """
+contract B {
+    function f() internal virtual {}
+}
+contract C is B {
+    function f() internal override {}
+    function g() public {
+        this.g();
+        super.f();
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    g = next(
+        binding for binding in report.bindings if binding.name == "g"
+    )
+    f_base = next(
+        binding for binding in report.bindings if binding.name == "f"
+    )
+    this_call = next(
+        ref
+        for ref in report.references
+        if ref.binding_id == g.id and ref.kind == "call"
+    )
+    assert _text(source, this_call.span) == "g"
+    super_call = next(
+        ref
+        for ref in report.references
+        if ref.binding_id == f_base.id and ref.kind == "call"
+    )
+    assert _text(source, super_call.span) == "f"
+    calls = {call.kind for call in report.calls}
+    assert "direct_local" in calls
+    assert "opaque_virtual" in calls
+    assert _unresolved(report, "this", "builtin")
+    assert _unresolved(report, "super", "builtin")
+
+
+def test_member_lookup_finds_inherited_members_and_rejects_private():
+    source = """
+contract B {
+    uint256 internal shared;
+    uint256 private hidden;
+}
+contract C is B {
+    B other;
+    function g() external {
+        uint256 x = other.shared;
+        uint256 y = other.hidden;
+        x = x + y;
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    shared = next(
+        binding for binding in report.bindings if binding.name == "shared"
+    )
+    shared_ref = next(
+        ref for ref in report.references if ref.binding_id == shared.id
+    )
+    assert _text(source, shared_ref.span) == "shared"
+    assert _unresolved(report, "hidden", "private_base_member")
+
+
+def test_member_access_on_non_contract_types_stays_opaque():
+    source = """
+contract C {
+    uint256[] values;
+    function g() external {
+        uint256 n = values.length;
+        values.push(1);
+        n = n + 1;
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    assert any(
+        call.kind == "opaque_member" and call.target == ""
+        for call in report.calls
+    )
+    assert not any(
+        _text(source, ref.span) in {"length", "push"}
+        for ref in report.references
+    )
+
+
+def test_super_member_resolves_most_derived_base_first():
+    source = """
+contract A { function f() internal virtual {} }
+contract B { function f() internal virtual {} }
+contract C is A, B {
+    function f() internal override(A, B) {}
+    function g() public { super.f(); }
+}
+"""
+    report = build_sol_bindings(source)
+    fs = [
+        binding for binding in report.bindings if binding.name == "f"
+    ]
+    # Declaration order: A.f, B.f, C.f — `super` in C binds to the most
+    # derived base (B), not the first declared.
+    f_base_b = fs[1]
+    call = next(call for call in report.calls)
+    assert call.target == f_base_b.id
+    super_ref = next(
+        ref
+        for ref in report.references
+        if ref.binding_id == f_base_b.id and ref.kind == "call"
+    )
+    assert _text(source, super_ref.span) == "f"
+
+
+def test_super_member_follows_c3_order_in_a_diamond():
+    source = """
+contract O { function f() internal virtual {} }
+contract A is O { function f() internal override {} }
+contract B is O {}
+contract C is A, B {
+    function f() internal override(A, B) {}
+    function g() public { super.f(); }
+}
+"""
+    report = build_sol_bindings(source)
+    fs = [
+        binding for binding in report.bindings if binding.name == "f"
+    ]
+    # C3 order for `C is A, B` is C, B, A, O — A.f is the first
+    # definition after C even though a depth-first walk of the bases
+    # reaches O.f (through B) first.
+    f_in_a = fs[1]
+    call = next(call for call in report.calls)
+    assert call.target == f_in_a.id
+
+
+def test_super_member_with_mixed_signatures_stays_opaque():
+    source = """
+contract A { function f(uint256 x) internal virtual {} }
+contract B is A { function f(bool x) internal virtual {} }
+contract C is B {
+    function g() public { super.f(1); }
+}
+"""
+    report = build_sol_bindings(source)
+    call = next(call for call in report.calls)
+    # super.f sees the overload set {B.f(bool), A.f(uint)}; without
+    # argument typing the call can't be bound to a single target.
+    assert call.kind == "opaque_overload"
+    assert not call.target
+    assert not any(
+        ref.kind == "call" for ref in report.references
+    )
+
+
+def test_qualified_declared_type_member_stays_opaque():
+    source = """
+library L {
+    struct S { uint256 x; }
+    uint256 internal x;
+}
+contract C {
+    L.S s;
+    function g() public {
+        uint256 y = s.x;
+        y = y + 1;
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    library_x = next(
+        binding
+        for binding in report.bindings
+        if binding.name == "x" and binding.kind == "state_variable"
+    )
+    assert not any(
+        ref.binding_id == library_x.id for ref in report.references
+    )
+    assert not any(
+        item.name == "x" for item in report.unresolved
+    )
+
+
+def test_overloaded_member_call_classifies_opaque_overload():
+    source = """
+contract T {
+    function f(uint256 a) external {}
+    function f(bool b) external {}
+}
+contract C {
+    T t;
+    function g() external { t.f(1); }
+}
+"""
+    report = build_sol_bindings(source)
+    assert _unresolved(report, "f", "ambiguous_overload")
+    assert any(
+        call.kind == "opaque_overload" and call.target == ""
+        for call in report.calls
+    )

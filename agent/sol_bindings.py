@@ -617,6 +617,7 @@ class _SolBindings:
         position: int,
         namespace: str,
         visited: set[str] | None = None,
+        allow_private_own: bool = True,
     ) -> tuple[_Record | None, str | None]:
         if namespace == "value":
             layers = self._contract_layers(
@@ -627,7 +628,7 @@ class _SolBindings:
             for index, (_layer, records) in enumerate(layers):
                 if not records:
                     continue
-                if index > 0:
+                if index > 0 or not allow_private_own:
                     private_match = private_match or any(
                         record.binding.kind in {"function", "state_variable"}
                         and record.visibility == "private"
@@ -675,6 +676,131 @@ class _SolBindings:
                     return None, "private_base_member"
                 return record, None
         return None, None
+
+    def _resolve_member(
+        self, node: Any
+    ) -> tuple[Any | None, _Record | None, str | None]:
+        """Resolve `object.property` when the object has a declared
+        contract/interface/library type or names one directly.
+
+        Returns the member name node, the member record and a failure
+        reason. When the object's declared type is not a contract kind —
+        a struct, enum, elementary type, mapping or array — the triple
+        carries no record and no reason: builtin members (`.length`,
+        `.balance`) and struct fields stay unmodeled rather than being
+        guessed, so the member position keeps its pre-existing opaque
+        treatment.
+        """
+        member = node.child_by_field_name("property")
+        if member is None or member.type != "identifier":
+            return None, None, None
+        name = self.text(member)
+        obj = self._unwrap(node.child_by_field_name("object"))
+        if obj is None:
+            return member, None, None
+        text = self.text(obj)
+        if obj.type == "identifier" and text == "super":
+            owner = self.current_contract
+            if owner is not None:
+                # `super` resolves among every contract after this one
+                # in the C3 linearization: private members are invisible
+                # to derived contracts and skipped, overridden
+                # same-signature definitions drop out, a lone surviving
+                # signature binds to the most derived definition, and a
+                # mixed-signature overload set stays opaque. The DFS
+                # layer walk would emit a base's ancestors before a
+                # sibling base under diamonds, so the merge has to be
+                # done explicitly.
+                saw_private = False
+                functions: list[_Record] = []
+                for base in self._linearized_bases(owner):
+                    records = self._matching_records(
+                        base.scope.records.get(name, []),
+                        base.body.start_byte,
+                        "value",
+                    )
+                    visible = [
+                        record
+                        for record in records
+                        if record.visibility != "private"
+                    ]
+                    saw_private = saw_private or len(visible) < len(records)
+                    if not visible:
+                        continue
+                    if any(
+                        record.binding.kind != "function"
+                        for record in visible
+                    ):
+                        if functions:
+                            break
+                        record, reason = self._choose(visible)
+                        return member, record, reason
+                    functions.extend(visible)
+                functions = self._drop_overridden_functions(functions)
+                if len(functions) == 1:
+                    return member, functions[0], None
+                if functions:
+                    # Same signature in several unrelated bases resolves
+                    # to the most derived, the first in linearization
+                    # order; differing signatures — or any signature the
+                    # scanner could not pin down — form an overload set
+                    # the call resolves against, which stays opaque.
+                    signatures = {
+                        record.parameter_signature for record in functions
+                    }
+                    if len(signatures) == 1 and None not in signatures:
+                        return member, functions[0], None
+                    return member, None, "ambiguous_overload"
+                if saw_private:
+                    return member, None, "private_base_member"
+            return member, None, None
+        contract = None
+        inside_owner = False
+        if obj.type == "identifier" and text == "this":
+            contract = self.current_contract
+            inside_owner = True
+        elif obj.type == "identifier":
+            record, _reason = self._lookup(text, obj.start_byte, "value")
+            if record is None:
+                record, _reason = self._lookup(text, obj.start_byte, "type")
+            if record is not None:
+                if record.binding.kind in {"contract", "interface", "library"}:
+                    contract = self.contracts.get(record.binding.name)
+                else:
+                    fact = self._type_fact(
+                        record.type_node, record.owner, set()
+                    )
+                    # A qualified declared type `Lib.S` still roots at
+                    # `Lib`, so `fact.type_id` names the library, not the
+                    # struct — leave such member positions opaque rather
+                    # than binding fields to library-level declarations.
+                    if (
+                        fact.type_id is not None
+                        and record.type_node is not None
+                        and "." not in self.text(record.type_node)
+                    ):
+                        contract = next(
+                            (
+                                candidate
+                                for candidate in self.contracts.values()
+                                if candidate.record.binding.id == fact.type_id
+                            ),
+                            None,
+                        )
+        if contract is None:
+            return member, None, None
+        inside_owner = inside_owner or (
+            self.current_contract is not None
+            and contract is self.current_contract
+        )
+        record, reason = self._lookup_contract(
+            name,
+            contract,
+            member.start_byte,
+            "value",
+            allow_private_own=inside_owner,
+        )
+        return member, record, reason
 
     def _lookup(
         self, name: str, position: int, namespace: str = "value"
@@ -1155,6 +1281,11 @@ class _SolBindings:
         if kind == "member_expression":
             obj = node.child_by_field_name("object")
             self._expr(obj)
+            member, record, reason = self._resolve_member(node)
+            if member is not None and record is not None:
+                self._add_ref(member, record, "read")
+            elif member is not None and reason is not None:
+                self._add_unresolved(member, self.text(member), reason)
             return
         if kind == "array_access":
             self._expr(node.child_by_field_name("base"))
@@ -1535,6 +1666,57 @@ class _SolBindings:
                 )
         return layers
 
+    def _linearized_bases(self, contract: _Contract) -> list[_Contract]:
+        """C3 linearization of `contract`'s ancestors, most derived
+        first. Solidity lists direct bases most base-like first, so the
+        merge consumes them in reverse declaration order; unresolved or
+        already-visited contracts contribute nothing.
+        """
+        memo: dict[str, list[_Contract]] = {}
+
+        def linearize(owner: _Contract) -> list[_Contract]:
+            cached = memo.get(owner.record.binding.id)
+            if cached is not None:
+                return cached
+            sequences: list[list[_Contract]] = []
+            declared: list[_Contract] = []
+            for base_name, _base_node in reversed(owner.bases):
+                base = self.contracts.get(base_name)
+                if base is None:
+                    continue
+                sequences.append([base] + linearize(base))
+                declared.append(base)
+            sequences.append(declared)
+            merged: list[_Contract] = []
+            seen = {owner.record.binding.id}
+            pools = [list(sequence) for sequence in sequences]
+            while any(pools):
+                progressed = False
+                for pool in pools:
+                    if not pool:
+                        continue
+                    head = pool[0]
+                    if any(
+                        head is candidate
+                        for other in pools
+                        for candidate in other[1:]
+                    ):
+                        continue
+                    if head.record.binding.id not in seen:
+                        seen.add(head.record.binding.id)
+                        merged.append(head)
+                    for other in pools:
+                        if other and other[0] is head:
+                            other.pop(0)
+                    progressed = True
+                    break
+                if not progressed:
+                    break
+            memo[owner.record.binding.id] = merged
+            return merged
+
+        return linearize(contract)
+
     def _drop_overridden_functions(
         self, candidates: list[_Record]
     ) -> list[_Record]:
@@ -1604,13 +1786,56 @@ class _SolBindings:
         if callee.type == "member_expression":
             base = callee.child_by_field_name("object")
             self._expr(base)
+            member, record, reason = self._resolve_member(callee)
+            if member is None or (record is None and reason is None):
+                self.calls.append(
+                    Call(
+                        self.span(node),
+                        args,
+                        self.call_owner,
+                        "",
+                        "opaque_member",
+                    )
+                )
+                return
+            if record is None:
+                self._add_unresolved(member, self.text(member), reason)
+                self.calls.append(
+                    Call(
+                        self.span(node),
+                        args,
+                        self.call_owner,
+                        "",
+                        (
+                            "opaque_overload"
+                            if reason == "ambiguous_overload"
+                            else "unresolved"
+                        ),
+                    )
+                )
+                return
+            self._add_ref(member, record, "call")
+            binding_kind = record.binding.kind
+            if binding_kind == "function":
+                if has_options:
+                    call_kind = "opaque_call_options"
+                elif record.body is None:
+                    call_kind = "opaque_bodyless"
+                elif self._is_virtual_dispatch(record):
+                    call_kind = "opaque_virtual"
+                else:
+                    call_kind = "direct_local"
+            elif binding_kind in _FUNCTION_BINDINGS:
+                call_kind = "opaque_call_options" if has_options else "opaque_value"
+            else:
+                call_kind = "opaque_call_options" if has_options else "opaque_value"
             self.calls.append(
                 Call(
                     self.span(node),
                     args,
                     self.call_owner,
-                    "",
-                    "opaque_member",
+                    record.binding.id,
+                    call_kind,
                 )
             )
             return
