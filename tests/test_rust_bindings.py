@@ -329,14 +329,10 @@ def test_unresolved_range_path_bounds_are_not_bound(source, name, reason):
             None,
             "prelude_name",
         ),
-        (
-            "enum E { V(i32) } fn f(value:E){ match value { E::V(x) => x } }",
-            "E::V",
-            None,
-            "qualified_path",
-        ),
     ],
 )
+
+
 def test_pattern_constructor_paths_are_referenced_or_explicitly_unresolved(
     source, constructor, binding_kind, reason
 ):
@@ -349,6 +345,19 @@ def test_pattern_constructor_paths_are_referenced_or_explicitly_unresolved(
         if constructor == "Some" and "Ok(_)" in source:
             for name in ("Some", "Ok", "Err", "None"):
                 assert _unresolved(report, name, "prelude_name")
+
+
+def test_pattern_enum_variant_path_resolves_to_the_member():
+    source = "enum E { V(i32) } fn f(value:E){ match value { E::V(x) => x } }"
+    report = build_rust_bindings(source, pointer_width=64)
+    variant = _bindings(report, "V", "enum_member")[0]
+    assert any(
+        ref.binding_id == variant.id
+        and source[ref.span.start:ref.span.end] == "V"
+        and ref.span.start > source.index("match")
+        for ref in report.references
+    )
+    assert not _unresolved(report, "E::V", "qualified_path")
 
 
 def test_match_guards_resolve_inside_the_arm_after_pattern_bindings():
@@ -3342,3 +3351,142 @@ fn main() { g(); h(); }
         if b.name == "h" and b.kind == "function"
     )
     assert calls["h()"].target == h.id
+
+
+def test_match_enum_variant_payload_is_typed():
+    # `match e { E::C(p) => p.m() }` types `p` by the variant's
+    # declared payload.
+    source = """
+enum E { C(P), D }
+struct P;
+impl P { fn m(&self) {} }
+fn f(e: E) {
+    match e { E::C(p) => p.m(), E::D => {} }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = _bindings(report, "m", "associated_function")[0]
+    call = _call(report, source, "p.m()")
+    assert call.target == method.id
+
+
+def test_let_condition_variant_payload_is_typed():
+    source = """
+enum E { C(P), D }
+struct P;
+impl P { fn m(&self) {} }
+fn f(e: E) {
+    if let E::C(p) = e { p.m(); }
+    while let E::C(q) = e { q.m(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = _bindings(report, "m", "associated_function")[0]
+    for text in ("p.m()", "q.m()"):
+        assert _call(report, source, text).target == method.id
+
+
+def test_match_named_variant_fields_are_typed():
+    source = """
+enum E { D { x: P } }
+struct P;
+impl P { fn m(&self) {} }
+fn f(e: E) {
+    match e { E::D { x } => x.m(), E::D { x: q } => q.m() }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = _bindings(report, "m", "associated_function")[0]
+    for text in ("x.m()", "q.m()"):
+        assert _call(report, source, text).target == method.id
+
+
+def test_struct_pattern_fields_are_typed():
+    source = """
+struct W { p: P }
+struct P;
+impl P { fn m(&self) {} }
+fn f(w: W) {
+    let W { p } = w;
+    p.m();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = _bindings(report, "m", "associated_function")[0]
+    assert _call(report, source, "p.m()").target == method.id
+
+
+def test_pattern_head_must_name_the_scrutinee():
+    # A pattern naming another type does not type its names by the
+    # scrutinee — `p` stays unpinned.
+    source = """
+enum E { C(P), D }
+enum F { G(P) }
+struct P;
+impl P { fn m(&self) {} }
+fn f(e: E) {
+    match e { F::G(p) => p.m(), _ => {} }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    assert _call(report, source, "p.m()").target == ""
+
+
+def test_generic_scrutinee_substitutes_field_types():
+    source = """
+struct W<T> { f: T }
+struct P;
+impl P { fn m(&self) {} }
+fn f(w: W<P>) {
+    match w { W { f } => f.m() }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = _bindings(report, "m", "associated_function")[0]
+    assert _call(report, source, "f.m()").target == method.id
+
+
+def test_prelude_variant_payload_stays_opaque():
+    # `Option`'s variants are prelude names — `Some(p)` leaves `p`
+    # unpinned rather than guessing a payload type.
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn f(o: Option<P>) {
+    match o { Some(p) => p.m(), None => {} }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    assert _call(report, source, "p.m()").target == ""
+
+
+def test_reference_and_cast_receivers_are_typed():
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn f(v: Vec<P>, x: u32) {
+    let p = &v[0];
+    p.m();
+    let q = x as P;
+    q.m();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = _bindings(report, "m", "associated_function")[0]
+    assert _call(report, source, "p.m()").target == method.id
+    assert _call(report, source, "q.m()").target == method.id
+
+
+def test_variant_constructor_initializer_types_the_binding():
+    source = """
+enum E { C(P), F }
+struct P;
+impl P { fn m(&self) {} }
+fn f() {
+    let e = E::C(P);
+    match e { E::C(p) => p.m(), E::F => {} }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = _bindings(report, "m", "associated_function")[0]
+    assert _call(report, source, "p.m()").target == method.id
