@@ -213,14 +213,16 @@ acceptance is unchanged.
 ### C04 effective dispatch enforcement in schedule records
 
 Each dispatched schedule entry has an additive `enforcement` object with
-`environment` (`inherited` or `minimal`), `network` (`permitted`,
-`isolated` or `unenforced`), `filesystem` (`permitted`, `isolated` or
-`unenforced`), `process_spawn` (`permitted`, `isolated` or `unenforced`) and
-`memory_bound_mb` (an integer or `null`). It reports what the runner was
-asked to apply; `unenforced` means the host lacks the corresponding network
-namespace, read-only mount or seccomp boundary. `filesystem.read` remains
-declared-only. This is not a sandbox or Evidence and does not change
-selection.
+the following keys in serialization order: `environment` (`inherited` or
+`minimal`), `network`, `filesystem_write`, `filesystem_read`,
+`process_spawn` (each `permitted`, `isolated` or `unenforced`), and
+`memory_bound_mb` (a positive integer or `null`). `filesystem.read` is `permitted`
+when declared and policy-allowed, `isolated` when not permitted and Landlock
+read isolation is enforceable, and otherwise `unenforced`; the recorded
+isolation value is the same one passed to dispatch. `not_dispatched` entries
+keep `enforcement: null`. The object reports what the runner was asked to
+apply; `unenforced` means the host lacks the corresponding isolation
+boundary. This is not a sandbox or Evidence and does not change selection.
 
 ### C04 permission enforcement for availability probes
 
