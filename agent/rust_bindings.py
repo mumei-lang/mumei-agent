@@ -2939,28 +2939,6 @@ class _RustBindings:
                                     element = self._qualified_spelling(
                                         element, arg_pos
                                     )
-                                    bare = re.sub(
-                                        r"\b(?:[A-Za-z_]\w*::)+"
-                                        r"[A-Za-z_]\w*",
-                                        "",
-                                        element,
-                                    )
-                                    if not self._spelling_scope_stable(
-                                        bare,
-                                        arg_pos,
-                                        node.start_byte,
-                                    ):
-                                        # A name that has no
-                                        # `crate::` path (a
-                                        # function-local type)
-                                        # stays bare and would
-                                        # re-resolve to a
-                                        # same-named type at the
-                                        # call site — leave the
-                                        # payload opaque rather
-                                        # than bind the wrong
-                                        # record.
-                                        return None, None
                     if element:
                         return None, prefix + element
                 if (
@@ -3305,6 +3283,20 @@ class _RustBindings:
                 return self._receiver_annotation_position(
                     callee.child_by_field_name("value")
                 )
+            if callee is not None and callee.type == "identifier":
+                # `let u = g()` — `u`'s spelled names were written in
+                # `g`'s return annotation.
+                record = self._through_import(
+                    self._lookup(
+                        self._normalize_identifier(self.text(callee)),
+                        callee.start_byte,
+                        "value",
+                    ),
+                    callee.start_byte,
+                    "value",
+                )
+                if record is not None and record.type_node is not None:
+                    return record.type_node.start_byte
             return None
         if node.type != "identifier":
             return None

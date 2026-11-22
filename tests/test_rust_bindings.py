@@ -6262,3 +6262,36 @@ fn g() {
     p2m = _bindings(report, "p2m", "associated_function")[0]
     targets = [c.target for c in report.calls]
     assert p2m.id in targets
+
+
+
+def test_option_and_keeps_the_option_head_when_scopes_differ():
+    source = """
+mod m { pub struct Q; impl Q { pub fn qm(&self) {} } }
+use m::Q;
+fn g() -> Option<Q> { None }
+fn f(o: Option<Q>) {
+    struct Q;
+    impl Q { fn is_some(&self) -> bool { true } }
+    let u = g();
+    o.and(u).is_some();
+    match o.and(u) { Some(q) => q.qm(), _ => () }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    qm = _bindings(report, "qm", "associated_function")[0]
+    local_is_some = next(
+        b
+        for b in _bindings(report, "is_some", "associated_function")
+        if b.span.start > source.index("struct Q;\n    impl Q { fn is_some")
+    )
+    raw = source.encode()
+    calls = {
+        raw[call.span.start:call.span.end].decode(): call.target
+        for call in report.calls
+    }
+    # Option::is_some is prelude — the local Q::is_some must not win.
+    assert calls["o.and(u).is_some()"] != local_is_some.id
+    # The payload still resolves in `u`'s scope — `q` is `m::Q`.
+    assert calls["q.qm()"] == qm.id
+
