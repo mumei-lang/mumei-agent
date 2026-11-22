@@ -139,6 +139,9 @@ class _Scope:
     function_id: str
     bindings: dict[str, list["_Record"]] = field(default_factory=dict)
     glob_import: bool = False
+    # Module paths pulled in by `use m::*` — names not bound directly
+    # resolve against the modules' declared items.
+    glob_imports: list[str] = field(default_factory=list)
     ambiguous_names: dict[str, tuple[int, int]] = field(default_factory=dict)
 
 
@@ -525,6 +528,8 @@ class _RustBindings:
         for name_node, is_glob, bound_name in self._use_names(node):
             if is_glob:
                 scope.glob_import = True
+                if bound_name:
+                    scope.glob_imports.append(bound_name)
                 self.gaps.append(Gap("glob_import", self.span(node)))
                 continue
             record = self._make_record(
@@ -769,7 +774,10 @@ class _RustBindings:
                 if alias is not None:
                     out.append((alias, False, self.text(alias)))
             elif tree.type in {"use_wildcard", "wildcard_pattern"} or self.text(tree).endswith("*"):
-                out.append((tree, True, None))
+                path = self.text(tree).removesuffix("*").removesuffix("::")
+                out.append(
+                    (tree, True, "::".join(prefix + (path,)) if prefix else path)
+                )
             elif tree.type == "self":
                 out.append((tree, False, prefix[-1] if prefix else "self"))
             else:
@@ -1293,6 +1301,32 @@ class _RustBindings:
             parts = self._type_arg_list(args)
             args = parts[-1] if parts else None
         return (None if record is None else record.binding.id), args
+
+    def _lookup_module_path(
+        self, path: str, position: int
+    ) -> "_Record | None":
+        """Module record of a `use` path — `a::b` walks the module
+        chain through each member's body scope."""
+        module = None
+        for segment in path.split("::"):
+            if module is None:
+                module = self._lookup_module(segment, position)
+            else:
+                if module.module_scope is None:
+                    return None
+                module = next(
+                    (
+                        record
+                        for record in reversed(
+                            module.module_scope.bindings.get(segment, ())
+                        )
+                        if record.binding.kind == "module"
+                    ),
+                    None,
+                )
+            if module is None:
+                return None
+        return module
 
     def _lookup_module(self, name: str, position: int) -> "_Record | None":
         name = self._normalize_identifier(name)
@@ -2656,7 +2690,33 @@ class _RustBindings:
             if ambiguous is not None and ambiguous[0] <= position < ambiguous[1]:
                 return None, "unknown_name"
             if scope.glob_import:
-                return None, "glob_import"
+                # A glob's names live at this scope — they resolve
+                # before the walk moves outward, and an unresolvable
+                # module keeps the lookup honest (its contents are
+                # unknown, so the name is not trusted).
+                found = None
+                ambiguous_glob = False
+                unresolvable = False
+                for path in scope.glob_imports:
+                    module = self._lookup_module_path(path, position)
+                    if module is None or module.module_scope is None:
+                        unresolvable = True
+                        continue
+                    for record in reversed(
+                        module.module_scope.bindings.get(name, ())
+                    ):
+                        if not self._in_namespace(record, namespace):
+                            continue
+                        if found is not None and found is not record:
+                            ambiguous_glob = True
+                            break
+                        found = record
+                    if ambiguous_glob:
+                        break
+                if ambiguous_glob or unresolvable:
+                    return None, "glob_import"
+                if found is not None:
+                    return found, None
         return None, blocked
 
     def _lookup(self, name: str, position: int, namespace: str) -> _Record | None:

@@ -3202,3 +3202,63 @@ fn g() { A::m(&a); }
             if source[c.span.start:c.span.end] == text
         )
         assert call.target == method.id
+
+
+def test_glob_import_resolves_module_items():
+    # `use m::*` exposes `m`'s items — a type annotation and a call
+    # resolve to the module's declared bindings.
+    source = """
+mod m {
+    pub struct P;
+    pub fn go() {}
+}
+use m::*;
+fn f() { let v: P = P; go(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    struct_p = next(
+        b for b in report.bindings if b.name == "P" and b.kind == "struct"
+    )
+    go = next(
+        b for b in report.bindings if b.name == "go" and b.kind == "function"
+    )
+    refs = _refs(report, source, "P")
+    assert any(ref.binding_id == struct_p.id for ref in refs)
+    call = _call(report, source, "go()")
+    assert call.target == go.id
+
+
+def test_glob_import_ambiguity_stays_unresolved():
+    # Two glob-imported modules exporting the same name is ambiguous —
+    # the name does not silently resolve to either.
+    source = """
+mod a { pub struct P; }
+mod b { pub struct P; }
+use a::*;
+use b::*;
+fn f() { let v: P = P; }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    refs = _refs(report, source, "P")
+    assert not any(
+        ref.binding_id
+        in {b.id for b in report.bindings if b.name == "P"}
+        for ref in refs
+    )
+
+
+def test_local_binding_shadows_glob_import():
+    # An explicit local `P` wins over `use m::*`'s `P`.
+    source = """
+mod m { pub struct P; }
+use m::*;
+struct P;
+fn f() { let v: P = P; }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    local_p = next(
+        b for b in report.bindings
+        if b.name == "P" and b.span.start == source.rindex("struct P") + 7
+    )
+    refs = _refs(report, source, "P")
+    assert any(ref.binding_id == local_p.id for ref in refs)
