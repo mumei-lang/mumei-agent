@@ -6159,6 +6159,24 @@ def test_interface_field_store_local_composite(go_types_helper):
     assert result.return_dependencies == frozenset({0})
 
 
+def test_interface_field_bare_read(go_types_helper):
+    # `v := p.I` binds the interface value the field slot tracks —
+    # the read carries the root's accumulated write deps plus every
+    # indirect store, so `v.M()` dispatches with p's deps.
+    declarations = (
+        "type I interface{ M() int64 }\n"
+        "type S struct{ I I }\n"
+        "func F(p *S, e I) int64 {\n"
+        "\tp.I = e\n"
+        "\tv := p.I\n"
+        "\treturn v.M()\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+
+
 @pytest.mark.parametrize(
     ("declarations", "expected"),
     [
@@ -6822,14 +6840,16 @@ def test_interface_collection_bound_local_store(go_types_helper):
             "\treturn t\n"
             "}\n"
         ),
-        # `p.I` — an interface-typed field is still closed on the
-        # bare read path (dispatch `p.I.M()` is supported).
+        # `f := p.I.M` — a method value on the interface-typed
+        # field stays closed: the bound-method record needs the
+        # receiver as a binding, and `p.I` names a field slot
+        # (bare reads `v := p.I` and dispatch `p.I.M()` work).
         (
             "type I interface{ M() int64 }\n"
             "type S struct{ I I }\n"
             "func F(p *S) int64 {\n"
-            "\tv := p.I\n"
-            "\treturn v.M()\n"
+            "\tf := p.I.M\n"
+            "\treturn f()\n"
             "}\n"
         ),
         # `p.W.I` — an interface field nested behind a

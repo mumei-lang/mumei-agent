@@ -7436,7 +7436,9 @@ class _Builder:
         through its own `import` reference to a scalar-or-pointer
         `var` member, like the imported-struct-var path — or, for a
         package-local struct type, through the field's `local`
-        reference to its `scope`-less `variable` binding. Only when
+        reference to its `scope`-less `variable` binding. An
+        interface-typed leaf also resolves — `v := p.I` binds the
+        interface value the field's slot tracks. Only when
         `intermediate=True` may a named struct-valued field also be
         returned, so recursive selection can pin its type identity;
         anonymous struct fields and intermediates under generic
@@ -7466,7 +7468,7 @@ class _Builder:
             not in (
                 {"integer", "boolean", "pointer", "struct"}
                 if intermediate
-                else {"integer", "boolean", "pointer"}
+                else {"integer", "boolean", "pointer", "interface"}
             )
             or field_member.type.kind == "struct"
             and not field_member.type.type_id
@@ -16147,6 +16149,24 @@ class _Builder:
                         )
                         is not None
                     )
+                    and not (
+                        # `v := p.I` — an interface-typed field
+                        # reached through a bound pointer binds
+                        # like `v := i` too: the read carries the
+                        # root's accumulated write deps plus every
+                        # indirect store.
+                        len(lefts) == len(rights)
+                        and (
+                            _iface_field := (
+                                self._bound_field_read(
+                                    rights[i], locals_, params
+                                )
+                            )
+                        )
+                        is not None
+                        and _iface_field[1].type is not None
+                        and _iface_field[1].type.kind == "interface"
+                    )
                 ):
                     raise _Unsupported("binding_unavailable", _span(node))
                 if binding.type.kind == "interface":
@@ -17001,10 +17021,26 @@ class _Builder:
                         )
                         if (
                             rhs is None
-                            or self._interface_value_binding(
-                                rhs, params, locals_
+                            or (
+                                self._interface_value_binding(
+                                    rhs, params, locals_
+                                )
+                                is None
+                                and not (
+                                    (
+                                        _var_iface_field := (
+                                            self._bound_field_read(
+                                                rhs, locals_, params
+                                            )
+                                        )
+                                    )
+                                    is not None
+                                    and _var_iface_field[1].type
+                                    is not None
+                                    and _var_iface_field[1].type.kind
+                                    == "interface"
+                                )
                             )
-                            is None
                         ):
                             raise _Unsupported(
                                 "binding_unavailable", _span(spec)
