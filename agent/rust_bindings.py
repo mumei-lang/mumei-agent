@@ -4075,7 +4075,7 @@ class _RustBindings:
                             "as_ref", "as_mut",
                             "as_deref", "as_deref_mut",
                             "as_deref_err", "as_deref_mut_err",
-                            "inspect", "inspect_err",
+                            "inspect", "inspect_ok", "inspect_err",
                         }
                         and receiver[1] is not None
                     ):
@@ -4165,12 +4165,13 @@ class _RustBindings:
                                 )
                             return None, None
                         if (
-                            method_name in {"inspect", "inspect_err"}
+                            method_name
+                            in {"inspect", "inspect_ok", "inspect_err"}
                             and head == "Result"
                             and len(recv_args) == 2
                         ):
-                            # `r.inspect(f)`/`r.inspect_err(f)` yield
-                            # the receiver unchanged — `Result<T, E>`.
+                            # `r.inspect*(f)` yields the receiver
+                            # unchanged — `Result<T, E>`.
                             return (
                                 None,
                                 "Result<{}>".format(receiver[1]),

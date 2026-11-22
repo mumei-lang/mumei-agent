@@ -7999,3 +7999,23 @@ fn f(v: Vec<P>, l: std::collections::LinkedList<P>, m: std::collections::BTreeMa
     assert bound.get("ge.pm()") == pm.id
     # A map names no `splice` — stays opaque.
     assert not bound.get("ve.pm()")
+def test_result_inspect_ok_keeps_the_payload():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(r: Result<P, u8>) {
+    let a = r.inspect_ok(|x| {});
+    if let Ok(p) = a { p.pm(); }
+    let b = r.inspect(|x| {});
+    if let Ok(q) = b { q.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    assert bound.get("p.pm()") == pm.id
+    assert bound.get("q.pm()") == pm.id
