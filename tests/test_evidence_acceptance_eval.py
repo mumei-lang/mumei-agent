@@ -210,6 +210,28 @@ def test_native_observation_route_extra_fields(tmp_path):
     assert evaluation["descriptor_match"] is True
 
 
+def test_native_observation_extras_accept_per_channel_checks(tmp_path):
+    # The per-channel routes (accept-exit-status/-stdout/-stderr) run
+    # the same bounded envelope but report only their own channel check
+    # — each one alone admits the observation extras.
+    for check in (
+        "os_exit_status_observation",
+        "os_stdout_observation",
+        "os_stderr_observation",
+        "runtime_observation_semantics",
+    ):
+        evaluation = evaluate_core_acceptance(
+            _descriptor(
+                schema_version=_NATIVE,
+                checks_performed=[check],
+                invocation=_observation_invocation(),
+                host=_observation_host(),
+                pin_envelope="unrecorded",
+            )
+        )
+        assert evaluation["descriptor_match"] is True, check
+
+
 def test_native_observation_extras_require_performed_check(tmp_path):
     # Core only emits the observation pins when it performed
     # runtime_observation_semantics — pins without that check do not
