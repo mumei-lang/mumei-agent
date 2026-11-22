@@ -2775,6 +2775,22 @@ class _RustBindings:
                         )
                     )
                     kind = "opaque_method"
+                elif field_node is not None:
+                    field_member = self._field_member(
+                        inner, ("struct_field",)
+                    )
+                    if field_member is not None:
+                        self.references.append(
+                            Reference(
+                                self.span(field_node),
+                                field_member.binding.id,
+                                "read",
+                            )
+                        )
+                        target = field_member.binding.id
+                        kind = "opaque_value"
+                    else:
+                        kind = "opaque_method"
                 else:
                     kind = "opaque_method"
             elif inner is not None and inner.type in {
@@ -2867,6 +2883,22 @@ class _RustBindings:
                     )
                 )
                 kind = "opaque_method"
+            elif field_node is not None:
+                field_member = self._field_member(
+                    callee, ("struct_field",)
+                )
+                if field_member is not None:
+                    self.references.append(
+                        Reference(
+                            self.span(field_node),
+                            field_member.binding.id,
+                            "read",
+                        )
+                    )
+                    target = field_member.binding.id
+                    kind = "opaque_value"
+                else:
+                    kind = "opaque_method"
             else:
                 kind = "opaque_method"
         elif callee is not None:

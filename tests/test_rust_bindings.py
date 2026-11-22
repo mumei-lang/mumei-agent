@@ -2537,3 +2537,22 @@ fn f() { <P as T>::other(); }
     report = build_rust_bindings(source, pointer_width=64)
     call = _call(report, source, "<P as T>::other()")
     assert call.kind == "opaque_path"
+
+
+def test_function_pointer_field_call_records_field_read():
+    source = """
+struct P { callback: fn() }
+fn f() { let p: P; (p.callback)(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    field = _bindings(report, "callback", "struct_field")[0]
+    call = _call(report, source, "(p.callback)()")
+    assert call.kind == "opaque_value"
+    assert call.target == field.id
+    field_refs = [
+        r
+        for r in report.references
+        if r.binding_id == field.id and r.kind == "read"
+    ]
+    assert len(field_refs) == 1
+    assert source[field_refs[0].span.start : field_refs[0].span.end] == "callback"
