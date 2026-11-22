@@ -1822,12 +1822,12 @@ fn f(q @ P{x}: P) { q.x; }
 
 
 def test_ref_pattern_binding_is_not_the_annotated_type():
-    # `ref x: i32` binds `x: &i32` — the annotation must not be
-    # reported as `x`'s type.
-    source = "fn f(ref x: i32) {}"
+    # `ref p: P` binds `p: &P` — the annotation must not be
+    # reported as `p`'s type.
+    source = "struct P {} fn f(ref p: P) {}"
     report = build_rust_bindings(source, pointer_width=64)
-    x = _bindings(report, "x", "parameter")[0]
-    assert x.type.kind != "named"
+    p = _bindings(report, "p", "parameter")[0]
+    assert p.type.kind == "unknown"
 
 
 def test_member_captured_pattern_inner_name_stays_opaque():
