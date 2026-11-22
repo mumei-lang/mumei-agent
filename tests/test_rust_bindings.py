@@ -1775,3 +1775,61 @@ fn f() { let q: &P = &P { x: 0 }; q.x; }
         if r.kind == "read" and source[r.span.start : r.span.end] == "x"
     )
     assert read.binding_id == field.id
+
+
+def test_member_receiver_prefers_field_over_same_named_method():
+    # `a.b.hit()` reads field `b` (type B), not method `b() -> C`.
+    source = """
+struct A { b: B }
+impl A { fn b(&self) -> C { C } }
+struct B;
+impl B { fn hit(&self) {} }
+struct C;
+fn f(a: &A) { a.b.hit(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    hit = _bindings(report, "hit", "associated_function")[0]
+    call = _call(report, source, "a.b.hit()")
+    assert call.target == hit.id
+    assert call.kind == "direct_local"
+
+
+def test_member_self_call_in_specialized_impl():
+    source = """
+struct W<T>(T);
+impl W<i32> { fn inner(&self) {} fn outer(&self) { self.inner(); } }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    inner = _bindings(report, "inner", "associated_function")[0]
+    call = _call(report, source, "self.inner()")
+    assert call.target == inner.id
+    assert call.kind == "direct_local"
+
+
+def test_member_ref_and_captured_patterns_keep_annotation():
+    source = """
+struct P { x: i32 }
+fn f(ref p: P, q @ P{x}: P) { p.x; q.x; }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    field = _bindings(report, "x", "struct_field")[0]
+    reads = [
+        r
+        for r in report.references
+        if r.kind == "read" and source[r.span.start - 1 : r.span.end] == ".x"
+    ]
+    assert [r.binding_id == field.id for r in reads] == [True, True]
+
+
+def test_member_captured_pattern_inner_name_stays_opaque():
+    source = """
+struct P { inner: i32 }
+impl P { fn n(&self) {} }
+fn f(q @ P{inner}: P) { inner.n(); q.n(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    n = _bindings(report, "n", "associated_function")[0]
+    inner_call = _call(report, source, "inner.n()")
+    q_call = _call(report, source, "q.n()")
+    assert inner_call.kind == "opaque_method"
+    assert q_call.target == n.id

@@ -150,6 +150,9 @@ class _Record:
     # The impl block itself is generic (`impl<T> Wrap<T>`) — its
     # members apply to every instantiation.
     member_impl_generic: bool = False
+    # The impl block's own `type` node — the declared type `self`
+    # parameters inside it refer to (keeps generic args).
+    self_type_node: Any = None
 
 
 class _RustBindings:
@@ -791,11 +794,13 @@ class _RustBindings:
                 member_of = None
                 member_args = None
                 member_generic = False
+                member_type_node = None
                 if node.type == "impl_item":
                     self._generic_references(node.child_by_field_name("type"))
                     if node.child_by_field_name("trait") is None:
+                        member_type_node = node.child_by_field_name("type")
                         member_of, member_args = self._annotation_type(
-                            node.child_by_field_name("type")
+                            member_type_node
                         )
                         member_generic = (
                             node.child_by_field_name("type_parameters")
@@ -809,6 +814,9 @@ class _RustBindings:
                         member_of,
                         member_args,
                         member_generic,
+                        member_type_node
+                        if node.type == "impl_item"
+                        else None,
                     )
             finally:
                 self.in_extern = old_extern
@@ -1008,7 +1016,9 @@ class _RustBindings:
                 return None, None
             return self._record_type(record, node.start_byte)
         if node.type == "field_expression":
-            member = self._field_member(node)
+            member = self._field_member(
+                node, ("struct_field", "associated_const")
+            )
             if member is None:
                 return None, None
             return self._record_type(member, node.start_byte)
@@ -1059,6 +1069,7 @@ class _RustBindings:
         member_of: str | None = None,
         member_impl_args: str | None = None,
         member_impl_generic: bool = False,
+        member_type_node: Any = None,
     ) -> None:
         children = self._children(body)
         # Predeclare members so a body earlier in the block can call a
@@ -1088,6 +1099,7 @@ class _RustBindings:
                 record.member_of = member_of
                 record.member_impl_args = member_impl_args
                 record.member_impl_generic = member_impl_generic
+                record.self_type_node = member_type_node
                 self._function_records[record.binding.id] = record
                 predeclared[node.id] = record
             elif node.type == "const_item":
@@ -1271,6 +1283,7 @@ class _RustBindings:
                 self_node, "self_parameter", body_span, self.current_function,
                 self.module_depth, item=False, mutable=mutable,
                 type_fact=self_type,
+                type_node=None if owner is None else owner.self_type_node,
             )
             self._add_to_scope(scope, record)
             return [record.binding.id]
@@ -1286,19 +1299,11 @@ class _RustBindings:
         pattern = node.child_by_field_name("pattern")
         annotation = node.child_by_field_name("type")
         self._generic_references(annotation)
-        # Destructured names (`P { inner }: P`) are not the annotated
-        # type — withholding the annotation keeps member resolution
-        # honest instead of binding `inner.m()` to `P::m`.
-        plain_pattern = pattern is None or pattern.type in {
-            "identifier",
-            "mutable_specifier",
-            "reference_pattern",
-        }
-        fact = (
-            _UNKNOWN
-            if annotation is None or not plain_pattern
-            else self._type_fact(annotation)
-        )
+        # Only names bound to the whole matched value carry the
+        # annotation — destructured names (`P { inner }: P`) get
+        # `_UNKNOWN` so `inner.m()` does not bind `P`'s members.
+        whole_names = self._whole_pattern_names(pattern)
+        fact = _UNKNOWN if annotation is None else self._type_fact(annotation)
         identifiers = []
         names = self._pattern_names(pattern, scope)
         mutable_specifier = any(
@@ -1306,6 +1311,7 @@ class _RustBindings:
         )
         names = self._apply_outer_mutability(names, pattern, mutable_specifier)
         for name_node, name_mutable in names:
+            whole = name_node.id in whole_names
             record = self._make_record(
                 name_node,
                 "parameter",
@@ -1313,9 +1319,9 @@ class _RustBindings:
                 self.current_function,
                 self.module_depth,
                 item=False,
-                type_fact=fact,
+                type_fact=fact if whole else _UNKNOWN,
                 mutable=name_mutable,
-                type_node=annotation if plain_pattern else None,
+                type_node=annotation if whole else None,
             )
             self._add_to_scope(scope, record)
             identifiers.append(record.binding.id)
@@ -1364,6 +1370,27 @@ class _RustBindings:
             if text[0] == "f" and text[1:].isdigit():
                 return TypeFact("float", text, int(text[1:]), None, "")
         return _UNKNOWN
+
+    def _whole_pattern_names(self, pattern: Any | None) -> set[int]:
+        """Name-node ids bound to the whole matched value.
+
+        `identifier`/`mut x`/`&x`/`ref x` bind the value under that
+        name; `x @ P { .. }` binds `x` to the whole value while nested
+        names only see their fields."""
+        if pattern is None:
+            return set()
+        if pattern.type == "identifier":
+            return {pattern.id}
+        if pattern.type in {
+            "mutable_specifier",
+            "reference_pattern",
+            "ref_pattern",
+            "captured_pattern",
+        }:
+            for child in self._children(pattern):
+                if child.type == "identifier":
+                    return {child.id}
+        return set()
 
     def _pattern_names(
         self, pattern: Any | None, scope: _Scope, mutable: bool = False
@@ -1695,16 +1722,8 @@ class _RustBindings:
         if value is not None:
             self._expr(value)
         self._generic_references(annotation)
-        plain_pattern = pattern is None or pattern.type in {
-            "identifier",
-            "mutable_specifier",
-            "reference_pattern",
-        }
-        fact = (
-            _UNKNOWN
-            if annotation is None or not plain_pattern
-            else self._type_fact(annotation)
-        )
+        whole_names = self._whole_pattern_names(pattern)
+        fact = _UNKNOWN if annotation is None else self._type_fact(annotation)
         alternative = node.child_by_field_name("alternative")
         if alternative is not None:
             self._expr(alternative)
@@ -1716,6 +1735,7 @@ class _RustBindings:
             names, pattern, mutable_specifier
         )
         for name_node, name_mutable in names:
+            whole = name_node.id in whole_names
             record = self._make_record(
                 name_node,
                 "local",
@@ -1723,9 +1743,9 @@ class _RustBindings:
                 self.current_function,
                 self.module_depth,
                 item=False,
-                type_fact=fact,
+                type_fact=fact if whole else _UNKNOWN,
                 mutable=name_mutable,
-                type_node=annotation if plain_pattern else None,
+                type_node=annotation if whole else None,
             )
             self._add_to_scope(scope, record)
 
