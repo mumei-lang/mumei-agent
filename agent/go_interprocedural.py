@@ -35112,6 +35112,14 @@ class _Builder:
             root_type is not None and root_type.kind in {"slice", "map"}
         ):
             self._store_call_writes([root], stored, locals_, params)
+            if (
+                explicit_address
+                and final_type is not None
+                and final_type.kind == "pointer"
+            ):
+                self._fold_pointer_call_writes(
+                    stored, locals_, params
+                )
             return
 
         self._store(locals_, params, root_id, stored, True)

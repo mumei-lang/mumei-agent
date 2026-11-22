@@ -50297,6 +50297,11 @@ def _addressable_import_result(helper, body, *, declared=None):
             {0, 1},
         ),
         (
+            "func F(x, z int64) int64 { w := z; p := &w; "
+            "b := []*int64{p}; lib.FillPP(&b[0], x); return w }",
+            {0, 1},
+        ),
+        (
             "type O struct { t lib.T }; func F(z, x int64) int64 { o := O{t: lib.T{V: z}}; o.t.Set(x); return o.t.Get() }",
             {0, 1},
         ),
