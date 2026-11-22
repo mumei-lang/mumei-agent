@@ -9421,3 +9421,44 @@ uniswap-contracts / lighthouse / grin / tidb / bsc-genesis-contract / world-chai
   でも走れることが要件。既定 OFF + docs 明記が正しい結論と評価。
 - **ローカル LLM 選定の profile 化 — ✅ Implemented**（#586、`a68b09a2`）:
   `MUMEI_LLM_PROFILE`（local-small / local-large preset）、`LLM_MODEL` 等の env は優先。
+
+## C11 evidence-acceptance-eval: conjunctive requirement-list acceptance の fold — ✅ Implemented
+
+canonical 上位ロードマップは mumei `docs/CROSS_PROJECT_ROADMAP.md` の C11
+（Evidence acceptance と attempt binding）。本節はその agent 側 fold の
+継続スライスであり、canonical contract に従属する。
+
+`evidence-acceptance-eval` はこれまで `mumei.source-evidence-acceptance/v1` と
+`mumei.native-evidence-acceptance/v1` の flat 記述子だけを受理し、Core
+`evidence accept --requirement-list`（および `evidence-check-schedule
+--promote` エクスポート）が emit する conjunctive
+`mumei.evidence-requirement-list-acceptance/v1` は foreign document として
+`descriptor_match: false` に落ちていた — 自分で書き出した promotable 記述子を
+自分の eval fold が読めない非対称。本スライスで fold を拡張した。
+
+**実装エビデンス**:
+
+1. **closed-shape の第二メンバー** — `agent/core_evidence.py` の
+   `evaluate_core_acceptance` が conjunctive 記述子を独自の閉じた形状で判定する
+   （`_requirement_list_acceptance_match`）。`verdict ∈ {accepted, rejected,
+   inconclusive}` が `accepted` Boolean の代わりになり、評価の `accepted` は
+   `verdict == "accepted"` のときだけ立つ。`requirements` / `records` /
+   `checks` / `conflicts` の入れ子も Core が emit する同一形状まで検証し、
+   未知フィールド・欠落フィールド・型違いは全て match=false。
+2. **pin と evidence schema の整合** — `evidence_fingerprint` は
+   `mumei.verification-evidence/v1`、`list_fingerprint` は
+   `mumei.verification-evidence-list/v1` と必ずペア。両方存在・両方欠落・
+   pin/schema の組合せ違いは foreign document であって別解釈ではない。
+3. **attempt binding は pin 非依存** — `attempt_bound` は引き続き
+   `evidence_fingerprint` との指紋一致のみ。list-pinned 記述子は単一レコードの
+   attempt にバインドできず `attempt_bound: false` と正直に報告する（エラーでは
+   ない）。`_BINDING_CARRIERS` にも conjunctive スキーマを `evidence_fingerprint`
+   carrier として登録し、`binding-eval` の `shared:` bind-path がそのまま解決する
+   （list-pinned は carrier 不在で fail-closed）。
+4. **read bound の引き上げ** — conjunctive 記述子は per-requirement per-record の
+   結果を繰り返すため Core 側で 4 MiB 上限（`MAX_ACCEPTANCE_DESCRIPTOR_BYTES`）。
+   `evidence-acceptance-eval` と `binding-eval` の読み取り上限を同じ 4 MiB に揃えた。
+   verdict 昇格・Core チェック・新しい claim は一切追加しない representation-level
+   の拡張であり、`checks_not_performed` は不変。
+
+**回帰ゲート**: `uv run pytest tests/test_evidence_acceptance_eval.py tests/test_binding_eval.py tests/test_contract_vocabulary.py tests/test_mcp_evidence_tools.py -q`

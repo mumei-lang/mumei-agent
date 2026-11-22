@@ -1,0 +1,85 @@
+{
+  "acceptance": "evaluated",
+  "checks_not_performed": [
+    "claim_truth",
+    "producer_authenticity",
+    "historical_execution",
+    "record_freshness",
+    "independent_model_correspondence",
+    "artifact_semantics",
+    "tool_execution",
+    "grade_promotion"
+  ],
+  "checks_performed": [
+    "representation_gate",
+    "declared_requirement_normalization",
+    "cross_record_pin_agreement",
+    "conjunctive_requirement_fold"
+  ],
+  "conflict_count": 0,
+  "conflicts": [],
+  "consistent": true,
+  "evidence_fingerprint": "dc74ee138631dedb75dcab78dc5727b031e512a3833537085bd20b6b8fbac615",
+  "evidence_schema_version": "mumei.verification-evidence/v1",
+  "records_evaluated": 1,
+  "requirement_list_fingerprint": "9e9ed8cb165be813570045faf68ce3ec75a0e8b0569dbb3406c7914870f3725c",
+  "requirement_schema_version": "mumei.evidence-requirement-list/v1",
+  "requirements": [
+    {
+      "index": 0,
+      "records": [
+        {
+          "checks": [
+            {
+              "name": "subject_pin",
+              "outcome": "passed"
+            },
+            {
+              "name": "obligation_pin",
+              "outcome": "passed"
+            },
+            {
+              "name": "profile_pin",
+              "outcome": "passed"
+            },
+            {
+              "name": "integer_model_pin",
+              "outcome": "passed"
+            },
+            {
+              "name": "execution_completed",
+              "outcome": "passed"
+            },
+            {
+              "name": "result_polarity",
+              "outcome": "passed"
+            },
+            {
+              "name": "method_sufficient",
+              "outcome": "passed"
+            },
+            {
+              "name": "scope_sufficient",
+              "outcome": "passed"
+            },
+            {
+              "name": "correspondence_status",
+              "outcome": "passed"
+            },
+            {
+              "name": "excluded_assumptions",
+              "outcome": "passed"
+            }
+          ],
+          "index": 0,
+          "verdict": "accepted"
+        }
+      ],
+      "requirement_fingerprint": "a1b604e45b3e4d93fccd20ee6116415c7dfc1311733d6c7d1eba1ea490e1c483",
+      "verdict": "accepted"
+    }
+  ],
+  "requirements_evaluated": 1,
+  "schema_version": "mumei.evidence-requirement-list-acceptance/v1",
+  "verdict": "accepted"
+}

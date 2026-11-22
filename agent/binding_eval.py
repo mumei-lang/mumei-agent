@@ -25,9 +25,15 @@ import json
 import sys
 from pathlib import Path
 
-from agent.core_evidence import evaluate_evidence_binding
+from agent.core_evidence import (
+    MAX_ACCEPTANCE_DESCRIPTOR_BYTES,
+    evaluate_evidence_binding,
+)
 
-MAX_DOCUMENT_BYTES = 1024 * 1024
+# The conjunctive acceptance descriptor — a subject-bearing carrier —
+# repeats per-requirement per-record outcomes, so the document bound
+# follows Core's 4 MiB acceptance-descriptor cap.
+MAX_DOCUMENT_BYTES = MAX_ACCEPTANCE_DESCRIPTOR_BYTES
 
 
 def build_eval_parser(parser: argparse.ArgumentParser) -> None:

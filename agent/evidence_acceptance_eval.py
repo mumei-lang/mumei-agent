@@ -1,12 +1,14 @@
 """C11 Core-acceptance fold route: evaluate a Core acceptance descriptor.
 
 `evidence-acceptance-eval` is a consumer route: it restores one declared
-Core acceptance descriptor (`mumei.source-evidence-acceptance/v1` or
-`mumei.native-evidence-acceptance/v1`, emitted by the Core `accept-*`
-commands) and emits `mumei.core-acceptance-evaluation/v1` — whether the
-document is a closed-shape member of the known descriptor family
-(`descriptor_match`) and whether it is `accepted` (matching AND the
-descriptor itself declared `accepted: true`).
+Core acceptance descriptor (`mumei.source-evidence-acceptance/v1`,
+`mumei.native-evidence-acceptance/v1`, or the conjunctive
+`mumei.evidence-requirement-list-acceptance/v1`, emitted by the Core
+`accept-*` commands) and emits `mumei.core-acceptance-evaluation/v1` —
+whether the document is a closed-shape member of the known descriptor
+family (`descriptor_match`) and whether it is `accepted` (matching AND
+the descriptor itself declared `accepted: true`, or
+`verdict: "accepted"` on the conjunctive shape).
 
 Representation-level evaluation only: the route performs no Core check,
 no fresh query and no semantic evaluation — `checks_not_performed` names
@@ -27,9 +29,15 @@ import json
 import sys
 from pathlib import Path
 
-from agent.core_evidence import evaluate_core_acceptance
+from agent.core_evidence import (
+    MAX_ACCEPTANCE_DESCRIPTOR_BYTES,
+    evaluate_core_acceptance,
+)
 
-MAX_DESCRIPTOR_BYTES = 1024 * 1024
+# The conjunctive descriptor repeats per-requirement per-record check
+# outcomes, so the read bound follows Core's 4 MiB acceptance-descriptor
+# cap rather than the flat family's smaller envelope.
+MAX_DESCRIPTOR_BYTES = MAX_ACCEPTANCE_DESCRIPTOR_BYTES
 
 
 def build_eval_parser(parser: argparse.ArgumentParser) -> None:
@@ -38,8 +46,9 @@ def build_eval_parser(parser: argparse.ArgumentParser) -> None:
         required=True,
         metavar="PATH",
         help="Declared Core acceptance descriptor JSON "
-        "(mumei.source-evidence-acceptance/v1 or "
-        "mumei.native-evidence-acceptance/v1).",
+        "(mumei.source-evidence-acceptance/v1, "
+        "mumei.native-evidence-acceptance/v1 or "
+        "mumei.evidence-requirement-list-acceptance/v1)."
     )
     parser.add_argument(
         "--expected-fingerprint",

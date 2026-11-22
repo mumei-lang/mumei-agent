@@ -642,6 +642,44 @@ _CORE_ACCEPTANCE_REQUIRED_FIELDS = frozenset(
 # Optional descriptor fields Core may emit on top of the required shape.
 _CORE_ACCEPTANCE_OPTIONAL_FIELDS = frozenset({"evidence_fingerprint"})
 
+# The conjunctive promotable descriptor Core `evidence accept
+# --requirement-list` emits: same `acceptance: "evaluated"` convention,
+# but the accepted claim is `verdict` and the evidence pin is exactly
+# one of `evidence_fingerprint` (a single record) or `list_fingerprint`
+# (a record list), paired with the matching `evidence_schema_version`.
+REQUIREMENT_LIST_ACCEPTANCE_SCHEMA = (
+    "mumei.evidence-requirement-list-acceptance/v1"
+)
+
+_REQUIREMENT_LIST_ACCEPTANCE_REQUIRED_FIELDS = frozenset(
+    {
+        "schema_version",
+        "acceptance",
+        "verdict",
+        "requirement_schema_version",
+        "requirement_list_fingerprint",
+        "evidence_schema_version",
+        "consistent",
+        "conflict_count",
+        "conflicts",
+        "requirements_evaluated",
+        "records_evaluated",
+        "requirements",
+        "checks_performed",
+        "checks_not_performed",
+    }
+)
+
+# Which `evidence_schema_version` each pin field must pair with — the
+# pin and the schema name the same conjunctive input, so a mismatched
+# pair is a foreign document, not a different opinion.
+_REQUIREMENT_LIST_ACCEPTANCE_PIN_SCHEMAS = {
+    "evidence_fingerprint": "mumei.verification-evidence/v1",
+    "list_fingerprint": "mumei.verification-evidence-list/v1",
+}
+
+_ACCEPTANCE_VERDICTS = frozenset({"accepted", "rejected", "inconclusive"})
+
 
 def _string_list(value: object) -> bool:
     return type(value) is list and all(type(item) is str for item in value)
@@ -652,6 +690,109 @@ def _is_fingerprint(value: object) -> bool:
         type(value) is str
         and len(value) == 64
         and all(char in "0123456789abcdef" for char in value)
+    )
+
+
+def _nonnegative_int(value: object) -> bool:
+    return type(value) is int and value >= 0
+
+
+def _verdict(value: object) -> bool:
+    return type(value) is str and value in _ACCEPTANCE_VERDICTS
+
+
+def _acceptance_check_match(value: object) -> bool:
+    return (
+        type(value) is dict
+        and frozenset(value) == frozenset({"name", "outcome"})
+        and type(value["name"]) is str
+        and type(value["outcome"]) is str
+    )
+
+
+def _acceptance_record_match(value: object) -> bool:
+    return (
+        type(value) is dict
+        and frozenset(value) == frozenset({"index", "verdict", "checks"})
+        and _nonnegative_int(value["index"])
+        and _verdict(value["verdict"])
+        and type(value["checks"]) is list
+        and all(
+            _acceptance_check_match(check) for check in value["checks"]
+        )
+    )
+
+
+def _acceptance_requirement_match(value: object) -> bool:
+    return (
+        type(value) is dict
+        and frozenset(value)
+        == frozenset(
+            {"index", "requirement_fingerprint", "verdict", "records"}
+        )
+        and _nonnegative_int(value["index"])
+        and _is_fingerprint(value["requirement_fingerprint"])
+        and _verdict(value["verdict"])
+        and type(value["records"]) is list
+        and all(
+            _acceptance_record_match(record)
+            for record in value["records"]
+        )
+    )
+
+
+def _consistency_conflict_match(value: object) -> bool:
+    return (
+        type(value) is dict
+        and frozenset(value) == frozenset({"index_a", "index_b", "field"})
+        and _nonnegative_int(value["index_a"])
+        and _nonnegative_int(value["index_b"])
+        and type(value["field"]) is str
+    )
+
+
+def _requirement_list_acceptance_match(descriptor: dict) -> bool:
+    """Closed-shape membership for the conjunctive acceptance descriptor.
+
+    Exactly one pin field is required and must pair with the matching
+    `evidence_schema_version`; the nested `requirements`/`records`/
+    `checks`/`conflicts` bodies are validated to the same closed shape
+    Core emits, so a foreign or malformed document never matches."""
+    fields = frozenset(descriptor)
+    pins = fields & frozenset(_REQUIREMENT_LIST_ACCEPTANCE_PIN_SCHEMAS)
+    return (
+        _REQUIREMENT_LIST_ACCEPTANCE_REQUIRED_FIELDS <= fields
+        and fields
+        <= _REQUIREMENT_LIST_ACCEPTANCE_REQUIRED_FIELDS
+        | frozenset(_REQUIREMENT_LIST_ACCEPTANCE_PIN_SCHEMAS)
+        and len(pins) == 1
+        and descriptor["schema_version"] == (
+            REQUIREMENT_LIST_ACCEPTANCE_SCHEMA
+        )
+        and descriptor["acceptance"] == "evaluated"
+        and _verdict(descriptor["verdict"])
+        and descriptor["requirement_schema_version"]
+        == "mumei.evidence-requirement-list/v1"
+        and _is_fingerprint(descriptor["requirement_list_fingerprint"])
+        and descriptor["evidence_schema_version"]
+        == _REQUIREMENT_LIST_ACCEPTANCE_PIN_SCHEMAS[next(iter(pins))]
+        and _is_fingerprint(descriptor[next(iter(pins))])
+        and type(descriptor["consistent"]) is bool
+        and _nonnegative_int(descriptor["conflict_count"])
+        and type(descriptor["conflicts"]) is list
+        and all(
+            _consistency_conflict_match(conflict)
+            for conflict in descriptor["conflicts"]
+        )
+        and _nonnegative_int(descriptor["requirements_evaluated"])
+        and _nonnegative_int(descriptor["records_evaluated"])
+        and type(descriptor["requirements"]) is list
+        and all(
+            _acceptance_requirement_match(requirement)
+            for requirement in descriptor["requirements"]
+        )
+        and _string_list(descriptor["checks_performed"])
+        and _string_list(descriptor["checks_not_performed"])
     )
 
 
@@ -689,35 +830,59 @@ def evaluate_core_acceptance(
     fingerprint equality says the descriptor and the caller pin the
     same record bytes, not that the descriptor was produced for this
     attempt (`descriptor_authenticity` and
-    `unperformed_check_recovery` stay unperformed)."""
+    `unperformed_check_recovery` stay unperformed).
+
+    The conjunctive `mumei.evidence-requirement-list-acceptance/v1`
+    descriptor (Core `evidence accept --requirement-list`, exported by
+    `evidence-check-schedule --promote`) is a second member of the
+    family with its own closed shape: `verdict` replaces the Boolean
+    `accepted` (`accepted` in the evaluation holds only for
+    `verdict == "accepted"`), and exactly one pin field names the
+    evaluated input — `evidence_fingerprint` pairs with
+    `mumei.verification-evidence/v1`, `list_fingerprint` with
+    `mumei.verification-evidence-list/v1`. `attempt_bound` still
+    compares `expected_fingerprint` to `evidence_fingerprint`, so a
+    list-pinned descriptor honestly reports `attempt_bound: false` —
+    it pins record-list bytes, not one record."""
     if type(descriptor) is not dict:
         raise ValueError("unsupported core acceptance evaluation request")
     if expected_fingerprint is not None and not _is_fingerprint(
         expected_fingerprint
     ):
         raise ValueError("invalid expected evidence fingerprint")
-    fields = frozenset(descriptor)
-    match = (
-        _CORE_ACCEPTANCE_REQUIRED_FIELDS <= fields
-        and fields <= _CORE_ACCEPTANCE_REQUIRED_FIELDS | _CORE_ACCEPTANCE_OPTIONAL_FIELDS
-        and type(descriptor["schema_version"]) is str
-        and descriptor["schema_version"] in CORE_ACCEPTANCE_SCHEMAS
-        and type(descriptor["acceptance"]) is str
-        and descriptor["acceptance"] == "evaluated"
-        and type(descriptor["accepted"]) is bool
-        and type(descriptor["scope"]) is str
-        and descriptor["scope"] != ""
-        and _string_list(descriptor["checks_performed"])
-        and _string_list(descriptor["checks_not_performed"])
-        and (
-            "evidence_fingerprint" not in descriptor
-            or _is_fingerprint(descriptor["evidence_fingerprint"])
+    conjunctive = descriptor.get("schema_version") == (
+        REQUIREMENT_LIST_ACCEPTANCE_SCHEMA
+    )
+    if conjunctive:
+        match = _requirement_list_acceptance_match(descriptor)
+    else:
+        fields = frozenset(descriptor)
+        match = (
+            _CORE_ACCEPTANCE_REQUIRED_FIELDS <= fields
+            and fields <= _CORE_ACCEPTANCE_REQUIRED_FIELDS | _CORE_ACCEPTANCE_OPTIONAL_FIELDS
+            and type(descriptor["schema_version"]) is str
+            and descriptor["schema_version"] in CORE_ACCEPTANCE_SCHEMAS
+            and type(descriptor["acceptance"]) is str
+            and descriptor["acceptance"] == "evaluated"
+            and type(descriptor["accepted"]) is bool
+            and type(descriptor["scope"]) is str
+            and descriptor["scope"] != ""
+            and _string_list(descriptor["checks_performed"])
+            and _string_list(descriptor["checks_not_performed"])
+            and (
+                "evidence_fingerprint" not in descriptor
+                or _is_fingerprint(descriptor["evidence_fingerprint"])
+            )
         )
+    declared_accepted = (
+        descriptor.get("verdict") == "accepted"
+        if conjunctive
+        else descriptor.get("accepted") is True
     )
     evaluation = {
         "schema_version": "mumei.core-acceptance-evaluation/v1",
         "descriptor_match": match,
-        "accepted": match and descriptor["accepted"],
+        "accepted": match and declared_accepted,
         "checks_not_performed": [
             "attempt_binding",
             "descriptor_authenticity",
@@ -1467,6 +1632,11 @@ _BINDING_CARRIERS: dict = {
     PRODUCER_SIGNATURE_SCHEMA: "subject_digest",
     "mumei.source-evidence-acceptance/v1": "evidence_fingerprint",
     "mumei.native-evidence-acceptance/v1": "evidence_fingerprint",
+    # The conjunctive acceptance descriptor pins `evidence_fingerprint`
+    # when it evaluates a single record; a list-pinned descriptor
+    # carries `list_fingerprint` instead and so binds no single record —
+    # a missing carrier is an honest miss, never an error.
+    REQUIREMENT_LIST_ACCEPTANCE_SCHEMA: "evidence_fingerprint",
     # `recheck-source --json` emits the same binding convention — the
     # diagnostic stays anonymous and non-reusable, but its fingerprint
     # pins the consistency verdict to the record it was derived from.
