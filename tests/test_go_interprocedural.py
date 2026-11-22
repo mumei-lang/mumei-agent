@@ -1510,7 +1510,7 @@ def test_unused_argument_is_still_evaluated_for_unsupported_effects(go_types_hel
 def test_opaque_callee_blocks_callers_but_not_an_unrelated_function(go_types_helper):
     data = unit(
         go_types_helper,
-        "func Bad(x int64)int64{defer func(){}(); return x}; func F(x int64)int64{return Bad(x)}; func Good(x int64)int64{return x}",
+        "func Bad(x int64)int64{go func(){}(); return x}; func F(x int64)int64{return Bad(x)}; func Good(x int64)int64{return x}",
     )
     assert not named(*data).available
     assert named(*data, "Good").available
@@ -7427,7 +7427,7 @@ def test_interface_method_value_binding_pins_stale_dependents(
             "type I interface{ M(int64) int64 }\n"
             "func F(i I, x int64) int64 { f := i.M; "
             "defer func() { f(x) }(); return 0 }",
-            "cfg_unavailable",
+            "unsupported_expression",
         ),
         (
             "type I interface{ M(int64) int64 }\n"
@@ -43601,6 +43601,174 @@ def test_defer_statement_admitted(go_types_helper):
     assert result.available and result.return_dependencies == frozenset({0})
 
 
+@pytest.mark.parametrize(
+    ("literal", "bound", "expected"),
+    [
+        (
+            "func Literal(x int64) (r int64) { "
+            "defer func() { r = x }(); return 0 }",
+            "func Bound(x int64) (r int64) { "
+            "g := func() { r = x }; defer g(); return 0 }",
+            frozenset({0}),
+        ),
+        (
+            "func Literal(x int64) (r int64) { "
+            "y := int64(0); defer func() { r = y }(); "
+            "y = x; return 0 }",
+            "func Bound(x int64) (r int64) { "
+            "y := int64(0); g := func() { r = y }; defer g(); "
+            "y = x; return 0 }",
+            frozenset({0}),
+        ),
+        (
+            "func Literal(x, z int64) (r int64) { "
+            "defer func(v int64) { r = v }(x); "
+            "x = z; return 0 }",
+            "func Bound(x, z int64) (r int64) { "
+            "g := func(v int64) { r = v }; defer g(x); "
+            "x = z; return 0 }",
+            frozenset({0}),
+        ),
+        (
+            "func Literal(x int64) int64 { "
+            "y := int64(0); defer func() { y = x }(); return y }",
+            "func Bound(x int64) int64 { "
+            "y := int64(0); g := func() { y = x }; defer g(); "
+            "return y }",
+            frozenset({0}),
+        ),
+        (
+            "func Literal(x int64) (r int64) { "
+            "defer func() { r += x }(); return 5 }",
+            "func Bound(x int64) (r int64) { "
+            "g := func() { r += x }; defer g(); return 5 }",
+            frozenset({0}),
+        ),
+        (
+            "func Literal(x int64) (r int64) { "
+            "p := &r; defer func() { *p = x }(); return 0 }",
+            "func Bound(x int64) (r int64) { "
+            "p := &r; g := func() { *p = x }; defer g(); return 0 }",
+            frozenset({0}),
+        ),
+        (
+            "func Literal(x int64) (r int64) { "
+            "var y int64; defer func() { r = y }(); "
+            "defer func() { y = x }(); return 0 }",
+            "func Bound(x int64) (r int64) { "
+            "var y int64; g := func() { r = y }; "
+            "h := func() { y = x }; defer g(); defer h(); return 0 }",
+            frozenset({0}),
+        ),
+        (
+            "func Literal(x, z int64) (r int64) { "
+            "var y int64; if x > 0 { defer func() { r = y }() }; "
+            "y = z; return 0 }",
+            "func Bound(x, z int64) (r int64) { "
+            "var y int64; g := func() { r = y }; "
+            "if x > 0 { defer g() }; y = z; return 0 }",
+            None,
+        ),
+        (
+            "func Literal(x int64) (r int64) { "
+            "var y int64; for i := 0; i < 1; i++ { "
+            "defer func() { r = y }() }; y = x; return 0 }",
+            "func Bound(x int64) (r int64) { "
+            "var y int64; g := func() { r = y }; "
+            "for i := 0; i < 1; i++ { defer g() }; "
+            "y = x; return 0 }",
+            frozenset({0}),
+        ),
+        (
+            "func Literal(x int64) (r int64) { "
+            "defer (func() { r = x })(); return 0 }",
+            "func Bound(x int64) (r int64) { "
+            "g := func() { r = x }; defer g(); return 0 }",
+            frozenset({0}),
+        ),
+    ],
+    ids=[
+        "named-result",
+        "exit-state-capture",
+        "defer-time-arguments",
+        "local-write",
+        "compound-write",
+        "pointer-capture",
+        "two-defers",
+        "if",
+        "loop",
+        "parenthesized",
+    ],
+)
+def test_deferred_func_literal_matches_bound_closure(
+    go_types_helper, literal, bound, expected
+):
+    source, snapshot, summaries = unit(
+        go_types_helper, f"{literal}\n{bound}"
+    )
+    immediate = named(source, snapshot, summaries, "Literal")
+    bound_result = named(source, snapshot, summaries, "Bound")
+    assert immediate.available, immediate.gaps
+    assert bound_result.available, bound_result.gaps
+    assert immediate.return_dependencies == bound_result.return_dependencies
+    assert immediate.effects == bound_result.effects
+    if expected is not None:
+        assert immediate.return_dependencies == expected
+
+
+def test_deferred_func_literal_closed_controls(go_types_helper):
+    source, snapshot, summaries = unit(
+        go_types_helper,
+        "var PackageValue int64\n"
+        "func Sink(x int64) {}\n"
+        "func GoLiteral(x int64) int64 { "
+        "go func() { _ = x }(); return x }\n"
+        "func DeferredAndGoLiteral(x int64) (r int64) { "
+        "defer func() { r = x }(); go func() {}(); return 0 }\n"
+        "func SendInLiteral(x int64) int64 { "
+        "ch := make(chan int64, 1); "
+        "defer func() { ch <- x }(); return x }\n"
+        "func NestedDeferInLiteral(x int64) int64 { "
+        "defer func() { defer Sink(x) }(); return x }\n"
+        "func NestedGoInLiteral(x int64) int64 { "
+        "defer func() { go Sink(x) }(); return x }\n"
+        "func PackageWriteInLiteral(x int64) int64 { "
+        "defer func() { PackageValue = x }(); return x }\n",
+    )
+    results = {
+        name: named(source, snapshot, summaries, name)
+        for name in (
+            "GoLiteral",
+            "DeferredAndGoLiteral",
+            "SendInLiteral",
+            "NestedDeferInLiteral",
+            "NestedGoInLiteral",
+            "PackageWriteInLiteral",
+        )
+    }
+    assert not results["GoLiteral"].available
+    assert any(
+        gap.reason == "cfg_unavailable"
+        for gap in results["GoLiteral"].gaps
+    )
+    assert not results["DeferredAndGoLiteral"].available
+    assert any(
+        gap.reason == "cfg_unavailable"
+        for gap in results["DeferredAndGoLiteral"].gaps
+    )
+    for name in (
+        "SendInLiteral",
+        "NestedDeferInLiteral",
+        "NestedGoInLiteral",
+        "PackageWriteInLiteral",
+    ):
+        assert not results[name].available, (name, results[name].gaps)
+    assert any(
+        gap.reason == "binding_unavailable"
+        for gap in results["PackageWriteInLiteral"].gaps
+    )
+
+
 def test_go_pure_callee_admitted(go_types_helper):
     source, snapshot, summaries = unit(
         go_types_helper,
@@ -44809,7 +44977,7 @@ def test_func_result_direct_call_inner_closed_stays_closed(
     # cannot evaluate, so the outer call fails closed through it.
     source, snapshot, summaries = unit(
         go_types_helper,
-        "func mk() func() int64 { defer func(){}(); return nil }; "
+        "func mk() func() int64 { go func(){}(); return nil }; "
         "func F(x int64) int64 { return mk()() }",
     )
     result = named(source, snapshot, summaries)
