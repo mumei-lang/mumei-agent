@@ -4339,7 +4339,13 @@ dependency like `p.V` does for one member, so `return *p` reports
 way `q := o` copies a value parameter's: scalar members read the
 parameter's dep, collection members alias the pointee's backing
 tokens (an over-report on divergence is sound, matching the value
-copy).
+copy). One level deeper, `(*pp)` on an unreseated `**S` parameter
+is the same caller-shared root one pointer level down — `(*pp).V`,
+`(*pp).A[i]`, `(*pp).M[k]`, `(*pp).W.f` and stores through them
+resolve like the `*S` versions, and `pp = qq` reseats through the
+same alias path — while a store into the middle pointer
+(`*pp = r`) reseats the `*S` value the caller sees, so the binding
+is marked dirty and every later `(*pp)` root stays closed.
 
 A *scalar-payload channel element* admits the same conflated way
 — `s := []chan int64{c}`, `var m map[K]chan int64 = {...}` bind
