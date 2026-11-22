@@ -1188,11 +1188,19 @@ class B extends Lib.Inner.Base { run(): void { this.m(); } }
 def test_member_declaration_merging_namespace_and_class():
     source = """
 namespace Lib {
-    export namespace Inner { export function viaNs(): void {} }
     export class Inner { static run(): void {} inst(): void {} }
+    export namespace Inner { export function viaNs(): void {} }
+}
+namespace Lib {
+    export namespace Inner2 { export function viaNs2(): void {} }
+}
+namespace Lib {
+    export class Inner2 { static run2(): void {} }
 }
 Lib.Inner.run();
 Lib.Inner.viaNs();
+Lib.Inner2.run2();
+Lib.Inner2.viaNs2();
 const i = new Lib.Inner();
 i.inst();
 """
@@ -1205,8 +1213,12 @@ i.inst();
     kinds = {c.kind for c in report.calls}
     assert "direct_local" in kinds
     targets = {c.target for c in report.calls}
+    run2 = _member_bindings(report, "run2", "associated_function")[0]
+    via_ns2 = _member_bindings(report, "viaNs2", "function")[0]
     assert run.id in targets
     assert via_ns.id in targets
+    assert run2.id in targets
+    assert via_ns2.id in targets
     assert inst_ids & targets
     news = [c for c in report.calls if c.kind == "opaque_new"]
     inner = _member_bindings(report, "Inner", "class")[0]

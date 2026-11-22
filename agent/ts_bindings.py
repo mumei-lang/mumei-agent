@@ -86,6 +86,7 @@ class _Record:
     member_of: int | None = None
     member_static: bool = False
     member_visibility: str = "public"
+    member_container: str | None = None
 
 
 @dataclass
@@ -1003,6 +1004,9 @@ class _TypeScriptBindings:
                     member_record.member_of = decl.id
                     member_record.member_static = is_static
                     member_record.member_visibility = visibility
+                    member_record.member_container = (
+                        self._decl_qualified_name(decl)
+                    )
             elif decl.type == "internal_module":
                 for other in self.records:
                     if other is record or other.member_of is not None:
@@ -1037,6 +1041,9 @@ class _TypeScriptBindings:
                         # Namespace members sit on the namespace object —
                         # treat them as static for call-kind selection.
                         other.member_static = True
+                        other.member_container = (
+                            self._decl_qualified_name(decl)
+                        )
 
     def _type_record_by_id(self, binding_id_value: str) -> _Record | None:
         for record in self.records:
@@ -1086,18 +1093,13 @@ class _TypeScriptBindings:
         queue = [type_record]
         # Declaration merging: a namespace may merge with a class,
         # interface or enum of the same name in the same container, so
-        # the siblings' members merge into a single type.
-        for sibling in self.records:
-            if (
-                sibling is not type_record
-                and sibling.member_of == type_record.member_of
-                and sibling.binding.name == type_record.binding.name
-                and (
-                    sibling.member_of is not None
-                    or sibling.binding.scope == type_record.binding.scope
-                )
-            ):
-                queue.append(sibling)
+        # the siblings' members merge into a single type. A merged
+        # namespace only augments the static side — instance lookups
+        # skip it.
+        for sibling in self._merge_siblings(type_record):
+            if not static and sibling.binding.kind == "namespace":
+                continue
+            queue.append(sibling)
         visited: set[str] = set()
         seed_ids = {record.binding.id for record in queue}
         while queue:
@@ -1267,9 +1269,7 @@ class _TypeScriptBindings:
                     self.text(constructor), init_position, "type"
                 )
             if constructor.type == "member_expression":
-                property_node = constructor.child_by_field_name(
-                    "property"
-                )
+                property_node = constructor.child_by_field_name("property")
                 if property_node is None:
                     return None
                 resolved = self._resolve_member(
@@ -1286,20 +1286,57 @@ class _TypeScriptBindings:
         finally:
             self._initializer_active.discard(record.binding.id)
 
-    def _merged_constructible(self, record: _Record) -> _Record:
-        """Prefer the class-like sibling of a merged declaration."""
-        if record.class_like:
-            return record
+    def _decl_qualified_name(self, decl: Any) -> str:
+        """Dotted name of a declaration, climbing `internal_module`s."""
+        parts = []
+        node = decl
+        while node is not None:
+            if node.type in {
+                "internal_module", "class_declaration",
+                "abstract_class_declaration", "interface_declaration",
+                "enum_declaration",
+            }:
+                name_node = node.child_by_field_name("name")
+                if name_node is not None:
+                    parts.insert(0, self.text(name_node))
+            node = node.parent
+        return ".".join(parts)
+
+    def _merge_siblings(self, record: _Record) -> list[_Record]:
+        """Same-named declarations that merge into `record`'s entity.
+
+        Siblings share a member container (a single namespace block, or
+        several same-named blocks — declaration merging works across
+        split `namespace N` declarations) or the same top-level scope.
+        """
+        siblings = []
         for sibling in self.records:
             if (
-                sibling.class_like
-                and sibling.member_of == record.member_of
-                and sibling.binding.name == record.binding.name
-                and (
-                    sibling.member_of is not None
-                    or sibling.binding.scope == record.binding.scope
-                )
+                sibling is record
+                or sibling.binding.name != record.binding.name
             ):
+                continue
+            if (
+                sibling.member_of is not None
+                and sibling.member_of == record.member_of
+            ) or (
+                sibling.member_container is not None
+                and sibling.member_container == record.member_container
+                and record.member_container is not None
+            ) or (
+                sibling.member_of is None
+                and record.member_of is None
+                and sibling.binding.scope == record.binding.scope
+            ):
+                siblings.append(sibling)
+        return siblings
+
+    def _merged_constructible(self, record: _Record) -> _Record:
+        """Prefer the `class` sibling of a merged declaration."""
+        if record.binding.kind == "class":
+            return record
+        for sibling in self._merge_siblings(record):
+            if sibling.binding.kind == "class":
                 return sibling
         return record
 
