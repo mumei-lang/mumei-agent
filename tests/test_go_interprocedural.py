@@ -6124,6 +6124,57 @@ def test_interface_field_dispatch(go_types_helper, declarations, expected):
     assert result.return_dependencies == expected
 
 
+def test_interface_field_store_then_dispatch(go_types_helper):
+    # `p.I = e` — a store into the interface field lands `e`'s
+    # deps in the base's slot, and the later `p.I.M()` receiver
+    # observes them through the field's conflated deps.
+    declarations = (
+        "type I interface{ M() int64 }\n"
+        "type S struct{ I I }\n"
+        "func F(p *S, e I) int64 {\n"
+        "\tp.I = e\n"
+        "\treturn p.I.M()\n"
+        "}\n"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+@pytest.mark.parametrize(
+    ("declarations", "expected"),
+    [
+        # `p.A[k].I.M()` — the receiver's own index chain
+        # evaluates: `k`'s dep reaches the result.
+        (
+            "type I interface{ M() int64 }\n"
+            "type T struct{ I I }\n"
+            "type S struct{ A []T }\n"
+            "func F(p *S, k int64) int64 { return p.A[k].I.M() }\n",
+            frozenset({0, 1}),
+        ),
+        # `p.A[k].B[j].I.M()` — both inner indexes evaluate in
+        # evaluation order.
+        (
+            "type I interface{ M() int64 }\n"
+            "type B struct{ I I }\n"
+            "type T struct{ B []B }\n"
+            "type S struct{ A []T }\n"
+            "func F(p *S, k int64, j int64) int64 {\n"
+            "\treturn p.A[k].B[j].I.M()\n"
+            "}\n",
+            frozenset({0, 1, 2}),
+        ),
+    ],
+)
+def test_interface_field_dispatch_indexed_receiver(
+    go_types_helper, declarations, expected
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available, result.gaps
+    assert result.return_dependencies == expected
+
+
 @pytest.mark.parametrize(
     ("declarations", "reason"),
     [
@@ -6763,16 +6814,14 @@ def test_interface_collection_bound_local_store(go_types_helper):
             "\treturn v.M()\n"
             "}\n"
         ),
-        # `p.I = e` — a store into an interface-typed field: the
-        # interface-value store gate admits only `_`, index and
-        # identifier LHSs, so the selector stays unmodelled.
+        # `p.W.I` — an interface field nested behind a
+        # pointer-typed member stays closed (the receiver chain
+        # crosses a pointer the slot model cannot identify).
         (
             "type I interface{ M() int64 }\n"
-            "type S struct{ I I }\n"
-            "func F(p *S, e I) int64 {\n"
-            "\tp.I = e\n"
-            "\treturn 0\n"
-            "}\n"
+            "type P struct{ I I }\n"
+            "type S struct{ W *P }\n"
+            "func F(p *S) int64 { return p.W.I.M() }\n"
         ),
         # `x[i] = e` — a store into a bare `[]I` binding that has
         # no tracked backing: `var x []I` never joined a share

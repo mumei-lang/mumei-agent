@@ -18466,6 +18466,39 @@ class _Builder:
                             # has no tracked backing and stays
                             # closed.
                             pass
+                        elif (
+                            lhs.type
+                            in {
+                                "selector_expression",
+                                "field_expression",
+                            }
+                            and self._opaque_write_target(
+                                lhs, locals_, params
+                            )
+                            is not None
+                            and (
+                                (_iface_member := (
+                                    self._scalar_container_field(
+                                        lhs,
+                                        params,
+                                        for_write=True,
+                                        allow_struct_elements=True,
+                                        allow_interface_member=True,
+                                    )
+                                )[1])
+                                is not None
+                                and _iface_member.type is not None
+                                and _iface_member.type.kind
+                                == "interface"
+                            )
+                        ):
+                            # `p.I = e` — a store into an
+                            # interface-typed field: `t.f = v`'s
+                            # write path already folds the RHS deps
+                            # into the base's slot, so a later
+                            # `p.I.M()` observes them through the
+                            # field receiver's conflated deps.
+                            pass
                         else:
                             target_ref = (
                                 self.references.get(
@@ -18541,6 +18574,29 @@ class _Builder:
                             and value.type is not None
                             and value.type.kind == "interface"
                             for value in (field, member)
+                        ) and not (
+                            member is None
+                            and field is not None
+                            and field.type is not None
+                            and field.type.kind == "interface"
+                            and self._opaque_write_target(
+                                lhs, locals_, params
+                            )
+                            is not None
+                            and (
+                                _iface_w := (
+                                    self._scalar_container_field(
+                                        lhs,
+                                        params,
+                                        for_write=True,
+                                        allow_struct_elements=True,
+                                        allow_interface_member=True,
+                                    )
+                                )[1]
+                            )
+                            is not None
+                            and _iface_w.type is not None
+                            and _iface_w.type.kind == "interface"
                         ):
                             raise _Unsupported(
                                 "unsupported_statement", _span(node)
@@ -33935,6 +33991,55 @@ class _Builder:
                             )
                         )
                     ):
+                        # The receiver's own operand chain may
+                        # index (`p.A[k].I`) and nest (`p.W.I`):
+                        # every index evaluates like the element
+                        # receiver's, and every intermediate
+                        # member's declared identity pins so a
+                        # redeclared `W` stales this summary.
+                        chain_indexes: list[Any] = []
+                        cur = receiver_id.child_by_field_name(
+                            "operand"
+                        )
+                        while cur is not None:
+                            cur = self._strip_parens(cur)
+                            if cur is None:
+                                break
+                            if cur.type == "index_expression":
+                                chain_indexes.append(
+                                    cur.child_by_field_name(
+                                        "index"
+                                    )
+                                )
+                                cur = cur.child_by_field_name(
+                                    "operand"
+                                )
+                                continue
+                            if cur.type != "selector_expression":
+                                break
+                            chain_field = (
+                                cur.child_by_field_name("field")
+                            )
+                            chain_ref = (
+                                self.references.get(
+                                    self.node_key(chain_field)
+                                )
+                                if chain_field is not None
+                                else None
+                            )
+                            chain_member = self._field_identity(
+                                chain_ref
+                            )
+                            if (
+                                chain_member is not None
+                                and chain_member.type is not None
+                            ):
+                                self._pin_fact_identities(
+                                    chain_member.type
+                                )
+                            cur = cur.child_by_field_name(
+                                "operand"
+                            )
                         element_receiver = (
                             ptr_field_receiver[1],
                             ptr_field_receiver[0],
@@ -33943,7 +34048,7 @@ class _Builder:
                                 ptr_field_receiver[0],
                                 ptr_field_receiver[1].id,
                             ),
-                            [],
+                            chain_indexes,
                         )
                         self._pin_method_binding(function_node)
                         self._pin_fact_identities(
