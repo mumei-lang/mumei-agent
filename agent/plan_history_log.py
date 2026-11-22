@@ -247,6 +247,8 @@ def append_plan_history(path: str, plan: VerificationPlan) -> str:
                         raise OSError
                     remaining = remaining[written:]
                 os.fsync(file_fd)
+                if current_size == 0:
+                    _fsync_directory(history_path.parent)
             except BaseException:
                 try:
                     os.ftruncate(file_fd, current_size)
@@ -259,8 +261,6 @@ def append_plan_history(path: str, plan: VerificationPlan) -> str:
                 raise
             finally:
                 os.close(file_fd)
-            if current_size == 0:
-                _fsync_directory(history_path.parent)
             return digest
     except ValueError:
         raise

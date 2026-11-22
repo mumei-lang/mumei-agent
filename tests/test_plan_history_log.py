@@ -515,3 +515,21 @@ def test_empty_existing_log_directory_is_fsynced(tmp_path, monkeypatch):
     append_plan_history(str(path), _plan("adapter-empty-log"))
 
     assert calls == [tmp_path]
+
+
+def test_directory_fsync_failure_rolls_back_append(tmp_path, monkeypatch):
+    path = tmp_path / "history.jsonl"
+    path.write_bytes(b"")
+
+    def fail_directory_fsync(directory):
+        if directory == tmp_path:
+            raise OSError(errno.EIO, "directory fsync failed")
+
+    monkeypatch.setattr(
+        plan_history_log, "_fsync_directory", fail_directory_fsync
+    )
+
+    with pytest.raises(ValueError, match="I/O failed"):
+        append_plan_history(str(path), _plan("adapter-fsync-failure"))
+
+    assert path.read_bytes() == b""
