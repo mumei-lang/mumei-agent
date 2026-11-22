@@ -4295,8 +4295,14 @@ extraction model; pure array fields reached through an index stay
 closed. A *bare `*S` parameter root* is admitted the same way —
 `p.A[i].V`, `p.M[k].V`, `p.F[0]` slot on the parameter the way a
 slice shares its backing — while local pointer bindings (`q :=
-p`), reseats, `**S` roots, explicit `(*p)` derefs and pointer-typed
-fields remain closed.
+p`), reseats (`p = q`, tracked at assignment), `**S` roots,
+explicit `(*p)` derefs and pointer-typed fields remain closed. A
+store through the parameter lands in the caller's pointee, so the
+param joins the caller-visible set and a grown dep set emits the
+`caller-backing` transfer like a shared slice. Two `*S` parameters
+that alias the same struct are not tracked as one group — the same
+may-alias gap the model already accepts between two slice or map
+parameters.
 
 A *scalar-payload channel element* admits the same conflated way
 — `s := []chan int64{c}`, `var m map[K]chan int64 = {...}` bind

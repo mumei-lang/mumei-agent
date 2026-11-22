@@ -2428,6 +2428,8 @@ class _Builder:
                 or (
                     params is not None
                     and root_ref.binding_id in params
+                    and root_ref.binding_id
+                    not in self._pointer_param_reseats
                     and (
                         (root_binding := self.bindings.get(
                             root_ref.binding_id
@@ -2536,7 +2538,12 @@ class _Builder:
         if params is None or node is None or node.type != "identifier":
             return False
         ref = self.references.get(self.node_key(node))
-        if ref is None or ref.binding_id is None or ref.binding_id not in params:
+        if (
+            ref is None
+            or ref.binding_id is None
+            or ref.binding_id not in params
+            or ref.binding_id in self._pointer_param_reseats
+        ):
             return False
         binding = self.bindings.get(ref.binding_id)
         if (
@@ -14080,6 +14087,11 @@ class _Builder:
             and (
                 p.binding_id in shared_container_ids
                 or p.type.kind == "struct"
+                or (
+                    p.type.kind == "pointer"
+                    and getattr(p.type, "elem", None) is not None
+                    and p.type.elem.kind == "struct"
+                )
             )
         }
         # Anonymous-struct signature slots declare their fields
@@ -16891,6 +16903,19 @@ class _Builder:
                 or (len(lefts) != len(rights) and not multi)
             ):
                 raise _Unsupported("unsupported_statement", _span(node))
+            for lhs in lefts:
+                lhs_ref = (
+                    self.references.get(self.node_key(lhs))
+                    if lhs.type == "identifier"
+                    else None
+                )
+                if self._param_pointer_struct_root(lhs, params):
+                    # `p = q` reseats the `*S` param onto `q`'s
+                    # pointee — reads through it no longer name the
+                    # slot declared at entry, so the root closes.
+                    self._pointer_param_reseats.add(
+                        lhs_ref.binding_id
+                    )
             if not compound:
                 for index, rhs in enumerate(rights):
                     if self._local_chan_chan_id(rhs) is None:
