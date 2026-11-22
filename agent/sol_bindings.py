@@ -702,7 +702,11 @@ class _SolBindings:
         if obj.type == "identifier" and text == "super":
             owner = self.current_contract
             if owner is not None:
-                for base_name, _base_node in owner.bases:
+                # `super` follows the C3 linearization: the later a base
+                # is declared, the more derived it is, so walk the bases
+                # in reverse declaration order (as `_lookup_contract`
+                # does for inherited members).
+                for base_name, _base_node in reversed(owner.bases):
                     base = self.contracts.get(base_name)
                     if base is None:
                         continue
