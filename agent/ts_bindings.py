@@ -122,6 +122,7 @@ class _TypeScriptBindings:
         self._loop_binding_ids: dict[int, frozenset[str]] = {}
         self._tdz_binding_ids: frozenset[str] = frozenset()
         self._type_bases: dict[int, list[str]] = {}
+        self._initializer_active: set[str] = set()
 
     def span(self, node: Any) -> ByteSpan:
         return ByteSpan(node.start_byte, node.end_byte)
@@ -1245,6 +1246,8 @@ class _TypeScriptBindings:
         self, record: _Record, position: int
     ) -> _Record | None:
         """Type named by a variable's `new T(...)` initializer."""
+        if record.binding.id in self._initializer_active:
+            return None
         declarator = record.node.parent
         if declarator is None or declarator.type != "variable_declarator":
             return None
@@ -1254,23 +1257,34 @@ class _TypeScriptBindings:
         constructor = value.child_by_field_name("constructor")
         if constructor is None:
             return None
-        if constructor.type in {"identifier", "type_identifier"}:
-            return self._lookup(self.text(constructor), position, "type")
-        if constructor.type == "member_expression":
-            property_node = constructor.child_by_field_name("property")
-            if property_node is None:
-                return None
-            record = self._resolve_member(
-                constructor.child_by_field_name("object"),
-                self.text(property_node),
-                position,
-            )
-            return (
-                self._merged_constructible(record)
-                if record is not None
-                else None
-            )
-        return None
+        # Names in the initializer resolve at the initializer, not at a
+        # later use site where a same-named local may shadow them.
+        init_position = value.start_byte
+        self._initializer_active.add(record.binding.id)
+        try:
+            if constructor.type in {"identifier", "type_identifier"}:
+                return self._lookup(
+                    self.text(constructor), init_position, "type"
+                )
+            if constructor.type == "member_expression":
+                property_node = constructor.child_by_field_name(
+                    "property"
+                )
+                if property_node is None:
+                    return None
+                resolved = self._resolve_member(
+                    constructor.child_by_field_name("object"),
+                    self.text(property_node),
+                    init_position,
+                )
+                return (
+                    self._merged_constructible(resolved)
+                    if resolved is not None
+                    else None
+                )
+            return None
+        finally:
+            self._initializer_active.discard(record.binding.id)
 
     def _merged_constructible(self, record: _Record) -> _Record:
         """Prefer the class-like sibling of a merged declaration."""
