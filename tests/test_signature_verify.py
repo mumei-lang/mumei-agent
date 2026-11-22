@@ -742,6 +742,81 @@ def test_revocation_signature_invalid_fails_list():
     # A non-authentic anchor must not let `key_not_revoked` pass.
     assert verification["key_not_revoked"] is False
 
+_V2_LIST = {
+    "schema_version": "mumei.key-revocation-list/v2",
+    "list_version": 3,
+    "issued_at": "2026-11-01T00:00:00Z",
+    "revoked_keys": ["other-key"],
+}
+
+
+def test_revocation_list_rollback_requires_authentic_list():
+    # `min_revocation_version` discharges the rollback check only when
+    # the v2 list's root signature verifies — an unauthenticated list
+    # could raise `list_version` freely and stay replayable.
+    import hashlib
+
+    from agent.core_evidence import (
+        revocation_key_set,
+        revocation_list_metadata,
+    )
+
+    meta = revocation_list_metadata(_V2_LIST)
+    digest = hashlib.sha256(
+        json.dumps(_V2_LIST).encode("utf-8")
+    ).hexdigest()
+    base = dict(
+        revoked_keys=revocation_key_set(_V2_LIST),
+        revocation_list_meta=meta,
+        reference_time="2026-11-10T00:00:00Z",
+        revocation_key=_ROOT_PUBLIC_KEY_HEX,
+        revocation_digest=digest,
+        min_revocation_version=3,
+    )
+    verification = verify_signature_envelope(
+        _envelope(),
+        _PUBLIC_KEY_HEX,
+        **base,
+        revocation_signature=_anchor_signature(digest),
+    )
+    assert verification["revocation_list_authentic"] is True
+    assert verification["revocation_list_current"] is True
+    assert "revocation_list_rollback" not in verification[
+        "checks_not_performed"
+    ]
+    # A signature that does not verify against the pinned key keeps
+    # the list unauthenticated — and therefore not current.
+    verification = verify_signature_envelope(
+        _envelope(),
+        _PUBLIC_KEY_HEX,
+        **base,
+        revocation_signature=_anchor_signature("d" * 64),
+    )
+    assert verification["revocation_list_authentic"] is False
+    assert verification["revocation_list_current"] is False
+    # A below-minimum version fails even with a valid signature.
+    verification = verify_signature_envelope(
+        _envelope(),
+        _PUBLIC_KEY_HEX,
+        **{**base, "min_revocation_version": 4},
+        revocation_signature=_anchor_signature(digest),
+    )
+    assert verification["revocation_list_current"] is False
+    # The minimum pin without a signed list is a caller error.
+    try:
+        verify_signature_envelope(
+            _envelope(),
+            _PUBLIC_KEY_HEX,
+            revoked_keys=revocation_key_set(_V2_LIST),
+            revocation_list_meta=meta,
+            reference_time="2026-11-10T00:00:00Z",
+            min_revocation_version=3,
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("accepted unsigned list with a minimum")
+
 
 def test_route_registry_signature(tmp_path, capsys):
     import hashlib

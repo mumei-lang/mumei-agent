@@ -1633,6 +1633,11 @@ def evaluate_signature_envelope(
             raise ValueError(
                 "min revocation version requires a reference time"
             )
+        if revocation_signature is None:
+            raise ValueError(
+                "min revocation version requires a signed revocation "
+                "list"
+            )
     match = _producer_signature_envelope_match(envelope)
     evaluation = {
         "schema_version": SIGNATURE_ENVELOPE_EVALUATION_SCHEMA,
@@ -1688,28 +1693,6 @@ def evaluate_signature_envelope(
             match and envelope["producer_key_id"] not in revoked_keys
         )
         evaluation["checks_not_performed"].remove("key_revocation")
-    if (
-        revoked_keys is not None
-        and revocation_list_meta is not None
-        and min_revocation_version is not None
-        and reference is not None
-    ):
-        # The replay check: the v2 list must predate the declared
-        # reference, stay inside its optional `not_after` window and
-        # clear the caller's minimum version — the conservative
-        # bounds convention, same as registry windows.
-        evaluation["revocation_list_current"] = (
-            revocation_list_meta["issued_at"][1] <= reference[0]
-            and (
-                revocation_list_meta["not_after"] is None
-                or revocation_list_meta["not_after"][0] >= reference[1]
-            )
-            and revocation_list_meta["list_version"]
-            >= min_revocation_version
-        )
-        evaluation["checks_not_performed"].remove(
-            "revocation_list_rollback"
-        )
     if key_registry is not None:
         # A declared registry performs `key_authenticity` on the
         # matched envelope's key id: `key_authentic` is true only
@@ -1767,6 +1750,33 @@ def evaluate_signature_envelope(
             _producer_signature_envelope_match(revocation_signature)
             and revocation_signature["subject_digest"]
             == revocation_digest
+        )
+    if (
+        revocation_signature is not None
+        and revoked_keys is not None
+        and revocation_list_meta is not None
+        and min_revocation_version is not None
+        and reference is not None
+    ):
+        # The replay check runs only on a signed list: an unsigned
+        # one lets the producer bump `list_version` at will, so it
+        # cannot prove currency. Beyond the signature binding the
+        # v2 list must predate the declared reference, stay inside
+        # its optional `not_after` window and clear the caller's
+        # minimum version — the conservative bounds convention, same
+        # as registry windows.
+        evaluation["revocation_list_current"] = (
+            evaluation["revocation_signature_bound"]
+            and revocation_list_meta["issued_at"][1] <= reference[0]
+            and (
+                revocation_list_meta["not_after"] is None
+                or revocation_list_meta["not_after"][0] >= reference[1]
+            )
+            and revocation_list_meta["list_version"]
+            >= min_revocation_version
+        )
+        evaluation["checks_not_performed"].remove(
+            "revocation_list_rollback"
         )
     return evaluation
 
@@ -1891,6 +1901,11 @@ def verify_signature_envelope(
             raise ValueError(
                 "min revocation version requires a reference time"
             )
+        if revocation_signature is None:
+            raise ValueError(
+                "min revocation version requires a signed revocation "
+                "list"
+            )
     match = _producer_signature_envelope_match(envelope)
     signature_valid = False
     if match:
@@ -1964,24 +1979,6 @@ def verify_signature_envelope(
             match and envelope["producer_key_id"] not in revoked_keys
         )
         verification["checks_not_performed"].remove("key_revocation")
-    if (
-        revoked_keys is not None
-        and revocation_list_meta is not None
-        and min_revocation_version is not None
-        and reference is not None
-    ):
-        verification["revocation_list_current"] = (
-            revocation_list_meta["issued_at"][1] <= reference[0]
-            and (
-                revocation_list_meta["not_after"] is None
-                or revocation_list_meta["not_after"][0] >= reference[1]
-            )
-            and revocation_list_meta["list_version"]
-            >= min_revocation_version
-        )
-        verification["checks_not_performed"].remove(
-            "revocation_list_rollback"
-        )
     if key_registry is not None:
         # Same declared registry as the evaluation fold:
         # `key_authentic` holds only when the envelope matched AND
@@ -2064,6 +2061,31 @@ def verify_signature_envelope(
                 verification["key_not_revoked"]
                 and revocation_list_authentic
             )
+    if (
+        revocation_signature is not None
+        and revoked_keys is not None
+        and revocation_list_meta is not None
+        and min_revocation_version is not None
+        and reference is not None
+    ):
+        # Currency only counts on an authentic list: without a
+        # verified root signature the producer can bump
+        # `list_version` at will and replay defeats the check —
+        # matching the Core `--min-revocation-version` gate, which
+        # requires `--revocation-signature`/`--revocation-key`.
+        verification["revocation_list_current"] = (
+            verification["revocation_list_authentic"]
+            and revocation_list_meta["issued_at"][1] <= reference[0]
+            and (
+                revocation_list_meta["not_after"] is None
+                or revocation_list_meta["not_after"][0] >= reference[1]
+            )
+            and revocation_list_meta["list_version"]
+            >= min_revocation_version
+        )
+        verification["checks_not_performed"].remove(
+            "revocation_list_rollback"
+        )
     return verification
 
 

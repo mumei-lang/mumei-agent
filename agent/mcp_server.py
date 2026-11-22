@@ -2919,7 +2919,9 @@ def signature_eval(
         reference_time: Optional caller-declared RFC3339 time.
         max_age_seconds: Optional declared envelope freshness window.
         min_revocation_version: Optional minimum `list_version` the
-            declared `mumei.key-revocation-list/v2` must reach.
+            declared `mumei.key-revocation-list/v2` must reach. Needs
+            a revocation_signature_path (and revocation_key on
+            signature_verify) — currency only counts on a signed list.
 
     Returns:
         JSON with `evaluation` on success or a path-redacted `error`.
@@ -3012,7 +3014,9 @@ def signature_verify(
         reference_time: Optional caller-declared RFC3339 time.
         max_age_seconds: Optional declared envelope freshness window.
         min_revocation_version: Optional minimum `list_version` the
-            declared `mumei.key-revocation-list/v2` must reach.
+            declared `mumei.key-revocation-list/v2` must reach. Needs
+            a revocation_signature_path (and revocation_key on
+            signature_verify) — currency only counts on a signed list.
         registry_key: Optional caller-declared registry signer public key.
         revocation_key: Optional caller-declared revocation signer public key.
 
