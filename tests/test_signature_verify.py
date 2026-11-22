@@ -794,6 +794,17 @@ def test_revocation_list_rollback_requires_authentic_list():
     )
     assert verification["revocation_list_authentic"] is False
     assert verification["revocation_list_current"] is False
+    # The correct digest signed by a different key: binding the
+    # digest must not stand in for verifying the signature.
+    other = Ed25519PrivateKey.generate()
+    verification = verify_signature_envelope(
+        _envelope(),
+        _PUBLIC_KEY_HEX,
+        **base,
+        revocation_signature=_anchor_signature(digest, key=other),
+    )
+    assert verification["revocation_list_authentic"] is False
+    assert verification["revocation_list_current"] is False
     # A below-minimum version fails even with a valid signature.
     verification = verify_signature_envelope(
         _envelope(),
