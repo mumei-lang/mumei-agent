@@ -75,6 +75,11 @@ _PRELUDE_TYPE_NAMES = frozenset(
     }
 )
 _PRELUDE_PATTERN_PATHS = frozenset({"Some", "None", "Ok", "Err"})
+_UNWRAP_OK_METHODS = frozenset(
+    {"unwrap", "expect", "unwrap_or", "unwrap_or_else", "unwrap_unchecked"}
+)
+_UNWRAP_ERR_METHODS = frozenset({"unwrap_err", "expect_err"})
+_TRY_HEADS = frozenset({"Option", "Result"})
 # Prelude constructors whose tuple payload position is fixed by the
 # container type — `Some(x)` binds `Option<T>`'s first arg, `Err(e)`
 # binds `Result<T, E>`'s second.
@@ -245,6 +250,7 @@ class _RustBindings:
         self.module_depth = 0
         self.in_extern = False
         self._function_records: dict[str, _Record] = {}
+        self._receiver_memo: dict[tuple, tuple] = {}
 
     def span(self, node: Any) -> ByteSpan:
         return ByteSpan(node.start_byte, node.end_byte)
@@ -2102,6 +2108,65 @@ class _RustBindings:
             impl_args,
         )
 
+    def _unwrapped(
+        self,
+        callee: Any,
+        position: int,
+        receiver: "tuple[str | None, str | None]",
+    ) -> tuple[str | None, str | None]:
+        """(type id, args) of `recv.<unwrap-family>()`, where the
+        receiver's declared head is `Option`/`Result` — `unwrap`,
+        `expect`, `unwrap_or*` and `unwrap_unchecked` yield the first
+        type argument (`P`), `unwrap_err`/`expect_err` the second
+        (`E`). Other receivers and names stay opaque — `Vec<P>`
+        exposes no `unwrap`. `receiver` is the callee's resolved
+        receiver type — the caller already computed it once."""
+        value = callee.child_by_field_name("value")
+        method_node = callee.child_by_field_name("field")
+        if value is None or method_node is None:
+            return None, None
+        method = self._normalize_identifier(self.text(method_node))
+        if method in _UNWRAP_OK_METHODS:
+            heads, index = _TRY_HEADS, 0
+        elif method in _UNWRAP_ERR_METHODS:
+            heads, index = {"Result"}, 1
+        else:
+            return None, None
+        value_id, value_args = receiver
+        head, spelled_pos, args_scope = self._scrutinee_shape(
+            value, value_id
+        )
+        if head not in heads:
+            return None, None
+        if spelled_pos is None:
+            # A resolved scrutinee id carries no annotation position
+            # — walk the declaration to recover one, or the spelled
+            # args would resolve at the call site and hit shadows.
+            _, spelled_pos, _ = self._scrutinee_shape(value, None)
+        args = self._type_arg_list(value_args or "")
+        if len(args) <= index:
+            return None, None
+        if (
+            args_scope is None
+            and value.type == "field_expression"
+        ):
+            # Substituted field args are spelled in the receiver's
+            # scope — resolve them at the receiver's own annotation,
+            # not the field's declaring scope.
+            _, inner_pos, _ = self._scrutinee_shape(
+                value.child_by_field_name("value"), None
+            )
+            if inner_pos is not None:
+                spelled_pos = inner_pos
+        # The payload arg is spelled where the receiver's type was
+        # annotated — resolving at the call site picks up a same-named
+        # shadow, and the import's record id must not gate on
+        # index-element containers.
+        return self._spelled_type(
+            args[index].strip(),
+            position if spelled_pos is None else spelled_pos,
+        )
+
     def _field_member(
         self, node: Any, kinds: tuple[str, ...] = ()
     ) -> _Record | None:
@@ -2132,7 +2197,26 @@ class _RustBindings:
     def _receiver_type(
         self, node: Any
     ) -> tuple[str | None, str | None]:
-        """(type id, generic-args key) of a member-access receiver."""
+        """(type id, generic-args key) of a member-access receiver.
+
+        Results are memoized per node — nested receivers otherwise
+        re-resolve the same subtree once per fallback path, which
+        compounds exponentially on call/field chains."""
+        key = (
+            None
+            if node is None
+            else (node.type, node.start_byte, node.end_byte)
+        )
+        if key is not None and key in self._receiver_memo:
+            return self._receiver_memo[key]
+        result = self._receiver_type_uncached(node)
+        if key is not None:
+            self._receiver_memo[key] = result
+        return result
+
+    def _receiver_type_uncached(
+        self, node: Any
+    ) -> tuple[str | None, str | None]:
         while node is not None and node.type == "reference_expression":
             # Auto-deref — `&P` calls `P`'s methods.
             node = next(iter(node.named_children), None)
@@ -2145,6 +2229,26 @@ class _RustBindings:
         if node.type == "type_cast_expression":
             # `x as T` reads as `T` — the cast pins the receiver.
             return self._annotation_type(node.child_by_field_name("type"))
+        if node.type == "try_expression":
+            # `x?` on `Option<P>`/`Result<P, E>` yields `P`.
+            inner = next(iter(self._children(node)), None)
+            inner_id, inner_args = self._receiver_type(inner)
+            head, spelled_pos, _ = self._scrutinee_shape(
+                inner, inner_id
+            )
+            if head not in _TRY_HEADS:
+                return None, None
+            if spelled_pos is None:
+                _, spelled_pos, _ = self._scrutinee_shape(inner, None)
+            first = next(
+                iter(self._type_arg_list(inner_args or "")), None
+            )
+            if first is None:
+                return None, None
+            return self._spelled_type(
+                first.strip(),
+                node.start_byte if spelled_pos is None else spelled_pos,
+            )
         if node.type in {"identifier", "self"}:
             record = self._lookup(
                 self._normalize_identifier(self.text(node)),
@@ -2260,6 +2364,13 @@ class _RustBindings:
                     "value",
                 )
             if member is None:
+                if (
+                    callee is not None
+                    and callee.type == "field_expression"
+                ):
+                    return self._unwrapped(
+                        callee, node.start_byte, receiver
+                    )
                 return None, None
             if member.binding.kind == "enum_member":
                 # A variant constructor spells its enum — `E::C(P)`
