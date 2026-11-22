@@ -120,6 +120,34 @@ def test_schedule_runs_fallback_and_emits_descriptor(inputs, capsys):
     assert SOURCE.decode() not in json.dumps(doc)
 
 
+def test_adapter_overlay_path_is_redacted_and_protected_from_output(
+    inputs, tmp_path, capsys
+):
+    missing_overlay = tmp_path / "missing-overlay.json"
+    with pytest.raises(SystemExit) as failure:
+        main_schedule(args_for(inputs, adapter_overlay=missing_overlay))
+    assert failure.value.code == 1
+    assert str(tmp_path) not in capsys.readouterr().err
+
+    overlay = tmp_path / "overlay.json"
+    overlay.write_text(json.dumps([manifest("gamma")]), encoding="utf-8")
+    original = overlay.read_bytes()
+    with pytest.raises(SystemExit) as failure:
+        main_schedule(
+            args_for(
+                inputs,
+                adapter_overlay=overlay,
+                output=overlay,
+            )
+        )
+
+    assert failure.value.code == 1
+    stderr = capsys.readouterr().err
+    assert "--output must not overwrite a declared input" in stderr
+    assert str(tmp_path) not in stderr
+    assert overlay.read_bytes() == original
+
+
 def test_output_writes_document(inputs, capsys, tmp_path):
     out = tmp_path / "schedule.json"
     args = args_for(inputs, output=str(out))
@@ -885,6 +913,31 @@ def test_export_evidence_acceptance_refuses_declared_collisions(
             core_requirement_list=str(req),
             export_evidence_acceptance=str(export),
         ))
+
+
+def test_export_evidence_acceptance_refuses_overlay_collision(
+    inputs, tmp_path
+):
+    req = _requirement_list(tmp_path)
+    core = _accept_list_core(tmp_path, "accepted")
+    export = tmp_path / "promotable"
+    export.mkdir()
+    overlay = export / "evidence.json"
+    overlay.write_text(json.dumps([manifest("alpha")]), encoding="utf-8")
+    original = overlay.read_bytes()
+
+    with pytest.raises(
+        ValueError, match="must not overwrite a declared input"
+    ):
+        run_schedule(args_for(
+            inputs,
+            core=str(core),
+            core_requirement_list=str(req),
+            export_evidence_acceptance=str(export),
+            adapter_overlay=str(overlay),
+        ))
+
+    assert overlay.read_bytes() == original
 
 
 def test_export_evidence_acceptance_refuses_foreign_files(

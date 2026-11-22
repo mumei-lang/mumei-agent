@@ -115,6 +115,12 @@ def cli(inputs, *extra, env_secret=False):
     )
 
 
+def write_overlay(tmp_path, name, manifests):
+    path = tmp_path / name
+    path.write_text(json.dumps(manifests), encoding="utf-8")
+    return path
+
+
 def test_priority_selection_with_reasons(inputs):
     doc = run_plan(args_for(inputs))
     assert doc["schema_version"] == "mumei.verification-plan/v1"
@@ -285,9 +291,145 @@ def test_duplicate_observation_is_a_static_error(inputs, tmp_path):
 def test_cli_doc_matches_library_doc(inputs):
     out = cli(inputs)
     assert out.returncode == 0, out.stderr
-    assert json.loads(out.stdout) == json.loads(
-        json.dumps(run_plan(args_for(inputs)))
+    expected = json.dumps(
+        run_plan(args_for(inputs)), indent=2, sort_keys=True
+    ) + "\n"
+    assert out.stdout == expected
+
+
+def test_adapter_overlay_adds_a_higher_priority_adapter(inputs, tmp_path):
+    observations = json.loads(
+        Path(inputs["observations"]).read_text(encoding="utf-8")
     )
+    observations.append(
+        {
+            "adapter_id": "gamma",
+            "availability": "available",
+            "tool_version": "1.0.0",
+            "stamp": 3,
+        }
+    )
+    observations_path = tmp_path / "observations-with-gamma.json"
+    observations_path.write_text(json.dumps(observations), encoding="utf-8")
+    overlay = write_overlay(
+        tmp_path, "gamma-overlay.json", [manifest("gamma", priority=20)]
+    )
+
+    out = cli(
+        {**inputs, "observations": str(observations_path)},
+        "--adapter-overlay",
+        str(overlay),
+    )
+
+    assert out.returncode == 0, out.stderr
+    assert json.loads(out.stdout)["selected"]["adapter_id"] == "gamma"
+
+
+def test_adapter_overlay_replaces_a_base_adapter(inputs, tmp_path):
+    overlay = write_overlay(
+        tmp_path,
+        "replacement.json",
+        [manifest("alpha", adapter_version="2.0.0", priority=10)],
+    )
+
+    out = cli(inputs, "--adapter-overlay", str(overlay))
+
+    assert out.returncode == 0, out.stderr
+    selected = json.loads(out.stdout)["selected"]
+    assert selected["adapter_id"] == "alpha"
+    assert selected["adapter_version"] == "2.0.0"
+
+
+def test_later_adapter_overlay_replaces_earlier_overlay(inputs, tmp_path):
+    first = write_overlay(
+        tmp_path,
+        "first-overlay.json",
+        [manifest("alpha", adapter_version="2.0.0", priority=10)],
+    )
+    second = write_overlay(
+        tmp_path,
+        "second-overlay.json",
+        [manifest("alpha", adapter_version="3.0.0", priority=20)],
+    )
+
+    out = cli(
+        inputs,
+        "--adapter-overlay",
+        str(first),
+        "--adapter-overlay",
+        str(second),
+    )
+
+    assert out.returncode == 0, out.stderr
+    selected = json.loads(out.stdout)["selected"]
+    assert selected["adapter_id"] == "alpha"
+    assert selected["adapter_version"] == "3.0.0"
+
+
+def test_duplicate_adapter_ids_in_one_overlay_are_rejected(inputs, tmp_path):
+    overlay = write_overlay(
+        tmp_path,
+        "duplicate-overlay.json",
+        [
+            manifest("gamma"),
+            manifest("gamma", adapter_version="2.0.0"),
+        ],
+    )
+
+    out = cli(inputs, "--adapter-overlay", str(overlay))
+
+    assert out.returncode == 1
+    assert "adapter overlay declares a duplicate adapter_id" in out.stderr
+    assert str(tmp_path) not in out.stderr
+
+
+@pytest.mark.parametrize("document", [[], {}])
+def test_empty_or_non_array_adapter_overlay_is_rejected(
+    inputs, tmp_path, document
+):
+    overlay = write_overlay(tmp_path, "invalid-overlay.json", document)
+
+    out = cli(inputs, "--adapter-overlay", str(overlay))
+
+    assert out.returncode == 1
+    assert (
+        "adapter overlay manifests must be a nonempty JSON array"
+        in out.stderr
+    )
+    assert str(tmp_path) not in out.stderr
+
+
+def test_adapter_overlay_paths_are_protected_from_outputs(inputs, tmp_path):
+    overlay = write_overlay(
+        tmp_path, "protected-overlay.json", [manifest("gamma")]
+    )
+    original = overlay.read_bytes()
+
+    output_refused = cli(
+        inputs,
+        "--adapter-overlay",
+        str(overlay),
+        "--output",
+        str(overlay),
+    )
+    history_refused = cli(
+        inputs,
+        "--adapter-overlay",
+        str(overlay),
+        "--history-log",
+        str(overlay),
+    )
+
+    assert output_refused.returncode == 1
+    assert "--output must not overwrite a declared input" in output_refused.stderr
+    assert history_refused.returncode == 1
+    assert (
+        "--history-log must not overwrite a declared input or output"
+        in history_refused.stderr
+    )
+    assert overlay.read_bytes() == original
+    assert str(tmp_path) not in output_refused.stderr
+    assert str(tmp_path) not in history_refused.stderr
 
 
 def test_history_log_appends_emitted_plans_and_accepts_previous_head(inputs, tmp_path):
