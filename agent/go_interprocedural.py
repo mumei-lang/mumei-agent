@@ -14777,6 +14777,7 @@ class _Builder:
         self._param_pointer_aliases = {}
         self._element_share = {}
         self._pending_lhs_pops = []
+        self._pre_locals = {}
         self.frames = []
         self.pinned = set()
         self.escaped = set()
@@ -15247,6 +15248,10 @@ class _Builder:
         if count[0] > MAX_EXPRESSION_NODES:
             raise _Unsupported("analysis_limit", _span(node))
         self._conditional = conditional
+        # `i, x := int64(0), p.B[i+1]` — the extraction's index
+        # reads the PRE-state `i`, before this statement's own
+        # declarations reseat it.
+        self._pre_locals = dict(locals_)
         self._flush_pending_param_reseats()
         kind = node.type
         if kind in {"block", "statement_list"}:
@@ -16216,10 +16221,15 @@ class _Builder:
                         # The extraction's index deps freeze at
                         # mark time — `i = 0` afterwards cannot
                         # re-seat the share onto another slot.
+                        # `_pre_locals` keeps the index's
+                        # pre-state deps for the multi-declare
+                        # case; a literal key (`p.M["k"]`)
+                        # carries none.
                         share_deps = (
                             self.expression(
                                 share_index, fn, params,
-                                locals_, transfers, count, 0,
+                                self._pre_locals,
+                                transfers, count, 0,
                             )
                             if share_index is not None
                             else frozenset()
