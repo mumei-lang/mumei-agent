@@ -121,6 +121,7 @@ def test_schedule_runs_fallback_and_emits_descriptor(inputs, capsys):
         "environment",
         "network",
         "filesystem",
+        "process_spawn",
         "memory_bound_mb",
     }
     assert "FAKE_PRIVATE" not in capsys.readouterr().out + repr(doc)
