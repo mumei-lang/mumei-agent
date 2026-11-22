@@ -2325,3 +2325,802 @@ fn go(p: P) { (p.callback)(); }
         if r.kind == "read" and source[r.span.start : r.span.end] == "callback"
     )
     assert read.binding_id == field.id
+
+
+def test_member_scoped_path_call_and_result_chain():
+    source = """
+struct P;
+impl P { fn new() -> P { P } fn hello(&self) {} }
+fn f() { let p = P::new(); p.hello(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    new = next(
+        b
+        for b in _bindings(report, "new", "associated_function")
+        if b.span.start > source.index("impl P")
+    )
+    hello = _bindings(report, "hello", "associated_function")[0]
+    new_call = _call(report, source, "P::new()")
+    hello_call = _call(report, source, "p.hello()")
+    assert new_call.target == new.id
+    assert new_call.kind == "direct_local"
+    assert hello_call.target == hello.id
+
+
+def test_member_generic_scoped_path_call():
+    source = """
+struct W<T>(T);
+impl W<i32> { fn mk() -> W<i32> { W(0) } fn n(&self) {} }
+fn f() { let w = W::<i32>::mk(); w.n(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    calls = [c for c in report.calls if source[c.span.start] == source.index("W::<i32>::mk")]
+    mk_call = next(
+        c for c in report.calls if source[c.span.start : c.span.end].startswith("W::<i32>::mk")
+    )
+    assert mk_call.kind == "direct_local"
+    n_call = _call(report, source, "w.n()")
+    assert n_call.kind == "direct_local"
+
+
+def test_member_deep_scoped_path_stays_opaque():
+    source = "mod m { pub struct P; } fn f() { m::P::new(); }"
+    report = build_rust_bindings(source, pointer_width=64)
+    call = report.calls[0]
+    assert call.kind == "opaque_path"
+    assert [u.name for u in report.unresolved] == ["m::P::new"]
+
+
+def test_member_let_infers_struct_literal_type():
+    source = """
+struct P { x: i32 }
+fn f() { let p = P{x: 0}; p.x; }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    field = _bindings(report, "x", "struct_field")[0]
+    read = next(
+        r
+        for r in report.references
+        if source[r.span.start - 1 : r.span.end] == ".x"
+    )
+    assert read.binding_id == field.id
+
+
+def test_member_let_infers_function_result_type():
+    source = """
+fn mk() -> P { P }
+struct P;
+impl P { fn n(&self) {} }
+fn f() { let p = mk(); p.n(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    n = _bindings(report, "n", "associated_function")[0]
+    call = _call(report, source, "p.n()")
+    assert call.target == n.id
+
+
+def test_member_scoped_module_type_annotation_resolves():
+    source = """
+mod m { pub struct P { pub x: i32 } }
+fn f(p: m::P) { p.x; }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    field = _bindings(report, "x", "struct_field")[0]
+    read = next(
+        r
+        for r in report.references
+        if source[r.span.start - 1 : r.span.end] == ".x"
+    )
+    assert read.binding_id == field.id
+
+
+def test_member_scoped_module_path_call_resolves():
+    source = """
+mod m { pub struct P; impl P { pub fn new() -> P { P } } }
+fn f() { let p = m::P::new(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    new = _bindings(report, "new", "associated_function")[0]
+    call = _call(report, source, "m::P::new()")
+    assert call.target == new.id
+    assert call.kind == "direct_local"
+
+
+def test_member_nested_module_type_annotation_resolves():
+    source = """
+mod a { pub mod b { pub struct P; impl P { pub fn n(&self) {} } } }
+fn f(p: a::b::P) { p.n(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    n = _bindings(report, "n", "associated_function")[0]
+    call = _call(report, source, "p.n()")
+    assert call.target == n.id
+
+
+def test_member_enum_variant_path_resolves():
+    source = """
+enum E { A, B(i32), C = 3 }
+fn f() { let e = E::A; let g = E::B; }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    variants = {
+        b.name: b for b in report.bindings if b.kind == "enum_member"
+    }
+    assert set(variants) == {"A", "B", "C"}
+    a_ref = next(
+        r
+        for r in report.references
+        if source[r.span.start - 2 : r.span.end] == "::A"
+    )
+    b_ref = next(
+        r
+        for r in report.references
+        if source[r.span.start - 2 : r.span.end] == "::B"
+    )
+    assert a_ref.binding_id == variants["A"].id
+    assert b_ref.binding_id == variants["B"].id
+    assert not [u for u in report.unresolved if u.name == "E::A"]
+
+
+def test_member_enum_variant_in_match_pattern_resolves():
+    source = """
+enum E { A, B }
+fn f(e: E) { match e { E::A => {}, E::B => {} } }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    variants = {b.name: b for b in report.bindings if b.kind == "enum_member"}
+    reads = {
+        source[r.span.start : r.span.end]: r.binding_id
+        for r in report.references
+        if source[r.span.start : r.span.end] in {"A", "B"}
+    }
+    assert reads == {"A": variants["A"].id, "B": variants["B"].id}
+    assert not [u for u in report.unresolved if u.name.startswith("E::")]
+
+
+def test_member_ufcs_resolves_named_trait_impl():
+    source = """
+struct P { x: i32 }
+trait T { fn get(&self) -> i32; }
+trait U { fn get(&self) -> i32; }
+impl T for P { fn get(&self) -> i32 { self.x } }
+impl U for P { fn get(&self) -> i32 { 2 } }
+fn f() { <P as T>::get(); <P as U>::get(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    impls = _bindings(report, "get", "associated_function")
+    t_impl = next(b for b in impls if b.span.start > source.index("impl T"))
+    u_impl = next(b for b in impls if b.span.start > source.index("impl U"))
+    t_call = _call(report, source, "<P as T>::get()")
+    u_call = _call(report, source, "<P as U>::get()")
+    assert t_call.target == t_impl.id
+    assert u_call.target == u_impl.id
+
+
+def test_member_ufcs_unknown_trait_stays_opaque():
+    source = """
+struct P { x: i32 }
+fn f() { <P as Z>::get(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    call = _call(report, source, "<P as Z>::get()")
+    assert call.kind == "opaque_path"
+
+
+def test_member_ufcs_bare_bracket_resolves_inherent_member():
+    source = """
+struct P { x: i32 }
+impl P { fn get(&self) -> i32 { 3 } const K: i32 = 1; }
+fn f() { <P>::get(); let k = <P>::K; }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    get = _bindings(report, "get", "associated_function")[0]
+    const = _bindings(report, "K", "associated_const")[0]
+    call = _call(report, source, "<P>::get()")
+    assert call.target == get.id
+    reads = [
+        r
+        for r in report.references
+        if r.kind == "read" and source[r.span.start : r.span.end] == "K"
+    ]
+    assert [r.binding_id == const.id for r in reads] == [True]
+
+
+def test_member_ufcs_missing_trait_member_stays_opaque():
+    source = """
+struct P { x: i32 }
+trait T { fn get(&self) -> i32; }
+impl T for P { fn get(&self) -> i32 { self.x } }
+impl P { fn other(&self) -> i32 { 3 } }
+fn f() { <P as T>::other(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    call = _call(report, source, "<P as T>::other()")
+    assert call.kind == "opaque_path"
+
+
+def test_function_pointer_field_call_records_field_read():
+    source = """
+struct P { callback: fn() }
+fn f() { let p: P; (p.callback)(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    field = _bindings(report, "callback", "struct_field")[0]
+    call = _call(report, source, "(p.callback)()")
+    assert call.kind == "opaque_value"
+    assert call.target == field.id
+    field_refs = [
+        r
+        for r in report.references
+        if r.binding_id == field.id and r.kind == "read"
+    ]
+    assert len(field_refs) == 1
+    assert source[field_refs[0].span.start : field_refs[0].span.end] == "callback"
+
+
+def test_ufcs_falls_back_to_trait_default_method():
+    source = """
+trait T { fn m(&self) {} }
+struct P;
+impl T for P {}
+fn f(p: P) { <P as T>::m(&p); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    default_m = next(
+        b
+        for b in report.bindings
+        if b.name == "m" and b.span.start == source.index("fn m") + 3
+    )
+    call = _call(report, source, "<P as T>::m(&p)")
+    assert call.target == default_m.id
+
+
+def test_ufcs_prefers_impl_member_over_trait_default():
+    source = """
+trait T { fn m(&self) {} }
+struct P;
+impl T for P { fn m(&self) {} }
+fn f(p: P) { <P as T>::m(&p); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    impl_m = next(
+        b
+        for b in report.bindings
+        if b.name == "m" and b.span.start == source.rindex("fn m") + 3
+    )
+    call = _call(report, source, "<P as T>::m(&p)")
+    assert call.target == impl_m.id
+
+
+def test_bare_type_path_call_sees_trait_default():
+    source = """
+trait T { fn m(&self) {} }
+struct P;
+impl T for P {}
+fn f(p: P) { P::m(&p); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    default_m = next(
+        b
+        for b in report.bindings
+        if b.name == "m" and b.span.start == source.index("fn m") + 3
+    )
+    call = _call(report, source, "P::m(&p)")
+    assert call.target == default_m.id
+
+
+def test_vec_index_receiver_types_member_by_element():
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn f(v: Vec<P>) { v[0].m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = _bindings(report, "m", "associated_function")[0]
+    call = _call(report, source, "v[0].m()")
+    assert call.target == m.id
+
+
+def test_nested_vec_index_receiver_resolves_innermost_element():
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn f(v: Vec<Vec<P>>) { v[0][0].m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = _bindings(report, "m", "associated_function")[0]
+    call = _call(report, source, "v[0][0].m()")
+    assert call.target == m.id
+
+
+def test_multi_arg_container_index_stays_opaque():
+    source = """
+struct P;
+struct Q;
+fn f(m: HashMap<u32, P>) { m[&0].q(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    call = _call(report, source, "m[&0].q()")
+    assert call.kind == "opaque_method"
+    assert call.target == ""
+
+
+def test_index_receiver_slice_and_array_element_types():
+    # `&[P]` and `[P; N]` index to `P`; a nested `[P; 2]` element is
+    # an anonymous type that keeps indexing to `P` without gaining
+    # `P`'s own members at the first level.
+    source = """
+struct P { }
+impl P { fn m(&self) {} }
+fn f(v: &[P]) { v[0].m(); }
+fn g(v: &[[P; 2]]) { v[0][1].m(); }
+fn h(v: &[[P; 2]]) { v[0].m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    member_m = _bindings(report, "m", "associated_function")[0]
+    calls = [c for c in report.calls]
+    assert calls[0].target == member_m.id
+    assert calls[1].target == member_m.id
+    assert calls[2].target == ""
+
+
+def test_index_receiver_std_map_indexes_to_value_type():
+    # `HashMap<K, V>`/`BTreeMap<K, V>` index to `V`; a value that is
+    # itself `Vec<P>` keeps chaining; a source-declared `HashMap` is
+    # untouched.
+    source = """
+struct P { }
+impl P { fn m(&self) {} }
+fn f(v: HashMap<u32, P>) { v[0].m(); }
+fn g(v: HashMap<u32, Vec<P>>) { v[0][0].m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    member_m = _bindings(report, "m", "associated_function")[0]
+    assert _call(report, source, "v[0].m()").target == member_m.id
+    assert _call(report, source, "v[0][0].m()").target == member_m.id
+
+def test_enum_discriminant_qualified_path_registers_once():
+    # The type walk and the value walk both see `P::K` — the
+    # reference must not duplicate or the report fails to load.
+    source = """
+struct P;
+impl P { const K: u32 = 1; }
+enum E { A = P::K }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    refs = [
+        reference
+        for reference in report.references
+        if source[reference.span.start : reference.span.end] == "K"
+    ]
+    assert len(refs) == 1
+
+
+def test_range_subscript_indexes_to_slice_not_element():
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn f(v: Vec<P>) { v[..].m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    call = _call(report, source, "v[..].m()")
+    assert not call.target
+
+
+def test_custom_container_index_stays_opaque():
+    # `Wrapper<P>` may pick any `Index::Output` — P's method must not
+    # attach.
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+struct Wrapper<P>;
+fn f(w: Wrapper<P>) { w[0].m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    call = _call(report, source, "w[0].m()")
+    assert not call.target
+
+
+def test_imported_map_index_receiver_uses_value_type():
+    source = """
+use std::collections::HashMap;
+struct P;
+impl P { fn m(&self) {} }
+fn f(m: HashMap<u32, P>) { m[&0].m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = _bindings(report, "m", "associated_function")[0]
+    call = _call(report, source, "m[&0].m()")
+    assert call.target == m.id
+
+
+def test_scoped_generic_annotation_keeps_type_args():
+    source = """
+mod m { pub struct W<T>; }
+impl m::W<i32> { fn n(&self) {} }
+fn f(p: m::W<i32>) { p.n(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    n = _bindings(report, "n", "associated_function")[0]
+    call = _call(report, source, "p.n()")
+    assert call.target == n.id
+
+
+def test_struct_literal_generic_keeps_type_args():
+    source = """
+struct W<T>;
+impl W<i32> { fn n(&self) {} }
+fn f() { let w = W::<i32> { }; w.n(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    n = _bindings(report, "n", "associated_function")[0]
+    call = _call(report, source, "w.n()")
+    assert call.target == n.id
+
+
+def test_module_declared_after_use_still_resolves():
+    source = """
+impl m::P2 { fn m(&self) {} }
+fn f(p: m::P2) { p.m(); }
+mod m {
+    pub struct P2;
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = _bindings(report, "m", "associated_function")[0]
+    call = _call(report, source, "p.m()")
+    assert call.target == m.id
+
+
+def test_plain_function_generic_return_types_receiver():
+    source = """
+struct W<T>;
+impl W<i32> { fn n(&self) {} }
+fn mk() -> W<i32> { unimplemented!() }
+fn f() { let w = mk(); w.n(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    n = _bindings(report, "n", "associated_function")[0]
+    call = _call(report, source, "w.n()")
+    assert call.target == n.id
+
+
+def test_ufcs_scoped_trait_name_resolves():
+    source = """
+struct P;
+mod m { pub trait T { fn go(&self); } }
+impl m::T for P { fn go(&self) {} }
+fn f(p: P) { <P as m::T>::go(&p); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    impl_member = next(
+        b for b in _bindings(report, "go", "associated_function")
+        if "impl m::T for P" in source[: b.span.start]
+    )
+    call = _call(report, source, "<P as m::T>::go(&p)")
+    assert call.target == impl_member.id
+
+
+def test_ufcs_alias_receiver_uses_concrete_impl():
+    source = """
+trait T { fn m(&self) { } }
+struct P;
+type A = P;
+impl T for P { fn m(&self) {} }
+fn f() { <A as T>::m(&P); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    impls = _bindings(report, "m", "associated_function")
+    impl_member = next(
+        b for b in impls
+        if source[b.span.start : b.span.end] == "m"
+        and "impl T for P" in source[: b.span.start]
+    )
+    call = _call(report, source, "<A as T>::m(&P)")
+    assert call.target == impl_member.id
+
+
+def test_ufcs_generic_trait_picks_matching_impl():
+    # `<P as T<u32>>::m` resolves to the `u32` impl, not the first
+    # registered `T` impl for `P`.
+    source = """
+trait T<A> { fn m(&self) -> i32; }
+struct P;
+impl T<i32> for P { fn m(&self) -> i32 { 1 } }
+impl T<u32> for P { fn m(&self) -> i32 { 2 } }
+fn f(p: P) { <P as T<u32>>::m(&p); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    u32_impl = next(
+        b
+        for b in report.bindings
+        if b.name == "m" and b.span.start == source.rindex("fn m") + 3
+    )
+    call = _call(report, source, "<P as T<u32>>::m(&p)")
+    assert call.target == u32_impl.id
+
+
+def test_index_range_then_index_resolves_element():
+    # `v[1..][0]` is a `P` — the slice's anonymous element type.
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn f(v: &[P]) { v[1..][0].m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    member = next(
+        b for b in report.bindings
+        if b.name == "m" and b.kind == "associated_function"
+    )
+    call = _call(report, source, "v[1..][0].m()")
+    assert call.target == member.id
+
+
+def test_index_call_arg_with_range_stays_element():
+    # `v[find_index(0..10)]` is an integer index — the `..` inside the
+    # call's argument does not make the receiver a slice.
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn find_index(_r: core::ops::Range<i32>) -> usize { 0 }
+fn f(v: &[P]) { v[find_index(0..10)].m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    member = next(
+        b for b in report.bindings
+        if b.name == "m" and b.kind == "associated_function"
+    )
+    call = _call(report, source, "v[find_index(0..10)].m()")
+    assert call.target == member.id
+
+
+def test_module_const_generic_type_annotation_resolves():
+    # `const N: Count` inside `mod m` finds the module-local alias.
+    source = """
+fn f(s: &m::S<3>) {}
+mod m {
+    pub type Count = usize;
+    pub struct S<const N: Count> { _a: [u8; N] }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    count = next(
+        b for b in report.bindings
+        if b.name == "Count" and b.kind == "type_alias"
+    )
+    param = next(
+        b for b in report.bindings
+        if b.name == "N" and b.kind == "generic_parameter"
+    )
+    assert param.type is not None
+    assert param.type.type_id == count.id
+
+def test_ufcs_generic_trait_picks_matching_associated_const():
+    # `<P as T<u32>>::C` binds to the `u32` impl's const, not the
+    # `i32` impl's or the trait's.
+    source = """
+trait T<A> { const C: i32; }
+struct P;
+impl T<i32> for P { const C: i32 = 1; }
+impl T<u32> for P { const C: i32 = 2; }
+fn f() { let x = <P as T<u32>>::C; }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    u32_const = next(
+        b
+        for b in report.bindings
+        if b.name == "C" and b.span.start == source.rindex("const C") + 6
+    )
+    ref = _refs(report, source, "C")[-1]
+    assert ref.binding_id == u32_const.id
+
+
+def test_parenthesized_range_index_stays_a_slice():
+    # `v[(..)]` is still a range — `.m()` on the slice does not
+    # resolve to `P`'s method.
+    source = """
+struct P;
+impl P { fn m(&self) {} }
+fn f(v: &[P]) { v[(..)].m(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    member = next(
+        b for b in report.bindings
+        if b.name == "m" and b.kind == "associated_function"
+    )
+    call = _call(report, source, "v[(..)].m()")
+    assert call.target != member.id
+
+
+def test_ufcs_generic_impl_trait_args_match_concrete_call():
+    # `impl<A> T<A> for P` — `A` is an impl parameter, a wildcard:
+    # `<P as T<u32>>::m` reaches the impl's `m`, not the trait's.
+    source = """
+trait T<A> { fn m(&self) {} }
+struct P;
+impl<A> T<A> for P { fn m(&self) {} }
+fn f() { <P as T<u32>>::m(&P); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    impl_m = next(
+        b for b in report.bindings
+        if b.name == "m" and b.span.start == source.rindex("fn m") + 3
+    )
+    call = _call(report, source, "<P as T<u32>>::m(&P)")
+    assert call.target == impl_m.id
+
+
+def test_ufcs_generic_impl_concrete_trait_arg_still_filters():
+    # `impl<A> T<i32> for W<A>` is generic over the impl type but its
+    # trait args are concrete — `T<u32>` must not reach it.
+    source = """
+trait T<A> { fn m(&self) {} }
+struct W<A>(A);
+struct P;
+impl<A> T<i32> for P { fn m(&self) {} }
+fn f() { <P as T<u32>>::m(&P); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    impl_m = next(
+        b for b in report.bindings
+        if b.name == "m" and b.span.start == source.rindex("fn m") + 3
+    )
+    call = _call(report, source, "<P as T<u32>>::m(&P)")
+    assert call.target != impl_m.id
+
+
+def test_ufcs_trait_arg_binding_constrains_impl_type_args():
+    # `impl<A> T<A> for W<A>` cannot answer `<W<V<u16>> as T<u8>>::m`
+    # — `A` would have to be both `u8` (trait side) and `V<u16>`
+    # (impl side). The `impl<A> T<u8> for W<V<A>>` impl is the match.
+    source = """
+trait T<A> { fn m(&self) {} }
+struct W<A>(A);
+struct V<A>(A);
+impl<A> T<A> for W<A> { fn m(&self) {} }
+impl<A> T<u8> for W<V<A>> { fn m(&self) {} }
+fn f() { <W<V<u16>> as T<u8>>::m(&W(V(0u16))); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    right_m = next(
+        b for b in report.bindings
+        if b.name == "m" and b.span.start == source.rindex("fn m") + 3
+    )
+    wrong_m = next(
+        b for b in report.bindings
+        if b.name == "m" and b.span.start != source.rindex("fn m") + 3
+        and b.span.start != source.index("fn m") + 3
+    )
+    call = _call(report, source, "<W<V<u16>> as T<u8>>::m(&W(V(0u16)))")
+    assert call.target == right_m.id
+    assert call.target != wrong_m.id
+
+
+def test_ufcs_alias_receiver_carries_impl_args():
+    # `type Alias = W<u8>` — `<Alias as T>::m` reads `W<u8>` for the
+    # impl match, so `impl<A> T for W<A>` answers with A = u8.
+    source = """
+trait T { fn m(&self) {} }
+struct W<A>(A);
+impl<A> T for W<A> { fn m(&self) {} }
+type Alias = W<u8>;
+fn f() { <Alias as T>::m(&W(0u8)); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    impl_m = next(
+        b for b in report.bindings
+        if b.name == "m" and b.span.start == source.rindex("fn m") + 3
+    )
+    call = _call(report, source, "<Alias as T>::m(&W(0u8))")
+    assert call.target == impl_m.id
+
+
+def test_ufcs_omitted_receiver_args_still_matches_generic_impl():
+    # `<W as T>::m` spells no receiver args — `impl<A> T for W<A>`
+    # still applies (every impl arg is a parameter).
+    source = """
+trait T { fn m(&self) {} }
+struct W<A = u8>(A);
+impl<A> T for W<A> { fn m(&self) {} }
+fn f() { <W as T>::m(&W(0u8)); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    impl_m = next(
+        b for b in report.bindings
+        if b.name == "m" and b.span.start == source.rindex("fn m") + 3
+    )
+    call = _call(report, source, "<W as T>::m(&W(0u8))")
+    assert call.target == impl_m.id
+
+
+def test_ufcs_nested_generic_impl_arg_matches():
+    # `Result<A, B>` — the comma inside `<>` is nested and does not
+    # split the impl's arg list.
+    source = """
+trait T { fn m(&self) {} }
+struct W<A>(A);
+struct R<A, B>(A, B);
+impl<A, B> T for W<R<A, B>> { fn m(&self) {} }
+fn f() { <W<R<u8, u16>> as T>::m(&W(R(0u8, 0u16))); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    impl_m = next(
+        b for b in report.bindings
+        if b.name == "m" and b.span.start == source.rindex("fn m") + 3
+    )
+    call = _call(report, source, "<W<R<u8, u16>> as T>::m(&W(R(0u8, 0u16)))")
+    assert call.target == impl_m.id
+
+
+def test_ufcs_array_impl_arg_matches_element_and_length():
+    # `impl<A, const N: usize> T for W<[A; N]>` — the receiver's
+    # `[u8; 4]` binds `A = u8` and `N = 4`.
+    source = """
+trait T { fn m(&self) {} }
+struct W<A>(A);
+impl<A, const N: usize> T for W<[A; N]> { fn m(&self) {} }
+fn f() { <W<[u8; 4]> as T>::m(&W([0u8; 4])); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    impl_m = next(
+        b for b in report.bindings
+        if b.name == "m" and b.span.start == source.rindex("fn m") + 3
+    )
+    call = _call(report, source, "<W<[u8; 4]> as T>::m(&W([0u8; 4]))")
+    assert call.target == impl_m.id
+
+
+def test_ufcs_generic_alias_substitutes_spelled_args():
+    # `type Alias<B> = W<B>` — `<Alias<u8> as T<u8>>::m` substitutes
+    # B = u8, so `impl<A> T<A> for W<A>` binds A = u8 and matches.
+    source = """
+trait T<A> { fn m(&self) {} }
+struct W<A>(A);
+impl<A> T<A> for W<A> { fn m(&self) {} }
+type Alias<B> = W<B>;
+fn f() { <Alias<u8> as T<u8>>::m(&W(0u8)); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    impl_m = next(
+        b for b in report.bindings
+        if b.name == "m" and b.span.start == source.rindex("fn m") + 3
+    )
+    call = _call(report, source, "<Alias<u8> as T<u8>>::m(&W(0u8))")
+    assert call.target == impl_m.id
+
+
+def test_ufcs_omitted_args_reject_repeated_param_impl():
+    # `impl<A> T for W<A, A>` cannot cover `<W as T>::m` — an omitted
+    # arg list cannot satisfy `A` at both positions; the trait default
+    # answers instead.
+    source = """
+trait T { fn m(&self) {} }
+struct W<A = u8, B = u16>(A, B);
+impl<A> T for W<A, A> { fn m(&self) {} }
+fn f() { <W as T>::m(&W(0u8, 0u16)); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    impl_m = next(
+        b for b in report.bindings
+        if b.name == "m" and b.span.start == source.rindex("fn m") + 3
+    )
+    call = _call(report, source, "<W as T>::m(&W(0u8, 0u16))")
+    assert call.target != impl_m.id
+
+
+def test_ufcs_const_expr_shift_arg_splits():
+    # `{1 << 2}, N` — the shift's `<`/`>` inside braces are not
+    # generic brackets; the trailing comma still splits.
+    source = """
+trait T { fn m(&self) {} }
+struct W<const A: usize, const B: usize>;
+impl<const N: usize> T for W<{1 << 2}, N> { fn m(&self) {} }
+fn f() { <W<{1 << 2}, 4> as T>::m(&W::<{1 << 2}, 4>); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    impl_m = next(
+        b for b in report.bindings
+        if b.name == "m" and b.span.start == source.rindex("fn m") + 3
+    )
+    call = _call(report, source, "<W<{1 << 2}, 4> as T>::m(&W::<{1 << 2}, 4>)")
+    assert call.target == impl_m.id
