@@ -5306,3 +5306,32 @@ fn f(r: R) {
         if source[c.span.start : c.span.end].endswith("m()")
     )
     assert call.target == ""
+
+
+def test_let_pattern_uses_inline_annotation() -> None:
+    source = """\
+struct P;
+impl P { fn m(&self) {} }
+struct Q;
+impl Q { fn q(&self) {} }
+struct W { x: P, y: Q }
+fn h() {
+    let (a, b): (P, P) = (P, P);
+    a.m();
+    b.m();
+    let Some(v): Option<P> = Some(P);
+    v.m();
+    let W { x, y }: W = W { x: P, y: Q };
+    x.m();
+    y.q();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    m = next(b for b in report.bindings if b.name == "m")
+    q = next(b for b in report.bindings if b.name == "q")
+    calls = [
+        c
+        for c in report.calls
+        if source[c.span.start : c.span.end].endswith(("m()", "q()"))
+    ]
+    assert [c.target for c in calls] == [m.id, m.id, m.id, m.id, q.id]
