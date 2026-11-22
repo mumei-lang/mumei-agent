@@ -3154,14 +3154,20 @@ class _RustBindings:
                         # `Option<&P>::cloned()` yields `Option<P>`
                         # — the payload's borrow peels off; a
                         # non-borrowed payload stays opaque.
+                        stripped = element.strip()
                         peeled = re.sub(
                             r"^&\s*(?:'\w+\s+)?(?:mut\s+)?",
                             "",
-                            element.strip(),
+                            stripped,
                         )
+                        if peeled == stripped and ";" in stripped:
+                            # `&[P; N]` already lost its brackets
+                            # and borrow to the slice normalizer —
+                            # re-wrap the array body.
+                            peeled = f"[{stripped}]"
                         element = (
                             peeled
-                            if peeled != element.strip()
+                            if peeled != stripped
                             else None
                         )
                     if (
