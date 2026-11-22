@@ -16232,6 +16232,8 @@ class _Builder:
                                 transfers, count, 0,
                             )
                             if share_index is not None
+                            and share_index.type
+                            not in _INDEX_LITERALS
                             else frozenset()
                         )
                         self._drop_element_share(binding.id)

@@ -34064,6 +34064,28 @@ def test_named_struct_value_element_pointer_member_read(
             "\treturn x.W.V\n}\n",
             frozenset({0, 1}),
         ),
+        (
+            # `i, x := int64(0), p.B[i+1]` — the extraction's
+            # index reads the PRE-state `i`.
+            "type E2 struct { V int64 }\n"
+            "type Elem struct { V int64; W *E2 }\n"
+            "type S struct { B []Elem }\n"
+            "func F(p *S, i int64) int64 {\n"
+            "\ti, x := int64(0), p.B[i+1]\n"
+            "\treturn x.W.V + i\n}\n",
+            frozenset({0, 1}),
+        ),
+        (
+            # `x := p.M["k"]` — a string-literal map key carries
+            # no index deps but still shares the element.
+            "type E2 struct { V int64 }\n"
+            "type Elem struct { V int64; W *E2 }\n"
+            "type S struct { M map[string]Elem }\n"
+            "func F(p *S) int64 {\n"
+            "\tx := p.M[\"k\"]\n"
+            "\treturn x.W.V\n}\n",
+            frozenset({0}),
+        ),
     ],
 )
 def test_named_struct_value_element_extract_share(
