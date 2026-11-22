@@ -3490,3 +3490,75 @@ fn f() {
     report = build_rust_bindings(source, pointer_width=64)
     method = _bindings(report, "m", "associated_function")[0]
     assert _call(report, source, "p.m()").target == method.id
+
+
+def test_pattern_field_args_keep_string_type_id():
+    # `items: Vec<P>` resolves args-only — the emitted fact keeps a
+    # string (empty) type_id so the shared loader re-reads it.
+    source = "struct W { items: Vec<P> } struct P; fn f(w: W) { let W { items } = w; }"
+    report = build_rust_bindings(source, pointer_width=64)
+    items = next(b for b in report.bindings if b.name == "items")
+    assert isinstance(items.type.type_id, str)
+
+
+def test_rest_pattern_skips_to_trailing_payload():
+    source = """
+enum E { V(A, B, C) }
+struct A; struct B; struct C;
+impl C { fn n(&self) {} }
+fn f(e: E) {
+    match e { E::V(.., x) => x.n() }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = next(b for b in report.bindings if b.name == "n")
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "x.n()"
+    )
+    assert call.target == method.id
+
+
+def test_pub_tuple_fields_do_not_shift_positions():
+    source = """
+struct W(pub A, pub B);
+struct A; struct B;
+impl A { fn a(&self) {} }
+impl B { fn b(&self) {} }
+fn f(w: W) {
+    match w { W(a, b) => { a.a(); b.b(); } }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    for text, name in (("a.a()", "a"), ("b.b()", "b")):
+        method = next(b for b in report.bindings if b.name == name)
+        call = next(
+            c for c in report.calls
+            if source[c.span.start:c.span.end] == text
+        )
+        assert call.target == method.id
+
+
+def test_module_field_types_resolve_in_the_module_scope():
+    source = """
+mod m {
+    pub struct P;
+    impl P { fn m(&self) {} }
+    pub struct W { pub f: P }
+}
+struct P;
+impl P { fn n(&self) {} }
+fn f(w: m::W) {
+    match w { m::W { f } => f.m() }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    method = next(
+        b for b in report.bindings
+        if b.name == "m" and b.kind == "associated_function"
+    )
+    call = next(
+        c for c in report.calls
+        if source[c.span.start:c.span.end] == "f.m()"
+    )
+    assert call.target == method.id

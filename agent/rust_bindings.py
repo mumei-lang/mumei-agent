@@ -2661,6 +2661,9 @@ class _RustBindings:
     ) -> None:
         if node.type in {"scoped_identifier", "scoped_type_identifier"}:
             member, name_node = self._scoped_member(node)
+            if member is None:
+                # `m::W` heads resolve a module's type, not a member.
+                member = self._scoped_type(node)
             if member is not None and member.binding.kind in {
                 "enum_member",
                 "struct",
@@ -3351,12 +3354,15 @@ class _RustBindings:
         type_node: Any,
         param_map: dict[str, str],
         position: int,
+        container: "_Record | None" = None,
     ) -> tuple[str | None, str | None]:
         """(type id, args) of a declared field, substituting the
         scrutinee's generic arguments — `W<T>` at `W<P>` reads the
         field as `P`. The parameters themselves resolve at the
         container's declaration site, not the pattern's scope stack,
-        so the map is consulted before the annotation."""
+        so the map is consulted before the annotation; the declared
+        type itself resolves in the container's own scope — `m::W`'s
+        field `P` is `m::P`, never a root-level `P`."""
         if param_map and type_node is not None and type_node.type in {
             "identifier",
             "type_identifier",
@@ -3366,7 +3372,15 @@ class _RustBindings:
             )
             if spelled is not None:
                 return self._spelled_type(spelled, position)
-        type_id, args = self._annotation_type(type_node)
+        scope = None if container is None else container.home_scope
+        push = scope is not None and scope not in self.scopes
+        if push:
+            self.scopes.append(scope)
+        try:
+            type_id, args = self._annotation_type(type_node)
+        finally:
+            if push:
+                self.scopes.pop()
         if not param_map:
             return type_id, args
         if type_id is not None:
@@ -3435,7 +3449,7 @@ class _RustBindings:
             fields[
                 self._normalize_identifier(self.text(name_node))
             ] = self._field_annotation(
-                type_node, param_map, head.start_byte
+                type_node, param_map, head.start_byte, container
             )
         return fields
 
@@ -3460,8 +3474,11 @@ class _RustBindings:
             return None
         param_map = self._pattern_param_map(container, scrut_args)
         return [
-            self._field_annotation(child, param_map, head.start_byte)
+            self._field_annotation(
+                child, param_map, head.start_byte, container
+            )
             for child in self._children(body)
+            if child.type != "visibility_modifier"
         ]
 
     def _pattern_type_map(
@@ -3551,7 +3568,9 @@ class _RustBindings:
                     tid, fargs = field_type
                     if tid is not None or fargs is not None:
                         mapping[fname_node.start_byte] = (
-                            TypeFact("named", fname or "", 0, None, tid),
+                            TypeFact(
+                                "named", fname or "", 0, None, tid or ""
+                            ),
                             fargs,
                         )
             return mapping
@@ -3567,11 +3586,27 @@ class _RustBindings:
                 for child in self._children(pattern)
                 if child != head
             ]
+            rest_at = next(
+                (
+                    index
+                    for index, child in enumerate(children)
+                    if child.type == "remaining_field_pattern"
+                ),
+                None,
+            )
             mapping = {}
             for index, child in enumerate(children):
-                if index >= len(payload):
-                    break
-                tid, fargs = payload[index]
+                if child.type == "remaining_field_pattern":
+                    continue
+                if rest_at is not None and index > rest_at:
+                    # `V(.., x)` binds `x` to the LAST payload
+                    # element — `..` covers the skipped middle.
+                    position = len(payload) - (len(children) - index)
+                else:
+                    position = index
+                if position < 0 or position >= len(payload):
+                    continue
+                tid, fargs = payload[position]
                 mapping.update(
                     self._pattern_type_map(child, tid, fargs)
                 )
