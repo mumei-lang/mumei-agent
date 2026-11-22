@@ -14939,10 +14939,9 @@ class _Builder:
             # the conflated set cannot tell a rebinding from a
             # backing write — which stays on the sound side.
             for pid, ordinal in caller_visible_params.items():
-                changed = locals_.get(
+                if locals_.get(
                     pid, frozenset({ordinal})
-                ) - frozenset({ordinal})
-                if changed:
+                ) != frozenset({ordinal}):
                     transfers.append(
                         CallTransfer(
                             FileSpan(

@@ -32666,6 +32666,26 @@ def test_value_struct_scalar_array_callee_mixed_writes_keep_x(
         assert result.return_dependencies == frozenset({0, 1})
 
 
+def test_caller_backing_transfer_survives_param_slice_reseat(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func G(a []int64, x int64) {\n"
+            "\ta[0] = x\n"
+            "\ta = []int64{0}\n"
+            "}\n"
+            "func F(a []int64, x int64) int64 {\n"
+            "\tG(a, x)\n"
+            "\treturn a[0]\n"
+            "}\n",
+        )
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+
+
 def test_value_struct_scalar_array_field_index_call_runs_once(
     go_types_helper,
 ):
