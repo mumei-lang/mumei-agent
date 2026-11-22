@@ -2679,13 +2679,14 @@ class _RustBindings:
                                     # argument's own scope — at the
                                     # receiver's annotation a
                                     # same-named type is another
-                                    # record.
-                                    tid = self._spelled_type(
+                                    # record. Spell it
+                                    # `crate::`-qualified so the
+                                    # Option head survives while the
+                                    # payload still lands on `u`'s
+                                    # own `Q`.
+                                    element = self._qualified_spelling(
                                         element, arg_pos
-                                    )[0]
-                                    if tid is not None:
-                                        return tid, None
-                                    element = None
+                                    )
                     if element:
                         return None, prefix + element
                 if (
@@ -3030,6 +3031,20 @@ class _RustBindings:
                 return self._receiver_annotation_position(
                     callee.child_by_field_name("value")
                 )
+            if callee is not None and callee.type == "identifier":
+                # `let u = g()` — `u`'s spelled names were written in
+                # `g`'s return annotation.
+                record = self._through_import(
+                    self._lookup(
+                        self._normalize_identifier(self.text(callee)),
+                        callee.start_byte,
+                        "value",
+                    ),
+                    callee.start_byte,
+                    "value",
+                )
+                if record is not None and record.type_node is not None:
+                    return record.type_node.start_byte
             return None
         if node.type != "identifier":
             return None
@@ -5538,8 +5553,39 @@ class _RustBindings:
     ) -> "_Record | None":
         """Type record for a `m::P` spelling — the module path walks
         `_lookup_module_path`, the last segment reads that module's
-        scope."""
+        scope. A `crate::` head anchors the walk at the root scope."""
         segments = name.split("::")
+        if segments[0] == "crate":
+            scope = self.scopes[0] if self.scopes else None
+            for segment in segments[1:-1]:
+                module = (
+                    None
+                    if scope is None
+                    else next(
+                        (
+                            candidate
+                            for candidate in reversed(
+                                scope.bindings.get(segment, ())
+                            )
+                            if candidate.binding.kind == "module"
+                        ),
+                        None,
+                    )
+                )
+                if module is None or module.module_scope is None:
+                    return None
+                scope = module.module_scope
+            if scope is None:
+                return None
+            head = self._normalize_identifier(segments[-1])
+            return next(
+                (
+                    candidate
+                    for candidate in reversed(scope.bindings.get(head, ()))
+                    if self._in_namespace(candidate, "type")
+                ),
+                None,
+            )
         module = self._lookup_module_path(
             "::".join(segments[:-1]), position
         )
@@ -5557,6 +5603,60 @@ class _RustBindings:
             None,
         )
         return record
+
+    def _record_scope_path(self, record: "_Record | None") -> "str | None":
+        """`a::b::Name` path of a record from the crate root — None
+        when it lives in a scope no `crate::` path can reach (a
+        function body, a parameter)."""
+        if record is None:
+            return None
+        segments = [record.binding.name]
+        scope = record.home_scope
+        root = self.scopes[0] if self.scopes else None
+        guard = 0
+        while scope is not None and scope is not root and guard < 16:
+            guard += 1
+            owner = next(
+                (
+                    candidate
+                    for candidate in self.records.values()
+                    if candidate.module_scope is scope
+                ),
+                None,
+            )
+            if owner is None:
+                return None
+            segments.append(owner.binding.name)
+            scope = owner.home_scope
+        if scope is not root:
+            return None
+        return "::".join(reversed(segments))
+
+    def _qualified_spelling(self, spelled: str, position: int) -> str:
+        """`spelled` with every resolvable type name/path rewritten
+        `crate::a::b::Name` — resolves to the same record from any
+        scope the text is consumed in."""
+        def replace(match: "re.Match[str]") -> str:
+            token = match.group(0)
+            if "::" in token:
+                record = self._through_import(
+                    self._scoped_spelled_type(token, position), position
+                )
+            else:
+                record = self._through_import(
+                    self._lookup(
+                        self._normalize_identifier(token),
+                        position,
+                        "type",
+                    ),
+                    position,
+                )
+            path = self._record_scope_path(record)
+            if path is None:
+                return token
+            return "crate::" + path
+
+        return re.sub(r"[A-Za-z_][\w:]*", replace, spelled)
 
     def _pattern_head_fields(
         self, head: Any | None, scrut_id: str, scrut_args: str | None
