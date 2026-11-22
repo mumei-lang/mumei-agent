@@ -209,6 +209,16 @@ selected when the adapter's first matching manifest verdict marker reports
 withhold selection: they are adapter self-reports, not Evidence, and Core
 acceptance is unchanged.
 
+### C04 permission enforcement for availability probes
+
+Manifest-declared `probe_argv` runs with only `PATH` (plus `SYSTEMROOT` on
+Windows) unless the adapter declares `environment.read` and policy allows it,
+and in a fresh network namespace unless `network.connect` is declared and
+allowed, where the host supports it; otherwise network remains unenforced.
+`probe_request_for` without policy fails closed. Command fingerprints and
+probe-history records are unchanged; `filesystem.*` and `process.spawn` remain
+declared-only. This is not a sandbox or Evidence.
+
 ### C11 declared memory bounds for attempted executions
 
 `AttemptRunner.run(request, argv, cancel_event=None, memory_bound_mb=None)`
