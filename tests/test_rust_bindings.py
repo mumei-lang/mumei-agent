@@ -1900,3 +1900,16 @@ fn f(t: T) { t.0.get(); }
     report = build_rust_bindings(source, pointer_width=64)
     call = _call(report, source, "t.0.get()")
     assert call.kind == "opaque_method"
+
+
+def test_member_tuple_element_receiver_through_lifetime_reference():
+    source = """
+struct P { x: i32 }
+impl P { fn get(&self) -> i32 { self.x } }
+fn f<'a>(t: &'a mut (i32, P), u: &'static (i32, P)) { t.1.get(); u.1.get(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    get = _bindings(report, "get", "associated_function")[0]
+    calls = {source[c.span.start : c.span.end]: c for c in report.calls}
+    assert calls["t.1.get()"].target == get.id
+    assert calls["u.1.get()"].target == get.id

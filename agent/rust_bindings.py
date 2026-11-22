@@ -1092,14 +1092,7 @@ class _RustBindings:
             return None
         type_node = self._receiver_type_node(value_node)
         while type_node is not None and type_node.type == "reference_type":
-            type_node = next(
-                (
-                    child
-                    for child in self._children(type_node)
-                    if child.type != "mutable_specifier"
-                ),
-                None,
-            )
+            type_node = type_node.child_by_field_name("type")
         if type_node is None or type_node.type != "tuple_type":
             return None
         elements = self._children(type_node)
