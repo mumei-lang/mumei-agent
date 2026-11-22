@@ -1978,3 +1978,18 @@ namespace N { interface I { m(): void } export {I as Public} }
         for item in report.unresolved
         if item.reason == "unknown_name"
     ]
+    interface_i = next(
+        b
+        for b in report.bindings
+        if b.name == "I" and b.kind == "interface"
+    )
+    # The clause name itself must reference the interface
+    # declaration — a silently skipped clause would pass the
+    # unresolved check above.
+    clause_i = next(
+        r
+        for r in report.references
+        if source[r.span.start : r.span.end] == "I"
+        and r.span.start > source.index("export {")
+    )
+    assert clause_i.binding_id == interface_i.id
