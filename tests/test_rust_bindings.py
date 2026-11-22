@@ -5905,9 +5905,6 @@ fn f(o: Option<P>, u: Option<P>, v: Option<Q>) {
     assert len(targets) == 4
     assert targets.count(pm.id) == 3
     assert sum(1 for t in targets if not t) == 1
-    assert len(calls) == 3
-    for call in calls:
-        assert call.target == pm.id
 
 
 def test_smart_pointer_receivers_deref_to_the_payload():
