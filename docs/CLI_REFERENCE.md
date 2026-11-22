@@ -68,7 +68,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `verify-recheck` | 8 | Run a declared Core source-evidence recheck as one attempt and emit the reconciled lineage plus the declared recheck outcome. |
 | `verify-accept` | 8 | Run a declared Core source-evidence acceptance evaluation as one attempt and emit the reconciled lineage plus the declared acceptance outcome. |
 | `verify-schedule` | 14 | Run the declared plan/dispatch/observe/fallback schedule over declared adapter manifests and emit mumei.attempt-schedule/v1. The schedule is a dispatch record, not an Evidence acceptance. |
-| `verify-plan` | 5 | Plan one declared route through the adapter registry and emit mumei.verification-plan/v1 — the selected adapter, its effective non-secret settings, per-candidate selection/exclusion reasons and the fallback origin. Planning only: nothing is spawned, dispatched or accepted. |
+| `verify-plan` | 7 | Plan one declared route through the adapter registry and emit mumei.verification-plan/v1 — the selected adapter, its effective non-secret settings, per-candidate selection/exclusion reasons and the fallback origin. Planning only: nothing is spawned, dispatched or accepted. |
 | `native-recheck` | 7 | Run a declared Core native consumer recheck as one attempt and emit the reconciled lineage plus the declared recheck outcome. |
 | `native-attempt` | 6 | Run a declared Core native bundle production as one attempt and emit the reconciled lineage plus the declared Build ID. |
 | `native-accept` | 7 | Run a declared Core native artifact acceptance as one attempt and emit the reconciled lineage plus the declared acceptance outcome. |
@@ -1078,6 +1078,8 @@ Plan one declared route through the adapter registry and emit mumei.verification
 | `--policy` | `<PATH>` | yes | — | Declared planner policy JSON. allowed_permissions must be declared (an empty list permits only permission-free adapters). |
 | `--observations` | `<PATH>` | no | — | Optional declared JSON array of runtime observations. |
 | `--output` | `<PATH>` | no | — | Write the plan document here instead of stdout. |
+| `--history-log` | `<PATH>` | no | — | Append the emitted plan to an opt-in tamper-evident plan history log (mumei.verification-plan-history-entry/v1). Not Evidence, a dispatch record or authentication. |
+| `--expected-history-head` | `<HEX>` | no | — | Refuse to append unless the log's last entry digest equals this pinned head. Requires --history-log. |
 
 
 ## `mumei-agent native-recheck`

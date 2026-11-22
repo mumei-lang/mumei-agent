@@ -22,13 +22,15 @@ import sys
 from pathlib import Path
 
 from agent.attempt_schedule import MAX_SCHEDULE_ATTEMPTS, run_attempt_schedule
+from agent.plan_history_log import append_plan_history
 from agent.verification_planner import (
+    SOURCE_INPUT_FORMAT,
     AdapterRegistry,
     PlannerPolicy,
     ResultContract,
     RouteRequirements,
     RuntimeObservation,
-    SOURCE_INPUT_FORMAT,
+    VerificationPlan,
 )
 
 MAX_INPUT_BYTES = 1 << 20
@@ -481,15 +483,34 @@ def build_plan_parser(
         "--output", metavar="PATH",
         help="Write the plan document here instead of stdout.",
     )
+    parser.add_argument(
+        "--history-log", metavar="PATH",
+        help=(
+            "Append the emitted plan to an opt-in tamper-evident plan history "
+            "log (mumei.verification-plan-history-entry/v1). Not Evidence, "
+            "a dispatch record or authentication."
+        ),
+    )
+    parser.add_argument(
+        "--expected-history-head", metavar="HEX",
+        help=(
+            "Refuse to append unless the log's last entry digest equals this "
+            "pinned head. Requires --history-log."
+        ),
+    )
     return parser
 
 
-def run_plan(args: argparse.Namespace) -> dict:
+def _build_plan(args: argparse.Namespace) -> VerificationPlan:
     request = _load_request(args.request)
     registry = _load_registry(args.adapters)
     policy = _load_policy(args.policy)
     observations = _load_observations(args.observations)
-    return registry.plan(request, policy, observations).to_dict()
+    return registry.plan(request, policy, observations)
+
+
+def run_plan(args: argparse.Namespace) -> dict:
+    return _build_plan(args).to_dict()
 
 
 def _plan_declared_paths(args: argparse.Namespace) -> list[str]:
@@ -498,6 +519,9 @@ def _plan_declared_paths(args: argparse.Namespace) -> list[str]:
         paths.append(args.observations)
     if args.output is not None:
         paths.append(args.output)
+    history_log = getattr(args, "history_log", None)
+    if history_log is not None:
+        paths.append(history_log)
     return paths
 
 
@@ -506,6 +530,10 @@ def main_plan(args: argparse.Namespace | None = None) -> int:
         args = build_plan_parser().parse_args()
     declared = _plan_declared_paths(args)
     try:
+        history_log = getattr(args, "history_log", None)
+        expected_history_head = getattr(args, "expected_history_head", None)
+        if expected_history_head is not None and history_log is None:
+            raise ValueError("--expected-history-head requires --history-log")
         if args.output is not None:
             target = os.path.realpath(args.output)
             inputs = [args.request, args.adapters, args.policy]
@@ -515,7 +543,25 @@ def main_plan(args: argparse.Namespace | None = None) -> int:
                 raise ValueError(
                     "--output must not overwrite a declared input"
                 )
-        document = json.dumps(run_plan(args), indent=2, sort_keys=True) + "\n"
+        if history_log is not None:
+            target = os.path.realpath(history_log)
+            declared_inputs = [args.request, args.adapters, args.policy]
+            if args.observations is not None:
+                declared_inputs.append(args.observations)
+            if args.output is not None:
+                declared_inputs.append(args.output)
+            if any(os.path.realpath(path) == target for path in declared_inputs):
+                raise ValueError(
+                    "--history-log must not overwrite a declared input or output"
+                )
+
+        plan = _build_plan(args)
+        if history_log is not None:
+            digest = append_plan_history(
+                history_log, plan, expected_head=expected_history_head
+            )
+            print(f"verify-plan: history head {digest}", file=sys.stderr)
+        document = json.dumps(plan.to_dict(), indent=2, sort_keys=True) + "\n"
         if args.output is not None:
             Path(args.output).write_text(document, encoding="utf-8")
         else:

@@ -198,7 +198,12 @@ def _fsync_directory(directory: Path) -> None:
         os.close(directory_fd)
 
 
-def append_plan_history(path: str, plan: VerificationPlan) -> str:
+def append_plan_history(
+    path: str,
+    plan: VerificationPlan,
+    *,
+    expected_head: str | None = None,
+) -> str:
     """Append one plan projection and return its digest."""
     if type(plan) is not VerificationPlan:
         raise ValueError(_PLAN_TYPE_ERROR)
@@ -217,7 +222,7 @@ def append_plan_history(path: str, plan: VerificationPlan) -> str:
         for directory in missing_directories:
             _fsync_directory(directory.parent)
         with _locked(history_path):
-            entries, current_size, _ = _read_entries(history_path)
+            entries, current_size, _ = _read_entries(history_path, expected_head)
             unsigned = {
                 "schema_version": ENTRY_SCHEMA,
                 "index": len(entries),

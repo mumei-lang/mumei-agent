@@ -161,6 +161,10 @@ C04/C11 remain partial: Evidence acceptance and default routes are open
 work. The log does not wire persistence into planning, dispatch or runtime
 fallback.
 
+`verify-plan --history-log PATH [--expected-history-head HEX]` appends the
+emitted plan and reports the new head on stderr without changing the plan
+document. MCP `verify_plan` and `verify-schedule` do not write this log.
+
 ### C11 declared memory bounds for attempted executions
 
 `AttemptRunner.run(request, argv, cancel_event=None, memory_bound_mb=None)`
