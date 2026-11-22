@@ -14024,6 +14024,25 @@ class _Builder:
                     else None
                 )
                 if alias is not None:
+                    if (
+                        alias.binding_id
+                        in self._pointer_param_reseats
+                        or alias.binding_id
+                        in self._param_pointer_aliases
+                    ):
+                        # The target's entry slot is gone — `*p`
+                        # still reads the pointee `p` captured when
+                        # it was bound, which is p's own slot.
+                        deps = locals_.get(bound_ref.binding_id)
+                        if deps is None:
+                            deps = (
+                                frozenset(
+                                    {params[bound_ref.binding_id]}
+                                )
+                                if bound_ref.binding_id in params
+                                else frozenset()
+                            )
+                        return deps
                     deps = locals_.get(alias.binding_id)
                     return (
                         deps
@@ -25550,16 +25569,16 @@ class _Builder:
         # `*q` through a `q := p` alias reads the TARGET's entry
         # pointee — deps land on p's slot, which carries stores
         # like `p.V = x` that q's own slot never sees. A target that
-        # was itself reseated or re-aliased lost its entry slot —
-        # the read closes like the field-read rule.
+        # was itself reseated or re-aliased lost its entry slot:
+        # `*q` then reads the pointee q captured, which is q's own
+        # slot — keep the unsubstituted binding_id.
         alias = self._param_pointer_aliases.get(binding_id)
-        if alias is not None:
+        if (
+            alias is not None
+            and alias.binding_id not in self._pointer_param_reseats
+            and alias.binding_id not in self._param_pointer_aliases
+        ):
             binding_id = alias.binding_id
-            if (
-                binding_id in self._pointer_param_reseats
-                or binding_id in self._param_pointer_aliases
-            ):
-                raise _Unsupported("non_parameter_reference")
         deps = locals_.get(binding_id)
         if deps is None:
             deps = (
