@@ -2595,3 +2595,35 @@ contract C {
         ref.binding_id == f_binding.id and ref.kind == "call"
         for ref in report.references
     )
+
+
+def test_overload_arg_type_resolves_in_callee_scope():
+    source = """
+contract A {
+    struct S { uint256 x; }
+    function get() external returns (S memory) {}
+}
+contract T {
+    function f(A.S memory s) external {}
+    function f(B.S memory s) external {}
+}
+contract B {
+    struct S { uint256 y; }
+    A a;
+    T t;
+    function run() external { t.f(a.get()); }
+}
+"""
+    report = build_sol_bindings(source)
+    # `a.get()` returns `S` spelled in A's scope — `A.S`, not `B.S`,
+    # so the `f(A.S)` overload (declared first) wins.
+    f_overloads = [b for b in report.bindings if b.name == "f"]
+    assert len(f_overloads) == 2
+    call_refs = [
+        r
+        for r in report.references
+        if r.kind == "call" and r.binding_id in {b.id for b in f_overloads}
+    ]
+    assert len(call_refs) == 1
+    bound = next(b for b in f_overloads if b.id == call_refs[0].binding_id)
+    assert bound is f_overloads[0]

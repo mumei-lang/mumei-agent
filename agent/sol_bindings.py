@@ -1055,13 +1055,22 @@ class _SolBindings:
         return member, None, reason
 
     def _object_declared_type_text(self, obj: Any) -> str | None:
-        """Declared-type text of a member-call receiver, or None when the
-        object's type cannot be named statically. Identifier objects keep
-        the original variable lookup; member chains (`coin.v.f()`), array
+        declared = self._object_declared_type(obj)
+        return declared[0] if declared is not None else None
+
+    def _object_declared_type(
+        self, obj: Any
+    ) -> "tuple[str, _Contract | None] | None":
+        """Declared-type text of a member-call receiver together with
+        the scope that spelling resolves in, or None when the object's
+        type cannot be named statically. Identifier objects keep the
+        original variable lookup; member chains (`coin.v.f()`), array
         elements (`totals[0].f()`), calls returning a named type
         (`getTotal().f()`, `total.add(1).sub(2)`) and type conversions
         (`Token(addr).f()`) reuse the same type-node machinery as the
-        contract path.
+        contract path. The owner matters for user-defined types:
+        `A.get()` returning `S` spells `S` inside `A`, not in the
+        call site's contract.
         """
         obj = self._unwrap(obj)
         if obj is None:
@@ -1079,12 +1088,12 @@ class _SolBindings:
                 in {"contract", "interface", "library"}
             ):
                 return None
-            return self.text(record.type_node)
+            return self.text(record.type_node), record.owner
         if obj.type == "member_expression":
             _member, inner, _reason = self._resolve_member(obj)
             if inner is None or inner.type_node is None:
                 return None
-            return self.text(inner.type_node)
+            return self.text(inner.type_node), inner.owner
         if obj.type == "array_access":
             base = self._unwrap(obj.child_by_field_name("base"))
             base_record = self._object_record(base)
@@ -1098,7 +1107,7 @@ class _SolBindings:
             element = re.sub(r"\[[^\]]*\]\s*$", "", text).strip()
             if element == text.strip() or "[" in element:
                 return None
-            return element
+            return element, base_record.owner
         if obj.type == "call_expression":
             callee = self._unwrap(obj.child_by_field_name("function"))
             record = self._object_record(callee)
@@ -1114,10 +1123,12 @@ class _SolBindings:
                 # `Token(addr)` / `Coin(...)` — the value is typed by
                 # the declared type itself. A qualified callee keeps
                 # its dotted name (`Container.Coin(1)`): using targets
-                # spell the type the same way.
+                # spell the type the same way. The name resolved at
+                # the call site, so it re-resolves in the call site's
+                # scope.
                 if callee.type == "member_expression":
-                    return self.text(callee)
-                return record.binding.name
+                    return self.text(callee), self.current_contract
+                return record.binding.name, self.current_contract
             if record.binding.kind != "function":
                 if record.type_node is None or re.match(
                     r"\s*function\b", self.text(record.type_node)
@@ -1160,7 +1171,7 @@ class _SolBindings:
                     "enum",
                 }:
                     return None
-                return text
+                return text, record.owner
             function_node = record.node.parent
             if function_node is None:
                 return None
@@ -1172,7 +1183,10 @@ class _SolBindings:
                 r"\s*function\b", self.text(type_node)
             ):
                 return None
-            return self.text(type_node)
+            # The returns clause is spelled inside the callee's
+            # declaring contract (`A.get(): returns (S)` means `A.S`),
+            # not the caller's.
+            return self.text(type_node), record.owner
         return None
 
     def _using_candidates(
@@ -1184,9 +1198,10 @@ class _SolBindings:
         named statically (mappings, nested arrays, function-typed
         returns) keep their opaque treatment.
         """
-        raw_text = self._object_declared_type_text(obj)
-        if raw_text is None:
+        declared = self._object_declared_type(obj)
+        if declared is None:
             return [], None
+        raw_text, type_owner = declared
         type_text = self._canonical_type_text(raw_text)
         directives = list(self.file_usings)
         if self.current_contract is not None:
@@ -1201,7 +1216,7 @@ class _SolBindings:
                         target_text, self.current_contract, position
                     )
                     receiver_record = self._user_type_record(
-                        type_text, self.current_contract, position
+                        type_text, type_owner, position
                     )
                     if (
                         target_record is None
@@ -1236,6 +1251,7 @@ class _SolBindings:
                         "typed",
                         type_text,
                         param_owner=item.owner,
+                        arg_owner=type_owner,
                         position=position,
                     )
                     == "nomatch"
@@ -1317,24 +1333,28 @@ class _SolBindings:
         _spans, expressions = self._call_arguments(parent)
         return [self._unwrap(expr) for expr in expressions]
 
-    def _argument_kind(self, arg: Any) -> tuple[str, str | None]:
+    def _argument_kind(
+        self, arg: Any
+    ) -> "tuple[str, str | None, _Contract | None]":
         """Best-effort type of a call argument: a literal marker for
         literals, the canonical declared-type text for expressions the
-        receiver-type machinery can name, or ``("unknown", None)``.
+        receiver-type machinery can name plus the scope that spelling
+        resolves in, or ``("unknown", None, None)``.
         """
         arg = self._unwrap(arg)
         if arg is None:
-            return "unknown", None
+            return "unknown", None, None
         if arg.type == "number_literal":
-            return "literal_int", self.text(arg)
+            return "literal_int", self.text(arg), None
         if arg.type == "string_literal":
-            return "literal_string", None
+            return "literal_string", None, None
         if arg.type == "boolean_literal":
-            return "literal_bool", None
-        text = self._object_declared_type_text(arg)
-        if text is not None:
-            return "typed", self._canonical_type_text(text)
-        return "unknown", None
+            return "literal_bool", None, None
+        declared = self._object_declared_type(arg)
+        if declared is not None:
+            text, owner = declared
+            return "typed", self._canonical_type_text(text), owner
+        return "unknown", None, None
 
     @staticmethod
     def _int_width(text: str) -> tuple[bool, int] | None:
@@ -1411,6 +1431,7 @@ class _SolBindings:
         arg_text: str | None,
         *,
         param_owner: "_Contract | None" = None,
+        arg_owner: "_Contract | None" = None,
         position: int = 0,
     ) -> str:
         """`match` / `convert` / `nomatch` for one parameter against one
@@ -1460,7 +1481,7 @@ class _SolBindings:
             param, param_owner, position
         )
         arg_record = self._user_type_record(
-            arg_text, self.current_contract, position
+            arg_text, arg_owner, position
         )
         if (
             param_record is not None
@@ -1499,12 +1520,13 @@ class _SolBindings:
             rank = 0
             viable = True
             for param, arg in zip(params, args):
-                kind, arg_text = self._argument_kind(arg)
+                kind, arg_text, arg_owner = self._argument_kind(arg)
                 verdict = self._param_accepts(
                     param,
                     kind,
                     arg_text,
                     param_owner=record.owner,
+                    arg_owner=arg_owner,
                     position=member_node.start_byte,
                 )
                 if verdict == "nomatch":
@@ -1519,7 +1541,8 @@ class _SolBindings:
         if not survivors:
             return None, "none"
         if any(
-            self._argument_kind(arg)[0] == "unknown" for arg in args
+            self._argument_kind(arg)[0] == "unknown"
+            for arg in args
         ):
             # An argument whose type cannot be named could be an exact
             # match for any survivor — solc would still disambiguate,
