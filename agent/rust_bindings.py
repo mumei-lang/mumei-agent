@@ -28,6 +28,22 @@ from agent.lexical_bindings import (
 PROFILE = "mumei.rust-lexical-bindings/v1"
 MAX_SOURCE_BYTES = 64 * 1024
 _UNKNOWN = TypeFact("unknown", "", 0, None, "")
+# Single-generic-argument containers whose `Index::Output` is the
+# element type — `Vec<P>[i]` : P. Maps are handled by value-arg
+# extraction in `_annotation_type`; anything else stays opaque.
+_INDEX_ELEMENT_CONTAINERS = frozenset(
+    {
+        "Vec",
+        "VecDeque",
+        "LinkedList",
+        "HashSet",
+        "BTreeSet",
+        "BinaryHeap",
+        "HashMap",
+        "BTreeMap",
+    }
+)
+
 _PRELUDE_NAMES = frozenset(
     {
         "Some", "None", "Ok", "Err", "Vec", "String", "Box", "Option",
@@ -364,12 +380,29 @@ class _RustBindings:
                     variadic=variadic,
                     extern=extern,
                     struct_constructor=constructor,
+                    # `fn mk() -> W<i32>` keeps its return annotation —
+                    # result-type inference reads it for receivers like
+                    # `mk().n()`.
+                    type_node=(
+                        node.child_by_field_name("return_type")
+                        if kind == "function"
+                        else None
+                    ),
                 )
                 self._add_to_scope(scope, record)
                 if kind == "function":
                     self._function_records[record.binding.id] = record
                 if kind == "type_alias":
                     record.alias_node = node.child_by_field_name("type")
+                if node.type == "mod_item" and body is not None:
+                    # Module contents are items too — predeclare them so
+                    # `m::P` resolves before `mod m` is scanned, like a
+                    # top-level item does.
+                    child_scope = _Scope(
+                        body, scope.module_depth + 1, scope.function_id
+                    )
+                    record.module_scope = child_scope
+                    self._predeclare(body, child_scope)
                 self._add_generic_parameters(
                     node,
                     scope,
@@ -786,12 +819,20 @@ class _RustBindings:
             body = node.child_by_field_name("body")
             if body is not None:
                 self.module_depth += 1
-                child_scope = _Scope(body, self.module_depth, self.current_function)
                 record = self._find_item_record(scope, node)
+                child_scope = (
+                    record.module_scope
+                    if record is not None
+                    and record.module_scope is not None
+                    else _Scope(
+                        body, self.module_depth, self.current_function
+                    )
+                )
                 if record is not None:
                     record.module_scope = child_scope
                 self.scopes.append(child_scope)
-                self._predeclare(body, child_scope)
+                # Items inside were already predeclared with the
+                # module's own record — only expressions need the walk.
                 self._scan_container(body, child_scope)
                 self.scopes.pop()
                 self.module_depth -= 1
@@ -1082,8 +1123,26 @@ class _RustBindings:
                 r"\s+", " ", self.text(element)
             ).strip()
         if node is not None and node.type == "scoped_type_identifier":
+            # `m::W<i32>` keeps its own type arguments — the scoped
+            # node's field takes them when the loop did not.
+            scoped_args = self._type_args_key(
+                node.child_by_field_name("type_arguments")
+            )
+            if scoped_args is not None:
+                args = scoped_args
             record = self._scoped_type(node)
-            return (None if record is None else record.binding.id), None
+            if record is not None and record.binding.kind == "import":
+                record = self._lookup(
+                    record.binding.name, node.start_byte, "type"
+                ) or record
+            if (
+                record is not None
+                and record.binding.name in {"HashMap", "BTreeMap"}
+                and args is not None
+            ):
+                parts = self._type_arg_list(args)
+                args = parts[-1] if parts else None
+            return (None if record is None else record.binding.id), args
         if node is None or node.type != "type_identifier":
             return None, None
         record = self._lookup(
@@ -1091,14 +1150,11 @@ class _RustBindings:
             node.start_byte,
             "type",
         )
-        if (
-            record is None
-            and args is not None
-            and self._normalize_identifier(self.text(node))
-            in {"HashMap", "BTreeMap"}
-        ):
-            # An unresolved std map indexes to its value type —
-            # `m[k]` : V, not the key-value pair.
+        name = self._normalize_identifier(self.text(node))
+        if name in {"HashMap", "BTreeMap"} and args is not None:
+            # A std map indexes to its value type — `m[k]` : V, not
+            # the key-value pair. Applies whether the name resolves
+            # (e.g. imported) or stays unresolved.
             parts = self._type_arg_list(args)
             args = parts[-1] if parts else None
         return (None if record is None else record.binding.id), args
@@ -1416,6 +1472,44 @@ class _RustBindings:
                 return None
         return first
 
+    def _concrete_type_id(self, type_id: str | None) -> str | None:
+        """Unwrap `type A = B` aliases to the aliased type's id."""
+        seen = set()
+        while type_id is not None and type_id not in seen:
+            seen.add(type_id)
+            record = self.records.get(type_id)
+            if (
+                record is None
+                or record.binding.kind != "type_alias"
+                or record.alias_node is None
+            ):
+                return type_id
+            resolved, _ = self._annotation_type(record.alias_node)
+            if resolved is None or resolved == type_id:
+                return type_id
+            type_id = resolved
+        return type_id
+
+    def _resolve_trait_node(self, trait_node: Any) -> "_Record | None":
+        """Trait record for a UFCS `as` qualifier — plain, scoped
+        (`m::T`) or generic (`T<A>`) spellings all resolve."""
+        node = trait_node
+        while node is not None and node.type in {
+            "generic_type",
+            "generic_type_with_turbofish",
+            "return_type",
+        }:
+            node = node.child_by_field_name("type")
+        if node is None:
+            return None
+        if node.type in {"scoped_identifier", "scoped_type_identifier"}:
+            return self._scoped_type(node)
+        return self._lookup(
+            self._normalize_identifier(self.text(node)),
+            node.start_byte,
+            "type",
+        )
+
     def _ufcs_member(
         self,
         type_id: str | None,
@@ -1432,6 +1526,11 @@ class _RustBindings:
         pool `P::m` would see."""
         if type_id is None:
             return None
+        # `<A as T>::m` with `type A = P` looks up the impl on the
+        # concrete type P — the alias only spells the receiver.
+        type_id = self._concrete_type_id(type_id)
+        if type_id is None:
+            return None
         if trait_node is None:
             return self._member_record(
                 type_id,
@@ -1440,11 +1539,7 @@ class _RustBindings:
                 impl_args,
                 position,
             )
-        trait = self._lookup(
-            self._normalize_identifier(self.text(trait_node)),
-            trait_node.start_byte,
-            "type",
-        )
+        trait = self._resolve_trait_node(trait_node)
         if trait is None:
             return None
         pool = [
@@ -1527,10 +1622,31 @@ class _RustBindings:
             children = node.named_children
             if not children:
                 return None, None
-            _, elem_args = self._receiver_type(children[0])
+            container_id, elem_args = self._receiver_type(children[0])
             if elem_args is None or "," in elem_args:
                 return None, None
             elem_args = elem_args.strip()
+            index = children[1] if len(children) > 1 else None
+            if index is not None and (
+                index.type in {"range_expression", "range_pattern"}
+                or ".." in self.text(index)
+            ):
+                # `v[a..b]` is a slice of the element, not the element.
+                return None, f"[{elem_args}]"
+            # A resolved container whose `Index::Output` is not its
+            # generic argument (a custom `Wrapper<P>`) stays opaque —
+            # only the known element-indexing collections apply.
+            if container_id is not None:
+                container_name = next(
+                    (
+                        b.name
+                        for b in self.bindings
+                        if b.id == container_id
+                    ),
+                    None,
+                )
+                if container_name not in _INDEX_ELEMENT_CONTAINERS:
+                    return None, None
             # A slice or array element exposes its own element type —
             # `&[[P; 2]]` indexes first to `[P; 2]`, then to `P`.
             bracket = re.fullmatch(
@@ -1603,17 +1719,18 @@ class _RustBindings:
                 # `a.mk()` is a Future, not the output type — await is
                 # required before `B`'s members apply.
                 return None, None
+            # The declaration's return annotation carries generic args
+            # (`fn mk() -> W<i32>`) that the summary's type id drops.
+            annotated = self._annotation_type(member.type_node)
+            if annotated[0] is not None or annotated[1] is not None:
+                return annotated
             if function.result.type_id:
                 return function.result.type_id, None
-            return self._annotation_type(member.type_node)
+            return annotated
         if node.type == "struct_expression":
-            name = node.child_by_field_name("name")
-            if name is not None and name.type in {
-                "generic_type",
-                "generic_type_with_turbofish",
-            }:
-                name = name.child_by_field_name("type")
-            return self._annotation_type(name)
+            # `W<i32>{..}` keeps its type arguments — the annotation
+            # walk reads them off the generic name node.
+            return self._annotation_type(node.child_by_field_name("name"))
         if node.type == "parenthesized_expression":
             children = self._children(node)
             if len(children) == 1:
@@ -2337,9 +2454,11 @@ class _RustBindings:
     def _record_qualified_path(self, node: Any) -> None:
         member, name_node = self._scoped_member(node)
         if member is not None:
-            self.references.append(
-                Reference(self.span(name_node), member.binding.id, "read")
-            )
+            # An enum discriminant's path is visited by both the type
+            # walk and the value walk — append once.
+            reference = Reference(self.span(name_node), member.binding.id, "read")
+            if reference not in self.references:
+                self.references.append(reference)
             return
         unresolved = Unresolved(
             self.span(node),
