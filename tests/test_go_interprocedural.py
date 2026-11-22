@@ -33917,6 +33917,17 @@ def test_named_struct_value_element_pointer_member_store(
             "\treturn p.B[k].W.V\n}\n",
             frozenset({0, 1}),
         ),
+        # `p.B[k].W.V = x` — a store through the pointer member
+        # lands in the pointee, legal even on a map element.
+        (
+            "type E2 struct { V int64 }\n"
+            "type Elem struct { W *E2 }\n"
+            "type S struct { B map[int64]Elem }\n"
+            "func F(p *S, k int64, x int64) int64 {\n"
+            "\tp.B[k].W.V = x\n"
+            "\treturn p.B[k].W.V\n}\n",
+            frozenset({0, 1, 2}),
+        ),
     ],
 )
 def test_named_struct_value_element_pointer_member_read(

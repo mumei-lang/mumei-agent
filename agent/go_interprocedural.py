@@ -18622,9 +18622,16 @@ class _Builder:
                     )
                     refs.append((oref, True, True, True))
                     continue
-                if (
-                    scalar_field_elem_lhs is not None
-                    and scalar_field_elem_lhs[3].type.kind != "map"
+                if scalar_field_elem_lhs is not None and (
+                    scalar_field_elem_lhs[3].type.kind != "map"
+                    # `p.B[k].W.V = x` — the member path crosses a
+                    # pointer, so the store lands inside the pointee,
+                    # caller memory — legal even though Go rejects a
+                    # direct member store on the map element.
+                    or any(
+                        getattr(member.type, "kind", None) == "pointer"
+                        for member in scalar_field_elem_lhs[6]
+                    )
                 ):
                     (
                         oref, indexes, field_key, _container_member,

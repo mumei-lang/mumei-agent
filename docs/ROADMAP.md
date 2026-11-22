@@ -4325,9 +4325,10 @@ pointer member resolves the same way once the field admits a
 named element type — `p.B[i].W.V` and `p.B[i].W = q` on
 `B []Elem` (and `ss[i].W` on a `[]Elem` parameter) fold into
 the collection's group like the `[]*Elem` forms; a
-`map[int64]Elem` field admits the *read* (`p.B[k].W.V`) — Go
-rejects field stores on map elements, so there is no store
-form to model. Handing the member to a call —
+`map[int64]Elem` field admits the *read* (`p.B[k].W.V`) and
+stores through the pointer member (`p.B[k].W.V = x`) — only
+a direct field store on the map element (`p.B[k].W = q`)
+stays closed because Go itself rejects it. Handing the member to a call —
 `G(p.A[i].W, x)` — folds the callee's writes through the
 pointer into the pointee like `p.A[i].W = q`. A pointer member read with no deeper field —
 `p.A[i].W`, `p.B[i].W`, `p.A[i].W == nil` — reads the
