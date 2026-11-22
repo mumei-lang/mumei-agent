@@ -7122,3 +7122,57 @@ fn f(v: Vec<Option<P>>, s: &mut [Option<P>]) {
     assert len(calls) == 2
     for call in calls:
         assert call.target == pm.id
+
+def test_set_algebra_methods_bind_left_set_elements():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(a: HashSet<P>, b: HashSet<P>, t: BTreeSet<P>, v: Vec<P>) {
+    for x in a.union(&b) { x.pm(); }
+    for x2 in a.intersection(&b) { x2.pm(); }
+    for x3 in a.difference(&b) { x3.pm(); }
+    for x4 in a.symmetric_difference(&b) { x4.pm(); }
+    for x5 in t.union(&t) { x5.pm(); }
+    for x6 in v.union(&v) { x6.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    for call in ("x.pm()", "x2.pm()", "x3.pm()", "x4.pm()", "x5.pm()"):
+        assert bound.get(call) == pm.id, call
+    # `Vec` has no union — the method does not invent an element type.
+    assert not bound.get("x6.pm()")
+
+
+def test_btreemap_range_binds_key_value_pairs():
+    source = """
+struct K;
+impl K { fn km(&self) {} }
+struct V;
+impl V { fn vm(&self) {} }
+fn f(m: BTreeMap<K, V>, h: HashMap<K, V>) {
+    for (k, v) in m.range(..) { k.km(); v.vm(); }
+    for (k2, v2) in m.range_mut(..) { k2.km(); v2.vm(); }
+    for (k3, v3) in h.range(..) { k3.km(); v3.vm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    km = _bindings(report, "km", "associated_function")[0]
+    vm = _bindings(report, "vm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    assert bound.get("k.km()") == km.id
+    assert bound.get("v.vm()") == vm.id
+    assert bound.get("k2.km()") == km.id
+    assert bound.get("v2.vm()") == vm.id
+    # `HashMap` has no `range` view — pairs stay unpinned.
+    assert not bound.get("k3.km()")
+    assert not bound.get("v3.vm()")
