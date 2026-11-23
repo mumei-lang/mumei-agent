@@ -11735,7 +11735,7 @@ class _RustBindings:
             else ""
         )
         if payload_head is not None and (
-            head_name in _DEREF_WRAPPER_NAMES
+            (head_name in _DEREF_WRAPPER_NAMES and type_id is None)
             # `OccupiedEntry<K, V>`/`VacantEntry<K, V>` are spelled
             # by the map-entry machinery — a same-named user type
             # must not steal the head: `e.get()` still reads the
