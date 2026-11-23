@@ -6685,6 +6685,36 @@ func index(s []int, i int) int {
     assert not any("can index" in issue.message for issue in issues)
 
 
+def test_go_inverted_len_guard_unsigned_short_copy_is_guarded() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package p
+
+func index(s []int, offset uint) int {
+    i := offset
+    if i >= uint(len(s)) { return 0 }
+    return s[i]
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("can index" in issue.message for issue in issues)
+
+
+def test_go_inverted_len_guard_unsigned_var_copy_is_guarded() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package p
+
+func index(s []int, offset uint) int {
+    var i = offset
+    if i >= uint(len(s)) { return 0 }
+    return s[i]
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("can index" in issue.message for issue in issues)
+
+
 def test_go_inverted_len_le_signed_index_reports_bounds() -> None:
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
 

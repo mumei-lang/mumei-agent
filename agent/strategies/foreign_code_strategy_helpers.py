@@ -3489,6 +3489,25 @@ def _go_unsigned_variables(
         r"\bfor\s+(\w+)\s*:=\s*(?:byte|uint(?:8|16|32|64|ptr)?)\s*\(", stripped
     ):
         unsigned.add(match.group(1))
+    copy_patterns = (
+        re.compile(
+            r"\b(?P<target>\w+)\s*:=\s*(?P<source>\w+)(?=[ \t]*(?:;|\r?\n|}|$))"
+        ),
+        re.compile(
+            r"\bvar\s+(?P<target>\w+)\s*=\s*(?P<source>\w+)(?=[ \t]*(?:;|\r?\n|}|$))"
+        ),
+    )
+    changed = True
+    while changed:
+        changed = False
+        for pattern in copy_patterns:
+            for match in pattern.finditer(stripped):
+                if (
+                    match.group("source") in unsigned
+                    and match.group("target") not in unsigned
+                ):
+                    unsigned.add(match.group("target"))
+                    changed = True
     return unsigned
 
 
