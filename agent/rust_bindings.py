@@ -3309,9 +3309,23 @@ class _RustBindings:
             if not children:
                 return None, None
             container_id, elem_args = self._receiver_type(children[0])
-            if elem_args is None or "," in elem_args:
+            if elem_args is None:
                 return None, None
             elem_args = elem_args.strip()
+            whole = re.fullmatch(
+                r"[A-Za-z_][\w:]*\s*<(.+)>", elem_args, re.DOTALL
+            )
+            if (
+                container_id is None
+                and whole is not None
+                and not self._verbatim_annotation_args(children[0])
+            ):
+                # `let v = Box::into_inner(b)` — produced args spell
+                # the whole `Vec<P>` type, not a container's element
+                # list — peel the head so `v[0]` is `P`.
+                elem_args = whole.group(1).strip()
+            if "," in elem_args:
+                return None, None
             index = children[1] if len(children) > 1 else None
             while index is not None and index.type == "parenthesized_expression":
                 index = next(iter(self._children(index)), None)
@@ -8290,7 +8304,21 @@ class _RustBindings:
         if iterator.type == "call_expression":
             return self._iterator_method_element(iterator)
         container_id, elem_args = self._receiver_type(iterator)
-        if elem_args is None or "," in elem_args:
+        if elem_args is None:
+            return _UNKNOWN, None
+        whole = re.fullmatch(
+            r"[A-Za-z_][\w:]*\s*<(.+)>", elem_args.strip(), re.DOTALL
+        )
+        if (
+            container_id is None
+            and whole is not None
+            and not self._verbatim_annotation_args(iterator)
+        ):
+            # `let v = Box::into_inner(b)` — produced args spell the
+            # whole `Vec<P>` type — peel the head so `for p in v`
+            # binds `P`.
+            elem_args = whole.group(1).strip()
+        if "," in elem_args:
             return _UNKNOWN, None
         # Iterating a map yields (K, V) pairs — index typing keeps
         # only the value type, so the pair's shape is unpinned here.
