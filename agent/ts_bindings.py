@@ -2824,6 +2824,29 @@ class _TypeScriptBindings:
         if declarator is None or declarator.type != "variable_declarator":
             return None
         value = declarator.child_by_field_name("value")
+        if value is not None and value.type in {
+            "subscript_expression",
+            "call_expression",
+            "member_expression",
+            "parenthesized_expression",
+            "non_null_expression",
+        }:
+            # `const q = arr[0]`/`f()`/`w.p` infer `q`'s type from
+            # the initializer's declared result — resolved at the
+            # initializer so a same-named local cannot shadow it.
+            self._initializer_active.add(record.binding.id)
+            try:
+                type_node = self._declared_type_node(
+                    value, value.start_byte
+                )
+                fact = self._type_fact(type_node)
+                return (
+                    self._type_record_by_id(fact.type_id)
+                    if fact.kind == "named"
+                    else None
+                )
+            finally:
+                self._initializer_active.discard(record.binding.id)
         if value is None or value.type != "new_expression":
             return None
         constructor = value.child_by_field_name("constructor")
@@ -3106,6 +3129,43 @@ class _TypeScriptBindings:
             )
         )
 
+    def _non_nullable_type_node(self, node: Any | None) -> Any | None:
+        """The non-null constituent of a union annotation — `P |
+        undefined` peels to `P` for `?.`/`!` narrowing. A union
+        that keeps several constituents returns None (the member
+        must exist on every part — unresolved either way)."""
+        node = self._unwrap_type(node)
+        if node is None:
+            return None
+        if node.type != "union_type":
+            return node
+        kept = []
+        for child in self.children(node):
+            text = self.text(child).strip()
+            if child.type in {"literal_type", "predefined_type",
+                              "type_identifier"} and text in {
+                "undefined", "null", "void", "never",
+            }:
+                continue
+            kept.append(child)
+        return kept[0] if len(kept) == 1 else None
+
+    def _accessed_optionally(self, node: Any) -> bool:
+        """True when `node` is the object of a `?.` member/subscript
+        access or wrapped by `!` — the forms TS narrows to the
+        non-null union constituent."""
+        parent = node.parent
+        if parent is None:
+            return False
+        if parent.type == "non_null_expression":
+            return True
+        if parent.type in {"member_expression", "subscript_expression"}:
+            return any(
+                child.type == "optional_chain"
+                for child in self.children(parent)
+            )
+        return False
+
     def _object_type(
         self,
         node: Any | None,
@@ -3148,8 +3208,66 @@ class _TypeScriptBindings:
                     False,
                     False,
                 )
-            inferred = self._initializer_type_record(record, position)
-            return inferred, False, False
+            if self._accessed_optionally(node):
+                # `o?.pm()` reads `pm` on the non-null union part —
+                # `P | undefined` narrows to `P`. Plain `o.pm()` on
+                # the union stays opaque (TS flags it an error).
+                fact = self._type_fact(
+                    self._non_nullable_type_node(record.type_node)
+                )
+                if fact.kind != "named" and record.type_node is None:
+                    # `const v = o` carries `o`'s union through the
+                    # initializer — peel that for `v?.pm()` too.
+                    declarator = record.node.parent
+                    if (
+                        declarator is not None
+                        and declarator.type == "variable_declarator"
+                    ):
+                        fact = self._type_fact(
+                            self._non_nullable_type_node(
+                                self._declared_type_node(
+                                    declarator.child_by_field_name(
+                                        "value"
+                                    ),
+                                    position,
+                                )
+                            )
+                        )
+                if fact.kind == "named":
+                    return (
+                        self._type_record_by_id(fact.type_id),
+                        False,
+                        False,
+                    )
+            annotated_opaque = self._unwrap_type(
+                record.type_node
+            )
+            if annotated_opaque is None or annotated_opaque.type not in {
+                "union_type", "intersection_type",
+            }:
+                # Unannotated or unresolvable (`x: Missing.T`)
+                # declarators infer `q`'s type from the initializer —
+                # `const q = arr[0]`/`f()`/`new P()`. A union or
+                # intersection annotation is authoritative even
+                # though the member stays opaque.
+                inferred = self._initializer_type_record(
+                    record, position
+                )
+                return inferred, False, False
+            return None, False, False
+        if node.type == "non_null_expression":
+            # `o!.pm()` — the assertion narrows the union to its
+            # non-null constituent before member lookup.
+            inner = next(
+                iter(self.children(node)), None
+            )
+            type_node = self._non_nullable_type_node(
+                self._declared_type_node(inner, position)
+            )
+            fact = self._type_fact(type_node)
+            if fact.kind != "named":
+                return None, False, False
+            return self._type_record_by_id(fact.type_id), False, False
         if node.type == "member_expression":
             property_node = node.child_by_field_name("property")
             if (
@@ -3845,7 +3963,9 @@ class _TypeScriptBindings:
                 if member is not None:
                     self.add_reference(property_node, member, "call")
             kind = "opaque_method"
-            if optional:
+            if optional and member is None:
+                # `o?.pm()` with `pm` unresolved — the optional chain
+                # keeps the receiver's narrowable type opaque.
                 kind = "opaque_optional"
             elif receiver is not None and receiver.type == "super":
                 kind = "opaque_super"
