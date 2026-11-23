@@ -5692,10 +5692,34 @@ fn h(vd: &mut std::collections::VecDeque<P>) { vd.as_mut_slices(); }
         source[: c.span.start].count("\n"): c.target
         for c in report.calls
     }
-    # `mut vd`/`&mut vd` can mutably borrow — the inherent
-    # `VecDeque::as_mut_slices` wins and the trait impl stays
-    # unbound; an immutable `vd` keeps the trait method.
+    # The trait's `&self` method matches at the `&VecDeque` step —
+    # before `&mut VecDeque` — so `vd` and `mut vd` both call the
+    # extension. Only a spelled `&mut VecDeque` receiver hits the
+    # inherent `VecDeque::as_mut_slices` first.
     assert calls[6] == member.id
+    assert calls[7] == member.id
+    assert not calls[8]
+
+def test_mut_field_shadowed_by_mut_inherent():
+    source = """
+trait Ext { fn as_mut_slices(&mut self) -> i32; }
+impl Ext for std::collections::VecDeque<P> {
+    fn as_mut_slices(&mut self) -> i32 { 0 }
+}
+struct P;
+struct H { d: std::collections::VecDeque<P> }
+fn f(mut h: H) { h.d.as_mut_slices(); }
+fn g(mut vd: std::collections::VecDeque<P>) { vd.as_mut_slices(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    member = _bindings(report, "as_mut_slices", "associated_function")[1]
+    calls = {
+        source[: c.span.start].count("\n"): c.target
+        for c in report.calls
+    }
+    # `h.d` on `mut h` mutably borrows — the inherent `&mut`
+    # method and the `&mut self` member meet at the same step,
+    # where the inherent method wins; same for `mut vd`.
     assert not calls[7]
     assert not calls[8]
 

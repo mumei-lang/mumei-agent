@@ -3105,10 +3105,13 @@ class _RustBindings:
             return None
         for ch in params.named_children:
             if ch.type == "self_parameter":
+                spelled = self.text(ch).strip()
+                if not spelled.startswith("&"):
+                    return "value"
                 return (
-                    "borrow"
-                    if self.text(ch).strip().startswith("&")
-                    else "value"
+                    "borrow_mut"
+                    if re.match(r"&\s*(?:'\w+\s+)?mut\b", spelled)
+                    else "borrow"
                 )
             if (
                 ch.type == "parameter"
@@ -3125,7 +3128,11 @@ class _RustBindings:
                 if spelling == "Self":
                     return "value"
                 if re.fullmatch(
-                    r"&\s*(?:'\w+\s*)?(?:mut\s+)?Self", spelling
+                    r"&\s*(?:'\w+\s*)?mut\s+Self", spelling
+                ):
+                    return "borrow_mut"
+                if re.fullmatch(
+                    r"&\s*(?:'\w+\s*)?Self", spelling
                 ):
                     return "borrow"
                 return "arbitrary"
@@ -3169,11 +3176,14 @@ class _RustBindings:
         return None
 
     def _receiver_ref_kind(self, receiver: "Any | None") -> "str | None":
-        """`shared` for an `&` receiver, `mut` for `&mut` or a
-        `mut` binding, `owned` for a bare value, None when unknown.
-        Method resolution tries `&self` one step before `self` on
-        a shared borrow; `&mut` and owned receivers keep the
-        by-value order."""
+        """`shared` for an `&` receiver, `mut` for a spelled `&mut`
+        receiver, `mut_place` for a place that can mutably borrow
+        (`mut` binding, or a field/index of a `mut`/`&mut`-typed
+        root), `owned` for a bare value, None when unknown.
+        A spelled `&mut` receiver matches `&mut self` first; a
+        mutable place reaches it only at the `&mut` autoref step —
+        after `self` and `&self` — so `&mut` inherent methods win
+        there only against `&mut self` trait members."""
         node = receiver
         while node is not None and node.type in {
             "reference_expression",
@@ -3200,16 +3210,35 @@ class _RustBindings:
                     )
                     else "shared"
                 )
-        if node.type == "identifier":
+        base = node
+        while base is not None and base.type in {
+            "field_expression",
+            "index_expression",
+        }:
+            base = next(iter(base.named_children), None)
+        if base is not None and base.type == "identifier":
             record = self._lookup(
-                self._normalize_identifier(self.text(node)),
-                node.start_byte,
+                self._normalize_identifier(self.text(base)),
+                base.start_byte,
                 "value",
             )
             if record is not None and record.binding.mutable:
-                # `mut vd` can mutably borrow for a `&mut self`
-                # call — the inherent method wins.
-                return "mut"
+                return "mut_place"
+            if base is not node:
+                # A field/index place borrows through the root's
+                # own type — `s: &mut S` makes `s.field` mutable.
+                btnode = self._receiver_type_node(base)
+                if btnode is not None:
+                    spelled = self.text(btnode).strip()
+                    if spelled.startswith("&"):
+                        return (
+                            "mut_place"
+                            if re.match(
+                                r"&\s*(?:'\w+\s+)?mut\b",
+                                spelled,
+                            )
+                            else "shared"
+                        )
             return "owned"
         return None if tnode is None else "owned"
 
@@ -3362,20 +3391,6 @@ class _RustBindings:
                         "".join(part.title() for part in mname.split("_"))
                     )
         ref_kind = self._receiver_ref_kind(receiver)
-        if any(
-            need is None or ref_kind == need
-            for head in receiver_heads
-            for method, need in _SPELLED_STD_INHERENT.get(
-                head, {}
-            ).items()
-            if method == name
-        ):
-            # `vd.as_slices()` calls the inherent
-            # `VecDeque::as_slices` — inherent methods outrank
-            # every trait impl, so no covering member may bind.
-            # A `&mut` inherent (`as_mut_slices`) only wins when
-            # the receiver can mutably borrow.
-            return None
         # A shared-borrow receiver (`s: &S`, `r: &str`) matches
         # `&self` one autoderef step before `self`; owned and
         # `&mut` receivers keep the by-value order.
@@ -3492,7 +3507,43 @@ class _RustBindings:
                     else:
                         covered = record
                         covered_kind = self_kind
-        return covered if covered is not None else trait_default
+        member = covered if covered is not None else trait_default
+        if member is not None:
+            inherent_need = next(
+                (
+                    need
+                    for head in receiver_heads
+                    for method, need in _SPELLED_STD_INHERENT.get(
+                        head, {}
+                    ).items()
+                    if method == name
+                ),
+                "absent",
+            )
+            if inherent_need != "absent":
+                member_kind = self._member_self_kind(member)
+                if inherent_need is None:
+                    # `VecDeque::as_slices(&self)` shadows the trait
+                    # member unless a by-value `self` member matched
+                    # at the value step first — a shared receiver
+                    # can never reach that step.
+                    if not (
+                        member_kind == "value"
+                        and ref_kind != "shared"
+                    ):
+                        return None
+                elif inherent_need == "mut":
+                    # `VecDeque::as_mut_slices(&mut self)` shadows
+                    # only when the receiver reaches `&mut` before
+                    # the member does — a spelled `&mut` receiver
+                    # always, a mutable place only against a
+                    # `&mut self` member.
+                    if ref_kind == "mut" or (
+                        ref_kind == "mut_place"
+                        and member_kind == "borrow_mut"
+                    ):
+                        return None
+        return member
 
     def _resolve_trait_node(self, trait_node: Any) -> "_Record | None":
         """Trait record for a UFCS `as` qualifier — plain, scoped
