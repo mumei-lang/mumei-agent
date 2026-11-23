@@ -14231,6 +14231,57 @@ class _Builder:
             or binding_id in self.pointee_closures
         )
 
+    def _type_can_carry_func_value(
+        self, fact: Any, seen: frozenset[str] = frozenset()
+    ) -> bool:
+        if fact is None:
+            return False
+        if fact.kind == "function":
+            return True
+        if fact.kind in {"slice", "array", "map", "chan", "pointer"}:
+            return self._type_can_carry_func_value(
+                getattr(fact, "elem", None), seen
+            )
+        struct_fact = self._struct_value_fact(fact)
+        if struct_fact is None:
+            return False
+        marker = struct_fact.type_id
+        if marker and marker in seen:
+            return False
+        if marker:
+            seen = seen | {marker}
+        return any(
+            self._type_can_carry_func_value(
+                getattr(member, "type", None), seen
+            )
+            for member in self._struct_fields_for_fact(struct_fact)
+        )
+
+    def _composite_literal_member_type_for_value(
+        self, node: Any
+    ) -> Any | None:
+        current = node
+        element = None
+        while current is not None and current.parent is not None:
+            parent = current.parent
+            if parent.type in {"keyed_element", "literal_element"}:
+                element = parent
+            if parent.type == "composite_literal":
+                if element is None:
+                    return None
+                is_struct, member = (
+                    self._func_literal_struct_element_member(
+                        parent, element, node
+                    )
+                )
+                return (
+                    getattr(member, "type", None)
+                    if is_struct
+                    else None
+                )
+            current = parent
+        return None
+
     def _value_carries_closure_records(
         self,
         node: Any,
@@ -14302,6 +14353,13 @@ class _Builder:
                 for source_id in source_ids
             )
         if value.type == "call_expression":
+            result_type = self._call_result_type(value)
+            if result_type is None:
+                result_type = (
+                    self._composite_literal_member_type_for_value(value)
+                )
+            if not self._type_can_carry_func_value(result_type):
+                return False
             function = self._strip_parens(
                 value.child_by_field_name("function")
             )

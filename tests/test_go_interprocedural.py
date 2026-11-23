@@ -57518,7 +57518,9 @@ def test_interface_slot_closure_values_fail_closed(go_types_helper):
             "package p\n"
             "type I interface { Run() int64 }\n"
             "type J interface { Do() }\n"
+            "type IG interface { Get() int64 }\n"
             "type O struct { I I }\n"
+            "type OG struct { I IG }\n"
             "type OW struct { J J }\n"
             "type OS struct { A []I }\n"
             "type OM struct { M map[int]I }\n"
@@ -57550,6 +57552,10 @@ def test_interface_slot_closure_values_fail_closed(go_types_helper):
             "\t\treturn func() int64 { return v }\n"
             "\t}; o := O{I: S{F: g()}}\n"
             "\tv = x; return o.I.Run()\n"
+            "}\n"
+            "func F_gint(x, y int64) int64 {\n"
+            "\tv := y; g := func() int64 { return v }\n"
+            "\to := OG{I: S{V: g()}}; v = x; return o.I.Get()\n"
             "}\n"
             "func F_sfvar(x, y int64) int64 {\n"
             "\tv := y; s := S{F: func() int64 { return v }}; o := O{I: s}\n"
@@ -57682,6 +57688,7 @@ def test_interface_slot_closure_values_fail_closed(go_types_helper):
         "F_sffac": frozenset({0, 1}),
         "F_ifarg": frozenset({0, 1}),
         "F_plain": frozenset({0}),
+        "F_gint": frozenset({1}),
     }
     for function_name, dependencies in expected.items():
         result = named_package(files, snapshot, summaries, function_name)
