@@ -5207,16 +5207,17 @@ fields retain ordinary analysis.
 Elided pointer-element literals carrying function-field closures remain
 fail-closed; closure-free pointer elements retain their existing analysis.
 
-Copies of named, alias-free value structs from local or parameter slices and
-arrays preserve their function-field closure records. Pointer, slice, map,
-channel and interface fields and map elements remain fail-closed.
+Copies of named, alias-free value structs from local or parameter slices,
+arrays and single-index maps preserve their function-field closure records.
+Pointer, slice, map, channel and interface fields remain fail-closed, as do
+copies of elements that themselves carry aliasing fields.
 
 Multi-index copies through non-pointer slice/array chains also preserve these
 records in copy, argument and return contexts; indexed method calls and values
 remain fail-closed.
 
 Bound method values on a single indexed alias-free struct element of a local
-or parameter slice/array freeze the container and index dependencies and
+or parameter slice/array/map freeze the container and index dependencies and
 preserve the element's function-field records. Unsupported indexed receivers
 fail closed when they carry closure records or the method can write.
 
@@ -5226,6 +5227,20 @@ Computed indexes at each chain level are evaluated in source order with their
 dependencies and side effects applied before method reads. Map and
 pointer-element paths, plus pointer-receiver method values whose receiver can
 be reseated, remain fail-closed.
+
+Single-index `map[K]S` element paths now carry the same function-field
+records — `map[K]S{k: {F: cl}}` literals and whole-element stores `m[k] =
+S{F: f}` record like their slice forms, and every read shape resolves:
+`m[k].F()`, `f := m[k].F`, bound method values `f := m[k].Run`, `e := m[k]`
+element copies, `ap(m[k].F)` arguments, `s.M[k]` struct-field roots,
+parameter maps (`m[k].F()` inside the callee), and passing the map itself
+to a callee that reads elements (`useMap(m)`), all with the element's own
+deps plus the index's. Map semantics make this strictly a read frontier:
+`m[k].F = g` never compiles, so the store-path machinery keeps its slice
+form unchanged. Nested map elements (`map[K]map`), multi-level indexing
+through a map, elements with aliasing fields (`map[int]A` where `A` holds a
+slice — the copy stays closed like `FAliasField`), and named map types
+declared *inside* a function body remain fail-closed.
 
 ### C06 imported method calls on concrete named types
 

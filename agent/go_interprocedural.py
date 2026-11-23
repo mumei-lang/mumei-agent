@@ -15580,10 +15580,14 @@ class _Builder:
     def _struct_collection_element_value_fact(
         self, fact: Any
     ) -> tuple[Any | None, bool]:
-        if fact is None or fact.kind not in {"slice", "array"}:
+        if fact is None or fact.kind not in {"slice", "array", "map"}:
             return None, False
         current = fact
-        while current.kind in {"slice", "array"}:
+        first = True
+        while current.kind in {"slice", "array"} or (
+            first and current.kind == "map"
+        ):
+            first = False
             element = getattr(current, "elem", None)
             if element is None or element.kind == "pointer":
                 return element, False
@@ -15650,10 +15654,13 @@ class _Builder:
                 else None
             )
         element_fact = binding.type
+        allowed_kinds = {"slice", "array"} | (
+            {"map"} if len(index_nodes) == 1 else set()
+        )
         for _ in index_nodes:
             if (
                 element_fact is None
-                or element_fact.kind not in {"slice", "array"}
+                or element_fact.kind not in allowed_kinds
                 or element_fact.elem is None
                 or element_fact.elem.kind == "pointer"
             ):
@@ -15718,9 +15725,17 @@ class _Builder:
         container_fact = self._deferred_expression_type(container)
         if container_fact is None:
             return None
+        # A map admits a single index only — `m[k]` reads copy the
+        # element like `s[i]` does, and `m[k].F =` never compiles, so
+        # the element is strictly a read path. Nested map elements
+        # (`map[K]map`) and multi-level indexing through a map stay
+        # closed here.
+        allowed_kinds = {"slice", "array"} | (
+            {"map"} if len(indexes) == 1 else set()
+        )
         for _ in reversed(indexes):
             if (
-                container_fact.kind not in {"slice", "array"}
+                container_fact.kind not in allowed_kinds
                 or getattr(container_fact, "elem", None) is None
                 or container_fact.elem.kind == "pointer"
             ):
