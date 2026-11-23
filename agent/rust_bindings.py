@@ -2745,7 +2745,34 @@ class _RustBindings:
                     and rcallee.type == "field_expression"
                     else None
                 )
-                slice_args = mname in {"remainder", "into_remainder"}
+                slice_args = (
+                    mname in {"remainder", "into_remainder"}
+                    or self._field_member(
+                        rcallee, ("associated_function",)
+                    )
+                    is not None
+                    or (
+                        rcallee is not None
+                        and rcallee.type
+                        in {
+                            "scoped_identifier",
+                            "scoped_type_identifier",
+                        }
+                        and self._scoped_member(rcallee)[0] is not None
+                    )
+                    or (
+                        rcallee is not None
+                        and rcallee.type == "identifier"
+                        and self._lookup(
+                            self._normalize_identifier(
+                                self.text(rcallee)
+                            ),
+                            rcallee.start_byte,
+                            "value",
+                        )
+                        is not None
+                    )
+                )
             annot_slice = False
             tnode = self._receiver_type_node(receiver)
             if tnode is not None:
