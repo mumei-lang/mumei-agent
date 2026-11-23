@@ -51110,7 +51110,7 @@ def test_func_field_values_in_func_collection_literals(go_types_helper):
             "\tv := y; s := S{F: func() int64 { return v }}\n"
             "\tfs := []func() int64{s.Run}; v = x; return fs[0]()\n"
             "}\n"
-            "func ClosedMapElement(x, y int64) int64 {\n"
+            "func MapElement(x, y int64) int64 {\n"
             "\tv := y\n"
             "\tm := map[int]S{0: {F: func() int64 { return v }}}\n"
             "\tfs := []func() int64{m[0].F}; v = x; return fs[0]()\n"
@@ -51148,6 +51148,7 @@ def test_func_field_values_in_func_collection_literals(go_types_helper):
         "BoundIdentifier": frozenset({0, 1}),
         "SimultaneousRead": frozenset({0, 1}),
         "SimultaneousWrite": frozenset({0}),
+        "MapElement": frozenset({0, 1}),
     }
     for function_name, dependencies in expected.items():
         result = named_package(files, snapshot, summaries, function_name)
@@ -51158,7 +51159,6 @@ def test_func_field_values_in_func_collection_literals(go_types_helper):
         )
     for function_name in (
         "ClosedMethodValue",
-        "ClosedMapElement",
         "ClosedPointerRoot",
         "ClosedPointerElement",
     ):
@@ -56098,24 +56098,27 @@ def test_slice_array_function_field_argument_boundaries(go_types_helper):
     files = {"a.go": "package p\n" + declarations}
     snapshot = _snapshot_for(go_types_helper, files)
     summaries = ip.summarize_go_package(files, snapshot)
-    for function_name in ("FMapArg", "FPointerArg"):
-        result = named_package(
-            files, snapshot, summaries, function_name
-        )
-        assert not result.available, function_name
-        assert "unsupported_expression" in {
-            gap.reason for gap in result.gaps
-        }, (function_name, result.gaps)
+    result = named_package(
+        files, snapshot, summaries, "FPointerArg"
+    )
+    assert not result.available, "FPointerArg"
+    assert "unsupported_expression" in {
+        gap.reason for gap in result.gaps
+    }, ("FPointerArg", result.gaps)
     indexed_result = named_package(
         files, snapshot, summaries, "FIndexedArg"
     )
     assert indexed_result.available, indexed_result.gaps
     assert indexed_result.return_dependencies == frozenset({0, 1})
-    for function_name in ("FMapCall", "FMapStore"):
+    for function_name in ("FMapCall", "FMapStore", "FMapArg"):
         result = named_package(
             files, snapshot, summaries, function_name
         )
-        assert not result.available, function_name
+        assert result.available, (function_name, result.gaps)
+        assert result.return_dependencies == frozenset({0, 1}), (
+            function_name,
+            result.return_dependencies,
+        )
     element_copy = named_package(
         files, snapshot, summaries, "FElementCopy"
     )
@@ -56132,6 +56135,139 @@ def test_slice_array_function_field_argument_boundaries(go_types_helper):
     param = named_package(files, snapshot, summaries, "FParam")
     assert param.available, param.gaps
     assert param.return_dependencies == frozenset({0})
+
+
+def test_map_element_function_field_closures(go_types_helper):
+    declarations = (
+        "type S struct { F func() int64 }\n"
+        "type A struct { F func() int64; B []int64 }\n"
+        "type W struct { M map[int]S; MM map[int]map[int]S; MA map[int]A }\n"
+        "func ap(cb func() int64) int64 { return cb() }\n"
+        "func use(e S) int64 { return e.F() }\n"
+        "func usea(e A) int64 { return e.F() }\n"
+        "func FLiteral(x, y int64) int64 {\n"
+        "\tv := y; m := map[int]S{0: {F: func() int64 { return v }}}\n"
+        "\tv = x; return m[0].F()\n"
+        "}\n"
+        "func FStore(x, y int64) int64 {\n"
+        "\tv := y; m := map[int]S{}\n"
+        "\tm[0] = S{F: func() int64 { return v }}; v = x\n"
+        "\treturn m[0].F()\n"
+        "}\n"
+        "func FCopy(x, y int64) int64 {\n"
+        "\tv := y; m := map[int]S{0: {F: func() int64 { return v }}}\n"
+        "\te := m[0]; v = x; return e.F()\n"
+        "}\n"
+        "func FFuncCopy(x, y int64) int64 {\n"
+        "\tv := y; m := map[int]S{0: {F: func() int64 { return v }}}\n"
+        "\tf := m[0].F; v = x; return f()\n"
+        "}\n"
+        "func FArg(x, y int64) int64 {\n"
+        "\tv := y; m := map[int]S{0: {F: func() int64 { return v }}}\n"
+        "\tv = x; return ap(m[0].F)\n"
+        "}\n"
+        "func FParam(m map[int64]S, x int64) int64 {\n"
+        "\treturn m[x].F()\n"
+        "}\n"
+        "func FStructField(x, y int64) int64 {\n"
+        "\tv := y; s := W{M: map[int]S{0: {F: func() int64 { return v }}}}\n"
+        "\tv = x; return s.M[0].F()\n"
+        "}\n"
+        "func FKeyedVar(x, y int64) int64 {\n"
+        "\tv := y; k := 1\n"
+        "\tm := map[int]S{k: {F: func() int64 { return v }}}\n"
+        "\tv = x; return m[k].F()\n"
+        "}\n"
+        "func FMethodValue(x, y int64) int64 {\n"
+        "\tv := y; m := map[int]S{0: {F: func() int64 { return v }}}\n"
+        "\tv = x; f := m[0].Run; return f()\n"
+        "}\n"
+        "func (s S) Run() int64 { return s.F() }\n"
+        "func FSliceFieldElem(x, y int64) int64 {\n"
+        "\tv := y; m := map[int]A{0: {F: func() int64 { return v }}}\n"
+        "\te := m[0]; v = x; return e.F()\n"
+        "}\n"
+        "func FMapFieldArg(x, y int64) int64 {\n"
+        "\tv := y; s := W{M: map[int]S{0: {F: func() int64 { return v }}}}\n"
+        "\tv = x; return use(s.M[0])\n"
+        "}\n"
+        "func FNestedMapFieldArg(x, y int64) int64 {\n"
+        "\tv := y; s := W{MM: map[int]map[int]S{0: {1: {F: func() int64 { return v }}}}}\n"
+        "\tv = x; return use(s.MM[0][1])\n"
+        "}\n"
+        "func FMapAliasFieldArg(x, y int64) int64 {\n"
+        "\tv := y; s := W{MA: map[int]A{0: {F: func() int64 { return v }}}}\n"
+        "\tv = x; return usea(s.MA[0])\n"
+        "}\n"
+    )
+    files = {"a.go": "package p\n" + declarations}
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    expected = {
+        "FLiteral": frozenset({0, 1}),
+        "FStore": frozenset({0, 1}),
+        "FCopy": frozenset({0, 1}),
+        "FFuncCopy": frozenset({0, 1}),
+        "FArg": frozenset({0, 1}),
+        "FParam": frozenset({0, 1}),
+        "FStructField": frozenset({0, 1}),
+        "FKeyedVar": frozenset({0, 1}),
+        "FMethodValue": frozenset({0, 1}),
+        "FMapFieldArg": frozenset({0, 1}),
+    }
+    for function_name, dependencies in expected.items():
+        result = named_package(
+            files, snapshot, summaries, function_name
+        )
+        assert result.available, (function_name, result.gaps)
+        assert result.return_dependencies == dependencies, (
+            function_name,
+            result.return_dependencies,
+        )
+    # A map element whose struct carries an aliasing field is not a
+    # value copy — `e := m[0]` on `map[int]A` stays closed, matching
+    # the slice form's `FAliasField`.
+    alias_elem = named_package(
+        files, snapshot, summaries, "FSliceFieldElem"
+    )
+    assert not alias_elem.available, alias_elem.gaps
+    # Elements of a nested map stay closed: `s.MM[0][1]` reads the
+    # element of a copied inner map, the multi-level boundary the
+    # single-index frontier excludes.
+    nested_map_elem = named_package(
+        files, snapshot, summaries, "FNestedMapFieldArg"
+    )
+    assert not nested_map_elem.available, nested_map_elem.gaps
+    # An element whose struct carries an aliasing field stays closed
+    # as an argument too — matching the `e := m[0]` copy boundary.
+    alias_elem_arg = named_package(
+        files, snapshot, summaries, "FMapAliasFieldArg"
+    )
+    assert not alias_elem_arg.available, alias_elem_arg.gaps
+
+
+def test_map_element_value_fact_stops_at_container_elements():
+    # Pure fact shapes — no compiler needed.
+    struct_fact = GoType("named", "S", 0, None, "p.S")
+    slice_elem = GoType(
+        "slice", "", 0, None, "", elem=struct_fact
+    )
+    map_of_struct = GoType(
+        "map", "", 0, None, "", elem=struct_fact, key=None
+    )
+    map_of_slice = GoType(
+        "map", "", 0, None, "", elem=slice_elem, key=None
+    )
+    value_fact = ip._Builder._struct_collection_element_value_fact
+    assert value_fact(None, map_of_struct) == (struct_fact, True)
+    assert value_fact(None, slice_elem) == (struct_fact, True)
+    # A map whose element is itself a container leaves the single-index
+    # frontier — `map[K][]S` elements alias shared slice headers.
+    assert value_fact(None, map_of_slice) == (slice_elem, False)
+    nested_map = GoType(
+        "map", "", 0, None, "", elem=map_of_struct, key=None
+    )
+    assert value_fact(None, nested_map) == (map_of_struct, False)
 
 
 def test_alias_free_slice_array_struct_element_copies(go_types_helper):
@@ -56281,6 +56417,7 @@ def test_alias_free_slice_array_struct_element_copies(go_types_helper):
         "FNoFunction": frozenset({0, 1}),
         "FRange": frozenset({0, 1}),
         "FPointerElement": frozenset({0, 1}),
+        "FMapElement": frozenset({0, 1}),
         "FMultiIndex": frozenset({0}),
     }
     for function_name, dependencies in expected.items():
@@ -56296,7 +56433,6 @@ def test_alias_free_slice_array_struct_element_copies(go_types_helper):
     assert reseat.available, reseat.gaps
     assert 1 in reseat.return_dependencies
     for function_name in (
-        "FMapElement",
         "FAliasField",
         "FPointerField",
     ):
@@ -56931,6 +57067,7 @@ def test_slice_array_element_method_values(go_types_helper):
         "FIdentifierSimul": frozenset({1}),
         "FShortSimul": frozenset({1}),
         "FMulti": frozenset({0, 1}),
+        "FMap": frozenset({0, 1}),
     }
     for function_name, dependencies in expected.items():
         result = named_package(files, snapshot, summaries, function_name)
@@ -56960,7 +57097,6 @@ def test_slice_array_element_method_values(go_types_helper):
     assert reseat.available, reseat.gaps
     assert 1 in reseat.return_dependencies
     for function_name in (
-        "FMap",
         "FPointerElement",
         "FComputedIndex",
         "FAliasClosure",
@@ -57567,6 +57703,7 @@ def test_cross_type_struct_function_field_value_copies(go_types_helper):
         "ComputedIndexedField": frozenset({0, 1, 2}),
         "ReturnField": frozenset({0}),
         "ReturnElementField": frozenset({0}),
+        "MapField": frozenset({0, 1, 2}),
     }
     for function_name, dependencies in expected.items():
         result = named_package(files, snapshot, summaries, function_name)
@@ -57581,7 +57718,6 @@ def test_cross_type_struct_function_field_value_copies(go_types_helper):
     for function_name in (
         "MethodField",
         "MethodReturn",
-        "MapField",
         "PointerRoot",
         "PointerElement",
         "PointerToSlice",
@@ -57737,7 +57873,8 @@ def test_named_collection_elided_struct_function_fields(go_types_helper):
     map_call = named_package(
         files, snapshot, summaries, "FNamedMapCall"
     )
-    assert not map_call.available, map_call.gaps
+    assert map_call.available, map_call.gaps
+    assert map_call.return_dependencies == frozenset({0, 1})
     generic = named_package(
         files, snapshot, summaries, "FGenericElided"
     )
