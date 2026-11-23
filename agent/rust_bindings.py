@@ -2020,6 +2020,28 @@ class _RustBindings:
                     args = key
             node = node.child_by_field_name("type")
         if node is not None and node.type in {
+            "abstract_type",
+            "bounded_type",
+        }:
+            # `impl Iterator<Item = P>` — the associated-type
+            # bindings carry the element spelling; an `impl Trait`
+            # with no bindings names no payload and stays opaque.
+            bound = [
+                re.sub(
+                    r"\s+",
+                    " ",
+                    self.text(
+                        bound_node.child_by_field_name("type")
+                    ),
+                ).strip()
+                for bound_node in self._descendants(node)
+                if bound_node.type == "type_binding"
+                and bound_node.child_by_field_name("type") is not None
+            ]
+            if bound:
+                return None, ", ".join(bound)
+            return None, None
+        if node is not None and node.type in {
             "slice_type",
             "array_type",
         }:
@@ -4484,9 +4506,32 @@ class _RustBindings:
                     )
                     arg_head = self._container_head_name(
                         first_arg
-                    ) or self._spelled_receiver_head(first_arg)
+                    ) or self._spelled_receiver_head(first_arg) or self._produced_head(first_arg)
                     if arg_head == s_head:
                         arg_args = self._receiver_type(first_arg)[1]
+                        if arg_args is None:
+                            # `Rc::try_unwrap(h.make())` — `-> Rc<P>`
+                            # peels at the call, so recover the
+                            # payload off the produced spelling
+                            # (`Rc<crate::P>` — already scope-pinned).
+                            spelled_arg = self._expr_type_spelling(
+                                first_arg
+                            )
+                            wrapped_arg = (
+                                None
+                                if spelled_arg is None
+                                else re.fullmatch(
+                                    r"[A-Za-z_][\w:]*\s*<([\s\S]*)>",
+                                    spelled_arg.strip(),
+                                )
+                            )
+                            if wrapped_arg is not None:
+                                arg_args = wrapped_arg.group(1)
+                            elif spelled_arg is not None:
+                                # The produced spelling peeled the
+                                # wrapper already — `crate::P` IS
+                                # the payload.
+                                arg_args = spelled_arg.strip()
                         parts = self._type_arg_list(arg_args or "")
                         if len(parts) == 1:
                             payload = parts[0].strip()
@@ -4838,8 +4883,13 @@ class _RustBindings:
                         index = option_head[2]
                         if (
                             self.text(field).strip() == "get"
-                            and self._container_head_name(
-                                callee.child_by_field_name("value")
+                            and (
+                                self._container_head_name(
+                                    callee.child_by_field_name("value")
+                                )
+                                or self._produced_head(
+                                    callee.child_by_field_name("value")
+                                )
                             )
                             in {"HashSet", "BTreeSet"}
                         ):
@@ -5388,10 +5438,29 @@ class _RustBindings:
                     ).strip()
                     if (
                         method_name == "deref"
+                        and receiver[1] is None
+                        and receiver[0] is not None
+                        and (
+                            (ph := self._produced_head(
+                                callee.child_by_field_name("value")
+                            )) is not None
+                            and ph.rsplit("::", 1)[-1]
+                            in _DEREF_WRAPPER_NAMES
+                        )
+                    ):
+                        # `h.make().deref()` — `-> Box<P>`/`Rc<P>`
+                        # peels at the call, so the receiver's
+                        # resolved type IS the payload.
+                        return receiver
+                    if (
+                        method_name == "deref"
                         and receiver[1] is not None
                         and (
                             (
                                 head_name := self._container_head_name(
+                                    callee.child_by_field_name("value")
+                                )
+                                or self._produced_head(
                                     callee.child_by_field_name("value")
                                 )
                             )
@@ -5523,8 +5592,13 @@ class _RustBindings:
                             self._is_slice_receiver(
                                 callee.child_by_field_name("value")
                             )
-                            or self._container_head_name(
-                                callee.child_by_field_name("value")
+                            or (
+                                self._container_head_name(
+                                    callee.child_by_field_name("value")
+                                )
+                                or self._produced_head(
+                                    callee.child_by_field_name("value")
+                                )
                             ) in _INDEX_ELEMENT_CONTAINERS
                         )
                     ):
@@ -5595,6 +5669,10 @@ class _RustBindings:
                             )
                             == "Option"
                             or self._call_declared_head(
+                                callee.child_by_field_name("value")
+                            )
+                            == "Option"
+                            or self._produced_head(
                                 callee.child_by_field_name("value")
                             )
                             == "Option"
@@ -5711,8 +5789,11 @@ class _RustBindings:
                                 "value"
                             )
                             if (
-                                self._container_head_name(
-                                    map_recv
+                                (
+                                    self._container_head_name(
+                                        map_recv
+                                    )
+                                    or self._produced_head(map_recv)
                                 ) in _MAP_CONTAINER_NAMES
                                 # A declared `entry` wins — a custom
                                 # map's `fn entry(..) -> Option<Q>`
@@ -5807,6 +5888,10 @@ class _RustBindings:
                             )
                             == "BTreeMap"
                             or self._expanded_container_head(
+                                callee.child_by_field_name("value")
+                            )
+                            == "BTreeMap"
+                            or self._produced_head(
                                 callee.child_by_field_name("value")
                             )
                             == "BTreeMap"
@@ -6105,8 +6190,13 @@ class _RustBindings:
                     if (
                         method_name in {"as_slices", "as_mut_slices"}
                         and receiver[1] is not None
-                        and self._container_head_name(
-                            callee.child_by_field_name("value")
+                        and (
+                            self._container_head_name(
+                                callee.child_by_field_name("value")
+                            )
+                            or self._produced_head(
+                                callee.child_by_field_name("value")
+                            )
                         )
                         in {"VecDeque", "LinkedList"}
                         # A declared `as_slices` (trait extension,
@@ -6542,8 +6632,13 @@ class _RustBindings:
                     if (
                         method_name in _SWAP_REMOVE_METHODS
                         and receiver[1] is not None
-                        and self._container_head_name(
-                            callee.child_by_field_name("value")
+                        and (
+                            self._container_head_name(
+                                callee.child_by_field_name("value")
+                            )
+                            or self._produced_head(
+                                callee.child_by_field_name("value")
+                            )
                         )
                         in {"Vec"}
                     ):
@@ -6898,6 +6993,22 @@ class _RustBindings:
         pair = self._generic_head_args(
             tnode, None if tnode is None else tnode.start_byte
         )
+        if pair is None and node is not None and node.type == "call_expression":
+            # `m.entry(k)` on `h.make()` — a produced map receiver
+            # has no annotation node; its spelled return carries the
+            # full `K, V` key already scope-pinned.
+            spelled = self._expr_type_spelling(node)
+            produced = (
+                None
+                if spelled is None
+                else re.fullmatch(
+                    r"[A-Za-z_][\w:]*\s*<([\s\S]*)>",
+                    spelled.strip(),
+                )
+            )
+            if produced is not None:
+                return produced.group(1)
+            return None
         if pair is None:
             return None
         key, head, _ = pair

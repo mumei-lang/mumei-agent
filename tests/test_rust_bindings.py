@@ -4080,7 +4080,7 @@ struct P;
 impl P { fn m(&self) {} }
 struct W;
 impl W {
-    fn iter(&self) -> impl Iterator<Item = P> { std::iter::empty() }
+    fn iter(&self) -> impl Iterator { std::iter::empty() }
 }
 fn f() {
     for x in std::iter::once(1) {
@@ -4091,8 +4091,8 @@ fn f() {
     }
 }
 fn g(w: W) {
-    // `impl Iterator<Item = P>` hides the element inside an
-    // associated binding the model does not spell - opaque.
+    // A bare `impl Iterator` names no `Item` binding — the
+    // element stays opaque.
     for p in w.iter() {
         p.m();
     }
@@ -4103,7 +4103,8 @@ fn g(w: W) {
     # An unresolved extern method's element also stays opaque.
     calls = [
         c for c in report.calls
-        if source[c.span.start:c.span.end] == "p.m()"
+        if "m()" in source[c.span.start:c.span.end]
+        and source[c.span.start:c.span.end] != "x.m()"
     ]
     assert len(calls) == 2
     assert all(c.target == "" for c in calls)
@@ -10373,6 +10374,91 @@ fn f() {
     # `right`'s declaration, not at the call site where
     # `use m::P` shadows it.
     assert bound.get("v[0].pm()") == pms[0].id
+
+
+def test_produced_impl_iterator_item_binds_element():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn make() -> impl Iterator<Item = P> { vec![].into_iter() }
+fn f() {
+    for x in make() { x.pm(); }
+    make().next().unwrap().pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    pm = _bindings(report, "pm", "associated_function")[0]
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `impl Iterator<Item = P>` carries the element spelling in
+    # its associated-type binding.
+    assert bound.get("x.pm()") == pm.id
+    assert bound.get("make().next().unwrap().pm()") == pm.id
+
+
+def test_produced_container_methods_spell_elements():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn vdq() -> VecDeque<P> { VecDeque::new() }
+fn hs() -> HashSet<P> { HashSet::new() }
+fn vec() -> Vec<P> { vec![] }
+fn opt() -> Option<P> { None }
+fn f(k: &P, d: P) {
+    let (a, b) = vdq().as_slices();
+    a[0].pm();
+    hs().get(k).unwrap().pm();
+    vec().as_ref()[0].pm();
+    opt().get_or_insert(d).pm();
+    vec().swap_remove(0).pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    pm = _bindings(report, "pm", "associated_function")[0]
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    for text in (
+        "a[0].pm()",
+        "hs().get(k).unwrap().pm()",
+        "vec().as_ref()[0].pm()",
+        "opt().get_or_insert(d).pm()",
+        "vec().swap_remove(0).pm()",
+    ):
+        assert bound.get(text) == pm.id, text
+
+
+def test_produced_wrapper_and_map_receivers_bind():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn bx() -> Box<P> { todo!() }
+fn rc() -> Rc<P> { todo!() }
+fn map() -> HashMap<i32, P> { HashMap::new() }
+fn f(d: P) {
+    bx().deref().pm();
+    map().entry(1).or_insert(d).pm();
+    if let Ok(p) = Rc::try_unwrap(rc()) { p.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    pm = _bindings(report, "pm", "associated_function")[0]
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    refs = _refs(report, source, "pm")
+    # `-> Box<P>`/`Rc<P>` peel at the call — the receiver's
+    # resolved type IS the payload.
+    assert bound.get("bx().deref().pm()") == pm.id
+    assert bound.get("map().entry(1).or_insert(d).pm()") == pm.id
+    assert any(ref.binding_id == pm.id for ref in refs)
 
 
 def test_struct_pattern_field_on_produced_plain_payload():
