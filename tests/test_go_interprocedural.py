@@ -18318,6 +18318,15 @@ def test_bound_closure_mutating_builtin_writes_carry_deps(
             "\treturn m[0]\n}",
             {1},
         ),
+        (
+            "func F(p int64, q int64) int64 {\n"
+            "\tdst := []int64{q}\n"
+            "\tsrc := []int64{p}\n"
+            "\tf := func() { _ = copy(make([]int64, 1), src) }\n"
+            "\tf()\n"
+            "\treturn dst[0]\n}",
+            {1},
+        ),
     ):
         data = unit(go_types_helper, body)
         result = named(*data)
@@ -18345,6 +18354,11 @@ def test_bound_closure_mutating_builtin_unresolvable_operand_stays_closed(
         "\tf := func() { _ = copy(*p, s) }\n"
         "\tf()\n"
         "\treturn (*p)[0]\n}",
+        "func mk(n int64) []int64 { return []int64{n} }\n"
+        "func F(p int64, q int64) int64 {\n"
+        "\tf := func() { _ = append(mk(0), p) }\n"
+        "\tf()\n"
+        "\treturn q\n}",
     ):
         data = unit(go_types_helper, body)
         result = named(*data)
