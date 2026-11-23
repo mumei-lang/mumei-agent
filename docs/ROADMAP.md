@@ -2808,7 +2808,13 @@ Backward `goto` targets are analysed in one walk, without re-walking the
 body. For a label at index `k` in statement list `S`, the walker finds
 the last top-level statement of `S` that contains a backward jump to that
 label and havocs the names assigned in that inclusive region at the
-label. Names not assigned there retain their facts. A backward jump
+label. When another backward-target label in the same list lies inside
+that region, the region is extended to the end of that label's region
+(to a fixpoint), because a path looping through the later label reaches
+those assignments too; this only havocs more names. If the walk skips a
+backward-target label (reachable only through a back edge), the function
+is not analysed (`None`). Names not assigned in the region retain their
+facts. A backward jump
 leaves its path dead; it does not add a carried environment or join
 resource `held` sets from the back edge. Consequently, the held-set
 analysis may miss defects on a looped path, but does not add false held

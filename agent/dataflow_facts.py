@@ -46,7 +46,9 @@ against the label and leaves the path dead, so the surviving paths continue
 uninterrupted and the recorded environments merge in when the labelled
 statement is reached. Backward jumps are analysed in a single walk: at the
 label, facts for names assigned between it and the last backward jump are
-havoced. Held resource sets are not joined from back edges, so this can miss
+havoced; overlapping same-list regions are extended to a fixpoint, and a
+backward-target label the walk skips leaves the function unanalysed
+(``None``). Held resource sets are not joined from back edges, so this can miss
 resource findings but cannot add false ones. A ``goto`` with an undeclared
 label or a target outside its own statement list's ancestors stays unanalysed
 (``None``).
