@@ -1,8 +1,8 @@
 import hashlib
 import json
 import os
-import signal
 import shutil
+import signal
 import socket
 import sys
 import threading
