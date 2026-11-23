@@ -9510,3 +9510,33 @@ fn g(b: Box<Vec<P>>, v: Vec<P>, s: S, w: a::W) {
     assert bound.get("C::make(w.f)[0].pm()") != pm_a.id
 
 
+def test_slice_trait_impl_gate():
+    source = """
+struct P;
+struct Q;
+impl P { fn pm(&self) {} }
+impl Q { fn qm(&self) {} }
+trait Each { fn for_each(&self, f: impl Fn(&Q)); }
+impl<P> Each for [P] { fn for_each(&self, f: impl Fn(&Q)) {} }
+fn g(v: Vec<P>) {
+    v.for_each(|q| { q.qm(); q.pm(); });
+    v.iter().for_each(|p| p.pm());
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `impl Each for [P]` reaches `v: Vec<P>` through auto-deref —
+    # the closure's `q` keeps the trait's signature, not `&P`, so
+    # neither P's nor Q's method may bind.
+    assert not bound.get("q.pm()")
+    assert not bound.get("q.qm()")
+    # `v.iter()` yields `Iter` — the slice impl does not cover it,
+    # so `for_each` still types `p` as `&P`.
+    pms = _bindings(report, "pm", "associated_function")
+    assert bound.get("p.pm()") == pms[0].id
+
+

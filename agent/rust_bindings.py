@@ -1473,20 +1473,26 @@ class _RustBindings:
                                 )
                             )
                         if member_trait not in {None, "<unresolved>"}:
-                            impl_head = re.match(
-                                r"[A-Za-z_][\w:]*",
-                                re.sub(
-                                    r"^&\s*(?:'\w+\s*)?(?:mut\s+)?",
-                                    "",
-                                    self.text(member_type_node).strip(),
-                                ),
+                            impl_target = re.sub(
+                                r"^&\s*(?:'\w+\s*)?(?:mut\s+)?",
+                                "",
+                                self.text(member_type_node).strip(),
                             )
-                            if impl_head is not None:
+                            if impl_target.startswith("["):
+                                impl_head_name = "[slice]"
+                            else:
+                                impl_head = re.match(
+                                    r"[A-Za-z_][\w:]*", impl_target
+                                )
+                                impl_head_name = (
+                                    impl_head.group(0).rsplit("::", 1)[-1]
+                                    if impl_head is not None
+                                    else None
+                                )
+                            if impl_head_name is not None:
                                 self._trait_impl_heads.setdefault(
                                     member_trait, []
-                                ).append(
-                                    impl_head.group(0).rsplit("::", 1)[-1]
-                                )
+                                ).append(impl_head_name)
                 if body is not None:
                     self._scan_associated_container(
                         body,
@@ -2697,8 +2703,9 @@ class _RustBindings:
         cannot be the callee."""
         container_id = None
         receiver_head = None
+        receiver_heads: "set[str]" = set()
         if receiver is not None:
-            container_id, _ = self._receiver_type(receiver)
+            container_id, recv_args = self._receiver_type(receiver)
             receiver_head = (
                 next(
                     (
@@ -2715,6 +2722,20 @@ class _RustBindings:
                 or self._spelled_receiver_head(receiver)
                 or self._produced_head(receiver)
             )
+            if receiver_head is not None:
+                receiver_heads.add(receiver_head)
+            # `impl T for [P]` reaches `Vec`/`VecDeque`/… receivers
+            # through auto-deref, and spelled `&[P]`/`[P]` args mark
+            # a slice receiver directly.
+            if (
+                receiver_head
+                in {"Vec", "VecDeque", "BinaryHeap", "LinkedList"}
+                or (
+                    recv_args is not None
+                    and re.match(r"&?\s*\[", recv_args.strip())
+                )
+            ):
+                receiver_heads.add("[slice]")
         for record in self.records.values():
             if not (
                 record.member_trait is not None
@@ -2735,18 +2756,25 @@ class _RustBindings:
                         )
                     ):
                         pass
-                    elif (
-                        receiver_head is None
-                        or receiver_head
-                        not in self._trait_impl_heads.get(
+                    elif not receiver_heads.intersection(
+                        self._trait_impl_heads.get(
                             record.member_trait, ()
                         )
                     ):
                         continue
-                elif not (
-                    record.member_of in {None, "<unresolved>"}
-                    or record.member_of == container_id
-                ):
+                elif record.member_of in {None, "<unresolved>"}:
+                    # An impl on an undeclared target (`impl T for
+                    # [P]`/`for Vec<P>`) — compare its spelled head
+                    # against the receiver's.
+                    if not receiver_heads.intersection(
+                        self._trait_impl_heads.get(
+                            record.member_trait, ()
+                        )
+                    ):
+                        continue
+                elif record.member_of == container_id:
+                    pass
+                else:
                     continue
             trait = self.records.get(record.member_trait)
             if trait is not None and self._trait_visible(
