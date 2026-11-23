@@ -3119,7 +3119,15 @@ writes — and a bound pointer's scalar-element `chan` field
 (`p.C <- x`, `<-p.W.C`, `close(p.C)`, `for range p.C`) admits
 the same way, the queue living in caller memory: ops record on
 the field member's identity, sends broadcast into the indirect
-writes, reads union `deps(root)`. A `chan T` result now admits
+writes, reads union `deps(root)`. A local value
+struct's scalar-element `chan` field (`w.C <- x`,
+`<-w.C`, `close(w.C)`, `for range w.C`) admits the
+same way — the member carries a may-set of the
+queues it could name (`W{C: ch}` and `w.C = ch`
+union `ch`'s queue in), sends broadcast into the
+indirect writes and reads union `deps(w)`; `chan
+chan` members and computed bases stay closed.
+A `chan T` result now admits
 the same way a `chan` parameter does: `ch := g()` and
 `var ch = g()` bind a callee-produced queue when the
 (local) callee declares a single scalar `chan` result —

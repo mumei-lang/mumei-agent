@@ -5019,6 +5019,20 @@ class _Builder:
             )
         return tuple(members)
 
+    def _struct_chan_members(
+        self, fact: Any, anchor: Any | None = None
+    ) -> tuple[Any, ...]:
+        """Direct `chan` field members of a struct fact — the fields
+        `W{C: ch}` / `w.C = ch` wire into the member may-set."""
+        struct_fact = self._struct_value_fact(fact)
+        if struct_fact is None:
+            return ()
+        return tuple(
+            member
+            for member in self._struct_fields_for_fact(fact, anchor)
+            if self._scalar_chan_fact(getattr(member, "type", None))
+        )
+
     def _detach_struct_container_aliases(
         self, binding_id: str
     ) -> None:
@@ -5998,6 +6012,26 @@ class _Builder:
             return
         for member, value in pairs:
             member_type = getattr(member, "type", None)
+            if self._scalar_chan_fact(member_type):
+                # `W{C: ch}` — the field may now hold `ch`'s queue:
+                # union its token into the member's may-set like a
+                # `w.C = ch` store. `make(chan)` yields no token —
+                # the member's own slot still carries the sends.
+                tokens = self._chan_queue_tokens(
+                    value, {}, params or {}
+                )
+                if tokens:
+                    self.field_chan_queues[member.id] = (
+                        self.field_chan_queues.get(
+                            member.id, frozenset()
+                        )
+                        | tokens
+                    )
+                    # Same escape as `w.C = ch`: sends on the
+                    # stored name are caller-visible now.
+                    for token in tokens:
+                        self.external_chan_locals.add(token)
+                continue
             is_collection = (
                 self._scalar_elem_collection(member_type)
                 or self._scalar_elem_nested_collection(member_type)
@@ -6165,6 +6199,9 @@ class _Builder:
         members = self._struct_collection_members(
             binding.type, binding
         )
+        chan_members = self._struct_chan_members(
+            binding.type, binding
+        )
         struct_call_result = (
             self._call_result_fact(rhs)[1]
             if rhs.type == "call_expression"
@@ -6188,7 +6225,7 @@ class _Builder:
                 in self._opaque_container_tokens
             ):
                 struct_identifier_source = source_binding
-        if not members and not (
+        if not members and not chan_members and not (
             struct_call_result is not None
             and struct_call_result.kind == "struct"
         ) and struct_identifier_source is None:
@@ -9481,6 +9518,79 @@ class _Builder:
             )
         return None
 
+    def _value_field_chan(
+        self,
+        node: Any,
+        locals_: dict[str, frozenset[int]],
+    ) -> tuple[Any, Any] | None:
+        """`w.C` — a scalar-element `chan` field reached through a
+        local value-struct binding (`w` a `struct` parameter or
+        local variable — never a pointer, which `_bound_field_chan`
+        covers).
+
+        A value struct copies the header but the `chan` field still
+        names a shared queue — for a parameter the queue lives in
+        caller memory exactly like `p.C`, so the bound-field model
+        applies: sends broadcast into `indirect_writes`, reads
+        observe the member's may-set (`field_chan_queues`), and
+        every op records an imported transfer on the member's
+        identity. Returns `(member, root binding)` or None when the
+        operand is not a plain local value-struct identifier or the
+        member is not a scalar `chan` — `chan chan` members stay
+        closed (the queue-of-queues model has no field slot yet).
+        """
+        inner = node
+        while (
+            inner is not None
+            and inner.type == "parenthesized_expression"
+        ):
+            inner = next(
+                (c for c in inner.named_children if c.type != "comment"),
+                None,
+            )
+        if inner is None or inner.type != "selector_expression":
+            return None
+        operand = inner.child_by_field_name("operand")
+        field = inner.child_by_field_name("field")
+        if (
+            operand is None
+            or field is None
+            or operand.type != "identifier"
+            or operand.text == b"_"
+        ):
+            return None
+        ref = self.references.get(self.node_key(operand))
+        if ref is None or ref.binding_id not in locals_:
+            return None
+        binding = self.bindings.get(ref.binding_id)
+        if not self._is_local_composite(binding):
+            return None
+        field_ref = self.references.get(self.node_key(field))
+        field_member = None
+        if field_ref is not None and field_ref.kind == "import":
+            field_member = self.members.get(field_ref.binding_id)
+        else:
+            field_member = self._local_field(field_ref)
+        if (
+            field_member is None
+            or field_member.name.encode("utf-8") != field.text
+            or field_member.kind not in {"var", "variable"}
+            or not self._scalar_chan_fact(field_member.type)
+        ):
+            return None
+        if not any(
+            member.id == field_member.id
+            for member in self._struct_fields_for_fact(
+                binding.type, binding
+            )
+        ):
+            # `w.C` where `C` promotes out of an embedded field —
+            # the may-set model keys on the member's own identity,
+            # and a promoted member's queue is not wired through
+            # `w`'s literal or stores, so stay closed.
+            return None
+        return (field_member, binding)
+
     def _field_chan_deps(
         self,
         member_id: str,
@@ -9495,6 +9605,15 @@ class _Builder:
             deps = deps | locals_.get(token, frozenset())
             if token in params:
                 deps = deps | frozenset({params[token]})
+            if (
+                token in self.external_chan_locals
+                or token in params
+            ):
+                # The stored queue is caller-visible: sends on its
+                # local name are imported transfers now, so the
+                # may-set's contents live in `indirect_writes` like
+                # the external receive arm reads them.
+                deps = deps | self.indirect_writes
         return deps
 
     def _bound_pointee_index_field(
@@ -12946,6 +13065,12 @@ class _Builder:
         for hid, toks in self._opaque_container_tokens.items():
             if hid != binding_id and binding_id in toks:
                 shared = True
+        for member_id, toks in self.field_chan_queues.items():
+            if member_id != binding_id and binding_id in toks:
+                # A `w.C = ch` / `W{C: ch}` may-set names the OLD
+                # queue like a share group does — the field keeps
+                # the parked descriptor, so the token detaches too.
+                shared = True
         if not shared:
             # `c, s = make(chan), append(s, c)` — a later slot of
             # THIS statement joins `c` into a group from its
@@ -12979,6 +13104,11 @@ class _Builder:
         for hid, toks in list(self._opaque_container_tokens.items()):
             if hid != binding_id and binding_id in toks:
                 self._opaque_container_tokens[hid] = (
+                    toks - {binding_id}
+                ) | {sur}
+        for member_id, toks in list(self.field_chan_queues.items()):
+            if member_id != binding_id and binding_id in toks:
+                self.field_chan_queues[member_id] = (
                     toks - {binding_id}
                 ) | {sur}
         # An `e := d` alias recorded before the reseat still names
@@ -25004,6 +25134,17 @@ class _Builder:
                     )
                     if field_chan is not None:
                         field_chan_lhs[len(refs) - 1] = field_chan[1]
+                    else:
+                        # `w.C = ch` on a value struct — the field
+                        # may now name `ch`'s queue; union into the
+                        # member's may-set like `p.C = ch`.
+                        value_field = self._value_field_chan(
+                            lhs, locals_
+                        )
+                        if value_field is not None:
+                            field_chan_lhs[len(refs) - 1] = (
+                                value_field[0]
+                            )
                     continue
                 # An imported member write — `lib.V = v`,
                 # `lib.VA[i] = v`, `lib.VS.f = v` — mutates package
@@ -27907,13 +28048,20 @@ class _Builder:
                         # `p.C = ch` — the field may now name ch's
                         # queue. Union into the member's may-set
                         # (a conditional store leaves the previous
-                        # queue a candidate, so never replace).
+                        # queue a candidate, so never replace). The
+                        # queue escaped into a container: sends on
+                        # the local name are caller-visible
+                        # transfers from here on, so mark each
+                        # token external like an `s[i] = ch` join
+                        # does.
                         self.field_chan_queues[member.id] = (
                             self.field_chan_queues.get(
                                 member.id, frozenset()
                             )
                             | tokens
                         )
+                        for token in tokens:
+                            self.external_chan_locals.add(token)
                 # An element store through one name lands in every
                 # name sharing the backing (`fs2 := fs`) — the
                 # stored value's deps join each sharer's set like
@@ -28960,6 +29108,10 @@ class _Builder:
             range_elem = None
             # (key binding id, seed deps, None, re-join escaped).
             range_key = None
+            # Element binding id -> chan field member id when the
+            # operand was `w.C`: the member's may-set deps re-join
+            # the element each pass like a local queue's group.
+            range_field_chan_members: dict[str, str] = {}
             if clause is not None and clause.type == "range_clause":
                 # Two operand families are reachable: an integer
                 # (`for i := range e` yields one index variable) and
@@ -29989,6 +30141,7 @@ class _Builder:
                             local_chan_chan_range_fact = (
                                 local_binding.type.elem
                             )
+                    range_field_member = None
                     chan = self._chan_operation_operand(
                         right, fn, params, scope, transfers, count
                     )
@@ -30237,6 +30390,54 @@ class _Builder:
                                 self.members.get(member.id)
                                 or self.bindings.get(member.id)
                             )
+                            range_field_member = member.id
+                        elif (
+                            value_field := self._value_field_chan(
+                                right, scope
+                            )
+                        ) is not None:
+                            # `for v := range w.C` — a value
+                            # struct's `chan` field names the same
+                            # caller-memory queue: the member's id
+                            # records the mutation and the
+                            # receiver's slot joins the read.
+                            member, root_binding = value_field
+                            self._pin_member_type(member)
+                            self._pin_fact_identities(member.type)
+                            transfers.append(
+                                CallTransfer(
+                                    FileSpan(
+                                        self.current_file,
+                                        right.start_byte,
+                                        right.end_byte,
+                                    ),
+                                    member.id,
+                                    (),
+                                    frozenset(),
+                                    imported=True,
+                                )
+                            )
+                            rdeps = (
+                                self.indirect_writes
+                                | scope.get(
+                                    root_binding.id, frozenset()
+                                )
+                                | (
+                                    frozenset(
+                                        {params[root_binding.id]}
+                                    )
+                                    if root_binding.id in params
+                                    else frozenset()
+                                )
+                                | self._field_chan_deps(
+                                    member.id, scope, params
+                                )
+                            )
+                            chan = (
+                                self.members.get(member.id)
+                                or self.bindings.get(member.id)
+                            )
+                            range_field_member = member.id
                         elif (
                             chan is None
                             and (
@@ -30510,6 +30711,10 @@ class _Builder:
                                     False,
                                     False,
                                 )
+                                if range_field_member is not None:
+                                    range_field_chan_members[
+                                        binding.id
+                                    ] = range_field_member
                             elif func_iter:
                                 # `for v := range lib.Iter(&a)` —
                                 # the element re-joins escaped
@@ -30635,6 +30840,10 @@ class _Builder:
                                     False,
                                     False,
                                 )
+                                if range_field_member is not None:
+                                    range_field_chan_members[
+                                        ref.binding_id
+                                    ] = range_field_member
                             elif func_iter:
                                 range_elem = (
                                     ref.binding_id, rdeps, None,
@@ -30737,6 +30946,18 @@ class _Builder:
                                 else self.indirect_writes
                             )
                         )
+                        field_member = range_field_chan_members.get(
+                            elem_id
+                        )
+                        if field_member is not None and not elem_static:
+                            # `for v := range w.C` — sends through
+                            # the field in the body grow the
+                            # member's may-set deps in `inner`;
+                            # re-join them like a local queue's
+                            # widened set.
+                            extra |= self._field_chan_deps(
+                                field_member, inner, params
+                            )
                         if (
                             opaque_range_field is not None
                             and not elem_static
@@ -32267,9 +32488,18 @@ class _Builder:
                     if external is None
                     else None
                 )
+                value_field = (
+                    self._value_field_chan(channel, locals_)
+                    if external is None and field_chan is None
+                    else None
+                )
                 chan_elem = (
                     self._chan_elem_index_target(channel, params)
-                    if external is None and field_chan is None
+                    if (
+                        external is None
+                        and field_chan is None
+                        and value_field is None
+                    )
                     else None
                 )
                 ext_elem = (
@@ -32277,6 +32507,7 @@ class _Builder:
                     if (
                         external is None
                         and field_chan is None
+                        and value_field is None
                         and chan_elem is None
                     )
                     else None
@@ -32286,6 +32517,7 @@ class _Builder:
                     if (
                         external is None
                         and field_chan is None
+                        and value_field is None
                         and chan_elem is None
                         and ext_elem is None
                     )
@@ -32294,6 +32526,7 @@ class _Builder:
                 if (
                     external is None
                     and field_chan is None
+                    and value_field is None
                     and chan_elem is None
                     and ext_elem is None
                     and ext_chan_chan_elem is None
@@ -32547,7 +32780,7 @@ class _Builder:
                     return
                 if external is not None:
                     target_id, fact = external
-                else:
+                elif field_chan is not None:
                     pointees, member, root_ref = field_chan
                     target_id, fact = member.id, member.type
                     self.pinned.update(
@@ -32555,6 +32788,10 @@ class _Builder:
                         for p in pointees
                         if not p.id.endswith("/pointee")
                     )
+                    self._pin_member_type(member)
+                else:
+                    member, root_binding = value_field
+                    target_id, fact = member.id, member.type
                     self._pin_member_type(member)
                 value_deps = self.expression(
                     value, fn, params, locals_, transfers, count, 0
@@ -32593,33 +32830,47 @@ class _Builder:
                             self._promote_chan_call_args(
                                 value, "", locals_, params
                             )
-                if field_chan is not None:
+                if field_chan is not None or value_field is not None:
                     # The send's destination read — like `(*p)[i]` —
-                    # observes the pointer's deps and every earlier
-                    # indirect store.
-                    self._record_read(
-                        self._pointer_deps(
+                    # observes the receiver's deps and every earlier
+                    # indirect store. `w.C <- x` reads the struct's
+                    # own slot instead of a pointee's.
+                    if field_chan is not None:
+                        dest_deps = self._pointer_deps(
                             root_ref.binding_id, params, locals_
                         )
-                        | self.indirect_writes
+                    else:
+                        dest_deps = locals_.get(
+                            root_binding.id, frozenset()
+                        )
+                        if root_binding.id in params:
+                            dest_deps = dest_deps | frozenset(
+                                {params[root_binding.id]}
+                            )
+                    self._record_read(
+                        dest_deps | self.indirect_writes
                     )
                 self.indirect_writes |= value_deps
-                if field_chan is not None:
+                if field_chan is not None or value_field is not None:
                     # The send writes into the pointee's contents:
                     # fold the value into the root binding like
                     # `p.F = v` does — a caller's deps on `p` then
                     # carry the queue, so `g(p)` sees this send —
                     # and into every queue the member may alias
-                    # (`p.C = ch` sends reach `<-ch` too).
-                    root_old = locals_.get(
-                        root_ref.binding_id, frozenset()
+                    # (`p.C = ch` sends reach `<-ch` too). A value
+                    # struct's `w.C` folds into `w`'s own slot.
+                    root_id = (
+                        root_ref.binding_id
+                        if field_chan is not None
+                        else root_binding.id
                     )
-                    if root_ref.binding_id in params:
+                    root_old = locals_.get(root_id, frozenset())
+                    if root_id in params:
                         root_old = root_old | frozenset(
-                            {params[root_ref.binding_id]}
+                            {params[root_id]}
                         )
                     self._store(
-                        locals_, params, root_ref.binding_id,
+                        locals_, params, root_id,
                         root_old | value_deps, conditional,
                     )
                     for token in self.field_chan_queues.get(
@@ -34871,9 +35122,18 @@ class _Builder:
                             if external is None
                             else None
                         )
+                        value_field = (
+                            self._value_field_chan(operand, locals_)
+                            if external is None and field_chan is None
+                            else None
+                        )
                         chan_elem = (
                             self._chan_elem_index_target(operand, params)
-                            if external is None and field_chan is None
+                            if (
+                                external is None
+                                and field_chan is None
+                                and value_field is None
+                            )
                             else None
                         )
                         ext_elem = (
@@ -34883,6 +35143,7 @@ class _Builder:
                             if (
                                 external is None
                                 and field_chan is None
+                                and value_field is None
                                 and chan_elem is None
                             )
                             else None
@@ -34890,6 +35151,7 @@ class _Builder:
                         if (
                             external is None
                             and field_chan is None
+                            and value_field is None
                             and chan_elem is None
                             and ext_elem is None
                         ):
@@ -35004,7 +35266,7 @@ class _Builder:
                                     )
                             else:
                                 base_deps = frozenset()
-                        else:
+                        elif field_chan is not None:
                             pointees, member, root_ref = field_chan
                             target_id, fact = member.id, member.type
                             self.pinned.update(
@@ -35022,6 +35284,24 @@ class _Builder:
                             base_deps = self._deref_read_deps(
                                 root_ref.binding_id, params, locals_
                             ) | self._field_chan_deps(
+                                member.id, locals_, params
+                            )
+                        else:
+                            # `<-w.C` — a value struct's `chan`
+                            # field: the member's may-set plus the
+                            # receiver's own slot (the struct the
+                            # queue was reached through).
+                            member, root_binding = value_field
+                            target_id, fact = member.id, member.type
+                            self._pin_member_type(member)
+                            base_deps = locals_.get(
+                                root_binding.id, frozenset()
+                            )
+                            if root_binding.id in params:
+                                base_deps |= frozenset(
+                                    {params[root_binding.id]}
+                                )
+                            base_deps |= self._field_chan_deps(
                                 member.id, locals_, params
                             )
                         self._pin_fact_identities(fact)
@@ -35752,7 +36032,18 @@ class _Builder:
                             if external is None
                             else None
                         )
-                        if external is None and field_chan is None:
+                        value_field = (
+                            self._value_field_chan(
+                                arguments[0], locals_
+                            )
+                            if external is None and field_chan is None
+                            else None
+                        )
+                        if (
+                            external is None
+                            and field_chan is None
+                            and value_field is None
+                        ):
                             elem = self._chan_elem_index_target(
                                 arguments[0], params
                             )
@@ -35891,24 +36182,45 @@ class _Builder:
                         if external is not None:
                             target_id, fact = external
                         else:
-                            pointees, member, root_ref = field_chan
+                            if field_chan is not None:
+                                (
+                                    pointees,
+                                    member,
+                                    root_ref,
+                                ) = field_chan
+                            else:
+                                (
+                                    member,
+                                    root_binding,
+                                ) = value_field
                             target_id, fact = member.id, member.type
-                            self.pinned.update(
-                                p.id
-                                for p in pointees
-                                if not p.id.endswith("/pointee")
-                            )
+                            if field_chan is not None:
+                                self.pinned.update(
+                                    p.id
+                                    for p in pointees
+                                    if not p.id.endswith("/pointee")
+                                )
                             self._pin_member_type(member)
                             # The operand read — resolving `p.C`
                             # reads the pointer plus every earlier
                             # indirect store, like the send's
-                            # destination read.
-                            self._record_read(
-                                self._pointer_deps(
+                            # destination read. `w.C` reads the
+                            # struct's own slot instead.
+                            if field_chan is not None:
+                                operand_deps = self._pointer_deps(
                                     root_ref.binding_id, params,
                                     locals_,
                                 )
-                                | self.indirect_writes
+                            else:
+                                operand_deps = locals_.get(
+                                    root_binding.id, frozenset()
+                                )
+                                if root_binding.id in params:
+                                    operand_deps = operand_deps | frozenset(
+                                        {params[root_binding.id]}
+                                    )
+                            self._record_read(
+                                operand_deps | self.indirect_writes
                             )
                         self._pin_fact_identities(fact)
                         transfers.append(
@@ -37340,6 +37652,47 @@ class _Builder:
                     self._call_arg_deps.get(key, frozenset())
                     | receiver_deps
                 )
+        for index, argument in enumerate(arguments):
+            # `g(w)` — the struct's `w.C` field may alias a queue;
+            # the callee reads it through its parameter's field, so
+            # the argument's deps carry each chan member's deps like
+            # a collection member's do.
+            if argument.type != "identifier":
+                continue
+            arg_ref = self.references.get(self.node_key(argument))
+            arg_binding = (
+                self.bindings.get(arg_ref.binding_id)
+                if arg_ref is not None
+                else None
+            )
+            if arg_binding is None or not self._is_local_composite(
+                arg_binding
+            ):
+                continue
+            for arg_member in self._struct_chan_members(
+                arg_binding.type, arg_binding
+            ):
+                actual_values[index] |= self._field_chan_deps(
+                    arg_member.id, locals_, params
+                )
+        if receiver_node is not None and receiver_node.type == "identifier":
+            recv_ref = self.references.get(
+                self.node_key(receiver_node)
+            )
+            recv_binding = (
+                self.bindings.get(recv_ref.binding_id)
+                if recv_ref is not None
+                else None
+            )
+            if recv_binding is not None and self._is_local_composite(
+                recv_binding
+            ):
+                for recv_member in self._struct_chan_members(
+                    recv_binding.type, recv_binding
+                ):
+                    receiver_deps |= self._field_chan_deps(
+                        recv_member.id, locals_, params
+                    )
         actual = tuple(actual_values)
         if receiver_deps is not None:
             actual = (receiver_deps, *actual)

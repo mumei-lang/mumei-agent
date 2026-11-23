@@ -31163,6 +31163,234 @@ def test_bound_field_channel_boundaries_stay_closed(go_types_helper):
     assert not results["Arr"].available
 
 
+def test_value_struct_field_channel_send_recv(go_types_helper):
+    # `w.C` — a `chan` field of a local value struct — names the
+    # same shared queue `p.C` does: sends broadcast into
+    # `indirect_writes` and reads observe the member's may-set.
+    # `W{C: ch}` / `w.C = ch` union `ch`'s queue into the may-set,
+    # so a send through the field reaches `<-ch`.
+    files = {
+        "a.go": "package p\n"
+        "type W struct{ C chan int64 }\n"
+        "func FSend(x int64) int64 {\n"
+        "\tw := W{C: make(chan int64, 1)}\n"
+        "\tw.C <- x\n"
+        "\treturn <-w.C\n}\n"
+        "func FLit(x int64) int64 {\n"
+        "\tch := make(chan int64, 1)\n"
+        "\tw := W{C: ch}\n"
+        "\tw.C <- x\n"
+        "\treturn <-ch\n}\n"
+        "func FAssign(x int64) int64 {\n"
+        "\tch := make(chan int64, 1)\n"
+        "\tvar w W\n"
+        "\tw.C = ch\n"
+        "\tw.C <- x\n"
+        "\treturn <-ch\n}\n"
+        "func FParam(w W, x int64) int64 {\n"
+        "\tw.C <- x\n"
+        "\treturn <-w.C\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    results = {
+        name: named_package(files, snapshot, summaries, name)
+        for name in ("FSend", "FLit", "FAssign", "FParam")
+    }
+    assert results["FSend"].available
+    assert results["FSend"].return_dependencies == frozenset({0})
+    assert results["FLit"].available
+    assert results["FLit"].return_dependencies == frozenset({0})
+    assert results["FAssign"].available
+    assert results["FAssign"].return_dependencies == frozenset({0})
+    assert results["FParam"].available
+    assert results["FParam"].return_dependencies == frozenset({0, 1})
+    assert results["FParam"].effects == "unknown"
+
+
+def test_value_struct_field_channel_range_and_close(go_types_helper):
+    # `for v := range w.C` re-joins the field's queue each pass and
+    # `close(w.C)` records on the member's identity, like `p.C`.
+    files = {
+        "a.go": "package p\n"
+        "type W struct{ C chan int64 }\n"
+        "func FRange(x int64) int64 {\n"
+        "\tw := W{C: make(chan int64, 2)}\n"
+        "\tw.C <- x\n"
+        "\ts := int64(0)\n"
+        "\tfor v := range w.C {\n"
+        "\t\ts += v\n"
+        "\t}\n"
+        "\treturn s\n}\n"
+        "func FClose(x int64) int64 {\n"
+        "\tw := W{C: make(chan int64, 1)}\n"
+        "\tw.C <- x\n"
+        "\tclose(w.C)\n"
+        "\treturn <-w.C\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    for name in ("FRange", "FClose"):
+        result = named_package(files, snapshot, summaries, name)
+        assert result.available
+        assert result.return_dependencies == frozenset({0})
+
+
+def test_value_struct_field_channel_boundaries_stay_closed(
+    go_types_helper,
+):
+    # `chan chan` members (the queue-of-queues model has no field
+    # slot yet), a non-scalar `chan string` field, and a computed
+    # base (`arr[i].C`, `s.W.C` nested one level deeper) all stay
+    # closed.
+    files = {
+        "a.go": "package p\n"
+        "type WC struct{ C chan chan int64 }\n"
+        "type WS struct{ C chan string }\n"
+        "type W struct{ C chan int64 }\n"
+        "type S struct{ W W }\n"
+        "func FChanChan(w WC, c chan int64) int64 {\n"
+        "\tw.C <- c\n"
+        "\treturn 0\n}\n"
+        "func FStr(w WS, x string) string {\n"
+        "\tw.C <- x\n"
+        "\treturn x\n}\n"
+        "func FArr(arr []W, x int64) int64 {\n"
+        "\tarr[0].C <- x\n"
+        "\treturn x\n}\n"
+        "func FNested(s S, x int64) int64 {\n"
+        "\ts.W.C <- x\n"
+        "\treturn x\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    for name in ("FChanChan", "FStr", "FArr", "FNested"):
+        assert not named_package(
+            files, snapshot, summaries, name
+        ).available
+
+
+def test_value_struct_field_channel_may_set_follows_reseat(
+    go_types_helper,
+):
+    # `ch = make(...)` after `W{C: ch}` detaches `ch`'s old queue
+    # under a surrogate — the field's may-set must swap to the
+    # surrogate so `<-w.C` still reads the pre-reseat sends.
+    files = {
+        "a.go": "package p\n"
+        "type W struct{ C chan int64 }\n"
+        "func F(x, y int64) int64 {\n"
+        "\tch := make(chan int64, 2)\n"
+        "\tw := W{C: ch}\n"
+        "\tch <- x\n"
+        "\tch = make(chan int64, 2)\n"
+        "\tch <- y\n"
+        "\treturn <-w.C\n}\n"
+        "type S struct{ C chan int64 }\n"
+        "func G(p *S, x, y int64) int64 {\n"
+        "\tch := make(chan int64, 2)\n"
+        "\tp.C = ch\n"
+        "\tch <- x\n"
+        "\tch = make(chan int64, 2)\n"
+        "\tch <- y\n"
+        "\treturn <-p.C\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    f = named_package(files, snapshot, summaries, "F")
+    assert f.available
+    assert {0} <= f.return_dependencies
+    g = named_package(files, snapshot, summaries, "G")
+    assert g.available
+    assert {0, 2} <= g.return_dependencies
+
+
+def test_value_struct_field_channel_through_call_edges(
+    go_types_helper,
+):
+    # `R(w)` — the callee reads `q.C` on its parameter; the
+    # argument's deps carry the field's may-set, so the caller's
+    # `ch <- x` reaches `<-q.C`. `Snd(w)` — a callee's `q.C <- x`
+    # is an imported transfer on the escaped queue, so the
+    # caller's `<-ch` reads it.
+    files = {
+        "a.go": "package p\n"
+        "type W struct{ C chan int64 }\n"
+        "func R(q W) int64 {\n"
+        "\treturn <-q.C\n}\n"
+        "func FArg(x int64) int64 {\n"
+        "\tch := make(chan int64, 1)\n"
+        "\tw := W{C: ch}\n"
+        "\tch <- x\n"
+        "\treturn R(w)\n}\n"
+        "func Snd(q W, x int64) int64 {\n"
+        "\tq.C <- x\n"
+        "\treturn x\n}\n"
+        "func FRecv(x int64) int64 {\n"
+        "\tch := make(chan int64, 1)\n"
+        "\tw := W{C: ch}\n"
+        "\t_ = Snd(w, x)\n"
+        "\treturn <-ch\n}\n"
+        "func SndP(p *W, x int64) int64 {\n"
+        "\tp.C <- x\n"
+        "\treturn x\n}\n"
+        "func GRecv(p *W, x int64) int64 {\n"
+        "\tch := make(chan int64, 1)\n"
+        "\tp.C = ch\n"
+        "\t_ = SndP(p, x)\n"
+        "\treturn <-ch\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    # GRecv's sent value is parameter 1 (`x`); the value cases'
+    # sent value is parameter 0.
+    for name, sent_value in (
+        ("FArg", {0}),
+        ("FRecv", {0}),
+        ("GRecv", {0, 1}),
+    ):
+        result = named_package(files, snapshot, summaries, name)
+        assert result.available
+        assert sent_value <= result.return_dependencies
+
+
+def test_value_struct_field_channel_range_rejoins_may_set(
+    go_types_helper,
+):
+    # `for v := range w.C` — a send through the shared `ch` inside
+    # the loop grows the member's may-set; the element name
+    # re-joins it each fixed-point pass like `p.C` does.
+    files = {
+        "a.go": "package p\n"
+        "type W struct{ C chan int64 }\n"
+        "func F(x int64) int64 {\n"
+        "\tch := make(chan int64, 4)\n"
+        "\tw := W{C: ch}\n"
+        "\ts := int64(0)\n"
+        "\tfor v := range w.C {\n"
+        "\t\ts += v\n"
+        "\t\tch <- x\n"
+        "\t}\n"
+        "\treturn s\n}\n"
+        "type S struct{ C chan int64 }\n"
+        "func G(p *S, x int64) int64 {\n"
+        "\tch := make(chan int64, 4)\n"
+        "\tp.C = ch\n"
+        "\ts := int64(0)\n"
+        "\tfor v := range p.C {\n"
+        "\t\ts += v\n"
+        "\t\tch <- x\n"
+        "\t}\n"
+        "\treturn s\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    for name in ("F", "G"):
+        result = named_package(files, snapshot, summaries, name)
+        assert result.available
+        assert {0} <= result.return_dependencies
+
+
 def test_chan_argument_propagates_queue_contents(go_types_helper):
     # `G(ch)` hands the callee the shared queue: sends the callee
     # records land in the caller's channel state, and a callee's
