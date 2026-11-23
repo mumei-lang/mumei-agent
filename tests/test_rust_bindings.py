@@ -9355,3 +9355,49 @@ fn f(v: Vec<P>) {
     assert bound.get("y[0].pm()") == pm.id
     # `y` itself is the `&[P]` slice — no `pm` member exists.
     assert bound.get("y.pm()") != pm.id
+
+
+def test_closure_first_param_takes_the_iterated_element():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(v: Vec<P>) {
+    v.iter().for_each(|p| p.pm());
+    v.iter().any(|p| p.pm());
+    let _ = v.iter().find(|p| p.pm());
+    v.iter().map(|p| p.pm()).count();
+    v.iter().filter(|p| p.pm()).count();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = sum(
+        1
+        for c in report.calls
+        if raw[c.span.start:c.span.end].decode() == "p.pm()"
+        and c.target == pm.id
+    )
+    assert bound == 5
+
+
+def test_closure_param_keeps_its_annotation():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(v: Vec<P>) {
+    let _ = v.iter().for_each(|x: u8| x.pm());
+    v.iter().fold(0, |acc, p| acc + { p.pm(); 0 });
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # Annotated `x: u8` keeps its own type — the `u8` miss stays
+    # opaque, and a `fold` accumulator pair is not an element param.
+    assert bound.get("x.pm()") != pm.id
+    assert bound.get("p.pm()") != pm.id
