@@ -627,6 +627,24 @@ def test_unused_assignments_report_final_store_after_earlier_read():
     )
 
 
+def test_unused_assignments_compound_assignment_reads_target_for_liveness():
+    body = "x := 1\nx += 2\nreturn x\n"
+    _, result = unuses(body)
+    assert result == ()
+
+
+def test_unused_assignments_terminate_call_reads_arguments_for_liveness():
+    body = "x := 1\n_ = x\nx = 2\npanic(x)\n"
+    _, result = unuses(body)
+    assert result == ()
+
+
+def test_unused_assignments_select_receive_target_indices_are_reads():
+    body = "i := 0\n_ = i\ni = 1\nselect {\ncase a[i] = <-ch:\ndefault:\n}\n"
+    _, result = unuses(body)
+    assert result == ()
+
+
 @pytest.mark.parametrize(
     "body",
     [

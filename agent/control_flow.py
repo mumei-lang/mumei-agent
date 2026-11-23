@@ -40,7 +40,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from agent import tree_sitter_extract
 
@@ -695,6 +695,36 @@ def _value_read_names(
     return frozenset(names)
 
 
+def _liveness_reads(
+    statement: tree_sitter_extract.Statement,
+    tracked_names: frozenset[str],
+) -> frozenset[str]:
+    reads = _value_read_names(statement)
+    if statement.kind == "assign" and statement.operator not in {"", "="}:
+        reads |= frozenset(
+            target
+            for target in statement.targets
+            if _IDENTIFIER.fullmatch(target)
+        )
+    if statement.kind == "terminate":
+        reads |= _value_read_names(replace(statement, kind="expr"))
+    if statement.kind in {"case", "range"}:
+        targets = tuple(
+            target
+            for target in statement.targets
+            if not _IDENTIFIER.fullmatch(target)
+        )
+        reads |= _value_read_names(
+            replace(
+                statement,
+                kind="assign",
+                targets=targets,
+                values=(),
+            )
+        )
+    return reads
+
+
 def unassigned_uses(
     body: str,
     graph: ControlFlowGraph,
@@ -849,7 +879,7 @@ def unused_assignments(
         if statement is None:
             reads_by_node[node_id] = tracked_names
         else:
-            reads_by_node[node_id] = _value_read_names(statement)
+            reads_by_node[node_id] = _liveness_reads(statement, tracked_names)
             kills_by_node[node_id] = _assigned_names(statement)
     read_anywhere = frozenset().union(*reads_by_node.values())
     successors: dict[int, list[int]] = defaultdict(list)
