@@ -5690,6 +5690,35 @@ class _Builder:
             value = self._strip_parens(value)
             if value is None:
                 continue
+            is_struct, member = (
+                self._func_literal_struct_element_member(
+                    literal, element, value
+                )
+            )
+            if (
+                is_struct
+                and member is not None
+                and member.type is not None
+                and (
+                    (
+                        member.type.kind == "interface"
+                        and self._value_carries_closure_records(
+                            value, params, locals_
+                        )
+                    )
+                    or (
+                        self._interface_collection_has_interface_element(
+                            member.type
+                        )
+                        and self._interface_store_value_carries_closure_records(
+                            value, params, locals_
+                        )
+                    )
+                )
+            ):
+                raise _Unsupported(
+                    "unsupported_expression", _span(value)
+                )
             if value.type == "literal_value":
                 inferred = self._local_struct_literal_fact(value)
                 elided_kind, element_type, element_file = (
@@ -5754,11 +5783,6 @@ class _Builder:
                     else self._is_tracked_literal_value(src_id, params)
                 )
             factory_result = src_id in factory_results
-            is_struct, member = (
-                self._func_literal_struct_element_member(
-                    literal, element, value
-                )
-            )
             if not is_struct:
                 continue
             source_ids = self._func_field_value_record_sources(
@@ -14205,6 +14229,206 @@ class _Builder:
             or binding_id in self.closure_star_writes
             or binding_id in self.closure_inner_calls
             or binding_id in self.pointee_closures
+        )
+
+    def _value_carries_closure_records(
+        self,
+        node: Any,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+    ) -> bool:
+        value = self._strip_parens(node)
+        if value is None:
+            return False
+        if value.type == "func_literal":
+            return True
+        if value.type == "identifier":
+            ref = self.references.get(self.node_key(value))
+            binding_id = ref.binding_id if ref is not None else None
+            if binding_id is None:
+                return False
+            if (
+                self._has_closure_records(binding_id)
+                or binding_id in self.bound_method_values
+                or binding_id in self.bound_interface_methods
+            ):
+                return True
+            if self._struct_binding_field_record_ids(
+                binding_id, value
+            ):
+                return True
+            binding = self.bindings.get(binding_id)
+            if (
+                binding is not None
+                and binding.type is not None
+                and (
+                    self._func_elem_collection(binding.type)
+                    or self._func_elem_nested_collection(binding.type)
+                )
+            ):
+                for collection_id in self._func_elem_sharers(
+                    binding_id
+                ):
+                    if self._has_closure_records(collection_id):
+                        return True
+                    if any(
+                        self._has_closure_records(donor_id)
+                        for donor_id in self._func_elem_slot_donors(
+                            collection_id, None
+                        )
+                    ):
+                        return True
+            return False
+        if value.type == "selector_expression":
+            if self._method_value_parts(value) is not None:
+                return self._value_carries_closure_records(
+                    value.child_by_field_name("operand"),
+                    params,
+                    locals_,
+                )
+            source_ids = self._func_field_value_record_sources(
+                value,
+                params,
+                locals_,
+                self.closure_captures,
+                self.closure_writes,
+                self.closure_star_writes,
+                self.closure_inner_calls,
+                self.pointee_closures,
+                include_receiver=True,
+            )
+            return any(
+                self._has_closure_records(source_id)
+                for source_id in source_ids
+            )
+        if value.type == "call_expression":
+            function = self._strip_parens(
+                value.child_by_field_name("function")
+            )
+            if function is None or function.type != "identifier":
+                return False
+            ref = self.references.get(self.node_key(function))
+            return (
+                ref is not None
+                and bool(ref.binding_id)
+                and self._has_closure_records(ref.binding_id)
+            )
+        if value.type == "composite_literal":
+            value = value.child_by_field_name("body")
+            if value is None:
+                return False
+        if value.type in {"literal_value", "literal_element"}:
+            for element in _children(value):
+                if element.type == "keyed_element":
+                    element_value = element.child_by_field_name("value")
+                elif element.type == "literal_element":
+                    element_value = next(
+                        iter(_children(element)), None
+                    )
+                else:
+                    element_value = element
+                while (
+                    element_value is not None
+                    and element_value.type == "literal_element"
+                ):
+                    element_value = next(
+                        iter(_children(element_value)), None
+                    )
+                if self._value_carries_closure_records(
+                    element_value, params, locals_
+                ):
+                    return True
+        elif value.type == "keyed_element":
+            return self._value_carries_closure_records(
+                value.child_by_field_name("value"),
+                params,
+                locals_,
+            )
+        return False
+
+    def _interface_collection_has_interface_element(
+        self, fact: Any
+    ) -> bool:
+        current = fact
+        while current is not None and current.kind in {
+            "slice",
+            "array",
+            "map",
+        }:
+            current = getattr(current, "elem", None)
+        return current is not None and current.kind == "interface"
+
+    def _interface_element_store_target(
+        self,
+        node: Any,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+    ) -> bool:
+        current = self._strip_parens(node)
+        index_count = 0
+        while current is not None and current.type == "index_expression":
+            index_count += 1
+            current = self._strip_parens(
+                current.child_by_field_name("operand")
+            )
+        if current is None:
+            return False
+        if current.type == "identifier":
+            ref = self.references.get(self.node_key(current))
+            binding = (
+                self.bindings.get(ref.binding_id)
+                if ref is not None and ref.binding_id
+                else None
+            )
+            fact = getattr(binding, "type", None)
+        elif current.type == "selector_expression":
+            member = self._field_member(current)
+            fact = getattr(member, "type", None)
+        else:
+            return False
+        for _ in range(index_count):
+            if fact is None or fact.kind not in {
+                "slice",
+                "array",
+                "map",
+            }:
+                return False
+            fact = fact.elem
+        return fact is not None and fact.kind == "interface"
+
+    def _interface_store_value_carries_closure_records(
+        self,
+        node: Any,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+    ) -> bool:
+        if self._value_carries_closure_records(node, params, locals_):
+            return True
+        value = self._strip_parens(node)
+        if value is None or value.type != "call_expression":
+            return False
+        function = self._strip_parens(
+            value.child_by_field_name("function")
+        )
+        ref = (
+            self.references.get(self.node_key(function))
+            if function is not None and function.type == "identifier"
+            else None
+        )
+        if (
+            function is None
+            or function.type != "identifier"
+            or function.text != b"append"
+            or ref is None
+            or ref.kind != "universe"
+        ):
+            return False
+        arguments = _children(value.child_by_field_name("arguments"))
+        return any(
+            self._value_carries_closure_records(
+                argument, params, locals_
+            )
+            for argument in arguments[1:]
         )
 
     def _closure_argument_record_id(
@@ -23316,6 +23540,49 @@ class _Builder:
                         if len(lefts) == len(rights)
                         else None
                     )
+                    if rhs is not None and lhs.type in {
+                        "selector_expression",
+                        "field_expression",
+                    }:
+                        field_member = self._field_member(lhs)
+                        field_type = getattr(
+                            field_member, "type", None
+                        )
+                        if (
+                            field_type is not None
+                            and field_type.kind == "interface"
+                            and self._value_carries_closure_records(
+                                rhs, params, locals_
+                            )
+                        ):
+                            raise _Unsupported(
+                                "unsupported_expression", _span(rhs)
+                            )
+                        if (
+                            field_type is not None
+                            and self._interface_collection_has_interface_element(
+                                field_type
+                            )
+                            and self._interface_store_value_carries_closure_records(
+                                rhs, params, locals_
+                            )
+                        ):
+                            raise _Unsupported(
+                                "unsupported_expression", _span(rhs)
+                            )
+                    elif (
+                        rhs is not None
+                        and lhs.type == "index_expression"
+                        and self._interface_element_store_target(
+                            lhs, params, locals_
+                        )
+                        and self._value_carries_closure_records(
+                            rhs, params, locals_
+                        )
+                    ):
+                        raise _Unsupported(
+                            "unsupported_expression", _span(rhs)
+                        )
                     source_interface = self._interface_value_binding(
                         rhs, params, locals_
                     )
