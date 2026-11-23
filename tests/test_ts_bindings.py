@@ -3166,3 +3166,61 @@ v.pm();
         if c.target == member_pm.id
     }
     assert bound == {"v?.pm()"}
+
+
+def test_for_of_and_array_destructuring_bind_element_types():
+    # `for (const x of arr)` and `const [a, b] = arr` take `P[]`'s
+    # element type; `Set<P>` and tuple positionals work the same.
+    source = """
+class P { pm(): void {} }
+class K { km(): void {} }
+declare const arr: P[];
+declare const pset: Set<P>;
+declare const tup: [K, P];
+for (const x of arr) { x.pm(); }
+const [a, b] = arr;
+a.pm();
+b.pm();
+const [k0, p0] = tup;
+k0.km();
+p0.pm();
+for (const s of pset) { s.pm(); }
+"""
+    report = build_ts_bindings(source)
+    pm = _member_bindings(report, "pm", "associated_function")[0]
+    km = _member_bindings(report, "km", "associated_function")[0]
+    bound_pm = {
+        source[c.span.start : c.span.end]
+        for c in _calls(report)
+        if c.target == pm.id
+    }
+    bound_km = {
+        source[c.span.start : c.span.end]
+        for c in _calls(report)
+        if c.target == km.id
+    }
+    assert bound_pm == {"x.pm()", "a.pm()", "b.pm()", "p0.pm()", "s.pm()"}
+    assert bound_km == {"k0.km()"}
+
+
+def test_for_of_map_pair_destructuring_takes_type_args():
+    # `for (const [k, v] of m: Map<K, P>)` destructures the `[K, P]`
+    # entry pair — `k` is `K`, `v` is `P`.
+    source = """
+class P { pm(): void {} }
+class K { km(): void {} }
+declare const m: Map<K, P>;
+for (const [kk, vv] of m) {
+  kk.km();
+  vv.pm();
+}
+"""
+    report = build_ts_bindings(source)
+    pm = _member_bindings(report, "pm", "associated_function")[0]
+    km = _member_bindings(report, "km", "associated_function")[0]
+    bound = {
+        source[c.span.start : c.span.end]: c.target
+        for c in _calls(report)
+    }
+    assert bound["kk.km()"] == km.id
+    assert bound["vv.pm()"] == pm.id
