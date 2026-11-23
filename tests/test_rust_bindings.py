@@ -9518,12 +9518,13 @@ impl P { fn pm(&self) {} }
 impl Q { fn qm(&self) {} }
 trait Each { fn for_each(&self, f: impl Fn(&Q)); }
 impl<P> Each for [P] { fn for_each(&self, f: impl Fn(&Q)) {} }
-fn g(v: Vec<P>, a: &[P; 3], lt: &'a [P], rows: &[[P; 2]]) {
+fn g(v: Vec<P>, a: &[P; 3], lt: &'a [P], lt2: &'a[P], rows: &[[P; 2]]) {
     v.for_each(|q| { q.qm(); q.pm(); });
     v.iter().for_each(|p| p.pm());
     v.chunks(2).for_each(|c| { c[0].pm(); });
     a.for_each(|qa| { qa.qm(); qa.pm(); });
     lt.for_each(|ql| { ql.qm(); ql.pm(); });
+    lt2.for_each(|ql2| { ql2.qm(); ql2.pm(); });
     rows.for_each(|row| { row[0].qm(); row[0].pm(); });
     let it = v.chunks_mut(2);
     it.for_each(|c2| { c2[0].pm(); });
@@ -9554,6 +9555,8 @@ fn g(v: Vec<P>, a: &[P; 3], lt: &'a [P], rows: &[[P; 2]]) {
     assert not bound.get("qa.qm()")
     # `&'a [P]` — lifetime spelling keeps the slice gate.
     assert not bound.get("ql.pm()")
+    # `&'a[P]` — the no-space lifetime spelling takes the same gate.
+    assert not bound.get("ql2.pm()")
     # `&[[P; 2]]` — a slice OF arrays: the `;` sits at bracket
     # depth 2, so the slice impl still covers the receiver.
     assert not bound.get("row[0].pm()")
