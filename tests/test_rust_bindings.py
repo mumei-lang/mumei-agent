@@ -8688,3 +8688,39 @@ fn f(r: Result<&P, u8>, w: Result<P, u8>, v: Vec<P>) {
     assert not bound.get("z.pm()")
     # `v.into_boxed_slice()` yields `Box<[P]>`.
     assert bound.get("b[0].pm()") == pm.id
+
+
+def test_cloned_and_boxed_slice_call_receivers():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+mod m { pub struct P; pub struct S { pub r: Result<&P, i32> } }
+fn make_vec() -> Vec<P> { Vec::new() }
+fn f(s: m::S, r: Result<&P, i32>, hs: std::collections::HashSet<P>) {
+    if let Ok(p) = s.r.cloned() { p.pm(); }
+    let c = r.as_ref().cloned();
+    if let Ok(q) = c { q.pm(); }
+    let b = make_vec().into_boxed_slice();
+    b[0].pm();
+    let bs = hs.into_boxed_slice();
+    bs[0].pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `s.r` is `Result<&m::P>` — the peeled `P` resolves in the
+    # field's module, not the caller's `P` that owns `pm`.
+    assert not bound.get("p.pm()")
+    # `r.as_ref().cloned()` keeps `Result<P, _>` — the produced
+    # spelling's head still gates the recipe.
+    assert bound.get("q.pm()") == pm.id
+    # `make_vec()` names `Vec` through its declared return.
+    assert bound.get("b[0].pm()") == pm.id
+    # `HashSet` has no `into_boxed_slice` — the Vec recipe does not
+    # apply to other containers.
+    assert not bound.get("bs[0].pm()")
