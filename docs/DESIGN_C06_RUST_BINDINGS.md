@@ -67,7 +67,9 @@ CLI サブコマンド（`lsif` / `scip` / `analysis-stats` / `diagnostics` / `u
    メタデータ記録で、lexical 解決を主張しない。
 6. lexical gap `macro_invocation` / `macro_definition` / `conditional_compilation`
    があれば比較自体を fail closed にする。
-7. LSIF の range は UTF-16 → byte offset 変換で検査、identifier の妥当性も確認。
+7. LSIF の range は UTF-16 → byte offset 変換で検査するが、対象は同梱された
+   project document 内の range に限る（sysroot 側 range はソースと照合しない）。
+   identifier 妥当性の検査も対象ファイルの参照のみ。
 
 ## 4. 出力の安定性
 
