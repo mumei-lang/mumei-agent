@@ -640,6 +640,47 @@ def test_batch_append_exceeding_log_size_writes_nothing(tmp_path, monkeypatch):
     assert not path.exists()
 
 
+def test_second_batch_entry_exceeding_log_size_preserves_existing_bytes(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "history.jsonl"
+    existing_digest = append_plan_history(
+        str(path), _plan("adapter-existing")
+    )
+    original = path.read_bytes()
+    first_plan = _plan("adapter-batch-first")
+    second_plan = _plan("adapter-batch-second")
+
+    def entry_line(plan, index, previous_digest):
+        unsigned = {
+            "schema_version": plan_history_log.ENTRY_SCHEMA,
+            "index": index,
+            "prev_digest": previous_digest,
+            "plan": plan.to_dict(),
+        }
+        digest = hashlib.sha256(_canonical(unsigned)).hexdigest()
+        return _canonical({**unsigned, "digest": digest}) + b"\n", digest
+
+    first_line, first_digest = entry_line(
+        first_plan, 1, existing_digest
+    )
+    second_line, _ = entry_line(second_plan, 2, first_digest)
+    limit = len(original) + len(first_line) + 4
+    assert len(original) + len(first_line) <= limit
+    assert limit < len(original) + len(first_line) + len(second_line)
+    monkeypatch.setattr(plan_history_log, "MAX_LOG_BYTES", limit)
+
+    with pytest.raises(
+        ValueError, match=plan_history_log._LOG_TOO_LARGE
+    ):
+        append_plan_histories(
+            str(path), (first_plan, second_plan)
+        )
+
+    assert path.read_bytes() == original
+    assert _temporary_files(path) == []
+
+
 def test_read_enforces_log_and_entry_size_caps(tmp_path, monkeypatch):
     path = tmp_path / "history.jsonl"
     _seed(path, (_plan("adapter-size"),))
