@@ -21097,6 +21097,135 @@ def test_bound_closure_resolves_captures_at_call(go_types_helper):
     assert result.return_dependencies == frozenset({1})
 
 
+def test_transitive_captured_closures_preserve_current_deps_and_writes(
+    go_types_helper,
+):
+    declarations = (
+        "type S struct { F func() int64 }\n"
+        "type W struct { F func() }\n"
+        "func (s S) Run() int64 { return s.F() }\n"
+        "func ap(f func() int64) int64 { return f() }\n"
+        "func NamedRead(x, y int64) int64 {\n"
+        "\tv := y; h := func() int64 { return v }\n"
+        "\tg := func() int64 { return h() }; v = x; return g()\n"
+        "}\n"
+        "func NamedWrite(x int64) int64 {\n"
+        "\tw := int64(0); h := func() { w = x }\n"
+        "\tg := func() { h() }; g(); return w\n"
+        "}\n"
+        "func StructField(x, y int64) int64 {\n"
+        "\tv := y; s := S{F: func() int64 { return v }}\n"
+        "\tg := func() int64 { return s.F() }\n"
+        "\tv = x; return g()\n"
+        "}\n"
+        "func FieldValue(x, y int64) int64 {\n"
+        "\tv := y; s := S{F: func() int64 { return v }}\n"
+        "\tg := func() int64 { f := s.F; return f() }\n"
+        "\tv = x; return g()\n"
+        "}\n"
+        "func MethodValue(x, y int64) int64 {\n"
+        "\tv := y; s := S{F: func() int64 { return v }}\n"
+        "\tg := func() int64 { f := s.Run; return f() }\n"
+        "\tv = x; return g()\n"
+        "}\n"
+        "func MethodCall(x, y int64) int64 {\n"
+        "\tv := y; s := S{F: func() int64 { return v }}\n"
+        "\tg := func() int64 { return s.Run() }\n"
+        "\tv = x; return g()\n"
+        "}\n"
+        "func SliceElement(x, y int64) int64 {\n"
+        "\tv := y; ss := []S{{F: func() int64 { return v }}}\n"
+        "\tg := func() int64 { return ss[0].F() }\n"
+        "\tv = x; return g()\n"
+        "}\n"
+        "func NestedSlice(x, y int64) int64 {\n"
+        "\tv := y; ss := [][]S{{{F: func() int64 { return v }}}}\n"
+        "\tg := func() int64 { return ss[0][0].F() }\n"
+        "\tv = x; return g()\n"
+        "}\n"
+        "func NestedArray(x, y int64) int64 {\n"
+        "\tv := y; var a [2][2]S\n"
+        "\ta[0][0].F = func() int64 { return v }\n"
+        "\tg := func() int64 { return a[0][0].F() }\n"
+        "\tv = x; return g()\n"
+        "}\n"
+        "func Immediate(x, y int64) int64 {\n"
+        "\tv := y; h := func() int64 { return v }; v = x\n"
+        "\treturn func() int64 { return h() }()\n"
+        "}\n"
+        "func Callback(x, y int64) int64 {\n"
+        "\tv := y; h := func() int64 { return v }; v = x\n"
+        "\treturn ap(func() int64 { return h() })\n"
+        "}\n"
+        "func DeferredRead(x, y int64) (r int64) {\n"
+        "\tv := y; s := S{F: func() int64 { return v }}\n"
+        "\tdefer func() { r = s.F() }(); v = x; return 0\n"
+        "}\n"
+        "func GoCall(x, y int64) int64 {\n"
+        "\tv := y; s := S{F: func() int64 { return v }}; v = x\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tgo func() { c <- s.F() }(); return <-c\n"
+        "}\n"
+        "func DeferredWrite(x int64) (r int64) {\n"
+        "\tvar s W; s.F = func() { r = x }\n"
+        "\tg := func() { s.F() }; defer func() { g() }(); return\n"
+        "}\n"
+        "func Factory(x, y int64) int64 {\n"
+        "\tv := y; h := func() int64 { return v }\n"
+        "\tfactory := func() func() int64 {\n"
+        "\t\treturn func() int64 { return h() }\n"
+        "\t}\n"
+        "\tf := factory(); v = x; return f()\n"
+        "}\n"
+        "func Rebind(x, y int64) int64 {\n"
+        "\th := func() int64 { return x }\n"
+        "\tg := func() int64 { return h() }\n"
+        "\th = func() int64 { return y }; return g()\n"
+        "}\n"
+        "func ConditionalRebind(b bool, x, y int64) int64 {\n"
+        "\tv := y; h := func() int64 { return v }\n"
+        "\tg := func() int64 { return h() }\n"
+        "\tif b { h = func() int64 { return x } }; return g()\n"
+        "}\n"
+        "func Cycle(x int64) int64 {\n"
+        "\tvar g func() int64\n"
+        "\tg = func() int64 { return g() }; return g()\n"
+        "}\n"
+        "func MapClosed(x int64) int64 {\n"
+        "\tm := map[int]S{0: {F: func() int64 { return x }}}\n"
+        "\tg := func() int64 { return m[0].F() }; return g()\n"
+        "}\n"
+    )
+    data = unit(go_types_helper, declarations)
+    for name, expected in (
+        ("NamedRead", frozenset({0, 1})),
+        ("NamedWrite", frozenset({0})),
+        ("StructField", frozenset({0, 1})),
+        ("FieldValue", frozenset({0, 1})),
+        ("MethodValue", frozenset({0, 1})),
+        ("MethodCall", frozenset({0, 1})),
+        ("SliceElement", frozenset({0, 1})),
+        ("NestedSlice", frozenset({0, 1})),
+        ("NestedArray", frozenset({0, 1})),
+        ("Immediate", frozenset({0, 1})),
+        ("Callback", frozenset({0, 1})),
+        ("DeferredRead", frozenset({0, 1})),
+        ("GoCall", frozenset({0, 1})),
+        ("DeferredWrite", frozenset({0})),
+        ("Factory", frozenset({0, 1})),
+        ("Rebind", frozenset({1})),
+        ("ConditionalRebind", frozenset({1, 2})),
+    ):
+        result = named(*data, name=name)
+        assert result.available, (name, result.gaps)
+        assert result.return_dependencies == expected, name
+    cycle = named(*data, name="Cycle")
+    assert cycle.available
+    assert cycle.return_dependencies == frozenset()
+    map_result = named(*data, name="MapClosed")
+    assert not map_result.available
+
+
 def test_chained_closure_values_resolve_shared_captures_once(
     go_types_helper,
 ):
@@ -21119,7 +21248,7 @@ def test_chained_closure_values_resolve_shared_captures_once(
         *unit(go_types_helper, "\n".join(declarations))
     )
     assert result.available, result.gaps
-    assert result.return_dependencies == frozenset({0})
+    assert result.return_dependencies == frozenset({0, 1})
 
 
 @pytest.mark.parametrize(
