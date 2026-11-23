@@ -2877,6 +2877,19 @@ class _RustBindings:
                 or annot_slice
             ):
                 receiver_heads.add("[slice]")
+            # `v.chunks_exact(2)` produces `ChunksExact` — the
+            # std type is named after the producing method, so a
+            # trait `impl Rem for ChunksExact<P>` covers the call's
+            # receiver even though the spelled args only keep `P`.
+            if receiver.type == "call_expression":
+                rcallee = receiver.child_by_field_name("function")
+                if rcallee is not None and rcallee.type == "field_expression":
+                    mname = self._normalize_identifier(
+                        self.text(rcallee.child_by_field_name("field"))
+                    )
+                    receiver_heads.add(
+                        "".join(part.title() for part in mname.split("_"))
+                    )
         for record in self.records.values():
             if not (
                 record.member_trait is not None
@@ -6699,25 +6712,6 @@ class _RustBindings:
         what `_iterator_method_element` types instead."""
         return self._iterator_spelling_with_pos(call, _depth)[0]
 
-    def _visible_trait_method(
-        self, name: str, position: int
-    ) -> bool:
-        """A trait in scope declares a method named `name` — a
-        `v.name(...)` call may be that trait's extension method,
-        not the std shape the caller's recipe assumes."""
-        for record in self.records.values():
-            if (
-                record.member_trait is not None
-                and record.binding.name == name
-                and record.binding.kind == "associated_function"
-            ):
-                trait = self.records.get(record.member_trait)
-                if trait is not None and self._trait_visible(
-                    trait, position
-                ):
-                    return True
-        return False
-
     def _chunks_exact_remainder_source(
         self, receiver: Any
     ) -> "Any | None":
@@ -7076,12 +7070,18 @@ class _RustBindings:
                 f"{prefix}[{spelled}]",
                 self._receiver_annotation_position(receiver),
             )
-        if method in {"remainder", "into_remainder"}:
+        if (
+            method in {"remainder", "into_remainder"}
+            and not self._visible_trait_method(
+                method, call.start_byte, receiver
+            )
+        ):
             # `v.chunks_exact(n).remainder()`/`into_remainder()` —
             # the trailing sub-slice, spelled `&[P]`/`&mut [P]`
             # like the chunked elements. A `let it = v.chunks_exact
             # (n); it.remainder()` receiver resolves through the
-            # alias to the chunks call.
+            # alias to the chunks call. A trait impl covering this
+            # receiver's head hides the std shape.
             inner_call = self._chunks_exact_remainder_source(receiver)
             if inner_call is None:
                 return None, None
@@ -7943,7 +7943,12 @@ class _RustBindings:
                 if spelled is None
                 else prefix + "[" + spelled + "]",
             )
-        if method in {"remainder", "into_remainder"}:
+        if (
+            method in {"remainder", "into_remainder"}
+            and not self._visible_trait_method(
+                method, call.start_byte, receiver
+            )
+        ):
             # `v.chunks_exact(n).remainder()`/`into_remainder()`
             # yields the trailing slice's `&P` elements — the
             # spelled `&[P]` container peels to `P` (`&mut [P]`
@@ -8772,7 +8777,11 @@ class _RustBindings:
                         break
                 inner_slice = (
                     None
-                    if producer_alias or vmethod is not None
+                    if producer_alias
+                    or (
+                        vmethod is not None
+                        and vmethod not in {"remainder", "into_remainder"}
+                    )
                     else re.fullmatch(
                         r"&\s*(?:'\w+\s+)?(?:mut\s+)?\[(.+)\]",
                         elem_args.strip(),
