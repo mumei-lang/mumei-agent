@@ -605,7 +605,8 @@ def test_rejects_oversized_envelope():
 
 
 def test_member_access_references_agree_and_type_positions_report_missing():
-    # Member calls, field reads, `self` receivers and locals agree
+    # Member calls, field reads, `self` receivers, locals, loop
+    # bindings and match/if-let scrutinee payload bindings agree
     # with rust-analyzer; struct names in type positions and field
     # labels stay `lexical_missing` — the lexical side does not emit
     # those reference positions (its honest coverage boundary).
@@ -626,6 +627,7 @@ def test_member_access_references_agree_and_type_positions_report_missing():
     }
     assert agreed >= {
         "w", "p", "self", "inner", "value", "field", "read", "new", "pm",
+        "vec", "p2", "r", "q", "m", "g",
     }
     assert missing == {"P", "V", "W", "inner", "value"}
     assert all(

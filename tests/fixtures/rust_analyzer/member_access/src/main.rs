@@ -38,3 +38,18 @@ fn main() {
     let p = P::new(V);
     let _copied = &p.value;
 }
+
+fn f(vec: Vec<P>, m: std::collections::HashMap<V, P>, r: Result<P, V>) {
+    for p2 in vec.iter() {
+        p2.pm();
+    }
+    match r {
+        Ok(q) => {
+            q.pm();
+        }
+        Err(_) => {}
+    }
+    if let Some(g) = m.get(&V) {
+        g.pm();
+    }
+}
