@@ -1432,7 +1432,11 @@ class _RustBindings:
             else:
                 current.append(ch)
         parts.append("".join(current))
-        return [part.strip() for part in parts]
+        items = [part.strip() for part in parts]
+        if len(items) > 1 and items[-1] == "":
+            # `(P, Q,)` — a trailing comma names no third arg.
+            items.pop()
+        return items
 
     def _resolve_spelled_in_scope(
         self, spelled: str, scope: "_Scope | None", position: int
@@ -3957,6 +3961,72 @@ class _RustBindings:
                                     ),
                                 )
                     if (
+                        method_name in {"unzip", "partition"}
+                        and receiver[1] is not None
+                        and self._container_head_name(
+                            callee.child_by_field_name("value")
+                        )
+                        is None
+                    ):
+                        # `it.unzip()` on a pair iterator yields
+                        # `(Vec<A>, Vec<B>)`; `it.partition(f)`
+                        # yields `(Vec<P>, Vec<P>)`. The spelled
+                        # args of an iterator binding ARE the
+                        # element — a named-container receiver
+                        # (excluded above) would name its own
+                        # method instead.
+                        value_expr = callee.child_by_field_name(
+                            "value"
+                        )
+                        it_record = (
+                            self._lookup(
+                                self._normalize_identifier(
+                                    self.text(value_expr)
+                                ),
+                                value_expr.start_byte,
+                                "value",
+                            )
+                            if value_expr is not None
+                            and value_expr.type == "identifier"
+                            else None
+                        )
+                        if value_expr is not None and (
+                            value_expr.type == "call_expression"
+                            or (
+                                it_record is not None
+                                and it_record.value_node is not None
+                                and it_record.value_node.type
+                                == "call_expression"
+                            )
+                        ):
+                            it_args = receiver[1].strip()
+                            if method_name == "partition":
+                                return (
+                                    None,
+                                    "(Vec<{0}>, Vec<{0}>)".format(
+                                        it_args
+                                    ),
+                                )
+                            if (
+                                it_args.startswith("(")
+                                and it_args.endswith(")")
+                                and self._paren_wraps(it_args)
+                            ):
+                                halves = self._type_arg_list(
+                                    it_args[1:-1]
+                                )
+                                if len(halves) == 2:
+                                    return (
+                                        None,
+                                        "(Vec<{}>, Vec<{}>)".format(
+                                            halves[0].strip(),
+                                            halves[1].strip(),
+                                        ),
+                                    )
+                            # `unzip` on a non-pair element names
+                            # no method — stays opaque.
+                            return None, None
+                    if (
                         method_name in _SWAP_REMOVE_METHODS
                         and receiver[1] is not None
                         and self._container_head_name(
@@ -6133,7 +6203,7 @@ class _RustBindings:
                     elem_args.strip(),
                 )
                 if peeled is not None:
-                    tid, _ = self._spelled_type(
+                    tid, spelled_args = self._spelled_type(
                         peeled.group(1).strip(), iterator.start_byte
                     )
                     if tid is not None:
@@ -6147,7 +6217,7 @@ class _RustBindings:
                         )
                         return (
                             TypeFact("named", name, 0, None, tid),
-                            None,
+                            spelled_args or None,
                         )
                 return _UNKNOWN, elem_args.strip()
             else:

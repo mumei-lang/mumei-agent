@@ -7709,3 +7709,96 @@ fn f(o: Option<Option<P>>) {
     # the nested `Some(q)` unwraps it, but `p` itself is not `P`.
     assert bound.get("q.pm()") == pm.id
     assert not bound.get("p.pm()")
+def test_iterator_unzip_and_partition_bind_elements():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct W<T> { x: T }
+fn f(v: Vec<(P, P)>, w: Vec<P>, t: (P, P), x: W<(P, P)>) {
+    let (xs, ys): (Vec<P>, Vec<P>) = v.into_iter().unzip();
+    for a in xs { a.pm(); }
+    for b in ys { b.pm(); }
+    let it = v.into_iter();
+    let (xs2, ys2) = it.unzip();
+    for c in xs2 { c.pm(); }
+    let (pa, pb) = w.iter().partition(|p| true);
+    for d in pa { d.pm(); }
+    let (e1, e2) = t.unzip();
+    e1.pm();
+    let (g1, g2) = x.iter().unzip();
+    for h in g1 { h.pm(); }
+    let (i1, i2) = w.iter().unzip();
+    i1.pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `it.unzip()` on a pair iterator gives `(Vec<P>, Vec<P>)`.
+    assert bound.get("a.pm()") == pm.id
+    assert bound.get("b.pm()") == pm.id
+    assert bound.get("c.pm()") == pm.id
+    # `it.partition(f)` gives `(Vec<P>, Vec<P>)`.
+    assert bound.get("d.pm()") == pm.id
+    # `t.unzip()` on a declared pair names no method — opaque.
+    assert not bound.get("e1.pm()")
+    # A custom `W` can name any `iter` — stays opaque.
+    assert not bound.get("h.pm()")
+    # `unzip` on a non-pair element names no method — opaque.
+    assert not bound.get("i1.pm()")
+
+
+def test_unzip_accepts_a_trailing_comma_pair():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(o: Option<(P, P,)>, v: Vec<(P, P,)>) {
+    if let Some((a, b)) = o {
+        a.pm();
+        b.pm();
+    }
+    let (xs, ys) = v.into_iter().unzip();
+    xs[0].pm();
+    ys[0].pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `(P, P,)` is a two-element pair — both halves and both
+    # unzip outputs resolve.
+    assert bound.get("a.pm()") == pm.id
+    assert bound.get("b.pm()") == pm.id
+    assert bound.get("xs[0].pm()") == pm.id
+    assert bound.get("ys[0].pm()") == pm.id
+
+
+def test_saved_result_iter_keeps_the_element_args():
+    source = """
+struct G<T>;
+impl G<u8> { fn um(&self) {} }
+fn f(r: Result<G<u8>, u8>) {
+    let it = r.iter();
+    for x in it { x.um(); }
+    for y in r.iter() { y.um(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    um = _bindings(report, "um", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `let it = r.iter()` then `for x in it` keeps `G<u8>`'s
+    # args like the direct `r.iter()` loop does.
+    assert bound.get("x.um()") == um.id
+    assert bound.get("y.um()") == um.id
