@@ -2801,10 +2801,22 @@ class _RustBindings:
                 elem_id, elem_args = self._element_of(
                     None, impl_args.strip(), spelled_pos
                 )
-                if elem_id is None and elem_args is not None:
+                elem_rec = (
+                    None
+                    if elem_id is None
+                    else self.records.get(elem_id)
+                )
+                if (
+                    elem_id is None
+                    or elem_rec is None
+                    or elem_rec.binding.kind
+                    not in {"struct", "enum"}
+                ) and elem_args is not None:
                     # `let r = c.borrow()` keeps `Ref<P>` as the
-                    # spelled args — peel the guard so `r.pm()`
-                    # reaches `P`'s members.
+                    # spelled args, and `Rc` resolves to a bare
+                    # `use std::rc::Rc` import — peel the spelled
+                    # head again so `r.pm()`/`e.pm()` reach `P`'s
+                    # members instead of the import placeholder.
                     elem_id, elem_args = self._element_of(
                         None, elem_args, spelled_pos
                     )
