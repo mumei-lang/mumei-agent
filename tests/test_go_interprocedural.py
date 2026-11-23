@@ -21325,6 +21325,43 @@ def test_transitive_struct_field_collection_traversal_is_bounded(
     assert result.return_dependencies == frozenset({0})
 
 
+def test_transitive_struct_record_cache_keeps_map_paths_fail_closed(
+    go_types_helper,
+):
+    declarations = (
+        "type S struct { F func() int64 }\n"
+        "type O struct { S S; M map[int]S }\n"
+        "type O2 struct { M map[int]S; S S }\n"
+        "func StructFirst(x int64) int64 {\n"
+        "\tvar o O; o.S.F = func() int64 { return x }\n"
+        "\tg := func() int64 { return o.S.F() }; return g()\n"
+        "}\n"
+        "func MapFirst(x int64) int64 {\n"
+        "\tvar o O2; o.S.F = func() int64 { return x }\n"
+        "\tg := func() int64 { return o.S.F() }; return g()\n"
+        "}\n"
+        "func CaptureSM(x int64) int64 {\n"
+        "\tvar s S; var m map[int]S\n"
+        "\ts.F = func() int64 { return x }\n"
+        "\tg := func() int64 { if m == nil { return s.F() }; return s.F() }\n"
+        "\treturn g()\n"
+        "}\n"
+        "func CaptureMS(x int64) int64 {\n"
+        "\tvar m map[int]S; var s S\n"
+        "\ts.F = func() int64 { return x }\n"
+        "\tg := func() int64 { if m == nil { return s.F() }; return s.F() }\n"
+        "\treturn g()\n"
+        "}\n"
+    )
+    data = unit(go_types_helper, declarations)
+    for name in ("StructFirst", "MapFirst", "CaptureSM", "CaptureMS"):
+        result = named(*data, name=name)
+        assert not result.available, (name, result.gaps)
+        assert any(
+            gap.reason == "unsupported_expression" for gap in result.gaps
+        ), (name, result.gaps)
+
+
 def test_chained_closure_values_resolve_shared_captures_once(
     go_types_helper,
 ):
