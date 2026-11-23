@@ -6027,6 +6027,10 @@ class _Builder:
                         )
                         | tokens
                     )
+                    # Same escape as `w.C = ch`: sends on the
+                    # stored name are caller-visible now.
+                    for token in tokens:
+                        self.external_chan_locals.add(token)
                 continue
             is_collection = (
                 self._scalar_elem_collection(member_type)
@@ -9574,6 +9578,17 @@ class _Builder:
             or not self._scalar_chan_fact(field_member.type)
         ):
             return None
+        if not any(
+            member.id == field_member.id
+            for member in self._struct_fields_for_fact(
+                binding.type, binding
+            )
+        ):
+            # `w.C` where `C` promotes out of an embedded field —
+            # the may-set model keys on the member's own identity,
+            # and a promoted member's queue is not wired through
+            # `w`'s literal or stores, so stay closed.
+            return None
         return (field_member, binding)
 
     def _field_chan_deps(
@@ -9590,6 +9605,15 @@ class _Builder:
             deps = deps | locals_.get(token, frozenset())
             if token in params:
                 deps = deps | frozenset({params[token]})
+            if (
+                token in self.external_chan_locals
+                or token in params
+            ):
+                # The stored queue is caller-visible: sends on its
+                # local name are imported transfers now, so the
+                # may-set's contents live in `indirect_writes` like
+                # the external receive arm reads them.
+                deps = deps | self.indirect_writes
         return deps
 
     def _bound_pointee_index_field(
@@ -13041,6 +13065,12 @@ class _Builder:
         for hid, toks in self._opaque_container_tokens.items():
             if hid != binding_id and binding_id in toks:
                 shared = True
+        for member_id, toks in self.field_chan_queues.items():
+            if member_id != binding_id and binding_id in toks:
+                # A `w.C = ch` / `W{C: ch}` may-set names the OLD
+                # queue like a share group does — the field keeps
+                # the parked descriptor, so the token detaches too.
+                shared = True
         if not shared:
             # `c, s = make(chan), append(s, c)` — a later slot of
             # THIS statement joins `c` into a group from its
@@ -13074,6 +13104,11 @@ class _Builder:
         for hid, toks in list(self._opaque_container_tokens.items()):
             if hid != binding_id and binding_id in toks:
                 self._opaque_container_tokens[hid] = (
+                    toks - {binding_id}
+                ) | {sur}
+        for member_id, toks in list(self.field_chan_queues.items()):
+            if member_id != binding_id and binding_id in toks:
+                self.field_chan_queues[member_id] = (
                     toks - {binding_id}
                 ) | {sur}
         # An `e := d` alias recorded before the reseat still names
@@ -28013,13 +28048,20 @@ class _Builder:
                         # `p.C = ch` — the field may now name ch's
                         # queue. Union into the member's may-set
                         # (a conditional store leaves the previous
-                        # queue a candidate, so never replace).
+                        # queue a candidate, so never replace). The
+                        # queue escaped into a container: sends on
+                        # the local name are caller-visible
+                        # transfers from here on, so mark each
+                        # token external like an `s[i] = ch` join
+                        # does.
                         self.field_chan_queues[member.id] = (
                             self.field_chan_queues.get(
                                 member.id, frozenset()
                             )
                             | tokens
                         )
+                        for token in tokens:
+                            self.external_chan_locals.add(token)
                 # An element store through one name lands in every
                 # name sharing the backing (`fs2 := fs`) — the
                 # stored value's deps join each sharer's set like
@@ -29066,6 +29108,10 @@ class _Builder:
             range_elem = None
             # (key binding id, seed deps, None, re-join escaped).
             range_key = None
+            # Element binding id -> chan field member id when the
+            # operand was `w.C`: the member's may-set deps re-join
+            # the element each pass like a local queue's group.
+            range_field_chan_members: dict[str, str] = {}
             if clause is not None and clause.type == "range_clause":
                 # Two operand families are reachable: an integer
                 # (`for i := range e` yields one index variable) and
@@ -30095,6 +30141,7 @@ class _Builder:
                             local_chan_chan_range_fact = (
                                 local_binding.type.elem
                             )
+                    range_field_member = None
                     chan = self._chan_operation_operand(
                         right, fn, params, scope, transfers, count
                     )
@@ -30343,6 +30390,7 @@ class _Builder:
                                 self.members.get(member.id)
                                 or self.bindings.get(member.id)
                             )
+                            range_field_member = member.id
                         elif (
                             value_field := self._value_field_chan(
                                 right, scope
@@ -30389,6 +30437,7 @@ class _Builder:
                                 self.members.get(member.id)
                                 or self.bindings.get(member.id)
                             )
+                            range_field_member = member.id
                         elif (
                             chan is None
                             and (
@@ -30662,6 +30711,10 @@ class _Builder:
                                     False,
                                     False,
                                 )
+                                if range_field_member is not None:
+                                    range_field_chan_members[
+                                        binding.id
+                                    ] = range_field_member
                             elif func_iter:
                                 # `for v := range lib.Iter(&a)` —
                                 # the element re-joins escaped
@@ -30787,6 +30840,10 @@ class _Builder:
                                     False,
                                     False,
                                 )
+                                if range_field_member is not None:
+                                    range_field_chan_members[
+                                        ref.binding_id
+                                    ] = range_field_member
                             elif func_iter:
                                 range_elem = (
                                     ref.binding_id, rdeps, None,
@@ -30889,6 +30946,18 @@ class _Builder:
                                 else self.indirect_writes
                             )
                         )
+                        field_member = range_field_chan_members.get(
+                            elem_id
+                        )
+                        if field_member is not None and not elem_static:
+                            # `for v := range w.C` — sends through
+                            # the field in the body grow the
+                            # member's may-set deps in `inner`;
+                            # re-join them like a local queue's
+                            # widened set.
+                            extra |= self._field_chan_deps(
+                                field_member, inner, params
+                            )
                         if (
                             opaque_range_field is not None
                             and not elem_static
@@ -37583,6 +37652,47 @@ class _Builder:
                     self._call_arg_deps.get(key, frozenset())
                     | receiver_deps
                 )
+        for index, argument in enumerate(arguments):
+            # `g(w)` — the struct's `w.C` field may alias a queue;
+            # the callee reads it through its parameter's field, so
+            # the argument's deps carry each chan member's deps like
+            # a collection member's do.
+            if argument.type != "identifier":
+                continue
+            arg_ref = self.references.get(self.node_key(argument))
+            arg_binding = (
+                self.bindings.get(arg_ref.binding_id)
+                if arg_ref is not None
+                else None
+            )
+            if arg_binding is None or not self._is_local_composite(
+                arg_binding
+            ):
+                continue
+            for arg_member in self._struct_chan_members(
+                arg_binding.type, arg_binding
+            ):
+                actual_values[index] |= self._field_chan_deps(
+                    arg_member.id, locals_, params
+                )
+        if receiver_node is not None and receiver_node.type == "identifier":
+            recv_ref = self.references.get(
+                self.node_key(receiver_node)
+            )
+            recv_binding = (
+                self.bindings.get(recv_ref.binding_id)
+                if recv_ref is not None
+                else None
+            )
+            if recv_binding is not None and self._is_local_composite(
+                recv_binding
+            ):
+                for recv_member in self._struct_chan_members(
+                    recv_binding.type, recv_binding
+                ):
+                    receiver_deps |= self._field_chan_deps(
+                        recv_member.id, locals_, params
+                    )
         actual = tuple(actual_values)
         if receiver_deps is not None:
             actual = (receiver_deps, *actual)
