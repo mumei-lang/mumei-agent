@@ -7771,6 +7771,10 @@ class _RustBindings:
         record = None
         ret_pos: "int | None" = None
         if target.type == "closure_expression":
+            if any(c.type == "async" for c in target.children):
+                # `async |a| ...` stores a `Future<U>` — `U`'s
+                # spelling would misresolve the stored payload.
+                return None
             body = target.child_by_field_name("body")
             params = target.child_by_field_name("parameters")
             while (
@@ -7831,12 +7835,15 @@ class _RustBindings:
                 member = None
                 if body.type == "call_expression":
                     member = self._call_member(body)
+                if member is not None and member.is_async:
+                    # `|a| af(a)` stores `Future<U>` — `af`'s `-> U`
+                    # is the awaited type, not the payload.
+                    return None
                 if (
                     member is not None
                     and member.binding.kind
                     in {"function", "associated_function"}
                     and member.type_node is not None
-                    and not member.is_async
                 ):
                     ret = (
                         member.type_node.child_by_field_name(

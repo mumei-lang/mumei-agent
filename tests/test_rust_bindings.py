@@ -10836,3 +10836,27 @@ fn f(o: Option<Vec<P>>, a: Option<Vec<[P; 2]>>) {
     assert not bound.get("v[0..2].pm()")
     assert not bound.get("w[0].pm()")
     assert bound.get("v[0].pm()") == pm.id
+
+
+def test_async_map_results_stay_future_payloads():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+async fn af(p: P) -> P { p }
+fn g(o: Option<P>) {
+    let x = o.map(|p| af(p));
+    let y = o.map(async |p| p);
+    x.unwrap().pm();
+    y.unwrap().pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # Both closures produce `Future<P>` — the awaited type `P`
+    # is not the stored payload.
+    assert not bound.get("x.unwrap().pm()")
+    assert not bound.get("y.unwrap().pm()")
