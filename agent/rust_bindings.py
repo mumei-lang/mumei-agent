@@ -4176,9 +4176,9 @@ class _RustBindings:
                             self.text(field).strip()
                             in _MAP_PAIR_METHODS
                             | _MAP_BORROWED_PAIR_METHODS
-                            and self._is_map_container(
-                                None,
-                                callee.child_by_field_name("value"),
+                            and option_head[1] is not None
+                            and self._map_container_head(
+                                callee.child_by_field_name("value")
                             )
                             and not (
                                 receiver[0] is not None
@@ -4192,6 +4192,8 @@ class _RustBindings:
                                 )
                                 in {"struct", "enum"}
                             )
+
+                            in option_head[1]
                         ):
                             # `m.pop_first()` yields
                             # `Option<(K, V)>` — the map's spelled
