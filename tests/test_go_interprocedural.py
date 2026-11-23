@@ -31342,10 +31342,16 @@ def test_value_struct_field_channel_through_call_edges(
     }
     snapshot = _snapshot_for(go_types_helper, files)
     summaries = ip.summarize_go_package(files, snapshot)
-    for name in ("FArg", "FRecv", "GRecv"):
+    # GRecv's sent value is parameter 1 (`x`); the value cases'
+    # sent value is parameter 0.
+    for name, sent_value in (
+        ("FArg", {0}),
+        ("FRecv", {0}),
+        ("GRecv", {0, 1}),
+    ):
         result = named_package(files, snapshot, summaries, name)
         assert result.available
-        assert {0} <= result.return_dependencies
+        assert sent_value <= result.return_dependencies
 
 
 def test_value_struct_field_channel_range_rejoins_may_set(
