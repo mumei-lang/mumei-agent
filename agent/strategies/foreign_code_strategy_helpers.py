@@ -2745,9 +2745,18 @@ def _go_guarded_indices(
     # A uint64 above MaxInt64 is not modelled.
     signed_index_conversions = {"int", "int64"}
 
-    def has_nonnegative_index_value(index_conversion: str | None, idx: str) -> bool:
+    def has_nonnegative_index_value(
+        index_conversion: str | None,
+        idx: str,
+        param_types: dict[str, str] | None,
+    ) -> bool:
         if index_conversion in unsigned_index_conversions:
             return True
+        if index_conversion in {"uint8", "uint16", "uint32", "byte"}:
+            declared_type = (param_types or {}).get(idx, "").replace("*", "").strip()
+            if index_conversion in {"uint8", "byte"}:
+                return declared_type in {"uint8", "byte"}
+            return declared_type == index_conversion
         return (
             idx in (unsigned_vars or set())
             and (
@@ -2767,7 +2776,7 @@ def _go_guarded_indices(
         idx = match.group("converted_index") or match.group("plain_index")
         arr = match.group("array")
         index_conversion = match.group("index_conversion")
-        if not has_nonnegative_index_value(index_conversion, idx):
+        if not has_nonnegative_index_value(index_conversion, idx, param_types):
             continue
         block_start = body.find("{", match.end() - 1)
         if block_start == -1:
@@ -2797,7 +2806,7 @@ def _go_guarded_indices(
         arr = match.group("array")
         idx = match.group("converted_index") or match.group("plain_index")
         index_conversion = match.group("index_conversion")
-        if not has_nonnegative_index_value(index_conversion, idx):
+        if not has_nonnegative_index_value(index_conversion, idx, param_types):
             continue
         block_start = body.find("{", match.end() - 1)
         if block_start == -1:
