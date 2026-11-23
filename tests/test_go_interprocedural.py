@@ -18363,6 +18363,10 @@ def test_bound_closure_mutating_builtin_unresolvable_operand_stays_closed(
         data = unit(go_types_helper, body)
         result = named(*data)
         assert not result.available
+        assert any(
+            gap.reason == "unsupported_expression"
+            for gap in result.gaps
+        )
 
 
 def test_bound_closure_star_write_folds_escaped(
