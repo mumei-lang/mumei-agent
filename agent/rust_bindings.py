@@ -10091,12 +10091,73 @@ class _RustBindings:
                     # payload args were written in the receiver's
                     # annotation — resolve them there, not at the
                     # call site.
+                    _args_value = callee.child_by_field_name("value")
+                    _args_position = (
+                        self._receiver_annotation_position(_args_value)
+                        or node.start_byte
+                    )
+                    _args_scope = None
+                    if (
+                        _args_value is not None
+                        and _args_value.type == "field_expression"
+                    ):
+                        # `w.map.first_key_value()` — a field spelling
+                        # the container's params anywhere in its args
+                        # (`BTreeMap<i32, V>` at `w: W<P>`) resolves the
+                        # substituted names where `w` was annotated,
+                        # not inside `W`'s own scope; decl-scope names
+                        # are `crate::`-pinned by `_map_spelled_args`.
+                        _fmember = self._field_member(
+                            _args_value,
+                            ("struct_field", "associated_const"),
+                        )
+                        _fvalue = _args_value.child_by_field_name(
+                            "value"
+                        )
+                        _cid, _iargs = (
+                            (None, None)
+                            if _fvalue is None
+                            else self._receiver_type(_fvalue)
+                        )
+                        _fcontainer = (
+                            None
+                            if _cid is None
+                            else self.records.get(_cid)
+                        )
+                        _fpmap = self._pattern_param_map(
+                            _fcontainer, _iargs
+                        )
+                        if (
+                            _fmember is not None
+                            and _fmember.type_node is not None
+                            and _fpmap
+                            and any(
+                                re.search(
+                                    rf"\b{re.escape(p)}\b",
+                                    self.text(_fmember.type_node),
+                                )
+                                for p in _fpmap
+                            )
+                        ):
+                            _args_position = (
+                                self._receiver_annotation_position(
+                                    _fvalue
+                                )
+                                or _args_position
+                            )
+                        else:
+                            _fpos, _fscope = self._field_args_scope(
+                                _args_value
+                            )
+                            if _fpos is not None or _fscope is not None:
+                                _args_position = (
+                                    _fpos or _args_position
+                                )
+                                _args_scope = _fscope
                     return (
                         "Option",
-                        self._receiver_annotation_position(
-                            callee.child_by_field_name("value")
-                        ) or node.start_byte,
-                        None,
+                        _args_position,
+                        _args_scope,
                     )
                 if (
                     field is not None
