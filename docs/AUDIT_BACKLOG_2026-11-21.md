@@ -45,6 +45,14 @@ at develop on 2026-11-21, plus PRs merged on 2026-11-20/21 in mumei, mumei-agent
   [mumei#1340](https://github.com/mumei-lang/mumei/pull/1340) (draft): agent
   #1026/#1037/#1041/#1048/#1061/#1065/#1067, demo #163/#164, Core #1167/#1169/
   #1170/#1184–#1191/#1208/#1211 are cross-referenced by number.
+- Item 8 (agent share) — reported on
+  [#651](https://github.com/mumei-lang/mumei-agent/issues/651) (2026-11-23):
+  unresolved/alias/dynamic stay opaque (71/35/49 negative cases for
+  Rust/TS/Sol), per-language compiler-backed envelope fixtures exist
+  (rust_analyzer 5, tsc 14, solc 9) with byte-span, shadowing and
+  reassignment coverage, and each slice ships paired positive/negative
+  regressions. Go share remains with `go-ip`; the three checkboxes stay
+  unchecked until that side reports.
 
 ## Deferred or demand-gated (excluded)
 
