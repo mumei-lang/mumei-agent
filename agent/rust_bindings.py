@@ -397,14 +397,12 @@ _OCCUPIED_ENTRY_METHODS = {
     "insert": "{V}",
     "remove": "{V}",
     "remove_entry": "({K}, {V})",
-    "into_entry": "Entry<{K}, {V}>",
 }
 _VACANT_ENTRY_METHODS = {
     "key": "&{K}",
     "into_key": "{K}",
     "into_mut": "&mut {V}",
     "insert": "&mut {V}",
-    "into_entry": "Entry<{K}, {V}>",
 }
 _ENTRY_BINDING_METHODS = {
     "OccupiedEntry": _OCCUPIED_ENTRY_METHODS,
@@ -4402,10 +4400,10 @@ class _RustBindings:
                                         )
                     if (
                         method_name == "entry"
-                        and self._container_head_name(
-                            callee.child_by_field_name("value")
+                        and self._is_map_container(
+                            None,
+                            callee.child_by_field_name("value"),
                         )
-                        in _MAP_CONTAINER_NAMES
                     ):
                         # `m.entry(k)` yields `Entry<K, V>` — the
                         # verbatim spelling feeds `if let
@@ -4413,18 +4411,22 @@ class _RustBindings:
                         # `receiver[1]` already reduced the map's
                         # args to `V`; the declared annotation
                         # keeps the raw `K, V` pair.
-                        entry_node = self._receiver_type_node(
+                        entry_args = self._map_spelled_args(
                             callee.child_by_field_name("value")
                         )
-                        entry_args = (
-                            self._generic_head_args(
-                                entry_node, node.start_byte
-                            )[0]
-                            if entry_node is not None
-                            else None
-                        )
                         if entry_args:
-                            return None, "Entry<" + entry_args + ">"
+                            entry_parts = self._type_arg_list(
+                                entry_args
+                            )
+                            # `HashMap<K, V, S>` carries the
+                            # hasher — the Entry spells K, V only.
+                            if len(entry_parts) >= 2:
+                                return None, (
+                                    "Entry<{}, {}>".format(
+                                        entry_parts[0].strip(),
+                                        entry_parts[1].strip(),
+                                    )
+                                )
                     entry_binding = re.fullmatch(
                         r"(OccupiedEntry|VacantEntry)\s*<(.+)>",
                         (receiver[1] or "").strip(),
@@ -4441,7 +4443,7 @@ class _RustBindings:
                             kv = self._type_arg_list(
                                 entry_binding.group(2)
                             )
-                            if len(kv) == 2:
+                            if len(kv) >= 2:
                                 spelled = template.format(
                                     K=kv[0].strip(), V=kv[1].strip()
                                 )
@@ -4457,6 +4459,18 @@ class _RustBindings:
                                     # Keep the `Entry` head — the
                                     # unresolvable spelling feeds
                                     # `if let Entry::V` arms.
+                                    return None, spelled
+                                if re.match(
+                                    r"&\s*(?:'\w+\s+)?"
+                                    r"(?:mut\s+)?"
+                                    r"(Option|Result)\s*<",
+                                    spelled,
+                                ):
+                                    # `e.get()` on an Option- or
+                                    # Result-valued map spells
+                                    # `&Option<P>` — keep the head
+                                    # so `Some(p)`/`Ok(p)` read the
+                                    # payload.
                                     return None, spelled
                                 return self._spelled_type(
                                     spelled, entry_pos
@@ -10958,7 +10972,11 @@ class _RustBindings:
                 if call_id is None and call_args is not None:
                     head = re.match(
                         r"[A-Za-z_][\w:]*(?=\s*<)",
-                        call_args.strip(),
+                        re.sub(
+                            r"^&\s*(?:'\w+\s+)?(?:mut\s+)?",
+                            "",
+                            call_args.strip(),
+                        ),
                     )
                     if head is not None and (
                         self._normalize_identifier(
