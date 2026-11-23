@@ -5080,6 +5080,9 @@ closure-valued elided literals through imported, generic or otherwise
 unresolved collection shapes fail closed; elided values without function
 fields retain ordinary analysis.
 
+Elided pointer-element literals carrying function-field closures remain
+fail-closed; closure-free pointer elements retain their existing analysis.
+
 Copies of named, alias-free value structs from local or parameter slices and
 arrays preserve their function-field closure records. Pointer, slice, map,
 channel and interface fields, map elements and nested-index copies remain
