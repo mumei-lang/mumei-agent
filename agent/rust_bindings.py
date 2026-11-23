@@ -2734,6 +2734,24 @@ class _RustBindings:
         callee = value.child_by_field_name("function")
         if callee is None or callee.type != "field_expression":
             return False
+        method = self._normalize_identifier(
+            self.text(callee.child_by_field_name("field"))
+        )
+        if method in {
+            # Unresolved but KNOWN to return the slice/value itself —
+            # the binding's spelled args are its own type, not a
+            # produced element spelling.
+            "leak",
+            "as_slice",
+            "as_mut_slice",
+            "remainder",
+            "into_remainder",
+            "split_at",
+            "split_at_mut",
+            "split_first",
+            "split_last",
+        }:
+            return False
         return (
             self._field_member(callee, ("associated_function",))
             is None
