@@ -9566,3 +9566,176 @@ fn g(v: Vec<P>, a: &[P; 3], lt: &'a [P], lt2: &'a[P], rows: &[[P; 2]]) {
     assert bound.get("c2[0].pm()") == pms[0].id
 
 
+
+
+def test_chunks_exact_remainder_binds_slice_elements():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct W<T> { x: T }
+fn f(v: Vec<P>, s: &mut [P], w: W<P>) {
+    for x in v.chunks_exact(2).remainder() { x.pm(); }
+    let r = v.chunks_exact(2).remainder();
+    r[0].pm();
+    for y in s.chunks_exact_mut(3).remainder() { y.pm(); }
+    for z in w.chunks_exact(2).remainder() { z.pm(); }
+    for q in v.chunks(2).remainder() { q.pm(); }
+    for c in v.chunks_exact(2) { c.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `remainder()` is the trailing `&[P]`/`&mut [P]` slice —
+    # iterating it yields `&P` and indexing it reads `P`.
+    assert bound.get("x.pm()") == pm.id
+    assert bound.get("r[0].pm()") == pm.id
+    assert bound.get("y.pm()") == pm.id
+    # A custom `W` can name any `chunks_exact` — stays opaque.
+    assert not bound.get("z.pm()")
+    # `chunks` has no `remainder` method — stays opaque.
+    assert not bound.get("q.pm()")
+    # A chunk `&[P]` has no `pm` member — stays opaque.
+    assert not bound.get("c.pm()")
+
+
+def test_slice_and_comparator_closures_bind_the_element():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(v: Vec<P>, m: std::collections::HashMap<u8, P>) {
+    v.retain(|r| r.pm());
+    v.sort_by(|a, b| a.pm());
+    v.dedup_by(|a, b| { b.pm(); true });
+    let _ = v.partition_point(|pp| pp.pm());
+    m.retain(|k, val| k.pm());
+    v.iter().try_for_each(|t| t.pm());
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # Single-element callbacks — `retain`/`partition_point`/
+    # `try_for_each` receive `&P`, each checked separately.
+    assert bound.get("r.pm()") == pm.id
+    assert bound.get("pp.pm()") == pm.id
+    assert bound.get("t.pm()") == pm.id
+    # Comparator pairs — `sort_by`/`dedup_by` bind both params.
+    assert bound.get("a.pm()") == pm.id
+    assert bound.get("b.pm()") == pm.id
+    # A map's `retain` key has no `pm` — stays opaque.
+    assert not bound.get("k.pm()")
+
+
+def test_chunks_remainder_alias_and_into_remainder_bind_the_element():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(v: Vec<P>, mut w: Vec<P>) {
+    let it = v.chunks_exact(2);
+    for p in it.remainder() { p.pm(); }
+    let r = it.remainder();
+    r[0].pm();
+    for q in w.chunks_exact_mut(2).into_remainder() { q.pm(); }
+    let r2 = v.chunks_exact(2).into_remainder();
+    for x in r2 { x.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `let it = v.chunks_exact(n); it.remainder()` resolves
+    # through the alias — its elements are `&P`.
+    assert bound.get("p.pm()") == pm.id
+    assert bound.get("r[0].pm()") == pm.id
+    # `into_remainder()` is the `chunks_exact_mut` spelling of the
+    # same trailing slice.
+    assert bound.get("q.pm()") == pm.id
+    # A `let`-bound remainder keeps `&[P]` as its own args — the
+    # iterated element is `P`.
+    assert bound.get("x.pm()") == pm.id
+
+
+def test_trait_into_remainder_does_not_assume_the_std_slice():
+    source = """
+struct P;
+struct R;
+impl P { fn pm(&self) {} }
+impl R { fn rm(&self) {} }
+trait Rem { fn into_remainder(self) -> &'static [R]; }
+impl<'a, P> Rem for std::slice::ChunksExact<'a, P> { fn into_remainder(self) -> &'static [R] { &[] } }
+fn f(v: Vec<P>) {
+    for q in v.chunks_exact(2).into_remainder() { q.rm(); q.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `impl Rem for ChunksExact<P>` owns `into_remainder` (std lacks
+    # it there) — its declared `&[R]` return means `q` iterates `R`,
+    # never the source Vec's `P`.
+    rm = _bindings(report, "rm", "associated_function")[0]
+    assert bound.get("q.rm()") == rm.id
+    assert not bound.get("q.pm()")
+
+
+def test_turbofish_sort_by_key_types_the_closure_param():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(v: &mut Vec<P>) {
+    v.sort_by_key::<u8, _>(|k| k.pm());
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `sort_by_key::<u8, _>` keeps the field_expression inside a
+    # generic_function — the closure param is still `&P`.
+    assert bound.get("k.pm()") == pm.id
+
+
+def test_declared_comparator_method_does_not_borrow_the_element_type():
+    source = """
+struct P;
+struct Q;
+impl P { fn pm(&self) {} }
+impl Q { fn pm(&self) {} }
+trait SortExt {
+    fn sort_by(&mut self, f: impl Fn(&Q, &Q));
+}
+impl SortExt for Vec<P> {}
+fn f(v: &mut Vec<P>) {
+    v.sort_by(|q1, q2| q1.pm());
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # The declared `SortExt::sort_by` names `&Q` params — `q1`
+    # must not be typed as the receiver's `P` element.
+    assert not bound.get("q1.pm()")
+    assert not bound.get("q2.pm()")

@@ -60,7 +60,19 @@ _CLOSURE_ELEMENT_METHODS = frozenset(
     {"map", "filter", "for_each", "inspect", "find", "any",
      "all", "position", "rposition", "filter_map", "flat_map",
      "map_while", "take_while", "skip_while", "find_map",
-     "partition"}
+     "partition", "rfind", "try_find", "try_for_each",
+     "retain", "retain_mut",
+     "sort_by", "sort_by_key", "sort_unstable_by",
+     "sort_unstable_by_key", "sort_by_cached_key",
+     "select_nth_unstable_by",
+     "dedup_by", "dedup_by_key",
+     "partition_point", "binary_search_by", "is_sorted_by"}
+)
+# Callbacks whose first TWO unannotated parameters take the
+# element — comparators and dedup pairs `|a, b|`.
+_CLOSURE_PAIR_ELEMENT_METHODS = frozenset(
+    {"sort_by", "sort_unstable_by", "select_nth_unstable_by",
+     "dedup_by", "is_sorted_by"}
 )
 _ITER_PRESERVING_METHODS = frozenset(
     {"rev", "skip", "take", "filter", "step_by", "chain",
@@ -455,6 +467,16 @@ def _spelled_slice_head(text: str) -> bool:
     return True
 
 
+# Std inherent methods of the exact-chunks iterators — inherent
+# methods outrank trait impls on the same receiver, so a trait
+# `impl Rem for ChunksExact` cannot replace std `remainder` (std
+# has it), but DOES own `into_remainder` there (std lacks it).
+_EXACT_CHUNKS_INHERENT = {
+    "ChunksExact": {"remainder"},
+    "RChunksExact": {"remainder"},
+    "ChunksExactMut": {"into_remainder"},
+    "RChunksExactMut": {"into_remainder"},
+}
 _TRY_HEADS = frozenset({"Option", "Result"})
 # Prelude constructors whose tuple payload position is fixed by the
 # container type — `Some(x)` binds `Option<T>`'s first arg, `Err(e)`
@@ -667,7 +689,9 @@ class _RustBindings:
         self.gaps: list[Gap] = []
         self.scopes: list[_Scope] = []
         self.records: dict[str, _Record] = {}
-        self._trait_impl_heads: dict[str, list[str]] = {}
+        self._trait_impl_heads: dict[
+            str, list[tuple[str, str | None, frozenset, "_Scope | None"]]
+        ] = {}
         self._type_impl_traits: dict[
             str, list[tuple[str, str | None, bool, frozenset[str]]]
         ] = {}
@@ -1514,7 +1538,15 @@ class _RustBindings:
                             if impl_head_name is not None:
                                 self._trait_impl_heads.setdefault(
                                     member_trait, []
-                                ).append(impl_head_name)
+                                ).append(
+                                    (
+                                        impl_head_name,
+                                        member_args,
+                                        impl_type_params,
+                                        scope,
+                                        member_type_node,
+                                    )
+                                )
                 if body is not None:
                     self._scan_associated_container(
                         body,
@@ -2757,6 +2789,187 @@ class _RustBindings:
             is None
         )
 
+    def _impl_target_record(
+        self, type_node: "Any | None", position: int
+    ) -> "_Record | None":
+        """Resolve the impl TARGET node to a declared type's record —
+        `impl Rem for ChunksExact<R>` in a scope where `type
+        ChunksExact = Coll` is for `Coll`, not for receivers named
+        `ChunksExact`. Callers compare the record's name to the impl
+        head: an equal name is the type the head spells, a different
+        name means the head was a renamed alias."""
+        if type_node is None:
+            return None
+
+        def _resolve(node: "Any | None") -> "_Record | None":
+            if node is None:
+                return None
+            record = self._through_import(
+                self._scoped_type(node), position
+            )
+            if record is None:
+                # A bare `T`/`T<A>` target has no path to resolve —
+                # look its head name up at the call site.
+                head = re.match(
+                    r"[A-Za-z_]\w*", self.text(node).strip()
+                )
+                if head is not None:
+                    record = self._through_import(
+                        self._lookup(
+                            head.group(0), position, "type"
+                        ),
+                        position,
+                    )
+            return record
+
+        record = _resolve(type_node)
+        seen: set[str] = set()
+        while (
+            record is not None
+            and record.binding.kind == "type_alias"
+            and record.alias_node is not None
+            and record.binding.id not in seen
+        ):
+            seen.add(record.binding.id)
+            record = _resolve(record.alias_node) or record
+        return record
+
+    def _impl_target_covers(
+        self,
+        type_node: "Any | None",
+        head: "str | None",
+        container_id: "str | None",
+        position: int,
+    ) -> bool:
+        """Whether an impl whose target node spells `head` can cover a
+        receiver whose declared container is `container_id`. A locally
+        declared target (`struct ChunksExact`) must be the receiver's
+        own type — a same-named std type the receiver produces is not
+        it. An unresolved import (`use std::slice::ChunksExact`) keeps
+        the head name, so the spelled match stands."""
+        target = self._impl_target_record(type_node, position)
+        if target is None:
+            return True
+        if target.binding.id == container_id:
+            return True
+        if target.binding.kind in {
+            "struct",
+            "enum",
+            "union",
+            "type",
+        }:
+            return False
+        return target.binding.name == head
+
+    def _impl_head_name(self, impl: "_Record") -> "str | None":
+        """The impl TARGET's head name, normalized like
+        `_trait_impl_heads`: `[`/`[T;N]` targets key as `[slice]`,
+        anything else keeps its last `::` segment."""
+        st = impl.self_type_node
+        if st is None:
+            return None
+        target = re.sub(
+            r"^&\s*(?:'\w+\s*)?(?:mut\s+)?", "", self.text(st).strip()
+        )
+        if target.startswith("["):
+            return "[slice]"
+        head = re.match(r"[A-Za-z_][\w:]*", target)
+        return (
+            head.group(0).rsplit("::", 1)[-1] if head is not None else None
+        )
+
+    def _impl_args_cover(
+        self,
+        impl_args: "str | None",
+        impl_params: "frozenset[str] | None",
+        impl_scope: "_Scope | None",
+        recv_args: "str | None",
+        position: int,
+    ) -> bool:
+        """`impl Rem for ChunksExact<R>` does not cover a
+        `ChunksExact<P>` receiver — the impl's concrete args must
+        match the receiver's spelled args positionally (generic
+        impl params are wildcards). Lifetimes do not participate."""
+        if recv_args is None or impl_args is None:
+            return True
+
+        def _peel_slice_brackets(t: str) -> str:
+            # `[T]` peels to `T`; `[T; N]` stays an array.
+            inner = t[1:-1]
+            depth = 0
+            for ch in inner:
+                if ch in "[<({":
+                    depth += 1
+                elif ch in "]>)}":
+                    depth -= 1
+                elif ch == ";" and depth == 0:
+                    return t
+            return inner.strip()
+
+        def _unspell_recv_arg(arg: str) -> str:
+            t = arg.strip()
+            if t.startswith("&"):
+                after_amp = re.sub(r"^&\s*", "", t)
+                if after_amp.startswith("'"):
+                    # `&'a T` is a spelled reference type — the
+                    # receiver's item IS a reference, so keep the
+                    # whole arg verbatim rather than peeling `&`.
+                    return t
+                t = re.sub(
+                    r"^&\s*(?:'\w+\s*)?(?:mut\s+)?", "", t
+                )
+                # `&[..]` unwraps to the element spelling — `&[&P]`
+                # spells `&P`, `&[P;3]` spells the array `[P;3]`.
+                if t.startswith("[") and t.endswith("]"):
+                    t = _peel_slice_brackets(t)
+                return t
+            if t.startswith("[") and t.endswith("]"):
+                # `Box<[P]>`'s spelled content peels to `P`.
+                return _peel_slice_brackets(t)
+            return t
+
+        def _unspell_impl_arg(arg: str) -> str:
+            t = arg.strip()
+            if t.startswith("[") and t.endswith("]"):
+                return _peel_slice_brackets(t)
+            return t
+
+        def _chase_alias(arg: str) -> str:
+            # `type Elem = P` — a bare-name arg means the aliased type.
+            seen: set[str] = set()
+            t = arg
+            while re.fullmatch(r"[A-Za-z_]\w*", t) and t not in seen:
+                seen.add(t)
+                record = self._through_import(
+                    self._lookup(t, position, "type"), position
+                )
+                if (
+                    record is None
+                    or record.binding.kind != "type_alias"
+                    or record.alias_node is None
+                ):
+                    break
+                t = self.text(record.alias_node).strip()
+            return t
+
+        norm_recv = ", ".join(
+            _chase_alias(_unspell_recv_arg(a))
+            for a in self._type_arg_list(recv_args)
+            if not a.strip().startswith("'")
+        )
+        norm_impl = ", ".join(
+            _chase_alias(_unspell_impl_arg(a))
+            for a in self._type_arg_list(impl_args)
+            if not a.strip().startswith("'")
+        )
+        return self._type_args_match(
+            norm_impl,
+            norm_recv,
+            impl_params or frozenset(),
+            pattern_scope=impl_scope,
+            position=position,
+        )
+
     def _visible_trait_method(
         self,
         name: str,
@@ -2765,10 +2978,112 @@ class _RustBindings:
     ) -> bool:
         """A trait in scope declares a method named `name` — a
         `v.name(...)` call may be that trait's extension method,
-        not the std shape the caller's recipe assumes. `receiver`
-        narrows the check to impls that can cover that receiver —
-        a trait implemented only for a different declared type
-        cannot be the callee."""
+        not the std shape the caller's recipe assumes."""
+        return (
+            self._covering_trait_member(name, position, receiver)
+            is not None
+        )
+
+    def _member_self_kind(self, record: "_Record") -> "str | None":
+        """`value` for `self`/`mut self`/`self: Self`, `borrow` for
+        `&self`/`self: &Self`, `arbitrary` for `self: Box<Self>`-style
+        receivers (the method only applies to a wrapped receiver)."""
+        pos = record.binding.span.start
+        node = self.root.descendant_for_byte_range(pos, pos)
+        while node is not None and node.type not in {
+            "function_item",
+            "function_signature_item",
+            "function",
+        }:
+            node = node.parent
+        params = (
+            node.child_by_field_name("parameters")
+            if node is not None
+            else None
+        )
+        if params is None:
+            return None
+        for ch in params.named_children:
+            if ch.type == "self_parameter":
+                return (
+                    "borrow"
+                    if self.text(ch).strip().startswith("&")
+                    else "value"
+                )
+            if (
+                ch.type == "parameter"
+                and ch.child_by_field_name("pattern") is not None
+                and self.text(ch.child_by_field_name("pattern")).strip()
+                == "self"
+            ):
+                # `self: T` parses as a plain parameter — only bare
+                # `Self`/`&Self` receivers apply to a bare receiver.
+                t = ch.child_by_field_name("type")
+                spelling = (
+                    self.text(t).strip() if t is not None else ""
+                )
+                if spelling == "Self":
+                    return "value"
+                if re.fullmatch(
+                    r"&\s*(?:'\w+\s*)?(?:mut\s+)?Self", spelling
+                ):
+                    return "borrow"
+                return "arbitrary"
+        return None
+
+    def _member_self_wrapper(self, record: "_Record") -> "str | None":
+        """For `self: T` receivers — the head name of `T` (`Box`,
+        `Rc`, ...); None when there is no arbitrary self type."""
+        pos = record.binding.span.start
+        node = self.root.descendant_for_byte_range(pos, pos)
+        while node is not None and node.type not in {
+            "function_item",
+            "function_signature_item",
+            "function",
+        }:
+            node = node.parent
+        params = (
+            node.child_by_field_name("parameters")
+            if node is not None
+            else None
+        )
+        if params is None:
+            return None
+        for ch in params.named_children:
+            if (
+                ch.type == "parameter"
+                and ch.child_by_field_name("pattern") is not None
+                and self.text(ch.child_by_field_name("pattern")).strip()
+                == "self"
+            ):
+                t = ch.child_by_field_name("type")
+                spelling = (
+                    self.text(t).strip() if t is not None else ""
+                )
+                head = re.match(r"[A-Za-z_][\w:]*", spelling)
+                return (
+                    head.group(0).rsplit("::", 1)[-1]
+                    if head is not None
+                    else None
+                )
+        return None
+
+    def _member_self_by_value(self, record: "_Record") -> bool:
+        """The covering member's receiver is by-value `self`/`mut self`
+        — a by-value receiver outranks a `&self` inherent method on
+        the same type, so std-inherent shortcuts must yield."""
+        return self._member_self_kind(record) == "value"
+
+    def _covering_trait_member(
+        self,
+        name: str,
+        position: int,
+        receiver: "Any | None" = None,
+    ) -> "_Record | None":
+        """The trait member covering `name` on this receiver, or None.
+        `receiver` narrows candidates to impls that can cover it — a
+        trait implemented only for a different declared type cannot
+        be the callee."""
         container_id = None
         receiver_head = None
         receiver_heads: "set[str]" = set()
@@ -2865,6 +3180,19 @@ class _RustBindings:
                 or annot_slice
             ):
                 receiver_heads.add("[slice]")
+            # `v.chunks_exact(2)` produces `ChunksExact` — the
+            # std type is named after the producing method, so a
+            # trait `impl Rem for ChunksExact<P>` covers the call's
+            # receiver even though the spelled args only keep `P`.
+            if receiver.type == "call_expression":
+                rcallee = receiver.child_by_field_name("function")
+                if rcallee is not None and rcallee.type == "field_expression":
+                    mname = self._normalize_identifier(
+                        self.text(rcallee.child_by_field_name("field"))
+                    )
+                    receiver_heads.add(
+                        "".join(part.title() for part in mname.split("_"))
+                    )
         for record in self.records.values():
             if not (
                 record.member_trait is not None
@@ -2873,11 +3201,21 @@ class _RustBindings:
             ):
                 continue
             if receiver is not None:
+                if self._member_self_kind(record) == "arbitrary":
+                    # `self: Box<Self>`/`self: Rc<Self>` methods only
+                    # apply to a wrapped receiver — a bare value of
+                    # the impl target never calls them.
+                    wrapper = self._member_self_wrapper(record)
+                    if wrapper not in receiver_heads:
+                        continue
                 if record.member_of == record.member_trait:
                     # A trait-declared member applies when the trait
                     # is implemented for a type whose head matches
                     # the receiver's — `impl Each for Vec<P>` covers
-                    # `v` but not `v.iter()`'s `Iter`.
+                    # `v` but not `v.iter()`'s `Iter`. Concrete impl
+                    # args must match the receiver's spelled args —
+                    # `impl Rem for ChunksExact<R>` cannot cover a
+                    # `ChunksExact<P>` receiver.
                     if container_id is not None and any(
                         trait_id == record.member_trait
                         for trait_id, _, _, _ in self._type_impl_traits.get(
@@ -2885,19 +3223,37 @@ class _RustBindings:
                         )
                     ):
                         pass
-                    elif not receiver_heads.intersection(
-                        self._trait_impl_heads.get(
+                    elif not any(
+                        head in receiver_heads
+                        and self._impl_target_covers(
+                            tnode, head, container_id, position
+                        )
+                        and self._impl_args_cover(
+                            args, params, home, recv_args, position
+                        )
+                        for head, args, params, home, tnode in self._trait_impl_heads.get(
                             record.member_trait, ()
                         )
                     ):
                         continue
                 elif record.member_of in {None, "<unresolved>"}:
                     # An impl on an undeclared target (`impl T for
-                    # [P]`/`for Vec<P>`) — compare its spelled head
-                    # against the receiver's.
-                    if not receiver_heads.intersection(
-                        self._trait_impl_heads.get(
-                            record.member_trait, ()
+                    # [P]`/`for Vec<P>`) — its head and concrete args
+                    # must both cover the receiver.
+                    if (
+                        self._impl_head_name(record) not in receiver_heads
+                        or not self._impl_target_covers(
+                            record.self_type_node,
+                            self._impl_head_name(record),
+                            container_id,
+                            position,
+                        )
+                        or not self._impl_args_cover(
+                            record.member_impl_args,
+                            record.member_impl_type_params,
+                            record.home_scope,
+                            recv_args,
+                            position,
                         )
                     ):
                         continue
@@ -2909,8 +3265,8 @@ class _RustBindings:
             if trait is not None and self._trait_visible(
                 trait, position
             ):
-                return True
-        return False
+                return record
+        return None
 
     def _resolve_trait_node(self, trait_node: Any) -> "_Record | None":
         """Trait record for a UFCS `as` qualifier — plain, scoped
@@ -4164,10 +4520,11 @@ class _RustBindings:
                             self.text(field).strip()
                             in _MAP_PAIR_METHODS
                             | _MAP_BORROWED_PAIR_METHODS
-                            and self._is_map_container(
-                                None,
-                                callee.child_by_field_name("value"),
+                            and option_head[1] is not None
+                            and self._map_container_head(
+                                callee.child_by_field_name("value")
                             )
+                            in option_head[1]
                             and not (
                                 receiver[0] is not None
                                 and next(
@@ -6686,6 +7043,57 @@ class _RustBindings:
         what `_iterator_method_element` types instead."""
         return self._iterator_spelling_with_pos(call, _depth)[0]
 
+    def _producing_call_head(self, call: Any) -> "str | None":
+        """Pascal-case std type named after a producing call's
+        method — `v.chunks_exact(n)` yields `ChunksExact`."""
+        callee = call.child_by_field_name("function")
+        if callee is None or callee.type != "field_expression":
+            return None
+        field = callee.child_by_field_name("field")
+        if field is None:
+            return None
+        mname = self._normalize_identifier(self.text(field))
+        return "".join(part.title() for part in mname.split("_"))
+
+    def _chunks_exact_remainder_source(
+        self, receiver: Any
+    ) -> "Any | None":
+        """The `v.chunks_exact*(n)` call behind a `remainder`/
+        `into_remainder` receiver — direct (`v.chunks_exact(n)
+        .remainder()`) or through a `let it = v.chunks_exact(n)`
+        alias (`it.remainder()`)."""
+        inner_call = receiver
+        if receiver.type == "identifier":
+            record = self._lookup(
+                self._normalize_identifier(self.text(receiver)),
+                receiver.start_byte,
+                "value",
+            )
+            inner_call = (
+                record.value_node
+                if record is not None and record.value_node is not None
+                else None
+            )
+        if inner_call is None or inner_call.type != "call_expression":
+            return None
+        inner_callee = inner_call.child_by_field_name("function")
+        inner_method = (
+            self.text(
+                inner_callee.child_by_field_name("field")
+            ).strip()
+            if inner_callee is not None
+            and inner_callee.type == "field_expression"
+            else None
+        )
+        if inner_method not in {
+            "chunks_exact",
+            "rchunks_exact",
+            "chunks_exact_mut",
+            "rchunks_exact_mut",
+        }:
+            return None
+        return inner_call
+
     def _iterator_spelling_with_pos(
         self, call: Any, _depth: int = 0
     ) -> "tuple[str | None, int | None]":
@@ -7005,6 +7413,44 @@ class _RustBindings:
                 f"{prefix}[{spelled}]",
                 self._receiver_annotation_position(receiver),
             )
+        if method in {"remainder", "into_remainder"}:
+            # `v.chunks_exact(n).remainder()`/`into_remainder()` —
+            # the trailing sub-slice, spelled `&[P]`/`&mut [P]`
+            # like the chunked elements. A `let it = v.chunks_exact
+            # (n); it.remainder()` receiver resolves through the
+            # alias to the chunks call. A trait impl covering this
+            # receiver's head hides the std shape — except where the
+            # method is already inherent on that iterator.
+            cover = self._covering_trait_member(
+                method, call.start_byte, receiver
+            )
+            inner_call = self._chunks_exact_remainder_source(receiver)
+            if inner_call is not None:
+                prod_head = self._producing_call_head(inner_call)
+                inherent = method in _EXACT_CHUNKS_INHERENT.get(
+                    prod_head or "", ()
+                )
+                if (
+                    inherent
+                    and cover is not None
+                    and self._member_self_by_value(cover)
+                ):
+                    # `fn remainder(self)` — a by-value receiver
+                    # outranks std's `&self` inherent, so the trait
+                    # shape wins.
+                    inherent = False
+                if inherent or cover is None:
+                    return self._iterator_spelling_with_pos(
+                        inner_call, _depth + 1
+                    )
+            # The covering member's shape applies — either a custom
+            # collection's own remainder, or a trait that outranks std
+            # — so the element spelling is its declared return.
+            if cover is not None and cover.type_node is not None:
+                ret = self.text(cover.type_node).strip()
+                if _spelled_slice_head(ret):
+                    return ret, cover.binding.span.start
+            return None, None
         if method == "flatten":
             # `v.iter().flatten()` unwraps the element's own args —
             # `Vec<Vec<P>>` iterates `Vec<P>`, flatten yields `P`
@@ -7860,6 +8306,87 @@ class _RustBindings:
                 if spelled is None
                 else prefix + "[" + spelled + "]",
             )
+        if method in {"remainder", "into_remainder"}:
+            # `v.chunks_exact(n).remainder()`/`into_remainder()`
+            # yields the trailing slice's `&P` elements — the
+            # spelled `&[P]` container peels to `P` (`&mut [P]`
+            # for the `_mut` forms). A `let it = v.chunks_exact(n);
+            # it.remainder()` receiver resolves through the alias.
+            # A trait impl covering this receiver's head hides the
+            # std shape — except where the method is already
+            # inherent on that iterator.
+            cover = self._covering_trait_member(
+                method, call.start_byte, receiver
+            )
+            inner_call = self._chunks_exact_remainder_source(receiver)
+            if inner_call is not None:
+                prod_head = self._producing_call_head(inner_call)
+                inherent = method in _EXACT_CHUNKS_INHERENT.get(
+                    prod_head or "", ()
+                )
+                if (
+                    inherent
+                    and cover is not None
+                    and self._member_self_by_value(cover)
+                ):
+                    inherent = False
+                if inherent or cover is None:
+                    spelled, spelled_pos = (
+                        self._iterator_spelling_with_pos(inner_call)
+                    )
+                    if spelled is None:
+                        return _UNKNOWN, None
+                    peeled = re.fullmatch(
+                        r"(&\s*(?:'\w+\s+)?mut\s+|&\s*(?:'\w+\s+)?)\[(.+)\]",
+                        spelled.strip(),
+                    )
+                    if peeled is None:
+                        return _UNKNOWN, None
+                    position = (
+                        spelled_pos if spelled_pos is not None
+                        else call.start_byte
+                    )
+                    elem_id, rest = self._element_of(
+                        None,
+                        peeled.group(2).strip(),
+                        position,
+                        self._literal_element_args(call),
+                    )
+                    if elem_id is None:
+                        return _UNKNOWN, rest
+                    name = next(
+                        (b.name for b in self.bindings if b.id == elem_id), ""
+                    )
+                    return (
+                        TypeFact("named", name, 0, None, elem_id),
+                        peeled.group(2).strip(),
+                    )
+            # The covering member's shape applies — element from its
+            # declared return (`-> &[R]` iterates `R`).
+            if cover is not None and cover.type_node is not None:
+                ret = self.text(cover.type_node).strip()
+                peeled = re.fullmatch(
+                    r"&\s*(?:'\w+\s+)?(?:mut\s+)?\[\s*(.+?)\s*\]",
+                    ret,
+                )
+                if peeled is not None:
+                    elem_id, rest = self._element_of(
+                        None,
+                        peeled.group(1),
+                        cover.binding.span.start,
+                        self._literal_element_args(call),
+                    )
+                    if elem_id is None:
+                        return _UNKNOWN, rest
+                    name = next(
+                        (b.name for b in self.bindings if b.id == elem_id),
+                        "",
+                    )
+                    return (
+                        TypeFact("named", name, 0, None, elem_id),
+                        peeled.group(1),
+                    )
+            return _UNKNOWN, None
         if method in _SET_ALGEBRA_METHODS | _MAP_RANGE_METHODS:
             # `a.union(&b)`/`intersection`/`difference`/
             # `symmetric_difference` and `s.range(..)`/`range_mut`
@@ -8650,7 +9177,11 @@ class _RustBindings:
                         break
                 inner_slice = (
                     None
-                    if producer_alias or vmethod is not None
+                    if producer_alias
+                    or (
+                        vmethod is not None
+                        and vmethod not in {"remainder", "into_remainder"}
+                    )
                     else re.fullmatch(
                         r"&\s*(?:'\w+\s+)?(?:mut\s+)?\[(.+)\]",
                         elem_args.strip(),
@@ -12456,19 +12987,21 @@ class _RustBindings:
         if params is not None:
             pending = self.closure_element
             self.closure_element = None
-            first = True
+            remaining = pending[2] if pending is not None else 0
             for parameter in self._children(params):
                 ids = self._parameter(parameter, closure_scope, self.span(body))
-                if pending is not None and first and ids:
-                    # `for_each(|p| ...)` — an unannotated first
-                    # parameter takes the iterated element.
+                if pending is not None and remaining > 0 and ids:
+                    # `for_each(|p| ...)`/`sort_by(|a, b| ...)` — an
+                    # unannotated element parameter takes the
+                    # iterated element.
                     annotation = (
                         parameter.child_by_field_name("type")
                         if parameter.type == "parameter"
                         else None
                     )
                     if annotation is None:
-                        fact, spelled = pending
+                        remaining -= 1
+                        fact, spelled, _slots = pending
                         idset = set(ids)
                         for recs in closure_scope.bindings.values():
                             for record in recs:
@@ -12485,7 +13018,6 @@ class _RustBindings:
                                             record.binding = (
                                                 self.bindings[i]
                                             )
-                first = False
         self._expr(body)
         self.call_owner = old_owner
         self.scopes.pop()
@@ -12749,11 +13281,15 @@ class _RustBindings:
                 ):
                     # `v.iter().for_each(|p| ...)` — the receiver's
                     # iterated element types the closure's first
-                    # bare parameter. A declared or trait-inherited
-                    # `for_each` signs its own callback — typing the
-                    # parameter from the element would misbind it.
+                    # bare parameter (two for comparator pairs). A
+                    # declared or trait-inherited `for_each` signs
+                    # its own callback — typing the parameter from
+                    # the element would misbind it.
                     closure_element = self._for_element(
                         closure_callee.child_by_field_name("value")
+                    ) + (
+                        2 if method_name in _CLOSURE_PAIR_ELEMENT_METHODS
+                        else 1,
                     )
             for argument in arguments:
                 if (
