@@ -1950,21 +1950,7 @@ class _SolBindings:
         for child in self._walk(node):
             if child.type != "user_defined_type":
                 continue
-            member = next(
-                (item for item in child.named_children if item.type == "member_expression"),
-                None,
-            )
-            if member is not None:
-                base = member.child_by_field_name("object")
-                if base is not None:
-                    self._expr(base)
-                continue
-            identifier = next(
-                (item for item in child.named_children if item.type == "identifier"),
-                None,
-            )
-            if identifier is not None:
-                self._resolve_name(identifier, namespace="type", reference_kind="read")
+            self._resolve_type_path(child, "read")
 
     def _type_nodes_in_parameters(self, node: Any) -> list[Any]:
         return [child for child in self.children(node) if child.type == "parameter"]
@@ -2199,7 +2185,9 @@ class _SolBindings:
         # user-defined type (`for Coin`) references its declaration;
         # primitive targets carry no compiler reference.
         for child in self.children(node):
-            if child.type in {"type_alias", "user_defined_type"}:
+            if child.type == "user_defined_type":
+                self._resolve_type_path(child, "read")
+            elif child.type == "type_alias":
                 identifier = next(
                     (
                         item
@@ -2219,20 +2207,7 @@ class _SolBindings:
                 for descendant in self._walk(child):
                     if descendant.type != "user_defined_type":
                         continue
-                    identifier = next(
-                        (
-                            item
-                            for item in descendant.named_children
-                            if item.type == "identifier"
-                        ),
-                        None,
-                    )
-                    if identifier is not None:
-                        self._resolve_name(
-                            identifier,
-                            namespace="type",
-                            reference_kind="read",
-                        )
+                    self._resolve_type_path(descendant, "read")
 
     def _record_for_declaration(self, node: Any) -> _Record | None:
         for record in self.records:
@@ -2282,6 +2257,72 @@ class _SolBindings:
                 continue
             self._visit(child)
 
+    def _resolve_type_path(
+        self, node: Any, reference_kind: str | None = "read"
+    ) -> _Record | None:
+        # A dotted type path (`Container.State`) resolves atomically to
+        # one declaration on the compiler side — solc's IdentifierPath
+        # carries the whole-path span — so for a multi-segment path the
+        # reference here is emitted on the `user_defined_type` itself
+        # rather than on the base or the member name.
+        member = next(
+            (
+                item
+                for item in node.named_children
+                if item.type == "member_expression"
+            ),
+            None,
+        )
+        if member is not None:
+            base = member.child_by_field_name("object")
+            if base is not None:
+                self._expr(base)
+            member_name, record, reason = self._resolve_member(member)
+            if record is not None:
+                if reference_kind is not None:
+                    self._add_ref(member, record, reference_kind)
+                return record
+            if member_name is not None and reason is not None:
+                self._add_unresolved(
+                    member_name, self.text(member_name), reason
+                )
+            return None
+        segments = [
+            item for item in node.named_children if item.type == "identifier"
+        ]
+        if not segments:
+            return None
+        record = self._resolve_name(
+            segments[0], namespace="type", reference_kind=reference_kind
+        )
+        for segment in segments[1:]:
+            if record is None:
+                return None
+            name = self.text(segment)
+            next_record = None
+            if record.binding.kind in {"contract", "interface", "library"}:
+                contract = self.contracts.get(record.binding.name)
+                if contract is not None:
+                    next_record, reason, _candidates = self._lookup_contract(
+                        name,
+                        contract,
+                        segment.start_byte,
+                        "value",
+                        exclude_type_members=False,
+                    )
+                    if next_record is None:
+                        if reason is not None:
+                            self._add_unresolved(segment, name, reason)
+                        return None
+            elif record.members:
+                next_record = record.members.get(name)
+            if next_record is None:
+                return None
+            record = next_record
+        if len(segments) > 1 and reference_kind is not None:
+            self._add_ref(node, record, reference_kind)
+        return record
+
     def _resolve_type_node(
         self,
         node: Any,
@@ -2289,16 +2330,12 @@ class _SolBindings:
         *,
         reference_kind: str | None = "read",
     ) -> _Record | None:
-        member = next(
-            (item for item in self._walk(node) if item.type == "member_expression"),
+        user_type = next(
+            (item for item in self._walk(node) if item.type == "user_defined_type"),
             None,
         )
-        if member is not None:
-            base = member.child_by_field_name("object")
-            if base is not None:
-                return self._resolve_name(
-                    base, namespace="type", reference_kind=reference_kind
-                )
+        if user_type is not None:
+            return self._resolve_type_path(user_type, reference_kind)
         identifier = next(
             (item for item in self._walk(node) if item.type == "identifier"),
             None,

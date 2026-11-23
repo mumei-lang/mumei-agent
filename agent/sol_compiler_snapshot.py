@@ -222,9 +222,10 @@ def load_sol_compiler_snapshot(
             # inheritance specifiers, `using ... for` lists and
             # user-defined type names (the older `UserDefinedTypeName`
             # node no longer appears). A dotted path such as `Lib.S`
-            # still resolves atomically to one declaration; the lexical
-            # report only records the base segment's reference, so the
-            # whole-path span honestly compares as `lexical_missing`.
+            # resolves atomically to one declaration, and the lexical
+            # report emits a whole-path reference when the member
+            # resolves (a path the lexical side cannot resolve stays
+            # `lexical_missing` / `lexical_unresolved`).
             if node["nodeType"] == "MemberAccess":
                 # `memberLocation` is the member-name span;
                 # `referencedDeclaration` points at the member's

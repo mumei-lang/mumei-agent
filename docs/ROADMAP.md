@@ -10273,3 +10273,22 @@ and fail-closed boundary are unchanged. Metadata comparison only — no
 new capture surface, route or claim.
 
 **回帰ゲート**: `uv run pytest tests/test_sol_compiler_snapshot.py -q`
+
+### C06 lexical member access — qualified type paths in annotations
+
+`agent/sol_bindings.py` `_resolve_type_path` resolves dotted type names in
+type positions (`Container.State cst`, `using Lib for Lib.S`, parameter
+and return annotations, `new`/base specifiers): the tree-sitter grammar
+spells a `user_defined_type` as flat `identifier` segments, and each
+segment now resolves through the previous declaration's members
+(contract members via `_lookup_contract` with type members included,
+struct/enum via `record.members`). A multi-segment path emits ONE
+whole-path `read` reference bound to the final declaration — matching
+solc's atomic `IdentifierPath` span — so `Container.State` in
+`member_access.sol` now compares `agree` (79/79 references; the pinned
+`lexical_missing` is gone). The base segment keeps its own `read`
+reference. Unresolvable intermediate segments record `unresolved` with
+the lookup reason rather than silently dropping the position. Value
+positions, builtin members and the `for *` target are unchanged.
+
+**回帰ゲート**: `uv run pytest tests/test_sol_bindings.py tests/test_sol_compiler_snapshot.py -q`

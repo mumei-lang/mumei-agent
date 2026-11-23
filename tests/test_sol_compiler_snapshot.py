@@ -110,8 +110,7 @@ def _assert_rejected(envelope, source, *, raw=None):
             + ["builtin"]
             + ["agree"] * 12
             + ["builtin"]
-            + ["agree"] * 20
-            + ["lexical_missing"]
+            + ["agree"] * 21
             + ["agree"] * 18
             + ["builtin"] * 2
             + ["agree"] * 5,
