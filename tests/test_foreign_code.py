@@ -6643,6 +6643,48 @@ func index(s []int, i int) int {
     assert not any("can index" in issue.message for issue in issues)
 
 
+def test_go_inverted_len_guard_int_conversion_of_unsigned_index_is_guarded() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package p
+
+func index(s []int, i uint16) int {
+    if int(i) >= len(s) { return 0 }
+    return s[i]
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("can index" in issue.message for issue in issues)
+
+
+def test_go_inverted_len_guard_narrow_conversion_reports_bounds() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package p
+
+func index(s []int, i int) int {
+    if uint8(i) >= uint8(len(s)) { return 0 }
+    return s[i]
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert any("can index" in issue.message for issue in issues)
+
+
+def test_go_inverted_len_guard_uint64_conversion_is_guarded() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package p
+
+func index(s []int, i int) int {
+    if uint64(i) >= uint64(len(s)) { return 0 }
+    return s[i]
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("can index" in issue.message for issue in issues)
+
+
 def test_go_inverted_len_le_signed_index_reports_bounds() -> None:
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
 

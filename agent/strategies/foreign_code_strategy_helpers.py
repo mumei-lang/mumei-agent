@@ -2741,14 +2741,21 @@ def _go_guarded_indices(
     # ``mapfast`` result range (``< nmapfast``) is a domain invariant of the callee.
     guarded |= _go_mapfast_guarded_indices(body)
     # Inverted guard for an unsigned index: ``if idx >= len(arr) { return }``.
-    unsigned_index_conversions = {
-        "uint",
-        "uint8",
-        "uint16",
-        "uint32",
-        "uint64",
-        "uintptr",
-    }
+    unsigned_index_conversions = {"uint", "uint64", "uintptr"}
+    # A uint64 above MaxInt64 is not modelled.
+    signed_index_conversions = {"int", "int64"}
+
+    def has_nonnegative_index_value(index_conversion: str | None, idx: str) -> bool:
+        if index_conversion in unsigned_index_conversions:
+            return True
+        return (
+            idx in (unsigned_vars or set())
+            and (
+                index_conversion is None
+                or index_conversion in signed_index_conversions
+            )
+        )
+
     for match in re.finditer(
         r"\bif\s+"
         r"(?:(?P<index_conversion>\w+)\s*\(\s*(?P<converted_index>\w+)\s*\)"
@@ -2760,12 +2767,7 @@ def _go_guarded_indices(
         idx = match.group("converted_index") or match.group("plain_index")
         arr = match.group("array")
         index_conversion = match.group("index_conversion")
-        is_unsigned_index = (
-            index_conversion in unsigned_index_conversions
-            if index_conversion is not None
-            else idx in (unsigned_vars or set())
-        )
-        if not is_unsigned_index:
+        if not has_nonnegative_index_value(index_conversion, idx):
             continue
         block_start = body.find("{", match.end() - 1)
         if block_start == -1:
@@ -2795,12 +2797,7 @@ def _go_guarded_indices(
         arr = match.group("array")
         idx = match.group("converted_index") or match.group("plain_index")
         index_conversion = match.group("index_conversion")
-        is_unsigned_index = (
-            index_conversion in unsigned_index_conversions
-            if index_conversion is not None
-            else idx in (unsigned_vars or set())
-        )
-        if not is_unsigned_index:
+        if not has_nonnegative_index_value(index_conversion, idx):
             continue
         block_start = body.find("{", match.end() - 1)
         if block_start == -1:
