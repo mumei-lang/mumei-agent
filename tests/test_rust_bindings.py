@@ -6263,6 +6263,32 @@ fn f() {
         "q.pm()", "r.pm()", "rd.pm()", "rm.pm()", "t.pm()", "wr.pm()",
     ]
 
+def test_peek_mut_and_scoped_unwrap_spell_the_payload():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+use std::collections::BinaryHeap;
+use std::rc::Rc;
+fn f() {
+    let mut h: BinaryHeap<P> = BinaryHeap::new();
+    if let Some(m) = h.peek_mut() { m.pm(); }
+    let r: Rc<P> = Rc::new(P);
+    match Rc::try_unwrap(r) { Ok(inner) => inner.pm(), Err(e) => e.pm() }
+    let b: Box<P> = Box::new(P);
+    let inner2 = Box::into_inner(b); inner2.pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    resolved = sorted(
+        raw[call.span.start:call.span.end].decode()
+        for call in report.calls
+        if raw[call.span.start:call.span.end].decode().endswith(".pm()")
+        and call.target == pm.id
+    )
+    assert resolved == ["inner.pm()", "inner2.pm()", "m.pm()"]
+
 def test_guard_accessors_stay_opaque_for_custom_containers():
     source = """
 struct P;

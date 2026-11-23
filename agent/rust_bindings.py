@@ -129,6 +129,7 @@ _DEREF_WRAPPER_NAMES = frozenset(
         "Box", "Rc", "Arc",
         "Ref", "RefMut",
         "MutexGuard", "RwLockReadGuard", "RwLockWriteGuard",
+        "PeekMut",
     }
 )
 
@@ -216,10 +217,11 @@ _OPTION_HEAD_METHODS = {
     "back": ("&", {"VecDeque", "LinkedList"}, -1),
     "pop_front": ("", {"VecDeque", "LinkedList"}, -1),
     "pop_back": ("", {"VecDeque", "LinkedList"}, -1),
-    # `h.peek()`/`it.peek()` yield `Option<&P>` — `peek_mut`
-    # returns a `PeekMut` wrapper instead of a plain borrow
-    # and stays opaque.
+    # `h.peek()`/`it.peek()` yield `Option<&P>`; `peek_mut`
+    # wraps the borrow in `PeekMut` — the spelled head keeps
+    # the wrapper so member calls deref to `P`.
     "peek": ("&", None, -1),
+    "peek_mut": ("", {"BinaryHeap"}, 0),
     # `it.next_if(f)`/`it.next_if_eq(&x)` yield `Option<&P>`
     # like `next` — the same borrowed element.
     "next_if": ("&", None, -1),
@@ -3279,6 +3281,57 @@ class _RustBindings:
                 member = self._field_member(
                     callee, ("associated_function",)
                 )
+            if member is None and callee is not None and (
+                callee.type == "scoped_identifier"
+            ):
+                # `Rc::try_unwrap(r)`/`Box::into_inner(b)` — scoped
+                # associated calls whose payload is the smart
+                # pointer's own element.
+                s_path = callee.child_by_field_name("path")
+                s_name = callee.child_by_field_name("name")
+                s_head = (
+                    None
+                    if s_path is None
+                    else self._normalize_identifier(
+                        self.text(s_path).rsplit("::", 1)[-1]
+                    )
+                )
+                s_method = (
+                    None
+                    if s_name is None
+                    else self._normalize_identifier(self.text(s_name))
+                )
+                if s_head in {"Rc", "Arc", "Box"} and (
+                    s_method == "try_unwrap"
+                    or (s_method == "into_inner" and s_head == "Box")
+                ):
+                    args_node = node.child_by_field_name("arguments")
+                    first_arg = (
+                        next(iter(self._children(args_node)), None)
+                        if args_node is not None
+                        else None
+                    )
+                    arg_head = self._container_head_name(
+                        first_arg
+                    ) or self._spelled_receiver_head(first_arg)
+                    if arg_head == s_head:
+                        arg_args = self._receiver_type(first_arg)[1]
+                        parts = self._type_arg_list(arg_args or "")
+                        if len(parts) == 1:
+                            payload = parts[0].strip()
+                            if s_method == "into_inner":
+                                return self._spelled_type(
+                                    payload, node.start_byte
+                                )
+                            # `Result<P, Rc<P>>` — the Err arm hands
+                            # the smart pointer back, so keep its
+                            # full spelling.
+                            return (
+                                None,
+                                "Result<{}, {}<{}>>".format(
+                                    payload, s_head, payload
+                                ),
+                            )
             if member is None:
                 field = (
                     callee.child_by_field_name("field")
@@ -3430,6 +3483,15 @@ class _RustBindings:
                                 if len(pair_args) >= 2
                                 else None
                             )
+                    if (
+                        element is not None
+                        and self.text(field).strip() == "peek_mut"
+                    ):
+                        # `h.peek_mut()` yields `Option<PeekMut<P>>`
+                        # — the wrapper is spelled whole so the
+                        # bound name's args head `PeekMut` for the
+                        # member deref.
+                        element = "PeekMut<{}>".format(element)
                     if (
                         self.text(field).strip() in {"get", "get_mut"}
                         and element
@@ -10033,12 +10095,16 @@ class _RustBindings:
             and self._normalize_identifier(
                 payload_head.group(0).split("::")[-1]
             )
-            in _TRY_HEADS | set(_PRELUDE_ENTRY_VARIANTS.values())
+            in _TRY_HEADS
+            | set(_PRELUDE_ENTRY_VARIANTS.values())
+            | _DEREF_WRAPPER_NAMES
         ):
             # `Result<Option<P>, E>`'s `Ok` payload is `Option<P>`
             # — keep the full spelled head (as the tuple-pattern
             # pin does) so `Some(q)` on the name still reaches `P`;
-            # `_spelled_type` would flatten it to bare `P`.
+            # `_spelled_type` would flatten it to bare `P`. A deref
+            # wrapper (`Result<P, Rc<P>>`'s `Err`) keeps its head
+            # the same way so `e.pm()` still reaches `P`.
             return [(None, payload)]
         # The spelled arg refers to names visible where the
         # scrutinee's type was annotated — resolving at the pattern
