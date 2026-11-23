@@ -49656,7 +49656,7 @@ def test_closures_handed_to_opaque_callees(go_types_helper):
         "a.go": (
             "package p\n"
             "type K interface {\n"
-            "\tSet(func() int64); Get() int64; Do(func())\n"
+            "\tSet(func() int64); Get() int64; Do(func()); Take(int64)\n"
             "\tHold(func()); Fire(); Put(S); SetAll([]func() int64)\n"
             "}\n"
             "type S struct { F func() int64 }\n"
@@ -49736,6 +49736,10 @@ def test_closures_handed_to_opaque_callees(go_types_helper):
             "func F_dowrite(x int64, k K) (w int64) {\n"
             "\tk.Do(func() { w = x }); return w\n"
             "}\n"
+            "func F_scalarfactory(x int64, k K) (w int64) {\n"
+            "\tg := func() int64 { w = x; return 1 }\n"
+            "\tk.Take(g()); k.Fire(); return w\n"
+            "}\n"
             "func F_cbdo(x int64, do func(func())) (w int64) {\n"
             "\tdo(func() { w = x }); return w\n"
             "}\n"
@@ -49787,6 +49791,7 @@ def test_closures_handed_to_opaque_callees(go_types_helper):
         "F_cbset": frozenset({0, 1, 2, 3}),
         "F_pkgvar": frozenset({0, 1}),
         "F_dowrite": frozenset({0}),
+        "F_scalarfactory": frozenset({0}),
         "F_cbdo": frozenset({0}),
         "F_noafter": frozenset({0}),
         "F_setptr": frozenset({0, 1, 2}),

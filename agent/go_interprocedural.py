@@ -14968,6 +14968,12 @@ class _Builder:
                     )
                 return False
             if value.type == "call_expression":
+                result_type = self._call_result_type(value)
+                if (
+                    result_type is not None
+                    and not self._type_can_carry_func_value(result_type)
+                ):
+                    return False
                 call = self.calls.get(self.node_key(value))
                 function = self._strip_parens(
                     value.child_by_field_name("function")
