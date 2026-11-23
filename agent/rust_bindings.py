@@ -77,7 +77,16 @@ _DEREF_WRAPPER_NAMES = frozenset({"Box", "Rc", "Arc"})
 # `s.first()`, `s.last()` yield `Option<&T>` on `&[T]`/`[T; N]` too.
 # `pop`/`remove` stay Vec-only — slices cannot shrink.
 _SLICE_OPTION_METHODS = frozenset(
-    {"get", "first", "last", "split_first", "split_last"}
+    {
+        "get",
+        "get_mut",
+        "first",
+        "first_mut",
+        "last",
+        "last_mut",
+        "split_first",
+        "split_last",
+    }
 )
 
 # `v.split_first()`/`v.split_last()` yield
@@ -96,7 +105,11 @@ _OPTION_HEAD_METHODS = {
     "get": ("&", {"Vec", "VecDeque", "HashMap", "BTreeMap"}, -1),
     "get_mut": ("&mut ", {"Vec", "VecDeque", "HashMap", "BTreeMap"}, -1),
     "first": ("&", {"Vec"}, -1),
+    "first_mut": ("&mut ", {"Vec"}, -1),
     "last": ("&", {"Vec"}, -1),
+    "last_mut": ("&mut ", {"Vec"}, -1),
+    "front_mut": ("&mut ", {"VecDeque"}, -1),
+    "back_mut": ("&mut ", {"VecDeque"}, -1),
     "pop": ("", {"Vec"}, -1),
     "front": ("&", {"VecDeque"}, -1),
     "back": ("&", {"VecDeque"}, -1),
@@ -129,7 +142,32 @@ _OPTION_HEAD_METHODS = {
     # post-processed below to peel the wrapper.
     "as_deref": ("&", {"Option"}, 0),
     "as_deref_mut": ("&mut ", {"Option"}, 0),
+    # `Option<&P>::cloned()`/`copied()` yield `Option<P>` — the
+    # payload's borrow peels off below; a non-borrowed payload
+    # stays opaque.
+    "cloned": ("", {"Option"}, 0),
+    "copied": ("", {"Option"}, 0),
+    # `o1.zip(o2)` yields `Option<(P, Q)>` — the payload pairs the
+    # receiver's arg with the argument's, spelled below.
+    "zip": ("", {"Option"}, 0),
+    # `m.insert(k, v)` yields `Option<V>` — the pair's value arg.
+    "insert": ("", {"HashMap", "BTreeMap"}, -1),
 }
+
+# `o.insert(p)`/`o.get_or_insert(..)`/`o.or_insert(..)` yield
+# `&mut P` — the mutable borrow carries `Option`'s own payload.
+_OPTION_MUT_PAYLOAD_METHODS = frozenset(
+    {
+        "insert",
+        "get_or_insert",
+        "get_or_insert_with",
+        "get_or_insert_default",
+        "or_insert",
+        "or_insert_with",
+        "or_insert_else",
+        "or_insert_with_else",
+    }
+)
 
 _PRELUDE_NAMES = frozenset(
     {
@@ -161,12 +199,44 @@ _UNWRAP_OK_METHODS = frozenset(
 )
 # `o.<method>(f)`/`r.<method>(f)` where a named function's return
 # annotation supplies the payload — `map`/`map_or`/`map_or_else`
-# yield `Option<U>` from `f() -> U`, `and_then`/`or_else` unwrap
-# `f() -> Option<U>`/`Result`, `map_err` rewrites `Result`'s last
-# arg. Closures stay opaque (their param types are unwritten).
+# yield `Option<U>` from `f() -> U`, `and_then`/`or_else`/`find_map`
+# unwrap `f() -> Option<U>`/`Result`, `map_err` rewrites `Result`'s
+# last arg. Closures stay opaque (their param types are unwritten).
 _FN_PAYLOAD_METHODS = frozenset(
-    {"map", "and_then", "or_else", "map_or", "map_or_else", "map_err"}
+    {
+        "map",
+        "and_then",
+        "or_else",
+        "find_map",
+        "map_or",
+        "map_or_else",
+        "map_err",
+    }
 )
+# Iterator consumers that hand back `Option<Item>` —
+# `it.find(..)`/`it.nth(i)`/`it.max()` keep the upstream element.
+_ITER_OPTION_METHODS = frozenset(
+    {
+        "find",
+        "nth",
+        "nth_back",
+        "last",
+        "min",
+        "max",
+        "min_by",
+        "max_by",
+        "min_by_key",
+        "max_by_key",
+        "reduce",
+    }
+)
+# Iterator transforms whose element comes from a named callback's
+# return annotation — `it.map(f)` yields `f`'s return `U`,
+# `it.filter_map(f)` unwraps `f() -> Option<U>`/`Result`, and
+# `it.flat_map(f)` peels one iterable layer (`Vec<U>`/`Option<U>`/
+# `&[U]`/`[U; N]` → `U`). Closures stay opaque — their param and
+# return types are unwritten.
+_ITER_FN_ELEMENT_METHODS = frozenset({"map", "flat_map", "filter_map"})
 _UNWRAP_ERR_METHODS = frozenset({"unwrap_err", "expect_err"})
 _TRY_HEADS = frozenset({"Option", "Result"})
 # Prelude constructors whose tuple payload position is fixed by the
@@ -1359,6 +1429,40 @@ class _RustBindings:
                     x, y, params, bindings, pattern_scope, position
                 )
                 for x, y in zip(sub_a, sub_b)
+            )
+        fn_a = re.fullmatch(
+            r"fn\s*\((.*)\)\s*(?:->\s*(.+))?", a, re.DOTALL
+        )
+        fn_b = re.fullmatch(
+            r"fn\s*\((.*)\)\s*(?:->\s*(.+))?", b, re.DOTALL
+        )
+        if (fn_a is None) != (fn_b is None):
+            return False
+        if fn_a is not None:
+            # `fn(P) -> Q` — parameter and return positions match
+            # structurally like tuple elements, so `fn(m::P)`
+            # covers the impl's `fn(P)`.
+            inner_a = fn_a.group(1).strip()
+            inner_b = fn_b.group(1).strip()
+            sub_a = [] if not inner_a else self._type_arg_list(inner_a)
+            sub_b = [] if not inner_b else self._type_arg_list(inner_b)
+            if len(sub_a) != len(sub_b):
+                return False
+            if not all(
+                self._type_arg_match(
+                    x, y, params, bindings, pattern_scope, position
+                )
+                for x, y in zip(sub_a, sub_b)
+            ):
+                return False
+            ret_a = (fn_a.group(2) or "").strip()
+            ret_b = (fn_b.group(2) or "").strip()
+            if bool(ret_a) != bool(ret_b):
+                return False
+            if not ret_a:
+                return True
+            return self._type_arg_match(
+                ret_a, ret_b, params, bindings, pattern_scope, position
             )
         if a.startswith("[") and a.endswith("]"):
             if not (b.startswith("[") and b.endswith("]")):
@@ -2981,7 +3085,10 @@ class _RustBindings:
                             if -len(elements) <= index < len(elements)
                             else None
                         )
-                    if self.text(field).strip() == "get" and element:
+                    if (
+                        self.text(field).strip() in {"get", "get_mut"}
+                        and element
+                    ):
                         arg_list = node.child_by_field_name(
                             "arguments"
                         )
@@ -3095,6 +3202,113 @@ class _RustBindings:
                                         return None, None
                     if (
                         element is not None
+                        and self.text(field).strip() == "zip"
+                    ):
+                        # `o1.zip(o2)` yields `Option<(P, Q)>` —
+                        # `o2` must read as another `Option` so its
+                        # first arg spells the pair's second half.
+                        arg_list = node.child_by_field_name(
+                            "arguments"
+                        )
+                        other = (
+                            None
+                            if arg_list is None
+                            else next(
+                                (
+                                    c
+                                    for c in arg_list.named_children
+                                    if "comment" not in c.type
+                                ),
+                                None,
+                            )
+                        )
+                        _other_id, other_args = (
+                            (None, None)
+                            if other is None
+                            else self._receiver_type(other)
+                        )
+                        other_args = (
+                            None
+                            if other_args is None
+                            else other_args.strip()
+                        )
+                        if (
+                            other_args is None
+                            or self._container_head_name(other)
+                            != "Option"
+                        ):
+                            element = None
+                        else:
+                            pair = self._type_arg_list(other_args)
+                            # Each half keeps the scope its own
+                            # annotation was written in — qualify
+                            # both before joining the tuple.
+                            receiver = callee.child_by_field_name(
+                                "value"
+                            )
+                            left_args = (
+                                self._receiver_type(receiver)[1]
+                                if receiver is not None
+                                else None
+                            )
+                            left_arg = next(
+                                iter(
+                                    self._type_arg_list(
+                                        left_args or ""
+                                    )
+                                ),
+                                None,
+                            )
+                            left_pos = (
+                                self._receiver_annotation_position(
+                                    receiver
+                                )
+                                or node.start_byte
+                            )
+                            right_pos = (
+                                self._receiver_annotation_position(
+                                    other
+                                )
+                                or node.start_byte
+                            )
+                            element = (
+                                "({left}, {right})".format(
+                                    left=self._qualified_spelling(
+                                        left_arg.strip(), left_pos
+                                    ),
+                                    right=self._qualified_spelling(
+                                        pair[0].strip(), right_pos
+                                    ),
+                                )
+                                if pair and left_arg is not None
+                                else None
+                            )
+                    if (
+                        element is not None
+                        and self.text(field).strip()
+                        in {"cloned", "copied"}
+                    ):
+                        # `Option<&P>::cloned()` yields `Option<P>`
+                        # — the payload's borrow peels off; a
+                        # non-borrowed payload stays opaque.
+                        stripped = element.strip()
+                        peeled = re.sub(
+                            r"^&\s*(?:'\w+\s+)?(?:mut\s+)?",
+                            "",
+                            stripped,
+                        )
+                        if peeled == stripped and ";" in stripped:
+                            # `&[P; N]` already lost its brackets
+                            # and borrow to the slice normalizer —
+                            # re-wrap the array body.
+                            peeled = f"[{stripped}]"
+                        element = (
+                            peeled
+                            if peeled != stripped
+                            else None
+                        )
+                    if (
+                        element is not None
                         and self.text(field).strip()
                         in {"as_deref", "as_deref_mut"}
                     ):
@@ -3149,6 +3363,25 @@ class _RustBindings:
                             return self._spelled_type(
                                 spelled, node.start_byte
                             )
+                        return None, spelled
+                if (
+                    callee is not None
+                    and callee.type == "field_expression"
+                    and self.text(
+                        callee.child_by_field_name("field")
+                    ).strip()
+                    in _ITER_OPTION_METHODS
+                ):
+                    # `it.find(..)`/`it.nth(i)`/`it.max()` yield
+                    # `Option<Item>` — the upstream chain's element.
+                    upstream = callee.child_by_field_name("value")
+                    spelled = (
+                        None
+                        if upstream is None
+                        or upstream.type != "call_expression"
+                        else self._iterator_spelling(upstream)
+                    )
+                    if spelled is not None:
                         return None, spelled
                 if (
                     callee is not None
@@ -3209,6 +3442,28 @@ class _RustBindings:
                         # same `&[P]` — the Option case is handled
                         # by the prelude recipe above.
                         return None, "&[" + receiver[1] + "]"
+                    if (
+                        method_name in _OPTION_MUT_PAYLOAD_METHODS
+                        and receiver[1] is not None
+                        and self._container_head_name(
+                            callee.child_by_field_name("value")
+                        )
+                        == "Option"
+                    ):
+                        # `o.get_or_insert(d)`/`o.or_insert(d)`
+                        # yield `&mut P` — the payload resolves at
+                        # the receiver's own annotation.
+                        parts = self._type_arg_list(receiver[1])
+                        if len(parts) == 1:
+                            return self._spelled_type(
+                                "&mut " + parts[0].strip(),
+                                self._receiver_annotation_position(
+                                    callee.child_by_field_name(
+                                        "value"
+                                    )
+                                )
+                                or node.start_byte,
+                            )
                     return self._unwrapped(
                         callee, node.start_byte, receiver
                     )
@@ -3695,7 +3950,7 @@ class _RustBindings:
             or record.type_node
         )
         text = self.text(ret).strip()
-        if method in {"and_then", "or_else"}:
+        if method in {"and_then", "or_else", "find_map"}:
             wrap = re.fullmatch(r"(?:Option|Result)\s*<(.+)>", text)
             if wrap is None:
                 return None
@@ -4392,7 +4647,195 @@ class _RustBindings:
                 # position could bind the wrong same-named type.
                 return None, None
             return f"({left}, {right})", position
+        if method in _ITER_FN_ELEMENT_METHODS:
+            return self._iter_fn_element_spelling(call, method)
         return None, None
+
+    def _iter_fn_element_spelling(
+        self, call: Any, method: str
+    ) -> "tuple[str | None, int | None]":
+        """Element spelling for `it.map(f)`/`it.filter_map(f)`/
+        `it.flat_map(f)` — `f` must name a function item whose
+        return annotation supplies the iterated element: `map`
+        yields `f`'s return `U`, `filter_map` unwraps
+        `f() -> Option<U>`/`Result<U, _>`, and `flat_map` peels one
+        iterable layer (`Vec<U>`/`Option<U>`/`&[U]`/`[U; N]` → `U`).
+        Closures and non-function args stay opaque."""
+        arguments = call.child_by_field_name("arguments")
+        target = (
+            None
+            if arguments is None
+            else next(
+                (
+                    c
+                    for c in arguments.named_children
+                    if "comment" not in c.type
+                ),
+                None,
+            )
+        )
+        if (
+            target is None
+            or target.type not in {"identifier", "scoped_identifier"}
+        ):
+            return None, None
+        if target.type == "scoped_identifier":
+            # `it.map(m::to_q)` — resolve the callee inside the
+            # named module's own scope.
+            record = self._scoped_value_member(target)
+        else:
+            record = self._through_import(
+                self._lookup(
+                    self._normalize_identifier(self.text(target)),
+                    target.start_byte,
+                    "value",
+                ),
+                target.start_byte,
+                "value",
+            )
+        if (
+            record is None
+            or record.binding.kind
+            not in {"function", "associated_function"}
+            or record.type_node is None
+        ):
+            return None, None
+        if record.is_async:
+            # `async fn f() -> U` returns a `Future<U>` — the
+            # adaptor's elements are futures, not `U`.
+            return None, None
+        ret = (
+            record.type_node.child_by_field_name("return_type")
+            or record.type_node
+        )
+        text = self.text(ret).strip()
+        home = record.home_scope
+        pushed = home is not None and home not in self.scopes
+        if pushed:
+            # `m::to_q`'s `-> Q` spells `Q` in `m`'s scope — qualify
+            # it there or a same-named root type steals the name.
+            self._push_scope(home)
+        try:
+            if method == "filter_map":
+                wrap = re.fullmatch(r"(?:Option|Result)\s*<(.+)>", text)
+                if wrap is None:
+                    return None, None
+                text = self._type_arg_list(wrap.group(1))[0].strip()
+            elif method == "flat_map":
+                slice_ref = re.fullmatch(
+                    r"&\s*(?:'\w+\s+)?(?:mut\s+)?\[(.+)\]", text
+                )
+                if slice_ref is not None:
+                    text = slice_ref.group(1).strip()
+                elif re.fullmatch(r"\[.+\]", text):
+                    text = self._array_elem(text[1:-1])
+                else:
+                    wrap = re.fullmatch(
+                        r"(Vec|Option)\s*<(.+)>", text
+                    )
+                    if wrap is None:
+                        return None, None
+                    head = wrap.group(1)
+                    head_record = self._lookup(
+                        self._normalize_identifier(head),
+                        ret.start_byte,
+                        "type",
+                    )
+                    if head_record is not None:
+                        resolved_record = (
+                            self._through_import(
+                                head_record, ret.start_byte
+                            )
+                            or head_record
+                        )
+                        imported = (
+                            resolved_record.binding.kind == "import"
+                            and resolved_record.import_path
+                            is not None
+                            and resolved_record.import_path.split(
+                                "::"
+                            )[0].strip()
+                            in {"std", "core", "alloc"}
+                        )
+                        if not imported:
+                            # A custom `Vec`/`Option` is opaque —
+                            # its IntoIterator::Item may not be Q.
+                            return None, None
+                    text = self._type_arg_list(wrap.group(2))[0].strip()
+            qualified = self._qualified_spelling(text, ret.start_byte)
+        finally:
+            if pushed:
+                self.scopes.pop()
+        bare = re.sub(
+            r"\b(?:[A-Za-z_]\w*::)+[A-Za-z_]\w*", "", qualified
+        )
+        if not self._spelling_scope_stable(
+            bare, ret.start_byte, call.start_byte
+        ):
+            # An unqualifiable name (a generic parameter of `f`,
+            # a function-local type) would re-resolve to a
+            # same-named type at the call site — opaque instead.
+            return None, None
+        return qualified, ret.start_byte
+
+    def _scoped_value_member(self, node: Any) -> "_Record | None":
+        """`m::to_q` → the function/item record `to_q` declared in
+        module `m`'s own scope (through `pub use` re-exports)."""
+        path = node.child_by_field_name("path")
+        name = node.child_by_field_name("name")
+        if path is None or name is None:
+            return None
+        path_segments = self.text(path).split("::")
+        if path_segments[0] == "crate":
+            # `crate::m::to_q` — the module chain starts at the
+            # root scope, not at a visible local name.
+            module = None
+            scope = self.scopes[0] if self.scopes else None
+            for segment in path_segments[1:]:
+                if scope is None:
+                    module = None
+                    break
+                module = next(
+                    (
+                        candidate
+                        for candidate in reversed(
+                            scope.bindings.get(segment, ())
+                        )
+                        if candidate.binding.kind == "module"
+                    ),
+                    None,
+                )
+                scope = (
+                    module.module_scope if module is not None else None
+                )
+        elif path.type in {"identifier", "type_identifier"}:
+            module = self._lookup_module(
+                self.text(path), path.start_byte
+            )
+        elif path.type in {"scoped_identifier", "scoped_type_identifier"}:
+            module = self._scoped_type(path)
+        else:
+            module = None
+        if module is None or module.module_scope is None:
+            return None
+        member = next(
+            (
+                r
+                for r in reversed(
+                    module.module_scope.bindings.get(
+                        self._normalize_identifier(self.text(name)), ()
+                    )
+                )
+                if self._in_namespace(r, "value")
+            ),
+            None,
+        )
+        if member is None:
+            return None
+        return (
+            self._through_import(member, name.start_byte, "value")
+            or member
+        )
 
     def _field_args_scope(
         self, field_expr: Any | None
@@ -4500,6 +4943,7 @@ class _RustBindings:
             or method == "enumerate"
             or method == "zip"
             or method == "flatten"
+            or method in _ITER_FN_ELEMENT_METHODS
         ) and self._field_member(
             callee, ("associated_function",)
         ) is not None:
@@ -4643,6 +5087,29 @@ class _RustBindings:
                 return _UNKNOWN, None
             spelled = self._iterator_spelling(call)
             return _UNKNOWN, spelled
+        if method in _ITER_FN_ELEMENT_METHODS:
+            # `it.map(f)`/`it.filter_map(f)`/`it.flat_map(f)` — the
+            # element is spelled by the named callback's return
+            # annotation, not by the upstream container's args.
+            spelled, fn_pos = self._iter_fn_element_spelling(
+                call, method
+            )
+            if spelled is None:
+                return _UNKNOWN, None
+            position = (
+                fn_pos if fn_pos is not None else call.start_byte
+            )
+            elem_id, rest = self._element_of(
+                None, spelled.strip(), position
+            )
+            if elem_id is None:
+                return _UNKNOWN, (
+                    spelled.strip() if rest is None else rest
+                )
+            name = next(
+                (b.name for b in self.bindings if b.id == elem_id), ""
+            )
+            return TypeFact("named", name, 0, None, elem_id), rest
         container_id, args = self._receiver_type(receiver)
         if args is None:
             return _UNKNOWN, None
@@ -7112,7 +7579,12 @@ class _RustBindings:
         if record is None or record.type_node is None:
             return None
         head = re.match(
-            r"[A-Za-z_][\w:]*", self.text(record.type_node).strip()
+            r"[A-Za-z_][\w:]*",
+            re.sub(
+                r"^&\s*(?:'\w+\s*)?(?:mut\s+)?",
+                "",
+                self.text(record.type_node).strip(),
+            ),
         )
         if head is None:
             return None
@@ -7423,10 +7895,39 @@ class _RustBindings:
                     )
                 if (
                     field is not None
+                    and self.text(field).strip()
+                    in _ITER_OPTION_METHODS
+                ):
+                    upstream = callee.child_by_field_name("value")
+                    if (
+                        upstream is not None
+                        and upstream.type == "call_expression"
+                        and self._iterator_spelling(upstream)
+                        is not None
+                    ):
+                        # `it.find(..)`/`it.nth(i)` yield
+                        # `Option<Item>` — head the scrutinee so
+                        # `Some(p)` binds the upstream element,
+                        # resolved where the receiver's `P` was
+                        # written, not at the call.
+                        return (
+                            "Option",
+                            self._receiver_annotation_position(
+                                upstream
+                            )
+                            or node.start_byte,
+                            None,
+                        )
+                if (
+                    field is not None
                     and self.text(field).strip() in _FN_PAYLOAD_METHODS
                     and self._fn_return_payload(node) is not None
                 ):
                     method = self.text(field).strip()
+                    if method == "find_map":
+                        # Iterator-only consumer — always yields
+                        # `Option<U>` whatever the receiver.
+                        return "Option", node.start_byte, None
                     if method in {"map_or", "map_or_else"}:
                         # `o.map_or(d, f)` yields `f`'s return `U`
                         # itself — a plain value, not a container.

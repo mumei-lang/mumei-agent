@@ -6405,3 +6405,87 @@ fn f(o: Option<P>, r: Result<Q, E>) {
     }
     assert bound.get("q2.qm()") == qm.id
     assert bound.get("q3.qm()") == qm.id
+
+def test_iter_consumers_bind_option_payloads():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct W<T> { items: Vec<T> }
+fn find_q(q: &Q) -> Option<P> { None }
+struct Q;
+fn f(v: Vec<P>, w: W<P>) {
+    match v.iter().find(|x| true) { Some(a) => a.pm(), _ => () }
+    match v.iter().nth(0) { Some(b) => b.pm(), _ => () }
+    match v.iter().min() { Some(c) => c.pm(), _ => () }
+    match v.iter().max() { Some(d) => d.pm(), _ => () }
+    match w.items.iter().find(|x| true) { Some(e) => e.pm(), _ => () }
+    match w.items.iter().find_map(find_q) { Some(g) => g.pm(), _ => () }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    for call in (
+        "a.pm()",
+        "b.pm()",
+        "c.pm()",
+        "d.pm()",
+        "e.pm()",
+        "g.pm()",
+    ):
+        assert bound.get(call) == pm.id, call
+
+def test_flat_map_named_callback_elements_and_std_reexport():
+    source = """
+mod m { pub use std::vec::Vec; }
+use m::Vec;
+struct P;
+impl P { fn pm(&self) {} }
+struct Q;
+impl Q { fn qm(&self) {} }
+fn to_qs(p: P) -> Vec<Q> { Vec::new() }
+fn to_opt(p: P) -> Option<Q> { None }
+fn f(v: Vec<P>) {
+    for q in v.iter().flat_map(to_qs) { q.qm(); }
+    for q2 in v.iter().flat_map(to_opt) { q2.qm(); }
+    for q3 in v.iter().map(to_qs) { q3.qm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    qm = _bindings(report, "qm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    assert bound.get("q.qm()") == qm.id
+    assert bound.get("q2.qm()") == qm.id
+    # `map` yields the container itself (Vec<Q>/Option<Q>), not Q.
+    assert not bound.get("q3.qm()")
+
+def test_zip_fn_pointer_args_match_impl_structurally():
+    source = """
+mod m { pub struct P; }
+use m::P;
+struct Q;
+impl Q { fn qm(&self) {} }
+struct W<T>;
+impl W<fn(P)> { fn wm(&self) {} }
+fn f(o: Option<W<fn(P)>>, o2: Option<Q>) {
+    match o.zip(o2) { Some((w, q)) => { w.wm(); q.qm(); }, _ => () }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    wm = _bindings(report, "wm", "associated_function")[0]
+    qm = _bindings(report, "qm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    assert bound.get("w.wm()") == wm.id
+    assert bound.get("q.qm()") == qm.id
