@@ -56,7 +56,8 @@ _ITER_ELEMENT_METHODS = frozenset(
 _ITER_PRESERVING_METHODS = frozenset(
     {"rev", "skip", "take", "filter", "step_by", "chain",
      "cloned", "copied", "peekable", "inspect", "fuse", "by_ref",
-     "cycle", "skip_while", "take_while"}
+     "cycle", "skip_while", "take_while", "intersperse",
+     "intersperse_with"}
 )
 # Vec/slice accessors that iterate the same element as `iter()`.
 _ITER_SLICE_METHODS = frozenset({"as_slice", "as_mut_slice"})
@@ -4178,47 +4179,59 @@ class _RustBindings:
                         entry_recv = callee.child_by_field_name(
                             "value"
                         )
-                        if (
-                            entry_recv is not None
-                            and entry_recv.type == "identifier"
-                        ):
-                            # `let e = m.entry(k); e.key()` — the
-                            # entry arrives through a binding's
-                            # initializer.
-                            entry_record = self._lookup(
-                                self._normalize_identifier(
-                                    self.text(entry_recv)
-                                ),
-                                entry_recv.start_byte,
-                                "value",
-                            )
-                            if (
-                                entry_record is not None
-                                and entry_record.value_node is not None
-                            ):
-                                entry_recv = entry_record.value_node
-                        while (
-                            entry_recv is not None
-                            and entry_recv.type == "call_expression"
-                            and (
-                                entry_fn := entry_recv.child_by_field_name(
-                                    "function"
+                        while entry_recv is not None:
+                            if entry_recv.type == "identifier":
+                                # `let e = m.entry(k)` — resolve the
+                                # name back to its initializer so
+                                # the split form feeds the chain
+                                # below.
+                                rec = self._lookup(
+                                    self._normalize_identifier(
+                                        self.text(entry_recv)
+                                    ),
+                                    entry_recv.start_byte,
+                                    "value",
                                 )
-                            )
-                            is not None
-                            and entry_fn.type == "field_expression"
-                            and self._normalize_identifier(
-                                self.text(
-                                    entry_fn.child_by_field_name(
-                                        "field"
+                                init = (
+                                    None
+                                    if rec is None
+                                    else rec.value_node
+                                )
+                                if (
+                                    init is not None
+                                    and init.type
+                                    == "call_expression"
+                                ):
+                                    entry_recv = init
+                                    continue
+                                break
+                            if (
+                                entry_recv.type
+                                == "call_expression"
+                                and (
+                                    entry_fn := entry_recv.child_by_field_name(
+                                        "function"
                                     )
                                 )
-                            )
-                            == "and_modify"
-                        ):
-                            entry_recv = entry_fn.child_by_field_name(
-                                "value"
-                            )
+                                is not None
+                                and entry_fn.type
+                                == "field_expression"
+                                and self._normalize_identifier(
+                                    self.text(
+                                        entry_fn.child_by_field_name(
+                                            "field"
+                                        )
+                                    )
+                                )
+                                == "and_modify"
+                            ):
+                                entry_recv = (
+                                    entry_fn.child_by_field_name(
+                                        "value"
+                                    )
+                                )
+                                continue
+                            break
                         if (
                             entry_recv is not None
                             and entry_recv.type == "call_expression"
@@ -4276,10 +4289,20 @@ class _RustBindings:
                                         )
                                     if (
                                         method_name == "into_mut"
-                                        and self._container_head_name(
-                                            map_recv
+                                        and (
+                                            self._container_head_name(
+                                                map_recv
+                                            )
+                                            != "BTreeMap"
+                                            # A declared `into_mut`
+                                            # extension keeps its own
+                                            # return — only the std
+                                            # BTreeMap entry spells
+                                            # `&mut V`.
+                                            or self._head_has_declared_method(
+                                                method_name, "Entry"
+                                            )
                                         )
-                                        != "BTreeMap"
                                     ):
                                         # `Entry::into_mut` is
                                         # `BTreeMap`-only — a
@@ -4291,6 +4314,29 @@ class _RustBindings:
                                             "&mut " + parts[1].strip(),
                                             entry_pos,
                                         )
+                    if (
+                        method_name == "leak"
+                        and receiver[1] is not None
+                        and self._container_head_name(
+                            callee.child_by_field_name("value")
+                        )
+                        == "Vec"
+                    ):
+                        # `v.leak()` yields `&'a mut [T]` — the
+                        # borrowed slice spelling feeds
+                        # `s[0]`/`for` element paths. Without the
+                        # annotation's site the element name would
+                        # re-resolve at the caller's scope and could
+                        # bind a same-named type, so it stays opaque.
+                        annotated = self._receiver_annotation_position(
+                            callee.child_by_field_name("value")
+                        )
+                        if annotated is None:
+                            return _UNKNOWN, None
+                        return self._spelled_type(
+                            "&mut [" + receiver[1] + "]",
+                            annotated,
+                        )
                     if (
                         method_name in {"as_slices", "as_mut_slices"}
                         and receiver[1] is not None
@@ -6504,6 +6550,38 @@ class _RustBindings:
             or member
         )
 
+    def _scope_at(self, position: int) -> "_Scope | None":
+        """Innermost scope whose node spans `position` — the lexical
+        home a spelled name at that site resolves in, whether or not
+        it is on the current stack."""
+        seen: set[int] = set()
+        stack = [
+            scope
+            for scope in self.scopes
+        ] + [
+            record.home_scope
+            for record in self.records.values()
+            if record.home_scope is not None
+        ]
+        best: "_Scope | None" = None
+        best_size: "int | None" = None
+        while stack:
+            scope = stack.pop()
+            if scope is None or id(scope) in seen:
+                continue
+            seen.add(id(scope))
+            if scope.parent is not None:
+                stack.append(scope.parent)
+            node = scope.node
+            if (
+                node is not None
+                and node.start_byte <= position < node.end_byte
+            ):
+                size = node.end_byte - node.start_byte
+                if best_size is None or size < best_size:
+                    best, best_size = scope, size
+        return best
+
     def _field_args_scope(
         self, field_expr: Any | None
     ) -> "tuple[int | None, _Scope | None]":
@@ -6515,7 +6593,14 @@ class _RustBindings:
         field's scope — module members are not reachable from the
         use-site stack)."""
         if field_expr is None or field_expr.type != "field_expression":
-            return self._receiver_annotation_position(field_expr), None
+            position = self._receiver_annotation_position(field_expr)
+            if position is None:
+                return None, None
+            # A name spelled in another module's annotation (a field
+            # declared in `mod m`) resolves in that module's scope —
+            # without it the element re-resolves at the caller's
+            # scope and can bind a same-named type.
+            return position, self._scope_at(position)
         member = self._field_member(
             field_expr, ("struct_field", "associated_const")
         )
@@ -9272,7 +9357,7 @@ class _RustBindings:
         return type_id, args
 
     def _spelled_type(
-        self, spelled: str, position: int
+        self, spelled: str, position: "int | None"
     ) -> tuple[str | None, str | None]:
         """(type id, args) for a type argument's spelling — `P`
         resolves to its record, `Vec<P>` keeps its args, `&P`/`m::P`
@@ -9306,11 +9391,20 @@ class _RustBindings:
         if match is None:
             return None, spelled
         name = match.group(1)
+        # `None` means the annotation's site is unknown — resolving
+        # the name at the call site would bind a same-named type in
+        # the caller's scope, so the spelling stays args-only.
         record = (
-            self._scoped_spelled_type(name, position)
-            if "::" in name
-            else self._lookup(
-                self._normalize_identifier(name), position, "type"
+            None
+            if position is None
+            else (
+                self._scoped_spelled_type(name, position)
+                if "::" in name
+                else self._lookup(
+                    self._normalize_identifier(name),
+                    position,
+                    "type",
+                )
             )
         )
         record = self._through_import(record, position)
