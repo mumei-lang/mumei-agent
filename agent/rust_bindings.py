@@ -3108,7 +3108,14 @@ class _RustBindings:
                     and callee.type == "field_expression"
                     else None
                 )
-                if field is not None and receiver[1] is not None:
+                map_pair = (
+                    field is not None
+                    and self.text(field).strip()
+                    in _MAP_PAIR_METHODS | _MAP_BORROWED_PAIR_METHODS
+                )
+                if field is not None and (
+                    receiver[1] is not None or map_pair
+                ):
                     option_head = _OPTION_HEAD_METHODS.get(
                         self.text(field).strip()
                     )
@@ -3121,6 +3128,13 @@ class _RustBindings:
                         or self._container_head_name(
                             callee.child_by_field_name("value")
                         ) in option_head[1]
+                        or (
+                            map_pair
+                            and self._is_map_container(
+                                None,
+                                callee.child_by_field_name("value"),
+                            )
+                        )
                         or (
                             self.text(field).strip()
                             in _SLICE_OPTION_METHODS
@@ -3140,7 +3154,7 @@ class _RustBindings:
                     # `_scrutinee_shape` to declare.
                     slice_args = re.fullmatch(
                         r"&\s*(?:'\w+\s+)?(?:mut\s+)?\[(.+)\]",
-                        receiver[1].strip(),
+                        (receiver[1] or "").strip(),
                     )
                     if slice_args is not None:
                         # The receiver itself spelled a borrowed
@@ -3150,7 +3164,9 @@ class _RustBindings:
                         # (`Vec<[P; 2]>`), never peeled.
                         element = slice_args.group(1).strip()
                     else:
-                        elements = self._type_arg_list(receiver[1])
+                        elements = self._type_arg_list(
+                            receiver[1] or ""
+                        )
                         index = option_head[2]
                         if (
                             self.text(field).strip() == "get"
@@ -3173,32 +3189,26 @@ class _RustBindings:
                             self.text(field).strip()
                             in _MAP_PAIR_METHODS
                             | _MAP_BORROWED_PAIR_METHODS
-                            and self._container_head_name(
-                                callee.child_by_field_name("value")
+                            and self._is_map_container(
+                                None,
+                                callee.child_by_field_name("value"),
                             )
-                            in _MAP_CONTAINER_NAMES
                         ):
                             # `m.pop_first()` yields
-                            # `Option<(K, V)>` — the map's raw args
-                            # spell the pair (`receiver[1]` already
-                            # reduced them to the value `V`), so
-                            # `Some((k, v))` binds each name.
-                            # `get_key_value` borrows both halves:
+                            # `Option<(K, V)>` — the map's spelled
+                            # args spell the pair, so `Some((k, v))`
+                            # binds each name. `get_key_value`
+                            # borrows both halves:
                             # `Option<(&K, &V)>`.
-                            type_node = self._receiver_type_node(
+                            # `_map_spelled_args` reaches field and
+                            # alias receivers — `s.map` and
+                            # `s.m: M` read the same `<K, V>` list.
+                            spelled = self._map_spelled_args(
                                 callee.child_by_field_name("value")
                             )
-                            head_args = (
-                                self._generic_head_args(
-                                    type_node, node.start_byte
-                                )
-                                if type_node is not None
-                                else None
-                            )
                             pair_args = (
-                                self._type_arg_list(head_args[0])
-                                if head_args is not None
-                                and head_args[0] is not None
+                                self._type_arg_list(spelled)
+                                if spelled is not None
                                 else []
                             )
                             borrowed = (
@@ -3940,36 +3950,36 @@ class _RustBindings:
                 None,
             )
             return name in _MAP_CONTAINER_NAMES
-        if node is not None and node.type == "identifier":
-            record = self._lookup(
-                self._normalize_identifier(self.text(node)),
-                node.start_byte,
-                "value",
+        tnode = None if node is None else self._receiver_type_node(node)
+        if tnode is None:
+            return False
+        if (
+            re.search(
+                r"\b(?:HashMap|BTreeMap)\s*<",
+                self.text(tnode),
             )
-            if record is not None and record.type_node is not None:
-                if (
-                    re.search(
-                        r"\b(?:HashMap|BTreeMap)\s*<",
-                        self.text(record.type_node),
-                    )
-                    is not None
-                ):
-                    return True
-                pair = self._generic_head_args(
-                    record.type_node, node.start_byte
-                )
-                seen: set[str] = set()
-                while pair is not None and pair[1] is not None and (
-                    pair[1].binding.kind == "type_alias"
-                    and pair[1].alias_node is not None
-                    and pair[1].binding.id not in seen
-                ):
-                    seen.add(pair[1].binding.id)
-                    pair = self._generic_head_args(
-                        pair[1].alias_node, node.start_byte
-                    )
-                return pair is not None and pair[2] in _MAP_CONTAINER_NAMES
-        return False
+            is not None
+        ):
+            return True
+        pair = self._generic_head_args(
+            tnode, node.start_byte if node is not None else 0
+        )
+        seen: set[str] = set()
+        while pair is not None and pair[1] is not None and (
+            pair[1].binding.kind == "type_alias"
+            and pair[1].alias_node is not None
+            and pair[1].binding.id not in seen
+        ):
+            seen.add(pair[1].binding.id)
+            pair = self._generic_head_args(
+                pair[1].alias_node,
+                node.start_byte if node is not None else 0,
+            )
+        return (
+            pair is not None
+            and pair[2] is not None
+            and pair[2].split("::")[-1] in _MAP_CONTAINER_NAMES
+        )
 
     def _generic_head_args(
         self, type_node: Any | None, position: int
@@ -4047,14 +4057,10 @@ class _RustBindings:
         node = receiver
         while node is not None and node.type == "reference_expression":
             node = next(iter(node.named_children), None)
-        if node is None or node.type != "identifier":
-            return None
-        record = self._lookup(
-            self._normalize_identifier(self.text(node)),
-            node.start_byte,
-            "value",
-        )
-        tnode = None if record is None else record.type_node
+        # `_receiver_type_node` reads identifier, `self`, field and
+        # tuple-element receivers alike — `s.map` reaches the field's
+        # annotation the same way `m` reaches the let binding's.
+        tnode = self._receiver_type_node(node)
         # The annotation's `M` is resolved where it was written — a
         # same-named alias declared inside the loop's scope must not
         # steal the expansion (`type M = HashMap<A, B>` then an inner
@@ -4087,7 +4093,13 @@ class _RustBindings:
                 else item.child_by_field_name("type_parameters")
             )
             args = self._type_arg_list(key or "")
-            if not names or len(args) < len(names):
+            if not names:
+                # `type M = HashMap<K, V>` — a non-generic alias
+                # carries its whole argument list in the body.
+                key = body_pair[0]
+                head = body_pair[1]
+                continue
+            if len(args) < len(names):
                 break
             mapping = dict(zip(names, args))
             key = re.sub(
@@ -4479,18 +4491,20 @@ class _RustBindings:
                 container_id, receiver
             ):
                 return None, None
-            if index == 0:
-                # `keys()`/`into_keys()` — `args` already reduced
-                # to `V`, so recover `K` from the spelled
-                # annotation.
-                spelled = self._map_spelled_args(receiver)
-                if spelled is None:
-                    return None, None
-                element = next(
-                    iter(self._type_arg_list(spelled)), None
-                )
-            else:
-                element = args.strip()
+            # `keys()`/`into_keys()`/`values()`/`into_values()` —
+            # `args` reduced a map's args to `V` (or to the last
+            # spelled arg on `HashMap<K, V, H>`), so recover the
+            # spelled argument list and index into it: 0 is `K`,
+            # 1 is `V` — a trailing hasher arg never wins.
+            spelled = self._map_spelled_args(receiver)
+            if spelled is None:
+                return None, None
+            spelled_args = self._type_arg_list(spelled)
+            element = (
+                spelled_args[index].strip()
+                if index < len(spelled_args)
+                else None
+            )
             if element is None:
                 return None, None
             # The element spelling drops the borrow — the same
@@ -5632,18 +5646,20 @@ class _RustBindings:
         elif (index := _MAP_ELEMENT_METHODS.get(method)) is not None:
             if not self._is_map_container(container_id, receiver):
                 return _UNKNOWN, None
-            if index == 0:
-                # `m[k]` typing reduces a map's args to the value
-                # type upstream, so `keys()` must recover the spelled
-                # argument list from the receiver's annotation.
-                spelled = self._map_spelled_args(receiver)
-                if spelled is None:
-                    return _UNKNOWN, None
-                arg = next(iter(self._type_arg_list(spelled)), None)
-            else:
-                # `values()` reads the value type — already the map's
-                # reduced args.
-                arg = args
+            # `m[k]` typing reduces a map's args to the value type
+            # upstream, so `keys()`/`values()` recover the spelled
+            # argument list and index into it — index 0 is `K`,
+            # 1 is `V`; a trailing hasher (`HashMap<K, V, H>`)
+            # never wins the value slot.
+            spelled = self._map_spelled_args(receiver)
+            if spelled is None:
+                return _UNKNOWN, None
+            spelled_args = self._type_arg_list(spelled)
+            arg = (
+                spelled_args[index].strip()
+                if index < len(spelled_args)
+                else None
+            )
             if arg is None:
                 return _UNKNOWN, None
             elem_id, rest = self._spelled_type(arg, position)
@@ -8095,25 +8111,19 @@ class _RustBindings:
 
     def _container_head_name(self, node: Any | None) -> "str | None":
         """Declared container head of a value — `v: Vec<P>` reads
-        `Vec`, `m: HashMap<K, V>` reads `HashMap`. None when the
-        receiver is not a plainly-annotated identifier."""
+        `Vec`, `m: HashMap<K, V>` reads `HashMap`. Field receivers
+        (`s.map`) read the field's annotation head the same way."""
         while node is not None and node.type == "reference_expression":
             node = next(iter(node.named_children), None)
-        if node is None or node.type != "identifier":
-            return None
-        record = self._lookup(
-            self._normalize_identifier(self.text(node)),
-            node.start_byte,
-            "value",
-        )
-        if record is None or record.type_node is None:
+        tnode = self._receiver_type_node(node)
+        if tnode is None:
             return None
         head = re.match(
             r"[A-Za-z_][\w:]*",
             re.sub(
                 r"^&\s*(?:'\w+\s*)?(?:mut\s+)?",
                 "",
-                self.text(record.type_node).strip(),
+                self.text(tnode).strip(),
             ),
         )
         if head is None:
@@ -8457,6 +8467,15 @@ class _RustBindings:
                         or self._container_head_name(
                             callee.child_by_field_name("value")
                         ) in option_head[1]
+                        or (
+                            self.text(field).strip()
+                            in _MAP_PAIR_METHODS
+                            | _MAP_BORROWED_PAIR_METHODS
+                            and self._is_map_container(
+                                None,
+                                callee.child_by_field_name("value"),
+                            )
+                        )
                         or (
                             self.text(field).strip()
                             in _SLICE_OPTION_METHODS
