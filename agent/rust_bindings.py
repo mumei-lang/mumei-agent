@@ -4791,15 +4791,15 @@ class _RustBindings:
                                 option_head_value
                             )
                             if produced_args is not None:
-                                produced_inner = re.fullmatch(
-                                    r"[A-Za-z_][\w:]*\s*<(.+)>",
-                                    produced_args.strip(),
-                                    re.DOTALL,
+                                # `_expr_type_spelling` already
+                                # returns args-form (`Vec<P>` for
+                                # `mr().ok()`), not a whole
+                                # `Head<args>` — a further peel
+                                # would drop the element's own
+                                # container (`Vec<P>` -> `P`).
+                                elements = self._type_arg_list(
+                                    produced_args
                                 )
-                                if produced_inner is not None:
-                                    elements = self._type_arg_list(
-                                        produced_inner.group(1)
-                                    )
                         if (
                             not elements
                             and peekish
@@ -7187,6 +7187,11 @@ class _RustBindings:
             return self._receiver_annotation_position(
                 record.value_node
             )
+        if record.spell_position is not None:
+            # A pattern-bound name (`let Some(v) = m::make().ok()`)
+            # keeps the position its args were spelled at — the
+            # scope containing it resolves a same-named caller type.
+            return record.spell_position
         return None
 
     def _verbatim_annotation_args(self, value: Any | None) -> bool:
@@ -12532,6 +12537,12 @@ class _RustBindings:
                                     )
                                 )
                                 in option_head[1]
+                                or self._combinator_head(
+                                    callee.child_by_field_name(
+                                        "value"
+                                    )
+                                )
+                                in option_head[1]
                             )
                         )
                         or (
@@ -13275,11 +13286,13 @@ class _RustBindings:
                         # declared field annotation heads later
                         # prelude patterns (`if let Some(q) = opt`).
                         got = mapping.get(bound.start_byte)
-                        if got is not None and len(got) == 2:
+                        if got is not None and len(got) >= 2:
                             mapping[bound.start_byte] = (
-                                *got,
+                                got[0],
+                                got[1],
                                 field_type[2],
                                 field_type[3],
+                                *got[4:],
                             )
                     continue
                 if fname_node is not None and field_type is not None:

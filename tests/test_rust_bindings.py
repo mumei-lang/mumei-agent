@@ -10136,14 +10136,9 @@ fn f() {
     assert (
         bound.get("mo().zip(mo()).unwrap().0[0].pm()") == pm.id
     )
-    # `ok()` does not exist on `Option`, `and` yields the arg's
-    # own element, and `flatten` needs `Option<Option<P>>` —
-    # these stay unbound.
-    for site in (
-        "mo().ok()",
-        "mo().and(mo()).unwrap()",
-        "mo().flatten()",
-    ):
+    # `ok()` does not exist on `Option`, and `flatten` needs
+    # `Option<Option<P>>` — these stay unbound.
+    for site in ("mo().ok()", "mo().flatten()"):
         assert not bound.get(site), site
 
 
@@ -10166,3 +10161,104 @@ fn f() {
     # The `Some(v)` payload keeps `Vec<P>` spelled at the
     # scrutinee's declaration, so `v[0]` resolves `P`.
     assert bound.get("v[0].pm()") == pm.id
+
+
+def test_produced_and_binds_the_arguments_type():
+    source = """
+struct P;
+struct Q;
+impl Q { fn qm(&self) {} }
+fn mo() -> Option<Vec<P>> { None }
+fn mq() -> Option<Q> { None }
+fn f() {
+    if let Some(u) = mo().and(mq()) { u.qm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    qm = _bindings(report, "qm", "associated_function")[0]
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `o.and(arg)` yields `arg`'s own type — `u` is `Q`, so `qm`
+    # resolves on `Q`, not the receiver's `Vec<P>` element.
+    assert bound.get("u.qm()") == qm.id
+
+
+def test_produced_chain_keeps_option_head_through_transforms():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn mr() -> Result<Vec<P>, String> { Ok(todo!()) }
+fn f() {
+    mr().ok().filter(|_| true).unwrap()[0].pm();
+    if let Some(v) = mr().ok().filter(|_| true) { v[0].pm(); }
+    let q = mr().ok().filter(|_| true).unwrap();
+    q[0].pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    pm = _bindings(report, "pm", "associated_function")[0]
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `mr().ok()` heads `Option` via the combinator chain (its
+    # args spell `Vec<P>`, whose head is `Vec`), so `filter`,
+    # `unwrap` and `Some(v)` all keep `Vec<P>` -> `P`.
+    for site in (
+        "mr().ok().filter(|_| true).unwrap()[0].pm()",
+        "v[0].pm()",
+        "q[0].pm()",
+    ):
+        assert bound.get(site) == pm.id, site
+
+
+def test_renamed_struct_pattern_field_keeps_declared_option():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct W { opt: Option<Vec<P>> }
+fn f(w: W) {
+    let W { opt: renamed } = w;
+    if let Some(p) = renamed { p[0].pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    pm = _bindings(report, "pm", "associated_function")[0]
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # A renamed field binding keeps the field's declared
+    # `Option<Vec<P>>` head — `Some(p)` still reads it.
+    assert bound.get("p[0].pm()") == pm.id
+
+
+def test_produced_payload_resolves_in_the_declaring_module():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+mod m {
+    pub struct P;
+    impl P { pub fn pm(&self) {} }
+    pub fn make() -> Result<Vec<P>, String> { Ok(todo!()) }
+}
+fn f() {
+    if let Some(v) = m::make().ok() { v[0].pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    pms = _bindings(report, "pm", "associated_function")
+    assert len(pms) == 2
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `v`'s `Vec<P>` was spelled inside `mod m` — `v[0]` is
+    # `m::P`, so `pm` resolves to `m`'s impl, not the caller's.
+    assert bound.get("v[0].pm()") == pms[1].id
