@@ -3224,3 +3224,26 @@ for (const [kk, vv] of m) {
     }
     assert bound["kk.km()"] == km.id
     assert bound["vv.pm()"] == pm.id
+
+
+def test_as_assertion_declares_the_member_type():
+    # `u as P` asserts the declared type — both `const a = u as P`
+    # and `(u as P).pm()` see `P`; `satisfies` keeps the operand's
+    # own type (`unknown` stays opaque).
+    source = """
+class P { pm(): void {} }
+declare const u: unknown;
+const a = u as P;
+a.pm();
+(u as P).pm();
+const s = u satisfies unknown;
+s.pm();
+"""
+    report = build_ts_bindings(source)
+    member_pm = _member_bindings(report, "pm", "associated_function")[0]
+    bound = {
+        source[c.span.start : c.span.end]
+        for c in _calls(report)
+        if c.target == member_pm.id
+    }
+    assert bound == {"a.pm()", "(u as P).pm()"}
