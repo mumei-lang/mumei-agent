@@ -3744,13 +3744,32 @@ function f(u: A | B, w: A | B | C, s: A[] | B) {
     report = build_ts_bindings(source)
     member_am = _member_bindings(report, "am", "associated_function")[0]
     member_bm = _member_bindings(report, "bm", "associated_function")[0]
+
+    def positions(text):
+        start = -1
+        while True:
+            start = source.find(text, start + 1)
+            if start < 0:
+                return
+            yield start
+
     bound_am = {
-        source[c.span.start : c.span.end] for c in _calls(report) if c.target == member_am.id
+        c.span.start
+        for c in _calls(report)
+        if c.target == member_am.id
+        and source[c.span.start : c.span.end] == "u.am()"
     }
     bound_bm = {
-        source[c.span.start : c.span.end] for c in _calls(report) if c.target == member_bm.id
+        c.span.start
+        for c in _calls(report)
+        if c.target == member_bm.id
+        and source[c.span.start : c.span.end] in {"u.bm()", "s.bm()"}
     }
-    # `u.am()` occurs six times: if-consequence, ternary-true,
-    # in-consequence, while-body bound; else-of-&& and stays opaque.
-    assert bound_am == {"u.am()"}
-    assert bound_bm == {"u.bm()", "s.bm()"}
+    # `u.am()` occurs six times: every branch but the `else` of
+    # `a && b` binds — position comparison keeps a wrong branch
+    # binding visible instead of collapsing into one string.
+    am_positions = sorted(positions("u.am()"))
+    assert bound_am == set(am_positions[:-1])
+    assert bound_bm == set(positions("u.bm()")) | set(
+        positions("s.bm()")
+    )

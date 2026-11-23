@@ -564,8 +564,12 @@ class _TypeScriptBindings:
             self._declared_type_node(obj, obj.start_byte)
         )
         if declared is None:
-            if self.text(obj) == "Object":
+            if self.text(obj) == "Object" and not self._builtin_shadowed(
+                obj, member
+            ):
                 # `Object.entries(obj)` — `obj` is the call's argument;
+                # a local `Object` that actually declares `entries`
+                # shadows the builtin and keeps this opaque.
                 # `Record<K, V>` iterates `[K, V]` pairs like a `Map`.
                 args_node = operand.child_by_field_name("arguments")
                 arg0 = (
@@ -612,6 +616,31 @@ class _TypeScriptBindings:
         if not kids or not args:
             return None
         return member, self.text(kids[0]), list(self.children(args[0]))
+
+    def _builtin_shadowed(self, obj: Any, member: str) -> bool:
+        """A same-named user declaration shadows `Object.values` /
+        `Array.from`/`Array.isArray` — a bare `class Object` keeps the
+        builtin statics unless it actually declares `member`."""
+        record = self._lookup(
+            self.text(obj), obj.start_byte, "value"
+        )
+        if record is None or record.node is None:
+            return False
+        parent = record.node.parent
+        if (
+            parent is not None
+            and parent.type
+            in {
+                "class_declaration",
+                "abstract_class_declaration",
+                "interface_declaration",
+                "type_alias_declaration",
+            }
+            and self._resolve_member(obj, member, obj.start_byte)
+            is None
+        ):
+            return False
+        return True
 
     def _iterable_element_node(self, operand: Any | None) -> Any | None:
         """Element type node of a `for..of` operand — `P[]` peels to
@@ -3110,7 +3139,9 @@ class _TypeScriptBindings:
             self._declared_type_node(obj, obj.start_byte)
         )
         if declared is None:
-            if self.text(obj) == "Array" and member == "from":
+            if self.text(obj) == "Array" and member == "from" and (
+                not self._builtin_shadowed(obj, member)
+            ):
                 # `Array.from(iterable)` keeps the iterable's
                 # element type.
                 args_node = node.child_by_field_name("arguments")
@@ -3381,8 +3412,11 @@ class _TypeScriptBindings:
                         return None
                     self._type_node_active.add(owner.node.id)
                     try:
+                        # The pair's value resolves in the
+                        # literal's own scope — a same-named
+                        # local at the use site cannot steal it.
                         return self._declared_type_node(
-                            literal_value, position
+                            literal_value, literal_value.start_byte
                         )
                     finally:
                         self._type_node_active.discard(
@@ -3456,6 +3490,25 @@ class _TypeScriptBindings:
                     )
                 )
                 if left_node is not None:
+                    right = kids[-1] if kids else None
+                    right_node = self._unwrap_type(
+                        self._declared_type_node(
+                            right,
+                            right.start_byte if right is not None else 0,
+                        )
+                    )
+                    if right_node is not None:
+                        left_fact = self._type_fact(left_node)
+                        right_fact = self._type_fact(right_node)
+                        if (
+                            left_fact.kind == "named"
+                            and right_fact.kind == "named"
+                            and right_fact.type_id != left_fact.type_id
+                        ):
+                            # `a ?? b` may hold `b`'s type —
+                            # claiming `a`'s alone would bind
+                            # calls to the wrong declaration.
+                            return None
                     return left_node
                 right = kids[-1] if kids else None
                 return self._declared_type_node(
@@ -3505,6 +3558,26 @@ class _TypeScriptBindings:
             return kids[-1] if len(kids) > 1 else None
         return None
 
+    def _pattern_slot_index(self, pattern: Any, name: Any) -> int:
+        """Positional slot index of `name` inside an array/tuple
+        destructuring pattern — `[, v]`'s leading comma is an elided
+        slot, so `v` sits at index 1, not 0."""
+        index = 0
+        prev_slot = False
+        for child in pattern.children:
+            if child.is_named:
+                if child.id == name.id:
+                    return index
+                index += 1
+                prev_slot = True
+            elif self.text(child) == ",":
+                if not prev_slot:
+                    index += 1
+                prev_slot = False
+            else:
+                prev_slot = False
+        return -1
+
     def _pattern_slot_type_node(
         self, pattern: Any, name: Any
     ) -> Any | None:
@@ -3535,15 +3608,7 @@ class _TypeScriptBindings:
             if member is not None:
                 member_name, head, arg_nodes = member
                 if member_name == "entries":
-                    slots = self.children(pattern)
-                    index = next(
-                        (
-                            i
-                            for i, slot in enumerate(slots)
-                            if slot.id == name.id
-                        ),
-                        -1,
-                    )
+                    index = self._pattern_slot_index(pattern, name)
                     if index < 0:
                         return None
                     # `for (const [k, v] of m.entries())` — Map pairs
@@ -3574,15 +3639,7 @@ class _TypeScriptBindings:
                 ):
                     # `for (const [k, v] of new Map<K, V>())` —
                     # the pair slots take the constructor's args.
-                    slots = self.children(pattern)
-                    index = next(
-                        (
-                            i
-                            for i, slot in enumerate(slots)
-                            if slot.id == name.id
-                        ),
-                        -1,
-                    )
+                    index = self._pattern_slot_index(pattern, name)
                     arg_nodes = constructed[1]
                     return (
                         arg_nodes[index]
@@ -3605,15 +3662,7 @@ class _TypeScriptBindings:
                 elems = (
                     self.children(args[0]) if args else []
                 )
-                slots = self.children(pattern)
-                index = next(
-                    (
-                        i
-                        for i, slot in enumerate(slots)
-                        if slot.id == name.id
-                    ),
-                    -1,
-                )
+                index = self._pattern_slot_index(pattern, name)
                 return (
                     elems[index]
                     if 0 <= index < len(elems)
@@ -3676,15 +3725,7 @@ class _TypeScriptBindings:
         if declared.type == "array_type":
             return next(iter(self.children(declared)), None)
         if declared.type == "tuple_type":
-            slots = self.children(pattern)
-            index = next(
-                (
-                    i
-                    for i, slot in enumerate(slots)
-                    if slot == name or slot.id == name.id
-                ),
-                -1,
-            )
+            index = self._pattern_slot_index(pattern, name)
             elems = self.children(declared)
             return elems[index] if 0 <= index < len(elems) else None
         if declared.type == "generic_type":
@@ -4092,15 +4133,9 @@ class _TypeScriptBindings:
                 for ident, narrowed in self._condition_narrowings(
                     kids[0]
                 ):
-                    name = self.text(ident)
-                    for desc in self.walk(kids[1]):
-                        if (
-                            desc.type == "identifier"
-                            and self.text(desc) == name
-                        ):
-                            self._narrowed.setdefault(
-                                desc.id, narrowed
-                            )
+                    self._narrow_uses(
+                        kids[1], self.text(ident), ident, narrowed
+                    )
 
     def _apply_condition_narrowings(
         self,
@@ -4112,24 +4147,62 @@ class _TypeScriptBindings:
             for ident, narrowed in self._condition_narrowings(
                 condition
             ):
-                name = self.text(ident)
-                for desc in self.walk(consequence):
-                    if (
-                        desc.type == "identifier"
-                        and self.text(desc) == name
-                        and desc.id != ident.id
-                    ):
-                        self._narrowed.setdefault(desc.id, narrowed)
+                self._narrow_uses(
+                    consequence, self.text(ident), ident, narrowed
+                )
         if alternative is not None:
             for ident, narrowed in self._else_narrowings(condition):
-                name = self.text(ident)
-                for desc in self.walk(alternative):
-                    if (
-                        desc.type == "identifier"
-                        and self.text(desc) == name
-                        and desc.id != ident.id
-                    ):
-                        self._narrowed.setdefault(desc.id, narrowed)
+                self._narrow_uses(
+                    alternative, self.text(ident), ident, narrowed
+                )
+
+    def _narrow_uses(
+        self,
+        region: Any,
+        name: str,
+        ident: Any,
+        narrowed: Any,
+    ) -> None:
+        """Apply `narrowed` to `name`'s uses inside `region`.
+
+        A use that resolves to another declaration (an inner
+        `const x` shadowing the guarded binding) or that follows a
+        reassignment of `name` keeps its own type. A later, deeper
+        guard wins over an outer one for the same use."""
+        target = self._lookup(name, ident.start_byte, "value")
+        writes = [
+            child
+            for child in self.walk(region)
+            if (
+                child.type
+                in {
+                    "assignment_expression",
+                    "augmented_assignment_expression",
+                }
+                and (left := child.child_by_field_name("left"))
+                is not None
+                and left.type == "identifier"
+                and self.text(left) == name
+            )
+        ]
+        for desc in self.walk(region):
+            if (
+                desc.type != "identifier"
+                or self.text(desc) != name
+                or desc.id == ident.id
+            ):
+                continue
+            if target is not None:
+                resolved = self._lookup(
+                    name, desc.start_byte, "value"
+                )
+                if resolved is not None and resolved is not target:
+                    continue
+            if any(
+                w.start_byte < desc.start_byte for w in writes
+            ):
+                continue
+            self._narrowed[desc.id] = narrowed
 
     def _else_narrowings(self, condition: Any | None):
         """(identifier, narrowed type node) pairs for the else /
@@ -4163,6 +4236,7 @@ class _TypeScriptBindings:
                     and prop is not None
                     and self.text(obj) == "Array"
                     and self.text(prop) == "isArray"
+                    and not self._builtin_shadowed(obj, "isArray")
                 ):
                     narrowed = self._union_minus(
                         kids[0],
@@ -4822,8 +4896,10 @@ class _TypeScriptBindings:
                         return None, False, False
                     self._type_node_active.add(owner.node.id)
                     try:
+                        # The pair's value resolves in the
+                        # literal's own scope, not the use site's.
                         return self._object_type(
-                            literal_value, position
+                            literal_value, literal_value.start_byte
                         )
                     finally:
                         self._type_node_active.discard(
@@ -4942,6 +5018,25 @@ class _TypeScriptBindings:
             member = self._union_member(object_node, name, position)
         return member
 
+    def _member_return_fact(self, member: _Record):
+        """`_type_fact` of a member's declared type — a field's
+        annotation, or a method's return annotation."""
+        type_node = member.type_node
+        if type_node is None and member.node is not None:
+            signature = member.node.parent
+            if signature is not None:
+                return_node = signature.child_by_field_name(
+                    "return_type"
+                )
+                type_node = (
+                    next(iter(self.children(return_node)), None)
+                    if return_node is not None
+                    else None
+                )
+        if type_node is None:
+            return None
+        return self._type_fact(self._unwrap_type(type_node))
+
     def _union_member(
         self, object_node: Any | None, name: str, position: int
     ) -> _Record | None:
@@ -4978,6 +5073,20 @@ class _TypeScriptBindings:
                 return None
             if found is None:
                 found = member
+                found_fact = self._member_return_fact(member)
+                continue
+            other_fact = self._member_return_fact(member)
+            if (
+                found_fact is not None
+                and other_fact is not None
+                and found_fact.kind == "named"
+                and other_fact.kind == "named"
+                and found_fact.type_id != other_fact.type_id
+            ):
+                # `u.m()` where the constituents' `m` return
+                # different types — a chained `.n()` would bind
+                # the first member's declaration only.
+                return None
         return found
 
     def _resolve(
