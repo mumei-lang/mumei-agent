@@ -163,7 +163,11 @@ fallback.
 
 `verify-plan --history-log PATH [--expected-history-head HEX]` appends the
 emitted plan and reports the new head on stderr without changing the plan
-document. MCP `verify_plan` and `verify-schedule` do not write this log.
+document. `verify-schedule --history-log PATH [--expected-history-head HEX]`
+appends every plan of the schedule (initial plan, then each replan) as one
+all-or-nothing batch after the schedule completes and before the document is
+emitted; the pinned head applies to the log before the batch. MCP
+`verify_plan` and `verify_schedule` do not write this log.
 
 ### C04 environment.read enforcement at dispatch
 

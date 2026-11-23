@@ -10,7 +10,11 @@ from threading import Barrier
 import pytest
 
 from agent import plan_history_log
-from agent.plan_history_log import append_plan_history, read_plan_history
+from agent.plan_history_log import (
+    append_plan_histories,
+    append_plan_history,
+    read_plan_history,
+)
 from agent.verification_planner import (
     AdapterDescriptor,
     AdapterRegistry,
@@ -108,6 +112,92 @@ def test_append_with_matching_expected_head(tmp_path):
     assert read_plan_history(str(path), expected_head=second_digest) == tuple(
         _json_plan(plan) for plan in plans[:2]
     )
+
+
+def test_batch_append_chains_two_plans(tmp_path):
+    path = tmp_path / "history.jsonl"
+    plans = _plans()[:2]
+
+    digests = append_plan_histories(str(path), plans)
+
+    entries = [json.loads(line) for line in _lines(path)]
+    assert [entry["index"] for entry in entries] == [0, 1]
+    assert [entry["prev_digest"] for entry in entries] == [
+        None,
+        digests[0],
+    ]
+    assert [entry["digest"] for entry in entries] == list(digests)
+    assert read_plan_history(str(path)) == tuple(
+        _json_plan(plan) for plan in plans
+    )
+
+
+def test_batch_append_continues_existing_chain(tmp_path):
+    path = tmp_path / "history.jsonl"
+    plans = _plans()
+    first_digest = append_plan_history(str(path), plans[0])
+
+    digests = append_plan_histories(str(path), plans[1:])
+
+    entries = [json.loads(line) for line in _lines(path)]
+    assert [entry["index"] for entry in entries] == [0, 1, 2]
+    assert [entry["prev_digest"] for entry in entries] == [
+        None,
+        first_digest,
+        digests[0],
+    ]
+    assert read_plan_history(str(path)) == tuple(
+        _json_plan(plan) for plan in plans
+    )
+
+
+def test_batch_append_with_wrong_expected_head_writes_nothing(tmp_path):
+    path = tmp_path / "history.jsonl"
+    append_plan_history(str(path), _plans()[0])
+    original = path.read_bytes()
+
+    with pytest.raises(ValueError, match="head mismatch"):
+        append_plan_histories(
+            str(path), _plans()[1:], expected_head="0" * 64
+        )
+
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    "plans",
+    [None, [], (), "not-a-tuple"],
+)
+def test_batch_append_rejects_empty_or_non_tuple_plans(tmp_path, plans):
+    path = tmp_path / "history.jsonl"
+
+    with pytest.raises(ValueError, match="nonempty plan tuple"):
+        append_plan_histories(str(path), plans)
+
+    assert not path.exists()
+
+
+def test_batch_append_rejects_non_verification_plan(tmp_path):
+    path = tmp_path / "history.jsonl"
+
+    with pytest.raises(ValueError, match="requires a verification plan"):
+        append_plan_histories(
+            str(path), (_plans()[0], {"schema_version": "other"})
+        )
+
+    assert not path.exists()
+
+
+def test_one_plan_batch_is_byte_identical_to_single_append(tmp_path):
+    single_path = tmp_path / "single.jsonl"
+    batch_path = tmp_path / "batch.jsonl"
+    plan = _plans()[0]
+
+    digest = append_plan_history(str(single_path), plan)
+    batch_digests = append_plan_histories(str(batch_path), (plan,))
+
+    assert batch_digests == (digest,)
+    assert batch_path.read_bytes() == single_path.read_bytes()
 
 
 def test_append_with_stale_expected_head_refuses_without_changing_bytes(tmp_path):
@@ -402,6 +492,40 @@ def test_failed_partial_append_rolls_back_to_validated_prefix(tmp_path, monkeypa
     assert len(read_plan_history(str(path))) == 2
 
 
+def test_failed_partial_batch_append_rolls_back_to_validated_prefix(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "history.jsonl"
+    append_plan_history(str(path), _plan("adapter-before-batch-failure"))
+    original = path.read_bytes()
+    write = plan_history_log.os.write
+    calls = 0
+
+    def partial_then_fail(file_fd, data):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return write(file_fd, data[:7])
+        raise OSError(errno.ENOSPC, "no space")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(plan_history_log.os, "write", partial_then_fail)
+        with pytest.raises(ValueError):
+            append_plan_histories(
+                str(path),
+                (
+                    _plan("adapter-batch-failure-a"),
+                    _plan("adapter-batch-failure-b"),
+                ),
+            )
+
+    assert path.read_bytes() == original
+    append_plan_histories(
+        str(path), (_plan("adapter-after-batch-failure"),)
+    )
+    assert len(read_plan_history(str(path))) == 2
+
+
 def test_non_verification_plan_is_rejected(tmp_path):
     path = tmp_path / "history.jsonl"
 
@@ -428,6 +552,16 @@ def test_append_enforces_entry_and_log_size_caps(tmp_path, monkeypatch):
 
     assert read_plan_history(str(path), expected_head=first_digest)
     assert path.read_bytes() == original
+
+
+def test_batch_append_exceeding_log_size_writes_nothing(tmp_path, monkeypatch):
+    path = tmp_path / "history.jsonl"
+    monkeypatch.setattr(plan_history_log, "MAX_LOG_BYTES", 1)
+
+    with pytest.raises(ValueError, match="log exceeds"):
+        append_plan_histories(str(path), _plans()[:2])
+
+    assert not path.exists()
 
 
 def test_read_enforces_log_and_entry_size_caps(tmp_path, monkeypatch):
