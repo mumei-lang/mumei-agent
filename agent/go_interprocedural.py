@@ -39980,8 +39980,25 @@ class _Builder:
                                         in {
                                             "unary_expression",
                                             "identifier",
-                                            "call_expression",
                                         }
+                                        or (
+                                            mutroot.type
+                                            == "call_expression"
+                                            and not (
+                                                # A builtin `make`/
+                                                # `new` result is a
+                                                # fresh value —
+                                                # writing it can
+                                                # touch no captured
+                                                # binding. Any other
+                                                # call may return its
+                                                # own argument's
+                                                # backing.
+                                                self._literal_builtin_fresh_call(
+                                                    mutroot
+                                                )
+                                            )
+                                        )
                                     ):
                                         raise _Unsupported(
                                             "unsupported_expression",
@@ -40152,6 +40169,32 @@ class _Builder:
                 continue
             targets |= self._literal_write_target(name, ptr_alias)
         return targets
+
+    def _literal_builtin_fresh_call(self, node: Any) -> bool:
+        """Whether a call node resolves to a builtin whose result
+        is provably fresh (`make`, `new`) — its backing shares
+        memory with no enclosing binding."""
+        call = self.calls.get(self.node_key(node))
+        function_node = node.child_by_field_name("function")
+        while (
+            function_node is not None
+            and function_node.type == "parenthesized_expression"
+        ):
+            function_node = next(
+                (
+                    c
+                    for c in function_node.named_children
+                    if c.type != "comment"
+                ),
+                None,
+            )
+        return (
+            call is not None
+            and call.kind == "builtin"
+            and function_node is not None
+            and function_node.type == "identifier"
+            and function_node.text.decode("utf-8") in {"make", "new"}
+        )
 
     def _literal_write_target(
         self, node: Any, ptr_alias: dict[str, set[str]] | None = None
