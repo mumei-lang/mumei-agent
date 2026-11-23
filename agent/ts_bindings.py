@@ -3403,6 +3403,31 @@ class _TypeScriptBindings:
             )
             if inner is not None and inner.type == "array_type":
                 return next(iter(self.children(inner)), None)
+            index = node.child_by_field_name("index")
+            if index is not None and index.type == "string":
+                # `o["head"]` on `const o = {head: arr[0]}` — the
+                # same literal-pair fallback as member access.
+                object_node = node.child_by_field_name("object")
+                literal_value = self._object_literal_property(
+                    object_node,
+                    self.text(index).strip().strip("\"'"),
+                    position,
+                )
+                if literal_value is not None:
+                    owner = self._literal_owner_record(
+                        object_node, position
+                    )
+                    if owner is None:
+                        return None
+                    self._type_node_active.add(owner.node.id)
+                    try:
+                        return self._declared_type_node(
+                            literal_value, position
+                        )
+                    finally:
+                        self._type_node_active.discard(
+                            owner.node.id
+                        )
             return None
         if node.type == "array":
             # `[...arr]` — a single spread keeps the operand's

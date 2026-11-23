@@ -3607,6 +3607,7 @@ function f() {
     o.head.pm();
     o.list[0].pm();
     o.other.pm();
+    o["head"].pm();
     const { head } = o;
     head.pm();
     const s = { head: s.head };
@@ -3625,6 +3626,7 @@ function f() {
     assert bound == {
         "o.head.pm()",
         "o.list[0].pm()",
+        'o["head"].pm()',
         "head.pm()",
         "n.head.inner.pm()",
         "t.head[0].pm()",
