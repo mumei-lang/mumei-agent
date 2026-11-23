@@ -6147,6 +6147,12 @@ class _RustBindings:
                 "scoped_identifier",
                 "scoped_type_identifier",
             }:
+                # A declared `C::make(...)` — the spelled names were
+                # written in its own return annotation, not in the
+                # argument's scope.
+                member, _ = self._scoped_member(callee)
+                if member is not None and member.type_node is not None:
+                    return member.type_node.start_byte
                 # `Rc::into_inner(rc)` — the spelled payload was
                 # written in the ARGUMENT's annotation, not at this
                 # call site.
