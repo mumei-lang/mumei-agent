@@ -14890,15 +14890,13 @@ class _Builder:
                 (
                     _deps,
                     captures,
-                    captures_pointer,
+                    _captures_pointer,
                     writes,
                     writes_star,
                     _has_call,
                 ) = self._func_literal_capture(value, params, locals_)
                 captured_ids.update(captures)
                 written_ids.update(writes)
-                if captures_pointer:
-                    written_ids.update(captures)
                 written_ids.update(
                     pointer_argument_writes(value, captures)
                 )
@@ -15096,13 +15094,11 @@ class _Builder:
 
             pending_records = list(record_ids)
             seen_records: set[str] = set()
-            pointee_record = False
             while pending_records:
                 record_id = pending_records.pop()
                 if record_id in seen_records:
                     continue
                 seen_records.add(record_id)
-                pointee_record |= record_id in self.pointee_closures
                 captured_ids.update(
                     self.closure_captures.get(record_id, frozenset())
                 )
@@ -15131,15 +15127,13 @@ class _Builder:
                 transitive_writes,
                 transitive_star_write,
                 _inner_calls,
-                transitive_pointee,
+                _transitive_pointee,
             ) = self._transitive_closure_records(
                 frozenset(captured_ids)
             )
             captured_ids.update(transitive_captures)
             written_ids.update(transitive_writes)
             star_write |= transitive_star_write
-            if pointee_record or transitive_pointee:
-                written_ids.update(captured_ids)
 
             for binding_id in captured_ids | written_ids:
                 if binding_id in locals_ or binding_id in params:

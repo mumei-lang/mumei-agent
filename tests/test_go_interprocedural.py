@@ -49715,6 +49715,18 @@ def test_closures_handed_to_opaque_callees(go_types_helper):
             "\tv := y; h := func() { writeThrough(&w, v) }\n"
             "\tk.Hold(h); v = x; k.Fire(); return w\n"
             "}\n"
+            "func F_pointerread(y int64, k K) int64 {\n"
+            "\tv := y; p := &v; k.Hold(func() { _ = *p + 1 })\n"
+            "\tk.Fire(); return v\n"
+            "}\n"
+            "func F_pointerreadnamed(y int64, k K) int64 {\n"
+            "\tv := y; p := &v; h := func() { _ = *p + 1 }\n"
+            "\tk.Hold(h); k.Fire(); return v\n"
+            "}\n"
+            "func F_addressread(y int64, k K) int64 {\n"
+            "\tv := y; k.Hold(func() { _ = *(&v) + 1 })\n"
+            "\tk.Fire(); return v\n"
+            "}\n"
             "func F_replaycap(x, y int64, k K) (w int64) {\n"
             "\tx2 := x; k.Hold(func() { w = x2 }); x2 = y\n"
             "\tk.Fire(); return w\n"
@@ -49790,6 +49802,9 @@ def test_closures_handed_to_opaque_callees(go_types_helper):
         "F_getafter": frozenset({0, 1, 2}),
         "F_cbset": frozenset({0, 1, 2, 3}),
         "F_pkgvar": frozenset({0, 1}),
+        "F_pointerread": frozenset({0}),
+        "F_pointerreadnamed": frozenset({0}),
+        "F_addressread": frozenset({0}),
         "F_dowrite": frozenset({0}),
         "F_scalarfactory": frozenset({0}),
         "F_cbdo": frozenset({0}),
