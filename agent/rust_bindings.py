@@ -689,7 +689,9 @@ class _RustBindings:
         self.gaps: list[Gap] = []
         self.scopes: list[_Scope] = []
         self.records: dict[str, _Record] = {}
-        self._trait_impl_heads: dict[str, list[str]] = {}
+        self._trait_impl_heads: dict[
+            str, list[tuple[str, str | None, frozenset, "_Scope | None"]]
+        ] = {}
         self._type_impl_traits: dict[
             str, list[tuple[str, str | None, bool, frozenset[str]]]
         ] = {}
@@ -1536,7 +1538,14 @@ class _RustBindings:
                             if impl_head_name is not None:
                                 self._trait_impl_heads.setdefault(
                                     member_trait, []
-                                ).append(impl_head_name)
+                                ).append(
+                                    (
+                                        impl_head_name,
+                                        member_args,
+                                        impl_type_params,
+                                        scope,
+                                    )
+                                )
                 if body is not None:
                     self._scan_associated_container(
                         body,
@@ -2779,6 +2788,66 @@ class _RustBindings:
             is None
         )
 
+    def _impl_head_name(self, impl: "_Record") -> "str | None":
+        """The impl TARGET's head name, normalized like
+        `_trait_impl_heads`: `[`/`[T;N]` targets key as `[slice]`,
+        anything else keeps its last `::` segment."""
+        st = impl.self_type_node
+        if st is None:
+            return None
+        target = re.sub(
+            r"^&\s*(?:'\w+\s*)?(?:mut\s+)?", "", self.text(st).strip()
+        )
+        if target.startswith("["):
+            return "[slice]"
+        head = re.match(r"[A-Za-z_][\w:]*", target)
+        return (
+            head.group(0).rsplit("::", 1)[-1] if head is not None else None
+        )
+
+    def _impl_args_cover(
+        self,
+        impl_args: "str | None",
+        impl_params: "frozenset[str] | None",
+        impl_scope: "_Scope | None",
+        recv_args: "str | None",
+        position: int,
+    ) -> bool:
+        """`impl Rem for ChunksExact<R>` does not cover a
+        `ChunksExact<P>` receiver — the impl's concrete args must
+        match the receiver's spelled args positionally (generic
+        impl params are wildcards). Lifetimes do not participate."""
+        if recv_args is None or impl_args is None:
+            return True
+
+        def _strip_borrow(arg: str) -> str:
+            t = re.sub(
+                r"^&\s*(?:'\w+\s*)?(?:mut\s+)?",
+                "",
+                arg.strip(),
+            )
+            if t.startswith("[") and t.endswith("]") and ";" not in t:
+                t = t[1:-1].strip()
+            return t
+
+        norm_recv = ", ".join(
+            _strip_borrow(a)
+            for a in self._type_arg_list(recv_args)
+            if not a.strip().startswith("'")
+        )
+        norm_impl = ", ".join(
+            _strip_borrow(a)
+            for a in self._type_arg_list(impl_args)
+            if not a.strip().startswith("'")
+        )
+        return self._type_args_match(
+            norm_impl,
+            norm_recv,
+            impl_params or frozenset(),
+            pattern_scope=impl_scope,
+            position=position,
+        )
+
     def _visible_trait_method(
         self,
         name: str,
@@ -2948,7 +3017,10 @@ class _RustBindings:
                     # A trait-declared member applies when the trait
                     # is implemented for a type whose head matches
                     # the receiver's — `impl Each for Vec<P>` covers
-                    # `v` but not `v.iter()`'s `Iter`.
+                    # `v` but not `v.iter()`'s `Iter`. Concrete impl
+                    # args must match the receiver's spelled args —
+                    # `impl Rem for ChunksExact<R>` cannot cover a
+                    # `ChunksExact<P>` receiver.
                     if container_id is not None and any(
                         trait_id == record.member_trait
                         for trait_id, _, _, _ in self._type_impl_traits.get(
@@ -2956,20 +3028,28 @@ class _RustBindings:
                         )
                     ):
                         pass
-                    elif not receiver_heads.intersection(
-                        self._trait_impl_heads.get(
+                    elif not any(
+                        head in receiver_heads
+                        and self._impl_args_cover(
+                            args, params, home, recv_args, position
+                        )
+                        for head, args, params, home in self._trait_impl_heads.get(
                             record.member_trait, ()
                         )
                     ):
                         continue
                 elif record.member_of in {None, "<unresolved>"}:
                     # An impl on an undeclared target (`impl T for
-                    # [P]`/`for Vec<P>`) — compare its spelled head
-                    # against the receiver's.
-                    if not receiver_heads.intersection(
-                        self._trait_impl_heads.get(
-                            record.member_trait, ()
-                        )
+                    # [P]`/`for Vec<P>`) — its head and concrete args
+                    # must both cover the receiver.
+                    if self._impl_head_name(
+                        record
+                    ) not in receiver_heads or not self._impl_args_cover(
+                        record.member_impl_args,
+                        record.member_impl_type_params,
+                        record.home_scope,
+                        recv_args,
+                        position,
                     ):
                         continue
                 elif record.member_of == container_id:
