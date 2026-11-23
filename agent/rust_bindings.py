@@ -53,6 +53,15 @@ _ITER_ELEMENT_METHODS = frozenset(
 )
 # Iterator adaptors that keep the same element type — `map`/`flat_map`
 # change it through a closure and stay opaque.
+# Methods whose callback receives the iterated element — the
+# receiver's element types the closure's first unannotated
+# parameter (`v.iter().for_each(|p| p.pm())` binds `p: &P`).
+_CLOSURE_ELEMENT_METHODS = frozenset(
+    {"map", "filter", "for_each", "inspect", "find", "any",
+     "all", "position", "rposition", "filter_map", "flat_map",
+     "map_while", "take_while", "skip_while", "find_map",
+     "partition"}
+)
 _ITER_PRESERVING_METHODS = frozenset(
     {"rev", "skip", "take", "filter", "step_by", "chain",
      "cloned", "copied", "peekable", "inspect", "fuse", "by_ref",
@@ -624,6 +633,10 @@ class _RustBindings:
         self.call_owner = ""
         self.module_depth = 0
         self.in_extern = False
+        # (TypeFact, spelled args) a `for_each`-family call hands to
+        # the next closure argument — types its first bare
+        # parameter from the receiver's iterated element.
+        self.closure_element: Any = None
         self._function_records: dict[str, _Record] = {}
         self._receiver_memo: dict[tuple, tuple] = {}
         self._spelling_memo: dict[tuple, tuple] = {}
@@ -10613,8 +10626,38 @@ class _RustBindings:
         old_owner = self.call_owner
         self.call_owner = ""
         if params is not None:
+            pending = self.closure_element
+            self.closure_element = None
+            first = True
             for parameter in self._children(params):
-                self._parameter(parameter, closure_scope, self.span(body))
+                ids = self._parameter(parameter, closure_scope, self.span(body))
+                if pending is not None and first and ids:
+                    # `for_each(|p| ...)` — an unannotated first
+                    # parameter takes the iterated element.
+                    annotation = (
+                        parameter.child_by_field_name("type")
+                        if parameter.type == "parameter"
+                        else None
+                    )
+                    if annotation is None:
+                        fact, spelled = pending
+                        idset = set(ids)
+                        for recs in closure_scope.bindings.values():
+                            for record in recs:
+                                if record.binding.id in idset:
+                                    record.type_fact = fact
+                                    record.type_args = spelled
+                                    for i, bound in enumerate(
+                                        self.bindings
+                                    ):
+                                        if bound.id in idset:
+                                            self.bindings[i] = replace(
+                                                bound, type=fact
+                                            )
+                                            record.binding = (
+                                                self.bindings[i]
+                                            )
+                first = False
         self._expr(body)
         self.call_owner = old_owner
         self.scopes.pop()
@@ -10834,8 +10877,35 @@ class _RustBindings:
         elif callee is not None:
             self._expr(callee)
         if arguments_node is not None:
+            closure_element = None
+            if callee is not None and callee.type == "field_expression":
+                method_field = callee.child_by_field_name("field")
+                if (
+                    method_field is not None
+                    and self._normalize_identifier(self.text(method_field))
+                    in _CLOSURE_ELEMENT_METHODS
+                    and any(
+                        argument.type == "closure_expression"
+                        for argument in arguments
+                    )
+                ):
+                    # `v.iter().for_each(|p| ...)` — the receiver's
+                    # iterated element types the closure's first
+                    # bare parameter.
+                    closure_element = self._for_element(
+                        callee.child_by_field_name("value")
+                    )
             for argument in arguments:
-                self._expr(argument)
+                if (
+                    closure_element is not None
+                    and argument.type == "closure_expression"
+                ):
+                    old_pending = self.closure_element
+                    self.closure_element = closure_element
+                    self._expr(argument)
+                    self.closure_element = old_pending
+                else:
+                    self._expr(argument)
         self.calls.append(Call(span, args, self.call_owner, target, kind))
 
     def _method_call(self, node: Any) -> None:
