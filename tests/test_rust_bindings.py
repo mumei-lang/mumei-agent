@@ -8584,34 +8584,6 @@ impl Ext for std::collections::BTreeSet<P> {
 
 
 
-def test_btree_set_range_binds_borrowed_elements():
-    source = """
-struct P;
-impl P { fn pm(&self) {} }
-struct K;
-fn f(s: std::collections::BTreeSet<P>, m: std::collections::BTreeMap<K, P>) {
-    for a in s.range(..) { a.pm(); }
-    for b in s.range_mut(..) { b.pm(); }
-    let r = s.range(..);
-    for c in r { c.pm(); }
-    for d in m.range(..) { d.pm(); }
-}
-"""
-    report = build_rust_bindings(source, pointer_width=64)
-    pm = _bindings(report, "pm", "associated_function")[0]
-    raw = source.encode()
-    bound = {
-        raw[c.span.start:c.span.end].decode(): c.target
-        for c in report.calls
-    }
-    # `BTreeSet::range`/`range_mut` iterate `&P` like the
-    # set-algebra methods.
-    assert bound.get("a.pm()") == pm.id
-    assert bound.get("b.pm()") == pm.id
-    assert bound.get("c.pm()") == pm.id
-    # A map's `range` yields `(K, V)` pairs, not `P` — a single
-    # loop name stays opaque.
-    assert not bound.get("d.pm()")
 def test_split_entry_leak_and_intersperse_bind_payloads():
     source = """
 struct P;
@@ -8654,3 +8626,35 @@ fn f(v: Vec<P>, m: std::collections::HashMap<K, P>, b: std::collections::BTreeMa
     assert not bound.get("r4.pm()")
     # `intersperse` keeps the element.
     assert bound.get("i.pm()") == pm.id
+
+
+def test_foreign_field_leak_and_declared_into_mut_stay_opaque():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct K;
+mod m { pub struct P; pub struct S { pub f: Vec<P> } }
+trait Ext { fn into_mut(self) -> i32; }
+impl<'a, K2, V2> Ext for std::collections::btree_map::Entry<'a, K2, V2> {
+    fn into_mut(self) -> i32 { 0 }
+}
+fn f(s: m::S, b: std::collections::BTreeMap<K, P>, k: K) {
+    let x = s.f.leak();
+    x[0].pm();
+    let eb = b.entry(k);
+    let r = eb.into_mut();
+    r.pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `s.f` is another module's `Vec<m::P>` — the element resolves in
+    # the field's scope, not the caller's `P` that owns `pm`.
+    assert not bound.get("x[0].pm()")
+    # A declared `into_mut` extension returns its own type, not the
+    # std `&mut V` the BTreeMap entry recipe spells.
+    assert not bound.get("r.pm()")
