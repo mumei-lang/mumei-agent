@@ -21296,6 +21296,35 @@ def test_transitive_captured_closures_preserve_current_deps_and_writes(
         ), name
 
 
+def test_transitive_struct_field_collection_traversal_is_bounded(
+    go_types_helper,
+):
+    depth = 24
+    type_declarations = [
+        f"type T{depth} struct {{ F func() int64 }}"
+    ]
+    type_declarations.extend(
+        (
+            f"type T{level} struct {{ F func() int64; "
+            f"A []T{level + 1}; B []T{level + 1} }}"
+            if level == 0
+            else f"type T{level} struct {{ "
+            f"A []T{level + 1}; B []T{level + 1} }}"
+        )
+        for level in reversed(range(depth))
+    )
+    declarations = (
+        "\n".join(type_declarations)
+        + "\n"
+        + f"func F(x int64) int64 {{ var o T0; "
+        + "o.F = func() int64 { return x }; "
+        + "g := func() int64 { return o.F() }; return g() }"
+    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
 def test_chained_closure_values_resolve_shared_captures_once(
     go_types_helper,
 ):

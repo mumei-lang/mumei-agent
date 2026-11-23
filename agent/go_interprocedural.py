@@ -14743,8 +14743,8 @@ class _Builder:
     def _transitive_struct_collection_element_field_record_ids(
         self,
         fact: Any,
+        visited_structs: set[str],
         anchor: Any | None = None,
-        seen: frozenset[str] = frozenset(),
     ) -> tuple[str, ...]:
         visited: set[int] = set()
 
@@ -14764,7 +14764,7 @@ class _Builder:
             if struct_fact is None:
                 return ()
             return self._transitive_struct_field_closure_record_ids(
-                struct_fact, anchor, seen
+                struct_fact, visited_structs, anchor
             )
 
         return collect(fact)
@@ -14772,8 +14772,8 @@ class _Builder:
     def _transitive_struct_field_closure_record_ids(
         self,
         fact: Any,
+        visited_structs: set[str],
         anchor: Any | None = None,
-        seen: frozenset[str] = frozenset(),
     ) -> tuple[str, ...]:
         struct_fact = self._struct_value_fact(fact)
         if struct_fact is None:
@@ -14781,10 +14781,10 @@ class _Builder:
         marker = struct_fact.type_id or (
             getattr(anchor, "id", "") if anchor is not None else ""
         )
-        if marker and marker in seen:
+        if marker and marker in visited_structs:
             return ()
         if marker:
-            seen = seen | {marker}
+            visited_structs.add(marker)
         record_ids: list[str] = []
         for member in self._struct_fields_for_fact(struct_fact, anchor):
             member_type = getattr(member, "type", None)
@@ -14799,7 +14799,7 @@ class _Builder:
             if nested is not None:
                 record_ids.extend(
                     self._transitive_struct_field_closure_record_ids(
-                        nested, member, seen
+                        nested, visited_structs, member
                     )
                 )
             elif member_type is not None and member_type.kind in {
@@ -14808,7 +14808,7 @@ class _Builder:
             }:
                 collection_records = (
                     self._transitive_struct_collection_element_field_record_ids(
-                        member_type, member, seen
+                        member_type, visited_structs, member
                     )
                 )
                 _, supported_path = (
@@ -14824,7 +14824,7 @@ class _Builder:
             }:
                 if (
                     self._transitive_struct_collection_element_field_record_ids(
-                        member_type, member, seen
+                        member_type, visited_structs, member
                     )
                 ):
                     raise _Unsupported("unsupported_expression")
@@ -14847,6 +14847,7 @@ class _Builder:
         pointee = False
         pending = list(captured)
         seen: set[str] = set()
+        visited_structs: set[str] = set()
         while pending:
             binding_id = pending.pop()
             if binding_id in seen:
@@ -14875,13 +14876,13 @@ class _Builder:
             if fact.kind == "struct":
                 pending.extend(
                     self._transitive_struct_field_closure_record_ids(
-                        fact, binding
+                        fact, visited_structs, binding
                     )
                 )
             elif fact.kind in {"slice", "array"}:
                 record_ids = (
                     self._transitive_struct_collection_element_field_record_ids(
-                        fact, binding
+                        fact, visited_structs, binding
                     )
                 )
                 _, supported_path = (
@@ -14892,7 +14893,7 @@ class _Builder:
                 pending.extend(record_ids)
             elif fact.kind in {"map", "chan", "pointer"}:
                 if self._transitive_struct_collection_element_field_record_ids(
-                    fact, binding
+                    fact, visited_structs, binding
                 ):
                     raise _Unsupported("unsupported_expression")
         return (
