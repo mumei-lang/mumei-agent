@@ -621,17 +621,50 @@ def test_member_access_references_agree_and_type_positions_report_missing():
         item["name"] for item in comparison["references"]
         if item["status"] == "agree"
     }
-    missing = {
-        item["name"] for item in comparison["references"]
+    missing_sites = [
+        (item["name"], item["span"]["start"])
+        for item in comparison["references"]
         if item["status"] == "lexical_missing"
-    }
+    ]
     assert agreed >= {
         "w", "p", "self", "inner", "value", "field", "read", "new", "pm",
         "vec", "p2", "r", "q", "m", "g",
     }
-    assert missing == {"P", "V", "W", "inner", "value"}
+    # Name sets alone cannot tell a missed `w.inner` read from the
+    # field labels that are legitimately unreferenced — pin the
+    # missing sites by (name, byte offset) instead.
+    assert missing_sites == [
+        ("V", 33),
+        ("P", 44),
+        ("V", 66),
+        ("P", 72),
+        ("value", 88),
+        ("P", 131),
+        ("P", 179),
+        ("W", 190),
+        ("P", 218),
+        ("P", 272),
+        ("inner", 345),
+        ("P", 352),
+        ("P", 475),
+    ]
     assert all(
         item["status"] != "disagree"
         for item in comparison["references"]
     )
     assert comparison["summary"]["lexical_unresolved"] == 0
+
+    # rust-analyzer 1.100 does not emit a reference for `g.pm()`
+    # inside the `if let` arm, so the call is outside the
+    # comparison's coverage — assert the lexical side resolves it
+    # directly instead.
+    raw = source
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    pm = next(
+        b for b in report.bindings
+        if b.name == "pm" and b.kind == "associated_function"
+    )
+    assert bound.get("g.pm()") == pm.id
