@@ -25,6 +25,17 @@ only simple identifier targets of recognized assignment statements count;
 selectors, indexes, the blank identifier, scoping/shadowing and mutation
 through opaque calls (including `&x` arguments) are not modelled, so the
 sets describe declared textual assignment, not memory truth.
+
+`unused_assignments` preserves its name-wide unread-name hints and adds
+backward fixed-point liveness for individual stores on the explicit CFG.
+This remains a name-based hint, not a defect verdict: fields, elements,
+aliasing and full lexical binding identity are not modelled. Liveness
+additions require a store span inside and after the sole declaration's
+scope, and exclude unreachable, multiply declared, closure-mentioned,
+address-taken and otherwise unreliable names. Bare returns and grouped
+var/const declarations read all tracked names conservatively; assignment-form
+range headers (``for x = range``) do not kill targets because their loops may
+execute zero times.
 """
 
 from __future__ import annotations
@@ -32,7 +43,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from agent import tree_sitter_extract
 
@@ -687,6 +698,48 @@ def _value_read_names(
     return frozenset(names)
 
 
+def _liveness_reads(
+    statement: tree_sitter_extract.Statement,
+    tracked_names: frozenset[str],
+) -> frozenset[str]:
+    reads = _value_read_names(statement)
+    if statement.kind == "return" and not statement.values:
+        reads |= tracked_names
+    if statement.kind in {"var", "const"} and not statement.targets:
+        reads |= tracked_names
+    if statement.kind == "assign" and statement.operator not in {"", "="}:
+        reads |= frozenset(
+            target
+            for target in statement.targets
+            if _IDENTIFIER.fullmatch(target)
+        )
+    if statement.kind == "terminate":
+        reads |= _value_read_names(replace(statement, kind="expr"))
+    if statement.kind in {"case", "range"}:
+        targets = tuple(
+            target
+            for target in statement.targets
+            if not _IDENTIFIER.fullmatch(target)
+        )
+        reads |= _value_read_names(
+            replace(
+                statement,
+                kind="assign",
+                targets=targets,
+                values=(),
+            )
+        )
+    return reads
+
+
+def _liveness_kills(
+    statement: tree_sitter_extract.Statement,
+) -> frozenset[str]:
+    if statement.kind == "range" and statement.operator != ":=":
+        return frozenset()
+    return _assigned_names(statement) | _declared_names(statement)
+
+
 def unassigned_uses(
     body: str,
     graph: ControlFlowGraph,
@@ -772,11 +825,14 @@ def unassigned_uses(
 
 @dataclass(frozen=True)
 class UnusedAssignment:
-    """A name textually assigned at a node but never read anywhere.
+    """A name assigned at a node whose store is not observed by a later read.
 
-    A heuristic hint, not a defect verdict: "read" uses a conservative
-    identifier scan, so a name mentioned inside a function literal or
-    only through address-taking still counts as used here.
+    A heuristic hint, not a defect verdict. It preserves the legacy
+    name-wide hint for identifiers never textually read, and adds
+    store-level CFG-liveness hints only for reachable stores that fall
+    within and after their sole declaration's scope. The liveness addition
+    excludes names that occur in function literals, are address-taken, or
+    are otherwise unreliable.
     """
 
     node_id: int
@@ -787,15 +843,26 @@ class UnusedAssignment:
 def unused_assignments(
     body: str, graph: ControlFlowGraph
 ) -> tuple[UnusedAssignment, ...]:
-    """Recognized assignment targets that are never textually read.
+    """Return name-wide unread targets and conservatively dead stores.
 
-    Reports `name` at `node` when `name` is a simple identifier target of
-    a recognized assignment statement and appears in no use position
-    anywhere in the body — the dead-store hint at name granularity. It
-    does not model fields, elements, calls, shadowing or closures, does
-    not check which assignment is dead when several write the same name,
-    and counts reads in unreachable code like any other. A finding is a
-    hint for the host's own analysis, not a defect verdict.
+    The legacy name-granularity hint reports every recognized simple
+    identifier target that has no textual use anywhere in the body,
+    including reads in unreachable code and function literals. For names
+    that are read, a backward fixed-point analysis over the explicit CFG
+    additionally reports a store when its name is not live out of that
+    node. These liveness additions require a reachable store and exactly
+    one declaration in the body (including short declarations, range and
+    select bindings, `var`/`const` specs, type-switch bindings and
+    function-literal parameters); the store's span must lie within and
+    start at or after that declaration's scope. They exclude names
+    mentioned in any function literal, address-taken names and the
+    extractor's unreliable names. Bare returns and grouped var/const
+    declarations read all tracked names conservatively. The analysis is
+    name-based: it does not model fields, elements, aliasing or full
+    lexical binding identity. Assignment-form range headers
+    (``for x = range``) do not kill targets because their loops may
+    execute zero times.
+    Every result is a hint for the host's analysis, not a defect verdict.
     """
     if hashlib.sha256(body.encode("utf-8")).hexdigest() != graph.source_sha256:
         raise ValueError("body does not match the graph source digest")
@@ -811,19 +878,281 @@ def unused_assignments(
     by_span = {
         (stmt.start, stmt.start + len(stmt.text)): stmt for stmt in walked
     }
+    declaration_sites, function_literal_names, syntax_address_taken = (
+        _body_declaration_scopes_and_function_literal_names(body)
+    )
+    unreliable = (
+        tree.closure_assigned | tree.address_taken | syntax_address_taken
+    )
+    statements_by_node = {
+        node.node_id: by_span.get((node.span.start, node.span.end))
+        for node in graph.nodes
+        if node.span is not None
+    }
+    tracked_names = frozenset(used) | frozenset(
+        name
+        for statement in walked
+        for name in _assigned_names(statement)
+    )
+    reads_by_node: dict[int, frozenset[str]] = {}
+    kills_by_node: dict[int, frozenset[str]] = {}
+    for node_id, statement in statements_by_node.items():
+        if statement is None:
+            reads_by_node[node_id] = tracked_names
+        else:
+            reads_by_node[node_id] = _liveness_reads(statement, tracked_names)
+            kills_by_node[node_id] = _liveness_kills(statement)
+    read_anywhere = frozenset().union(*reads_by_node.values())
+    successors: dict[int, list[int]] = defaultdict(list)
+    for edge in graph.edges:
+        successors[edge.source].append(edge.target)
+    live_in = {node.node_id: frozenset() for node in graph.nodes}
+    live_out = {node.node_id: frozenset() for node in graph.nodes}
+    while True:
+        changed = False
+        for node in reversed(graph.nodes):
+            outgoing = frozenset().union(
+                *(live_in[successor] for successor in successors[node.node_id])
+            )
+            incoming = reads_by_node.get(node.node_id, frozenset()) | (
+                outgoing - kills_by_node.get(node.node_id, frozenset())
+            )
+            if outgoing != live_out[node.node_id] or incoming != live_in[node.node_id]:
+                live_out[node.node_id] = outgoing
+                live_in[node.node_id] = incoming
+                changed = True
+        if not changed:
+            break
+
+    reachable = graph.reachable()
     findings: list[UnusedAssignment] = []
     for node in graph.nodes:
         if node.span is None:
             continue
-        statement = by_span.get((node.span.start, node.span.end))
+        statement = statements_by_node.get(node.node_id)
         if statement is None:
             continue
         for name in sorted(_assigned_names(statement)):
-            if name not in used:
-                findings.append(
-                    UnusedAssignment(node.node_id, name, node.span)
+            if name not in used or (
+                node.node_id in reachable
+                and name in read_anywhere
+                and len(declaration_sites.get(name, ())) == 1
+                and any(
+                    scope.start <= node.span.start
+                    and node.span.end <= scope.end
+                    for scope in declaration_sites[name][0].spans
                 )
+                and name not in function_literal_names
+                and name not in unreliable
+                and name not in live_out[node.node_id]
+            ):
+                findings.append(UnusedAssignment(node.node_id, name, node.span))
     return tuple(findings)
+
+
+@dataclass(frozen=True)
+class _DeclarationSite:
+    spans: tuple[SourceSpan, ...]
+
+
+def _body_declaration_scopes_and_function_literal_names(
+    body: str,
+) -> tuple[
+    dict[str, tuple[_DeclarationSite, ...]],
+    frozenset[str],
+    frozenset[str],
+]:
+    prefix = tree_sitter_extract._GO_BODY_PREFIX
+    wrapped = f"{prefix}{body}\n}}\n"
+    syntax_tree, source_bytes = tree_sitter_extract.parse(wrapped, "go")
+    if syntax_tree is None or source_bytes is None or syntax_tree.root_node.has_error:
+        return {}, frozenset(), frozenset()
+
+    offsets = tree_sitter_extract._char_offsets(source_bytes)
+    body_start = len(prefix)
+    declarations: dict[str, list[_DeclarationSite]] = defaultdict(list)
+    function_literal_names: set[str] = set()
+    address_taken_names: set[str] = set()
+
+    def body_offset(byte_offset: int) -> int:
+        return max(0, min(len(body), offsets[byte_offset] - body_start))
+
+    def add_declaration(
+        name_node,
+        declaration_start: int,
+        scope_ends: tuple[int, ...],
+    ) -> None:
+        if name_node.type != "identifier":
+            return
+        name = source_bytes[name_node.start_byte : name_node.end_byte].decode("utf-8")
+        if name != "_":
+            start = body_offset(declaration_start)
+            declarations[name].append(
+                _DeclarationSite(
+                    tuple(
+                        SourceSpan(start, body_offset(scope_end))
+                        for scope_end in scope_ends
+                    )
+                )
+            )
+
+    def lexical_scope(node):
+        current = node.parent
+        while current is not None:
+            if current.type in {
+                "block",
+                "communication_case",
+                "default_case",
+                "expression_case",
+                "type_case",
+            }:
+                return current
+            current = current.parent
+        return None
+
+    def short_declaration_scope(node):
+        current = node.parent
+        while current is not None:
+            if current.type in {
+                "block",
+                "communication_case",
+                "default_case",
+                "expression_case",
+                "type_case",
+            }:
+                return current
+            if current.type in {
+                "expression_switch_statement",
+                "if_statement",
+                "type_switch_statement",
+            }:
+                return current
+            if current.type == "for_clause":
+                return current.parent
+            current = current.parent
+        return None
+
+    def declaration_scope(node, scope) -> tuple[int, ...]:
+        if scope is None:
+            return (node.end_byte,)
+        return (scope.end_byte,)
+
+    stack = [syntax_tree.root_node]
+    while stack:
+        node = stack.pop()
+        if node.type == "short_var_declaration":
+            left = node.child_by_field_name("left")
+            if left is not None:
+                scope = short_declaration_scope(node)
+                for target in left.named_children:
+                    add_declaration(
+                        target,
+                        node.start_byte,
+                        declaration_scope(node, scope),
+                    )
+        elif node.type == "range_clause":
+            if any(child.type == ":=" for child in node.children):
+                left = node.child_by_field_name("left")
+                if left is not None:
+                    owner = node.parent
+                    if owner is None or owner.type != "for_statement":
+                        owner = node
+                    for target in left.named_children:
+                        add_declaration(
+                            target,
+                            owner.start_byte,
+                            (owner.end_byte,),
+                        )
+        elif node.type == "receive_statement":
+            if any(child.type == ":=" for child in node.children):
+                left = node.child_by_field_name("left")
+                if left is not None:
+                    owner = node.parent
+                    if owner is None or owner.type != "communication_case":
+                        owner = node
+                    for target in left.named_children:
+                        add_declaration(
+                            target,
+                            owner.start_byte,
+                            (owner.end_byte,),
+                        )
+        elif node.type in {"var_spec", "const_spec"}:
+            declaration = node.parent
+            if declaration is None or declaration.type not in {
+                "const_declaration",
+                "var_declaration",
+            }:
+                declaration = node
+            scope = lexical_scope(node)
+            for name_node in node.children_by_field_name("name"):
+                add_declaration(
+                    name_node,
+                    declaration.start_byte,
+                    declaration_scope(node, scope),
+                )
+        elif node.type == "type_switch_statement":
+            alias = node.child_by_field_name("alias")
+            if alias is not None:
+                case_ends = tuple(
+                    child.end_byte
+                    for child in node.named_children
+                    if child.type in {"default_case", "type_case"}
+                )
+                for name_node in alias.named_children:
+                    add_declaration(
+                        name_node,
+                        alias.start_byte,
+                        case_ends,
+                    )
+        elif node.type == "unary_expression":
+            operator = node.child_by_field_name("operator")
+            operand = node.child_by_field_name("operand")
+            if operator is not None and operator.text == b"&":
+                while operand is not None and operand.type == "parenthesized_expression":
+                    operands = [
+                        child
+                        for child in operand.named_children
+                        if child.type != "comment"
+                    ]
+                    operand = operands[0] if len(operands) == 1 else None
+                if operand is not None and operand.type == "identifier":
+                    address_taken_names.add(
+                        source_bytes[
+                            operand.start_byte : operand.end_byte
+                        ].decode("utf-8")
+                    )
+        elif node.type == "func_literal":
+            literal_stack = [node]
+            while literal_stack:
+                literal_node = literal_stack.pop()
+                if literal_node.type == "identifier":
+                    function_literal_names.add(
+                        source_bytes[
+                            literal_node.start_byte : literal_node.end_byte
+                        ].decode("utf-8")
+                    )
+                literal_stack.extend(literal_node.named_children)
+
+            parameters = node.child_by_field_name("parameters")
+            if parameters is not None:
+                for parameter in parameters.named_children:
+                    if parameter.type in {
+                        "parameter_declaration",
+                        "variadic_parameter_declaration",
+                    }:
+                        for name_node in parameter.children_by_field_name("name"):
+                            add_declaration(
+                                name_node,
+                                node.start_byte,
+                                (node.end_byte,),
+                            )
+        stack.extend(node.named_children)
+
+    return (
+        {name: tuple(sites) for name, sites in declarations.items()},
+        frozenset(function_literal_names),
+        frozenset(address_taken_names),
+    )
 
 
 @dataclass(frozen=True)

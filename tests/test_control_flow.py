@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 import pytest
 
@@ -577,7 +577,8 @@ def test_unused_assignments_flag_unused_range_targets():
 
 def test_unused_assignments_inc_dec_count_as_read():
     cfg, result = unuses("x := 1\nx++")
-    assert result == ()
+    inc = nodes(cfg, "inc")[0]
+    assert result == (control_flow.UnusedAssignment(inc.node_id, "x", inc.span),)
 
 
 def test_unused_assignments_self_rhs_counts_as_read():
@@ -592,7 +593,8 @@ def test_unused_assignments_rhs_read_clears_name():
 
 def test_unused_assignments_count_unreachable_reads():
     cfg, result = unuses("x := 1\nreturn 0\nprint(x)")
-    assert result == ()
+    define = nodes(cfg, "define")[0]
+    assert result == (control_flow.UnusedAssignment(define.node_id, "x", define.span),)
 
 
 def test_unused_assignments_ignore_blank_and_selector_targets():
@@ -609,6 +611,267 @@ def test_unused_assignments_flag_every_writer_of_unread_name():
     cfg, result = unuses("x := 1\nx = 2")
     assert [use.name for use in result] == ["x", "x"]
     assert len({use.node_id for use in result}) == 2
+
+
+def test_unused_assignments_report_overwritten_store_before_later_read():
+    cfg, result = unuses("x := 1\nx = 2\n_ = x")
+    define = nodes(cfg, "define")[0]
+    assert result == (control_flow.UnusedAssignment(define.node_id, "x", define.span),)
+
+
+def test_unused_assignments_report_final_store_after_earlier_read():
+    cfg, result = unuses("x := 1\n_ = x\nx = 2")
+    final_store = nodes(cfg, "assign")[-1]
+    assert result == (
+        control_flow.UnusedAssignment(final_store.node_id, "x", final_store.span),
+    )
+
+
+def test_unused_assignments_compound_assignment_reads_target_for_liveness():
+    body = "x := 1\nx += 2\nreturn x\n"
+    _, result = unuses(body)
+    assert result == ()
+
+
+def test_unused_assignments_terminate_call_reads_arguments_for_liveness():
+    body = "x := 1\n_ = x\nx = 2\npanic(x)\n"
+    _, result = unuses(body)
+    assert result == ()
+
+
+def test_unused_assignments_select_receive_target_indices_are_reads():
+    body = "i := 0\n_ = i\ni = 1\nselect {\ncase a[i] = <-ch:\ndefault:\n}\n"
+    _, result = unuses(body)
+    assert result == ()
+
+
+def test_unused_assignments_bare_return_reads_all_tracked_names():
+    body = "r, n := f()\n_ = n\n_ = r\nr = 2\nreturn\n"
+    _, result = unuses(body)
+    assert result == ()
+
+
+def test_unused_assignments_grouped_var_reads_all_tracked_names():
+    body = "x := 1\n_ = x\nx = 2\nvar (\ny = x\n)\nreturn y\n"
+    _, result = unuses(body)
+    assert result == ()
+
+
+def test_unused_assignments_range_header_does_not_kill_liveness():
+    body = "x := 0\nfor x = range xs {\n}\nreturn x\n"
+    _, result = unuses(body)
+    assert result == ()
+
+
+def test_unused_assignments_bare_var_declaration_kills_liveness():
+    body = "for i := 0; i < 2; i++ {\nvar x int\nprintln(x)\nx = 1\n}\n"
+    _, result = unuses(body)
+    assert [body[finding.span.start : finding.span.end] for finding in result] == [
+        "x = 1"
+    ]
+
+
+def test_unused_assignments_parenthesized_address_taken_name_is_excluded():
+    body = "x := 1\n_ = x\np := &(x)\nx = 2\nreturn *p\n"
+    _, result = unuses(body)
+    assert result == ()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "x := 1; switch { case x > 0: }; x = 2; _ = x",
+        "x := 1; switch x { case 1: }; x = 2; _ = x",
+        "x := 1; select { case ch <- x: }; x = 2; _ = x",
+        "x := 1; for x < 3 { break }; x = 2; _ = x",
+        "x := 1; for range x { break }; x = 2; _ = x",
+        "x := 1; if c { return x }; x = 2; _ = x",
+    ],
+    ids=(
+        "switch-without-tag",
+        "switch-tag",
+        "select-send",
+        "for-condition",
+        "range-expression",
+        "if-return",
+    ),
+)
+def test_unused_assignments_keep_structured_reads_live(body):
+    cfg, result = unuses(body)
+    first_store = nodes(cfg, "define")[0]
+    assert not any(
+        finding.node_id == first_store.node_id and finding.name == "x"
+        for finding in result
+    )
+
+
+def test_unused_assignments_treat_unmapped_span_node_as_reading_every_name():
+    body = "x := 1\n_ = x\nif c {}\nx = 2\nreturn 0"
+    cfg = graph(body)
+    assert {
+        node.kind for node in cfg.nodes if node.span is None
+    } == {"entry", "exit"}
+    return_node = nodes(cfg, "return")[0]
+    assert return_node.span is not None
+    cfg = replace(
+        cfg,
+        nodes=tuple(
+            replace(
+                node,
+                span=control_flow.SourceSpan(
+                    node.span.start + 1,
+                    node.span.end,
+                ),
+            )
+            if node.node_id == return_node.node_id
+            else node
+            for node in cfg.nodes
+        ),
+    )
+    assert control_flow.unused_assignments(body, cfg) == ()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "var x int\nx = 1\n_ = x\nx = 2",
+        "if x := 1; x > 0 { _ = x; x = 2 }",
+        "for x := 0; c; { _ = x; x = 2; break }",
+        "switch x := 1; x { case 1: _ = x; x = 2 }",
+        "for x := range xs { _ = x; x = 2 }",
+        "select { case x := <-ch: _ = x; x = 2; default: }",
+        "switch x := v.(type) { case int: _ = x; x = 2 }",
+    ],
+    ids=(
+        "var-spec",
+        "if-init",
+        "for-init",
+        "switch-init",
+        "range-binding",
+        "select-binding",
+        "type-switch-binding",
+    ),
+)
+def test_unused_assignments_count_single_declarations_across_constructs(body):
+    cfg, result = unuses(body)
+    stores = [node for node in nodes(cfg, "assign") if node.span is not None]
+    assert len(result) == 1
+    assert result[0].name == "x"
+    assert result[0].node_id == stores[-1].node_id
+
+
+def test_unused_assignments_loop_carried_store_is_live():
+    body = "x := 0\nfor i := 0; i < n; i++ { _ = x; x = i }"
+    _, result = unuses(body)
+    assert result == ()
+
+
+def test_unused_assignments_store_read_on_one_branch_is_live():
+    _, result = unuses("x := 1\nif c { _ = x }")
+    assert result == ()
+
+
+def test_unused_assignments_exclude_shadowed_name():
+    _, result = unuses("x := 1\n{ x := 2; _ = x }\n_ = x")
+    assert result == ()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "if c { x := 1; _ = x }; x = 5; return",
+        "if c { count := 0; _ = count }; count = 1; _ = count; count = 2",
+        "count = 1; count := 0; _ = count",
+    ],
+    ids=(
+        "named-result-after-inner-declaration",
+        "package-variable-after-inner-declaration",
+        "outer-store-before-declaration",
+    ),
+)
+def test_unused_assignments_exclude_stores_outside_declaration_scope(body):
+    _, result = unuses(body)
+    assert result == ()
+
+
+def test_unused_assignments_report_dead_store_in_inner_if_scope():
+    body = "if c { y := 1; y = 2; _ = y }"
+    cfg, result = unuses(body)
+    first_store = nodes(cfg, "define")[0]
+    assert result == (
+        control_flow.UnusedAssignment(
+            first_store.node_id,
+            "y",
+            first_store.span,
+        ),
+    )
+
+
+def test_unused_assignments_report_dead_store_for_for_init_scope():
+    body = "for i := 0; i < 3; i++ { j := i; j = 0; _ = j }"
+    cfg, result = unuses(body)
+    first_j_store = next(
+        node
+        for node in nodes(cfg, "define")
+        if body[node.span.start : node.span.end] == "j := i"
+    )
+    assert result == (
+        control_flow.UnusedAssignment(
+            first_j_store.node_id,
+            "j",
+            first_j_store.span,
+        ),
+    )
+
+
+def test_unused_assignments_convert_non_ascii_declaration_offsets():
+    body = "// é\nx := 1\nx = 2\n_ = x"
+    cfg, result = unuses(body)
+    first_store = nodes(cfg, "define")[0]
+    assert result == (
+        control_flow.UnusedAssignment(
+            first_store.node_id,
+            "x",
+            first_store.span,
+        ),
+    )
+
+
+def test_unused_assignments_exclude_closure_captured_name():
+    body = "x := 1\nf := func() { _ = x }\nx = 2\nf()"
+    _, result = unuses(body)
+    assert result == ()
+
+
+def test_unused_assignments_exclude_function_literal_parameter_name():
+    body = "x := 1\nf := func(x int) { _ = x }\nf(0)\n_ = x\nx = 2"
+    _, result = unuses(body)
+    assert result == ()
+
+
+def test_unused_assignments_exclude_address_taken_name():
+    _, result = unuses("x := 1\n_ = &x\nx = 2")
+    assert result == ()
+
+
+def test_unused_assignments_without_body_declaration_keep_name_only_behavior():
+    _, result = unuses("x = 1\n_ = x\nx = 2\nreturn 0")
+    assert result == ()
+
+
+def test_unused_assignments_unreachable_stores_keep_name_only_behavior():
+    cfg, result = unuses("return 0\nx := 1")
+    define = nodes(cfg, "define")[0]
+    assert result == (control_flow.UnusedAssignment(define.node_id, "x", define.span),)
+
+    cfg, result = unuses("x := 1\n_ = x\nreturn 0\nx = 2\n_ = x")
+    assert result == ()
+
+
+def test_unused_assignments_follow_goto_to_later_read():
+    body = "x := 1\ngoto read\nx = 2\nread:\n_ = x"
+    _, result = unuses(body)
+    assert result == ()
 
 
 def test_unused_assignments_require_matching_digest():
@@ -717,11 +980,9 @@ def test_evaluate_flow_hints_missed_expected():
 def test_evaluate_flow_hints_unexpected_findings():
     cfg = graph("print(x)\nx := 1")
     hints = control_flow.flow_hints("print(x)\nx := 1", cfg)
-    result = control_flow.evaluate_flow_hints(
-        hints, control_flow.HintExpectations()
-    )
+    result = control_flow.evaluate_flow_hints(hints, control_flow.HintExpectations())
     assert result.unassigned == control_flow.FamilyMetrics(0, 0, 1)
-    assert result.unused == control_flow.FamilyMetrics(0, 0, 0)
+    assert result.unused == control_flow.FamilyMetrics(0, 0, 1)
 
 
 def test_evaluate_flow_hints_mixed_per_family():

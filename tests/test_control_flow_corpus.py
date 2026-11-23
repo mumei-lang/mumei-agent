@@ -7,9 +7,12 @@ not an explicit assignment. Parameters, named results, and package-level
 names from this source file seed the entry facts; other package files are not
 indexed.
 
-`unused` labels explicit stores to function-local names that no later read can
-observe. Package-level stores, parameter pointees, fields, and elements are
-never labeled unused. `unreachable` labels are unchanged.
+`unused` labels explicit stores to function-local names that have no textual
+read anywhere, plus reachable stores of singly declared names that backward
+CFG liveness says are dead. The store-level addition excludes names mentioned
+inside function literals, address-taken names, and other unreliable names;
+fields, elements, and aliasing are not modelled. `unreachable` labels are
+unchanged.
 
 Labels are corpus-declared expectations; counts measure agreement on this
 corpus only, not soundness or completeness. The family counts stay separate:
@@ -56,7 +59,7 @@ EXPECTED_METRICS: dict[str, dict[str, tuple[int, int, int]]] = {
     },
     "dead_store.go": {
         "unassigned": _METRIC_ZERO,
-        "unused": (0, 1, 0),  # The later read masks the overwritten store.
+        "unused": (1, 0, 0),
         "unreachable": _METRIC_ZERO,
     },
     "defer.go": {
@@ -101,7 +104,7 @@ EXPECTED_METRICS: dict[str, dict[str, tuple[int, int, int]]] = {
     },
     "straight_line.go": {
         "unassigned": (1, 0, 0),
-        "unused": (1, 1, 0),  # The earlier read of the name hides the final store.
+        "unused": (2, 0, 0),
         "unreachable": _METRIC_ZERO,
     },
     "type_switch.go": {
@@ -124,7 +127,7 @@ EXPECTED_METRICS: dict[str, dict[str, tuple[int, int, int]]] = {
 EXPECTED_AGGREGATE: dict[str, tuple[int, int, int]] = {
     # Path-insensitive: the nil check on the backward-goto loop guards this read.
     "unassigned": (12, 0, 1),
-    "unused": (5, 2, 0),  # Any read of the name hides an unread store.
+    "unused": (7, 0, 0),
     "unreachable": (4, 0, 0),
 }
 
