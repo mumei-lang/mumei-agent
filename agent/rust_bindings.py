@@ -7898,10 +7898,6 @@ class _RustBindings:
                 if spelled is None
                 else prefix + "[" + spelled + "]",
             )
-        if method in _SET_ALGEBRA_METHODS | _MAP_RANGE_METHODS:
-
-        if method in _SET_ALGEBRA_METHODS:
-
         if method == "remainder":
             # `v.chunks_exact(n).remainder()` yields the trailing
             # slice's `&P` elements — the spelled `&[P]` container
