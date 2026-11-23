@@ -734,7 +734,7 @@ def _liveness_reads(
 def _liveness_kills(
     statement: tree_sitter_extract.Statement,
 ) -> frozenset[str]:
-    if statement.kind == "range":
+    if statement.kind == "range" and statement.operator != ":=":
         return frozenset()
     return _assigned_names(statement) | _declared_names(statement)
 
