@@ -1369,6 +1369,7 @@ class _Walker:
             for label, region in self._backward_regions.items()
         }
         self._backward_gotos = backward_gotos
+        self._skipped_backward_target = False
         # (statement-list id, names it declares) for every open frame —
         # a ``goto`` strips the names of the scopes it exits.
         self._scope_stack: list[
@@ -1513,10 +1514,16 @@ class _Walker:
                         and later.label
                         and self.goto_carried.get(later.label)
                     ):
+                        if self._contains_backward_target_label(
+                            statements[index:ahead]
+                        ):
+                            self._skipped_backward_target = True
                         env = None
                         index = ahead
                         break
                 else:
+                    if self._contains_backward_target_label(statements[index:]):
+                        self._skipped_backward_target = True
                     return env, terminated
             return env, ""
         finally:
@@ -2201,6 +2208,24 @@ class _Walker:
                 continue
             if any(
                 self._contains_break_statement(nested)
+                for nested in (
+                    statement.init,
+                    statement.body,
+                    statement.orelse,
+                    statement.post,
+                )
+            ):
+                return True
+        return False
+
+    def _contains_backward_target_label(
+        self, statements: tuple[tree_sitter_extract.Statement, ...]
+    ) -> bool:
+        for statement in statements:
+            if statement.labeled and statement.label in self._backward_havoc:
+                return True
+            if any(
+                self._contains_backward_target_label(nested)
                 for nested in (
                     statement.init,
                     statement.body,
@@ -3127,6 +3152,9 @@ def analyze_function(
     seed.nonzero |= {_norm(n) for n in nonzero_names or ()}
     seed.slices |= {_norm(n) for n in sequence_names or ()}
     try:
-        return walker.run(seed)
+        result = walker.run(seed)
+        if walker._skipped_backward_target:
+            return None
+        return result
     except RecursionError:
         return None

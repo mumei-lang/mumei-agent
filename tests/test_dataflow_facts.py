@@ -650,6 +650,41 @@ def test_duplicate_goto_labels_stay_unanalysed() -> None:
     ) is None
 
 
+def test_forward_resume_skipping_backward_target_stays_unanalysed() -> None:
+    body = (
+        "goto B\n"
+        "A:\n"
+        "m[\"x\"] = 1\n"
+        "B:\n"
+        "if c {\n"
+        "    goto A\n"
+        "}\n"
+        "return 0\n"
+    )
+    assert dataflow_facts.analyze_function(
+        body, "go", param_names={"c"}
+    ) is None
+
+
+def test_return_resume_skipping_backward_target_stays_unanalysed() -> None:
+    body = (
+        "if c {\n"
+        "    goto B\n"
+        "}\n"
+        "return 0\n"
+        "A:\n"
+        "m[\"x\"] = 1\n"
+        "B:\n"
+        "if e {\n"
+        "    goto A\n"
+        "}\n"
+        "return 0\n"
+    )
+    assert dataflow_facts.analyze_function(
+        body, "go", param_names={"c", "e"}
+    ) is None
+
+
 def test_backward_goto_does_not_join_held_resource_sets() -> None:
     body = (
         "mu.Lock()\n"
