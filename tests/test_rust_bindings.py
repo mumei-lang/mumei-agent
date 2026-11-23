@@ -9401,3 +9401,64 @@ fn f(v: Vec<P>) {
     # opaque, and a `fold` accumulator pair is not an element param.
     assert bound.get("x.pm()") != pm.id
     assert bound.get("p.pm()") != pm.id
+
+
+def test_scoped_unwrap_and_closure_edge_cases():
+    source = """
+struct P;
+struct Q;
+struct Box<T>(T);
+struct Rc<T>(T);
+impl P { fn pm(&self) {} }
+impl Q { fn pm(&self) {} }
+impl<T> Box<T> { fn bm(&self) {} }
+impl<T> Rc<T> { fn rm(&self) {} }
+trait Each { fn for_each(&self, f: impl Fn(&Q)); }
+impl Each for Vec<P> {}
+fn f(o: Option<Box<P>>, v: Vec<P>, b: std::boxed::Box<Option<P>>, r: std::rc::Rc<P>) {
+    if let Some(x) = o { x.bm(); x.pm(); }
+    v.for_each(|q| q.pm());
+    v.iter().map::<(), _>(|p| p.pm());
+    let oo = std::boxed::Box::into_inner(b);
+    if let Some(p) = oo { p.pm(); }
+    let rr = std::rc::Rc::try_unwrap(r);
+    if let Err(e) = rr { e.rm(); }
+}
+fn g(rc: std::rc::Rc<P>) {
+    struct P;
+    impl P { fn pm(&self) {} }
+    let r = Rc::into_inner(rc);
+    let p = r.unwrap();
+    p.pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    pm_outer = _bindings(report, "pm", "associated_function")[0]
+    # A declared `struct Box` in `Option<Box<P>>` keeps its own
+    # members — `Some(x)` binds `x: Box<P>` and `x.bm()` resolves.
+    bm = _bindings(report, "bm", "associated_function")[0]
+    assert bound.get("x.bm()") == bm.id
+    assert not bound.get("x.pm()")
+    # A trait `for_each` extension signs `&Q` — the receiver's `P`
+    # element must not type the closure's `q`.
+    assert not bound.get("q.pm()")
+    # A turbofish `map::<(), _>` still types the closure's `p`.
+    assert bound.get("p.pm()") == pm_outer.id
+    # `Box<Option<P>>::into_inner` keeps `Option<P>` — `Some(p)` binds.
+    assert bound.get("p.pm()") == pm_outer.id
+    # `Rc::into_inner` resolves `P` at the declaration, not at the
+    # inner-scope `struct P` in `g` — every `p.pm()` lands on the
+    # outer `impl P`.
+    g_call_targets = {
+        c.target
+        for c in report.calls
+        if raw[c.span.start:c.span.end].decode() == "p.pm()"
+    }
+    assert g_call_targets == {pm_outer.id}
+
+
