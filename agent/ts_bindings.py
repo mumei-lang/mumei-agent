@@ -4037,6 +4037,31 @@ class _TypeScriptBindings:
                         and self.text(desc) == name
                     ):
                         self._narrowed.setdefault(desc.id, narrowed)
+            for node in self.walk(condition):
+                # `x && x.pm()` — the left operand's narrowing also
+                # covers the right operand's uses.
+                if node.type != "binary_expression":
+                    continue
+                if not any(
+                    self.text(child) == "&&"
+                    for child in node.children
+                ):
+                    continue
+                kids = self.children(node)
+                if len(kids) != 2:
+                    continue
+                for ident, narrowed in self._condition_narrowings(
+                    kids[0]
+                ):
+                    name = self.text(ident)
+                    for desc in self.walk(kids[1]):
+                        if (
+                            desc.type == "identifier"
+                            and self.text(desc) == name
+                        ):
+                            self._narrowed.setdefault(
+                                desc.id, narrowed
+                            )
 
     def _condition_narrowings(self, condition: Any | None):
         """(identifier, narrowed type node) pairs a condition spells:
@@ -4078,10 +4103,32 @@ class _TypeScriptBindings:
                         if narrowed is not None:
                             return ((right, narrowed),)
                     return ()
+                if "!==" in operators or "!=" in operators:
+                    left, right = kids
+                    operand = (
+                        right
+                        if self.text(left).strip()
+                        in {"null", "undefined"}
+                        else left
+                        if self.text(right).strip()
+                        in {"null", "undefined"}
+                        else None
+                    )
+                    if operand is not None and operand.type == "identifier":
+                        narrowed = self._non_nullable_declared(operand)
+                        if narrowed is not None:
+                            return ((operand, narrowed),)
+                    return ()
                 if "&&" in operators:
                     return self._condition_narrowings(
                         kids[0]
                     ) + self._condition_narrowings(kids[1])
+            return ()
+        if condition.type == "identifier":
+            # `if (x)` — truthy narrows `P | undefined` to `P`.
+            narrowed = self._non_nullable_declared(condition)
+            if narrowed is not None:
+                return ((condition, narrowed),)
             return ()
         if condition.type == "call_expression":
             callee = condition.child_by_field_name("function")
@@ -4189,6 +4236,18 @@ class _TypeScriptBindings:
             ):
                 return child
         return None
+
+    def _non_nullable_declared(self, ident: Any) -> Any | None:
+        """The non-null constituent of `ident`'s declared type —
+        `x !== undefined`/`if (x)` narrow `P | undefined` to `P`."""
+        record = self._lookup(
+            self.text(ident), ident.start_byte, "value"
+        )
+        if record is None or record.type_node is None:
+            return None
+        return self._non_nullable_type_node(
+            self._unwrap_type(record.type_node)
+        )
 
     def _member_union_constituent(
         self, ident: Any, prop: str

@@ -3653,3 +3653,36 @@ function f(u: P | Q) {
         source[c.span.start : c.span.end] for c in _calls(report) if c.target == member_pm.id
     }
     assert bound == {"u.pm()"}
+
+def test_truthy_and_null_equality_checks_narrow_the_consequence():
+    # `if (o)`/`o !== undefined` narrow `P | undefined` to `P`; the
+    # narrowing also covers the `&&` right operand. A union with no
+    # null member, or with two non-null parts, keeps its uses opaque.
+    source = """
+class P { pm(): void {} }
+class Q { qm(): void {} }
+function f(o: P | undefined, u: P | Q, w: P | undefined | Q) {
+    if (o !== undefined) {
+        o.pm();
+    }
+    if (o) {
+        o.pm();
+    }
+    if (u !== null) {
+        u.pm();
+    }
+    if (w !== undefined) {
+        w.pm();
+    }
+    if (o !== undefined && o.pm()) {
+        o.pm();
+    }
+    o.pm();
+}
+"""
+    report = build_ts_bindings(source)
+    member_pm = _member_bindings(report, "pm", "associated_function")[0]
+    bound = {
+        source[c.span.start : c.span.end] for c in _calls(report) if c.target == member_pm.id
+    }
+    assert bound == {"o.pm()"}
