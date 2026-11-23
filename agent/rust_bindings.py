@@ -3530,6 +3530,18 @@ class _RustBindings:
                                 None,
                                 callee.child_by_field_name("value"),
                             )
+                            and not (
+                                receiver[0] is not None
+                                and next(
+                                    (
+                                        b.kind
+                                        for b in self.bindings
+                                        if b.id == receiver[0]
+                                    ),
+                                    None,
+                                )
+                                in {"struct", "enum"}
+                            )
                         ):
                             # `m.pop_first()` yields
                             # `Option<(K, V)>` — the map's spelled
@@ -4990,6 +5002,50 @@ class _RustBindings:
         if pair is None:
             return None
         key, head, _ = pair
+        if head is None and node is not None and node.type == "field_expression":
+            # `w.map` — the field's declared `BTreeMap<i32, V>`
+            # spells `W`'s own params; substitute the receiver's
+            # concrete args (`w: W<P>` reads `V` as `P`) and pin the
+            # field's scope names so a use-site same-named type
+            # cannot steal them.
+            value_node = node.child_by_field_name("value")
+            member = self._field_member(
+                node, ("struct_field", "associated_const")
+            )
+            container_id, impl_args = self._receiver_type(value_node)
+            container = (
+                None
+                if container_id is None
+                else self.records.get(container_id)
+            )
+            param_map = self._pattern_param_map(container, impl_args)
+            scope = (
+                None if container is None else container.home_scope
+            ) or (None if member is None else member.home_scope)
+            push = scope is not None and scope not in self.scopes
+            if push:
+                self._push_scope(scope)
+            try:
+                qualified = ", ".join(
+                    self._qualified_spelling(
+                        part.strip(), tnode.start_byte
+                    )
+                    for part in self._type_arg_list(key or "")
+                )
+            finally:
+                if push:
+                    self.scopes.pop()
+            if param_map:
+                qualified = re.sub(
+                    r"\b("
+                    + "|".join(
+                        re.escape(name) for name in param_map
+                    )
+                    + r")\b",
+                    lambda m: param_map[m.group(1)],
+                    qualified,
+                )
+            return qualified
         seen: set[str] = set()
         # `type Flip<A, B> = HashMap<B, A>` — the alias's args must
         # be substituted into the body's spelling, not read raw.
@@ -5020,7 +5076,9 @@ class _RustBindings:
             if not names:
                 # `type M = HashMap<K, V>` — a non-generic alias
                 # carries its whole argument list in the body.
-                key = body_pair[0]
+                key = self._alias_scope_qualified_args(
+                    body_pair[0], head
+                )
                 head = body_pair[1]
                 continue
             if len(args) < len(names):
@@ -5031,10 +5089,36 @@ class _RustBindings:
                     re.escape(name) for name in mapping
                 ) + r")\b",
                 lambda m: mapping[m.group(1)],
-                body_pair[0],
+                self._alias_scope_qualified_args(
+                    body_pair[0], head
+                ),
             )
             head = body_pair[1]
         return key
+
+    def _alias_scope_qualified_args(
+        self, spelled_args: "str | None", alias_record: "_Record"
+    ) -> "str | None":
+        """`spelled_args` with each declared name pinned to the
+        alias's own scope — `type M = HashMap<K, V2>` used where a
+        different `V2` is in scope still binds the decl-site `V2`.
+        Substituted params stay raw (they spell use-site names)."""
+        if spelled_args is None:
+            return None
+        scope = alias_record.home_scope
+        push = scope is not None and scope not in self.scopes
+        if push:
+            self._push_scope(scope)
+        try:
+            return ", ".join(
+                self._qualified_spelling(
+                    part.strip(), alias_record.alias_node.start_byte
+                )
+                for part in self._type_arg_list(spelled_args)
+            )
+        finally:
+            if push:
+                self.scopes.pop()
 
     def _expanded_container_head(self, node: Any | None) -> "str | None":
         """Container head of an annotation after type-alias

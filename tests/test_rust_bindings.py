@@ -8311,22 +8311,26 @@ def test_btreemap_first_last_key_value_bind_pairs():
 struct P;
 impl P { fn pm(&self) {} }
 struct K;
+impl K { fn km(&self) {} }
 fn f(b: std::collections::BTreeMap<K, P>, h: std::collections::HashMap<K, P>) {
-    if let Some((k, x)) = b.first_key_value() { x.pm(); }
-    if let Some((k2, y)) = b.last_key_value() { y.pm(); }
+    if let Some((k, x)) = b.first_key_value() { k.km(); x.pm(); }
+    if let Some((k2, y)) = b.last_key_value() { k2.km(); y.pm(); }
     if let Some((k3, z)) = h.first_key_value() { z.pm(); }
 }
 """
     report = build_rust_bindings(source, pointer_width=64)
     pm = _bindings(report, "pm", "associated_function")[0]
+    km = _bindings(report, "km", "associated_function")[0]
     raw = source.encode()
     bound = {
         raw[c.span.start:c.span.end].decode(): c.target
         for c in report.calls
     }
     # `first_key_value`/`last_key_value` are `BTreeMap`-only —
-    # `Option<(&K, &V)>`.
+    # `Option<(&K, &V)>` — both halves bind.
+    assert bound.get("k.km()") == km.id
     assert bound.get("x.pm()") == pm.id
+    assert bound.get("k2.km()") == km.id
     assert bound.get("y.pm()") == pm.id
     # `HashMap` names no such method — stays opaque.
     assert not bound.get("z.pm()")
