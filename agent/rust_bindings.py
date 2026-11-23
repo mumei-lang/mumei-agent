@@ -4040,25 +4040,52 @@ class _RustBindings:
                             "get_or_insert_with",
                         }
                         and receiver[1] is not None
-                        and self._container_head_name(
+                        and self._expanded_container_head(
                             callee.child_by_field_name("value")
+                        ) in _SET_CONTAINER_NAMES
+                        and not (
+                            receiver[0] is not None
+                            and next(
+                                (
+                                    b.kind
+                                    for b in self.bindings
+                                    if b.id == receiver[0]
+                                ),
+                                None,
+                            )
+                            in {"struct", "enum"}
                         )
-                        in _SET_CONTAINER_NAMES
                     ):
                         # `s.get_or_insert(d)`/`get_or_insert_owned`/
                         # `get_or_insert_with` yield `&P` — the set's
-                        # element resolved at its own annotation.
+                        # element resolved at its own annotation. A
+                        # hasher arg (`HashSet<P, S>`) comes after the
+                        # element; a user-declared `struct HashSet`
+                        # spells the same head but is not the std
+                        # set, and `type S = HashSet<P>` still reads
+                        # `HashSet` through the alias.
                         parts = self._type_arg_list(receiver[1])
-                        if len(parts) == 1:
-                            return self._spelled_type(
-                                "&" + parts[0].strip(),
-                                self._receiver_annotation_position(
-                                    callee.child_by_field_name(
-                                        "value"
-                                    )
-                                )
-                                or node.start_byte,
+                        if parts:
+                            field_value = callee.child_by_field_name(
+                                "value"
                             )
+                            args_position, args_scope = (
+                                self._field_args_scope(field_value)
+                            )
+                            push = (
+                                args_scope is not None
+                                and args_scope not in self.scopes
+                            )
+                            if push:
+                                self._push_scope(args_scope)
+                            try:
+                                return self._spelled_type(
+                                    "&" + parts[0].strip(),
+                                    args_position or node.start_byte,
+                                )
+                            finally:
+                                if push:
+                                    self.scopes.pop()
                     if (
                         method_name in _OPTION_MUT_PAYLOAD_METHODS
                         and receiver[1] is not None
