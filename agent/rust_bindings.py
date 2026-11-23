@@ -3510,10 +3510,18 @@ class _RustBindings:
                             if first_arg is None
                             else self._expr_type_spelling(first_arg)
                         )
+                    # The `Ok` spelling was taken from the
+                    # receiver's annotation — qualify it there so a
+                    # body-local same-named type does not shadow it.
+                    ok_arg = self._qualified_spelling(
+                        ok_arg.strip(),
+                        self._receiver_annotation_position(receiver)
+                        or node.start_byte,
+                    )
                     return None, (
-                        ok_arg.strip()
+                        ok_arg
                         if err is None
-                        else f"{ok_arg.strip()}, {err}"
+                        else f"{ok_arg}, {err}"
                     )
                 if (
                     callee is not None
@@ -3617,14 +3625,23 @@ class _RustBindings:
                     if (
                         method_name in _OPTION_MUT_PAYLOAD_METHODS
                         and receiver[1] is not None
-                        and self._container_head_name(
-                            callee.child_by_field_name("value")
+                        and (
+                            self._container_head_name(
+                                callee.child_by_field_name("value")
+                            )
+                            == "Option"
+                            or self._call_declared_head(
+                                callee.child_by_field_name("value")
+                            )
+                            == "Option"
                         )
-                        == "Option"
                     ):
                         # `o.get_or_insert(d)`/`o.or_insert(d)`
                         # yield `&mut P` — the payload resolves at
-                        # the receiver's own annotation.
+                        # the receiver's own annotation. The Option
+                        # can also arrive through a call result
+                        # (`m.entry(k)` on a custom map's declared
+                        # `entry` returns `Option<Q>`).
                         parts = self._type_arg_list(receiver[1])
                         if len(parts) == 1:
                             return self._spelled_type(
@@ -3636,6 +3653,91 @@ class _RustBindings:
                                 )
                                 or node.start_byte,
                             )
+                    if (
+                        method_name
+                        in {
+                            "or_insert",
+                            "or_insert_with",
+                            "or_insert_with_key",
+                            "or_default",
+                        }
+                    ):
+                        # `m.entry(k).or_insert(d)`/`and_modify`
+                        # chains yield `&mut V` of the map's args.
+                        entry_recv = callee.child_by_field_name(
+                            "value"
+                        )
+                        while (
+                            entry_recv is not None
+                            and entry_recv.type == "call_expression"
+                            and (
+                                entry_fn := entry_recv.child_by_field_name(
+                                    "function"
+                                )
+                            )
+                            is not None
+                            and entry_fn.type == "field_expression"
+                            and self._normalize_identifier(
+                                self.text(
+                                    entry_fn.child_by_field_name(
+                                        "field"
+                                    )
+                                )
+                            )
+                            == "and_modify"
+                        ):
+                            entry_recv = entry_fn.child_by_field_name(
+                                "value"
+                            )
+                        if (
+                            entry_recv is not None
+                            and entry_recv.type == "call_expression"
+                            and (
+                                entry_fn := entry_recv.child_by_field_name(
+                                    "function"
+                                )
+                            )
+                            is not None
+                            and entry_fn.type == "field_expression"
+                            and self._normalize_identifier(
+                                self.text(
+                                    entry_fn.child_by_field_name(
+                                        "field"
+                                    )
+                                )
+                            )
+                            == "entry"
+                        ):
+                            map_recv = entry_fn.child_by_field_name(
+                                "value"
+                            )
+                            if (
+                                self._container_head_name(
+                                    map_recv
+                                ) in _MAP_CONTAINER_NAMES
+                                # A declared `entry` wins — a custom
+                                # map's `fn entry(..) -> Option<Q>`
+                                # feeds `or_insert`'s receiver as
+                                # `Option<Q>`, not `Entry<K, V>`.
+                                and self._field_member(
+                                    entry_fn, ("associated_function",)
+                                )
+                                is None
+                            ):
+                                map_args = self._map_spelled_args(
+                                    map_recv
+                                )
+                                parts = self._type_arg_list(
+                                    map_args or ""
+                                )
+                                if len(parts) >= 2:
+                                    return self._spelled_type(
+                                        "&mut " + parts[1].strip(),
+                                        self._receiver_annotation_position(
+                                            map_recv
+                                        )
+                                        or node.start_byte,
+                                    )
                     if (
                         method_name in _SWAP_REMOVE_METHODS
                         and receiver[1] is not None
@@ -3896,6 +3998,22 @@ class _RustBindings:
                 self.text(node)
             )
         return None
+
+    def _call_declared_head(self, node: Any | None) -> "str | None":
+        """Head of a call's declared return annotation — `m.entry(k)`
+        on a custom `fn entry(..) -> Option<Q>` reads `Option`. None
+        when the callee is not a declared method."""
+        if node is None or node.type != "call_expression":
+            return None
+        callee = node.child_by_field_name("function")
+        if callee is None or callee.type != "field_expression":
+            return None
+        member = self._field_member(callee, ("associated_function",))
+        tn = None if member is None else member.type_node
+        if tn is None:
+            return None
+        head = re.match(r"[A-Za-z_][\w:]*", self.text(tn).strip())
+        return None if head is None else head.group(0)
 
     def _map_spelled_args(self, receiver: Any | None) -> str | None:
         """Full `<K, V>` argument key of a map annotation — recovered
@@ -8014,6 +8132,28 @@ class _RustBindings:
                     r"^&\s*(?:'\w+\s+)?(?:mut\s+)?", "", self.text(tn)
                 ).strip()
                 head_part = annotated.split("<", 1)[0].strip()
+                if "::" in head_part:
+                    head = head_part
+        if node.type == "struct_expression":
+            # `errors::E {}` — the literal's own path keeps the
+            # qualifier; the resolved name `E` alone would bind a
+            # same-named root type instead.
+            tn = next(
+                (
+                    c
+                    for c in node.children
+                    if c.type
+                    in {
+                        "type_identifier",
+                        "scoped_type_identifier",
+                        "generic_type",
+                    }
+                ),
+                None,
+            )
+            if tn is not None:
+                literal_head = self.text(tn).strip()
+                head_part = literal_head.split("<", 1)[0].strip()
                 if "::" in head_part:
                     head = head_part
         if head is None:

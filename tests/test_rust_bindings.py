@@ -7303,3 +7303,113 @@ fn f(o: Option<u8>, e: m::E, e2: E) {
     assert bound.get("x.em()") is not None
     assert bound.get("x2.em()") is not None
     assert bound["x.em()"] != bound["x2.em()"]
+
+def test_map_entry_or_insert_binds_mut_value_payload():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn def() -> P { P }
+fn f(m: HashMap<K, P>, b: BTreeMap<K, P>, v: Vec<P>) {
+    let e = m.entry(K).or_insert_with(def);
+    e.pm();
+    let e2 = m.entry(K).or_insert(def());
+    e2.pm();
+    let e3 = m.entry(K).and_modify(|x| ()).or_insert(def());
+    e3.pm();
+    let e4 = b.entry(K).or_default();
+    e4.pm();
+    let e5 = b.entry(K).or_insert_with_key(|k| def());
+    e5.pm();
+    let e6 = v.entry(0).or_insert(def());
+    e6.pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    for call in ("e.pm()", "e2.pm()", "e3.pm()", "e4.pm()", "e5.pm()"):
+        assert bound.get(call) == pm.id, call
+    # `Vec` has no `entry` API.
+    assert not bound.get("e6.pm()")
+
+def test_ok_or_ok_payload_resolves_at_the_receiver_annotation():
+    # A body-local same-named type must not shadow the `Ok` payload —
+    # `o: Option<P>` spells `P` at the parameter's annotation, not
+    # inside the body where a second `P` is declared.
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct E;
+fn f(o: Option<P>) {
+    struct P;
+    impl P { fn pm2(&self) {} }
+    match o.ok_or(E) { Ok(x) => x.pm(), _ => {} }
+    match o.ok_or(E) { Ok(y) => y.pm2(), _ => {} }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    assert bound.get("x.pm()") == pm.id
+    assert not bound.get("y.pm2()")
+
+
+def test_custom_map_declared_entry_feeds_option_or_insert():
+    # A custom `HashMap` whose declared `entry` returns `Option<Q>`
+    # feeds `Option::or_insert` — `&mut Q`, not the map's `V`.
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct Q;
+impl Q { fn qm(&mut self) {} }
+struct HashMap<K, V>;
+impl<K, V> HashMap<K, V> {
+    fn entry(&mut self, k: K) -> Option<Q> { None }
+}
+fn f(m: &mut HashMap<i32, P>, k: i32) {
+    m.entry(k).or_insert(P).qm();
+    m.entry(k).or_insert(P).pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    qm = _bindings(report, "qm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    assert bound.get("m.entry(k).or_insert(P).qm()") == qm.id
+    assert not bound.get("m.entry(k).or_insert(P).pm()")
+
+def test_ok_or_spells_qualified_literal_error_type():
+    # `o.ok_or(errors::E {})` — the literal's own `errors::` path
+    # qualifies the `Err` payload; a same-named root `E` must not
+    # steal it.
+    source = """
+mod errors { pub struct E; }
+struct E;
+impl errors::E { fn em(&self) {} }
+impl E { fn em2(&self) {} }
+fn f(o: Option<u8>) {
+    match o.ok_or(errors::E {}) { Err(e) => e.em(), _ => {} }
+    match o.ok_or(errors::E {}) { Err(e2) => e2.em2(), _ => {} }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    em = _bindings(report, "em", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    assert bound.get("e.em()") == em.id
+    assert not bound.get("e2.em2()")
+
