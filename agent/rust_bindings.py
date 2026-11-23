@@ -2884,6 +2884,15 @@ class _RustBindings:
         for ch in params.named_children:
             if ch.type == "self_parameter":
                 return not self.text(ch).strip().startswith("&")
+            if (
+                ch.type == "parameter"
+                and ch.child_by_field_name("pattern") is not None
+                and self.text(ch.child_by_field_name("pattern")).strip()
+                == "self"
+            ):
+                # `self: Self`/`self: Box<Self>` spell a by-value
+                # receiver but parse as a plain parameter.
+                return True
         return False
 
     def _covering_trait_member(
