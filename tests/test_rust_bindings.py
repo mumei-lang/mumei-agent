@@ -7810,13 +7810,15 @@ struct Q;
 impl Q { fn qm(&self) {} }
 struct E;
 impl E { fn em(&self) {} }
+struct F;
+impl F { fn fm(&self) {} }
 struct W<T> { x: T }
-fn f(r1: Result<P, E>, r2: Result<Q, E>, o: Option<Result<P, E>>, ro: Result<Option<P>, E>, w: W<P>, wo: W<Result<P,E>>) {
+fn f(r1: Result<P, E>, r2: Result<Q, F>, o: Option<Result<P, E>>, ro: Result<Option<P>, E>, w: W<P>, wo: W<Result<P,E>>) {
     let a = r1.and(r2);
     if let Ok(u) = a { u.qm(); }
     let b = r1.or(r2);
     if let Ok(v) = b { v.pm(); }
-    if let Err(e1) = b { e1.em(); }
+    if let Err(e1) = b { e1.fm(); }
     let t1 = o.transpose();
     if let Ok(x) = t1 {
         if let Some(inner) = x { inner.pm(); }
@@ -7835,7 +7837,7 @@ fn f(r1: Result<P, E>, r2: Result<Q, E>, o: Option<Result<P, E>>, ro: Result<Opt
     report = build_rust_bindings(source, pointer_width=64)
     pm = _bindings(report, "pm", "associated_function")[0]
     qm = _bindings(report, "qm", "associated_function")[0]
-    em = _bindings(report, "em", "associated_function")[0]
+    fm = _bindings(report, "fm", "associated_function")[0]
     raw = source.encode()
     bound = {
         raw[c.span.start:c.span.end].decode(): c.target
@@ -7845,7 +7847,7 @@ fn f(r1: Result<P, E>, r2: Result<Q, E>, o: Option<Result<P, E>>, ro: Result<Opt
     assert bound.get("u.qm()") == qm.id
     # `r1.or(r2)` yields `Result<P, F>` — `Ok` reads r1's, `Err` r2's.
     assert bound.get("v.pm()") == pm.id
-    assert bound.get("e1.em()") == em.id
+    assert bound.get("e1.fm()") == fm.id
     # `Option<Result<P, E>>::transpose` yields `Result<Option<P>, E>`.
     assert bound.get("inner.pm()") == pm.id
     # `Result<Option<P>, E>::transpose` yields `Option<Result<P, E>>`.
