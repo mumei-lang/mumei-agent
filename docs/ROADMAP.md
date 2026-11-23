@@ -3334,7 +3334,14 @@ call `h(args)` admits with deps(captured) ∪ deps(args) ∪
 indirect writes, and a literal that captures a pointer-typed
 enclosing binding records an imported transfer on the bound
 name's identity (effects unknown — the captured pointer may aim
-at caller memory).
+at caller memory). Container-mutating builtins in the body
+(`copy`, `delete`, `clear`, `append`) record their first
+operand's captured root as written, so post-call reads keep the
+mutated elements' contribution like an `s[i] = x` store does;
+a name bound to a non-builtin (`copy := f`) stays an ordinary
+opaque call, a missing call record fails closed, and an operand
+that could write caller memory without resolving (a `(*p)` or
+unresolvable root) reports a gap rather than losing the write.
 Passing a tracked literal as a direct-call function value resolves its
 captures at invocation time (recursively for nested captures); `defer`
 and `go` shapes carry those captures into exit/race analysis.
