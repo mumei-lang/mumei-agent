@@ -472,6 +472,11 @@ class _Record:
     # inside `mod m` resolves its bare `Q` to `m::Q`, not a same-named
     # type in the binding scope.
     pattern_decl_scope: Any = None
+    # Byte position where the binding's spelled args were written —
+    # a producer call's receiver annotation. Deferred re-resolution
+    # of those args (`&[P]` on a pattern-bound slice) must look there,
+    # not at the use site, or a body-local same-named type steals it.
+    spell_position: Any = None
     # The item carries a `pub` visibility modifier — only `pub` items
     # come through a `use m::*` glob.
     public: bool = False
@@ -3893,6 +3898,13 @@ class _RustBindings:
                             callee.child_by_field_name("value")
                         )
                         in {"VecDeque", "LinkedList"}
+                        # A declared `as_slices` (trait extension,
+                        # inherent override) keeps its own return —
+                        # only the std recipe spells the pair.
+                        and self._field_member(
+                            callee, ("associated_function",)
+                        )
+                        is None
                     ):
                         # `vd.as_slices()` yields
                         # `(&[P], &[P])` — the pair feeds the
@@ -6049,19 +6061,61 @@ class _RustBindings:
             )
             if vmethod == "flatten":
                 pass
-            elif vmethod is None:
-                # A pattern-bound slice (`let (a, _) =
-                # v.split_at(i)`/`vd.as_slices()`) keeps `&[P]` as
-                # its own args — `a` IS the borrowed slice, so the
-                # iterated element is `P`, not the slice.
-                inner_slice = re.fullmatch(
-                    r"&\s*(?:'\w+\s+)?(?:mut\s+)?\[(.+)\]",
-                    elem_args.strip(),
+            else:
+                producer_alias = False
+                probe = value
+                hops = 0
+                while (
+                    probe is not None
+                    and probe.type == "identifier"
+                    and hops < 8
+                ):
+                    # `let it2 = it` — the alias keeps `it`'s own
+                    # spelling convention: `&[P]` args on a
+                    # producer-bound record ARE the iterated
+                    # element, not the binding's own slice type.
+                    probe_record = self._lookup(
+                        self._normalize_identifier(self.text(probe)),
+                        probe.start_byte,
+                        "value",
+                    )
+                    if (
+                        probe_record is None
+                        or probe_record.value_node is probe
+                    ):
+                        break
+                    probe = probe_record.value_node
+                    hops += 1
+                    if probe is not None and (
+                        probe.type == "call_expression"
+                    ):
+                        producer_alias = True
+                        break
+                inner_slice = (
+                    None
+                    if producer_alias or vmethod is not None
+                    else re.fullmatch(
+                        r"&\s*(?:'\w+\s+)?(?:mut\s+)?\[(.+)\]",
+                        elem_args.strip(),
+                    )
                 )
                 if inner_slice is not None:
+                    # A pattern-bound slice (`let (a, _) =
+                    # v.split_at(i)`/`vd.as_slices()`) keeps `&[P]`
+                    # as its own args — `a` IS the borrowed slice,
+                    # so the iterated element is `P`, not the
+                    # slice. The spelling was written at the
+                    # producer's receiver annotation — resolving it
+                    # here would pick up a same-named local type.
                     tid, _ = self._spelled_type(
                         inner_slice.group(1).strip(),
-                        iterator.start_byte,
+                        self._receiver_annotation_position(iterator)
+                        or (
+                            None
+                            if record is None
+                            else record.spell_position
+                        )
+                        or iterator.start_byte,
                     )
                     if tid is not None:
                         name = next(
@@ -6077,8 +6131,6 @@ class _RustBindings:
                             None,
                         )
                     return _UNKNOWN, inner_slice.group(1).strip()
-                return _UNKNOWN, elem_args.strip()
-            else:
                 return _UNKNOWN, elem_args.strip()
         # Spelled element names on `it` (`let it = v.iter()`) were
         # written in `it`'s annotation — resolve them there.
@@ -6989,6 +7041,15 @@ class _RustBindings:
             if annotation is not None
             else self._scrutinee_shape(value, scrut_id)
         )
+        if (
+            scrut_position is None
+            and value is not None
+            and value.type == "call_expression"
+        ):
+            # `let (a, _) = vd.as_slices()` — a produced spelling's
+            # args were written in the producer's receiver
+            # annotation (`vd`'s `P`), not at the let site.
+            scrut_position = self._receiver_annotation_position(value)
         type_map = (
             {}
             if whole_names
@@ -7028,6 +7089,8 @@ class _RustBindings:
                     record.pattern_decl_scope = pinned[3]
             if whole:
                 record.value_node = value
+            if record.type_args is not None:
+                record.spell_position = scrut_position
             self._add_to_scope(scope, record)
 
     def _expr(self, node: Any | None) -> None:
