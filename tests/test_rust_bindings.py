@@ -9095,3 +9095,90 @@ fn f(m: std::collections::HashMap<u32, P>) {
         for c in report.calls
     }
     assert not bound.get("e.into_entry().pm()")
+
+def test_first_entry_and_rotate_bind_payloads():
+    source = """
+use std::collections::BTreeMap;
+struct P;
+impl P { fn pm(&self) {} }
+fn f(m: BTreeMap<u8, P>, v: Vec<P>, q: std::collections::VecDeque<P>) {
+    if let Some(e) = m.first_entry() {
+        e.insert(P).pm();
+        e.get().pm();
+    }
+    if let Some(l) = m.last_entry() {
+        l.get().pm();
+    }
+    // std `rotate_left`/`rotate_right` return `()` — the
+    // rotated elements stay in place.
+    v.rotate_left(1);
+    v[0].pm();
+    q.rotate_right(2);
+    q[0].pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    for name in (
+        "e.insert(P).pm()",
+        "e.get().pm()",
+        "l.get().pm()",
+        "v[0].pm()",
+        "q[0].pm()",
+    ):
+        assert bound.get(name) == pm.id, name
+
+def test_first_entry_args_resolve_in_the_annotation_scope():
+    source = """
+mod m {
+    pub struct P;
+    impl P { pub fn pm(&self) {} }
+    pub struct S { pub map: std::collections::BTreeMap<u32, P> }
+}
+struct G<P> { pub map: std::collections::BTreeMap<u32, P> }
+type M2 = std::collections::BTreeMap<u32, m::P>;
+fn f(s: m::S, g: G<m::P>, mm: M2) {
+    if let Some(e) = s.map.first_entry() { e.get().pm(); }
+    if let Some(e2) = mm.first_entry() { e2.get().pm(); }
+    if let Some(e3) = g.map.first_entry() { e3.get().pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    for name in ("e.get().pm()", "e2.get().pm()", "e3.get().pm()"):
+        assert bound.get(name) == pm.id, name
+
+
+def test_bound_entry_payload_head_does_not_steal_user_type():
+    source = """
+use std::collections::BTreeMap;
+struct P;
+impl P { fn pm(&self) {} }
+struct OccupiedEntry;
+impl OccupiedEntry { fn get(&self) {} }
+fn f(b: BTreeMap<u32, P>) {
+    if let Some(e) = b.first_entry() { e.get().pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `e` binds `OccupiedEntry<u32, P>` from the bound-entry
+    # machinery — `e.get()` reads `&P`, not the user's
+    # `OccupiedEntry::get`.
+    assert bound.get("e.get().pm()") == pm.id
+    assert not bound.get("e.get()")

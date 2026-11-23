@@ -103,6 +103,18 @@ _EXTRACT_IF_METHODS = frozenset({"extract_if"})
 _EXTRACT_IF_ELEMENT_CONTAINERS = _SET_CONTAINER_NAMES | {
     "LinkedList"
 }
+# Methods that yield `&mut [T]` views of the container —
+# `v.leak()`, `q.make_contiguous()` — `rotate_left`/
+# `rotate_right` are absent: std returns `()` from them.
+# Each name names the container heads it exists on.
+_MUT_SLICE_VIEW_METHODS = {
+    "leak": {"Vec"},
+    "make_contiguous": {"VecDeque"},
+}
+# `BTreeMap::first_entry()`/`last_entry()` yield
+# `Option<OccupiedEntry<K, V>>` — `Some(e)` binds the Occupied
+# entry like `Entry::Occupied` does.
+_MAP_BOUND_ENTRY_METHODS = frozenset({"first_entry", "last_entry"})
 
 # Smart pointers that `Deref` straight to their payload — `b.pm()`
 # on `Box<P>`/`Rc<P>`/`Arc<P>` calls `P`'s members. `Mutex`/`Cell`/
@@ -4427,6 +4439,39 @@ class _RustBindings:
                                         entry_parts[1].strip(),
                                     )
                                 )
+                    if (
+                        method_name in _MAP_BOUND_ENTRY_METHODS
+                        and (
+                            self._container_head_name(
+                                callee.child_by_field_name("value")
+                            )
+                            == "BTreeMap"
+                            or self._expanded_container_head(
+                                callee.child_by_field_name("value")
+                            )
+                            == "BTreeMap"
+                        )
+                    ):
+                        bound_args = self._map_spelled_args(
+                            callee.child_by_field_name("value")
+                        )
+                        if bound_args:
+                            bound_parts = self._type_arg_list(
+                                bound_args
+                            )
+                            if len(bound_parts) >= 2:
+                                # `Option<OccupiedEntry<K, V>>` —
+                                # verbatim spelling so `Some(e)`
+                                # reads the OccupiedEntry payload
+                                # head.
+                                return (
+                                    None,
+                                    "Option<OccupiedEntry<"
+                                    "{}, {}>>".format(
+                                        bound_parts[0].strip(),
+                                        bound_parts[1].strip(),
+                                    ),
+                                )
                     entry_binding = re.fullmatch(
                         r"(OccupiedEntry|VacantEntry)\s*<(.+)>",
                         (receiver[1] or "").strip(),
@@ -4476,7 +4521,7 @@ class _RustBindings:
                                     spelled, entry_pos
                                 )
                     if (
-                        method_name in {"leak", "make_contiguous"}
+                        method_name in _MUT_SLICE_VIEW_METHODS
                         and receiver[1] is not None
                         and (
                             self._container_head_name(
@@ -4486,8 +4531,7 @@ class _RustBindings:
                                 callee.child_by_field_name("value")
                             )
                         )
-                        == ("Vec" if method_name == "leak"
-                            else "VecDeque")
+                        in _MUT_SLICE_VIEW_METHODS[method_name]
                     ):
                         # `v.leak()` yields `&'a mut [T]` — the
                         # borrowed slice spelling feeds
@@ -4505,6 +4549,11 @@ class _RustBindings:
                         # `&'a mut [T]` — the borrowed slice
                         # spelling feeds `s[0]`/`for` element
                         # paths.
+
+                        # `v.leak()`/`q.make_contiguous()`/
+                        # `v.rotate_left(n)` yield `&mut [T]` —
+                        # the borrowed slice spelling feeds
+                        # `s[0]`/`for` element paths.
                         return self._spelled_type(
                             "&mut [" + receiver[1] + "]",
                             annotated,
@@ -11187,6 +11236,18 @@ class _RustBindings:
         type_id, fargs = self._spelled_type(
             args[entry[1]], scrut_position
         )
+        if (
+            payload_head is not None
+            and self._normalize_identifier(
+                payload_head.group(0).split("::")[-1]
+            )
+            in set(_PRELUDE_ENTRY_VARIANTS.values())
+        ):
+            # `OccupiedEntry<K, V>`/`VacantEntry<K, V>` are spelled
+            # by the map-entry machinery — a same-named user type
+            # must not steal the head: `e.get()` still reads the
+            # entry templates, not the user's members.
+            return [(None, payload)]
         if (
             payload_head is not None
             and self._normalize_identifier(
