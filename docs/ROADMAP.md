@@ -295,7 +295,8 @@ for scheduled adapter execution. Before dispatch, a pinned adapter's
 streamed SHA-256 matches the configured digest. Bare command names, missing
 files, non-regular files, mismatches and I/O errors are `not_dispatched` and
 follow the schedule's existing fallback or denial path. Unpinned adapters
-are unaffected.
+are unaffected. Every pinned adapter ID must name a registered adapter;
+unknown pin IDs are rejected before scheduling.
 
 The digest is checked before `exec`, so a file swapped after the check is
 not detected. Only `argv[0]` is pinned; pinning an interpreter does not pin

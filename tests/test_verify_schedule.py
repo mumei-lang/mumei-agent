@@ -610,6 +610,25 @@ def test_policy_rejects_malformed_executable_digest_pin_declaration(
     assert "invalid executable digest pin declaration" in capsys.readouterr().err
 
 
+def test_policy_rejects_executable_digest_pin_for_unregistered_adapter(
+    inputs, tmp_path, capsys
+):
+    policy_document = json.loads(
+        Path(inputs["policy"]).read_text(encoding="utf-8")
+    )
+    policy_document["executable_sha256_pins"] = [["unregistered", "a" * 64]]
+    policy_path = tmp_path / "FAKE_PRIVATE_unregistered-pin-policy.json"
+    policy_path.write_text(json.dumps(policy_document), encoding="utf-8")
+
+    with pytest.raises(SystemExit) as error:
+        main_schedule(args_for({**inputs, "policy": str(policy_path)}))
+
+    assert error.value.code != 0
+    assert "executable digest pin names an unregistered adapter" in (
+        capsys.readouterr().err
+    )
+
+
 def test_empty_allowed_locations_is_rejected(inputs, capsys):
     policy = json.loads(open(inputs["policy"]).read())
     policy["allowed_locations"] = []

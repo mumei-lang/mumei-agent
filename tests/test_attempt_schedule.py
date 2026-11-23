@@ -1484,6 +1484,21 @@ def test_mismatched_executable_digest_pin_denies_fallback():
     assert result.entries[0].terminal_state == NOT_DISPATCHED
 
 
+def test_executable_digest_pin_requires_registered_adapter():
+    with pytest.raises(
+        ValueError,
+        match="executable digest pin names an unregistered adapter",
+    ):
+        schedule(
+            registry_with("alpha"),
+            ("alpha",),
+            {"alpha": argv(0)},
+            policy=policy(
+                executable_sha256_pins=(("unregistered", "a" * 64),)
+            ),
+        )
+
+
 @pytest.mark.parametrize("path_kind", ["relative", "bare", "missing", "directory"])
 def test_invalid_pinned_executable_paths_are_not_dispatched(tmp_path, path_kind):
     if path_kind == "relative":

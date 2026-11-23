@@ -627,6 +627,11 @@ def run_attempt_schedule(
         raise ValueError("attempt scheduling requires route requirements")
     if type(policy) is not PlannerPolicy:
         raise ValueError("attempt scheduling requires a planner policy")
+    if any(
+        registry.descriptor(adapter_id) is None
+        for adapter_id, _digest in policy.executable_sha256_pins
+    ):
+        raise ValueError("executable digest pin names an unregistered adapter")
     if type(source) is not bytes or not source:
         raise ValueError("attempt scheduling requires source bytes")
     if (
