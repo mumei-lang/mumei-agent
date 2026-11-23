@@ -21176,6 +21176,16 @@ def test_transitive_captured_closures_preserve_current_deps_and_writes(
         "\tc := make(chan int64, 1); h2 := func() { c <- h() }\n"
         "\tgo h2(); v = x; return <-c\n"
         "}\n"
+        "func GoCallBeforeStore(x, y int64) int64 {\n"
+        "\tv := y; s := S{F: func() int64 { return v }}; v = x\n"
+        "\tc := make(chan int64, 1); go func() { c <- s.F() }()\n"
+        "\treturn <-c\n"
+        "}\n"
+        "func GoNamedBeforeStore(x, y int64) int64 {\n"
+        "\tv := y; h := func() int64 { return v }; v = x\n"
+        "\tc := make(chan int64, 1); go func() { c <- h() }()\n"
+        "\treturn <-c\n"
+        "}\n"
         "func GoTransitiveWrite(x, y int64) int64 {\n"
         "\tw := int64(0); h := func() { w = x }\n"
         "\th2 := func() { h() }; go h2(); w = y; return w\n"
@@ -21224,9 +21234,8 @@ def test_transitive_captured_closures_preserve_current_deps_and_writes(
         ("Immediate", frozenset({0, 1})),
         ("Callback", frozenset({0, 1})),
         ("DeferredRead", frozenset({0, 1})),
-        ("GoCall", frozenset({0, 1})),
-        ("GoNamedLiteral", frozenset({0, 1})),
-        ("GoNamedCall", frozenset({0, 1})),
+        ("GoCallBeforeStore", frozenset({0, 1})),
+        ("GoNamedBeforeStore", frozenset({0, 1})),
         ("DeferredWrite", frozenset({0})),
         ("Factory", frozenset({0, 1})),
         ("Rebind", frozenset({1})),
@@ -21241,12 +21250,18 @@ def test_transitive_captured_closures_preserve_current_deps_and_writes(
     map_result = named(*data, name="MapClosed")
     assert not map_result.available
 
-    go_write_race = named(*data, name="GoTransitiveWrite")
-    assert not go_write_race.available
-    assert any(
-        gap.reason == "unsupported_statement"
-        for gap in go_write_race.gaps
-    )
+    for name in (
+        "GoCall",
+        "GoNamedLiteral",
+        "GoNamedCall",
+        "GoTransitiveWrite",
+    ):
+        result = named(*data, name=name)
+        assert not result.available, name
+        assert any(
+            gap.reason == "unsupported_statement"
+            for gap in result.gaps
+        ), name
 
 
 def test_chained_closure_values_resolve_shared_captures_once(
