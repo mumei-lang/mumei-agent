@@ -163,6 +163,7 @@ class _TypeScriptBindings:
         self._tdz_binding_ids: frozenset[str] = frozenset()
         self._type_bases: dict[int, list[tuple[str, bool]]] = {}
         self._initializer_active: set[str] = set()
+        self._optional_narrow_active: set[str] = set()
 
     def span(self, node: Any) -> ByteSpan:
         return ByteSpan(node.start_byte, node.end_byte)
@@ -506,20 +507,27 @@ class _TypeScriptBindings:
         and its type-arg nodes, when `m` carries no annotation. A
         user-declared `class Map`/`Set`/`Array` shadows the builtin,
         so it stays unbound."""
-        if node is None or node.type != "identifier":
-            return None
-        record = self._lookup(self.text(node), node.start_byte, "value")
-        if record is None or record.node is None:
-            return None
-        declarator = record.node.parent
-        if (
-            declarator is None
-            or declarator.type != "variable_declarator"
-        ):
-            return None
-        value = declarator.child_by_field_name("value")
-        if value is None or value.type != "new_expression":
-            return None
+        if node is not None and node.type == "new_expression":
+            # `for (const x of new Set<P>())` — the operand is the
+            # constructor call itself, not a variable holding it.
+            value = node
+        else:
+            if node is None or node.type != "identifier":
+                return None
+            record = self._lookup(
+                self.text(node), node.start_byte, "value"
+            )
+            if record is None or record.node is None:
+                return None
+            declarator = record.node.parent
+            if (
+                declarator is None
+                or declarator.type != "variable_declarator"
+            ):
+                return None
+            value = declarator.child_by_field_name("value")
+            if value is None or value.type != "new_expression":
+                return None
         constructor = value.child_by_field_name("constructor")
         if constructor is None or constructor.type not in {
             "identifier", "type_identifier",
@@ -532,6 +540,14 @@ class _TypeScriptBindings:
         if resolved is not None and resolved.binding.kind not in {
             "import", "ambient",
         }:
+            return None
+        shadowed = self._lookup(head, node.start_byte, "value")
+        if shadowed is not None and shadowed.binding.kind not in {
+            "import", "ambient",
+        }:
+            # `const Map = Other` — the value binding shadows the
+            # builtin in every namespace; `new Map<K, V>()` is the
+            # user's constructor, not std Map.
             return None
         args_node = value.child_by_field_name("type_arguments")
         return head, (
@@ -2992,6 +3008,24 @@ class _TypeScriptBindings:
             return kids[-1] if len(kids) > 1 else None
         return None
 
+    @staticmethod
+    def _array_pattern_slot_index(pattern: Any, name: Any) -> int:
+        """Slot index of `name` inside an array destructuring
+        pattern, counting elision holes (`[, v]` puts `v` at
+        index 1). Commas — including holes — are anonymous
+        children, so named-children enumeration alone miscounts.
+        """
+        index = 0
+        for child in pattern.children:
+            if child == name or child.id == name.id:
+                return index
+            if child.type == ",":
+                # A hole is an elided slot — every comma before
+                # the element bumps its index.
+                index += 1
+        return -1
+
+
     def _pattern_slot_type_node(
         self, pattern: Any, name: Any
     ) -> Any | None:
@@ -3022,14 +3056,8 @@ class _TypeScriptBindings:
             if member is not None:
                 member_name, head, arg_nodes = member
                 if member_name == "entries":
-                    slots = self.children(pattern)
-                    index = next(
-                        (
-                            i
-                            for i, slot in enumerate(slots)
-                            if slot.id == name.id
-                        ),
-                        -1,
+                    index = self._array_pattern_slot_index(
+                        pattern, name
                     )
                     if index < 0:
                         return None
@@ -3092,14 +3120,8 @@ class _TypeScriptBindings:
                 elems = (
                     self.children(args[0]) if args else []
                 )
-                slots = self.children(pattern)
-                index = next(
-                    (
-                        i
-                        for i, slot in enumerate(slots)
-                        if slot.id == name.id
-                    ),
-                    -1,
+                index = self._array_pattern_slot_index(
+                    pattern, name
                 )
                 return (
                     elems[index]
@@ -3118,23 +3140,25 @@ class _TypeScriptBindings:
             return None
         else:
             value = declarator.child_by_field_name("value")
-            declared = self._unwrap_type(
-                self._declared_type_node(value, value.start_byte)
+            declared = (
+                self._unwrap_type(
+                    self._declared_type_node(
+                        value, value.start_byte
+                    )
+                )
+                if value is not None
+                # `let [x]: [P];` — no initializer; the pattern's
+                # own annotation carries the tuple.
+                else self._unwrap_type(
+                    declarator.child_by_field_name("type")
+                )
             )
         if declared is None:
             return None
         if declared.type == "array_type":
             return next(iter(self.children(declared)), None)
         if declared.type == "tuple_type":
-            slots = self.children(pattern)
-            index = next(
-                (
-                    i
-                    for i, slot in enumerate(slots)
-                    if slot == name or slot.id == name.id
-                ),
-                -1,
-            )
+            index = self._array_pattern_slot_index(pattern, name)
             elems = self.children(declared)
             return elems[index] if 0 <= index < len(elems) else None
         if declared.type == "generic_type":
@@ -3496,8 +3520,17 @@ class _TypeScriptBindings:
             return None
         if node.type != "union_type":
             return node
+        stack = list(self.children(node))
         kept = []
-        for child in self.children(node):
+        while stack:
+            child = self._unwrap_type(stack.pop(0))
+            if child is None:
+                continue
+            if child.type == "union_type":
+                # `(P | null) | undefined` nests the union — keep
+                # flattening until only real constituents remain.
+                stack = list(self.children(child)) + stack
+                continue
             text = self.text(child).strip()
             if child.type in {"literal_type", "predefined_type",
                               "type_identifier"} and text in {
@@ -3512,6 +3545,12 @@ class _TypeScriptBindings:
         access or wrapped by `!` — the forms TS narrows to the
         non-null union constituent."""
         parent = node.parent
+        while (
+            parent is not None
+            and parent.type == "parenthesized_expression"
+        ):
+            # `(o)?.m()` — parens don't change the optional access.
+            parent = parent.parent
         if parent is None:
             return False
         if parent.type == "non_null_expression":
@@ -3549,6 +3588,28 @@ class _TypeScriptBindings:
                 if base_record is not None:
                     return base_record, False, True
             return None, False, True
+        if node.type == "parenthesized_expression":
+            inner = next(iter(self.children(node)), None)
+            return self._object_type(inner, position, extras_out)
+        if (
+            node.type in {"member_expression", "call_expression"}
+            and self._accessed_optionally(node)
+        ):
+            # `w.p?.m()`/`f()?.m()` — the receiver expression's
+            # declared type narrows to its non-null constituent,
+            # same as `o?.m()` on an identifier.
+            fact = self._type_fact(
+                self._non_nullable_type_node(
+                    self._declared_type_node(node, node.start_byte)
+                )
+            )
+            if fact.kind == "named":
+                return (
+                    self._type_record_by_id(fact.type_id),
+                    False,
+                    False,
+                )
+            return None, False, False
         if node.type == "identifier":
             record = self._lookup(self.text(node), position, "value")
             if record is None:
@@ -3579,17 +3640,30 @@ class _TypeScriptBindings:
                     if (
                         declarator is not None
                         and declarator.type == "variable_declarator"
+                        # An initializer that resolves back to this
+                        # record (`var v = f(v)`) would recurse —
+                        # the record stays opaque instead.
+                        and record.binding.id
+                        not in self._optional_narrow_active
                     ):
-                        fact = self._type_fact(
-                            self._non_nullable_type_node(
-                                self._declared_type_node(
-                                    declarator.child_by_field_name(
-                                        "value"
-                                    ),
-                                    position,
+                        self._optional_narrow_active.add(
+                            record.binding.id
+                        )
+                        try:
+                            fact = self._type_fact(
+                                self._non_nullable_type_node(
+                                    self._declared_type_node(
+                                        declarator.child_by_field_name(
+                                            "value"
+                                        ),
+                                        position,
+                                    )
                                 )
                             )
-                        )
+                        finally:
+                            self._optional_narrow_active.discard(
+                                record.binding.id
+                            )
                 if fact.kind == "named":
                     return (
                         self._type_record_by_id(fact.type_id),

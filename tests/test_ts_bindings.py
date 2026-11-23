@@ -3338,3 +3338,107 @@ for (const [k, v] of m) { v.pm(); }
         for c in _calls(report)
         if c.target == member_pm.id
     }
+
+def test_destructure_without_initializer_uses_pattern_annotation():
+    source = """
+declare class P { m(): void }
+let [x]: [P];
+x.m();
+"""
+    report = build_ts_bindings(source)
+    m = _bindings(report, "m")[0]
+    bound = {source[c.span.start:c.span.end]: c.target for c in report.calls}
+    assert bound.get("x.m()") == m.id
+
+
+def test_destructure_elision_counts_the_slot():
+    source = """
+declare const pair: [P, Q];
+declare class P { pm(): void }
+declare class Q { qm(): void }
+const [, v] = pair;
+v.qm();
+v.pm();
+"""
+    report = build_ts_bindings(source)
+    qm = _bindings(report, "qm")[0]
+    bound = {source[c.span.start:c.span.end]: c.target for c in report.calls}
+    assert bound.get("v.qm()") == qm.id
+    assert not bound.get("v.pm()")
+
+
+def test_value_binding_shadows_builtin_container():
+    source = """
+declare class Other { entries(): [string, Q][] }
+declare class P { pm(): void }
+declare class Q { qm(): void }
+const Map = Other;
+const m = new Map<string, P>();
+for (const [k, v] of m.entries()) { v.pm(); }
+"""
+    report = build_ts_bindings(source)
+    pm = _bindings(report, "pm")[0]
+    bound = {source[c.span.start:c.span.end]: c.target for c in report.calls}
+    # `const Map = Other` shadows the builtin — `m.entries()`
+    # must not take Map's [K, V] pair typing.
+    assert bound.get("v.pm()") != pm.id
+
+
+def test_optional_chain_peels_nested_union():
+    source = """
+declare class P { m(): void }
+declare const o: P | null | undefined;
+o?.m();
+o!.m();
+"""
+    report = build_ts_bindings(source)
+    m = _bindings(report, "m")[0]
+    bound = {source[c.span.start:c.span.end]: c.target for c in report.calls}
+    assert bound.get("o?.m()") == m.id
+    assert bound.get("o!.m()") == m.id
+
+
+def test_optional_chain_non_identifier_receivers():
+    source = """
+declare class P { m(): void }
+declare const o: P | undefined;
+declare class W { p: P | undefined }
+declare const w: W;
+declare function f(): P | undefined;
+(o)?.m();
+w.p?.m();
+f()?.m();
+"""
+    report = build_ts_bindings(source)
+    m = _bindings(report, "m")[0]
+    bound = {source[c.span.start:c.span.end]: c.target for c in report.calls}
+    for name in ("(o)?.m()", "w.p?.m()", "f()?.m()"):
+        assert bound.get(name) == m.id, name
+
+
+def test_for_of_inline_new_container():
+    source = """
+declare class P { m(): void }
+for (const x of new Set<P>()) { x.m(); }
+"""
+    report = build_ts_bindings(source)
+    m = _bindings(report, "m")[0]
+    bound = {source[c.span.start:c.span.end]: c.target for c in report.calls}
+    assert bound.get("x.m()") == m.id
+
+
+def test_self_referential_initializer_stays_opaque_not_recursive():
+    source = """
+declare class P { m(): void }
+declare function mk(x?: P | undefined): P | undefined;
+function outer(v: P | undefined) {
+  {
+    const v = v;
+    const w = mk(v);
+    w?.m();
+  }
+}
+"""
+    # must not raise/recurse — `const v = v` self-init stays opaque.
+    report = build_ts_bindings(source)
+    assert report is not None
