@@ -9674,9 +9674,8 @@ struct P;
 struct R;
 impl P { fn pm(&self) {} }
 impl R { fn rm(&self) {} }
-struct ChunksExact<P>;
 trait Rem { fn into_remainder(self) -> &'static [R]; }
-impl<P> Rem for ChunksExact<P> { fn into_remainder(self) -> &'static [R] { &[] } }
+impl<'a, P> Rem for std::slice::ChunksExact<'a, P> { fn into_remainder(self) -> &'static [R] { &[] } }
 fn f(v: Vec<P>) {
     for q in v.chunks_exact(2).into_remainder() { q.rm(); q.pm(); }
 }
