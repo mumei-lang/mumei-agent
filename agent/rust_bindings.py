@@ -91,6 +91,9 @@ _MAP_RANGE_METHODS = frozenset({"range", "range_mut"})
 _SET_ALGEBRA_METHODS = frozenset(
     {"union", "intersection", "difference", "symmetric_difference"}
 )
+# `s.extract_if(f)` drains matching elements — sets yield `P`;
+# the maps yield `(K, V)` pairs spelled at the pair-pattern site.
+_EXTRACT_IF_METHODS = frozenset({"extract_if"})
 _SET_CONTAINER_NAMES = frozenset({"HashSet", "BTreeSet"})
 
 # Smart pointers that `Deref` straight to their payload — `b.pm()`
@@ -207,8 +210,9 @@ _OPTION_HEAD_METHODS = {
     "zip": ("", {"Option"}, 0),
     # `m.insert(k, v)` yields `Option<V>` — the pair's value arg.
     "insert": ("", {"HashMap", "BTreeMap"}, -1),
-    # `o.replace(v)` yields `Option<P>` — the old payload.
-    "replace": ("", {"Option"}, 0),
+    # `o.replace(v)`/`s.replace(v)` yield `Option<P>` — the old
+    # payload/element.
+    "replace": ("", {"Option", "HashSet", "BTreeSet"}, 0),
     # `m.remove_entry(k)`/`m.pop_first()`/`m.pop_last()` yield
     # `Option<(K, V)>` — `_MAP_PAIR_METHODS` spells the pair.
     "remove_entry": ("", {"HashMap", "BTreeMap"}, 0),
@@ -3288,6 +3292,14 @@ class _RustBindings:
                         in _ITER_INNER_ITER_HEADS
                         | _ITER_ITEM_ARG_HEADS
                     )
+                    or (
+                        self.text(field).strip()
+                        in _OPTION_HEAD_METHODS
+                        and self._map_spelled_args(
+                            option_head_value
+                        )
+                        is not None
+                    )
                 ):
                     option_head = _OPTION_HEAD_METHODS.get(
                         self.text(field).strip()
@@ -3317,9 +3329,30 @@ class _RustBindings:
                     option_head is not None
                     and (
                         option_head[1] is None
-                        or self._container_head_name(
-                            option_head_value
-                        ) in option_head[1]
+                        or (
+                            not (
+                                receiver[0] is not None
+                                and next(
+                                    (
+                                        b.kind
+                                        for b in self.bindings
+                                        if b.id == receiver[0]
+                                    ),
+                                    None,
+                                )
+                                in {"struct", "enum"}
+                            )
+                            and (
+                                self._container_head_name(
+                                    option_head_value
+                                )
+                                in option_head[1]
+                                or self._expanded_container_head(
+                                    option_head_value
+                                )
+                                in option_head[1]
+                            )
+                        )
                         or produced_head in option_head[1]
                         or (
                             map_pair
@@ -3382,6 +3415,20 @@ class _RustBindings:
                         elements = self._type_arg_list(
                             receiver[1] or ""
                         )
+                        if not elements and (
+                            option_head_value is not None
+                        ):
+                            # `s: S` via `type S = HashSet<P>` —
+                            # the annotation carries no spelled
+                            # args; the alias expansion supplies
+                            # them.
+                            expanded_args = self._map_spelled_args(
+                                option_head_value
+                            )
+                            if expanded_args is not None:
+                                elements = self._type_arg_list(
+                                    expanded_args
+                                )
                         if (
                             not elements
                             and peekish
@@ -4921,6 +4968,32 @@ class _RustBindings:
             head = body_pair[1]
         return key
 
+    def _expanded_container_head(self, node: Any | None) -> "str | None":
+        """Container head of an annotation after type-alias
+        expansion — `type S = HashSet<P>` still reads `HashSet`.
+        Falls back to the spelled head when no alias applies."""
+        while node is not None and node.type == "reference_expression":
+            node = next(iter(node.named_children), None)
+        tnode = None if node is None else self._receiver_type_node(node)
+        pair = self._generic_head_args(
+            tnode, tnode.start_byte if tnode is not None else 0
+        )
+        seen: set[str] = set()
+        while (
+            pair is not None
+            and pair[1] is not None
+            and pair[1].binding.kind == "type_alias"
+            and pair[1].alias_node is not None
+            and pair[1].binding.id not in seen
+        ):
+            seen.add(pair[1].binding.id)
+            pair = self._generic_head_args(
+                pair[1].alias_node, pair[1].alias_node.start_byte
+            )
+        if pair is None or pair[2] is None:
+            return self._container_head_name(node)
+        return pair[2].split("::")[-1]
+
     def _receiver_annotation_position(
         self, receiver: Any | None
     ) -> "int | None":
@@ -5406,6 +5479,23 @@ class _RustBindings:
             # `a.union(&b)`/`intersection`/`difference`/
             # `symmetric_difference` iterate `&P` elements of the
             # left set — the same element `a.iter()` spells.
+            container_id, args = self._receiver_type(receiver)
+            if args is None:
+                return None, None
+            if self._container_head_name(receiver) not in (
+                _SET_CONTAINER_NAMES
+            ):
+                return None, None
+            spelled = args.strip() or None
+            if spelled is None:
+                return None, None
+            return spelled, self._receiver_annotation_position(
+                receiver
+            )
+        if method in _EXTRACT_IF_METHODS:
+            # `s.extract_if(f)` yields the set's `P` elements; the
+            # map variant yields `(K, V)` pairs handled at the
+            # pair-pattern site.
             container_id, args = self._receiver_type(receiver)
             if args is None:
                 return None, None
@@ -6250,6 +6340,7 @@ class _RustBindings:
             or method in _ITER_CHUNK_METHODS
             or method in _ITER_CHUNK_MUT_METHODS
             or method in _SET_ALGEBRA_METHODS
+            or method in _EXTRACT_IF_METHODS
             or method == "enumerate"
             or method == "zip"
             or method == "flatten"
@@ -6319,20 +6410,81 @@ class _RustBindings:
             # left set — bind `P` like `a.iter()` does.
             container_id, args = self._receiver_type(receiver)
             if args is None:
+                # `type S = HashSet<P>` — the spelled args come
+                # from the alias expansion, not the annotation.
+                args = self._map_spelled_args(receiver)
+            if args is None:
                 return _UNKNOWN, None
-            if self._container_head_name(receiver) not in (
+            if self._expanded_container_head(receiver) not in (
                 _SET_CONTAINER_NAMES
             ):
+                return _UNKNOWN, None
+            if container_id is not None and next(
+                (
+                    b.kind
+                    for b in self.bindings
+                    if b.id == container_id
+                ),
+                None,
+            ) in {"struct", "enum"}:
+                # A declared `struct HashSet` is a same-named
+                # custom type — its set-algebra methods need not
+                # iterate the std set's element.
                 return _UNKNOWN, None
             arg0 = next(
                 iter(self._type_arg_list(args.strip())), ""
             )
             if not arg0:
                 return _UNKNOWN, None
+            annotated = self._receiver_annotation_position(receiver)
             elem_id, rest = self._element_of(
                 container_id,
                 arg0,
-                call.start_byte,
+                call.start_byte if annotated is None else annotated,
+                self._literal_element_args(call),
+            )
+            if elem_id is None:
+                return _UNKNOWN, rest
+            name = next(
+                (b.name for b in self.bindings if b.id == elem_id), ""
+            )
+            return TypeFact("named", name, 0, None, elem_id), rest
+        if method in _EXTRACT_IF_METHODS:
+            # `s.extract_if(.., f)` yields the set's `P` elements.
+            container_id, args = self._receiver_type(receiver)
+            if args is None:
+                args = self._map_spelled_args(receiver)
+            if args is None:
+                return _UNKNOWN, None
+            if self._expanded_container_head(receiver) not in (
+                _SET_CONTAINER_NAMES
+            ):
+                return _UNKNOWN, None
+            if container_id is not None and next(
+                (
+                    b.kind
+                    for b in self.bindings
+                    if b.id == container_id
+                ),
+                None,
+            ) in {"struct", "enum"}:
+                # A declared `struct HashSet`/`BTreeSet` is a
+                # same-named custom type — only its declared
+                # `extract_if` return type (handled above) is
+                # trustworthy, not the std recipe.
+                return _UNKNOWN, None
+            # `HashSet<P, S>`/`BTreeSet<P, A>` carry a trailing
+            # hasher/allocator arg — the element is arg 0.
+            arg0 = next(
+                iter(self._type_arg_list(args.strip())), ""
+            )
+            if not arg0:
+                return _UNKNOWN, None
+            annotated = self._receiver_annotation_position(receiver)
+            elem_id, rest = self._element_of(
+                container_id,
+                arg0,
+                call.start_byte if annotated is None else annotated,
                 self._literal_element_args(call),
             )
             if elem_id is None:
@@ -6420,6 +6572,50 @@ class _RustBindings:
                 if range_rest is None:
                     return _UNKNOWN, None
                 return _UNKNOWN, f"(usize, {range_rest.strip()})"
+            if inner_name in _EXTRACT_IF_METHODS:
+                # `s.extract_if(.., f).enumerate()` yields
+                # (usize, P) for sets and (usize, (K, V)) for
+                # maps — the spelled element/pair comes from the
+                # receiver's (alias-expanded) generic args.
+                inner_container, inner_args = self._receiver_type(
+                    inner_receiver
+                )
+                if inner_container is not None and next(
+                    (
+                        b.kind
+                        for b in self.bindings
+                        if b.id == inner_container
+                    ),
+                    None,
+                ) in {"struct", "enum"}:
+                    return _UNKNOWN, None
+                inner_spelled = (
+                    inner_args
+                    if inner_args is not None
+                    else self._map_spelled_args(inner_receiver)
+                )
+                if inner_spelled is None:
+                    return _UNKNOWN, None
+                inner_parts = self._type_arg_list(inner_spelled.strip())
+                expanded = self._expanded_container_head(inner_receiver)
+                if expanded in _SET_CONTAINER_NAMES:
+                    elem = (
+                        inner_parts[0].strip() if inner_parts else ""
+                    )
+                    if not elem:
+                        return _UNKNOWN, None
+                    return _UNKNOWN, f"(usize, {elem})"
+                if (
+                    expanded in _MAP_CONTAINER_NAMES
+                    or self._is_map_container(
+                        inner_container, inner_receiver
+                    )
+                ) and len(inner_parts) >= 2:
+                    pair = ", ".join(
+                        part.strip() for part in inner_parts[:2]
+                    )
+                    return _UNKNOWN, f"(usize, ({pair}))"
+                return _UNKNOWN, None
             if inner_name not in _ITER_ELEMENT_METHODS:
                 return _UNKNOWN, None
             if (
@@ -6672,7 +6868,9 @@ class _RustBindings:
             )
             if (
                 method
-                not in _ITER_ELEMENT_METHODS | _MAP_RANGE_METHODS
+                not in _ITER_ELEMENT_METHODS
+                | _MAP_RANGE_METHODS
+                | _EXTRACT_IF_METHODS
             ):
                 return {}
             if (
@@ -6692,12 +6890,24 @@ class _RustBindings:
             # `range`/`range_mut` are `BTreeMap`-only — a `HashMap`
             # receiver names no such std method.
             return {}
+        if (
+            method in _EXTRACT_IF_METHODS
+            and self._expanded_container_head(receiver)
+            not in _MAP_CONTAINER_NAMES
+            and not self._is_map_container(container_id, receiver)
+        ):
+            # `extract_if` is a map/set method — the pair path
+            # only admits the maps.
+            return {}
         spelled = self._map_spelled_args(receiver)
         if spelled is None:
             return {}
         parts = self._type_arg_list(spelled)
-        if len(parts) != 2:
+        if len(parts) < 2:
             return {}
+        # `HashMap<K, V, S>` carries a trailing hasher arg —
+        # the pair reads only the first two.
+        parts = parts[:2]
         annotated = self._receiver_annotation_position(receiver)
         if annotated is not None:
             position = annotated
@@ -9575,13 +9785,45 @@ class _RustBindings:
                     return self._scrutinee_shape(
                         callee.child_by_field_name("value"), None
                     )
+                _head_value = (
+                    callee.child_by_field_name("value")
+                    if callee is not None
+                    else None
+                )
+                _head_id = (
+                    None
+                    if _head_value is None
+                    else self._receiver_type(_head_value)[0]
+                )
+                _head_declared = _head_id is not None and next(
+                    (
+                        b.kind
+                        for b in self.bindings
+                        if b.id == _head_id
+                    ),
+                    None,
+                ) in {"struct", "enum"}
                 if (
                     option_head is not None
                     and (
                         option_head[1] is None
-                        or self._container_head_name(
-                            callee.child_by_field_name("value")
-                        ) in option_head[1]
+                        or (
+                            not _head_declared
+                            and (
+                                self._container_head_name(
+                                    callee.child_by_field_name(
+                                        "value"
+                                    )
+                                )
+                                in option_head[1]
+                                or self._expanded_container_head(
+                                    callee.child_by_field_name(
+                                        "value"
+                                    )
+                                )
+                                in option_head[1]
+                            )
+                        )
                         or (
                             self.text(field).strip()
                             in _MAP_PAIR_METHODS
