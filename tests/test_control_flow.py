@@ -645,6 +645,18 @@ def test_unused_assignments_select_receive_target_indices_are_reads():
     assert result == ()
 
 
+def test_unused_assignments_bare_return_reads_all_tracked_names():
+    body = "r, n := f()\n_ = n\n_ = r\nr = 2\nreturn\n"
+    _, result = unuses(body)
+    assert result == ()
+
+
+def test_unused_assignments_grouped_var_reads_all_tracked_names():
+    body = "x := 1\n_ = x\nx = 2\nvar (\ny = x\n)\nreturn y\n"
+    _, result = unuses(body)
+    assert result == ()
+
+
 @pytest.mark.parametrize(
     "body",
     [

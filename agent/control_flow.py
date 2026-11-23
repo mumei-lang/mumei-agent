@@ -32,7 +32,8 @@ This remains a name-based hint, not a defect verdict: fields, elements,
 aliasing and full lexical binding identity are not modelled. Liveness
 additions require a store span inside and after the sole declaration's
 scope, and exclude unreachable, multiply declared, closure-mentioned,
-address-taken and otherwise unreliable names.
+address-taken and otherwise unreliable names. Bare returns and grouped
+var/const declarations read all tracked names conservatively.
 """
 
 from __future__ import annotations
@@ -700,6 +701,10 @@ def _liveness_reads(
     tracked_names: frozenset[str],
 ) -> frozenset[str]:
     reads = _value_read_names(statement)
+    if statement.kind == "return" and not statement.values:
+        reads |= tracked_names
+    if statement.kind in {"var", "const"} and not statement.targets:
+        reads |= tracked_names
     if statement.kind == "assign" and statement.operator not in {"", "="}:
         reads |= frozenset(
             target
@@ -841,8 +846,10 @@ def unused_assignments(
     function-literal parameters); the store's span must lie within and
     start at or after that declaration's scope. They exclude names
     mentioned in any function literal, address-taken names and the
-    extractor's unreliable names. The analysis is name-based: it does
-    not model fields, elements, aliasing or full lexical binding identity.
+    extractor's unreliable names. Bare returns and grouped var/const
+    declarations read all tracked names conservatively. The analysis is
+    name-based: it does not model fields, elements, aliasing or full
+    lexical binding identity.
     Every result is a hint for the host's analysis, not a defect verdict.
     """
     if hashlib.sha256(body.encode("utf-8")).hexdigest() != graph.source_sha256:
