@@ -8334,3 +8334,86 @@ fn f(b: std::collections::BTreeMap<K, P>, h: std::collections::HashMap<K, P>) {
     assert bound.get("y.pm()") == pm.id
     # `HashMap` names no such method — stays opaque.
     assert not bound.get("z.pm()")
+
+
+def test_map_pair_args_resolve_in_annotation_scope():
+    source = """
+mod m {
+    pub type A<V> = std::collections::BTreeMap<i32, V>;
+    pub type S<V> = std::collections::BTreeSet<V>;
+}
+struct P;
+impl P { fn crate_pm(&self) {} }
+fn f() {
+    struct P;
+    impl P { fn local_pm(&self) {} }
+    let m: m::A<P> = mk();
+    let mut s: m::S<P> = mk();
+    if let Some((k, v)) = m.first_key_value() { v.local_pm(); v.crate_pm(); }
+    for (k2, v2) in m.iter() { v2.local_pm(); }
+    for v3 in m.values() { v3.local_pm(); }
+    for p in s.extract_if(|q| true) { p.local_pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    local = _bindings(report, "local_pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # Substituted args were written at the receiver's annotation —
+    # `P` inside `f`/`g` is the fn-local type, not the crate one.
+    assert bound.get("v.local_pm()") == local.id
+    assert bound.get("v2.local_pm()") == local.id
+    assert bound.get("v3.local_pm()") == local.id
+    assert bound.get("p.local_pm()") == local.id
+    assert not bound.get("v.crate_pm()")
+
+
+def test_map_field_pair_args_resolve_at_receiver_annotation():
+    source = """
+mod a { pub struct T; impl T { fn tm(&self) {} } }
+mod m {
+    pub struct W { pub map: std::collections::BTreeMap<crate::a::T, i32> }
+    pub struct W2<V> { pub map: std::collections::BTreeMap<crate::a::T, V> }
+}
+struct P;
+impl P { fn crate_pm(&self) {} }
+fn f(w: m::W) {
+    if let Some((k, v)) = w.map.first_key_value() { k.tm(); }
+}
+fn g(w2: m::W2<P>) {
+    if let Some((k, v)) = w2.map.first_key_value() { k.tm(); v.crate_pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    tm = _bindings(report, "tm", "associated_function")[0]
+    pm = _bindings(report, "crate_pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    assert bound.get("k.tm()") == tm.id
+    assert bound.get("v.crate_pm()") == pm.id
+
+
+def test_declared_btreemap_first_key_value_stays_opaque():
+    source = """
+struct BTreeMap<K, V> { _p: core::marker::PhantomData<(K, V)> }
+struct P;
+impl P { fn pm(&self) {} }
+fn f(m: BTreeMap<i32, P>) {
+    if let Some((k, v)) = m.first_key_value() { v.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # A user-declared `BTreeMap` is not std's — the speculative
+    # `Option<(&K, &V)>` produce stays off.
+    assert not bound.get("v.pm()")
