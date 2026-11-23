@@ -426,6 +426,84 @@ def test_probe_requests_with_gate_match_when_enforceable(monkeypatch):
     assert gated == ungated
 
 
+@pytest.mark.parametrize(
+    ("dimension", "permission", "enforceability"),
+    [
+        (
+            "filesystem_write",
+            "filesystem.write",
+            "filesystem_write_isolation_enforceable",
+        ),
+        (
+            "filesystem_read",
+            "filesystem.read",
+            "filesystem_read_isolation_enforceable",
+        ),
+        (
+            "process_spawn",
+            "process.spawn",
+            "process_spawn_isolation_enforceable",
+        ),
+    ],
+    ids=("filesystem_write", "filesystem_read", "process_spawn"),
+)
+def test_probe_requests_gate_other_required_isolation(
+    monkeypatch, dimension, permission, enforceability
+):
+    _patch_probe_enforceability(
+        monkeypatch, **{enforceability: False}
+    )
+    isolated_id = f"probe.isolated-{dimension}"
+    permitted_id = f"probe.permitted-{dimension}"
+    descriptors = (
+        AdapterDescriptor.from_manifest(
+            _manifest(adapter_id=isolated_id, required_permissions=[])
+        ),
+        AdapterDescriptor.from_manifest(
+            _manifest(
+                adapter_id=permitted_id,
+                required_permissions=[permission],
+            )
+        ),
+    )
+    registry = AdapterRegistry()
+    for descriptor in descriptors:
+        registry.register(descriptor)
+    allowed_permissions = frozenset({permission})
+    gated_policy = PlannerPolicy(
+        allowed_permissions=allowed_permissions,
+        require_enforced_isolation=True,
+    )
+
+    gated_requests = probe_requests_for(
+        registry, _route(), gated_policy, stamp=3
+    )
+
+    assert [request.adapter_id for request in gated_requests] == [
+        permitted_id
+    ]
+    assert getattr(gated_requests[0], f"isolate_{dimension}") is False
+
+    ungated_policy = PlannerPolicy(allowed_permissions=allowed_permissions)
+    ungated_requests = probe_requests_for(
+        registry, _route(), ungated_policy, stamp=3
+    )
+    expected = {
+        descriptor.adapter_id: probe_request_for(
+            descriptor, stamp=3, policy=ungated_policy
+        )
+        for descriptor in descriptors
+    }
+
+    assert {request.adapter_id for request in ungated_requests} == {
+        isolated_id,
+        permitted_id,
+    }
+    assert {
+        request.adapter_id: request for request in ungated_requests
+    } == expected
+
+
 def test_probe_requests_skip_undeclared_probe():
     m = _manifest()
     del m["probe_argv"]
