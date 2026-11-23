@@ -1432,11 +1432,7 @@ class _RustBindings:
             else:
                 current.append(ch)
         parts.append("".join(current))
-        items = [part.strip() for part in parts]
-        if len(items) > 1 and items[-1] == "":
-            # `(P, Q,)` — a trailing comma names no third arg.
-            items.pop()
-        return items
+        return [part.strip() for part in parts]
 
     def _resolve_spelled_in_scope(
         self, spelled: str, scope: "_Scope | None", position: int
@@ -3930,10 +3926,27 @@ class _RustBindings:
                     if (
                         method_name == "unzip"
                         and receiver[1] is not None
-                        and self._container_head_name(
-                            callee.child_by_field_name("value")
+                        and (
+                            self._container_head_name(
+                                callee.child_by_field_name("value")
+                            )
+                            == "Option"
+                            or (
+                                self._container_head_name(
+                                    callee.child_by_field_name("value")
+                                )
+                                is None
+                                and re.match(
+                                    r"Option\s*<",
+                                    self._expr_type_spelling(
+                                        callee.child_by_field_name(
+                                            "value"
+                                        )
+                                    )
+                                    or "",
+                                )
+                            )
                         )
-                        == "Option"
                     ):
                         # `Option<(A, B)>::unzip` yields
                         # `(Option<A>, Option<B>)` — the pair feeds
@@ -3952,6 +3965,9 @@ class _RustBindings:
                             and self._paren_wraps(inner)
                         ):
                             halves = self._type_arg_list(inner[1:-1])
+                            # `(P, Q,)` — a trailing comma is fine.
+                            if len(halves) == 3 and halves[-1] == "":
+                                halves = halves[:2]
                             if len(halves) == 2:
                                 return (
                                     None,
@@ -4015,6 +4031,13 @@ class _RustBindings:
                                 halves = self._type_arg_list(
                                     it_args[1:-1]
                                 )
+                                # `(P, Q,)` — a trailing comma is
+                                # fine.
+                                if (
+                                    len(halves) == 3
+                                    and halves[-1] == ""
+                                ):
+                                    halves = halves[:2]
                                 if len(halves) == 2:
                                     return (
                                         None,
@@ -4025,6 +4048,164 @@ class _RustBindings:
                                     )
                             # `unzip` on a non-pair element names
                             # no method — stays opaque.
+                            return None, None
+                    if (
+                        method_name in {"and", "or", "transpose"}
+                        and receiver[1] is not None
+                    ):
+                        value_expr = callee.child_by_field_name(
+                            "value"
+                        )
+                        head = self._container_head_name(value_expr)
+                        recv_args = self._type_arg_list(
+                            receiver[1]
+                        )
+                        if head is None:
+                            # `r.and(s).or(t)` — the produced args
+                            # still spell `Result<...>`.
+                            spelled_head = re.fullmatch(
+                                r"([A-Za-z_][\w:]*)\s*<(.+)>",
+                                receiver[1].strip(),
+                                re.DOTALL,
+                            )
+                            if spelled_head is not None:
+                                head = self._normalize_identifier(
+                                    spelled_head.group(1)
+                                    .split("::")[-1]
+                                )
+                                recv_args = self._type_arg_list(
+                                    spelled_head.group(2)
+                                )
+                        if (
+                            method_name in {"and", "or"}
+                            and head == "Result"
+                            and len(recv_args) == 2
+                        ):
+                            # `r1.and(r2)` yields `Result<U, E>`
+                            # — r2's `Ok` with r1's `Err`;
+                            # `r1.or(r2)` yields `Result<T, F>`.
+                            arg_list = node.child_by_field_name(
+                                "arguments"
+                            )
+                            first_arg = (
+                                None
+                                if arg_list is None
+                                else next(
+                                    (
+                                        c
+                                        for c
+                                        in arg_list.named_children
+                                        if "comment" not in c.type
+                                    ),
+                                    None,
+                                )
+                            )
+                            other = (
+                                None
+                                if first_arg is None
+                                else self._expr_type_spelling(
+                                    first_arg
+                                )
+                            )
+                            other_args = (
+                                []
+                                if other is None
+                                else self._type_arg_list(
+                                    re.sub(
+                                        r"^[A-Za-z_][\w:]*\s*<|>$",
+                                        "",
+                                        other,
+                                    )
+                                )
+                            )
+                            other_head = (
+                                None
+                                if other is None
+                                else re.match(
+                                    r"[A-Za-z_][\w:]*(?=\s*<)",
+                                    other,
+                                )
+                            )
+                            if (
+                                other_head is not None
+                                and self._normalize_identifier(
+                                    other_head.group(0)
+                                    .split("::")[-1]
+                                )
+                                == "Result"
+                                and len(other_args) == 2
+                            ):
+                                if method_name == "and":
+                                    yield_args = (
+                                        other_args[0].strip()
+                                        + ", "
+                                        + recv_args[1].strip()
+                                    )
+                                else:
+                                    yield_args = (
+                                        recv_args[0].strip()
+                                        + ", "
+                                        + other_args[1].strip()
+                                    )
+                                return (
+                                    None,
+                                    "Result<{}>".format(
+                                        yield_args
+                                    ),
+                                )
+                            return None, None
+                        if method_name == "transpose" and (
+                            head == "Result"
+                            and len(recv_args) == 2
+                            or head == "Option"
+                            and len(recv_args) == 1
+                        ):
+                            inner = recv_args[0].strip()
+                            wrapped = re.fullmatch(
+                                r"([A-Za-z_][\w:]*)\s*<(.+)>",
+                                inner,
+                                re.DOTALL,
+                            )
+                            if wrapped is not None:
+                                inner_head = (
+                                    self._normalize_identifier(
+                                        wrapped.group(1)
+                                        .split("::")[-1]
+                                    )
+                                )
+                                inner_args = self._type_arg_list(
+                                    wrapped.group(2)
+                                )
+                                if (
+                                    head == "Result"
+                                    and inner_head == "Option"
+                                    and len(inner_args) == 1
+                                ):
+                                    # `Result<Option<P>, E>` ->
+                                    # `Option<Result<P, E>>`.
+                                    return (
+                                        None,
+                                        "Option<Result<{}, {}>>"
+                                        .format(
+                                            inner_args[0].strip(),
+                                            recv_args[1].strip(),
+                                        ),
+                                    )
+                                if (
+                                    head == "Option"
+                                    and inner_head == "Result"
+                                    and len(inner_args) == 2
+                                ):
+                                    # `Option<Result<P, E>>` ->
+                                    # `Result<Option<P>, E>`.
+                                    return (
+                                        None,
+                                        "Result<Option<{}>, {}>"
+                                        .format(
+                                            inner_args[0].strip(),
+                                            inner_args[1].strip(),
+                                        ),
+                                    )
                             return None, None
                     if (
                         method_name in _SWAP_REMOVE_METHODS
@@ -4435,6 +4616,70 @@ class _RustBindings:
                 record.value_node
             )
         return None
+
+    def _verbatim_annotation_args(self, value: Any | None) -> bool:
+        """Whether this value's type args were literally written in
+        a type annotation — `o: Option<Option<P>>` and
+        `let u = g()` (g's return annotation) keep them verbatim,
+        while `let a = r1.and(r2)` produces args no annotation
+        spelled. Used for prelude payloads: verbatim args are the
+        constructor's inner payload (`Some(p)` binds `p` to the
+        args as-is); produced args still carry the container's own
+        head and must be unwrapped first."""
+        node = value
+        while node is not None and node.type in {
+            "reference_expression",
+            "parenthesized_expression",
+        }:
+            node = next(iter(node.named_children), None)
+        if node is None:
+            return False
+        if node.type == "call_expression":
+            callee = node.child_by_field_name("function")
+            if callee is not None and callee.type == "identifier":
+                # `let u = g()` — `g`'s return annotation spelled
+                # the args verbatim.
+                record = self._through_import(
+                    self._lookup(
+                        self._normalize_identifier(
+                            self.text(callee)
+                        ),
+                        callee.start_byte,
+                        "value",
+                    ),
+                    callee.start_byte,
+                    "value",
+                )
+                return (
+                    record is not None
+                    and record.type_node is not None
+                )
+            # `r1.and(r2)` — a method call produces the args.
+            return False
+        if node.type == "field_expression":
+            member = self._field_member(
+                node, ("struct_field", "associated_const")
+            )
+            return (
+                member is not None
+                and member.type_node is not None
+            )
+        if node.type != "identifier":
+            return self._receiver_annotation_position(node) is not None
+        record = self._lookup(
+            self._normalize_identifier(self.text(node)),
+            node.start_byte,
+            "value",
+        )
+        if record is None:
+            return False
+        if record.type_node is not None:
+            return True
+        if record.value_node is not None and (
+            record.value_node is not node
+        ):
+            return self._verbatim_annotation_args(record.value_node)
+        return False
 
     def _field_args_position(
         self, field_expr: Any | None
@@ -6203,8 +6448,15 @@ class _RustBindings:
                     elem_args.strip(),
                 )
                 if peeled is not None:
+                    # `let it = r.iter()` — `it`'s spelled element
+                    # names were written in `r`'s annotation, not
+                    # at the `for` site.
+                    position = (
+                        self._receiver_annotation_position(iterator)
+                        or iterator.start_byte
+                    )
                     tid, spelled_args = self._spelled_type(
-                        peeled.group(1).strip(), iterator.start_byte
+                        peeled.group(1).strip(), position
                     )
                     if tid is not None:
                         name = next(
@@ -7217,11 +7469,7 @@ class _RustBindings:
                 scrut_position, scrut_scope,
                 inner_args=(
                     annotation is not None
-                    or (
-                        value is not None
-                        and self._receiver_annotation_position(value)
-                        is not None
-                    )
+                    or self._verbatim_annotation_args(value)
                 ),
             )
         )
@@ -7530,11 +7778,7 @@ class _RustBindings:
                 self._pattern_type_map(
                     pattern, scrut_id, scrut_args,
                     scrut_name, scrut_position, scrut_scope,
-                    inner_args=(
-                        value is not None
-                        and self._receiver_annotation_position(value)
-                        is not None
-                    ),
+                    inner_args=self._verbatim_annotation_args(value),
                 ),
             )
         if any(node.type == "let_condition" for node in self._descendants(condition)):
@@ -7744,11 +7988,7 @@ class _RustBindings:
             type_map = self._pattern_type_map(
                 pattern, scrut_id, scrut_args,
                 *self._scrutinee_shape(value, scrut_id),
-                inner_args=(
-                    value is not None
-                    and self._receiver_annotation_position(value)
-                    is not None
-                ),
+                inner_args=self._verbatim_annotation_args(value),
             )
             self._bind_pattern_names(
                 names, arm_scope, self.span(arm), type_map=type_map
@@ -8645,6 +8885,30 @@ class _RustBindings:
                 head_part = literal_head.split("<", 1)[0].strip()
                 if "::" in head_part:
                     head = head_part
+        if head is None and node.type == "call_expression":
+            # `make() -> Result<Q, E>` — the callee's return
+            # annotation spells the produced type verbatim.
+            callee = node.child_by_field_name("function")
+            callee_name = (
+                self._normalize_identifier(self.text(callee))
+                if callee is not None and callee.type == "identifier"
+                else None
+            )
+            if callee_name is not None:
+                record = self._through_import(
+                    self._lookup(callee_name, callee.start_byte, "value"),
+                    callee.start_byte,
+                    "value",
+                )
+                tn = None if record is None else record.type_node
+                if tn is not None:
+                    annotated = re.sub(
+                        r"^&\s*(?:'\w+\s+)?(?:mut\s+)?", "",
+                        self.text(tn),
+                    ).strip()
+                    return self._qualified_spelling(
+                        annotated, tn.start_byte
+                    )
         if head is None:
             return None
         spelled = head if not targs else f"{head}<{targs}>"
@@ -9022,6 +9286,30 @@ class _RustBindings:
                     if head not in _TRY_HEADS:
                         return None, None, None
                     return head, node.start_byte, None
+                # `r1.and(r2)`/`o.transpose()`-style calls spell
+                # their own prelude head in the result args
+                # (`Result<Q, E>`) — read it like the identifier
+                # arm's spelled-args fallback so `Ok`/`Some` still
+                # reach the payload.
+                call_id, call_args = self._receiver_type(node)
+                if call_id is None and call_args is not None:
+                    head = re.match(
+                        r"[A-Za-z_][\w:]*(?=\s*<)",
+                        call_args.strip(),
+                    )
+                    if head is not None and (
+                        self._normalize_identifier(
+                            head.group(0).split("::")[-1]
+                        )
+                        in _TRY_HEADS
+                    ):
+                        return (
+                            self._normalize_identifier(
+                                head.group(0).split("::")[-1]
+                            ),
+                            node.start_byte,
+                            None,
+                        )
                 return None, None, None
             if member.type_node is None:
                 return None, None, None
@@ -9134,6 +9422,22 @@ class _RustBindings:
         args = self._type_arg_list(scrut_args or "")
         if entry[1] >= len(args):
             return None
+        payload = args[entry[1]].strip()
+        payload_head = re.match(
+            r"[A-Za-z_][\w:]*(?=\s*<)", payload
+        )
+        if (
+            payload_head is not None
+            and self._normalize_identifier(
+                payload_head.group(0).split("::")[-1]
+            )
+            in _TRY_HEADS
+        ):
+            # `Result<Option<P>, E>`'s `Ok` payload is `Option<P>`
+            # — keep the full spelled head (as the tuple-pattern
+            # pin does) so `Some(q)` on the name still reaches `P`;
+            # `_spelled_type` would flatten it to bare `P`.
+            return [(None, payload)]
         # The spelled arg refers to names visible where the
         # scrutinee's type was annotated — resolving at the pattern
         # position would pick up a same-named shadow.
@@ -9217,6 +9521,9 @@ class _RustBindings:
                 if not spelled_args
                 else self._type_arg_list(spelled_args)
             )
+            # `(P, P,)` — a trailing comma names no extra element.
+            if elements and elements[-1] == "":
+                elements = elements[:-1]
             # Positions count anonymous `_` too — `(_, b)` binds
             # `b` to element 1, not 0.
             slots = [
