@@ -27585,12 +27585,6 @@ def test_chan_chan_boundaries_stay_closed(go_types_helper):
         "\tf(cc)\n"
         "\treturn 0\n"
         "}\n",
-        "type St struct{ C chan chan int64 }\n"
-        "func F() int64 {\n"
-        "\tcc := make(chan chan int64, 1)\n"
-        "\tst := St{}\n"
-        "\tst.C = cc\n"
-        "\treturn 0\n}\n",
         "func F() int64 {\n"
         "\tcc := make(chan chan int64, 1)\n"
         "\th := func() chan chan int64 { return cc }\n"
@@ -27613,10 +27607,6 @@ def test_chan_chan_boundaries_stay_closed(go_types_helper):
         "\treturn 0\n}\n",
         "func F(p chan chan []int64) int64 {\n"
         "\tq := p\n\t_ = q\n\treturn 0\n}\n",
-        "type St struct{ C chan chan int64 }\n"
-        "func F() St {\n"
-        "\tcc := make(chan chan int64, 1)\n"
-        "\treturn St{C: cc}\n}\n",
         "func F() any {\n"
         "\tcc := make(chan chan int64, 1)\n"
         "\treturn cc\n}\n",
@@ -31299,6 +31289,30 @@ def test_value_struct_field_chan_chan_send_recv(go_types_helper):
         "\tcc <- c\n"
         "\tw := WW{C: cc}\n"
         "\treturn <-(<-w.C)\n}\n"
+        "func FLocalDonor(x int64) int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tc <- x\n"
+        "\tcc <- c\n"
+        "\tvar w WW\n"
+        "\tw.C = cc\n"
+        "\treturn <-(<-w.C)\n}\n"
+        "func FParamDonor(cc chan chan int64, x int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tc <- x\n"
+        "\tcc <- c\n"
+        "\tw := WW{C: cc}\n"
+        "\treturn <-(<-w.C)\n}\n"
+        "func FParamDonorStore(cc chan chan int64, x int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tc <- x\n"
+        "\tcc <- c\n"
+        "\tvar w WW\n"
+        "\tw.C = cc\n"
+        "\treturn <-(<-w.C)\n}\n"
+        "func FTwoRoots(a WW, b WW) int64 {\n"
+        "\t_ = <-(<-a.C)\n"
+        "\treturn <-(<-b.C)\n}\n"
     }
     snapshot = _snapshot_for(go_types_helper, files)
     summaries = ip.summarize_go_package(files, snapshot)
@@ -31310,16 +31324,28 @@ def test_value_struct_field_chan_chan_send_recv(go_types_helper):
             "FLit",
             "FStore",
             "FLitStore",
+            "FLocalDonor",
+            "FParamDonor",
+            "FParamDonorStore",
+            "FTwoRoots",
         )
     }
     assert results["FSend"].available
     assert results["FSend"].return_dependencies == frozenset()
-    for name in ("FRecv", "FLit"):
+    for name in ("FRecv", "FLit", "FLocalDonor"):
         assert results[name].available
         assert results[name].return_dependencies == frozenset({0})
-    for name in ("FStore", "FLitStore"):
+    # A param donor's queue is caller-visible — reads carry its
+    # origin alongside the sent value's.
+    for name in (
+        "FStore",
+        "FLitStore",
+        "FParamDonor",
+        "FParamDonorStore",
+        "FTwoRoots",
+    ):
         assert results[name].available
-        assert results[name].return_dependencies == frozenset({1})
+        assert results[name].return_dependencies == frozenset({0, 1})
 
 
 def test_value_struct_field_channel_may_set_follows_reseat(

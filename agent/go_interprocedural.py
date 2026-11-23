@@ -6017,9 +6017,25 @@ class _Builder:
                 # member's queue-of-queues root and join it into the
                 # donor's group like a `w.C = cc` store.
                 self._local_chan_chan_member_init(member)
-                cc_root = self._local_chan_chan_id(value)
-                if cc_root is not None:
+                donor = self._chan_chan_donor_root(
+                    value, None, params
+                )
+                if donor is not None:
+                    cc_root, donor_id = donor
                     self._chan_group_join(member.id, cc_root)
+                    if donor_id is not None:
+                        # External donor (e.g. a param's queue) —
+                        # the member observes indirect writes and
+                        # carries the donor's origin.
+                        self._mark_external_chan_group_member(
+                            member.id
+                        )
+                        if params is not None and donor_id in params:
+                            self._set_chan_chan_param_origins(
+                                member.id,
+                                frozenset({params[donor_id]}),
+                                True,
+                            )
                 continue
             if self._scalar_chan_fact(member_type):
                 # `W{C: ch}` — the field may now hold `ch`'s queue:
@@ -13900,19 +13916,22 @@ class _Builder:
             member, root_binding = value_field
             if member.id not in self.local_chan_chans:
                 self._local_chan_chan_member_init(member)
-                if (
-                    params is not None
-                    and root_binding.id in params
-                ):
-                    # A parameter's field queue is caller-provided
-                    # memory — like `p.C`, reads observe indirect
-                    # writes and ops carry the param's origin.
-                    self._mark_external_chan_group_member(member.id)
-                    self._set_chan_chan_param_origins(
-                        member.id,
-                        frozenset({params[root_binding.id]}),
-                        True,
-                    )
+            if (
+                params is not None
+                and root_binding.id in params
+            ):
+                # A parameter's field queue is caller-provided
+                # memory — like `p.C`, reads observe indirect
+                # writes and ops carry the param's origin. Union on
+                # every resolution: `a.C` and `b.C` share one member
+                # identity, so each param root contributes its own
+                # origin to the summary.
+                self._mark_external_chan_group_member(member.id)
+                self._set_chan_chan_param_origins(
+                    member.id,
+                    frozenset({params[root_binding.id]}),
+                    True,
+                )
             return self._chan_root(member.id)
         if inner.type == "index_expression":
             target = self._chan_chan_elem_index_target(inner)
@@ -14077,6 +14096,53 @@ class _Builder:
                 }
             ),
         )
+
+    def _chan_chan_donor_root(
+        self,
+        node: Any,
+        locals_: dict[str, frozenset[int]] | None,
+        params: dict[str, int] | None,
+    ) -> tuple[str, str | None] | None:
+        """The share-group root a `chan chan` store/literal donor
+        names: `(root, donor_binding_id)` — the binding id when the
+        donor is an external (param/caller-visible) queue, else
+        None."""
+        local = self._local_chan_chan_id(node, locals_, params)
+        if local is not None:
+            return (local, None)
+        inner = node
+        while (
+            inner is not None
+            and inner.type == "parenthesized_expression"
+        ):
+            inner = next(
+                (c for c in inner.named_children if c.type != "comment"),
+                None,
+            )
+        if inner is None or inner.type != "identifier":
+            return None
+        ref = self.references.get(self.node_key(inner))
+        if ref is None or not ref.binding_id:
+            return None
+        binding = self.bindings.get(ref.binding_id)
+        if (
+            binding is None
+            or not (
+                self._chan_chan_fact(binding.type)
+                or self._chan_chan_elem_collection(binding.type)
+            )
+            or (
+                params is not None
+                and ref.binding_id not in params
+                and ref.binding_id not in self.external_chan_locals
+            )
+            or (
+                params is None
+                and ref.binding_id not in self.external_chan_locals
+            )
+        ):
+            return None
+        return (self._chan_root(ref.binding_id), ref.binding_id)
 
     def _local_chan_chan_member_init(self, member: Any) -> None:
         """A `chan chan` field member has no entry in `bindings` —
@@ -24553,6 +24619,13 @@ class _Builder:
                         self._chan_chan_elem_index_target(lhs)
                         is not None
                     )
+                    field_chan_chan_lhs_allowed = (
+                        lhs is not None
+                        and self._value_field_chan_chan(
+                            lhs, locals_
+                        )
+                        is not None
+                    )
                     if (
                         (
                             lhs_id is None
@@ -24565,6 +24638,7 @@ class _Builder:
                         )
                         and not external_chan_chan_lhs
                         and not local_chan_chan_elem_lhs
+                        and not field_chan_chan_lhs_allowed
                     ):
                         raise _Unsupported(
                             "binding_unavailable", _span(node)
@@ -26596,7 +26670,7 @@ class _Builder:
                 if len(lefts) == len(rights) and i < len(rights)
             }
             field_chan_chan_roots = {
-                i: self._local_chan_chan_id(
+                i: self._chan_chan_donor_root(
                     rights[i], locals_, params
                 )
                 for i in field_chan_chan_lhs
@@ -28226,9 +28300,27 @@ class _Builder:
                     # into the RHS's group so sends on either
                     # name reach reads on the other.
                     self._local_chan_chan_member_init(member_cc)
-                    cc_root = field_chan_chan_roots.get(i)
+                    donor_cc = field_chan_chan_roots.get(i)
+                    cc_root = (
+                        donor_cc[0] if donor_cc is not None else None
+                    )
                     if cc_root is not None:
                         self._chan_group_join(member_cc.id, cc_root)
+                        if donor_cc[1] is not None:
+                            self._mark_external_chan_group_member(
+                                member_cc.id
+                            )
+                            if (
+                                params is not None
+                                and donor_cc[1] in params
+                            ):
+                                self._set_chan_chan_param_origins(
+                                    member_cc.id,
+                                    frozenset(
+                                        {params[donor_cc[1]]}
+                                    ),
+                                    True,
+                                )
                     if member_cc.id in self.local_chan_chans or (
                         cc_root is not None
                     ):
