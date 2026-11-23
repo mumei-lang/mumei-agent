@@ -524,6 +524,38 @@ def test_missing_memory_enforcement_fails_closed(monkeypatch):
     assert runner_calls == []
 
 
+def test_explicit_unenforceable_memory_bound_fails_closed_and_falls_back(
+    monkeypatch,
+):
+    set_enforcement_capabilities(monkeypatch, memory=False)
+    result, runner_calls = schedule_with_runner_stub(
+        monkeypatch,
+        registry_with("alpha", "beta"),
+        ("alpha", "beta"),
+        {"alpha": argv(0), "beta": argv(0)},
+        policy=policy(
+            selected_adapter="alpha",
+            allow_fallback=True,
+            require_enforced_isolation=True,
+        ),
+        memory_bound_mb=64,
+    )
+
+    first = result.entries[0]
+    assert first == ScheduledAttemptEntry(
+        1,
+        "alpha",
+        first.plan_fingerprint,
+        None,
+        NOT_DISPATCHED,
+        None,
+    )
+    assert result.outcome == "exhausted"
+    assert [entry.adapter_id for entry in result.entries] == ["alpha", "beta"]
+    assert all(entry.terminal_state == NOT_DISPATCHED for entry in result.entries)
+    assert runner_calls == []
+
+
 def test_permitted_unenforceable_dimension_does_not_fail_closed(monkeypatch):
     set_enforcement_capabilities(monkeypatch, network=False)
     registry = AdapterRegistry()

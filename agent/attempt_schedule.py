@@ -201,13 +201,17 @@ class _DispatchConfiguration:
 
     @property
     def fully_enforced(self) -> bool:
-        return self.enforcement.memory_bound_mb is not None and all(
-            value != "unenforced"
-            for value in (
-                self.enforcement.network,
-                self.enforcement.filesystem_write,
-                self.enforcement.filesystem_read,
-                self.enforcement.process_spawn,
+        return (
+            self.enforcement.memory_bound_mb is not None
+            and memory_bound_enforceable()
+            and all(
+                value != "unenforced"
+                for value in (
+                    self.enforcement.network,
+                    self.enforcement.filesystem_write,
+                    self.enforcement.filesystem_read,
+                    self.enforcement.process_spawn,
+                )
             )
         )
 
