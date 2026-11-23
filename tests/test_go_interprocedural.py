@@ -50013,6 +50013,39 @@ def test_func_result_captured_chan_send_after_bind(go_types_helper):
 
 
 
+def test_imported_opaque_call_folds_escaped_callback_bindings(
+    go_types_helper,
+):
+    files = {
+        "a.go": (
+            "package p\nimport \"lib\"\n"
+            "func F(x, y int64) int64 {\n"
+            "\tv := y; lib.Set(func() int64 { return v }); v = x\n"
+            "\treturn lib.Get()\n"
+            "}\n"
+        )
+    }
+    lib = {
+        "lib": {
+            "lib.go": (
+                "package lib\n"
+                "var callback func() int64\n"
+                "func Set(f func() int64) { callback = f }\n"
+                "func Get() int64 { return callback() }\n"
+            )
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+
+
 def test_imported_func_result_binds_opaque(go_types_helper):
     # `f := lib.Mk()` — a func-typed imported result records
     # `direct_import` and the name binds an opaque func value;

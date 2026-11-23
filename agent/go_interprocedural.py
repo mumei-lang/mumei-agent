@@ -960,6 +960,7 @@ class _Builder:
         # one of them, so deref member stores union the stored
         # value's dependencies into every escaped binding.
         self.escaped: set[str] = set()
+        self.opaque_closure_escaped: set[str] = set()
         # Dependencies stored through any pointer write — `*p = v` or
         # `*lib.PV = v`. The pointee is untracked memory, but a later
         # dereference read may observe the stored value, so every
@@ -15013,6 +15014,7 @@ class _Builder:
             for binding_id in captured_ids | written_ids:
                 if binding_id in locals_ or binding_id in params:
                     self.escaped.add(binding_id)
+                    self.opaque_closure_escaped.add(binding_id)
 
             if (written_ids or star_write) and (
                 self._opaque_write_closure_may_replay(call_node, fn)
@@ -20320,6 +20322,7 @@ class _Builder:
         saved_frames = self.frames
         saved_pinned = self.pinned
         saved_escaped = self.escaped
+        saved_opaque_closure_escaped = self.opaque_closure_escaped
         saved_indirect = self.indirect_writes
         saved_external_container_tokens = (
             self._external_container_tokens
@@ -20384,6 +20387,7 @@ class _Builder:
         self.frames = []
         self.pinned = set()
         self.escaped = set()
+        self.opaque_closure_escaped = set()
         self.indirect_writes = frozenset()
         self._external_container_tokens = set()
         self._read_stack = []
@@ -20484,6 +20488,9 @@ class _Builder:
             self.frames = saved_frames
             self.pinned = saved_pinned
             self.escaped = saved_escaped
+            self.opaque_closure_escaped = (
+                saved_opaque_closure_escaped
+            )
             self.indirect_writes = saved_indirect
             self._external_container_tokens = (
                 saved_external_container_tokens
@@ -42419,6 +42426,11 @@ class _Builder:
             argument_deps | receiver_deps | channel_deps
         )
         result = argument_deps | receiver_deps | self.indirect_writes
+        for escaped_id in self.opaque_closure_escaped:
+            if escaped_id in locals_:
+                result |= locals_[escaped_id]
+            elif escaped_id in params:
+                result |= frozenset({params[escaped_id]})
         transfers.append(
             CallTransfer(call.span, call.target, actual, result, imported=True)
         )
