@@ -275,8 +275,11 @@ or process.spawn isolation cannot be enforced, or if no memory bound is
 available. The schedule follows its existing fallback/denial path. The
 policy adds no schedule keys and is omitted from `VerificationPlan.to_dict()`,
 so plan fingerprints and Core-checked representations remain unchanged.
-Probes are not covered. This host enforcement gate is not a sandbox or
-Evidence.
+Probe scheduling (`probe_requests_for`, `probe_retry_requests`,
+`plan_with_probes`) also skips a probe whose required isolation or memory
+bound cannot be enforced, so the adapter stays excluded by observation;
+direct `probe_request_for`/`run_probe` calls are not gated. This host
+enforcement gate is not a sandbox or Evidence.
 
 ### C11 declared memory bounds for attempted executions
 

@@ -77,6 +77,7 @@ from agent.attempt_runner import (
     filesystem_read_isolation_enforceable,
     filesystem_write_isolation_enforceable,
     minimal_environment,
+    memory_bound_enforceable,
     memory_bound_spawn_thread_safe,
     network_isolation_enforceable,
     process_spawn_isolation_enforceable,
@@ -410,6 +411,26 @@ def probe_request_for(
     )
 
 
+def _probe_isolation_enforceable(req: AdapterProbeRequest) -> bool:
+    return (
+        req.memory_bound_mb is not None
+        and memory_bound_enforceable()
+        and (not req.isolate_network or network_isolation_enforceable())
+        and (
+            not req.isolate_filesystem_write
+            or filesystem_write_isolation_enforceable()
+        )
+        and (
+            not req.isolate_process_spawn
+            or process_spawn_isolation_enforceable()
+        )
+        and (
+            not req.isolate_filesystem_read
+            or filesystem_read_isolation_enforceable()
+        )
+    )
+
+
 _OBSERVATION_REASONS = frozenset(
     {
         "availability_unknown",
@@ -439,6 +460,8 @@ def probe_requests_for(
     Adapters excluded for any structural reason are not probed — a probe
     cannot fix an unsupported method or a denied location. The shared
     `stamp` is per-request safe: registry stamps are per adapter id.
+    With `require_enforced_isolation`, requests lacking enforceable
+    required isolation or a memory bound are omitted.
     """
     if not isinstance(registry, AdapterRegistry):
         raise ValueError("probe scheduling requires a registry")
@@ -460,15 +483,19 @@ def probe_requests_for(
         descriptor = registry.descriptor(decision.adapter_id)
         if descriptor is None or descriptor.probe_argv is None:
             continue
-        out.append(
-            probe_request_for(
-                descriptor,
-                stamp,
-                attempt_number=attempt_number,
-                tool_version=tool_version,
-                policy=policy,
-            )
+        probe_request = probe_request_for(
+            descriptor,
+            stamp,
+            attempt_number=attempt_number,
+            tool_version=tool_version,
+            policy=policy,
         )
+        if (
+            policy.require_enforced_isolation
+            and not _probe_isolation_enforceable(probe_request)
+        ):
+            continue
+        out.append(probe_request)
     return tuple(out)
 
 def _run_probe_batch(
