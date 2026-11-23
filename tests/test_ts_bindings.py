@@ -3247,3 +3247,40 @@ s.pm();
         if c.target == member_pm.id
     }
     assert bound == {"a.pm()", "(u as P).pm()"}
+
+
+def test_for_of_map_set_view_calls_type_elements():
+    # `for (const x of m.keys()/values())` and
+    # `for (const [k, v] of m.entries())` type the loop slots from
+    # the receiver's container args; `arr.entries()` pairs a `number`
+    # index (honestly unbound) with the element.
+    source = """
+class P { pm(): void {} }
+class K { km(): void {} }
+declare const m: Map<K, P>;
+declare const s: Set<P>;
+declare const arr: P[];
+for (const k of m.keys()) { k.km(); }
+for (const v of m.values()) { v.pm(); }
+for (const [k2, v2] of m.entries()) { k2.km(); v2.pm(); }
+for (const [a, b] of s.entries()) { a.pm(); b.pm(); }
+for (const [i, e] of arr.entries()) { e.pm(); i.pm(); }
+for (const x of s.values()) { x.pm(); }
+"""
+    report = build_ts_bindings(source)
+    member_pm = _member_bindings(report, "pm", "associated_function")[0]
+    member_km = _member_bindings(report, "km", "associated_function")[0]
+    pm_calls = {
+        source[c.span.start : c.span.end]
+        for c in _calls(report)
+        if c.target == member_pm.id
+    }
+    km_calls = {
+        source[c.span.start : c.span.end]
+        for c in _calls(report)
+        if c.target == member_km.id
+    }
+    assert pm_calls == {
+        "v.pm()", "v2.pm()", "a.pm()", "b.pm()", "e.pm()", "x.pm()",
+    }
+    assert km_calls == {"k.km()", "k2.km()"}

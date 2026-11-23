@@ -499,9 +499,64 @@ class _TypeScriptBindings:
                     declaration_function=declaration_function,
                 )
 
+    def _iterable_member_args(
+        self, operand: Any | None
+    ) -> tuple[str, str, list[Any]] | None:
+        """`recv.keys()|values()|entries()` on a generic container —
+        (member name, container head, container type-arg nodes)."""
+        if operand is None or operand.type != "call_expression":
+            return None
+        callee = operand.child_by_field_name("function")
+        if callee is None or callee.type != "member_expression":
+            return None
+        obj = callee.child_by_field_name("object")
+        prop = callee.child_by_field_name("property")
+        if obj is None or prop is None:
+            return None
+        member = self.text(prop)
+        if member not in {"keys", "values", "entries"}:
+            return None
+        declared = self._unwrap_type(
+            self._declared_type_node(obj, obj.start_byte)
+        )
+        if declared is None:
+            return None
+        if declared.type == "array_type":
+            elem = next(iter(self.children(declared)), None)
+            return (
+                member,
+                "Array",
+                [elem] if elem is not None else [],
+            )
+        if declared.type != "generic_type":
+            return None
+        kids = self.children(declared)
+        args = [c for c in kids if c.type == "type_arguments"]
+        if not kids or not args:
+            return None
+        return member, self.text(kids[0]), list(self.children(args[0]))
+
     def _iterable_element_node(self, operand: Any | None) -> Any | None:
         """Element type node of a `for..of` operand — `P[]` peels to
         `P`; `Array<P>`/`Set<P>`/`Iterable<P>` take args[0]."""
+        member = self._iterable_member_args(operand)
+        if member is not None:
+            name, head, arg_nodes = member
+            # `m.keys()`/`m.values()` yield scalars; `entries()` yields
+            # pairs the pattern path handles. Array keys are `number`
+            # — no named type to bind, so stay unbound.
+            if head == "Map":
+                if name == "keys" and arg_nodes:
+                    return arg_nodes[0]
+                if name == "values" and len(arg_nodes) > 1:
+                    return arg_nodes[1]
+                return None
+            if head in {"Array", "Set", "Iterable", "ReadonlyArray"}:
+                if name == "values" and arg_nodes:
+                    return arg_nodes[0]
+                if name == "keys" and head == "Set" and arg_nodes:
+                    return arg_nodes[0]
+                return None
         declared = self._unwrap_type(
             self._declared_type_node(operand, operand.start_byte)
             if operand is not None
@@ -2909,6 +2964,35 @@ class _TypeScriptBindings:
                 ),
                 None,
             )
+            member = self._iterable_member_args(operand)
+            if member is not None:
+                member_name, head, arg_nodes = member
+                if member_name == "entries":
+                    slots = self.children(pattern)
+                    index = next(
+                        (
+                            i
+                            for i, slot in enumerate(slots)
+                            if slot.id == name.id
+                        ),
+                        -1,
+                    )
+                    if index < 0:
+                        return None
+                    # `for (const [k, v] of m.entries())` — Map pairs
+                    # take args positionally; Set yields [P, P];
+                    # Array entries pair `number` with the element.
+                    if head == "Map" and index < len(arg_nodes):
+                        return arg_nodes[index]
+                    if head == "Set" and arg_nodes:
+                        return arg_nodes[0]
+                    if (
+                        head in {"Array", "Iterable", "ReadonlyArray"}
+                        and index == 1
+                        and arg_nodes
+                    ):
+                        return arg_nodes[0]
+                return None
             iterable = self._unwrap_type(
                 self._declared_type_node(
                     operand,
