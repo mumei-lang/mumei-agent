@@ -56158,7 +56158,11 @@ def test_multi_index_computed_indexes_on_record_carrying_elements(
         "func lenx(x int64) int { return int(x) & 0 }\n"
         "func setv(p *int64, x int64) int { *p = x; return 0 }\n"
         "func gc() int { return 0 }\n"
+        "func rrow(ss [][]S, x int64) int {\n"
+        "\tss[0][0].F = func() int64 { return x }; return 0\n"
+        "}\n"
         "func useSS(ss [][]S) int64 { return ss[g()][0].F() }\n"
+        "func (s S) Get() int64 { return s.F() }\n"
         "func (s S) Run() int64 { return s.F() }\n"
         "func (s *S) PGet() int64 { return s.V }\n"
         "func (s *S) PRun() int64 { return s.F() }\n"
@@ -56235,6 +56239,36 @@ def test_multi_index_computed_indexes_on_record_carrying_elements(
         "\tss := [][]S{{{V: y}}}; f := ss[g()][0].PGet\n"
         "\tss[0][0].V = x; return f()\n"
         "}\n"
+        "func FComputedGetAssign(x, y int64, i int) int64 {\n"
+        "\tv := y; ss := [][]S{{{F: func() int64 { return v }}}}\n"
+        "\tv = x; var f func() int64; f = ss[gi(i)][0].Get\n"
+        "\treturn f()\n"
+        "}\n"
+        "func FComputedGetDecl(x, y int64, i int) int64 {\n"
+        "\tv := y; ss := [][]S{{{F: func() int64 { return v }}}}\n"
+        "\tv = x; f := ss[gi(i)][0].Get; return f()\n"
+        "}\n"
+        "func FComputedPGetAssign(x, y int64, i int) int64 {\n"
+        "\tss := [][]S{{{V: y}, {V: x}}}; var f func() int64\n"
+        "\tf = ss[0][gi(i)].PGet; return f()\n"
+        "}\n"
+        "func FComputedPGetDecl(x, y int64, i int) int64 {\n"
+        "\tss := [][]S{{{V: y}, {V: x}}}; f := ss[0][gi(i)].PGet\n"
+        "\treturn f()\n"
+        "}\n"
+        "func FComputedRRowAssign(x, y int64) int64 {\n"
+        "\tv := y; ss := [][]S{{{F: func() int64 { return v }}}}; v = x\n"
+        "\tvar f func() int64; f = ss[rrow(ss, x)][0].Run\n"
+        "\treturn f()\n"
+        "}\n"
+        "func FComputedRRowDecl(x, y int64) int64 {\n"
+        "\tv := y; ss := [][]S{{{F: func() int64 { return v }}}}; v = x\n"
+        "\tf := ss[rrow(ss, x)][0].Run; return f()\n"
+        "}\n"
+        "func FComputedSingleIndexAssign(x, y int64, i int) int64 {\n"
+        "\tv := y; ss := []S{{F: func() int64 { return v }}}\n"
+        "\tvar f func() int64; f = ss[gi(i)].Get; return f()\n"
+        "}\n"
         "func FComputedPointerReseat(x, y int64) int64 {\n"
         "\tv := y; ss := [][]S{{{F: func() int64 { return v }}}}\n"
         "\tf := ss[g()][0].PRun\n"
@@ -56271,15 +56305,46 @@ def test_multi_index_computed_indexes_on_record_carrying_elements(
         "FComputedParameter": frozenset({0}),
         "FComputedUse": frozenset({0, 1}),
         "FComputedPointerMethodValue": frozenset({0, 1}),
+        "FComputedGetAssign": frozenset({0, 1, 2}),
+        "FComputedGetDecl": frozenset({0, 1, 2}),
+        "FComputedPGetAssign": frozenset({0, 1, 2}),
+        "FComputedPGetDecl": frozenset({0, 1, 2}),
     }
     for function_name, dependencies in expected.items():
         result = named_package(files, snapshot, summaries, function_name)
         assert result.available, (function_name, result.gaps)
         assert result.return_dependencies == dependencies, function_name
+    for assigned, declared in (
+        ("FComputedGetAssign", "FComputedGetDecl"),
+        ("FComputedPGetAssign", "FComputedPGetDecl"),
+        ("FComputedRRowAssign", "FComputedRRowDecl"),
+    ):
+        assigned_result = named_package(
+            files, snapshot, summaries, assigned
+        )
+        declared_result = named_package(
+            files, snapshot, summaries, declared
+        )
+        assert assigned_result.available, (
+            assigned,
+            assigned_result.gaps,
+        )
+        assert declared_result.available, (
+            declared,
+            declared_result.gaps,
+        )
+        assert (
+            assigned_result.return_dependencies
+            == declared_result.return_dependencies
+        ), (assigned, declared)
+    assert 0 in named_package(
+        files, snapshot, summaries, "FComputedRRowAssign"
+    ).return_dependencies
     for function_name in (
         "FComputedPointerReseat",
         "FComputedMap",
         "FComputedPointerElement",
+        "FComputedSingleIndexAssign",
     ):
         result = named_package(files, snapshot, summaries, function_name)
         assert not result.available, (function_name, result.gaps)

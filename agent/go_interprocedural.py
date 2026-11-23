@@ -26843,7 +26843,7 @@ class _Builder:
                             self._record_bound_method(
                                 ref.binding_id, mv, params, locals_,
                                 rights[i],
-                                values[i] if len(lefts) > 1 else None,
+                                values[i],
                             )
                         else:
                             self._record_bound_interface_method(
