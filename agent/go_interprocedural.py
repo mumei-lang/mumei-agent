@@ -960,6 +960,7 @@ class _Builder:
         # one of them, so deref member stores union the stored
         # value's dependencies into every escaped binding.
         self.escaped: set[str] = set()
+        self.opaque_closure_escaped: set[str] = set()
         # Dependencies stored through any pointer write — `*p = v` or
         # `*lib.PV = v`. The pointee is untracked memory, but a later
         # dereference read may observe the stored value, so every
@@ -7466,6 +7467,9 @@ class _Builder:
                     imported=True,
                 )
             )
+        self._escape_opaque_closure_arguments(
+            node, inner_args, fn, params, locals_
+        )
         return result_deps
 
     def _func_elem_share(
@@ -14263,6 +14267,70 @@ class _Builder:
             for member in self._struct_fields_for_fact(struct_fact)
         )
 
+    def _type_can_carry_func_or_interface(
+        self, fact: Any, seen: frozenset[tuple[str, object]] = frozenset()
+    ) -> bool:
+        if fact is None:
+            return False
+        if fact.kind == "interface" or self._type_can_carry_func_value(
+            fact
+        ):
+            return True
+        if fact.kind in {"slice", "array", "map", "chan", "pointer"}:
+            marker = (
+                fact.kind,
+                getattr(fact, "type_id", "") or id(fact),
+            )
+            if marker in seen:
+                return False
+            return self._type_can_carry_func_or_interface(
+                getattr(fact, "elem", None), seen | {marker}
+            )
+        struct_fact = self._struct_value_fact(fact)
+        if struct_fact is None:
+            return False
+        marker = (
+            "struct",
+            getattr(struct_fact, "type_id", "") or id(struct_fact),
+        )
+        if marker in seen:
+            return False
+        seen |= {marker}
+        return any(
+            self._type_can_carry_func_or_interface(
+                getattr(member, "type", None), seen
+            )
+            for member in self._struct_fields_for_fact(struct_fact)
+        )
+
+    def _closure_literal_result_can_carry_func_value(
+        self, literal: Any
+    ) -> bool:
+        result = literal.child_by_field_name("result")
+        if result is None:
+            return True
+        type_nodes = (
+            [
+                declaration.child_by_field_name("type")
+                for declaration in result.named_children
+                if declaration.type
+                in {
+                    "parameter_declaration",
+                    "variadic_parameter_declaration",
+                }
+            ]
+            if result.type == "parameter_list"
+            else [result]
+        )
+        for type_node in type_nodes:
+            fact = self._literal_type_fact(type_node, self.current_file)
+            if (
+                fact is None
+                or self._type_can_carry_func_or_interface(fact)
+            ):
+                return True
+        return False
+
     def _composite_literal_member_type_for_value(
         self, node: Any
     ) -> Any | None:
@@ -14473,7 +14541,9 @@ class _Builder:
                 )
             if (
                 result_type is not None
-                and not self._type_can_carry_func_value(result_type)
+                and not self._type_can_carry_func_or_interface(
+                    result_type
+                )
             ):
                 return False
             function = self._strip_parens(
@@ -14757,6 +14827,385 @@ class _Builder:
             ):
                 return member.id
         return None
+
+    def _opaque_write_closure_may_replay(
+        self, call_node: Any, fn: Any
+    ) -> bool:
+        body = getattr(fn, "body", None)
+        binding = self.bindings.get(getattr(fn, "binding_id", ""))
+        block = (
+            self.blocks.get(_key3(binding.span))
+            if binding is not None and binding.span is not None
+            else None
+        )
+        if body is None or block is None:
+            return True
+
+        parent = call_node
+        while parent is not None and parent != block:
+            if parent.type == "for_statement":
+                return True
+            parent = parent.parent
+        if parent is None:
+            return True
+
+        pending = [block]
+        while pending:
+            current = pending.pop()
+            if current.type in {"defer_statement", "go_statement"}:
+                return True
+            pending.extend(_children(current))
+
+        for call in self.calls.values():
+            span = call.span
+            if (
+                (
+                    span.file
+                    if isinstance(span, FileSpan)
+                    else self.current_file
+                )
+                == self.current_file
+                and body.start <= span.start
+                and span.end <= body.end
+                and span.start > call_node.end_byte
+                and call.kind not in {"builtin", "conversion"}
+            ):
+                return True
+        return False
+
+    def _escape_opaque_closure_arguments(
+        self,
+        call_node: Any,
+        arguments: list[Any],
+        fn: Any,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+    ) -> None:
+        def literal_may_write_captures(
+            literal: Any,
+            captured: Iterable[str],
+            captures_pointer: bool = False,
+        ) -> bool:
+            if captures_pointer:
+                return True
+            captured_ids = set(captured)
+            body = literal.child_by_field_name("body")
+            pending = [body] if body is not None else []
+            while pending:
+                current = pending.pop()
+                if current.type == "call_expression":
+                    arguments = current.child_by_field_name("arguments")
+                    for argument in _children(arguments):
+                        pointer_argument = argument
+                        while (
+                            pointer_argument is not None
+                            and pointer_argument.type == "variadic_argument"
+                        ):
+                            pointer_argument = next(
+                                iter(_children(pointer_argument)), None
+                            )
+                        if self._deferred_argument_is_pointer(
+                            pointer_argument
+                        ):
+                            return True
+                if current.type == "unary_expression":
+                    operator = current.child_by_field_name("operator")
+                    if operator is not None and operator.type == "&":
+                        binding_id = self._deferred_root_binding(
+                            current.child_by_field_name("operand"),
+                            params,
+                            locals_,
+                        )
+                        if binding_id in captured_ids:
+                            return True
+                pending.extend(_children(current))
+            return False
+
+        def collect(
+            value: Any,
+            record_ids: set[str],
+            captured_ids: set[str],
+            written_ids: set[str],
+        ) -> bool:
+            value = self._strip_parens(value)
+            while value is not None and value.type == "variadic_argument":
+                value = next(
+                    (
+                        child
+                        for child in value.named_children
+                        if child.type != "comment"
+                    ),
+                    None,
+                )
+            if value is None:
+                return False
+            if value.type == "func_literal":
+                (
+                    _deps,
+                    captures,
+                    captures_pointer,
+                    writes,
+                    writes_star,
+                    _has_call,
+                ) = self._func_literal_capture(value, params, locals_)
+                captured_ids.update(captures)
+                written_ids.update(writes)
+                if literal_may_write_captures(
+                    value, captures, captures_pointer
+                ):
+                    written_ids.update(captures)
+                return writes_star
+            if value.type == "composite_literal":
+                return collect(
+                    value.child_by_field_name("body"),
+                    record_ids,
+                    captured_ids,
+                    written_ids,
+                )
+            if value.type == "slice_expression":
+                return collect(
+                    value.child_by_field_name("operand"),
+                    record_ids,
+                    captured_ids,
+                    written_ids,
+                )
+            if value.type == "keyed_element":
+                return collect(
+                    value.child_by_field_name("value"),
+                    record_ids,
+                    captured_ids,
+                    written_ids,
+                )
+            if value.type in {"literal_value", "literal_element"}:
+                star_write = False
+                for child in _children(value):
+                    if child.type == "keyed_element":
+                        star_write |= collect(
+                            child.child_by_field_name("value"),
+                            record_ids,
+                            captured_ids,
+                            written_ids,
+                        )
+                    else:
+                        star_write |= collect(
+                            child, record_ids, captured_ids, written_ids
+                        )
+                return star_write
+            if value.type in {"identifier", "selector_expression"}:
+                record_id = self._closure_argument_record_id(
+                    value, params
+                )
+                if record_id is not None:
+                    record_ids.add(record_id)
+                if value.type == "identifier":
+                    ref = self.references.get(self.node_key(value))
+                    binding_id = (
+                        ref.binding_id if ref is not None else None
+                    )
+                    if (
+                        binding_id is not None
+                        and self._has_closure_records(binding_id)
+                    ):
+                        record_ids.add(binding_id)
+                    if binding_id is not None:
+                        binding = self.bindings.get(binding_id)
+                        fact = (
+                            binding.type
+                            if binding is not None
+                            else None
+                        )
+                        if (
+                            fact is not None
+                            and (
+                                self._func_elem_collection(fact)
+                                or self._func_elem_nested_collection(fact)
+                            )
+                        ):
+                            for collection_id in self._func_elem_sharers(
+                                binding_id
+                            ):
+                                if self._has_closure_records(
+                                    collection_id
+                                ):
+                                    record_ids.add(collection_id)
+                                record_ids.update(
+                                    donor_id
+                                    for donor_id in (
+                                        self._func_elem_slot_donors(
+                                            collection_id, None
+                                        )
+                                    )
+                                    if self._has_closure_records(donor_id)
+                                )
+                else:
+                    source_ids = self._func_field_value_record_sources(
+                        value,
+                        params,
+                        locals_,
+                        self.closure_captures,
+                        self.closure_writes,
+                        self.closure_star_writes,
+                        self.closure_inner_calls,
+                        self.pointee_closures,
+                        include_receiver=True,
+                    )
+                    record_ids.update(
+                        source_id
+                        for source_id in source_ids
+                        if self._has_closure_records(source_id)
+                    )
+                record_ids.update(
+                    self._method_value_field_record_ids(value)
+                )
+                record_ids.update(
+                    self._struct_argument_field_record_ids(value)
+                )
+                return False
+            if value.type == "index_expression":
+                record_ids.update(
+                    self._struct_argument_field_record_ids(value)
+                )
+                root = value
+                while root is not None and root.type == "index_expression":
+                    root = self._strip_parens(
+                        root.child_by_field_name("operand")
+                    )
+                if root is not None:
+                    return collect(
+                        root, record_ids, captured_ids, written_ids
+                    )
+                return False
+            if value.type == "call_expression":
+                result_type = self._call_result_type(value)
+                if (
+                    result_type is not None
+                    and not self._type_can_carry_func_or_interface(
+                        result_type
+                    )
+                ):
+                    return False
+                call = self.calls.get(self.node_key(value))
+                function = self._strip_parens(
+                    value.child_by_field_name("function")
+                )
+                if result_type is None and function is not None:
+                    if function.type == "identifier":
+                        ref = self.references.get(
+                            self.node_key(function)
+                        )
+                        binding_id = (
+                            ref.binding_id
+                            if ref is not None
+                            else None
+                        )
+                        literal_record = (
+                            self.closure_factory_literals.get(binding_id)
+                            if binding_id is not None
+                            else None
+                        )
+                        if (
+                            literal_record is not None
+                            and not self._closure_literal_result_can_carry_func_value(
+                                literal_record[0]
+                            )
+                        ):
+                            return False
+                if (
+                    call is not None
+                    and call.kind == "builtin"
+                    and function is not None
+                    and function.type == "identifier"
+                    and function.text == b"append"
+                ):
+                    append_args = value.child_by_field_name("arguments")
+                    star_write = False
+                    for argument in _children(append_args):
+                        star_write |= collect(
+                            argument,
+                            record_ids,
+                            captured_ids,
+                            written_ids,
+                        )
+                    return star_write
+                record_ids.update(
+                    self._struct_argument_field_record_ids(value)
+                )
+                if function is not None and function.type == "identifier":
+                    ref = self.references.get(self.node_key(function))
+                    if (
+                        ref is not None
+                        and ref.binding_id
+                        and self._has_closure_records(ref.binding_id)
+                    ):
+                        record_ids.add(ref.binding_id)
+            return False
+
+        for argument in arguments:
+            record_ids: set[str] = set()
+            captured_ids: set[str] = set()
+            written_ids: set[str] = set()
+            star_write = collect(
+                argument, record_ids, captured_ids, written_ids
+            )
+
+            pending_records = list(record_ids)
+            seen_records: set[str] = set()
+            while pending_records:
+                record_id = pending_records.pop()
+                if record_id in seen_records:
+                    continue
+                seen_records.add(record_id)
+                captured_ids.update(
+                    self.closure_captures.get(record_id, frozenset())
+                )
+                written_ids.update(
+                    self.closure_writes.get(record_id, frozenset())
+                )
+                star_write |= record_id in self.closure_star_writes
+                pending_records.extend(
+                    self.bound_method_field_records.get(record_id, ())
+                )
+
+            (
+                transitive_captures,
+                transitive_writes,
+                transitive_star_write,
+                _inner_calls,
+                _transitive_pointee,
+            ) = self._transitive_closure_records(
+                frozenset(captured_ids)
+            )
+            captured_ids.update(transitive_captures)
+            written_ids.update(transitive_writes)
+            star_write |= transitive_star_write
+            for record_id in seen_records | set(transitive_captures):
+                literal_record = self.closure_factory_literals.get(
+                    record_id
+                )
+                if literal_record is None:
+                    continue
+                record_captures = self.closure_captures.get(
+                    record_id, frozenset()
+                )
+                if literal_may_write_captures(
+                    literal_record[0],
+                    record_captures,
+                    record_id in self.pointee_closures,
+                ):
+                    captured_ids.update(record_captures)
+                    written_ids.update(record_captures)
+
+            for binding_id in captured_ids | written_ids:
+                if binding_id in locals_ or binding_id in params:
+                    self.escaped.add(binding_id)
+                    self.opaque_closure_escaped.add(binding_id)
+
+            if (written_ids or star_write) and (
+                self._opaque_write_closure_may_replay(call_node, fn)
+            ):
+                raise _Unsupported(
+                    "unsupported_expression", _span(argument)
+                )
 
     def _method_value_receiver_may_write(
         self, method: Function
@@ -20057,6 +20506,7 @@ class _Builder:
         saved_frames = self.frames
         saved_pinned = self.pinned
         saved_escaped = self.escaped
+        saved_opaque_closure_escaped = self.opaque_closure_escaped
         saved_indirect = self.indirect_writes
         saved_external_container_tokens = (
             self._external_container_tokens
@@ -20121,6 +20571,7 @@ class _Builder:
         self.frames = []
         self.pinned = set()
         self.escaped = set()
+        self.opaque_closure_escaped = set()
         self.indirect_writes = frozenset()
         self._external_container_tokens = set()
         self._read_stack = []
@@ -20221,6 +20672,9 @@ class _Builder:
             self.frames = saved_frames
             self.pinned = saved_pinned
             self.escaped = saved_escaped
+            self.opaque_closure_escaped = (
+                saved_opaque_closure_escaped
+            )
             self.indirect_writes = saved_indirect
             self._external_container_tokens = (
                 saved_external_container_tokens
@@ -36472,6 +36926,13 @@ class _Builder:
                                     imported=True,
                                 )
                             )
+                        self._escape_opaque_closure_arguments(
+                            call_node,
+                            inner_args,
+                            fn,
+                            params,
+                            locals_,
+                        )
                         return result_deps
                     self._pin_fact_identities(member.type)
                     transfers.append(
@@ -36529,7 +36990,7 @@ class _Builder:
                         )
                 return self._direct_import_call(
                     call, arguments, fn, params, locals_, transfers,
-                    count, depth, receiver=receiver,
+                    count, depth, receiver=receiver, call_node=node,
                 )
             return self._direct_local_call(
                 node, call.span, call.target, arguments, fn, params,
@@ -36589,7 +37050,7 @@ class _Builder:
             if call.kind == "direct_import":
                 return self._direct_import_call(
                     call, arguments, fn, params, locals_, transfers,
-                    count, depth,
+                    count, depth, call_node=node,
                 )
             # `lib.S[T…](x)` — an instantiated type conversion, which is
             # effect-free like any `T(e)`: the result inherits the
@@ -40055,6 +40516,9 @@ class _Builder:
                 self._store(
                     locals_, params, escaped_id, write_deps, True
                 )
+            self._escape_opaque_closure_arguments(
+                node, arguments, fn, params, locals_
+            )
         return deps
 
     def _field_member(self, node: Any) -> Any | None:
@@ -40554,6 +41018,9 @@ class _Builder:
             )
             self.func_aliases.pop(target, None)
             self.opaque_callees.add(target)
+        self._escape_opaque_closure_arguments(
+            node, arguments, fn, params, locals_
+        )
         return deps
 
     def _interface_value_binding(
@@ -41227,6 +41694,9 @@ class _Builder:
         )
         self._escape_interface_dispatch_containers(
             write_arguments, params, locals_
+        )
+        self._escape_opaque_closure_arguments(
+            node, value_arguments, fn, params, locals_
         )
         return deps
 
@@ -41922,6 +42392,7 @@ class _Builder:
         count: int,
         depth: int,
         receiver: Any = None,
+        call_node: Any = None,
     ) -> frozenset[int]:
         # The callee lives in a resolved imported unit; its body is
         # opaque here. The result may depend on every argument and
@@ -42111,6 +42582,14 @@ class _Builder:
                         self._promote_chan_arg_roots(
                             arguments, "", locals_, params
                         )
+                self._escape_opaque_closure_arguments(
+                    call_node,
+                    ([receiver] if receiver is not None else [])
+                    + arguments,
+                    fn,
+                    params,
+                    locals_,
+                )
             # The callee's declared type pins fold like a local
             # call's — redeclaring any of them flags this summary.
             self.pinned.update(declared.pinned)
@@ -42138,6 +42617,11 @@ class _Builder:
             argument_deps | receiver_deps | channel_deps
         )
         result = argument_deps | receiver_deps | self.indirect_writes
+        for escaped_id in self.opaque_closure_escaped:
+            if escaped_id in locals_:
+                result |= locals_[escaped_id]
+            elif escaped_id in params:
+                result |= frozenset({params[escaped_id]})
         transfers.append(
             CallTransfer(call.span, call.target, actual, result, imported=True)
         )
@@ -42158,6 +42642,13 @@ class _Builder:
                 params,
                 pointer_receiver=True,
             )
+        self._escape_opaque_closure_arguments(
+            call_node,
+            ([receiver] if receiver is not None else []) + arguments,
+            fn,
+            params,
+            locals_,
+        )
         # The callee's declared named/alias signature types are pinned
         # the same way a member read's declared type is: redeclaring one
         # flags this summary even when the callee's own identity is
