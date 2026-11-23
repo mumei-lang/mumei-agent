@@ -8761,3 +8761,58 @@ fn f(h: std::collections::BinaryHeap<P>, v: Vec<[P; 2]>, w: Vec<P>, s: std::coll
     # `into_vec` — both stay opaque.
     assert not bound.get("e.pm()")
     assert not bound.get("hs[0].pm()")
+
+
+def test_into_vec_family_iteration_and_shadowed_vec():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn make_heap() -> std::collections::BinaryHeap<P> { todo!() }
+fn f(h: std::collections::BinaryHeap<P>, vv: Vec<Vec<P>>) {
+    for x in h.into_vec() { x.pm(); }
+    for y in vv.into_flattened() { y.pm(); }
+    let v = make_heap().into_vec();
+    v[0].pm();
+    let s = h.into_sorted_vec();
+    s[0].pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # Direct iteration reads the produced `Vec`'s element.
+    assert bound.get("x.pm()") == pm.id
+    # `Vec<Vec<P>>::into_flattened` iterates the inner element.
+    assert bound.get("y.pm()") == pm.id
+    assert bound.get("s[0].pm()") == pm.id
+    # A call receiver names `BinaryHeap` through its declared
+    # return annotation.
+    assert bound.get("v[0].pm()") == pm.id
+
+
+def test_into_vec_shadowed_std_vec_stays_opaque():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct Vec;
+impl Vec { fn len(&self) -> usize { 0 } }
+fn f(h: std::collections::BinaryHeap<P>) {
+    let n = h.into_vec().len();
+    let v = h.into_vec();
+    v.len();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # The produced standard `Vec` is not the declared `struct Vec`
+    # — `len` on it must not bind the user's method.
+    assert not bound.get("h.into_vec().len()")
+    assert not bound.get("v.len()")

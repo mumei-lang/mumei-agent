@@ -4367,52 +4367,78 @@ class _RustBindings:
                     if (
                         method_name in {"into_vec", "into_sorted_vec"}
                         and receiver[1] is not None
-                        and self._container_head_name(
-                            callee.child_by_field_name("value")
+                        and (
+                            self._container_head_name(
+                                callee.child_by_field_name("value")
+                            )
+                            or self._produced_head(
+                                callee.child_by_field_name("value")
+                            )
                         )
                         == "BinaryHeap"
                     ):
                         # `h.into_vec()`/`into_sorted_vec()` yield
-                        # `Vec<P>` — the spelled Vec feeds `for`/
-                        # `iter` element paths.
-                        return self._spelled_type(
-                            "Vec<" + receiver[1] + ">",
-                            self._receiver_annotation_position(
-                                callee.child_by_field_name("value")
-                            )
-                            or node.start_byte,
-                        )
+                        # the standard `Vec<P>` — the args carry
+                        # the element spelling only, so a declared
+                        # `struct Vec` in scope never takes over
+                        # the produced type's members.
+                        return None, receiver[1].strip()
                     if (
                         method_name == "into_flattened"
                         and receiver[1] is not None
-                        and self._container_head_name(
-                            callee.child_by_field_name("value")
+                        and (
+                            self._container_head_name(
+                                callee.child_by_field_name("value")
+                            )
+                            or self._produced_head(
+                                callee.child_by_field_name("value")
+                            )
                         )
                         == "Vec"
                     ):
                         # `Vec<[P; N]>::into_flattened()` yields
-                        # `Vec<P>` — the array's element spelling;
-                        # a non-array `Vec` names no such method
-                        # and stays opaque.
+                        # `Vec<P>` — `Vec<Vec<P>>`/`Vec<Option<P>>`/
+                        # `Vec<&[P]>` flatten through their inner
+                        # iterable's element the same way; a scalar
+                        # `Vec` names no such method and stays
+                        # opaque.
                         flat_args = receiver[1].strip()
+                        inner = None
                         if (
                             flat_args.startswith("[")
                             and flat_args.endswith("]")
                         ):
-                            return self._spelled_type(
-                                "Vec<"
-                                + self._array_elem(
-                                    flat_args[1:-1]
-                                )
-                                + ">",
-                                self._receiver_annotation_position(
-                                    callee.child_by_field_name(
-                                        "value"
-                                    )
-                                )
-                                or node.start_byte,
+                            inner = self._array_elem(
+                                flat_args[1:-1]
                             )
-                        return None, None
+                        else:
+                            borrowed = re.fullmatch(
+                                r"&\s*(?:'\w+\s+)?(?:mut\s+)?"
+                                r"\[\s*([\s\S]+?)\s*\]",
+                                flat_args,
+                            )
+                            nested = (
+                                borrowed
+                                if borrowed is not None
+                                else re.fullmatch(
+                                    r"(?:Vec|VecDeque|LinkedList|"
+                                    r"HashSet|BTreeSet|BinaryHeap|"
+                                    r"Option|Result)\s*<([\s\S]+)>",
+                                    flat_args,
+                                )
+                            )
+                            if nested is not None:
+                                inner = next(
+                                    iter(
+                                        self._type_arg_list(
+                                            nested.group(1)
+                                        )
+                                    ),
+                                    None,
+                                )
+                        if inner is None:
+                            return None, None
+                        return None, inner.strip()
                     if (
                         method_name in {"cloned", "copied"}
                         and receiver[1] is not None
@@ -7333,7 +7359,45 @@ class _RustBindings:
                 self._literal_element_args(receiver),
             )
         else:
-            return _UNKNOWN, None
+            # A method outside the recipes still iterates whatever
+            # its produced type spells — `h.into_vec()`'s `Vec<P>`
+            # yields `P`, `o.iter().cloned()` keeps the produced
+            # `Option`/`Result` payload's first arg. A scalar or
+            # a pair spelling stays opaque.
+            call_id, call_args = self._receiver_type(call)
+            if call_args is None:
+                return _UNKNOWN, None
+            spelled = call_args.strip()
+            produced = re.fullmatch(
+                r"(Vec|HashSet|BTreeSet|VecDeque|LinkedList|"
+                r"BinaryHeap|Option|Result)\s*<([\s\S]+)>",
+                spelled,
+            )
+            if produced is not None:
+                parts = self._type_arg_list(produced.group(2))
+                if not parts:
+                    return _UNKNOWN, None
+                spelled = parts[0].strip()
+            elif "," in spelled:
+                return _UNKNOWN, None
+            if not spelled:
+                return _UNKNOWN, None
+            _pos, _scope = self._field_args_scope(receiver)
+            if _pos is None:
+                _pos = position
+            push = (
+                _scope is not None and _scope not in self.scopes
+            )
+            if push:
+                self._push_scope(_scope)
+            try:
+                elem_id, rest = self._element_of(
+                    None if produced is not None else call_id,
+                    spelled, _pos
+                )
+            finally:
+                if push:
+                    self._pop_scope()
         if elem_id is None:
             return _UNKNOWN, rest
         name = next(
@@ -10025,6 +10089,21 @@ class _RustBindings:
             }:
                 member, _ = self._scoped_member(callee)
         if member is not None and member.type_node is not None:
+            tnode = member.type_node
+            while tnode is not None and tnode.type in {
+                "reference_type",
+                "generic_type",
+                "generic_type_with_turbofish",
+                "return_type",
+            }:
+                tnode = tnode.child_by_field_name("type")
+            if (
+                tnode is not None
+                and tnode.type == "scoped_type_identifier"
+            ):
+                # `fn() -> std::collections::BinaryHeap<P>` — the
+                # last segment names the produced container.
+                return self.text(tnode).strip().rsplit("::", 1)[-1]
             return self._alias_head_name(
                 member.type_node, node.start_byte
             )
