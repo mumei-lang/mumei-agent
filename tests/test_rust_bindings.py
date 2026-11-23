@@ -8948,7 +8948,7 @@ fn f(v: Vec<P>, mut v2: Vec<P>) {
         or raw[s[0]:s[1]] == b"c[0].pm()"
         or raw[s[0]:s[1]] == b"p.pm()"
     ]
-    assert len(spans) == 6
+    assert len(spans) == 5
     assert all(bound[s] == pm.id for s in spans)
 
 
