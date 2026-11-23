@@ -4943,19 +4943,27 @@ class _RustBindings:
                 )
                 if key is not None:
                     head = node.child_by_field_name("type")
-                    record = (
-                        None
-                        if head is None
-                        or head.type
-                        not in {"identifier", "type_identifier"}
-                        else self._lookup(
-                            self._normalize_identifier(
-                                self.text(head)
-                            ),
-                            position,
-                            "type",
+                    if head is not None and head.type in {
+                        "scoped_identifier",
+                        "scoped_type_identifier",
+                    }:
+                        # `m::A<P>` — the head lives inside `m`'s
+                        # module scope, not the caller's stack.
+                        record = self._scoped_type(head)
+                    else:
+                        record = (
+                            None
+                            if head is None
+                            or head.type
+                            not in {"identifier", "type_identifier"}
+                            else self._lookup(
+                                self._normalize_identifier(
+                                    self.text(head)
+                                ),
+                                position,
+                                "type",
+                            )
                         )
-                    )
                     name = (
                         None
                         if head is None
@@ -4966,11 +4974,18 @@ class _RustBindings:
         if node is not None and node.type in {
             "identifier",
             "type_identifier",
+            "scoped_identifier",
+            "scoped_type_identifier",
         }:
-            record = self._lookup(
-                self._normalize_identifier(self.text(node)),
-                position,
-                "type",
+            record = (
+                self._scoped_type(node)
+                if node.type
+                in {"scoped_identifier", "scoped_type_identifier"}
+                else self._lookup(
+                    self._normalize_identifier(self.text(node)),
+                    position,
+                    "type",
+                )
             )
             return None, record, self._normalize_identifier(
                 self.text(node)
