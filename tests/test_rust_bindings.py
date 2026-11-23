@@ -10089,3 +10089,80 @@ fn f(v: Vec<Vec<P>>) {
     # `v`'s annotated element is `Vec<P>` — the chunk is `&[Vec<P>]`
     # and `c[0][0]` reaches `P` through two index levels.
     assert _call(report, source, "c[0][0].pm()").target == pm.id
+
+
+def test_produced_option_result_receivers_feed_option_transforms():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn mo() -> Option<Vec<P>> { None }
+fn mr() -> Result<Vec<P>, String> { Ok(todo!()) }
+fn f() {
+    mr().ok().unwrap()[0].pm();
+    mo().filter(|_| true).unwrap()[0].pm();
+    mo().take_if(|_| true).unwrap()[0].pm();
+    mo().or(mo()).unwrap()[0].pm();
+    mo().and(mo()).unwrap();
+    mo().xor(mo()).unwrap()[0].pm();
+    mo().flatten();
+    mo().ok_or("e").unwrap()[0].pm();
+    mo().zip(mo()).unwrap().0[0].pm();
+    let q = mo().unwrap();
+    q[0].pm();
+    mo().or_else(|_| mo()).unwrap()[0].pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    pm = _bindings(report, "pm", "associated_function")[0]
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # Produced `Option<Vec<P>>`/`Result<Vec<P>, _>` receivers spell
+    # no args of their own — each spec method keeps the declared
+    # `Vec<P>` element through to `P`.
+    for site in (
+        "mr().ok().unwrap()[0].pm()",
+        "mo().filter(|_| true).unwrap()[0].pm()",
+        "mo().take_if(|_| true).unwrap()[0].pm()",
+        "mo().or(mo()).unwrap()[0].pm()",
+        "mo().xor(mo()).unwrap()[0].pm()",
+        "mo().ok_or(\"e\").unwrap()[0].pm()",
+        "mo().or_else(|_| mo()).unwrap()[0].pm()",
+        "q[0].pm()",
+    ):
+        assert bound.get(site) == pm.id, site
+    assert (
+        bound.get("mo().zip(mo()).unwrap().0[0].pm()") == pm.id
+    )
+    # `ok()` does not exist on `Option`, `and` yields the arg's
+    # own element, and `flatten` needs `Option<Option<P>>` —
+    # these stay unbound.
+    for site in (
+        "mo().ok()",
+        "mo().and(mo()).unwrap()",
+        "mo().flatten()",
+    ):
+        assert not bound.get(site), site
+
+
+def test_if_let_some_payload_on_produced_scrutinee():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn mr() -> Result<Vec<P>, String> { Ok(todo!()) }
+fn f() {
+    if let Some(v) = mr().ok() { v[0].pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    pm = _bindings(report, "pm", "associated_function")[0]
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # The `Some(v)` payload keeps `Vec<P>` spelled at the
+    # scrutinee's declaration, so `v[0]` resolves `P`.
+    assert bound.get("v[0].pm()") == pm.id

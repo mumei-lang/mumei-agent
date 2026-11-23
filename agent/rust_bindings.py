@@ -4572,10 +4572,21 @@ class _RustBindings:
                     or (
                         self.text(field).strip()
                         in _OPTION_HEAD_METHODS
-                        and self._map_spelled_args(
-                            option_head_value
+                        and (
+                            self._map_spelled_args(
+                                option_head_value
+                            )
+                            is not None
+                            or (
+                                option_head_value is not None
+                                and option_head_value.type
+                                == "call_expression"
+                                and self._produced_head(
+                                    option_head_value
+                                )
+                                is not None
+                            )
                         )
-                        is not None
                     )
                 ):
                     option_head = _OPTION_HEAD_METHODS.get(
@@ -4767,6 +4778,28 @@ class _RustBindings:
                                 elements = self._type_arg_list(
                                     expanded_args
                                 )
+                        if not elements and (
+                            option_head_value is not None
+                            and option_head_value.type
+                            == "call_expression"
+                        ):
+                            # `mr().ok()` — a produced receiver has
+                            # no spelled args; the callee's declared
+                            # return (`Result<Vec<P>, String>`)
+                            # supplies them, so `ok` keeps `Vec<P>`.
+                            produced_args = self._expr_type_spelling(
+                                option_head_value
+                            )
+                            if produced_args is not None:
+                                produced_inner = re.fullmatch(
+                                    r"[A-Za-z_][\w:]*\s*<(.+)>",
+                                    produced_args.strip(),
+                                    re.DOTALL,
+                                )
+                                if produced_inner is not None:
+                                    elements = self._type_arg_list(
+                                        produced_inner.group(1)
+                                    )
                         if (
                             not elements
                             and peekish
@@ -5065,8 +5098,12 @@ class _RustBindings:
                         )
                         if (
                             other_args is None
-                            or self._container_head_name(other)
-                            != "Option"
+                            or (
+                                self._container_head_name(other)
+                                != "Option"
+                                and self._produced_head(other)
+                                != "Option"
+                            )
                         ):
                             element = None
                         else:
@@ -5203,10 +5240,10 @@ class _RustBindings:
                     in {"ok_or", "ok_or_else"}
                 ):
                     receiver = callee.child_by_field_name("value")
-                    if (
-                        receiver is None
-                        or self._container_head_name(receiver)
+                    if receiver is None or (
+                        self._container_head_name(receiver)
                         != "Option"
+                        and self._produced_head(receiver) != "Option"
                     ):
                         return _UNKNOWN, None
                     _, recv_args = self._receiver_type(receiver)
@@ -11975,7 +12012,10 @@ class _RustBindings:
         while node is not None and node.type == "call_expression":
             callee = node.child_by_field_name("function")
             if callee is None or callee.type != "field_expression":
-                return None
+                # `mr().ok()` bottoms out at a bare callee — keep an
+                # `Option`/`Result` head an upstream method already
+                # spelled rather than dropping the chain whole.
+                break
             field = callee.child_by_field_name("field")
             if field is None:
                 return None
@@ -11986,6 +12026,8 @@ class _RustBindings:
                 head = flow[method]
             node = callee.child_by_field_name("value")
         base = self._container_head_name(node)
+        if base is None:
+            base = self._produced_head(node)
         if base is not None and head is None:
             head = base
         return head
@@ -12484,6 +12526,12 @@ class _RustBindings:
                                     )
                                 )
                                 in option_head[1]
+                                or self._produced_head(
+                                    callee.child_by_field_name(
+                                        "value"
+                                    )
+                                )
+                                in option_head[1]
                             )
                         )
                         or (
@@ -12612,10 +12660,16 @@ class _RustBindings:
                     field is not None
                     and self.text(field).strip()
                     in {"ok_or", "ok_or_else"}
-                    and self._container_head_name(
-                        callee.child_by_field_name("value")
+                    and (
+                        self._container_head_name(
+                            callee.child_by_field_name("value")
+                        )
+                        == "Option"
+                        or self._produced_head(
+                            callee.child_by_field_name("value")
+                        )
+                        == "Option"
                     )
-                    == "Option"
                 ):
                     # `o.ok_or(e)`/`o.ok_or_else(f)` yield
                     # `Result<P, E>` — `Ok`/`Err` patterns read the
@@ -12953,7 +13007,9 @@ class _RustBindings:
             # `Option<P>`; decomposing it to args `P` would drop the
             # `Option` head and misbind `Some(q)` later.
             fargs = args[entry[1]]
-        return [(type_id, fargs)]
+        return [
+            (type_id, fargs, None, None, scrut_position)
+        ]
 
     def _pattern_type_map(
         self,
@@ -13131,7 +13187,11 @@ class _RustBindings:
                 if scrut_id is not None
                 else _UNKNOWN
             )
-            return {pattern.start_byte: (fact, scrut_args)}
+            return {
+                pattern.start_byte: (
+                    fact, scrut_args, None, None, scrut_position
+                )
+            }
         if kind in {"ref_pattern", "reference_pattern", "mut_pattern"}:
             inner = next(
                 (
@@ -13305,7 +13365,7 @@ class _RustBindings:
                     position = index
                 if position < 0 or position >= len(payload):
                     continue
-                tid, fargs = payload[position]
+                tid, fargs = payload[position][:2]
                 mapping.update(
                     self._pattern_type_map(
                         child, tid, fargs,
@@ -13341,6 +13401,11 @@ class _RustBindings:
                 record.pattern_decl_node = decl_node
             if decl_scope is not None:
                 record.pattern_decl_scope = decl_scope
+            if len(entry) > 4 and entry[4] is not None:
+                # The payload's spelled args were written where the
+                # scrutinee's type was spelled — resolving a bare
+                # `P` at the pattern site could pick a shadow.
+                record.spell_position = entry[4]
             self._add_to_scope(scope, record)
 
     def _bind_pattern(
