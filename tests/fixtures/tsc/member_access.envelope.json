@@ -576,9 +576,549 @@
         "end": 835,
         "start": 832
       }
+    },
+    {
+      "declarations": [
+        {
+          "end": 852,
+          "start": 847
+        }
+      ],
+      "library": false,
+      "name": "Guard",
+      "span": {
+        "end": 933,
+        "start": 928
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 926,
+          "start": 921
+        }
+      ],
+      "library": false,
+      "name": "maybe",
+      "span": {
+        "end": 956,
+        "start": 951
+      }
+    },
+    {
+      "declarations": [],
+      "library": true,
+      "name": "undefined",
+      "span": {
+        "end": 970,
+        "start": 961
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 926,
+          "start": 921
+        }
+      ],
+      "library": false,
+      "name": "maybe",
+      "span": {
+        "end": 979,
+        "start": 974
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 860,
+          "start": 855
+        }
+      ],
+      "library": false,
+      "name": "watch",
+      "span": {
+        "end": 985,
+        "start": 980
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 926,
+          "start": 921
+        }
+      ],
+      "library": false,
+      "name": "maybe",
+      "span": {
+        "end": 1000,
+        "start": 995
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 926,
+          "start": 921
+        }
+      ],
+      "library": false,
+      "name": "maybe",
+      "span": {
+        "end": 1009,
+        "start": 1004
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 860,
+          "start": 855
+        }
+      ],
+      "library": false,
+      "name": "watch",
+      "span": {
+        "end": 1015,
+        "start": 1010
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 926,
+          "start": 921
+        }
+      ],
+      "library": false,
+      "name": "maybe",
+      "span": {
+        "end": 1026,
+        "start": 1021
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 860,
+          "start": 855
+        }
+      ],
+      "library": false,
+      "name": "watch",
+      "span": {
+        "end": 1033,
+        "start": 1028
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 852,
+          "start": 847
+        }
+      ],
+      "library": false,
+      "name": "Guard",
+      "span": {
+        "end": 1064,
+        "start": 1059
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 885,
+          "start": 880
+        }
+      ],
+      "library": false,
+      "name": "Other",
+      "span": {
+        "end": 1072,
+        "start": 1067
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 1057,
+          "start": 1051
+        }
+      ],
+      "library": false,
+      "name": "either",
+      "span": {
+        "end": 1084,
+        "start": 1078
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 852,
+          "start": 847
+        }
+      ],
+      "library": false,
+      "name": "Guard",
+      "span": {
+        "end": 1101,
+        "start": 1096
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 1057,
+          "start": 1051
+        }
+      ],
+      "library": false,
+      "name": "either",
+      "span": {
+        "end": 1111,
+        "start": 1105
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 860,
+          "start": 855
+        }
+      ],
+      "library": false,
+      "name": "watch",
+      "span": {
+        "end": 1117,
+        "start": 1112
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 1057,
+          "start": 1051
+        }
+      ],
+      "library": false,
+      "name": "either",
+      "span": {
+        "end": 1136,
+        "start": 1130
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 893,
+          "start": 888
+        }
+      ],
+      "library": false,
+      "name": "other",
+      "span": {
+        "end": 1142,
+        "start": 1137
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 1057,
+          "start": 1051
+        }
+      ],
+      "library": false,
+      "name": "either",
+      "span": {
+        "end": 1154,
+        "start": 1148
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 852,
+          "start": 847
+        }
+      ],
+      "library": false,
+      "name": "Guard",
+      "span": {
+        "end": 1171,
+        "start": 1166
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 1057,
+          "start": 1051
+        }
+      ],
+      "library": false,
+      "name": "either",
+      "span": {
+        "end": 1180,
+        "start": 1174
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 860,
+          "start": 855
+        }
+      ],
+      "library": false,
+      "name": "watch",
+      "span": {
+        "end": 1186,
+        "start": 1181
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 1057,
+          "start": 1051
+        }
+      ],
+      "library": false,
+      "name": "either",
+      "span": {
+        "end": 1197,
+        "start": 1191
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 893,
+          "start": 888
+        }
+      ],
+      "library": false,
+      "name": "other",
+      "span": {
+        "end": 1203,
+        "start": 1198
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 926,
+          "start": 921
+        }
+      ],
+      "library": false,
+      "name": "maybe",
+      "span": {
+        "end": 1219,
+        "start": 1214
+      }
+    },
+    {
+      "declarations": [],
+      "library": true,
+      "name": "undefined",
+      "span": {
+        "end": 1233,
+        "start": 1224
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 926,
+          "start": 921
+        }
+      ],
+      "library": false,
+      "name": "maybe",
+      "span": {
+        "end": 1242,
+        "start": 1237
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 860,
+          "start": 855
+        }
+      ],
+      "library": false,
+      "name": "watch",
+      "span": {
+        "end": 1248,
+        "start": 1243
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 1273,
+          "start": 1271
+        }
+      ],
+      "library": false,
+      "name": "Da",
+      "span": {
+        "end": 1359,
+        "start": 1357
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 1312,
+          "start": 1310
+        }
+      ],
+      "library": false,
+      "name": "Db",
+      "span": {
+        "end": 1364,
+        "start": 1362
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 1355,
+          "start": 1353
+        }
+      ],
+      "library": false,
+      "name": "du",
+      "span": {
+        "end": 1376,
+        "start": 1374
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 1280,
+          "start": 1276
+        },
+        {
+          "end": 1319,
+          "start": 1315
+        }
+      ],
+      "library": false,
+      "name": "kind",
+      "span": {
+        "end": 1381,
+        "start": 1377
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 1355,
+          "start": 1353
+        }
+      ],
+      "library": false,
+      "name": "du",
+      "span": {
+        "end": 1401,
+        "start": 1399
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 1289,
+          "start": 1287
+        }
+      ],
+      "library": false,
+      "name": "pa",
+      "span": {
+        "end": 1404,
+        "start": 1402
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 1355,
+          "start": 1353
+        }
+      ],
+      "library": false,
+      "name": "du",
+      "span": {
+        "end": 1430,
+        "start": 1428
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 1328,
+          "start": 1326
+        }
+      ],
+      "library": false,
+      "name": "pb",
+      "span": {
+        "end": 1433,
+        "start": 1431
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 926,
+          "start": 921
+        }
+      ],
+      "library": false,
+      "name": "maybe",
+      "span": {
+        "end": 1467,
+        "start": 1462
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 1451,
+          "start": 1445
+        }
+      ],
+      "library": false,
+      "name": "holder",
+      "span": {
+        "end": 1477,
+        "start": 1471
+      }
+    },
+    {
+      "declarations": [
+        {
+          "end": 1460,
+          "start": 1456
+        }
+      ],
+      "library": false,
+      "name": "item",
+      "span": {
+        "end": 1482,
+        "start": 1478
+      }
     }
   ],
-  "source": "interface Shape { area(): number }\nclass Engine { start(): void {} }\nclass Car implements Shape {\n    engine: Engine = new Engine();\n    base(): void {}\n    area(): number { return 0 }\n    run(other: Car): void {\n        this.engine.start();\n        other.engine.start();\n        this.base();\n        other.area();\n    }\n}\nnamespace N {\n    export function help(): void {}\n    export class Inner { ping(): void {} }\n}\nenum Direction { Up, Down }\nconst heading = Direction.Up;\nN.help();\nconst inner = new N.Inner();\ninner.ping();\nconst s: Shape = new Car();\ns.area();\nconst cars: Car[] = [new Car()];\ncars[0].base();\ncars.push(new Car());\ncars.length;\nclass Quoted { \"m\"(): void {} }\nconst quoted = new Quoted(); quoted.m();\ndeclare const record: Record<\"undefined\", number>;\nrecord.undefined;\nCar.prototype;\ndeclare const dyn: any;\ndyn.foo;\n",
+  "source": "interface Shape { area(): number }\nclass Engine { start(): void {} }\nclass Car implements Shape {\n    engine: Engine = new Engine();\n    base(): void {}\n    area(): number { return 0 }\n    run(other: Car): void {\n        this.engine.start();\n        other.engine.start();\n        this.base();\n        other.area();\n    }\n}\nnamespace N {\n    export function help(): void {}\n    export class Inner { ping(): void {} }\n}\nenum Direction { Up, Down }\nconst heading = Direction.Up;\nN.help();\nconst inner = new N.Inner();\ninner.ping();\nconst s: Shape = new Car();\ns.area();\nconst cars: Car[] = [new Car()];\ncars[0].base();\ncars.push(new Car());\ncars.length;\nclass Quoted { \"m\"(): void {} }\nconst quoted = new Quoted(); quoted.m();\ndeclare const record: Record<\"undefined\", number>;\nrecord.undefined;\nCar.prototype;\ndeclare const dyn: any;\ndyn.foo;\nclass Guard { watch(): void {} }\nclass Other { other(): void {} }\ndeclare const maybe: Guard | undefined;\nif (maybe !== undefined) { maybe.watch(); }\nif (maybe) { maybe.watch(); }\nmaybe?.watch();\ndeclare const either: Guard | Other;\nif (either instanceof Guard) { either.watch(); } else { either.other(); }\neither instanceof Guard ? either.watch() : either.other();\nwhile (maybe !== undefined) { maybe.watch(); break; }\ninterface Da { kind: \"a\"; pa(): void }\ninterface Db { kind: \"b\"; pb(): void }\ndeclare const du: Da | Db;\nswitch (du.kind) {\n    case \"a\": du.pa(); break;\n    default: du.pb();\n}\nconst holder = { item: maybe };\nholder.item;\n",
   "typescript_version": "5.9.3",
   "unsupported": []
 }

@@ -4507,15 +4507,33 @@ class _TypeScriptBindings:
         if body is None:
             return
         name = self.text(obj)
+        covered = {
+            constituents[self.text(c.child_by_field_name("value")).strip()].id
+            for c in self.children(body)
+            if c.type == "switch_case"
+            and c.child_by_field_name("value") is not None
+            and self.text(c.child_by_field_name("value")).strip() in constituents
+        }
         for case in self.children(body):
-            if case.type != "switch_case":
+            if case.type == "switch_case":
+                case_value = case.child_by_field_name("value")
+                if case_value is None:
+                    continue
+                narrowed = constituents.get(
+                    self.text(case_value).strip()
+                )
+            elif case.type == "switch_default":
+                # `default:` sees the union minus every covered
+                # constituent — only a single remaining part
+                # spells a type.
+                remaining = [
+                    child
+                    for child in self.children(declared)
+                    if child.id not in covered
+                ]
+                narrowed = remaining[0] if len(remaining) == 1 else None
+            else:
                 continue
-            case_value = case.child_by_field_name("value")
-            if case_value is None:
-                continue
-            narrowed = constituents.get(
-                self.text(case_value).strip()
-            )
             if narrowed is None:
                 continue
             for desc in self.walk(case):
@@ -4905,11 +4923,11 @@ class _TypeScriptBindings:
             object_node, position, extras_out=inner_extras
         )
         if type_record is None:
-            return None
+            return self._union_member(object_node, name, position)
         # The collision losers only apply when the winning member
         # record does not provide the name — seeded candidates can
         # never beat the winner's own members.
-        return self._member_lookup(
+        member = self._member_lookup(
             type_record,
             name,
             position,
@@ -4920,6 +4938,47 @@ class _TypeScriptBindings:
             args_node=args_node,
             arg_nodes=arg_nodes,
         )
+        if member is None:
+            member = self._union_member(object_node, name, position)
+        return member
+
+    def _union_member(
+        self, object_node: Any | None, name: str, position: int
+    ) -> _Record | None:
+        """`u.m` where `u: A | B` and every named constituent declares
+        `m` — tsc resolves the access to each declaration, so binding
+        the first is honest. A primitive or undeclared part keeps it
+        opaque (the access would not typecheck)."""
+        if object_node is None or object_node.type != "identifier":
+            return None
+        record = self._lookup(
+            self.text(object_node), object_node.start_byte, "value"
+        )
+        if record is None:
+            return None
+        declared = self._unwrap_type(record.type_node)
+        if declared is None or declared.type != "union_type":
+            return None
+        found: _Record | None = None
+        for child in self.children(declared):
+            fact = self._type_fact(child)
+            if fact.kind != "named":
+                return None
+            type_record = self._type_record_by_id(fact.type_id)
+            if type_record is None:
+                return None
+            member = self._member_lookup(
+                type_record,
+                name,
+                position,
+                static=False,
+                via_this=False,
+            )
+            if member is None:
+                return None
+            if found is None:
+                found = member
+        return found
 
     def _resolve(
         self,

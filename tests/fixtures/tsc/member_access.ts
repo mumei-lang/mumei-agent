@@ -33,3 +33,22 @@ record.undefined;
 Car.prototype;
 declare const dyn: any;
 dyn.foo;
+class Guard { watch(): void {} }
+class Other { other(): void {} }
+declare const maybe: Guard | undefined;
+if (maybe !== undefined) { maybe.watch(); }
+if (maybe) { maybe.watch(); }
+maybe?.watch();
+declare const either: Guard | Other;
+if (either instanceof Guard) { either.watch(); } else { either.other(); }
+either instanceof Guard ? either.watch() : either.other();
+while (maybe !== undefined) { maybe.watch(); break; }
+interface Da { kind: "a"; pa(): void }
+interface Db { kind: "b"; pb(): void }
+declare const du: Da | Db;
+switch (du.kind) {
+    case "a": du.pa(); break;
+    default: du.pb();
+}
+const holder = { item: maybe };
+holder.item;

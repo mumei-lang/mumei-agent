@@ -51,7 +51,13 @@ POSITIVE_FIXTURES = (
         + ["agree"] * 2
         + ["builtin"]
         + ["agree"] * 3
-        + ["builtin", "agree", "builtin", "agree", "builtin", "agree"],
+        + ["builtin", "agree", "builtin", "agree", "builtin"]
+        + ["agree"] * 3
+        + ["builtin"]
+        + ["agree"] * 22
+        + ["builtin"]
+        + ["agree"] * 12
+        + ["lexical_missing"],
     ),
 )
 _STATUSES = (
