@@ -8918,3 +8918,59 @@ fn f(q: std::collections::VecDeque<P>, v: Vec<P>) {
     assert bound.get("a[0].pm()") == pm.id
     assert bound.get("b[0].pm()") == pm.id
     assert bound.get("c[0].pm()") == pm.id
+
+
+def test_chunks_exact_iteration_and_next_payload():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(v: Vec<P>, mut v2: Vec<P>) {
+    let mut it = v.chunks_exact(2);
+    if let Some(chunk) = it.next() { chunk[0].pm(); }
+    for chunk in v.chunks_exact(2) {
+        for p in chunk { p.pm(); }
+        chunk[0].pm();
+    }
+    for (_, c) in v.chunks_exact(2).enumerate() { c[0].pm(); }
+    for chunk in v2.rchunks_exact_mut(2) { chunk[0].pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        (c.span.start, c.span.end): c.target for c in report.calls
+    }
+    spans = [
+        s
+        for s in bound
+        if raw[s[0]:s[1]] == b"chunk[0].pm()"
+        or raw[s[0]:s[1]] == b"c[0].pm()"
+        or raw[s[0]:s[1]] == b"p.pm()"
+    ]
+    assert len(spans) == 6
+    assert all(bound[s] == pm.id for s in spans)
+
+
+def test_make_contiguous_call_receiver():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn make() -> VecDeque<P> { VecDeque::new() }
+fn f() {
+    let q = make();
+    let slice = q.make_contiguous();
+    slice[0].pm();
+    let slice2 = make().make_contiguous();
+    slice2[0].pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    assert bound.get("slice[0].pm()") == pm.id
+    assert bound.get("slice2[0].pm()") == pm.id

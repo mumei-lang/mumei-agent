@@ -3439,15 +3439,63 @@ class _RustBindings:
                         # `chunks` the item IS `&[P]`, spelled `&P`,
                         # so the produced payload is `&&P`; `next`/
                         # `next_back` yield `Option<Item>` → `&P`.
+                        _opt_recv = callee.child_by_field_name(
+                            "value"
+                        )
+                        _recv_call = _opt_recv
+                        if (
+                            _opt_recv is not None
+                            and _opt_recv.type == "identifier"
+                        ):
+                            _recv_record = self._lookup(
+                                self._normalize_identifier(
+                                    self.text(_opt_recv)
+                                ),
+                                _opt_recv.start_byte,
+                                "value",
+                            )
+                            _recv_call = (
+                                None
+                                if _recv_record is None
+                                else _recv_record.value_node
+                            )
+                        _recv_method = None
+                        if (
+                            _recv_call is not None
+                            and _recv_call.type == "call_expression"
+                        ):
+                            _recv_fn = _recv_call.child_by_field_name(
+                                "function"
+                            )
+                            if (
+                                _recv_fn is not None
+                                and _recv_fn.type
+                                == "field_expression"
+                            ):
+                                _recv_field = (
+                                    _recv_fn.child_by_field_name(
+                                        "field"
+                                    )
+                                )
+                                if _recv_field is not None:
+                                    _recv_method = self.text(
+                                        _recv_field
+                                    ).strip()
+                        # A chunks-family iterator's `&[P]` args
+                        # already spell the ITEM (`it.next()` →
+                        # `Option<&[P]>`) — the slice-args inner
+                        # would drop the borrow down to `P`.
+                        if _recv_method in (
+                            _ITER_CHUNK_METHODS
+                            | _ITER_CHUNK_MUT_METHODS
+                        ):
+                            element = receiver[1].strip()
+                        else:
+                            element = slice_args.group(1).strip()
                         if self.text(field).strip() in {
                             "peek", "next_if", "next_if_eq",
                         }:
-                            element = (
-                                "&"
-                                + slice_args.group(1).strip()
-                            )
-                        else:
-                            element = slice_args.group(1).strip()
+                            element = "&" + element
                     else:
                         elements = self._type_arg_list(
                             receiver[1] or ""
@@ -4322,8 +4370,13 @@ class _RustBindings:
                     if (
                         method_name in {"leak", "make_contiguous"}
                         and receiver[1] is not None
-                        and self._container_head_name(
-                            callee.child_by_field_name("value")
+                        and (
+                            self._container_head_name(
+                                callee.child_by_field_name("value")
+                            )
+                            or self._produced_head(
+                                callee.child_by_field_name("value")
+                            )
                         )
                         == ("Vec" if method_name == "leak"
                             else "VecDeque")
@@ -6918,9 +6971,9 @@ class _RustBindings:
             )
             return TypeFact("named", name, 0, None, elem_id), rest
         if method in _ITER_CHUNK_METHODS | _ITER_CHUNK_MUT_METHODS:
-            # `v.chunks(n)` yields `&[P]` slices — spell `&P`,
-            # which index/iter sites unwrap to `P`; the `_mut`
-            # variants spell `&mut P`.
+            # `v.chunks(n)` yields `&[P]` slices — spelled so
+            # index/iter sites unwrap to `P`; the `_mut`
+            # variants spell `&mut [P]`.
             container_id, args = self._receiver_type(receiver)
             if args is None:
                 return _UNKNOWN, None
@@ -6952,7 +7005,9 @@ class _RustBindings:
             )
             return (
                 _UNKNOWN,
-                None if spelled is None else prefix + spelled,
+                None
+                if spelled is None
+                else prefix + "[" + spelled + "]",
             )
         if method in _SET_ALGEBRA_METHODS | _MAP_RANGE_METHODS:
             # `a.union(&b)`/`intersection`/`difference`/
@@ -7150,6 +7205,18 @@ class _RustBindings:
                 if range_rest is None:
                     return _UNKNOWN, None
                 return _UNKNOWN, f"(usize, {range_rest.strip()})"
+            if inner_name in (
+                _ITER_CHUNK_METHODS | _ITER_CHUNK_MUT_METHODS
+            ):
+                # `v.chunks_exact(n).enumerate()` yields
+                # (usize, &[P]) pairs — the slice element comes
+                # from the chunk recipe like `range` above.
+                _chunk_fact, chunk_rest = (
+                    self._iterator_method_element(receiver)
+                )
+                if chunk_rest is None:
+                    return _UNKNOWN, None
+                return _UNKNOWN, f"(usize, {chunk_rest.strip()})"
             if inner_name in _EXTRACT_IF_METHODS:
                 # `s.extract_if(.., f).enumerate()` yields
                 # (usize, P) for sets and (usize, (K, V)) for
@@ -10100,6 +10167,20 @@ class _RustBindings:
         """Container head a call result names — the callee's declared
         return annotation (`fn make_vec() -> Vec<P>`) or a produced
         spelling (`r.as_ref()` -> `Result<...>`). None for non-calls."""
+        if node is not None and node.type == "identifier":
+            record = self._through_import(
+                self._lookup(
+                    self._normalize_identifier(self.text(node)),
+                    node.start_byte,
+                    "value",
+                ),
+                node.start_byte,
+                "value",
+            )
+            value = None if record is None else record.value_node
+            if value is None or value is node:
+                return None
+            return self._produced_head(value)
         if node is None or node.type != "call_expression":
             return None
         callee = node.child_by_field_name("function")
