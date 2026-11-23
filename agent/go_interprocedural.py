@@ -6012,6 +6012,15 @@ class _Builder:
             return
         for member, value in pairs:
             member_type = getattr(member, "type", None)
+            if self._chan_chan_fact(member_type):
+                # `WW{C: cc}` / `WW{C: make(chan chan T)}` — init the
+                # member's queue-of-queues root and join it into the
+                # donor's group like a `w.C = cc` store.
+                self._local_chan_chan_member_init(member)
+                cc_root = self._local_chan_chan_id(value)
+                if cc_root is not None:
+                    self._chan_group_join(member.id, cc_root)
+                continue
             if self._scalar_chan_fact(member_type):
                 # `W{C: ch}` — the field may now hold `ch`'s queue:
                 # union its token into the member's may-set like a
@@ -6225,7 +6234,14 @@ class _Builder:
                 in self._opaque_container_tokens
             ):
                 struct_identifier_source = source_binding
-        if not members and not chan_members and not (
+        chan_chan_members = tuple(
+            m
+            for m in self._struct_fields_for_fact(
+                binding.type, binding
+            )
+            if self._chan_chan_fact(getattr(m, "type", None))
+        )
+        if not members and not chan_members and not chan_chan_members and not (
             struct_call_result is not None
             and struct_call_result.kind == "struct"
         ) and struct_identifier_source is None:
@@ -9591,6 +9607,71 @@ class _Builder:
             return None
         return (field_member, binding)
 
+    def _value_field_chan_chan(
+        self,
+        node: Any,
+        locals_: dict[str, frozenset[int]] | None,
+    ) -> tuple[Any, Any] | None:
+        """`w.C` where `C` is a `chan chan` field of a local value
+        struct — the queue-of-queues twin of `_value_field_chan`.
+
+        The member's identity is the share-group root a `w.C = cc`
+        store or `WW{C: cc}` literal joins into `cc`'s group, so
+        sends through either name reach reads through the other.
+        Returns `(member, root binding)` or None; the caller checks
+        `member.id` for `local_chan_chans` membership."""
+        if locals_ is None:
+            return None
+        inner = node
+        while (
+            inner is not None
+            and inner.type == "parenthesized_expression"
+        ):
+            inner = next(
+                (c for c in inner.named_children if c.type != "comment"),
+                None,
+            )
+        if inner is None or inner.type != "selector_expression":
+            return None
+        operand = inner.child_by_field_name("operand")
+        field = inner.child_by_field_name("field")
+        if (
+            operand is None
+            or field is None
+            or operand.type != "identifier"
+            or operand.text == b"_"
+        ):
+            return None
+        ref = self.references.get(self.node_key(operand))
+        if ref is None or ref.binding_id not in locals_:
+            return None
+        binding = self.bindings.get(ref.binding_id)
+        if not self._is_local_composite(binding):
+            return None
+        field_ref = self.references.get(self.node_key(field))
+        field_member = None
+        if field_ref is not None and field_ref.kind == "import":
+            field_member = self.members.get(field_ref.binding_id)
+        else:
+            field_member = self._local_field(field_ref)
+        if (
+            field_member is None
+            or field_member.name.encode("utf-8") != field.text
+            or field_member.kind not in {"var", "variable"}
+            or not self._chan_chan_fact(field_member.type)
+        ):
+            return None
+        if not any(
+            member.id == field_member.id
+            for member in self._struct_fields_for_fact(
+                binding.type, binding
+            )
+        ):
+            # Promoted member through an embedded field — same
+            # fail-closed boundary as `_value_field_chan`.
+            return None
+        return (field_member, binding)
+
     def _field_chan_deps(
         self,
         member_id: str,
@@ -12281,7 +12362,7 @@ class _Builder:
         # lands, so `i, GB[Set(&r, i)] = <-ch` must read the OLD `i`
         # inside `Set`'s arguments. Resolve every target and evaluate
         # its extras first, then perform the stores.
-        local_chan_chan_root = self._local_chan_chan_receive(recv)
+        local_chan_chan_root = self._local_chan_chan_receive(recv, locals_, params)
         external_chan_receive = self._chan_chan_receive(
             recv, params
         )
@@ -12812,7 +12893,7 @@ class _Builder:
             else None
         )
         if operator is None or operator.type != "<-":
-            local_queue = self._local_chan_chan_id(node)
+            local_queue = self._local_chan_chan_id(node, locals_, params)
             if local_queue is not None:
                 binding = self.bindings.get(local_queue)
                 fact = binding.type if binding is not None else None
@@ -12915,7 +12996,7 @@ class _Builder:
             return self._chan_binding(node, locals_, params)
 
         queue = inner.child_by_field_name("operand")
-        local_queue = self._local_chan_chan_id(queue)
+        local_queue = self._local_chan_chan_id(queue, locals_, params)
         received_queue = None
         if local_queue is not None:
             outer = self.bindings.get(local_queue)
@@ -13791,7 +13872,12 @@ class _Builder:
             if origins
         }
 
-    def _local_chan_chan_id(self, node: Any) -> str | None:
+    def _local_chan_chan_id(
+        self,
+        node: Any,
+        locals_: dict[str, frozenset[int]] | None = None,
+        params: dict[str, int] | None = None,
+    ) -> str | None:
         """The root identity of a local scalar-leaf nested-channel queue."""
         inner = node
         while (
@@ -13804,6 +13890,30 @@ class _Builder:
             )
         if inner is None:
             return None
+        if inner.type == "selector_expression":
+            # `w.C` on a value struct's `chan chan` field — the
+            # member is the queue-of-queues root once a literal,
+            # store, or first op inits it.
+            value_field = self._value_field_chan_chan(inner, locals_)
+            if value_field is None:
+                return None
+            member, root_binding = value_field
+            if member.id not in self.local_chan_chans:
+                self._local_chan_chan_member_init(member)
+                if (
+                    params is not None
+                    and root_binding.id in params
+                ):
+                    # A parameter's field queue is caller-provided
+                    # memory — like `p.C`, reads observe indirect
+                    # writes and ops carry the param's origin.
+                    self._mark_external_chan_group_member(member.id)
+                    self._set_chan_chan_param_origins(
+                        member.id,
+                        frozenset({params[root_binding.id]}),
+                        True,
+                    )
+            return self._chan_root(member.id)
         if inner.type == "index_expression":
             target = self._chan_chan_elem_index_target(inner)
             if target is None or target[0] not in self.local_chan_chans:
@@ -13909,7 +14019,12 @@ class _Builder:
             return None
         return roots
 
-    def _local_chan_chan_receive(self, node: Any) -> str | None:
+    def _local_chan_chan_receive(
+        self,
+        node: Any,
+        locals_: dict[str, frozenset[int]] | None = None,
+        params: dict[str, int] | None = None,
+    ) -> str | None:
         """The local share-group root read by a channel receive."""
         inner = node
         while (
@@ -13940,10 +14055,10 @@ class _Builder:
         if operator is None or operator.type != "<-":
             return None
         queue = inner.child_by_field_name("operand")
-        local = self._local_chan_chan_id(queue)
+        local = self._local_chan_chan_id(queue, locals_, params)
         if local is not None:
             return local
-        return self._local_chan_chan_receive(queue)
+        return self._local_chan_chan_receive(queue, locals_, params)
 
     def _local_chan_chan_anchor(self, binding_id: str) -> tuple[str, str]:
         return ("local-chan-chan", binding_id)
@@ -13959,6 +14074,23 @@ class _Builder:
                 {
                     binding_id,
                     self._local_chan_chan_anchor(binding_id),
+                }
+            ),
+        )
+
+    def _local_chan_chan_member_init(self, member: Any) -> None:
+        """A `chan chan` field member has no entry in `bindings` —
+        init the member's own queue-of-queues root the way a
+        `cc := make(chan chan T)` binding does."""
+        self.local_chan_chans.add(member.id)
+        self._pin_member_type(member)
+        self._pin_fact_identities(member.type)
+        self._opaque_container_tokens.setdefault(
+            member.id,
+            frozenset(
+                {
+                    member.id,
+                    self._local_chan_chan_anchor(member.id),
                 }
             ),
         )
@@ -17898,7 +18030,7 @@ class _Builder:
         reassigned between the literal and the `return cl` reads the
         CURRENT value (`y = x` after `cl := func(){return y}` hands x's
         deps to the caller, not the empty set the literal captured)."""
-        local_chan_chan = self._local_chan_chan_id(expr)
+        local_chan_chan = self._local_chan_chan_id(expr, locals_, params)
         returned_chan_chan_groups: set[str] = set()
         if expr.type == "composite_literal":
             direct_queue_nodes: set[tuple[int, int, int]] = set()
@@ -17917,7 +18049,7 @@ class _Builder:
                     else:
                         value = None
                     if value is not None and value.type == "identifier":
-                        binding_id = self._local_chan_chan_id(value)
+                        binding_id = self._local_chan_chan_id(value, locals_, params)
                         if binding_id is not None:
                             direct_queue_nodes.add(
                                 self.node_key(value)
@@ -17932,7 +18064,7 @@ class _Builder:
                     continue
                 if (
                     candidate.type == "identifier"
-                    and self._local_chan_chan_id(candidate) is not None
+                    and self._local_chan_chan_id(candidate, locals_, params) is not None
                     and self.node_key(candidate)
                     not in direct_queue_nodes
                 ):
@@ -21965,7 +22097,7 @@ class _Builder:
                                         rights[i], params
                                     )
                                     or self._local_chan_chan_receive(
-                                        rights[i]
+                                        rights[i], locals_, params
                                     )
                                     # `d := s[i]` — the element
                                     # queue a bound `[]chan`/
@@ -22012,7 +22144,7 @@ class _Builder:
                                         rights[0], len(lefts)
                                     )
                                     and self._local_chan_chan_receive(
-                                        rights[0]
+                                        rights[0], locals_, params
                                     )
                                     is not None
                                 )
@@ -22031,7 +22163,7 @@ class _Builder:
                                 and (
                                     self._is_make_chan_call(rights[i])
                                     or self._local_chan_chan_id(
-                                        rights[i]
+                                        rights[i], locals_, params
                                     )
                                     is not None
                                 )
@@ -22065,7 +22197,7 @@ class _Builder:
                                 len(lefts) == len(rights)
                                 and (
                                     self._local_chan_chan_receive(
-                                        rights[i]
+                                        rights[i], locals_, params
                                     )
                                     is not None
                                     or self._chan_chan_receive(
@@ -22081,7 +22213,7 @@ class _Builder:
                                 )
                                 and (
                                     self._local_chan_chan_receive(
-                                        rights[0]
+                                        rights[0], locals_, params
                                     )
                                     is not None
                                     or self._chan_chan_receive(
@@ -22142,7 +22274,7 @@ class _Builder:
                     # against the pre-state above.
                     pre_target = pre_chan_targets[i]
                     local_chan_chan_target = (
-                        self._local_chan_chan_id(chan_rhs)
+                        self._local_chan_chan_id(chan_rhs, locals_, params)
                         if self._chan_chan_fact(binding.type)
                         else None
                     )
@@ -22179,7 +22311,7 @@ class _Builder:
                         )
                     elif (
                         local_chan_chan_root
-                        := self._local_chan_chan_receive(chan_rhs)
+                        := self._local_chan_chan_receive(chan_rhs, locals_, params)
                     ) is not None:
                         self.chan_aliases.pop(binding.id, None)
                         self.external_chan_locals.discard(binding.id)
@@ -24774,6 +24906,7 @@ class _Builder:
             # the leaf `chan` member, so the store can union the RHS
             # queue's tokens into the member's may-set.
             field_chan_lhs: dict[int, Any] = {}
+            field_chan_chan_lhs: dict[int, Any] = {}
             # `fs[i] = f` — an element store into a bound func-element
             # container keeps the stored value's records under the
             # container's name; the store loop unions rather than
@@ -25145,6 +25278,19 @@ class _Builder:
                             field_chan_lhs[len(refs) - 1] = (
                                 value_field[0]
                             )
+                        else:
+                            # `w.C = cc` on a value struct's
+                            # `chan chan` field — the member joins
+                            # `cc`'s share group.
+                            value_field_cc = (
+                                self._value_field_chan_chan(
+                                    lhs, locals_
+                                )
+                            )
+                            if value_field_cc is not None:
+                                field_chan_chan_lhs[
+                                    len(refs) - 1
+                                ] = value_field_cc[0]
                     continue
                 # An imported member write — `lib.V = v`,
                 # `lib.VA[i] = v`, `lib.VS.f = v` — mutates package
@@ -26447,6 +26593,13 @@ class _Builder:
             field_chan_tokens = {
                 i: self._chan_queue_tokens(rights[i], locals_, params)
                 for i in field_chan_lhs
+                if len(lefts) == len(rights) and i < len(rights)
+            }
+            field_chan_chan_roots = {
+                i: self._local_chan_chan_id(
+                    rights[i], locals_, params
+                )
+                for i in field_chan_chan_lhs
                 if len(lefts) == len(rights) and i < len(rights)
             }
             # `a, b = b, a` — an identifier RHS's container backing
@@ -28062,6 +28215,36 @@ class _Builder:
                         )
                         for token in tokens:
                             self.external_chan_locals.add(token)
+                member_cc = field_chan_chan_lhs.get(i)
+                if (
+                    member_cc is not None
+                    and i < len(rights)
+                    and len(lefts) == len(rights)
+                ):
+                    # `w.C = cc` — the field names `cc`'s queue-
+                    # of-queues: init the member root and join it
+                    # into the RHS's group so sends on either
+                    # name reach reads on the other.
+                    self._local_chan_chan_member_init(member_cc)
+                    cc_root = field_chan_chan_roots.get(i)
+                    if cc_root is not None:
+                        self._chan_group_join(member_cc.id, cc_root)
+                    if member_cc.id in self.local_chan_chans or (
+                        cc_root is not None
+                    ):
+                        transfers.append(
+                            CallTransfer(
+                                FileSpan(
+                                    self.current_file,
+                                    rights[i].start_byte,
+                                    rights[i].end_byte,
+                                ),
+                                member_cc.id,
+                                (),
+                                frozenset(),
+                                imported=True,
+                            )
+                        )
                 # An element store through one name lands in every
                 # name sharing the backing (`fs2 := fs`) — the
                 # stored value's deps join each sharer's set like
@@ -32392,7 +32575,9 @@ class _Builder:
                     channel, fn, params, locals_, transfers, count
                 )
             )
-            local_chan_chan = self._local_chan_chan_id(channel)
+            local_chan_chan = self._local_chan_chan_id(
+                channel, locals_, params
+            )
             if (
                 local_chan_chan is None
                 and binding is not None
@@ -32403,7 +32588,9 @@ class _Builder:
                 external_members = self._chan_group_external_tokens(
                     local_chan_chan
                 )
-                received_chan_chan = self._local_chan_chan_receive(value)
+                received_chan_chan = self._local_chan_chan_receive(
+                    value, locals_, params
+                )
                 received_channel = None
                 if received_chan_chan is not None:
                     for token in self._chan_group_members(

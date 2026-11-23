@@ -31239,19 +31239,13 @@ def test_value_struct_field_channel_range_and_close(go_types_helper):
 def test_value_struct_field_channel_boundaries_stay_closed(
     go_types_helper,
 ):
-    # `chan chan` members (the queue-of-queues model has no field
-    # slot yet), a non-scalar `chan string` field, and a computed
-    # base (`arr[i].C`, `s.W.C` nested one level deeper) all stay
-    # closed.
+    # A non-scalar `chan string` field and a computed base
+    # (`arr[i].C`, `s.W.C` nested one level deeper) stay closed.
     files = {
         "a.go": "package p\n"
-        "type WC struct{ C chan chan int64 }\n"
         "type WS struct{ C chan string }\n"
         "type W struct{ C chan int64 }\n"
         "type S struct{ W W }\n"
-        "func FChanChan(w WC, c chan int64) int64 {\n"
-        "\tw.C <- c\n"
-        "\treturn 0\n}\n"
         "func FStr(w WS, x string) string {\n"
         "\tw.C <- x\n"
         "\treturn x\n}\n"
@@ -31264,10 +31258,68 @@ def test_value_struct_field_channel_boundaries_stay_closed(
     }
     snapshot = _snapshot_for(go_types_helper, files)
     summaries = ip.summarize_go_package(files, snapshot)
-    for name in ("FChanChan", "FStr", "FArr", "FNested"):
+    for name in ("FStr", "FArr", "FNested"):
         assert not named_package(
             files, snapshot, summaries, name
         ).available
+
+
+def test_value_struct_field_chan_chan_send_recv(go_types_helper):
+    # `w.C` on a `chan chan` field — the member IS the queue-of-
+    # queues root: `w.C <- c` joins `c` to the member's group and
+    # `c := <-w.C` / `<-(<-w.C)` read the member's deps. `w.C = cc`
+    # and `WW{C: cc}` join the member into `cc`'s share group, so
+    # sends on either name reach reads on the other. A param's
+    # field queue is caller-provided memory — reads observe the
+    # param's origin.
+    files = {
+        "a.go": "package p\n"
+        "type WW struct{ C chan chan int64 }\n"
+        "func FSend(w WW, c chan int64) int64 {\n"
+        "\tw.C <- c\n"
+        "\treturn 0\n}\n"
+        "func FRecv(w WW) int64 {\n"
+        "\treturn <-(<-w.C)\n}\n"
+        "func FLit(x int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tc <- x\n"
+        "\tw := WW{C: make(chan chan int64, 1)}\n"
+        "\tw.C <- c\n"
+        "\treturn <-(<-w.C)\n}\n"
+        "func FStore(cc chan chan int64, x int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tc <- x\n"
+        "\tcc <- c\n"
+        "\tvar w WW\n"
+        "\tw.C = cc\n"
+        "\treturn <-(<-w.C)\n}\n"
+        "func FLitStore(cc chan chan int64, x int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tc <- x\n"
+        "\tcc <- c\n"
+        "\tw := WW{C: cc}\n"
+        "\treturn <-(<-w.C)\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    results = {
+        name: named_package(files, snapshot, summaries, name)
+        for name in (
+            "FSend",
+            "FRecv",
+            "FLit",
+            "FStore",
+            "FLitStore",
+        )
+    }
+    assert results["FSend"].available
+    assert results["FSend"].return_dependencies == frozenset()
+    for name in ("FRecv", "FLit"):
+        assert results[name].available
+        assert results[name].return_dependencies == frozenset({0})
+    for name in ("FStore", "FLitStore"):
+        assert results[name].available
+        assert results[name].return_dependencies == frozenset({1})
 
 
 def test_value_struct_field_channel_may_set_follows_reseat(

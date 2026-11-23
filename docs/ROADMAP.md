@@ -3125,8 +3125,18 @@ struct's scalar-element `chan` field (`w.C <- x`,
 same way — the member carries a may-set of the
 queues it could name (`W{C: ch}` and `w.C = ch`
 union `ch`'s queue in), sends broadcast into the
-indirect writes and reads union `deps(w)`; `chan
-chan` members and computed bases stay closed.
+indirect writes and reads union `deps(w)`;
+computed bases stay closed.
+The `chan chan` field slice (`w.C <- c`,
+`c := <-w.C`, `<-(<-w.C)`, `w.C = cc`,
+`WW{C: cc}`) admits the same way: the member IS
+the queue-of-queues root — ops init it lazily like a
+`cc := make(chan chan T)` binding, `w.C = cc` /
+literal stores join it into the donor's share group,
+and a param's field queue is caller-provided memory
+(reads observe the param's origin). Ranging over a
+`chan chan` field and nested container elements
+(`arr[i].C`, `s.W.C` one level deeper) stay closed.
 A `chan T` result now admits
 the same way a `chan` parameter does: `ch := g()` and
 `var ch = g()` bind a callee-produced queue when the
