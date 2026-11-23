@@ -53,6 +53,15 @@ _ITER_ELEMENT_METHODS = frozenset(
 )
 # Iterator adaptors that keep the same element type — `map`/`flat_map`
 # change it through a closure and stay opaque.
+# Methods whose callback receives the iterated element — the
+# receiver's element types the closure's first unannotated
+# parameter (`v.iter().for_each(|p| p.pm())` binds `p: &P`).
+_CLOSURE_ELEMENT_METHODS = frozenset(
+    {"map", "filter", "for_each", "inspect", "find", "any",
+     "all", "position", "rposition", "filter_map", "flat_map",
+     "map_while", "take_while", "skip_while", "find_map",
+     "partition"}
+)
 _ITER_PRESERVING_METHODS = frozenset(
     {"rev", "skip", "take", "filter", "step_by", "chain",
      "cloned", "copied", "peekable", "inspect", "fuse", "by_ref",
@@ -127,6 +136,7 @@ _DEREF_WRAPPER_NAMES = frozenset(
         "Box", "Rc", "Arc",
         "Ref", "RefMut",
         "MutexGuard", "RwLockReadGuard", "RwLockWriteGuard",
+        "PeekMut",
     }
 )
 
@@ -214,10 +224,11 @@ _OPTION_HEAD_METHODS = {
     "back": ("&", {"VecDeque", "LinkedList"}, -1),
     "pop_front": ("", {"VecDeque", "LinkedList"}, -1),
     "pop_back": ("", {"VecDeque", "LinkedList"}, -1),
-    # `h.peek()`/`it.peek()` yield `Option<&P>` — `peek_mut`
-    # returns a `PeekMut` wrapper instead of a plain borrow
-    # and stays opaque.
+    # `h.peek()`/`it.peek()` yield `Option<&P>`; `peek_mut`
+    # wraps the borrow in `PeekMut` — the spelled head keeps
+    # the wrapper so member calls deref to `P`.
     "peek": ("&", None, -1),
+    "peek_mut": ("", {"BinaryHeap"}, 0),
     # `it.next_if(f)`/`it.next_if_eq(&x)` yield `Option<&P>`
     # like `next` — the same borrowed element.
     "next_if": ("&", None, -1),
@@ -422,6 +433,28 @@ _ITER_INNER_ITER_HEADS = frozenset(
         "Filter", "SkipWhile", "TakeWhile", "Chain",
     }
 )
+def _spelled_slice_head(text: str) -> bool:
+    """`&[T]`/`[T]` spelled args mark a slice receiver. `[T; N]` is
+    an array, not a slice — but `[[T; N]]` (slice of arrays) IS, so
+    the `;` only disqualifies at bracket depth 1."""
+    t = text.strip()
+    if t.startswith("&"):
+        t = re.sub(r"^&\s*(?:'\w+\s*)?(?:mut\s+)?", "", t)
+    if not t.startswith("["):
+        return False
+    depth = 0
+    for ch in t:
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                break
+        elif ch == ";" and depth == 1:
+            return False
+    return True
+
+
 _TRY_HEADS = frozenset({"Option", "Result"})
 # Prelude constructors whose tuple payload position is fixed by the
 # container type — `Some(x)` binds `Option<T>`'s first arg, `Err(e)`
@@ -634,6 +667,7 @@ class _RustBindings:
         self.gaps: list[Gap] = []
         self.scopes: list[_Scope] = []
         self.records: dict[str, _Record] = {}
+        self._trait_impl_heads: dict[str, list[str]] = {}
         self._type_impl_traits: dict[
             str, list[tuple[str, str | None, bool, frozenset[str]]]
         ] = {}
@@ -641,6 +675,10 @@ class _RustBindings:
         self.call_owner = ""
         self.module_depth = 0
         self.in_extern = False
+        # (TypeFact, spelled args) a `for_each`-family call hands to
+        # the next closure argument — types its first bare
+        # parameter from the receiver's iterated element.
+        self.closure_element: Any = None
         self._function_records: dict[str, _Record] = {}
         self._receiver_memo: dict[tuple, tuple] = {}
         self._spelling_memo: dict[tuple, tuple] = {}
@@ -1456,6 +1494,27 @@ class _RustBindings:
                                     impl_type_params,
                                 )
                             )
+                        if member_trait not in {None, "<unresolved>"}:
+                            impl_target = re.sub(
+                                r"^&\s*(?:'\w+\s*)?(?:mut\s+)?",
+                                "",
+                                self.text(member_type_node).strip(),
+                            )
+                            if impl_target.startswith("["):
+                                impl_head_name = "[slice]"
+                            else:
+                                impl_head = re.match(
+                                    r"[A-Za-z_][\w:]*", impl_target
+                                )
+                                impl_head_name = (
+                                    impl_head.group(0).rsplit("::", 1)[-1]
+                                    if impl_head is not None
+                                    else None
+                                )
+                            if impl_head_name is not None:
+                                self._trait_impl_heads.setdefault(
+                                    member_trait, []
+                                ).append(impl_head_name)
                 if body is not None:
                     self._scan_associated_container(
                         body,
@@ -2652,6 +2711,207 @@ class _RustBindings:
                         return True
         return False
 
+    def _bound_to_producing_call(self, receiver: Any) -> bool:
+        """`let it = v.chunks_mut(n)`-style receivers: bound to an
+        unresolved method call's result, so their spelled args hold
+        the ELEMENT spelling (`&mut [P]` chunks), not the binding's
+        own type. Declared callees (`C::make()`, `w.m()`) return
+        whole values — those args ARE the type."""
+        if receiver.type not in {"identifier", "field_expression"}:
+            return False
+        record = self._lookup(
+            self._normalize_identifier(self.text(receiver)),
+            receiver.start_byte,
+            "value",
+        )
+        value = (
+            record.value_node
+            if record is not None and record.value_node is not None
+            else None
+        )
+        if value is None or value.type != "call_expression":
+            return False
+        callee = value.child_by_field_name("function")
+        if callee is None or callee.type != "field_expression":
+            return False
+        method = self._normalize_identifier(
+            self.text(callee.child_by_field_name("field"))
+        )
+        if method in {
+            # Unresolved but KNOWN to return the slice/value itself —
+            # the binding's spelled args are its own type, not a
+            # produced element spelling.
+            "leak",
+            "as_slice",
+            "as_mut_slice",
+            "remainder",
+            "into_remainder",
+            "split_at",
+            "split_at_mut",
+            "split_first",
+            "split_last",
+        }:
+            return False
+        return (
+            self._field_member(callee, ("associated_function",))
+            is None
+        )
+
+    def _visible_trait_method(
+        self,
+        name: str,
+        position: int,
+        receiver: "Any | None" = None,
+    ) -> bool:
+        """A trait in scope declares a method named `name` — a
+        `v.name(...)` call may be that trait's extension method,
+        not the std shape the caller's recipe assumes. `receiver`
+        narrows the check to impls that can cover that receiver —
+        a trait implemented only for a different declared type
+        cannot be the callee."""
+        container_id = None
+        receiver_head = None
+        receiver_heads: "set[str]" = set()
+        if receiver is not None:
+            container_id, recv_args = self._receiver_type(receiver)
+            receiver_head = (
+                next(
+                    (
+                        b.name
+                        for b in self.bindings
+                        if b.id == container_id
+                    ),
+                    None,
+                )
+                if container_id is not None
+                else None
+            ) or (
+                self._container_head_name(receiver)
+                or self._spelled_receiver_head(receiver)
+                or self._produced_head(receiver)
+            )
+            if receiver_head is not None:
+                receiver_heads.add(receiver_head)
+            # `impl T for [P]` reaches `Vec`/`VecDeque`/… receivers
+            # through auto-deref, and spelled `&[P]`/`[P]` args mark
+            # a slice receiver directly — but only for names bound
+            # to the value: a producing call's spelled args hold the
+            # ELEMENTS (`v.chunks(n)` spells `&[P]` per item, yet
+            # yields `Chunks`, not a slice), unless the method is an
+            # own-slice producer like `remainder`.
+            slice_args = False
+            if recv_args is not None and re.match(
+                r"&?\s*(?:'\w+\s*)?(?:mut\s+)?\[",
+                recv_args.strip(),
+            ):
+                if receiver.type == "call_expression":
+                    rcallee = receiver.child_by_field_name("function")
+                    mname = (
+                        self._normalize_identifier(
+                            self.text(rcallee.child_by_field_name("field"))
+                        )
+                        if rcallee is not None
+                        and rcallee.type == "field_expression"
+                        else None
+                    )
+                    slice_args = _spelled_slice_head(
+                        recv_args.strip()
+                    ) and (
+                        mname in {"remainder", "into_remainder"}
+                        or self._field_member(
+                            rcallee, ("associated_function",)
+                        )
+                        is not None
+                        or (
+                            rcallee is not None
+                            and rcallee.type
+                            in {
+                                "scoped_identifier",
+                                "scoped_type_identifier",
+                            }
+                            and self._scoped_member(rcallee)[0] is not None
+                        )
+                        or (
+                            rcallee is not None
+                            and rcallee.type == "identifier"
+                            and self._lookup(
+                                self._normalize_identifier(
+                                    self.text(rcallee)
+                                ),
+                                rcallee.start_byte,
+                                "value",
+                            )
+                            is not None
+                        )
+                    )
+                else:
+                    slice_args = not self._bound_to_producing_call(
+                        receiver
+                    )
+            annot_slice = False
+            tnode = self._receiver_type_node(receiver)
+            if tnode is not None:
+                annot_slice = _spelled_slice_head(
+                    self.text(tnode).strip()
+                ) or re.sub(
+                    r"^&\s*(?:'\w+\s*)?(?:mut\s+)?",
+                    "",
+                    self.text(tnode).strip(),
+                ).startswith("[")
+            if (
+                receiver_head
+                in {"Vec", "VecDeque", "BinaryHeap", "LinkedList"}
+                or slice_args
+                or annot_slice
+            ):
+                receiver_heads.add("[slice]")
+        for record in self.records.values():
+            if not (
+                record.member_trait is not None
+                and record.binding.name == name
+                and record.binding.kind == "associated_function"
+            ):
+                continue
+            if receiver is not None:
+                if record.member_of == record.member_trait:
+                    # A trait-declared member applies when the trait
+                    # is implemented for a type whose head matches
+                    # the receiver's — `impl Each for Vec<P>` covers
+                    # `v` but not `v.iter()`'s `Iter`.
+                    if container_id is not None and any(
+                        trait_id == record.member_trait
+                        for trait_id, _, _, _ in self._type_impl_traits.get(
+                            container_id, ()
+                        )
+                    ):
+                        pass
+                    elif not receiver_heads.intersection(
+                        self._trait_impl_heads.get(
+                            record.member_trait, ()
+                        )
+                    ):
+                        continue
+                elif record.member_of in {None, "<unresolved>"}:
+                    # An impl on an undeclared target (`impl T for
+                    # [P]`/`for Vec<P>`) — compare its spelled head
+                    # against the receiver's.
+                    if not receiver_heads.intersection(
+                        self._trait_impl_heads.get(
+                            record.member_trait, ()
+                        )
+                    ):
+                        continue
+                elif record.member_of == container_id:
+                    pass
+                else:
+                    continue
+            trait = self.records.get(record.member_trait)
+            if trait is not None and self._trait_visible(
+                trait, position
+            ):
+                return True
+        return False
+
     def _resolve_trait_node(self, trait_node: Any) -> "_Record | None":
         """Trait record for a UFCS `as` qualifier — plain, scoped
         (`m::T`) or generic (`T<A>`) spellings all resolve."""
@@ -2891,10 +3151,22 @@ class _RustBindings:
                 elem_id, elem_args = self._element_of(
                     None, ", ".join(arg_list), spelled_pos
                 )
-                if elem_id is None and elem_args is not None:
+                elem_rec = (
+                    None
+                    if elem_id is None
+                    else self.records.get(elem_id)
+                )
+                if (
+                    elem_id is None
+                    or elem_rec is None
+                    or elem_rec.binding.kind
+                    not in {"struct", "enum"}
+                ) and elem_args is not None:
                     # `let r = c.borrow()` keeps `Ref<P>` as the
-                    # spelled args — peel the guard so `r.pm()`
-                    # reaches `P`'s members.
+                    # spelled args, and `Rc` resolves to a bare
+                    # `use std::rc::Rc` import — peel the spelled
+                    # head again so `r.pm()`/`e.pm()` reach `P`'s
+                    # members instead of the import placeholder.
                     elem_id, elem_args = self._element_of(
                         None, elem_args, spelled_pos
                     )
@@ -3263,9 +3535,23 @@ class _RustBindings:
             if not children:
                 return None, None
             container_id, elem_args = self._receiver_type(children[0])
-            if elem_args is None or "," in elem_args:
+            if elem_args is None:
                 return None, None
             elem_args = elem_args.strip()
+            whole = re.fullmatch(
+                r"[A-Za-z_][\w:]*\s*<(.+)>", elem_args, re.DOTALL
+            )
+            if (
+                container_id is None
+                and whole is not None
+                and not self._verbatim_annotation_args(children[0])
+            ):
+                # `let v = Box::into_inner(b)` — produced args spell
+                # the whole `Vec<P>` type, not a container's element
+                # list — peel the head so `v[0]` is `P`.
+                elem_args = whole.group(1).strip()
+            if "," in elem_args:
+                return None, None
             index = children[1] if len(children) > 1 else None
             while index is not None and index.type == "parenthesized_expression":
                 index = next(iter(self._children(index)), None)
@@ -3480,6 +3766,87 @@ class _RustBindings:
                 member = self._field_member(
                     callee, ("associated_function",)
                 )
+            if member is None and callee is not None and (
+                callee.type == "scoped_identifier"
+            ):
+                # `Rc::try_unwrap(r)`/`Box::into_inner(b)` — scoped
+                # associated calls whose payload is the smart
+                # pointer's own element.
+                s_path = callee.child_by_field_name("path")
+                s_name = callee.child_by_field_name("name")
+                s_head = (
+                    None
+                    if s_path is None
+                    else self._normalize_identifier(
+                        self.text(s_path).rsplit("::", 1)[-1]
+                    )
+                )
+                s_method = (
+                    None
+                    if s_name is None
+                    else self._normalize_identifier(self.text(s_name))
+                )
+                if s_head in {"Rc", "Arc", "Box"} and (
+                    s_method == "try_unwrap"
+                    or s_method == "into_inner"
+                ):
+                    args_node = node.child_by_field_name("arguments")
+                    first_arg = (
+                        next(iter(self._children(args_node)), None)
+                        if args_node is not None
+                        else None
+                    )
+                    arg_head = self._container_head_name(
+                        first_arg
+                    ) or self._spelled_receiver_head(first_arg)
+                    if arg_head == s_head:
+                        arg_args = self._receiver_type(first_arg)[1]
+                        parts = self._type_arg_list(arg_args or "")
+                        if len(parts) == 1:
+                            payload = parts[0].strip()
+                            if s_method == "into_inner":
+                                if s_head == "Box":
+                                    spelled_pair = self._spelled_type(
+                                        payload,
+                                        self._receiver_annotation_position(
+                                            first_arg
+                                        )
+                                        or node.start_byte,
+                                    )
+                                    if (
+                                        spelled_pair[0] is None
+                                        and re.fullmatch(
+                                            r"[A-Za-z_][\w:]*\s*<.+>",
+                                            payload.strip(),
+                                            re.DOTALL,
+                                        )
+                                    ):
+                                        # `Box<Option<P>>` yields
+                                        # `Option<P>` — keep the head
+                                        # so `Some(p)` still binds.
+                                        return None, payload
+                                    return spelled_pair
+                                # `Rc::into_inner`/`Arc::into_inner`
+                                # only succeed when the pointer is
+                                # unique — the spell is `Option<P>`.
+                                return (
+                                    None,
+                                    "Option<{}>".format(payload),
+                                )
+                            # `Result<P, std::rc::Rc<P>>` — the Err
+                            # arm hands the smart pointer back, so
+                            # keep its full spelling. The callee's
+                            # own qualification stays in the name so
+                            # `std::rc::Rc` cannot collide with a
+                            # same-named declared type.
+                            return (
+                                None,
+                                "Result<{}, {}<{}>>".format(
+                                    payload,
+                                    self.text(s_path).strip(),
+                                    payload,
+                                ),
+                            )
             if member is None:
                 field = (
                     callee.child_by_field_name("field")
@@ -3549,15 +3916,6 @@ class _RustBindings:
                             produced_head = self._normalize_identifier(
                                 produced.group(0).split("::")[-1]
                             )
-                _spelled_head = self._expanded_container_head(
-                    option_head_value
-                )
-                _head_disallowed = (
-                    _spelled_head is not None
-                    and option_head is not None
-                    and option_head[1] is not None
-                    and _spelled_head not in option_head[1]
-                )
                 if (
                     option_head is not None
                     and (
@@ -3589,11 +3947,11 @@ class _RustBindings:
                         or produced_head in option_head[1]
                         or (
                             map_pair
-                            and not _head_disallowed
-                            and self._is_map_container(
-                                None,
-                                callee.child_by_field_name("value"),
+                            and option_head[1] is not None
+                            and self._map_container_head(
+                                callee.child_by_field_name("value")
                             )
+                            in option_head[1]
                             and not (
                                 receiver[0] is not None
                                 and next(
@@ -3855,6 +4213,15 @@ class _RustBindings:
                                 if len(pair_args) >= 2
                                 else None
                             )
+                    if (
+                        element is not None
+                        and self.text(field).strip() == "peek_mut"
+                    ):
+                        # `h.peek_mut()` yields `Option<PeekMut<P>>`
+                        # — the wrapper is spelled whole so the
+                        # bound name's args head `PeekMut` for the
+                        # member deref.
+                        element = "PeekMut<{}>".format(element)
                     if (
                         self.text(field).strip() in {"get", "get_mut"}
                         and element
@@ -5652,6 +6019,41 @@ class _RustBindings:
             and pair[2].split("::")[-1] in _MAP_CONTAINER_NAMES
         )
 
+    def _map_container_head(
+        self, node: Any | None
+    ) -> str | None:
+        """The map head name a receiver's declared container
+        resolves to — `HashMap`/`BTreeMap` through field and
+        alias receivers, else None."""
+        if node is None:
+            return None
+        tnode = self._receiver_type_node(node)
+        if tnode is None:
+            return None
+        spelled = re.search(
+            r"\b(HashMap|BTreeMap)\s*<", self.text(tnode)
+        )
+        if spelled is not None:
+            return spelled.group(1)
+        pair = self._generic_head_args(
+            tnode, node.start_byte
+        )
+        seen: set[str] = set()
+        while pair is not None and pair[1] is not None and (
+            pair[1].binding.kind == "type_alias"
+            and pair[1].alias_node is not None
+            and pair[1].binding.id not in seen
+        ):
+            seen.add(pair[1].binding.id)
+            pair = self._generic_head_args(
+                pair[1].alias_node,
+                node.start_byte,
+            )
+        if pair is None or pair[2] is None:
+            return None
+        head = pair[2].split("::")[-1]
+        return head if head in _MAP_CONTAINER_NAMES else None
+
     def _generic_head_args(
         self, type_node: Any | None, position: int
     ) -> "tuple[str | None, _Record | None, str | None] | None":
@@ -5981,6 +6383,33 @@ class _RustBindings:
                 return self._receiver_annotation_position(
                     callee.child_by_field_name("value")
                 )
+            if callee is not None and callee.type in {
+                "scoped_identifier",
+                "scoped_type_identifier",
+            }:
+                # A declared `C::make(...)` — the spelled names were
+                # written in its own return annotation, not in the
+                # argument's scope.
+                member, _ = self._scoped_member(callee)
+                if member is not None and member.type_node is not None:
+                    return member.type_node.start_byte
+                # `Rc::into_inner(rc)` — the spelled payload was
+                # written in the ARGUMENT's annotation, not at this
+                # call site.
+                arguments = node.child_by_field_name("arguments")
+                first = (
+                    next(
+                        (
+                            c
+                            for c in arguments.named_children
+                            if "comment" not in c.type
+                        ),
+                        None,
+                    )
+                    if arguments is not None
+                    else None
+                )
+                return self._receiver_annotation_position(first)
             if callee is not None and callee.type == "identifier":
                 # `let u = g()` — `u`'s spelled names were written in
                 # `g`'s return annotation.
@@ -8101,7 +8530,21 @@ class _RustBindings:
         if iterator.type == "call_expression":
             return self._iterator_method_element(iterator)
         container_id, elem_args = self._receiver_type(iterator)
-        if elem_args is None or "," in elem_args:
+        if elem_args is None:
+            return _UNKNOWN, None
+        whole = re.fullmatch(
+            r"[A-Za-z_][\w:]*\s*<(.+)>", elem_args.strip(), re.DOTALL
+        )
+        if (
+            container_id is None
+            and whole is not None
+            and not self._verbatim_annotation_args(iterator)
+        ):
+            # `let v = Box::into_inner(b)` — produced args spell the
+            # whole `Vec<P>` type — peel the head so `for p in v`
+            # binds `P`.
+            elem_args = whole.group(1).strip()
+        if "," in elem_args:
             return _UNKNOWN, None
         # Iterating a map yields (K, V) pairs — index typing keeps
         # only the value type, so the pair's shape is unpinned here.
@@ -8245,6 +8688,30 @@ class _RustBindings:
                             None,
                         )
                     return _UNKNOWN, inner_slice.group(1).strip()
+                # `for z in y` where `y` spells a borrowed element
+                # (`v.chunks(n)` binds `&P`) — `z` is the borrowed
+                # item, so peel the `&` like `iter`/`iter_mut` do.
+                peeled = re.fullmatch(
+                    r"&\s*(?:'\w+\s+)?(?:mut\s+)?([^\[\s].*)",
+                    elem_args.strip(),
+                )
+                if peeled is not None:
+                    tid, _ = self._spelled_type(
+                        peeled.group(1).strip(), iterator.start_byte
+                    )
+                    if tid is not None:
+                        name = next(
+                            (
+                                b.name
+                                for b in self.bindings
+                                if b.id == tid
+                            ),
+                            "",
+                        )
+                        return (
+                            TypeFact("named", name, 0, None, tid),
+                            None,
+                        )
                 return _UNKNOWN, elem_args.strip()
         # Spelled element names on `it` (`let it = v.iter()`) were
         # written in `it`'s annotation — resolve them there.
@@ -11083,15 +11550,6 @@ class _RustBindings:
                     ),
                     None,
                 ) in {"struct", "enum"}
-                _spelled_head = self._expanded_container_head(
-                    _head_value
-                )
-                _head_disallowed = (
-                    _spelled_head is not None
-                    and option_head is not None
-                    and option_head[1] is not None
-                    and _spelled_head not in option_head[1]
-                )
                 if (
                     option_head is not None
                     and (
@@ -11114,14 +11572,14 @@ class _RustBindings:
                             )
                         )
                         or (
-                            not _head_disallowed
-                            and self.text(field).strip()
+                            self.text(field).strip()
                             in _MAP_PAIR_METHODS
                             | _MAP_BORROWED_PAIR_METHODS
-                            and self._is_map_container(
-                                None,
-                                callee.child_by_field_name("value"),
+                            and option_head[1] is not None
+                            and self._map_container_head(
+                                callee.child_by_field_name("value")
                             )
+                            in option_head[1]
                         )
                         or (
                             self.text(field).strip()
@@ -11529,30 +11987,28 @@ class _RustBindings:
         type_id, fargs = self._spelled_type(
             args[entry[1]], scrut_position
         )
-        if (
-            payload_head is not None
-            and self._normalize_identifier(
+        head_name = (
+            self._normalize_identifier(
                 payload_head.group(0).split("::")[-1]
             )
-            in set(_PRELUDE_ENTRY_VARIANTS.values())
-        ):
+            if payload_head is not None
+            else ""
+        )
+        if payload_head is not None and (
+            (head_name in _DEREF_WRAPPER_NAMES and type_id is None)
             # `OccupiedEntry<K, V>`/`VacantEntry<K, V>` are spelled
             # by the map-entry machinery — a same-named user type
             # must not steal the head: `e.get()` still reads the
             # entry templates, not the user's members.
-            return [(None, payload)]
-        if (
-            payload_head is not None
-            and self._normalize_identifier(
-                payload_head.group(0).split("::")[-1]
-            )
-            in _TRY_HEADS
-            and type_id is None
+            or head_name in set(_PRELUDE_ENTRY_VARIANTS.values())
+            or (head_name in _TRY_HEADS and type_id is None)
         ):
             # `Result<Option<P>, E>`'s `Ok` payload is `Option<P>`
             # — keep the full spelled head (as the tuple-pattern
             # pin does) so `Some(q)` on the name still reaches `P`;
-            # `_spelled_type` would flatten it to bare `P`. A
+            # `_spelled_type` would flatten it to bare `P`. A deref
+            # wrapper (`Result<P, Rc<P>>`'s `Err`) keeps its head
+            # the same way so `e.pm()` still reaches `P`. A
             # prelude-named head that resolves to a real record
             # (`m::Option` on a custom type) keeps its type id —
             # member resolution matters more than the pattern pin.
@@ -11998,8 +12454,38 @@ class _RustBindings:
         old_owner = self.call_owner
         self.call_owner = ""
         if params is not None:
+            pending = self.closure_element
+            self.closure_element = None
+            first = True
             for parameter in self._children(params):
-                self._parameter(parameter, closure_scope, self.span(body))
+                ids = self._parameter(parameter, closure_scope, self.span(body))
+                if pending is not None and first and ids:
+                    # `for_each(|p| ...)` — an unannotated first
+                    # parameter takes the iterated element.
+                    annotation = (
+                        parameter.child_by_field_name("type")
+                        if parameter.type == "parameter"
+                        else None
+                    )
+                    if annotation is None:
+                        fact, spelled = pending
+                        idset = set(ids)
+                        for recs in closure_scope.bindings.values():
+                            for record in recs:
+                                if record.binding.id in idset:
+                                    record.type_fact = fact
+                                    record.type_args = spelled
+                                    for i, bound in enumerate(
+                                        self.bindings
+                                    ):
+                                        if bound.id in idset:
+                                            self.bindings[i] = replace(
+                                                bound, type=fact
+                                            )
+                                            record.binding = (
+                                                self.bindings[i]
+                                            )
+                first = False
         self._expr(body)
         self.call_owner = old_owner
         self.scopes.pop()
@@ -12219,8 +12705,67 @@ class _RustBindings:
         elif callee is not None:
             self._expr(callee)
         if arguments_node is not None:
+            closure_element = None
+            closure_callee = callee
+            if (
+                closure_callee is not None
+                and closure_callee.type == "generic_function"
+            ):
+                # `v.iter().map::<(), _>(|p| ...)` — the method
+                # sits inside the turbofish's function field.
+                closure_callee = closure_callee.child_by_field_name(
+                    "function"
+                )
+            if (
+                closure_callee is not None
+                and closure_callee.type == "field_expression"
+            ):
+                method_field = closure_callee.child_by_field_name(
+                    "field"
+                )
+                method_name = (
+                    None
+                    if method_field is None
+                    else self._normalize_identifier(
+                        self.text(method_field)
+                    )
+                )
+                if (
+                    method_name is not None
+                    and method_name in _CLOSURE_ELEMENT_METHODS
+                    and self._field_member(
+                        closure_callee, ("associated_function",)
+                    )
+                    is None
+                    and not self._visible_trait_method(
+                        method_name,
+                        closure_callee.start_byte,
+                        closure_callee.child_by_field_name("value"),
+                    )
+                    and any(
+                        argument.type == "closure_expression"
+                        for argument in arguments
+                    )
+                ):
+                    # `v.iter().for_each(|p| ...)` — the receiver's
+                    # iterated element types the closure's first
+                    # bare parameter. A declared or trait-inherited
+                    # `for_each` signs its own callback — typing the
+                    # parameter from the element would misbind it.
+                    closure_element = self._for_element(
+                        closure_callee.child_by_field_name("value")
+                    )
             for argument in arguments:
-                self._expr(argument)
+                if (
+                    closure_element is not None
+                    and argument.type == "closure_expression"
+                ):
+                    old_pending = self.closure_element
+                    self.closure_element = closure_element
+                    self._expr(argument)
+                    self.closure_element = old_pending
+                else:
+                    self._expr(argument)
         self.calls.append(Call(span, args, self.call_owner, target, kind))
 
     def _method_call(self, node: Any) -> None:

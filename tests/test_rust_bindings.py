@@ -6310,6 +6310,40 @@ fn f(c: Cell<W<P>>, r: Rc<P>, o: Option<W<P>>, mut m: Mutex<P>) {
     assert bound.get("l.pm()") == pm.id
 
 
+def test_peek_mut_and_scoped_unwrap_spell_the_payload():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+use std::collections::BinaryHeap;
+use std::rc::Rc;
+use std::sync::Arc;
+fn f() {
+    let mut h: BinaryHeap<P> = BinaryHeap::new();
+    if let Some(m) = h.peek_mut() { m.pm(); }
+    let r: Rc<P> = Rc::new(P);
+    match Rc::try_unwrap(r) { Ok(inner) => inner.pm(), Err(e) => e.pm() }
+    let b: Box<P> = Box::new(P);
+    let inner2 = Box::into_inner(b); inner2.pm();
+    let a: Arc<P> = Arc::new(P);
+    if let Some(u) = Arc::into_inner(a) { u.pm(); }
+    let r2: Rc<P> = Rc::new(P);
+    if let Some(v) = Rc::into_inner(r2) { v.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    resolved = sorted(
+        raw[call.span.start:call.span.end].decode()
+        for call in report.calls
+        if raw[call.span.start:call.span.end].decode().endswith(".pm()")
+        and call.target == pm.id
+    )
+    assert resolved == [
+        "e.pm()", "inner.pm()", "inner2.pm()",
+        "m.pm()", "u.pm()", "v.pm()",
+    ]
+
 def test_guard_accessors_stay_opaque_for_custom_containers():
     source = """
 struct P;
@@ -9241,6 +9275,7 @@ fn f(m: BTreeMap<u8, P>, v: Vec<P>, q: std::collections::VecDeque<P>) {
     ):
         assert bound.get(name) == pm.id, name
 
+
 def test_first_entry_args_resolve_in_the_annotation_scope():
     source = """
 mod m {
@@ -9290,3 +9325,244 @@ fn f(b: BTreeMap<u32, P>) {
     # `OccupiedEntry::get`.
     assert bound.get("e.get().pm()") == pm.id
     assert not bound.get("e.get()")
+
+
+def test_for_inner_loop_over_chunk_pattern_binding():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(v: Vec<P>) {
+    for y in v.chunks(2) {
+        for z in y {
+            z.pm();
+        }
+        y[0].pm();
+        y.pm();
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `z` iterates the borrowed element `&P` — resolves like a
+    # let-bound `v.chunks(2)` iterator does. `y[0]` reads the
+    # element through the spelled borrow.
+    assert bound.get("z.pm()") == pm.id
+    assert bound.get("y[0].pm()") == pm.id
+    # `y` itself is the `&[P]` slice — no `pm` member exists.
+    assert bound.get("y.pm()") != pm.id
+
+
+def test_closure_first_param_takes_the_iterated_element():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(v: Vec<P>) {
+    v.iter().for_each(|p| p.pm());
+    v.iter().any(|p| p.pm());
+    let _ = v.iter().find(|p| p.pm());
+    v.iter().map(|p| p.pm()).count();
+    v.iter().filter(|p| p.pm()).count();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = sum(
+        1
+        for c in report.calls
+        if raw[c.span.start:c.span.end].decode() == "p.pm()"
+        and c.target == pm.id
+    )
+    assert bound == 5
+
+
+def test_closure_param_keeps_its_annotation():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(v: Vec<P>) {
+    let _ = v.iter().for_each(|x: u8| x.pm());
+    v.iter().fold(0, |acc, p| acc + { p.pm(); 0 });
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # Annotated `x: u8` keeps its own type — the `u8` miss stays
+    # opaque, and a `fold` accumulator pair is not an element param.
+    assert bound.get("x.pm()") != pm.id
+    assert bound.get("p.pm()") != pm.id
+
+
+def test_scoped_unwrap_and_closure_edge_cases():
+    source = """
+struct P;
+struct Q;
+struct Box<T>(T);
+struct Rc<T>(T);
+impl P { fn pm(&self) {} }
+impl Q { fn pm(&self) {} }
+impl<T> Box<T> { fn bm(&self) {} }
+impl<T> Rc<T> { fn rm(&self) {} }
+trait Each { fn for_each(&self, f: impl Fn(&Q)); }
+impl Each for Vec<P> {}
+fn f(o: Option<Box<P>>, v: Vec<P>, b: std::boxed::Box<Option<P>>, r: std::rc::Rc<P>) {
+    if let Some(x) = o { x.bm(); x.pm(); }
+    v.for_each(|q| q.pm());
+    v.iter().map::<(), _>(|p| p.pm());
+    let oo = std::boxed::Box::into_inner(b);
+    if let Some(p) = oo { p.pm(); }
+    let rr = std::rc::Rc::try_unwrap(r);
+    if let Err(e) = rr { e.rm(); }
+}
+fn g(rc: std::rc::Rc<P>) {
+    struct P;
+    impl P { fn pm(&self) {} }
+    let r = Rc::into_inner(rc);
+    let p = r.unwrap();
+    p.pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    pm_outer = _bindings(report, "pm", "associated_function")[0]
+    # A declared `struct Box` in `Option<Box<P>>` keeps its own
+    # members — `Some(x)` binds `x: Box<P>` and `x.bm()` resolves.
+    bm = _bindings(report, "bm", "associated_function")[0]
+    assert bound.get("x.bm()") == bm.id
+    assert not bound.get("x.pm()")
+    # A trait `for_each` extension signs `&Q` — the receiver's `P`
+    # element must not type the closure's `q`.
+    assert not bound.get("q.pm()")
+    # A turbofish `map::<(), _>` still types the closure's `p`.
+    assert bound.get("p.pm()") == pm_outer.id
+    # `Box<Option<P>>::into_inner` keeps `Option<P>` — `Some(p)` binds.
+    assert bound.get("p.pm()") == pm_outer.id
+    # `Rc::into_inner` resolves `P` at the declaration, not at the
+    # inner-scope `struct P` in `g` — every `p.pm()` lands on the
+    # outer `impl P`.
+    g_call_targets = {
+        c.target
+        for c in report.calls
+        if raw[c.span.start:c.span.end].decode() == "p.pm()"
+    }
+    assert g_call_targets == {pm_outer.id}
+    # A qualified `std::rc::Rc::try_unwrap` `Err` arm spells the std
+    # pointer, not the declared `Rc` — `e.rm()` stays unresolved.
+    rm = _bindings(report, "rm", "associated_function")[0]
+    assert not bound.get("e.rm()")
+
+
+def test_scoped_call_return_scope_and_trait_gate():
+    source = """
+struct P;
+struct S;
+struct C;
+impl P { fn pm(&self) {} }
+trait E { fn for_each(&self, f: impl Fn(&S)); }
+impl E for S { fn for_each(&self, f: impl Fn(&S)) {} }
+mod a {
+    pub struct P;
+    impl P { pub fn pm(&self) {} }
+    pub struct W { pub f: P }
+}
+impl C { fn make(x: a::P) -> Vec<P> { vec![] } }
+fn g(b: Box<Vec<P>>, v: Vec<P>, s: S, w: a::W) {
+    let u = Box::into_inner(b);
+    u[0].pm();
+    for p in u { p.pm(); }
+    s.for_each(|x| {});
+    v.iter().for_each(|p| p.pm());
+    C::make(w.f)[0].pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    pms = _bindings(report, "pm", "associated_function")
+    pm_outer, pm_a = pms[0], pms[1]
+    # `Box::into_inner(b)` produces the whole `Vec<P>` — `u[0]` and
+    # `for p in u` still read the element.
+    assert bound.get("u[0].pm()") == pm_outer.id
+    assert bound.get("p.pm()") == pm_outer.id
+    # A `for_each` trait implemented only for `S` must not stop the
+    # std `Iterator::for_each` element typing on `v`.
+    assert bound.get("p.pm()") == pm_outer.id
+    # `C::make`'s return `Vec<P>` was written in the outer scope —
+    # the element resolves there, not in the argument's module `a`.
+    assert bound.get("C::make(w.f)[0].pm()") == pm_outer.id
+    assert bound.get("C::make(w.f)[0].pm()") != pm_a.id
+
+
+def test_slice_trait_impl_gate():
+    source = """
+struct P;
+struct Q;
+impl P { fn pm(&self) {} }
+impl Q { fn qm(&self) {} }
+trait Each { fn for_each(&self, f: impl Fn(&Q)); }
+impl<P> Each for [P] { fn for_each(&self, f: impl Fn(&Q)) {} }
+fn g(v: Vec<P>, a: &[P; 3], lt: &'a [P], lt2: &'a[P], rows: &[[P; 2]]) {
+    v.for_each(|q| { q.qm(); q.pm(); });
+    v.iter().for_each(|p| p.pm());
+    v.chunks(2).for_each(|c| { c[0].pm(); });
+    a.for_each(|qa| { qa.qm(); qa.pm(); });
+    lt.for_each(|ql| { ql.qm(); ql.pm(); });
+    lt2.for_each(|ql2| { ql2.qm(); ql2.pm(); });
+    rows.for_each(|row| { row[0].qm(); row[0].pm(); });
+    let it = v.chunks_mut(2);
+    it.for_each(|c2| { c2[0].pm(); });
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `impl Each for [P]` reaches `v: Vec<P>` through auto-deref —
+    # the closure's `q` keeps the trait's signature, not `&P`, so
+    # neither P's nor Q's method may bind.
+    assert not bound.get("q.pm()")
+    assert not bound.get("q.qm()")
+    # `v.iter()` yields `Iter` — the slice impl does not cover it,
+    # so `for_each` still types `p` as `&P`.
+    pms = _bindings(report, "pm", "associated_function")
+    assert bound.get("p.pm()") == pms[0].id
+    # `v.chunks(n)` yields `Chunks` whose ITEM is `&[P]` — spelled
+    # args are elements, not the receiver, so the slice impl must
+    # not block the std `for_each` either.
+    assert bound.get("c[0].pm()") == pms[0].id
+    # `a: &[P; 3]` is an array — unsize-coerces to `[P]`, so the
+    # slice impl covers it too.
+    assert not bound.get("qa.pm()")
+    assert not bound.get("qa.qm()")
+    # `&'a [P]` — lifetime spelling keeps the slice gate.
+    assert not bound.get("ql.pm()")
+    # `&'a[P]` — the no-space lifetime spelling takes the same gate.
+    assert not bound.get("ql2.pm()")
+    # `&[[P; 2]]` — a slice OF arrays: the `;` sits at bracket
+    # depth 2, so the slice impl still covers the receiver.
+    assert not bound.get("row[0].pm()")
+    # `let it = v.chunks_mut(n)` — spelled `&mut [P]` args are the
+    # chunk ELEMENTS, not `it`'s own type — the slice impl must
+    # not block the std `for_each` on `ChunksMut`.
+    assert bound.get("c2[0].pm()") == pms[0].id
+
+
