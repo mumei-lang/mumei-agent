@@ -3227,6 +3227,9 @@ class _RustBindings:
             if base is not node:
                 # A field/index place borrows through the root's
                 # own type — `s: &mut S` makes `s.field` mutable.
+                # Through `s: &S` the place `s.field` still types
+                # as `P` — the call site tries `self` before
+                # `&self`, like any value receiver.
                 btnode = self._receiver_type_node(base)
                 if btnode is not None:
                     spelled = self.text(btnode).strip()
@@ -3237,7 +3240,7 @@ class _RustBindings:
                                 r"&\s*(?:'\w+\s+)?mut\b",
                                 spelled,
                             )
-                            else "shared"
+                            else "owned"
                         )
             return "owned"
         return None if tnode is None else "owned"

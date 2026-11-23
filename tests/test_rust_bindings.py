@@ -5706,22 +5706,46 @@ trait Ext { fn as_mut_slices(&mut self) -> i32; }
 impl Ext for std::collections::VecDeque<P> {
     fn as_mut_slices(&mut self) -> i32 { 0 }
 }
+trait Peek { fn peek(&self) -> i32; }
+impl Peek for std::collections::VecDeque<P> {
+    fn peek(&self) -> i32 { 0 }
+}
 struct P;
 struct H { d: std::collections::VecDeque<P> }
-fn f(mut h: H) { h.d.as_mut_slices(); }
+fn f(mut h: H) { h.d.as_mut_slices(); h.d.peek(); }
 fn g(mut vd: std::collections::VecDeque<P>) { vd.as_mut_slices(); }
 """
     report = build_rust_bindings(source, pointer_width=64)
-    member = _bindings(report, "as_mut_slices", "associated_function")[1]
+    peek = _bindings(report, "peek", "associated_function")[1]
     calls = {
-        source[: c.span.start].count("\n"): c.target
+        source.encode()[c.span.start:c.span.end].decode(): c.target
         for c in report.calls
     }
     # `h.d` on `mut h` mutably borrows — the inherent `&mut`
     # method and the `&mut self` member meet at the same step,
-    # where the inherent method wins; same for `mut vd`.
-    assert not calls[7]
-    assert not calls[8]
+    # where the inherent method wins; same for `mut vd`. The
+    # `&self` member on the same field still binds, so the
+    # candidates were discovered and only shadowed.
+    assert calls["h.d.peek()"] == peek.id
+    assert not calls["h.d.as_mut_slices()"]
+    assert not calls["vd.as_mut_slices()"]
+
+def test_shared_ref_field_place_prefers_the_value_impl():
+    source = """
+struct S { f: P }
+struct P;
+trait V { fn t(self); }
+trait B { fn t(&self); }
+impl V for P { fn t(self) {} }
+impl B for P { fn t(&self) {} }
+fn f(s: &S) { s.f.t(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    impls = _bindings(report, "t", "associated_function")
+    # `s.f` is a place of type `P` — the call tries `self`
+    # before `&self`, like any value receiver, even through
+    # the shared `&S` borrow.
+    assert _call(report, source, "s.f.t()").target == impls[2].id
 
 def test_linked_list_trait_as_slices_covers():
     source = """
