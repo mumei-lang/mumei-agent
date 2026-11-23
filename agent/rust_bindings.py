@@ -156,6 +156,9 @@ _OPTION_HEAD_METHODS = {
     "next": ("&", None, -1),
     # `it.next_back()` — the `DoubleEndedIterator` twin of `next`.
     "next_back": ("&", None, -1),
+    # `o.flatten()` peels one `Option` layer — the arg index is
+    # read again inside so `Option<Option<P>>` spells `Option<P>`.
+    "flatten": ("", {"Option"}, 0),
     # `Option` exposes no `ok()` — only `Result::ok()` narrows to
     # `Option<T>`; an unresolved extension method on `Option` stays
     # opaque rather than pinning a payload.
@@ -469,6 +472,11 @@ class _Record:
     # inside `mod m` resolves its bare `Q` to `m::Q`, not a same-named
     # type in the binding scope.
     pattern_decl_scope: Any = None
+    # Byte position where the binding's spelled args were written —
+    # a producer call's receiver annotation. Deferred re-resolution
+    # of those args (`&[P]` on a pattern-bound slice) must look there,
+    # not at the use site, or a body-local same-named type steals it.
+    spell_position: Any = None
     # The item carries a `pub` visibility modifier — only `pub` items
     # come through a `use m::*` glob.
     public: bool = False
@@ -3201,6 +3209,23 @@ class _RustBindings:
                             else None
                         )
                         if (
+                            element is not None
+                            and self.text(field).strip() == "flatten"
+                        ):
+                            # `o.flatten()` yields `Option<P>` on
+                            # `Option<Option<P>>` — peel the inner
+                            # wrapper's args.
+                            inner = re.fullmatch(
+                                r"Option\s*<(.+)>", element
+                            )
+                            element = (
+                                self._type_arg_list(inner.group(1))[
+                                    0
+                                ].strip()
+                                if inner is not None
+                                else None
+                            )
+                        if (
                             self.text(field).strip()
                             in _MAP_PAIR_METHODS
                             | _MAP_BORROWED_PAIR_METHODS
@@ -3866,6 +3891,37 @@ class _RustBindings:
                                             "&mut " + parts[1].strip(),
                                             entry_pos,
                                         )
+                    if (
+                        method_name in {"as_slices", "as_mut_slices"}
+                        and receiver[1] is not None
+                        and self._container_head_name(
+                            callee.child_by_field_name("value")
+                        )
+                        in {"VecDeque", "LinkedList"}
+                        # A declared `as_slices` (trait extension,
+                        # inherent override) keeps its own return —
+                        # only the std recipe spells the pair.
+                        and self._field_member(
+                            callee, ("associated_function",)
+                        )
+                        is None
+                    ):
+                        # `vd.as_slices()` yields
+                        # `(&[P], &[P])` — the pair feeds the
+                        # tuple-pattern/tuple-index path.
+                        slice_prefix = (
+                            "&mut "
+                            if method_name == "as_mut_slices"
+                            else "&"
+                        )
+                        slice_elem = self._type_arg_list(
+                            receiver[1]
+                        )[0].strip()
+                        pair = slice_prefix + "[" + slice_elem + "]"
+                        return (
+                            None,
+                            f"({pair}, {pair})",
+                        )
                     if (
                         method_name in _SWAP_REMOVE_METHODS
                         and receiver[1] is not None
@@ -6003,7 +6059,78 @@ class _RustBindings:
                 and vcall.type == "field_expression"
                 else None
             )
-            if vmethod != "flatten":
+            if vmethod == "flatten":
+                pass
+            else:
+                producer_alias = False
+                probe = value
+                hops = 0
+                while (
+                    probe is not None
+                    and probe.type == "identifier"
+                    and hops < 8
+                ):
+                    # `let it2 = it` — the alias keeps `it`'s own
+                    # spelling convention: `&[P]` args on a
+                    # producer-bound record ARE the iterated
+                    # element, not the binding's own slice type.
+                    probe_record = self._lookup(
+                        self._normalize_identifier(self.text(probe)),
+                        probe.start_byte,
+                        "value",
+                    )
+                    if (
+                        probe_record is None
+                        or probe_record.value_node is probe
+                    ):
+                        break
+                    probe = probe_record.value_node
+                    hops += 1
+                    if probe is not None and (
+                        probe.type == "call_expression"
+                    ):
+                        producer_alias = True
+                        break
+                inner_slice = (
+                    None
+                    if producer_alias or vmethod is not None
+                    else re.fullmatch(
+                        r"&\s*(?:'\w+\s+)?(?:mut\s+)?\[(.+)\]",
+                        elem_args.strip(),
+                    )
+                )
+                if inner_slice is not None:
+                    # A pattern-bound slice (`let (a, _) =
+                    # v.split_at(i)`/`vd.as_slices()`) keeps `&[P]`
+                    # as its own args — `a` IS the borrowed slice,
+                    # so the iterated element is `P`, not the
+                    # slice. The spelling was written at the
+                    # producer's receiver annotation — resolving it
+                    # here would pick up a same-named local type.
+                    tid, _ = self._spelled_type(
+                        inner_slice.group(1).strip(),
+                        self._receiver_annotation_position(iterator)
+                        or (
+                            None
+                            if record is None
+                            else record.spell_position
+                        )
+                        or iterator.start_byte,
+                    )
+                    if tid is not None:
+                        name = next(
+                            (
+                                b.name
+                                for b in self.bindings
+                                if b.id == tid
+                            ),
+                            "",
+                        )
+                        return (
+                            TypeFact("named", name, 0, None, tid),
+                            None,
+                        )
+                    return _UNKNOWN, inner_slice.group(1).strip()
                 return _UNKNOWN, elem_args.strip()
         # Spelled element names on `it` (`let it = v.iter()`) were
         # written in `it`'s annotation — resolve them there.
@@ -6914,6 +7041,15 @@ class _RustBindings:
             if annotation is not None
             else self._scrutinee_shape(value, scrut_id)
         )
+        if (
+            scrut_position is None
+            and value is not None
+            and value.type == "call_expression"
+        ):
+            # `let (a, _) = vd.as_slices()` — a produced spelling's
+            # args were written in the producer's receiver
+            # annotation (`vd`'s `P`), not at the let site.
+            scrut_position = self._receiver_annotation_position(value)
         type_map = (
             {}
             if whole_names
@@ -6953,6 +7089,8 @@ class _RustBindings:
                     record.pattern_decl_scope = pinned[3]
             if whole:
                 record.value_node = value
+            if record.type_args is not None:
+                record.spell_position = scrut_position
             self._add_to_scope(scope, record)
 
     def _expr(self, node: Any | None) -> None:
