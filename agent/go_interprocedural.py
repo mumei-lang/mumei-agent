@@ -39696,6 +39696,31 @@ class _Builder:
             stack = [value] if value is not None else []
             while stack:
                 cur = stack.pop()
+                if cur.type == "call_expression":
+                    function_node = cur.child_by_field_name("function")
+                    while (
+                        function_node is not None
+                        and function_node.type == "parenthesized_expression"
+                    ):
+                        function_node = next(
+                            (
+                                c
+                                for c in function_node.named_children
+                                if c.type != "comment"
+                            ),
+                            None,
+                        )
+                    if not (
+                        function_node is not None
+                        and function_node.type == "identifier"
+                        and function_node.text.decode("utf-8") == "make"
+                    ):
+                        # A non-make call may return an enclosing
+                        # channel; folding it in as "fresh" would
+                        # hide its identity and drop the later
+                        # sends' dependencies.
+                        return None
+                    continue
                 if cur.type == "identifier":
                     ref = self.references.get(self.node_key(cur))
                     binding = (
