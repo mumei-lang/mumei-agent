@@ -14280,12 +14280,119 @@ class _Builder:
                         parent, element, node
                     )
                 )
-                return (
-                    getattr(member, "type", None)
-                    if is_struct
-                    else None
+                if is_struct:
+                    return getattr(member, "type", None)
+                literal_type = self._literal_type_fact(
+                    parent.child_by_field_name("type"),
+                    self.current_file,
                 )
+                if literal_type is None or literal_type.kind not in {
+                    "slice",
+                    "array",
+                    "map",
+                }:
+                    return None
+                if element.type == "keyed_element":
+                    key = element.child_by_field_name("key")
+                    value = element.child_by_field_name("value")
+                    if (
+                        key is not None
+                        and key.start_byte <= node.start_byte
+                        and node.end_byte <= key.end_byte
+                    ):
+                        return None
+                    if (
+                        value is None
+                        or value.start_byte > node.start_byte
+                        or node.end_byte > value.end_byte
+                    ):
+                        return None
+                return getattr(literal_type, "elem", None)
             current = parent
+        return None
+
+    def _literal_type_fact(self, node: Any, file: int) -> Any | None:
+        while node is not None and node.type == "parenthesized_type":
+            node = next(
+                (
+                    child
+                    for child in node.named_children
+                    if child.type != "comment"
+                ),
+                None,
+            )
+        if node is None:
+            return None
+        if node.type == "type_identifier":
+            ref = self.references.get(
+                (file, node.start_byte, node.end_byte)
+            )
+            if ref is None:
+                return None
+            binding = self.bindings.get(ref.binding_id)
+            if binding is not None and binding.kind == "type":
+                return binding.type
+            member = self.members.get(ref.binding_id)
+            if member is not None and member.type is not None:
+                return member.type
+            if ref.kind == "universe":
+                name = node.text.decode("utf-8")
+                if name == "bool":
+                    return GoType("boolean", name, 0, None, "")
+                if name.encode("utf-8") in _SCALAR_BASIC_TYPES:
+                    return GoType("integer", name, 0, None, "")
+                if name in {"any", "error"}:
+                    return GoType("interface", name, 0, None, "")
+                return GoType("basic", name, 0, None, "")
+            return None
+        if node.type in {"qualified_type", "selector_expression"}:
+            member = self._qualified_type_member(node)
+            if member is None:
+                member = self._package_member(node)
+            return member.type if member is not None else None
+        if node.type == "function_type":
+            return GoType("function", "", 0, None, "")
+        if node.type == "interface_type":
+            return GoType("interface", "", 0, None, "")
+        if node.type == "struct_type":
+            return None
+        if node.type in {"slice_type", "array_type", "map_type"}:
+            kind, element_node, type_file = (
+                self._local_literal_type_element(node, file)
+            )
+            if kind not in {"slice", "array", "map"}:
+                return None
+            element_type = self._literal_type_fact(
+                element_node, type_file
+            )
+            if element_type is None:
+                return None
+            return GoType(kind, "", 0, None, "", element_type)
+        if node.type == "pointer_type":
+            _, element_node, type_file = self._local_literal_type_element(
+                node, file
+            )
+            element_type = self._literal_type_fact(
+                element_node, type_file
+            )
+            if element_type is None:
+                return None
+            return GoType("pointer", "", 0, None, "", element_type)
+        if node.type == "channel_type":
+            element_node = next(
+                (
+                    child
+                    for child in reversed(node.named_children)
+                    if child.type != "channel_direction"
+                ),
+                None,
+            )
+            element_type = self._literal_type_fact(
+                element_node, file
+            )
+            if element_type is None:
+                return None
+            return GoType("chan", "", 0, None, "", element_type)
         return None
 
     def _value_carries_closure_records(

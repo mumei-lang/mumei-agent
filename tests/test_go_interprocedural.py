@@ -57526,12 +57526,14 @@ def test_interface_slot_closure_values_fail_closed(go_types_helper):
             "type OM struct { M map[int]I }\n"
             "type OO struct { O O }\n"
             "type S struct { F func() int64; V int64 }\n"
+            "type L []int64\n"
             "type W struct { F func() }\n"
             "type Runner struct { F func() int64 }\n"
             "type FS []func() int64\n"
             "type R []R\n"
             "func (s S) Run() int64 { return s.F() }\n"
             "func (s S) Get() int64 { return s.V }\n"
+            "func (l L) Get() int64 { return l[0] }\n"
             "func (w W) Do() { w.F() }\n"
             "func (r Runner) Run() int64 { return r.F() }\n"
             "func (fs FS) Run() int64 { return fs[0]() }\n"
@@ -57573,6 +57575,10 @@ def test_interface_slot_closure_values_fail_closed(go_types_helper):
             "func F_gint(x, y int64) int64 {\n"
             "\tv := y; g := func() int64 { return v }\n"
             "\to := OG{I: S{V: g()}}; v = x; return o.I.Get()\n"
+            "}\n"
+            "func F_lint(x, y int64) int64 {\n"
+            "\tv := y; g := func() int64 { return v }\n"
+            "\to := OG{I: L{g()}}; v = x; return o.I.Get()\n"
             "}\n"
             "func F_recappend(x int64) int64 {\n"
             "\t_ = append(R{}, R{}); return x\n"
@@ -57763,6 +57769,7 @@ def test_interface_slot_closure_values_fail_closed(go_types_helper):
         "F_ifarg": frozenset({0, 1}),
         "F_plain": frozenset({0}),
         "F_gint": frozenset({1}),
+        "F_lint": frozenset({1}),
     }
     for function_name, dependencies in expected.items():
         result = named_package(files, snapshot, summaries, function_name)
