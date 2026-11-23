@@ -33,7 +33,8 @@ aliasing and full lexical binding identity are not modelled. Liveness
 additions require a store span inside and after the sole declaration's
 scope, and exclude unreachable, multiply declared, closure-mentioned,
 address-taken and otherwise unreliable names. Bare returns and grouped
-var/const declarations read all tracked names conservatively.
+var/const declarations read all tracked names conservatively; range headers
+do not kill targets because their loops may execute zero times.
 """
 
 from __future__ import annotations
@@ -730,6 +731,14 @@ def _liveness_reads(
     return reads
 
 
+def _liveness_kills(
+    statement: tree_sitter_extract.Statement,
+) -> frozenset[str]:
+    if statement.kind == "range":
+        return frozenset()
+    return _assigned_names(statement) | _declared_names(statement)
+
+
 def unassigned_uses(
     body: str,
     graph: ControlFlowGraph,
@@ -849,7 +858,8 @@ def unused_assignments(
     extractor's unreliable names. Bare returns and grouped var/const
     declarations read all tracked names conservatively. The analysis is
     name-based: it does not model fields, elements, aliasing or full
-    lexical binding identity.
+    lexical binding identity. Range headers do not kill targets because
+    their loops may execute zero times.
     Every result is a hint for the host's analysis, not a defect verdict.
     """
     if hashlib.sha256(body.encode("utf-8")).hexdigest() != graph.source_sha256:
@@ -887,7 +897,7 @@ def unused_assignments(
             reads_by_node[node_id] = tracked_names
         else:
             reads_by_node[node_id] = _liveness_reads(statement, tracked_names)
-            kills_by_node[node_id] = _assigned_names(statement)
+            kills_by_node[node_id] = _liveness_kills(statement)
     read_anywhere = frozenset().union(*reads_by_node.values())
     successors: dict[int, list[int]] = defaultdict(list)
     for edge in graph.edges:

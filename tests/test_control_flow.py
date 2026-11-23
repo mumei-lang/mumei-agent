@@ -657,6 +657,20 @@ def test_unused_assignments_grouped_var_reads_all_tracked_names():
     assert result == ()
 
 
+def test_unused_assignments_range_header_does_not_kill_liveness():
+    body = "x := 0\nfor x = range xs {\n}\nreturn x\n"
+    _, result = unuses(body)
+    assert result == ()
+
+
+def test_unused_assignments_bare_var_declaration_kills_liveness():
+    body = "for i := 0; i < 2; i++ {\nvar x int\nprintln(x)\nx = 1\n}\n"
+    _, result = unuses(body)
+    assert [body[finding.span.start : finding.span.end] for finding in result] == [
+        "x = 1"
+    ]
+
+
 @pytest.mark.parametrize(
     "body",
     [
