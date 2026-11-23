@@ -7361,3 +7361,30 @@ fn f(o: Option<P>) {
     assert bound.get("x.pm()") == pm.id
     assert not bound.get("y.pm2()")
 
+
+def test_custom_map_declared_entry_feeds_option_or_insert():
+    # A custom `HashMap` whose declared `entry` returns `Option<Q>`
+    # feeds `Option::or_insert` — `&mut Q`, not the map's `V`.
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct Q;
+impl Q { fn qm(&mut self) {} }
+struct HashMap<K, V>;
+impl<K, V> HashMap<K, V> {
+    fn entry(&mut self, k: K) -> Option<Q> { None }
+}
+fn f(m: &mut HashMap<i32, P>, k: i32) {
+    m.entry(k).or_insert(P).qm();
+    m.entry(k).or_insert(P).pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    qm = _bindings(report, "qm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    assert bound.get("m.entry(k).or_insert(P).qm()") == qm.id
+    assert not bound.get("m.entry(k).or_insert(P).pm()")

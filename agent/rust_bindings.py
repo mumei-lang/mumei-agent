@@ -3625,14 +3625,23 @@ class _RustBindings:
                     if (
                         method_name in _OPTION_MUT_PAYLOAD_METHODS
                         and receiver[1] is not None
-                        and self._container_head_name(
-                            callee.child_by_field_name("value")
+                        and (
+                            self._container_head_name(
+                                callee.child_by_field_name("value")
+                            )
+                            == "Option"
+                            or self._call_declared_head(
+                                callee.child_by_field_name("value")
+                            )
+                            == "Option"
                         )
-                        == "Option"
                     ):
                         # `o.get_or_insert(d)`/`o.or_insert(d)`
                         # yield `&mut P` — the payload resolves at
-                        # the receiver's own annotation.
+                        # the receiver's own annotation. The Option
+                        # can also arrive through a call result
+                        # (`m.entry(k)` on a custom map's declared
+                        # `entry` returns `Option<Q>`).
                         parts = self._type_arg_list(receiver[1])
                         if len(parts) == 1:
                             return self._spelled_type(
@@ -3702,9 +3711,19 @@ class _RustBindings:
                             map_recv = entry_fn.child_by_field_name(
                                 "value"
                             )
-                            if self._container_head_name(
-                                map_recv
-                            ) in _MAP_CONTAINER_NAMES:
+                            if (
+                                self._container_head_name(
+                                    map_recv
+                                ) in _MAP_CONTAINER_NAMES
+                                # A declared `entry` wins — a custom
+                                # map's `fn entry(..) -> Option<Q>`
+                                # feeds `or_insert`'s receiver as
+                                # `Option<Q>`, not `Entry<K, V>`.
+                                and self._field_member(
+                                    entry_fn, ("associated_function",)
+                                )
+                                is None
+                            ):
                                 map_args = self._map_spelled_args(
                                     map_recv
                                 )
@@ -3979,6 +3998,22 @@ class _RustBindings:
                 self.text(node)
             )
         return None
+
+    def _call_declared_head(self, node: Any | None) -> "str | None":
+        """Head of a call's declared return annotation — `m.entry(k)`
+        on a custom `fn entry(..) -> Option<Q>` reads `Option`. None
+        when the callee is not a declared method."""
+        if node is None or node.type != "call_expression":
+            return None
+        callee = node.child_by_field_name("function")
+        if callee is None or callee.type != "field_expression":
+            return None
+        member = self._field_member(callee, ("associated_function",))
+        tn = None if member is None else member.type_node
+        if tn is None:
+            return None
+        head = re.match(r"[A-Za-z_][\w:]*", self.text(tn).strip())
+        return None if head is None else head.group(0)
 
     def _map_spelled_args(self, receiver: Any | None) -> str | None:
         """Full `<K, V>` argument key of a map annotation — recovered
