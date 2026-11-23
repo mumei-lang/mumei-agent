@@ -18604,6 +18604,16 @@ def test_bound_closure_local_channel_send_folds_dependencies(
             id="queue-element-scalar-call-send",
         ),
         pytest.param(
+            "type Fi func() int64\n"
+            "func F(x int64) int64 { "
+            "fs := []Fi{nil}; "
+            "cc := make(chan chan int64, 1); "
+            "c := make(chan int64, 1); cc <- c; "
+            "g := func() { (<-cc) <- fs[0]() }; "
+            "g(); return x }",
+            id="queue-element-scalar-unresolved-call-send",
+        ),
+        pytest.param(
             "func F(x int64) int64 { "
             "s := []chan int64{make(chan int64, 1)}; "
             "g := func() { _ = len(s); _ = cap(s); "
