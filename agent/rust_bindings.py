@@ -6121,6 +6121,27 @@ class _RustBindings:
                 return self._receiver_annotation_position(
                     callee.child_by_field_name("value")
                 )
+            if callee is not None and callee.type in {
+                "scoped_identifier",
+                "scoped_type_identifier",
+            }:
+                # `Rc::into_inner(rc)` — the spelled payload was
+                # written in the ARGUMENT's annotation, not at this
+                # call site.
+                arguments = node.child_by_field_name("arguments")
+                first = (
+                    next(
+                        (
+                            c
+                            for c in arguments.named_children
+                            if "comment" not in c.type
+                        ),
+                        None,
+                    )
+                    if arguments is not None
+                    else None
+                )
+                return self._receiver_annotation_position(first)
             if callee is not None and callee.type == "identifier":
                 # `let u = g()` — `u`'s spelled names were written in
                 # `g`'s return annotation.
