@@ -3622,15 +3622,6 @@ class _RustBindings:
                             produced_head = self._normalize_identifier(
                                 produced.group(0).split("::")[-1]
                             )
-                _spelled_head = self._expanded_container_head(
-                    option_head_value
-                )
-                _head_disallowed = (
-                    _spelled_head is not None
-                    and option_head is not None
-                    and option_head[1] is not None
-                    and _spelled_head not in option_head[1]
-                )
                 if (
                     option_head is not None
                     and (
@@ -3662,10 +3653,9 @@ class _RustBindings:
                         or produced_head in option_head[1]
                         or (
                             map_pair
-                            and not _head_disallowed
-                            and self._is_map_container(
-                                None,
-                                callee.child_by_field_name("value"),
+                            and option_head[1] is not None
+                            and self._map_container_head(
+                                callee.child_by_field_name("value")
                             )
                             and not (
                                 receiver[0] is not None
@@ -3679,6 +3669,8 @@ class _RustBindings:
                                 )
                                 in {"struct", "enum"}
                             )
+
+                            in option_head[1]
                         )
                         or (
                             self.text(field).strip()
@@ -5733,6 +5725,41 @@ class _RustBindings:
             and pair[2] is not None
             and pair[2].split("::")[-1] in _MAP_CONTAINER_NAMES
         )
+
+    def _map_container_head(
+        self, node: Any | None
+    ) -> str | None:
+        """The map head name a receiver's declared container
+        resolves to — `HashMap`/`BTreeMap` through field and
+        alias receivers, else None."""
+        if node is None:
+            return None
+        tnode = self._receiver_type_node(node)
+        if tnode is None:
+            return None
+        spelled = re.search(
+            r"\b(HashMap|BTreeMap)\s*<", self.text(tnode)
+        )
+        if spelled is not None:
+            return spelled.group(1)
+        pair = self._generic_head_args(
+            tnode, node.start_byte
+        )
+        seen: set[str] = set()
+        while pair is not None and pair[1] is not None and (
+            pair[1].binding.kind == "type_alias"
+            and pair[1].alias_node is not None
+            and pair[1].binding.id not in seen
+        ):
+            seen.add(pair[1].binding.id)
+            pair = self._generic_head_args(
+                pair[1].alias_node,
+                node.start_byte,
+            )
+        if pair is None or pair[2] is None:
+            return None
+        head = pair[2].split("::")[-1]
+        return head if head in _MAP_CONTAINER_NAMES else None
 
     def _generic_head_args(
         self, type_node: Any | None, position: int
@@ -11189,15 +11216,6 @@ class _RustBindings:
                     ),
                     None,
                 ) in {"struct", "enum"}
-                _spelled_head = self._expanded_container_head(
-                    _head_value
-                )
-                _head_disallowed = (
-                    _spelled_head is not None
-                    and option_head is not None
-                    and option_head[1] is not None
-                    and _spelled_head not in option_head[1]
-                )
                 if (
                     option_head is not None
                     and (
@@ -11220,14 +11238,14 @@ class _RustBindings:
                             )
                         )
                         or (
-                            not _head_disallowed
-                            and self.text(field).strip()
+                            self.text(field).strip()
                             in _MAP_PAIR_METHODS
                             | _MAP_BORROWED_PAIR_METHODS
-                            and self._is_map_container(
-                                None,
-                                callee.child_by_field_name("value"),
+                            and option_head[1] is not None
+                            and self._map_container_head(
+                                callee.child_by_field_name("value")
                             )
+                            in option_head[1]
                         )
                         or (
                             self.text(field).strip()
