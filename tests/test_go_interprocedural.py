@@ -31351,11 +31351,30 @@ def test_value_struct_field_chan_chan_send_recv(go_types_helper):
         assert results[name].available
         assert results[name].return_dependencies == frozenset({0})
     # `w.C = cc` on a LOCAL struct is a header copy — the store
-    # records no external transfer. (The member identity is shared
-    # package-wide, so this function may still observe `unknown`
-    # effects once a sibling marks the member external via a
+    # records no external transfer. A single-function package keeps
+    # `effects` clean (the member identity is shared package-wide,
+    # so the multi-function package above can still observe
+    # `unknown` once a sibling marks the member external via a
     # parameter root — same summary-level conflation as the
-    # shared may-set.)
+    # shared may-set).
+    solo_files = {
+        "a.go": "package p\n"
+        "type WW struct{ C chan chan int64 }\n"
+        "func F(x int64) int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tc <- x\n"
+        "\tcc <- c\n"
+        "\tvar w WW\n"
+        "\tw.C = cc\n"
+        "\treturn <-(<-w.C)\n}\n"
+    }
+    solo_snapshot = _snapshot_for(go_types_helper, solo_files)
+    solo_summaries = ip.summarize_go_package(solo_files, solo_snapshot)
+    solo = named_package(solo_files, solo_snapshot, solo_summaries, "F")
+    assert solo.available
+    assert solo.return_dependencies == frozenset({0})
+    assert solo.effects == "none_in_supported_fragment"
     # A param donor's queue is caller-visible — reads carry its
     # origin alongside the sent value's.
     for name in (
