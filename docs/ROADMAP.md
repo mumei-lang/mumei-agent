@@ -2553,12 +2553,22 @@ unread = control_flow.unused_assignments(body, graph)
 # -> tuple[UnusedAssignment, ...], ordered by node then name
 ```
 
-Still a **hint, not a defect verdict**: "read" means any textual
-occurrence in a use position, so a name mentioned inside its own
-initializer counts as read, `x++` reads `x`, and reads in unreachable
-code count like any other. The check does not decide which of several
-writers is dead — every writer of an unread name is flagged — and
-fields/elements, calls, shadowing and closures remain unmodelled.
+Still a **hint, not a defect verdict**: the legacy name-wide rule treats
+any textual occurrence in a use position as a read, so a name mentioned
+inside its own initializer counts as read, `x++` reads `x`, and reads in
+unreachable code count like any other. That rule continues to flag every
+writer of a name with no textual read.
+
+### C05 store-granularity unused hints over CFG liveness
+
+For names with reads, `unused_assignments` also applies backward
+fixed-point liveness over the explicit CFG: a store is reported when its
+name is not live out of that node. The liveness addition only applies to
+reachable stores of names declared exactly once in the body, and excludes
+names mentioned in function literals, address-taken names, and the
+extractor's unreliable names. It uses simple identifier names only; fields,
+elements, aliasing and shadowing are not modelled. Unreachable stores keep
+only the legacy name-wide behavior. These remain **hints, not verdicts**.
 
 ### C05 one-pass flow-hint report and unreachable-statement hints
 
@@ -2793,7 +2803,7 @@ frames stay unanalysed.
 ### C05 labeled flow-hint corpus
 
 The labeled Go corpus measures per-family agreement: `unassigned`
-matched 12, missed 0, unexpected 1; `unused` matched 5, missed 2,
+matched 12, missed 0, unexpected 1; `unused` matched 7, missed 0,
 unexpected 0; `unreachable` matched 4, missed 0, unexpected 0. Bare
 zero-value `var` declarations kill prior assignment facts without
 generating an assignment. Entry seeding uses
