@@ -595,6 +595,24 @@ def test_backward_goto_rechecks_guard_after_havoc() -> None:
     assert "d" in facts.nonzero
 
 
+def test_overlapping_backward_regions_extend_havoc_to_nested_target_end() -> None:
+    body = (
+        "d := 1\n"
+        "L1:\n"
+        "if c {\n"
+        "    return n / d\n"
+        "}\n"
+        "L2:\n"
+        "if e {\n"
+        "    goto L1\n"
+        "}\n"
+        "d = 0\n"
+        "goto L2\n"
+    )
+    facts = _facts(body, "n / d", param_names={"n", "d", "c", "e"})
+    assert "d" not in facts.nonzero
+
+
 def test_forward_and_backward_gotos_merge_at_the_label() -> None:
     body = (
         "if d == 0 {\n"

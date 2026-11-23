@@ -1114,6 +1114,23 @@ def _forward_goto_plan(
                 backward_ends.get(label, label_start), end
             )
             backward_gotos.add(goto_start)
+    changed = True
+    while changed:
+        changed = False
+        for label, end in tuple(backward_ends.items()):
+            frame = label_frames[label]
+            start = labels[label][2]
+            extended = end
+            for nested_label, nested_end in tuple(backward_ends.items()):
+                nested_start = labels[nested_label][2]
+                if (
+                    label_frames[nested_label] == frame
+                    and start < nested_start <= end
+                ):
+                    extended = max(extended, nested_end)
+            if extended > end:
+                backward_ends[label] = extended
+                changed = True
     return (
         {
             label: groups[label_frames[label]][labels[label][2] : end + 1]
