@@ -14950,6 +14950,30 @@ class _Builder:
         params: dict[str, int],
         locals_: dict[str, frozenset[int]],
     ) -> None:
+        def pointer_argument_writes(
+            literal: Any, captured: Iterable[str]
+        ) -> set[str]:
+            captured_ids = set(captured)
+            written: set[str] = set()
+            body = literal.child_by_field_name("body")
+            pending = [body] if body is not None else []
+            while pending:
+                current = pending.pop()
+                if current.type == "func_literal":
+                    continue
+                if current.type == "call_expression":
+                    arguments = current.child_by_field_name("arguments")
+                    for argument in _children(arguments):
+                        if not self._deferred_argument_is_pointer(argument):
+                            continue
+                        binding_id = self._deferred_root_binding(
+                            argument, params, locals_
+                        )
+                        if binding_id in captured_ids:
+                            written.add(binding_id)
+                pending.extend(_children(current))
+            return written
+
         def collect(
             value: Any,
             record_ids: set[str],
@@ -14981,6 +15005,9 @@ class _Builder:
                 written_ids.update(writes)
                 if captures_pointer:
                     written_ids.update(captures)
+                written_ids.update(
+                    pointer_argument_writes(value, captures)
+                )
                 return writes_star
             if value.type == "composite_literal":
                 return collect(
@@ -15188,6 +15215,18 @@ class _Builder:
                 written_ids.update(
                     self.closure_writes.get(record_id, frozenset())
                 )
+                literal_record = self.closure_factory_literals.get(
+                    record_id
+                )
+                if literal_record is not None:
+                    written_ids.update(
+                        pointer_argument_writes(
+                            literal_record[0],
+                            self.closure_captures.get(
+                                record_id, frozenset()
+                            ),
+                        )
+                    )
                 star_write |= record_id in self.closure_star_writes
                 pending_records.extend(
                     self.bound_method_field_records.get(record_id, ())
@@ -39279,26 +39318,6 @@ class _Builder:
                             "binding_unavailable", _span(cur)
                         )
             stack.extend(_children(cur))
-        if captures_pointer:
-            writes.update(captured)
-        pointer_call_stack = [node]
-        while pointer_call_stack:
-            current = pointer_call_stack.pop()
-            pointer_call_stack.extend(_children(current))
-            if (
-                current.type != "call_expression"
-                or not current_literal_context(current)
-            ):
-                continue
-            arguments = current.child_by_field_name("arguments")
-            for argument in _children(arguments):
-                if not self._deferred_argument_is_pointer(argument):
-                    continue
-                binding_id = self._deferred_root_binding(
-                    argument, params, locals_
-                )
-                if binding_id in captured:
-                    writes.add(binding_id)
         return (
             deps,
             captured,
