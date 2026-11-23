@@ -5096,6 +5096,11 @@ or parameter slice/array freeze the container and index dependencies and
 preserve the element's function-field records. Unsupported indexed receivers
 fail closed when they carry closure records or the method can write.
 
+Multi-index method calls and bound method values also preserve those records
+across non-pointer slice/array chains rooted in local or parameter containers.
+Map, pointer-element, computed-index and reseatable pointer-receiver method
+value shapes remain fail-closed.
+
 ### C06 imported method calls on concrete named types
 
 A method call `recv.M(args)` now classifies as `direct_import` when
