@@ -1449,6 +1449,17 @@ def test_matching_executable_digest_pin_dispatches(monkeypatch):
     assert len(runner_calls) == 1
 
 
+def test_matching_executable_digest_pin_without_nonblock_flag(
+    tmp_path, monkeypatch
+):
+    executable = tmp_path / "pinned-executable"
+    executable.write_bytes(b"pinned executable")
+    digest = hashlib.sha256(executable.read_bytes()).hexdigest()
+    monkeypatch.delattr(attempt_schedule.os, "O_NONBLOCK", raising=False)
+
+    assert attempt_schedule._executable_matches_pin(str(executable), digest)
+
+
 def test_mismatched_executable_digest_pin_falls_back(monkeypatch):
     result, runner_calls = schedule_with_runner_stub(
         monkeypatch,

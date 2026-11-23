@@ -89,7 +89,7 @@ def _executable_matches_pin(path: str, digest: str) -> bool:
         descriptor = os.open(
             path,
             os.O_RDONLY
-            | os.O_NONBLOCK
+            | getattr(os, "O_NONBLOCK", 0)
             | getattr(os, "O_CLOEXEC", 0),
         )
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
