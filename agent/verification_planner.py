@@ -631,7 +631,6 @@ class PlannerPolicy:
     allow_fallback: bool = False
     allow_manifest_attempt_argv: bool = False
     allow_manifest_attempt_stdin: bool = False
-    require_enforced_isolation: bool = False
     disabled_adapters: frozenset[str] = frozenset()
     allowed_locations: frozenset[str] = frozenset({"local"})
     tool_version_pins: tuple[tuple[str, str], ...] = ()
@@ -642,6 +641,7 @@ class PlannerPolicy:
     )
     allowed_permissions: frozenset[str] | None = None
     allow_manifest_attempt_argv: bool = False
+    require_enforced_isolation: bool = False
 
     def __post_init__(self) -> None:
         if self.allowed_permissions is not None:

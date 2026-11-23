@@ -5,7 +5,7 @@ import json
 import os
 import subprocess
 import traceback
-from dataclasses import replace
+from dataclasses import fields, replace
 from pathlib import Path
 
 import pytest
@@ -248,6 +248,13 @@ def test_require_enforced_isolation_requires_an_explicit_boolean():
     with pytest.raises(ValueError) as error:
         PlannerPolicy(require_enforced_isolation=1)
     assert str(error.value) == "enforced isolation must be explicit Boolean policy"
+
+
+def test_require_enforced_isolation_preserves_positional_field_order():
+    policy_fields = fields(PlannerPolicy)
+
+    assert policy_fields[-1].name == "require_enforced_isolation"
+    assert policy_fields[4].name == "disabled_adapters"
 
 
 def test_require_enforced_isolation_is_omitted_from_plan_fingerprint():
