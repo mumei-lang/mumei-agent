@@ -49660,6 +49660,7 @@ def test_closures_handed_to_opaque_callees(go_types_helper):
             "\tHold(func()); Fire(); Put(S)\n"
             "}\n"
             "type S struct { F func() int64 }\n"
+            "func writeThrough(p *int64, v int64) { *p = v }\n"
             "func F_setlit(x, y int64, k K) int64 {\n"
             "\tv := y; k.Set(func() int64 { return v }); v = x\n"
             "\treturn k.Get()\n"
@@ -49696,6 +49697,14 @@ def test_closures_handed_to_opaque_callees(go_types_helper):
             "}\n"
             "func F_replaylitw(x int64, k K) (w int64) {\n"
             "\tk.Hold(func() { w = x }); w = 0; k.Fire(); return w\n"
+            "}\n"
+            "func F_pointerwrite(x, y int64, k K) (w int64) {\n"
+            "\tv := y; k.Hold(func() { writeThrough(&w, v) }); v = x\n"
+            "\tk.Fire(); return w\n"
+            "}\n"
+            "func F_pointerwritenamed(x, y int64, k K) (w int64) {\n"
+            "\tv := y; h := func() { writeThrough(&w, v) }\n"
+            "\tk.Hold(h); v = x; k.Fire(); return w\n"
             "}\n"
             "func F_replaycap(x, y int64, k K) (w int64) {\n"
             "\tx2 := x; k.Hold(func() { w = x2 }); x2 = y\n"
@@ -49744,6 +49753,8 @@ def test_closures_handed_to_opaque_callees(go_types_helper):
         "F_localfire",
         "F_loopwrite",
         "F_deferwrite",
+        "F_pointerwrite",
+        "F_pointerwritenamed",
     }
     for function_name in unavailable:
         result = named_package(files, snapshot, summaries, function_name)

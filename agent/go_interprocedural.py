@@ -14837,13 +14837,15 @@ class _Builder:
                 (
                     _deps,
                     captures,
-                    _captures_pointer,
+                    captures_pointer,
                     writes,
                     writes_star,
                     _has_call,
                 ) = self._func_literal_capture(value, params, locals_)
                 captured_ids.update(captures)
                 written_ids.update(writes)
+                if captures_pointer:
+                    written_ids.update(captures)
                 return writes_star
             if value.type == "composite_literal":
                 return collect(
@@ -14985,11 +14987,13 @@ class _Builder:
 
             pending_records = list(record_ids)
             seen_records: set[str] = set()
+            pointee_record = False
             while pending_records:
                 record_id = pending_records.pop()
                 if record_id in seen_records:
                     continue
                 seen_records.add(record_id)
+                pointee_record |= record_id in self.pointee_closures
                 captured_ids.update(
                     self.closure_captures.get(record_id, frozenset())
                 )
@@ -15006,13 +15010,15 @@ class _Builder:
                 transitive_writes,
                 transitive_star_write,
                 _inner_calls,
-                _pointee,
+                transitive_pointee,
             ) = self._transitive_closure_records(
                 frozenset(captured_ids)
             )
             captured_ids.update(transitive_captures)
             written_ids.update(transitive_writes)
             star_write |= transitive_star_write
+            if pointee_record or transitive_pointee:
+                written_ids.update(captured_ids)
 
             for binding_id in captured_ids | written_ids:
                 if binding_id in locals_ or binding_id in params:
@@ -39085,6 +39091,26 @@ class _Builder:
                             "binding_unavailable", _span(cur)
                         )
             stack.extend(_children(cur))
+        if captures_pointer:
+            writes.update(captured)
+        pointer_call_stack = [node]
+        while pointer_call_stack:
+            current = pointer_call_stack.pop()
+            pointer_call_stack.extend(_children(current))
+            if (
+                current.type != "call_expression"
+                or not current_literal_context(current)
+            ):
+                continue
+            arguments = current.child_by_field_name("arguments")
+            for argument in _children(arguments):
+                if not self._deferred_argument_is_pointer(argument):
+                    continue
+                binding_id = self._deferred_root_binding(
+                    argument, params, locals_
+                )
+                if binding_id in captured:
+                    writes.add(binding_id)
         return (
             deps,
             captured,
