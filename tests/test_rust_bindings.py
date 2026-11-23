@@ -8180,3 +8180,128 @@ fn f(x: Holder, c: HashSet<P>) {
     assert not bound.get("q.pm()")
     assert not bound.get("w.pm()")
     assert not bound.get("r.pm()")
+
+def test_set_get_or_insert_binds_the_borrowed_element():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(s: std::collections::HashSet<P>, b: std::collections::BTreeSet<P>, v: Vec<P>) {
+    let g = s.get_or_insert(P);
+    g.pm();
+    let g2 = s.get_or_insert_owned(P);
+    g2.pm();
+    let g3 = s.get_or_insert_with(P, |p| p);
+    g3.pm();
+    let gb = b.get_or_insert(P);
+    gb.pm();
+    let gb2 = b.get_or_insert_owned(P);
+    gb2.pm();
+    let gb3 = b.get_or_insert_with(P, |p| p);
+    gb3.pm();
+    let gv = v.get_or_insert(P);
+    gv.pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `s.get_or_insert*` borrow the element — `&P`.
+    assert bound.get("g.pm()") == pm.id
+    assert bound.get("g2.pm()") == pm.id
+    assert bound.get("g3.pm()") == pm.id
+    assert bound.get("gb.pm()") == pm.id
+    assert bound.get("gb2.pm()") == pm.id
+    assert bound.get("gb3.pm()") == pm.id
+    # `Vec` names no `get_or_insert` — stays opaque.
+    assert not bound.get("gv.pm()")
+
+
+def test_set_get_or_insert_reads_the_element_arg_before_the_hasher():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct S;
+fn f(s: std::collections::HashSet<P, S>) {
+    let g = s.get_or_insert(P);
+    g.pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `HashSet<P, S>` — `P` is the element, `S` the hasher.
+    assert bound.get("g.pm()") == pm.id
+
+
+def test_set_get_or_insert_reads_through_a_type_alias():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+type S = std::collections::HashSet<P>;
+fn f(s: S) {
+    let g = s.get_or_insert(P);
+    g.pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    assert bound.get("g.pm()") == pm.id
+
+
+def test_set_get_or_insert_field_resolves_args_in_the_field_scope():
+    source = """
+mod m {
+    pub struct P;
+    impl P { pub fn pm(&self) {} }
+    pub struct W {
+        pub f: std::collections::HashSet<P>,
+    }
+}
+fn f(w: m::W) {
+    let g = w.f.get_or_insert(m::P);
+    g.pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `P` was spelled inside `mod m` — resolves `m::P`, not a root `P`.
+    assert bound.get("g.pm()") == pm.id
+
+
+def test_set_get_or_insert_stays_opaque_on_a_declared_same_named_set():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct HashSet<P> { q: i32 }
+fn f(s: HashSet<P>, d: P) {
+    let g = s.get_or_insert(d);
+    g.pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # A user-declared `HashSet` is not the std set — its method
+    # could return anything.
+    assert not bound.get("g.pm()")
