@@ -10262,3 +10262,57 @@ fn f() {
     # `v`'s `Vec<P>` was spelled inside `mod m` — `v[0]` is
     # `m::P`, so `pm` resolves to `m`'s impl, not the caller's.
     assert bound.get("v[0].pm()") == pms[1].id
+
+def test_struct_pattern_field_resolves_in_its_own_module():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct W { v: Vec<P> }
+mod m {
+    pub struct P;
+    impl P { pub fn pm(&self) {} }
+    pub fn make() -> Result<Vec<super::W>, String> { Ok(todo!()) }
+}
+fn f() {
+    if let Some(W { v: xs }) = m::make().ok() { xs[0].pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    pms = _bindings(report, "pm", "associated_function")
+    assert len(pms) == 2
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `xs`'s `Vec<P>` was spelled in `v`'s annotation inside the
+    # caller's module — `xs[0]` is the caller's `P`, not `m::P`.
+    assert bound.get("xs[0].pm()") == pms[0].id
+
+
+def test_produced_and_payload_resolves_at_the_arguments_decl():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn right() -> Option<Vec<P>> { None }
+mod m {
+    pub struct P;
+    impl P { pub fn pm(&self) {} }
+    pub fn left() -> Option<Vec<P>> { None }
+}
+fn f() {
+    if let Some(v) = m::left().and(right()) { v[0].pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    pms = _bindings(report, "pm", "associated_function")
+    assert len(pms) == 2
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `and` yields the argument's `Option<Vec<P>>` — `v`'s `P`
+    # was spelled at `right`'s declaration in the root module,
+    # not at `m::left`.
+    assert bound.get("v[0].pm()") == pms[0].id

@@ -4764,7 +4764,9 @@ class _RustBindings:
                         elements = self._type_arg_list(
                             receiver[1] or ""
                         )
-                        if not elements and (
+                        if not any(
+                            element.strip() for element in elements
+                        ) and (
                             option_head_value is not None
                         ):
                             # `s: S` via `type S = HashSet<P>` —
@@ -4778,7 +4780,9 @@ class _RustBindings:
                                 elements = self._type_arg_list(
                                     expanded_args
                                 )
-                        if not elements and (
+                        if not any(
+                            element.strip() for element in elements
+                        ) and (
                             option_head_value is not None
                             and option_head_value.type
                             == "call_expression"
@@ -12579,6 +12583,29 @@ class _RustBindings:
                         self._receiver_annotation_position(_args_value)
                         or node.start_byte
                     )
+                    if self.text(field).strip() == "and":
+                        # `o.and(r)` yields `r`'s `Option` — the
+                        # spelled payload args were written in `r`'s
+                        # annotation, not in `o`'s.
+                        _arguments = node.child_by_field_name(
+                            "arguments"
+                        )
+                        _and_arg = (
+                            None
+                            if _arguments is None
+                            else next(
+                                iter(_arguments.named_children),
+                                None,
+                            )
+                        )
+                        if _and_arg is not None:
+                            _args_value = _and_arg
+                            _args_position = (
+                                self._receiver_annotation_position(
+                                    _args_value
+                                )
+                                or node.start_byte
+                            )
                     _args_scope = None
                     if (
                         _args_value is not None
@@ -13271,11 +13298,21 @@ class _RustBindings:
                         if field_type is not None
                         else (None, None)
                     )
+                    # `W { v: xs }` — `xs`'s args were spelled in
+                    # `v`'s own annotation inside the declaring
+                    # module; the outer scrutinee's position would
+                    # resolve them in the wrong module.
+                    field_spell = scrut_position
+                    if (
+                        field_type is not None
+                        and field_type[2] is not None
+                    ):
+                        field_spell = field_type[2].start_byte
                     mapping.update(
                         self._pattern_type_map(
                             bound, tid, fargs,
                             self._type_head_name(tid, fargs),
-                            scrut_position,
+                            field_spell,
                         )
                     )
                     if (
