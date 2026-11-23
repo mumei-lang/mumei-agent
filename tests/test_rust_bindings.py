@@ -8081,12 +8081,13 @@ struct P;
 impl P { fn pm(&self) {} }
 fn f(s: std::collections::HashSet<P>, b: std::collections::BTreeSet<P>, m: std::collections::BTreeMap<i32, P>, h: std::collections::HashMap<i32, P>, v: Vec<P>) {
     for a in s.extract_if(|x| true) { a.pm(); }
-    for c in b.extract_if(|x| true) { c.pm(); }
-    for (k, e1) in m.extract_if(|k, e1| true) { e1.pm(); }
-    for (k2, e2) in h.extract_if(|k2, e2| true) { e2.pm(); }
+    for c in b.extract_if(.., |x| true) { c.pm(); }
+    for (k, e1) in m.extract_if(.., |k, e1| true) { e1.pm(); }
+    for (k2, e2) in h.extract_if(.., |k2, e2| true) { e2.pm(); }
     let g = s.extract_if(|x| true);
     for ge in g { ge.pm(); }
-    for ve in v.extract_if(|x| true) { ve.pm(); }
+    for (i, np) in s.extract_if(|x| true).enumerate() { np.pm(); }
+    for ve in v.extract_if(0.., |x| true) { ve.pm(); }
     if let Some(rp) = s.replace(P) { rp.pm(); }
     if let Some(rb) = b.replace(P) { rb.pm(); }
 }
@@ -8106,8 +8107,76 @@ fn f(s: std::collections::HashSet<P>, b: std::collections::BTreeSet<P>, m: std::
     assert bound.get("e2.pm()") == pm.id
     # A let-bound `extract_if` iterator keeps the element too.
     assert bound.get("ge.pm()") == pm.id
+    # `extract_if(..).enumerate()` yields (usize, P) pairs.
+    assert bound.get("np.pm()") == pm.id
     # `Vec` names no `extract_if` — stays opaque.
     assert not bound.get("ve.pm()")
     # `s.replace(v)` returns the old element — `Option<P>`.
     assert bound.get("rp.pm()") == pm.id
     assert bound.get("rb.pm()") == pm.id
+
+
+def test_extract_if_hasher_arg_and_alias():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct H;
+type S = std::collections::HashSet<P>;
+type M = std::collections::HashMap<i32, P>;
+fn f(s: std::collections::HashSet<P, H>, m: std::collections::HashMap<i32, P, H>, a: S, b: M) {
+    for x in s.extract_if(|v| true) { x.pm(); }
+    for (k, e) in m.extract_if(.., |k, e| true) { e.pm(); }
+    for y in a.extract_if(|v| true) { y.pm(); }
+    for (k2, e2) in b.extract_if(.., |k2, e2| true) { e2.pm(); }
+    if let Some(r) = a.replace(P) { r.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # A trailing hasher arg is not the element — `HashSet<P, H>`
+    # still yields `P`; `HashMap<K, V, H>` still pairs `(K, V)`.
+    assert bound.get("x.pm()") == pm.id
+    assert bound.get("e.pm()") == pm.id
+    # Type aliases expand to the std containers for the recipe.
+    assert bound.get("y.pm()") == pm.id
+    assert bound.get("e2.pm()") == pm.id
+    assert bound.get("r.pm()") == pm.id
+
+
+def test_extract_if_element_scope_and_custom_type():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct Holder { s: std::collections::HashSet<P> }
+struct HashSet<P>(P);
+fn f(x: Holder, c: HashSet<P>) {
+    struct P;
+    impl P { fn local(&self) {} }
+    for a in x.s.extract_if(|v| true) { a.pm(); }
+    for b in x.s.union(&x.s) { b.pm(); }
+    for q in c.extract_if(|v| true) { q.pm(); }
+    for w in c.union(&c) { w.pm(); }
+    if let Some(r) = c.replace(P) { r.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # The element name resolves where the receiver's `P` was
+    # annotated — the fn-local `struct P` cannot steal it.
+    assert bound.get("a.pm()") == pm.id
+    assert bound.get("b.pm()") == pm.id
+    # A declared `struct HashSet` is not the std set — the
+    # extract_if/union/replace recipes stay opaque.
+    assert not bound.get("q.pm()")
+    assert not bound.get("w.pm()")
+    assert not bound.get("r.pm()")
