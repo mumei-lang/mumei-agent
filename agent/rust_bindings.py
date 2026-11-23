@@ -47,7 +47,9 @@ _INDEX_ELEMENT_CONTAINERS = frozenset(
 # `for p in v.iter()` binds like `for p in v`. Maps are excluded
 # here (they iterate (K, V) pairs) and handled by their own
 # `keys`/`values` entry points below.
-_ITER_ELEMENT_METHODS = frozenset({"iter", "iter_mut", "into_iter", "drain"})
+_ITER_ELEMENT_METHODS = frozenset(
+    {"iter", "iter_mut", "into_iter", "drain", "split_off"}
+)
 # Iterator adaptors that keep the same element type — `map`/`flat_map`
 # change it through a closure and stay opaque.
 _ITER_PRESERVING_METHODS = frozenset(
@@ -310,7 +312,9 @@ _ITER_OPTION_METHODS = frozenset(
 # `it.flat_map(f)` peels one iterable layer (`Vec<U>`/`Option<U>`/
 # `&[U]`/`[U; N]` → `U`). Closures stay opaque — their param and
 # return types are unwritten.
-_ITER_FN_ELEMENT_METHODS = frozenset({"map", "flat_map", "filter_map"})
+_ITER_FN_ELEMENT_METHODS = frozenset(
+    {"map", "flat_map", "filter_map", "map_while", "scan"}
+)
 _UNWRAP_ERR_METHODS = frozenset({"unwrap_err", "expect_err"})
 _TRY_HEADS = frozenset({"Option", "Result"})
 # Prelude constructors whose tuple payload position is fixed by the
@@ -3154,14 +3158,23 @@ class _RustBindings:
                     # `Option<&T>`/`Option<T>` — only the payload
                     # spelling is carried; the head stays for
                     # `_scrutinee_shape` to declare.
-                    slice_args = re.fullmatch(
-                        r"&\s*(?:'\w+\s+)?(?:mut\s+)?\[(.+)\]",
-                        (receiver[1] or "").strip(),
+                    slice_args = (
+                        re.fullmatch(
+                            r"&\s*(?:'\w+\s+)?(?:mut\s+)?\[(.+)\]",
+                            (receiver[1] or "").strip(),
+                        )
+                        if self._container_head_name(
+                            callee.child_by_field_name("value")
+                        )
+                        is None
+                        else None
                     )
                     if slice_args is not None:
                         # The receiver itself spelled a borrowed
                         # slice (`s.as_ref()` → `&[P]`) — the element
                         # is inside the brackets, not the whole arg.
+                        # `Vec<&[P]>` names a headed container whose
+                        # element IS `&[P]` — never peeled either.
                         # Bare `[P; N]` args are an element spelling
                         # (`Vec<[P; 2]>`), never peeled.
                         element = slice_args.group(1).strip()
@@ -3602,7 +3615,17 @@ class _RustBindings:
                             None,
                         )
                         if keep is not None:
-                            return None, keep.strip()
+                            # The payload's name was spelled in the
+                            # receiver's annotation — qualify it
+                            # there or a body-local same-named type
+                            # steals it.
+                            return None, self._qualified_spelling(
+                                keep.strip(),
+                                self._receiver_annotation_position(
+                                    value
+                                )
+                                or node.start_byte,
+                            )
                 if (
                     callee is not None
                     and callee.type == "field_expression"
@@ -3719,13 +3742,36 @@ class _RustBindings:
                             "or_insert_with",
                             "or_insert_with_key",
                             "or_default",
+                            "into_mut",
+                            "key",
                         }
                     ):
                         # `m.entry(k).or_insert(d)`/`and_modify`
-                        # chains yield `&mut V` of the map's args.
+                        # chains yield `&mut V` of the map's args;
+                        # `key()` reads `&K`, and `into_mut()`
+                        # (`BTreeMap::Entry` only) reads `&mut V`.
                         entry_recv = callee.child_by_field_name(
                             "value"
                         )
+                        if (
+                            entry_recv is not None
+                            and entry_recv.type == "identifier"
+                        ):
+                            # `let e = m.entry(k); e.key()` — the
+                            # entry arrives through a binding's
+                            # initializer.
+                            entry_record = self._lookup(
+                                self._normalize_identifier(
+                                    self.text(entry_recv)
+                                ),
+                                entry_recv.start_byte,
+                                "value",
+                            )
+                            if (
+                                entry_record is not None
+                                and entry_record.value_node is not None
+                            ):
+                                entry_recv = entry_record.value_node
                         while (
                             entry_recv is not None
                             and entry_recv.type == "call_expression"
@@ -3790,13 +3836,36 @@ class _RustBindings:
                                     map_args or ""
                                 )
                                 if len(parts) >= 2:
-                                    return self._spelled_type(
-                                        "&mut " + parts[1].strip(),
+                                    entry_pos = (
                                         self._receiver_annotation_position(
                                             map_recv
                                         )
-                                        or node.start_byte,
+                                        or node.start_byte
                                     )
+                                    if method_name == "key":
+                                        # `e.key()` yields `&K`.
+                                        return self._spelled_type(
+                                            "&"
+                                            + parts[0].strip(),
+                                            entry_pos,
+                                        )
+                                    if (
+                                        method_name == "into_mut"
+                                        and self._container_head_name(
+                                            map_recv
+                                        )
+                                        != "BTreeMap"
+                                    ):
+                                        # `Entry::into_mut` is
+                                        # `BTreeMap`-only — a
+                                        # `HashMap` entry names no
+                                        # such method.
+                                        pass
+                                    else:
+                                        return self._spelled_type(
+                                            "&mut " + parts[1].strip(),
+                                            entry_pos,
+                                        )
                     if (
                         method_name in _SWAP_REMOVE_METHODS
                         and receiver[1] is not None
@@ -5101,17 +5170,20 @@ class _RustBindings:
         iterable layer (`Vec<U>`/`Option<U>`/`&[U]`/`[U; N]` → `U`).
         Closures and non-function args stay opaque."""
         arguments = call.child_by_field_name("arguments")
-        target = (
-            None
+        # `scan(state, f)`'s callback is the second argument; the
+        # other adaptors take it first.
+        index = 1 if method == "scan" else 0
+        named_args = (
+            []
             if arguments is None
-            else next(
-                (
-                    c
-                    for c in arguments.named_children
-                    if "comment" not in c.type
-                ),
-                None,
-            )
+            else [
+                c
+                for c in arguments.named_children
+                if "comment" not in c.type
+            ]
+        )
+        target = (
+            named_args[index] if len(named_args) > index else None
         )
         if (
             target is None
@@ -5155,8 +5227,15 @@ class _RustBindings:
             # it there or a same-named root type steals the name.
             self._push_scope(home)
         try:
-            if method == "filter_map":
-                wrap = re.fullmatch(r"(?:Option|Result)\s*<(.+)>", text)
+            if method in {"filter_map", "map_while", "scan"}:
+                # `f() -> Option<U>`/`Result<U, _>` — the unwrap
+                # shape `filter_map` already uses; a fully
+                # qualified `std::option::Option` unwraps too.
+                wrap = re.fullmatch(
+                    r"(?:(?:std|core|alloc)::(?:option|result)::)?"
+                    r"(?:Option|Result)\s*<(.+)>",
+                    text,
+                )
                 if wrap is None:
                     return None, None
                 text = self._type_arg_list(wrap.group(1))[0].strip()
