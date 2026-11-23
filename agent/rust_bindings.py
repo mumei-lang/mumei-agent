@@ -5724,16 +5724,36 @@ class _RustBindings:
                 element,
                 self._receiver_annotation_position(receiver),
             )
-        if method in _SET_ALGEBRA_METHODS:
+        if method in _SET_ALGEBRA_METHODS | _MAP_RANGE_METHODS:
             # `a.union(&b)`/`intersection`/`difference`/
-            # `symmetric_difference` iterate `&P` elements of the
-            # left set — the same element `a.iter()` spells.
+            # `symmetric_difference` and `s.range(..)`/`range_mut`
+            # iterate `&P` elements of the left set — the same
+            # element `a.iter()` spells.
             container_id, args = self._receiver_type(receiver)
             if args is None:
                 return None, None
             if self._container_head_name(receiver) not in (
                 _SET_CONTAINER_NAMES
             ):
+                return None, None
+            if container_id is not None and next(
+                (
+                    b.kind
+                    for b in self.bindings
+                    if b.id == container_id
+                ),
+                None,
+            ) in {"struct", "enum"}:
+                # A declared `struct BTreeSet` may `Deref` to a
+                # different set — its `range` element is not the
+                # receiver's own arg.
+                return None, None
+            if self._head_has_declared_method(
+                method, self._container_head_name(receiver) or ""
+            ):
+                # A declared `range`/`range_mut` extension decides
+                # its own return type (`BTreeSet` has no std
+                # `range_mut`).
                 return None, None
             spelled = args.strip() or None
             if spelled is None:
@@ -6589,6 +6609,7 @@ class _RustBindings:
             or method in _ITER_CHUNK_METHODS
             or method in _ITER_CHUNK_MUT_METHODS
             or method in _SET_ALGEBRA_METHODS
+            or method in _MAP_RANGE_METHODS
             or method in _EXTRACT_IF_METHODS
             or method == "enumerate"
             or method == "zip"
@@ -6653,10 +6674,13 @@ class _RustBindings:
                 _UNKNOWN,
                 None if spelled is None else prefix + spelled,
             )
-        if method in _SET_ALGEBRA_METHODS:
+        if method in _SET_ALGEBRA_METHODS | _MAP_RANGE_METHODS:
             # `a.union(&b)`/`intersection`/`difference`/
-            # `symmetric_difference` yield `&P` elements of the
-            # left set — bind `P` like `a.iter()` does.
+            # `symmetric_difference` and `s.range(..)`/`range_mut`
+            # yield `&P` elements of the left set — bind `P` like
+            # `a.iter()` does. `m.range(..)`/`range_mut` on a
+            # `BTreeMap` yields `(K, V)` pairs — spelled so
+            # `enumerate`/adapter chains keep the pair shape.
             container_id, args = self._receiver_type(receiver)
             if args is None:
                 # `type S = HashSet<P>` — the spelled args come
@@ -6664,10 +6688,7 @@ class _RustBindings:
                 args = self._map_spelled_args(receiver)
             if args is None:
                 return _UNKNOWN, None
-            if self._expanded_container_head(receiver) not in (
-                _SET_CONTAINER_NAMES
-            ):
-                return _UNKNOWN, None
+            expanded = self._expanded_container_head(receiver)
             if container_id is not None and next(
                 (
                     b.kind
@@ -6679,6 +6700,33 @@ class _RustBindings:
                 # A declared `struct HashSet` is a same-named
                 # custom type — its set-algebra methods need not
                 # iterate the std set's element.
+                return _UNKNOWN, None
+            if expanded is not None and self._head_has_declared_method(
+                method, expanded
+            ):
+                # A declared `range`/`range_mut` extension decides
+                # its own return type — `BTreeSet` has no std
+                # `range_mut` at all.
+                return _UNKNOWN, None
+            if expanded in _MAP_CONTAINER_NAMES or (
+                expanded is None
+                and self._is_map_container(container_id, receiver)
+            ):
+                # `range`/`range_mut` are `BTreeMap`-only — a
+                # `HashMap` receiver names no such std method.
+                if (
+                    method not in _MAP_RANGE_METHODS
+                    or expanded != "BTreeMap"
+                ):
+                    return _UNKNOWN, None
+                parts = [
+                    part.strip()
+                    for part in self._type_arg_list(args.strip())
+                ]
+                if len(parts) < 2:
+                    return _UNKNOWN, None
+                return _UNKNOWN, f"({parts[0]}, {parts[1]})"
+            if expanded not in _SET_CONTAINER_NAMES:
                 return _UNKNOWN, None
             arg0 = next(
                 iter(self._type_arg_list(args.strip())), ""
@@ -7131,6 +7179,16 @@ class _RustBindings:
             method = self._normalize_identifier(
                 self.text(method_node)
             )
+            if (
+                method in _ITER_PRESERVING_METHODS
+                and method != "chain"
+            ):
+                # `m.range(..).rev()`/`take(n)`/`filter(f)` keep the
+                # iterated item — the pair slots come from the
+                # adapted call, whose own method decides the pair.
+                if receiver.type != "call_expression":
+                    return {}
+                return self._for_pair_type_map(pattern, receiver)
             if (
                 method
                 not in _ITER_ELEMENT_METHODS

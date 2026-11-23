@@ -8506,3 +8506,77 @@ fn f(r: Result<P, u8>) {
     }
     # An extension `inspect_ok` need not echo the receiver — opaque.
     assert not bound.get("p.pm()") or bound.get("p.pm()") != pm.id
+
+def test_btree_set_range_binds_borrowed_elements():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct K;
+impl K { fn km(&self) {} }
+fn f(s: std::collections::BTreeSet<P>, m: std::collections::BTreeMap<K, P>) {
+    for a in s.range(..) { a.pm(); }
+    for b in s.range_mut(..) { b.pm(); }
+    let r = s.range(..);
+    for c in r { c.pm(); }
+    for d in m.range(..) { d.pm(); }
+    for (i, (k, v)) in m.range(..).enumerate() { k.km(); v.pm(); }
+    for (k2, v2) in m.range(..).chain(m.range(..)) { k2.km(); v2.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    km = _bindings(report, "km", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `BTreeSet::range`/`range_mut` iterate `&P` like the
+    # set-algebra methods.
+    assert bound.get("a.pm()") == pm.id
+    assert bound.get("b.pm()") == pm.id
+    assert bound.get("c.pm()") == pm.id
+    # A map's `range` yields `(K, V)` pairs, not `P` — a single
+    # loop name stays opaque.
+    assert not bound.get("d.pm()")
+    # `enumerate`/`chain` adapters keep the pair slots.
+    assert bound.get("k.km()") == km.id
+    assert bound.get("v.pm()") == pm.id
+    assert bound.get("k2.km()") == km.id
+    assert bound.get("v2.pm()") == pm.id
+
+
+def test_declared_set_head_stops_the_range_recipe():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct BTreeSet<P>(P);
+trait Ext { fn range_mut(&self) -> i32; }
+fn f(s: BTreeSet<P>) {
+    let r = s.range(..);
+    for x in r { x.pm(); }
+    for y in s.range(..) { y.pm(); }
+}
+fn g(s: std::collections::BTreeSet<P>) {
+    for z in s.range_mut(..) { z.pm(); }
+    let t = s.range_mut(..);
+    for w in t { w.pm(); }
+}
+impl Ext for std::collections::BTreeSet<P> {
+    fn range_mut(&self) -> i32 { 0 }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # A declared `struct BTreeSet` may `Deref` to a different
+    # set — its `range` element is not the receiver's arg.
+    assert not bound.get("x.pm()")
+    assert not bound.get("y.pm()")
+    # A declared `range_mut` extension decides its own return
+    # type — `BTreeSet` has no std `range_mut`.
+    assert not bound.get("z.pm()")
+    assert not bound.get("w.pm()")
