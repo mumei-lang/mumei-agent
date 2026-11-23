@@ -7145,6 +7145,14 @@ class _RustBindings:
             else self._pattern_type_map(
                 pattern, scrut_id, scrut_args, scrut_name,
                 scrut_position, scrut_scope,
+                inner_args=(
+                    annotation is not None
+                    or (
+                        value is not None
+                        and self._receiver_annotation_position(value)
+                        is not None
+                    )
+                ),
             )
         )
         for name_node, name_mutable in names:
@@ -7452,6 +7460,11 @@ class _RustBindings:
                 self._pattern_type_map(
                     pattern, scrut_id, scrut_args,
                     scrut_name, scrut_position, scrut_scope,
+                    inner_args=(
+                        value is not None
+                        and self._receiver_annotation_position(value)
+                        is not None
+                    ),
                 ),
             )
         if any(node.type == "let_condition" for node in self._descendants(condition)):
@@ -7661,6 +7674,11 @@ class _RustBindings:
             type_map = self._pattern_type_map(
                 pattern, scrut_id, scrut_args,
                 *self._scrutinee_shape(value, scrut_id),
+                inner_args=(
+                    value is not None
+                    and self._receiver_annotation_position(value)
+                    is not None
+                ),
             )
             self._bind_pattern_names(
                 names, arm_scope, self.span(arm), type_map=type_map
@@ -8333,6 +8351,7 @@ class _RustBindings:
         scrut_args: str | None,
         scrut_name: str | None = None,
         scrut_position: int | None = None,
+        inner_args: bool = False,
     ) -> "list[tuple[str | None, str | None]] | None":
         """Positional [(type id, args)] for `W(..)` / `E::V(..)`
         heads — None when the head does not name the scrutinee."""
@@ -8350,7 +8369,8 @@ class _RustBindings:
                 # need the annotation position to resolve args.
                 return None
             return self._prelude_pattern_payload(
-                head, scrut_name, scrut_args, scrut_position
+                head, scrut_name, scrut_args, scrut_position,
+                inner_args=inner_args,
             )
         container = (
             record
@@ -9004,6 +9024,7 @@ class _RustBindings:
         scrut_name: str | None,
         scrut_args: str | None,
         scrut_position: int,
+        inner_args: bool = False,
     ) -> "list[tuple[str | None, str | None]] | None":
         """Positional payload for a prelude constructor
         (`Some(x)`/`Ok(x)`/`Err(e)`) when the scrutinee's declared
@@ -9017,12 +9038,16 @@ class _RustBindings:
         )
         if entry is None or scrut_name != entry[0]:
             return None
-        if scrut_args is not None:
+        if scrut_args is not None and not inner_args:
             # An args-only scrutinee spells the whole container —
             # `Option<P>` unwraps to `P`, `Result<P, E>` to `P, E`,
             # so `Err(e)` still reads the payload at index 1. The
             # spelled head must match the pattern's container —
             # `Some(w)` on `W<m::P>` payload args keeps `W<m::P>`.
+            # An annotated scrutinee's args are already inner —
+            # `Option<Option<P>>` spells `Option<P>` for the
+            # payload itself, and unwrapping it would bind `Some(p)`
+            # one layer too deep.
             wrapped = re.fullmatch(
                 r"([A-Za-z_][\w:]*)\s*<(.+)>",
                 scrut_args.strip(),
@@ -9045,6 +9070,19 @@ class _RustBindings:
         type_id, fargs = self._spelled_type(
             args[entry[1]], scrut_position
         )
+        if (
+            type_id is None
+            and inner_args
+            and re.fullmatch(
+                r"[A-Za-z_][\w:]*\s*<.+>",
+                args[entry[1]].strip(),
+                re.DOTALL,
+            )
+        ):
+            # `Option<Option<P>>` — the payload's own spelling is
+            # `Option<P>`; decomposing it to args `P` would drop the
+            # `Option` head and misbind `Some(q)` later.
+            fargs = args[entry[1]]
         return [(type_id, fargs)]
 
     def _pattern_type_map(
@@ -9055,6 +9093,7 @@ class _RustBindings:
         scrut_name: str | None = None,
         scrut_position: int | None = None,
         scrut_scope: "_Scope | None" = None,
+        inner_args: bool = False,
     ) -> dict:
         """start_byte -> (TypeFact, args) for the names a destructuring
         pattern binds, resolved against the scrutinee's declared
@@ -9066,7 +9105,7 @@ class _RustBindings:
         try:
             return self._pattern_type_map_body(
                 pattern, scrut_id, scrut_args,
-                scrut_name, scrut_position,
+                scrut_name, scrut_position, inner_args,
             )
         finally:
             if push:
@@ -9079,6 +9118,7 @@ class _RustBindings:
         scrut_args: str | None,
         scrut_name: str | None = None,
         scrut_position: int | None = None,
+        inner_args: bool = False,
     ) -> dict:
         if pattern is None:
             return {}
@@ -9362,7 +9402,8 @@ class _RustBindings:
         if kind == "tuple_struct_pattern":
             head = pattern.child_by_field_name("type")
             payload = self._pattern_head_payload(
-                head, scrut_id, scrut_args, scrut_name, scrut_position
+                head, scrut_id, scrut_args, scrut_name, scrut_position,
+                inner_args,
             )
             if payload is None:
                 return {}

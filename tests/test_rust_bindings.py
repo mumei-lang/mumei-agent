@@ -7649,15 +7649,17 @@ def test_result_iter_and_option_unzip_bind_payloads():
     source = """
 struct P;
 impl P { fn pm(&self) {} }
+struct Q;
+impl Q { fn qm(&self) {} }
 struct W<T> { x: T }
-fn f(r: Result<P, E>, o: Option<(P, P)>, w: W<P>) {
+fn f(r: Result<P, E>, o: Option<(P, Q)>, w: W<P>) {
     for p in r.iter() { p.pm(); }
     for q in r.iter_mut() { q.pm(); }
     let i1 = r.iter();
     for u in i1 { u.pm(); }
     let (x, y) = o.unzip();
     if let Some(a) = x { a.pm(); }
-    if let Some(b) = y { b.pm(); }
+    if let Some(b) = y { b.qm(); }
     let z = o.unzip();
     if let Some(c) = z { c.pm(); }
     for s in w.iter() { s.pm(); }
@@ -7665,6 +7667,7 @@ fn f(r: Result<P, E>, o: Option<(P, P)>, w: W<P>) {
 """
     report = build_rust_bindings(source, pointer_width=64)
     pm = _bindings(report, "pm", "associated_function")[0]
+    qm = _bindings(report, "qm", "associated_function")[0]
     raw = source.encode()
     bound = {
         raw[c.span.start:c.span.end].decode(): c.target
@@ -7674,11 +7677,35 @@ fn f(r: Result<P, E>, o: Option<(P, P)>, w: W<P>) {
     assert bound.get("p.pm()") == pm.id
     assert bound.get("q.pm()") == pm.id
     assert bound.get("u.pm()") == pm.id
-    # `Option<(P, P)>::unzip` gives `(Option<P>, Option<P>)` —
-    # each name keeps its spelled `Option` head for `Some`.
+    # `Option<(P, Q)>::unzip` gives `(Option<P>, Option<Q>)` —
+    # the left name binds `P`, the right `Q`, so a swap shows.
     assert bound.get("a.pm()") == pm.id
-    assert bound.get("b.pm()") == pm.id
+    assert bound.get("b.qm()") == qm.id
     # `z` is the pair itself — `Some` on a tuple is a type error.
     assert not bound.get("c.pm()")
     # A custom `W` can name any `iter` — stays opaque.
     assert not bound.get("s.pm()")
+
+
+def test_nested_option_destructure_binds_the_inner_option():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(o: Option<Option<P>>) {
+    if let Some(p) = o {
+        if let Some(q) = p { q.pm(); }
+        p.pm();
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `Some(p)` on `Option<Option<P>>` binds `p: Option<P>` —
+    # the nested `Some(q)` unwraps it, but `p` itself is not `P`.
+    assert bound.get("q.pm()") == pm.id
+    assert not bound.get("p.pm()")
