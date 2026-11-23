@@ -2789,13 +2789,15 @@ class _RustBindings:
             is None
         )
 
-    def _impl_target_id(
+    def _impl_target_record(
         self, type_node: "Any | None", position: int
-    ) -> "str | None":
-        """Resolve the impl TARGET node to a declared type's record id
-        — `impl Rem for ChunksExact<R>` in a scope where `type
+    ) -> "_Record | None":
+        """Resolve the impl TARGET node to a declared type's record —
+        `impl Rem for ChunksExact<R>` in a scope where `type
         ChunksExact = Coll` is for `Coll`, not for receivers named
-        `ChunksExact`."""
+        `ChunksExact`. Callers compare the record's name to the impl
+        head: an equal name is the type the head spells, a different
+        name means the head was a renamed alias."""
         if type_node is None:
             return None
 
@@ -2830,7 +2832,7 @@ class _RustBindings:
         ):
             seen.add(record.binding.id)
             record = _resolve(record.alias_node) or record
-        return None if record is None else record.binding.id
+        return record
 
     def _impl_head_name(self, impl: "_Record") -> "str | None":
         """The impl TARGET's head name, normalized like
@@ -2880,6 +2882,12 @@ class _RustBindings:
         def _unspell_recv_arg(arg: str) -> str:
             t = arg.strip()
             if t.startswith("&"):
+                after_amp = re.sub(r"^&\s*", "", t)
+                if after_amp.startswith("'"):
+                    # `&'a T` is a spelled reference type — the
+                    # receiver's item IS a reference, so keep the
+                    # whole arg verbatim rather than peeling `&`.
+                    return t
                 t = re.sub(
                     r"^&\s*(?:'\w+\s*)?(?:mut\s+)?", "", t
                 )
@@ -3191,8 +3199,16 @@ class _RustBindings:
                     elif not any(
                         head in receiver_heads
                         and (
-                            self._impl_target_id(tnode, position)
-                            in {None, container_id}
+                            self._impl_target_record(tnode, position)
+                            is None
+                            or self._impl_target_record(
+                                tnode, position
+                            ).binding.name
+                            == head
+                            or self._impl_target_record(
+                                tnode, position
+                            ).binding.id
+                            == container_id
                         )
                         and self._impl_args_cover(
                             args, params, home, recv_args, position
@@ -3206,14 +3222,16 @@ class _RustBindings:
                     # An impl on an undeclared target (`impl T for
                     # [P]`/`for Vec<P>`) — its head and concrete args
                     # must both cover the receiver.
-                    target_id = self._impl_target_id(
+                    target_record = self._impl_target_record(
                         record.self_type_node, position
                     )
                     if (
                         self._impl_head_name(record) not in receiver_heads
                         or (
-                            target_id is not None
-                            and target_id != container_id
+                            target_record is not None
+                            and target_record.binding.name
+                            != self._impl_head_name(record)
+                            and target_record.binding.id != container_id
                         )
                         or not self._impl_args_cover(
                             record.member_impl_args,
