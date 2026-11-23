@@ -164,6 +164,7 @@ class _TypeScriptBindings:
         self._type_bases: dict[int, list[tuple[str, bool]]] = {}
         self._initializer_active: set[str] = set()
         self._type_node_active: set[int] = set()
+        self._narrowed: dict[int, Any] = {}
 
     def span(self, node: Any) -> ByteSpan:
         return ByteSpan(node.start_byte, node.end_byte)
@@ -293,6 +294,7 @@ class _TypeScriptBindings:
             if node.type == "decorator":
                 self.add_gap("decorator", node)
             self._predeclare_node(node)
+        self._collect_narrowings()
         self._link_members()
         for record in list(self.records):
             if record.function_node is not None:
@@ -3308,6 +3310,13 @@ class _TypeScriptBindings:
             record = self._lookup(self.text(node), position, "value")
             if record is None:
                 return None
+            narrowed = self._narrowed.get(node.id)
+            if narrowed is not None and narrowed.type != "identifier":
+                # `Array.isArray(arr)` narrows the use to the
+                # declared union's array constituent — a real type
+                # node. An `instanceof` right operand is a class
+                # expression, consumed by member lookup only.
+                return narrowed
             type_node = self._unwrap_type(record.type_node)
             if type_node is not None:
                 if (
@@ -3947,6 +3956,105 @@ class _TypeScriptBindings:
             )
         )
 
+    def _collect_narrowings(self) -> None:
+        """Map each identifier use inside an `if` consequence to the
+        type a `x instanceof C`/`Array.isArray(x)` condition narrows
+        it to. Only the positive consequence is handled — else-side
+        narrowing and reassignment are out of scope (uses there fall
+        back to the declared type)."""
+        for node in self.walk(self.root):
+            if node.type != "if_statement":
+                continue
+            condition = node.child_by_field_name("condition")
+            consequence = node.child_by_field_name("consequence")
+            if condition is None or consequence is None:
+                continue
+            for ident, narrowed in self._condition_narrowings(
+                condition
+            ):
+                name = self.text(ident)
+                for desc in self.walk(consequence):
+                    if (
+                        desc.type == "identifier"
+                        and self.text(desc) == name
+                    ):
+                        self._narrowed.setdefault(desc.id, narrowed)
+
+    def _condition_narrowings(self, condition: Any | None):
+        """(identifier, narrowed type node) pairs a condition spells:
+        `x instanceof C` narrows to C's class expression;
+        `Array.isArray(x)` narrows to the declared union's single
+        array constituent; `&&` combines both sides."""
+        while (
+            condition is not None
+            and condition.type == "parenthesized_expression"
+        ):
+            condition = next(iter(self.children(condition)), None)
+        if condition is None:
+            return ()
+        if condition.type == "binary_expression":
+            kids = self.children(condition)
+            if len(kids) == 2:
+                operators = {
+                    self.text(child) for child in condition.children
+                }
+                if "instanceof" in operators:
+                    left, right = kids
+                    if left.type == "identifier" and right.type in {
+                        "identifier",
+                        "member_expression",
+                    }:
+                        return ((left, right),)
+                    return ()
+                if "&&" in operators:
+                    return self._condition_narrowings(
+                        kids[0]
+                    ) + self._condition_narrowings(kids[1])
+            return ()
+        if condition.type == "call_expression":
+            callee = condition.child_by_field_name("function")
+            if (
+                callee is not None
+                and callee.type == "member_expression"
+                and self.text(callee.child_by_field_name("property"))
+                == "isArray"
+                and self.text(callee.child_by_field_name("object"))
+                == "Array"
+            ):
+                arg = next(
+                    iter(
+                        self.children(
+                            condition.child_by_field_name("arguments")
+                        )
+                    ),
+                    None,
+                )
+                if arg is not None and arg.type == "identifier":
+                    narrowed = self._array_constituent_node(arg)
+                    if narrowed is not None:
+                        return ((arg, narrowed),)
+            return ()
+        return ()
+
+    def _array_constituent_node(self, ident: Any) -> Any | None:
+        """The array part of `ident`'s declared union —
+        `Array.isArray` narrows `P[] | string` to `P[]`. Anything
+        else (no union, several array parts, none) stays opaque."""
+        record = self._lookup(
+            self.text(ident), ident.start_byte, "value"
+        )
+        if record is None:
+            return None
+        declared = self._unwrap_type(record.type_node)
+        if declared is None or declared.type != "union_type":
+            return None
+        parts = [
+            child
+            for child in self.children(declared)
+            if child.type == "array_type"
+        ]
+        return parts[0] if len(parts) == 1 else None
+
     def _non_nullable_type_node(self, node: Any | None) -> Any | None:
         """The non-null constituent of a union annotation — `P |
         undefined` peels to `P` for `?.`/`!` narrowing. A union
@@ -4014,6 +4122,48 @@ class _TypeScriptBindings:
             record = self._lookup(self.text(node), position, "value")
             if record is None:
                 return None, False, False
+            narrowed = self._narrowed.get(node.id)
+            if narrowed is not None:
+                # `x instanceof C` narrows x's uses in the
+                # consequence to the checked class; the right
+                # operand is a value (class expression), so look
+                # it up as a value.
+                if narrowed.type == "identifier":
+                    narrowed_record = self._lookup(
+                        self.text(narrowed),
+                        narrowed.start_byte,
+                        "value",
+                    )
+                    if narrowed_record is not None and (
+                        narrowed_record.class_like
+                        or narrowed_record.binding.kind
+                        in {"class", "interface", "enum", "namespace"}
+                    ):
+                        return narrowed_record, False, False
+                elif narrowed.type == "member_expression":
+                    property_node = narrowed.child_by_field_name(
+                        "property"
+                    )
+                    if property_node is not None:
+                        narrowed_record = self._resolve_member(
+                            narrowed.child_by_field_name("object"),
+                            self.text(property_node),
+                            narrowed.start_byte,
+                        )
+                        if narrowed_record is not None and (
+                            narrowed_record.class_like
+                            or narrowed_record.binding.kind
+                            in {"class", "interface", "enum", "namespace"}
+                        ):
+                            return narrowed_record, False, False
+                else:
+                    fact = self._type_fact(narrowed)
+                    if fact.kind == "named":
+                        return (
+                            self._type_record_by_id(fact.type_id),
+                            False,
+                            False,
+                        )
             if record.class_like or record.binding.kind == "namespace":
                 return record, True, False
             fact = record.binding.type

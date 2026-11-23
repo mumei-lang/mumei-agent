@@ -3552,3 +3552,45 @@ function f(arr: P[], arr2: P[], tern: boolean, pq: P | Q) {
         source[c.span.start : c.span.end] for c in _calls(report) if c.target == member_pm.id
     }
     assert bound == {"sel.pm()", "selarr[0].pm()"}
+
+def test_instanceof_and_isarray_checks_narrow_the_consequence():
+    # `x instanceof C` narrows x's uses in the consequence to the
+    # checked class; `Array.isArray(w)` narrows to the declared
+    # union's single array constituent. Uses outside the check, an
+    # undeclared class and a union with two array parts stay opaque.
+    source = """
+class P { pm(): void {} }
+class C { cm(): void {} }
+declare const u: P | C;
+declare const mixed: P[] | string[];
+function f(v: P | C, w: P[] | string) {
+    if (v instanceof C) {
+        v.cm();
+    }
+    v.cm();
+    if (Array.isArray(w)) {
+        w[0].pm();
+    }
+    w[0].pm();
+    if (u instanceof C && v instanceof C) {
+        u.cm();
+    }
+    if (u instanceof Missing) {
+        u.cm();
+    }
+    if (Array.isArray(mixed)) {
+        mixed[0].pm();
+    }
+}
+"""
+    report = build_ts_bindings(source)
+    member_pm = _member_bindings(report, "pm", "associated_function")[0]
+    member_cm = _member_bindings(report, "cm", "associated_function")[0]
+    bound_pm = {
+        source[c.span.start : c.span.end] for c in _calls(report) if c.target == member_pm.id
+    }
+    bound_cm = {
+        source[c.span.start : c.span.end] for c in _calls(report) if c.target == member_cm.id
+    }
+    assert bound_pm == {"w[0].pm()"}
+    assert bound_cm == {"v.cm()", "u.cm()"}
