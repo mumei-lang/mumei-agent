@@ -3566,9 +3566,26 @@ class _RustBindings:
                             payload = parts[0].strip()
                             if s_method == "into_inner":
                                 if s_head == "Box":
-                                    return self._spelled_type(
-                                        payload, node.start_byte
+                                    spelled_pair = self._spelled_type(
+                                        payload,
+                                        self._receiver_annotation_position(
+                                            first_arg
+                                        )
+                                        or node.start_byte,
                                     )
+                                    if (
+                                        spelled_pair[0] is None
+                                        and re.fullmatch(
+                                            r"[A-Za-z_][\w:]*\s*<.+>",
+                                            payload.strip(),
+                                            re.DOTALL,
+                                        )
+                                    ):
+                                        # `Box<Option<P>>` yields
+                                        # `Option<P>` — keep the head
+                                        # so `Some(p)` still binds.
+                                        return None, payload
+                                    return spelled_pair
                                 # `Rc::into_inner`/`Arc::into_inner`
                                 # only succeed when the pointer is
                                 # unique — the spell is `Option<P>`.
