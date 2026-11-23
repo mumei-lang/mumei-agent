@@ -14854,6 +14854,13 @@ class _Builder:
                     captured_ids,
                     written_ids,
                 )
+            if value.type == "slice_expression":
+                return collect(
+                    value.child_by_field_name("operand"),
+                    record_ids,
+                    captured_ids,
+                    written_ids,
+                )
             if value.type == "keyed_element":
                 return collect(
                     value.child_by_field_name("value"),
@@ -14961,11 +14968,29 @@ class _Builder:
                     )
                 return False
             if value.type == "call_expression":
-                record_ids.update(
-                    self._struct_argument_field_record_ids(value)
-                )
+                call = self.calls.get(self.node_key(value))
                 function = self._strip_parens(
                     value.child_by_field_name("function")
+                )
+                if (
+                    call is not None
+                    and call.kind == "builtin"
+                    and function is not None
+                    and function.type == "identifier"
+                    and function.text == b"append"
+                ):
+                    append_args = value.child_by_field_name("arguments")
+                    star_write = False
+                    for argument in _children(append_args):
+                        star_write |= collect(
+                            argument,
+                            record_ids,
+                            captured_ids,
+                            written_ids,
+                        )
+                    return star_write
+                record_ids.update(
+                    self._struct_argument_field_record_ids(value)
                 )
                 if function is not None and function.type == "identifier":
                     ref = self.references.get(self.node_key(function))
