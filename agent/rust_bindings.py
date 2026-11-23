@@ -3315,7 +3315,7 @@ class _RustBindings:
                 )
                 if s_head in {"Rc", "Arc", "Box"} and (
                     s_method == "try_unwrap"
-                    or (s_method == "into_inner" and s_head == "Box")
+                    or s_method == "into_inner"
                 ):
                     args_node = node.child_by_field_name("arguments")
                     first_arg = (
@@ -3332,8 +3332,16 @@ class _RustBindings:
                         if len(parts) == 1:
                             payload = parts[0].strip()
                             if s_method == "into_inner":
-                                return self._spelled_type(
-                                    payload, node.start_byte
+                                if s_head == "Box":
+                                    return self._spelled_type(
+                                        payload, node.start_byte
+                                    )
+                                # `Rc::into_inner`/`Arc::into_inner`
+                                # only succeed when the pointer is
+                                # unique — the spell is `Option<P>`.
+                                return (
+                                    None,
+                                    "Option<{}>".format(payload),
                                 )
                             # `Result<P, Rc<P>>` — the Err arm hands
                             # the smart pointer back, so keep its
