@@ -6263,6 +6263,53 @@ fn f() {
         "q.pm()", "r.pm()", "rd.pm()", "rm.pm()", "t.pm()", "wr.pm()",
     ]
 
+def test_guard_accessor_edge_cases_stay_honest():
+    source = """
+struct P;
+struct W<T>(T);
+impl P { fn pm(&self) {} }
+impl<T> W<T> { fn wm(&self) {} }
+fn make() -> RefCell<P> { todo!() }
+fn f(c: Cell<W<P>>, r: Rc<P>, o: Option<W<P>>, mut m: Mutex<P>) {
+    let w = c.into_inner();
+    w.pm();
+    w.wm();
+    let wk = Rc::downgrade(&r);
+    let u = wk.upgrade().unwrap();
+    u.pm();
+    let x = o.unwrap();
+    x.pm();
+    x.wm();
+    let b = make().borrow();
+    b.pm();
+    let l = m.lock().unwrap();
+    l.pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    wm = _bindings(report, "wm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `Cell<W<P>>::into_inner` yields `W<P>` — `w.pm()` must not
+    # steal `P`'s method; `w.wm()` reaches `W<P>`'s own member.
+    assert not bound.get("w.pm()")
+    assert bound.get("w.wm()") == wm.id
+    # `Option<W<P>>::unwrap` keeps `W<P>` the same way.
+    assert not bound.get("x.pm()")
+    assert bound.get("x.wm()") == wm.id
+    # `Rc::downgrade(&r)` spells `Weak<P>` — `upgrade().unwrap()`
+    # reaches `P` through the produced args.
+    assert bound.get("u.pm()") == pm.id
+    # `make().borrow()` reads the factory's `RefCell<P>` return.
+    assert bound.get("b.pm()") == pm.id
+    # `m.lock().unwrap()` keeps `MutexGuard<P>` — `l.pm()` reaches P.
+    assert bound.get("l.pm()") == pm.id
+
+
 def test_guard_accessors_stay_opaque_for_custom_containers():
     source = """
 struct P;
