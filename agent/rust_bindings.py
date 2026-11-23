@@ -3576,13 +3576,18 @@ class _RustBindings:
                                     None,
                                     "Option<{}>".format(payload),
                                 )
-                            # `Result<P, Rc<P>>` — the Err arm hands
-                            # the smart pointer back, so keep its
-                            # full spelling.
+                            # `Result<P, std::rc::Rc<P>>` — the Err
+                            # arm hands the smart pointer back, so
+                            # keep its full spelling. The callee's
+                            # own qualification stays in the name so
+                            # `std::rc::Rc` cannot collide with a
+                            # same-named declared type.
                             return (
                                 None,
                                 "Result<{}, {}<{}>>".format(
-                                    payload, s_head, payload
+                                    payload,
+                                    self.text(s_path).strip(),
+                                    payload,
                                 ),
                             )
             if member is None:
