@@ -33,8 +33,9 @@ aliasing and full lexical binding identity are not modelled. Liveness
 additions require a store span inside and after the sole declaration's
 scope, and exclude unreachable, multiply declared, closure-mentioned,
 address-taken and otherwise unreliable names. Bare returns and grouped
-var/const declarations read all tracked names conservatively; range headers
-do not kill targets because their loops may execute zero times.
+var/const declarations read all tracked names conservatively; assignment-form
+range headers (``for x = range``) do not kill targets because their loops may
+execute zero times.
 """
 
 from __future__ import annotations
@@ -858,8 +859,9 @@ def unused_assignments(
     extractor's unreliable names. Bare returns and grouped var/const
     declarations read all tracked names conservatively. The analysis is
     name-based: it does not model fields, elements, aliasing or full
-    lexical binding identity. Range headers do not kill targets because
-    their loops may execute zero times.
+    lexical binding identity. Assignment-form range headers
+    (``for x = range``) do not kill targets because their loops may
+    execute zero times.
     Every result is a hint for the host's analysis, not a defect verdict.
     """
     if hashlib.sha256(body.encode("utf-8")).hexdigest() != graph.source_sha256:
