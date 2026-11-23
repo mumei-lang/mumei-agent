@@ -14239,7 +14239,10 @@ class _Builder:
         if fact.kind == "function":
             return True
         if fact.kind in {"slice", "array", "map", "chan", "pointer"}:
-            marker = getattr(fact, "type_id", "") or id(fact)
+            marker = (
+                fact.kind,
+                getattr(fact, "type_id", "") or id(fact),
+            )
             if marker in seen:
                 return False
             return self._type_can_carry_func_value(
