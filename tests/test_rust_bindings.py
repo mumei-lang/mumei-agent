@@ -6334,7 +6334,7 @@ fn f() {
         if raw[call.span.start:call.span.end].decode().endswith(".pm()")
         and call.target == pm.id
     )
-    assert resolved == ["inner.pm()", "inner2.pm()", "m.pm()"]
+    assert resolved == ["e.pm()", "inner.pm()", "inner2.pm()", "m.pm()"]
 
 def test_guard_accessors_stay_opaque_for_custom_containers():
     source = """
