@@ -57510,3 +57510,271 @@ def test_imported_named_collection_elided_closure_fails_closed(
     assert "unsupported_expression" in {
         gap.reason for gap in result.gaps
     }, result.gaps
+
+
+def test_interface_slot_closure_values_fail_closed(go_types_helper):
+    files = {
+        "a.go": (
+            "package p\n"
+            "type I interface { Run() int64 }\n"
+            "type J interface { Do() }\n"
+            "type IG interface { Get() int64 }\n"
+            "type O struct { I I }\n"
+            "type OG struct { I IG }\n"
+            "type OW struct { J J }\n"
+            "type OS struct { A []I }\n"
+            "type OM struct { M map[int]I }\n"
+            "type OO struct { O O }\n"
+            "type S struct { F func() int64; V int64 }\n"
+            "type L []int64\n"
+            "type W struct { F func() }\n"
+            "type Runner struct { F func() int64 }\n"
+            "type FS []func() int64\n"
+            "type R []R\n"
+            "func (s S) Run() int64 { return s.F() }\n"
+            "func (s S) Get() int64 { return s.V }\n"
+            "func (l L) Get() int64 { return l[0] }\n"
+            "func (w W) Do() { w.F() }\n"
+            "func (r Runner) Run() int64 { return r.F() }\n"
+            "func (fs FS) Run() int64 { return fs[0]() }\n"
+            "func mk(v *int64) func() int64 {\n"
+            "\treturn func() int64 { return *v }\n"
+            "}\n"
+            "func useO(o O) int64 { return o.I.Run() }\n"
+            "func callI(i I) int64 { return i.Run() }\n"
+            "func F_sf(x, y int64) int64 {\n"
+            "\tv := y; o := O{I: S{F: func() int64 { return v }}}\n"
+            "\tv = x; return o.I.Run()\n"
+            "}\n"
+            "func F_sfnamed(x, y int64) int64 {\n"
+            "\tv := y; g := func() int64 { return v }; o := O{I: S{F: g}}\n"
+            "\tv = x; return o.I.Run()\n"
+            "}\n"
+            "func F_sffactory(x, y int64) int64 {\n"
+            "\tv := y; g := func() func() int64 {\n"
+            "\t\treturn func() int64 { return v }\n"
+            "\t}; o := O{I: S{F: g()}}\n"
+            "\tv = x; return o.I.Run()\n"
+            "}\n"
+            "func F_ptrfac(x, y int64) int64 {\n"
+            "\tv := y; mkp := func() *S {\n"
+            "\t\treturn &S{F: func() int64 { return v }}\n"
+            "\t}; o := O{I: mkp()}\n"
+            "\tv = x; return o.I.Run()\n"
+            "}\n"
+            "func F_fsind(x, y int64) int64 {\n"
+            "\tv := y; g := func() func() int64 {\n"
+            "\t\treturn func() int64 { return v }\n"
+            "\t}; o := O{I: FS{g()}}\n"
+            "\tv = x; return o.I.Run()\n"
+            "}\n"
+            "func F_fslit(x, y int64) int64 {\n"
+            "\tv := y; o := O{I: FS{func() int64 { return v }}}\n"
+            "\tv = x; return o.I.Run()\n"
+            "}\n"
+            "func F_gint(x, y int64) int64 {\n"
+            "\tv := y; g := func() int64 { return v }\n"
+            "\to := OG{I: S{V: g()}}; v = x; return o.I.Get()\n"
+            "}\n"
+            "func F_lint(x, y int64) int64 {\n"
+            "\tv := y; g := func() int64 { return v }\n"
+            "\to := OG{I: L{g()}}; v = x; return o.I.Get()\n"
+            "}\n"
+            "func F_recappend(x int64) int64 {\n"
+            "\t_ = append(R{}, R{}); return x\n"
+            "}\n"
+            "func F_sfvar(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}; o := O{I: s}\n"
+            "\tv = x; return o.I.Run()\n"
+            "}\n"
+            "func F_sfselector(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\to := O{I: S{F: s.F}}; v = x; return o.I.Run()\n"
+            "}\n"
+            "func F_sfmethod(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\to := O{I: Runner{F: s.Get}}; v = x; return o.I.Run()\n"
+            "}\n"
+            "func F_sfcollection(x, y int64) int64 {\n"
+            "\tv := y; fs := FS{func() int64 { return v }}; o := O{I: fs}\n"
+            "\tv = x; return o.I.Run()\n"
+            "}\n"
+            "func F_sfelem(x, y int64) int64 {\n"
+            "\tv := y; ss := []S{{F: func() int64 { return v }}}\n"
+            "\to := O{I: ss[0]}; v = x; return o.I.Run()\n"
+            "}\n"
+            "func F_sfelemi(x, y int64, i int) int64 {\n"
+            "\tv := y; ss := []S{{F: func() int64 { return v }}}\n"
+            "\to := O{I: ss[i]}; v = x; return o.I.Run()\n"
+            "}\n"
+            "func F_sfelemasg(x, y int64) int64 {\n"
+            "\tv := y; ss := []S{{F: func() int64 { return v }}}\n"
+            "\tvar o O; o.I = ss[0]; v = x; return o.I.Run()\n"
+            "}\n"
+            "func F_sfmv(x, y int64) int64 {\n"
+            "\tv := y; o := O{I: S{F: func() int64 { return v }}}\n"
+            "\tf := o.I.Run; v = x; return f()\n"
+            "}\n"
+            "func G_sfret(x, y int64) O {\n"
+            "\tv := y; o := O{I: S{F: func() int64 { return v }}}\n"
+            "\tv = x; return o\n"
+            "}\n"
+            "func F_sfret(x, y int64) int64 {\n"
+            "\treturn G_sfret(x, y).I.Run()\n"
+            "}\n"
+            "func F_sfassign(x, y int64) int64 {\n"
+            "\tv := y; var o O\n"
+            "\to.I = S{F: func() int64 { return v }}\n"
+            "\tv = x; return o.I.Run()\n"
+            "}\n"
+            "func F_sfarg(x, y int64) int64 {\n"
+            "\tv := y; o := O{I: S{F: func() int64 { return v }}}\n"
+            "\tv = x; return useO(o)\n"
+            "}\n"
+            "func F_sfsl(x, y int64) int64 {\n"
+            "\tv := y; o := OS{A: []I{S{F: func() int64 { return v }}}}\n"
+            "\tv = x; return o.A[0].Run()\n"
+            "}\n"
+            "func F_sfmap(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\to := OM{M: map[int]I{0: s}}\n"
+            "\tv = x; return o.M[0].Run()\n"
+            "}\n"
+            "func F_sfnested(x, y int64) int64 {\n"
+            "\tv := y; oo := OO{O: O{I: S{F: func() int64 { return v }}}}\n"
+            "\tv = x; return oo.O.I.Run()\n"
+            "}\n"
+            "func F_sfw(x int64) (w int64) {\n"
+            "\to := OW{J: W{F: func() { w = x }}}\n"
+            "\to.J.Do(); return w\n"
+            "}\n"
+            "func F_sfnow(x, y int64) int64 {\n"
+            "\tv := y; o := O{I: S{F: func() int64 { return v }}}\n"
+            "\treturn o.I.Run()\n"
+            "}\n"
+            "func F_elem(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\to := OS{A: make([]I, 1)}; o.A[0] = s\n"
+            "\tv = x; return o.A[0].Run()\n"
+            "}\n"
+            "func F_append(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}; o := OS{}\n"
+            "\to.A = append(o.A, s); v = x; return o.A[0].Run()\n"
+            "}\n"
+            "func F_map(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\to := OM{M: make(map[int]I)}; o.M[0] = s\n"
+            "\tv = x; return o.M[0].Run()\n"
+            "}\n"
+            "func F_slice(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}; o := OS{}\n"
+            "\to.A = []I{s}; v = x; return o.A[0].Run()\n"
+            "}\n"
+            "func F_localsliceassign(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\tvar a []I; a = []I{s}; v = x; return a[0].Run()\n"
+            "}\n"
+            "func F_localsliceelem(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\ta := make([]I, 1); a[0] = s; v = x; return a[0].Run()\n"
+            "}\n"
+            "func F_localmap(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\tm := map[int]I{}; m[0] = s; v = x; return m[0].Run()\n"
+            "}\n"
+            "func F_localappend(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\ta := append([]I{}, s); v = x; return a[0].Run()\n"
+            "}\n"
+            "func F_appendcopy(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\to := OS{}; a := append(o.A, s); v = x; return a[0].Run()\n"
+            "}\n"
+            "func F_localappendspread(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\ta := append([]I{}, []I{s}...); v = x; return a[0].Run()\n"
+            "}\n"
+            "func F_sfnov(x, y int64) int64 {\n"
+            "\to := O{I: S{V: x}}; return o.I.Run() + y\n"
+            "}\n"
+            "func F_sffac(x, y int64) int64 {\n"
+            "\tv := y; o := O{I: S{F: mk(&v)}}\n"
+            "\tv = x; return o.I.Run()\n"
+            "}\n"
+            "func F_ifarg(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\tv = x; return callI(s)\n"
+            "}\n"
+            "func F_plain(x int64) int64 {\n"
+            "\to := O{I: S{V: x}}; return o.I.Run()\n"
+            "}\n"
+        ),
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, {}),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    unavailable = {
+        "F_sf",
+        "F_sfnamed",
+        "F_sffactory",
+        "F_ptrfac",
+        "F_fsind",
+        "F_fslit",
+        "F_sfvar",
+        "F_sfselector",
+        "F_sfmethod",
+        "F_sfcollection",
+        "F_sfelem",
+        "F_sfelemi",
+        "F_sfelemasg",
+        "F_sfmv",
+        "F_sfret",
+        "F_sfassign",
+        "F_sfarg",
+        "F_sfsl",
+        "F_sfmap",
+        "F_sfnested",
+        "F_sfw",
+        "F_sfnow",
+        "F_elem",
+        "F_append",
+        "F_map",
+        "F_slice",
+        "F_localsliceassign",
+        "F_localsliceelem",
+        "F_localmap",
+        "F_localappend",
+        "F_appendcopy",
+        "F_localappendspread",
+    }
+    for function_name in unavailable:
+        result = named_package(files, snapshot, summaries, function_name)
+        assert not result.available, (
+            function_name,
+            result.return_dependencies,
+            result.gaps,
+        )
+    recappend = named_package(files, snapshot, summaries, "F_recappend")
+    assert not recappend.available, recappend.gaps
+    assert any(
+        gap.reason == "unresolved_or_opaque_call"
+        for gap in recappend.gaps
+    ), recappend.gaps
+    expected = {
+        "F_sfnov": frozenset({0, 1}),
+        "F_sffac": frozenset({0, 1}),
+        "F_ifarg": frozenset({0, 1}),
+        "F_plain": frozenset({0}),
+        "F_gint": frozenset({1}),
+        "F_lint": frozenset({1}),
+    }
+    for function_name, dependencies in expected.items():
+        result = named_package(files, snapshot, summaries, function_name)
+        assert result.available, (function_name, result.gaps)
+        assert result.return_dependencies == dependencies, (
+            function_name,
+            result.return_dependencies,
+        )
