@@ -9460,5 +9460,53 @@ fn g(rc: std::rc::Rc<P>) {
         if raw[c.span.start:c.span.end].decode() == "p.pm()"
     }
     assert g_call_targets == {pm_outer.id}
+    # A qualified `std::rc::Rc::try_unwrap` `Err` arm spells the std
+    # pointer, not the declared `Rc` — `e.rm()` stays unresolved.
+    rm = _bindings(report, "rm", "associated_function")[0]
+    assert not bound.get("e.rm()")
+
+
+def test_scoped_call_return_scope_and_trait_gate():
+    source = """
+struct P;
+struct S;
+struct C;
+impl P { fn pm(&self) {} }
+trait E { fn for_each(&self, f: impl Fn(&S)); }
+impl E for S { fn for_each(&self, f: impl Fn(&S)) {} }
+mod a {
+    pub struct P;
+    impl P { pub fn pm(&self) {} }
+    pub struct W { pub f: P }
+}
+impl C { fn make(x: a::P) -> Vec<P> { vec![] } }
+fn g(b: Box<Vec<P>>, v: Vec<P>, s: S, w: a::W) {
+    let u = Box::into_inner(b);
+    u[0].pm();
+    for p in u { p.pm(); }
+    s.for_each(|x| {});
+    v.iter().for_each(|p| p.pm());
+    C::make(w.f)[0].pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    pms = _bindings(report, "pm", "associated_function")
+    pm_outer, pm_a = pms[0], pms[1]
+    # `Box::into_inner(b)` produces the whole `Vec<P>` — `u[0]` and
+    # `for p in u` still read the element.
+    assert bound.get("u[0].pm()") == pm_outer.id
+    assert bound.get("p.pm()") == pm_outer.id
+    # A `for_each` trait implemented only for `S` must not stop the
+    # std `Iterator::for_each` element typing on `v`.
+    assert bound.get("p.pm()") == pm_outer.id
+    # `C::make`'s return `Vec<P>` was written in the outer scope —
+    # the element resolves there, not in the argument's module `a`.
+    assert bound.get("C::make(w.f)[0].pm()") == pm_outer.id
+    assert bound.get("C::make(w.f)[0].pm()") != pm_a.id
 
 

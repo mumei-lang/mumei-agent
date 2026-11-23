@@ -645,6 +645,7 @@ class _RustBindings:
         self.gaps: list[Gap] = []
         self.scopes: list[_Scope] = []
         self.records: dict[str, _Record] = {}
+        self._trait_impl_heads: dict[str, list[str]] = {}
         self._type_impl_traits: dict[
             str, list[tuple[str, str | None, bool, frozenset[str]]]
         ] = {}
@@ -1471,6 +1472,21 @@ class _RustBindings:
                                     impl_type_params,
                                 )
                             )
+                        if member_trait not in {None, "<unresolved>"}:
+                            impl_head = re.match(
+                                r"[A-Za-z_][\w:]*",
+                                re.sub(
+                                    r"^&\s*(?:'\w+\s*)?(?:mut\s+)?",
+                                    "",
+                                    self.text(member_type_node).strip(),
+                                ),
+                            )
+                            if impl_head is not None:
+                                self._trait_impl_heads.setdefault(
+                                    member_trait, []
+                                ).append(
+                                    impl_head.group(0).rsplit("::", 1)[-1]
+                                )
                 if body is not None:
                     self._scan_associated_container(
                         body,
@@ -2668,22 +2684,75 @@ class _RustBindings:
         return False
 
     def _visible_trait_method(
-        self, name: str, position: int
+        self,
+        name: str,
+        position: int,
+        receiver: "Any | None" = None,
     ) -> bool:
         """A trait in scope declares a method named `name` — a
         `v.name(...)` call may be that trait's extension method,
-        not the std shape the caller's recipe assumes."""
+        not the std shape the caller's recipe assumes. `receiver`
+        narrows the check to impls that can cover that receiver —
+        a trait implemented only for a different declared type
+        cannot be the callee."""
+        container_id = None
+        receiver_head = None
+        if receiver is not None:
+            container_id, _ = self._receiver_type(receiver)
+            receiver_head = (
+                next(
+                    (
+                        b.name
+                        for b in self.bindings
+                        if b.id == container_id
+                    ),
+                    None,
+                )
+                if container_id is not None
+                else None
+            ) or (
+                self._container_head_name(receiver)
+                or self._spelled_receiver_head(receiver)
+                or self._produced_head(receiver)
+            )
         for record in self.records.values():
-            if (
+            if not (
                 record.member_trait is not None
                 and record.binding.name == name
                 and record.binding.kind == "associated_function"
             ):
-                trait = self.records.get(record.member_trait)
-                if trait is not None and self._trait_visible(
-                    trait, position
+                continue
+            if receiver is not None:
+                if record.member_of == record.member_trait:
+                    # A trait-declared member applies when the trait
+                    # is implemented for a type whose head matches
+                    # the receiver's — `impl Each for Vec<P>` covers
+                    # `v` but not `v.iter()`'s `Iter`.
+                    if container_id is not None and any(
+                        trait_id == record.member_trait
+                        for trait_id, _, _, _ in self._type_impl_traits.get(
+                            container_id, ()
+                        )
+                    ):
+                        pass
+                    elif (
+                        receiver_head is None
+                        or receiver_head
+                        not in self._trait_impl_heads.get(
+                            record.member_trait, ()
+                        )
+                    ):
+                        continue
+                elif not (
+                    record.member_of in {None, "<unresolved>"}
+                    or record.member_of == container_id
                 ):
-                    return True
+                    continue
+            trait = self.records.get(record.member_trait)
+            if trait is not None and self._trait_visible(
+                trait, position
+            ):
+                return True
         return False
 
     def _resolve_trait_node(self, trait_node: Any) -> "_Record | None":
@@ -12512,7 +12581,9 @@ class _RustBindings:
                     )
                     is None
                     and not self._visible_trait_method(
-                        method_name, closure_callee.start_byte
+                        method_name,
+                        closure_callee.start_byte,
+                        closure_callee.child_by_field_name("value"),
                     )
                     and any(
                         argument.type == "closure_expression"
