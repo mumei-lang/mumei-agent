@@ -242,6 +242,69 @@ def test_wrong_schedule_history_head_leaves_log_unchanged(
     assert history_log.read_bytes() == original
 
 
+def test_wrong_history_head_preserves_export_before_dispatch(
+    inputs, tmp_path, capsys
+):
+    requirement_list = _requirement_list(tmp_path)
+    core = _accept_list_core(tmp_path, "accepted")
+    export = tmp_path / "promotable"
+    setup_args = args_for(
+        inputs,
+        core=str(core),
+        core_requirement_list=str(requirement_list),
+        export_evidence_acceptance=str(export),
+    )
+    result = verify_schedule_module._run_schedule_result(setup_args)
+    export_names = (
+        "requirement-list.json",
+        "evidence.json",
+        "acceptance.json",
+    )
+    original_export = {
+        name: (export / name).read_bytes() for name in export_names
+    }
+    history_log = tmp_path / "schedule-history.jsonl"
+    append_plan_history(str(history_log), result.plans[0])
+    original_log = history_log.read_bytes()
+    marker = tmp_path / "attempt-dispatched"
+    argv_map = tmp_path / "marker-argv.json"
+    argv_map.write_text(
+        json.dumps({
+            "alpha": [
+                ATTEMPT_PY,
+                "-c",
+                (
+                    "from pathlib import Path; import sys; "
+                    "Path(sys.argv[1]).write_text('dispatched')"
+                ),
+                str(marker),
+            ],
+        }),
+        encoding="utf-8",
+    )
+    args = args_for(
+        inputs,
+        argv_map=str(argv_map),
+        core=str(core),
+        core_requirement_list=str(requirement_list),
+        export_evidence_acceptance=str(export),
+        history_log=str(history_log),
+        expected_history_head="0" * 64,
+    )
+
+    with pytest.raises(SystemExit) as failure:
+        main_schedule(args)
+
+    output = capsys.readouterr()
+    assert failure.value.code == 1
+    assert "plan history head mismatch" in output.err
+    assert history_log.read_bytes() == original_log
+    assert {
+        name: (export / name).read_bytes() for name in export_names
+    } == original_export
+    assert not marker.exists()
+
+
 def test_run_schedule_accepts_namespace_without_history_attributes(inputs):
     args = args_for(inputs)
     del args.history_log

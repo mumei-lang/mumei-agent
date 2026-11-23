@@ -23,11 +23,15 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from agent.attempt_schedule import (
-    AttemptScheduleResult,
     MAX_SCHEDULE_ATTEMPTS,
+    AttemptScheduleResult,
     run_attempt_schedule,
 )
-from agent.plan_history_log import append_plan_histories, append_plan_history
+from agent.plan_history_log import (
+    append_plan_histories,
+    append_plan_history,
+    read_plan_history,
+)
 from agent.verification_planner import (
     SOURCE_INPUT_FORMAT,
     AdapterRegistry,
@@ -718,6 +722,10 @@ def main_schedule(args: argparse.Namespace | None = None) -> int:
                 raise ValueError(
                     "--output must not overwrite a declared input"
                 )
+        if history_log is not None:
+            read_plan_history(
+                history_log, expected_head=expected_history_head
+            )
         result = _run_schedule_result(args)
         if history_log is not None:
             digests = append_plan_histories(
