@@ -1,5 +1,7 @@
 import hashlib
 import json
+import os
+import signal
 import shutil
 import socket
 import sys
@@ -1501,6 +1503,35 @@ def test_invalid_pinned_executable_paths_are_not_dispatched(tmp_path, path_kind)
             executable_sha256_pins=(("alpha", "a" * 64),)
         ),
     )
+
+    assert result.entries[0].terminal_state == NOT_DISPATCHED
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or not hasattr(os, "mkfifo") or not hasattr(signal, "SIGALRM"),
+    reason="named pipe checks require POSIX",
+)
+def test_pinned_fifo_is_not_dispatched_without_blocking(tmp_path):
+    executable = tmp_path / "pinned-fifo"
+    os.mkfifo(executable)
+
+    def fail_if_blocked(_signum, _frame):
+        raise AssertionError("opening a pinned FIFO blocked")
+
+    previous_handler = signal.signal(signal.SIGALRM, fail_if_blocked)
+    signal.alarm(3)
+    try:
+        result = schedule(
+            registry_with("alpha"),
+            ("alpha",),
+            {"alpha": (str(executable),)},
+            policy=policy(
+                executable_sha256_pins=(("alpha", "a" * 64),)
+            ),
+        )
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous_handler)
 
     assert result.entries[0].terminal_state == NOT_DISPATCHED
 

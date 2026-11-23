@@ -84,15 +84,29 @@ def _adapter_environment(plan: VerificationPlan) -> dict[str, str] | None:
 def _executable_matches_pin(path: str, digest: str) -> bool:
     if not isinstance(path, str) or not os.path.isabs(path):
         return False
+    descriptor = None
     try:
-        if not stat.S_ISREG(os.stat(path).st_mode):
+        descriptor = os.open(
+            path,
+            os.O_RDONLY
+            | os.O_NONBLOCK
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
             return False
         hasher = hashlib.sha256()
-        with open(path, "rb") as executable:
+        with os.fdopen(descriptor, "rb") as executable:
+            descriptor = None
             while chunk := executable.read(1024 * 1024):
                 hasher.update(chunk)
     except (OSError, ValueError):
         return False
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
     return hasher.hexdigest() == digest
 
 
