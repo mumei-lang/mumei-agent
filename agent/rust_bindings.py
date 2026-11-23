@@ -104,14 +104,12 @@ _EXTRACT_IF_ELEMENT_CONTAINERS = _SET_CONTAINER_NAMES | {
     "LinkedList"
 }
 # Methods that yield `&mut [T]` views of the container —
-# `v.leak()`, `q.make_contiguous()`, `v.rotate_left(n)`/
-# `rotate_right(n)` (slice rotation, stable via Vec/VecDeque
-# deref). Each names the container heads it exists on.
+# `v.leak()`, `q.make_contiguous()` — `rotate_left`/
+# `rotate_right` are absent: std returns `()` from them.
+# Each name names the container heads it exists on.
 _MUT_SLICE_VIEW_METHODS = {
     "leak": {"Vec"},
     "make_contiguous": {"VecDeque"},
-    "rotate_left": {"Vec", "VecDeque"},
-    "rotate_right": {"Vec", "VecDeque"},
 }
 # `BTreeMap::first_entry()`/`last_entry()` yield
 # `Option<OccupiedEntry<K, V>>` — `Some(e)` binds the Occupied
@@ -4443,31 +4441,37 @@ class _RustBindings:
                                 )
                     if (
                         method_name in _MAP_BOUND_ENTRY_METHODS
-                        and self._container_head_name(
-                            callee.child_by_field_name("value")
+                        and (
+                            self._container_head_name(
+                                callee.child_by_field_name("value")
+                            )
+                            == "BTreeMap"
+                            or self._expanded_container_head(
+                                callee.child_by_field_name("value")
+                            )
+                            == "BTreeMap"
                         )
-                        == "BTreeMap"
                     ):
-                        bound_node = self._receiver_type_node(
+                        bound_args = self._map_spelled_args(
                             callee.child_by_field_name("value")
-                        )
-                        bound_args = (
-                            self._generic_head_args(
-                                bound_node, node.start_byte
-                            )[0]
-                            if bound_node is not None
-                            else None
                         )
                         if bound_args:
-                            # `Option<OccupiedEntry<K, V>>` —
-                            # verbatim spelling so `Some(e)` reads
-                            # the OccupiedEntry payload head.
-                            return (
-                                None,
-                                "Option<OccupiedEntry<"
-                                + bound_args
-                                + ">>",
+                            bound_parts = self._type_arg_list(
+                                bound_args
                             )
+                            if len(bound_parts) >= 2:
+                                # `Option<OccupiedEntry<K, V>>` —
+                                # verbatim spelling so `Some(e)`
+                                # reads the OccupiedEntry payload
+                                # head.
+                                return (
+                                    None,
+                                    "Option<OccupiedEntry<"
+                                    "{}, {}>>".format(
+                                        bound_parts[0].strip(),
+                                        bound_parts[1].strip(),
+                                    ),
+                                )
                     entry_binding = re.fullmatch(
                         r"(OccupiedEntry|VacantEntry)\s*<(.+)>",
                         (receiver[1] or "").strip(),
@@ -11237,7 +11241,19 @@ class _RustBindings:
             and self._normalize_identifier(
                 payload_head.group(0).split("::")[-1]
             )
-            in _TRY_HEADS | set(_PRELUDE_ENTRY_VARIANTS.values())
+            in set(_PRELUDE_ENTRY_VARIANTS.values())
+        ):
+            # `OccupiedEntry<K, V>`/`VacantEntry<K, V>` are spelled
+            # by the map-entry machinery — a same-named user type
+            # must not steal the head: `e.get()` still reads the
+            # entry templates, not the user's members.
+            return [(None, payload)]
+        if (
+            payload_head is not None
+            and self._normalize_identifier(
+                payload_head.group(0).split("::")[-1]
+            )
+            in _TRY_HEADS
             and type_id is None
         ):
             # `Result<Option<P>, E>`'s `Ok` payload is `Option<P>`
