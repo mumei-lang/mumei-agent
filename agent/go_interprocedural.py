@@ -14361,7 +14361,10 @@ class _Builder:
                 result_type = (
                     self._composite_literal_member_type_for_value(value)
                 )
-            if not self._type_can_carry_func_value(result_type):
+            if (
+                result_type is not None
+                and not self._type_can_carry_func_value(result_type)
+            ):
                 return False
             function = self._strip_parens(
                 value.child_by_field_name("function")

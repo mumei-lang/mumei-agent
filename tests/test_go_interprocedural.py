@@ -57554,6 +57554,16 @@ def test_interface_slot_closure_values_fail_closed(go_types_helper):
             "\t}; o := O{I: S{F: g()}}\n"
             "\tv = x; return o.I.Run()\n"
             "}\n"
+            "func F_fsind(x, y int64) int64 {\n"
+            "\tv := y; g := func() func() int64 {\n"
+            "\t\treturn func() int64 { return v }\n"
+            "\t}; o := O{I: FS{g()}}\n"
+            "\tv = x; return o.I.Run()\n"
+            "}\n"
+            "func F_fslit(x, y int64) int64 {\n"
+            "\tv := y; o := O{I: FS{func() int64 { return v }}}\n"
+            "\tv = x; return o.I.Run()\n"
+            "}\n"
             "func F_gint(x, y int64) int64 {\n"
             "\tv := y; g := func() int64 { return v }\n"
             "\to := OG{I: S{V: g()}}; v = x; return o.I.Get()\n"
@@ -57694,6 +57704,8 @@ def test_interface_slot_closure_values_fail_closed(go_types_helper):
         "F_sf",
         "F_sfnamed",
         "F_sffactory",
+        "F_fsind",
+        "F_fslit",
         "F_sfvar",
         "F_sfselector",
         "F_sfmethod",
