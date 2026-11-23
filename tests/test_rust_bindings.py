@@ -8253,3 +8253,37 @@ fn f(m: HashMap<u8, P>) {
         "v.insert(P).pm()",
     ):
         assert bound.get(name) == pm.id, name
+def test_first_entry_and_rotate_bind_payloads():
+    source = """
+use std::collections::BTreeMap;
+struct P;
+impl P { fn pm(&self) {} }
+fn f(m: BTreeMap<u8, P>, v: Vec<P>, q: std::collections::VecDeque<P>) {
+    if let Some(e) = m.first_entry() {
+        e.insert(P).pm();
+        e.get().pm();
+    }
+    if let Some(l) = m.last_entry() {
+        l.get().pm();
+    }
+    let s = v.rotate_left(1);
+    s[0].pm();
+    let r = q.rotate_right(2);
+    r[0].pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    for name in (
+        "e.insert(P).pm()",
+        "e.get().pm()",
+        "l.get().pm()",
+        "s[0].pm()",
+        "r[0].pm()",
+    ):
+        assert bound.get(name) == pm.id, name
