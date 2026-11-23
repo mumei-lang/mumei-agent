@@ -7169,6 +7169,30 @@ class _RustBindings:
                             None,
                         )
                     return _UNKNOWN, inner_slice.group(1).strip()
+                # `for z in y` where `y` spells a borrowed element
+                # (`v.chunks(n)` binds `&P`) — `z` is the borrowed
+                # item, so peel the `&` like `iter`/`iter_mut` do.
+                peeled = re.fullmatch(
+                    r"&\s*(?:'\w+\s+)?(?:mut\s+)?([^\[\s].*)",
+                    elem_args.strip(),
+                )
+                if peeled is not None:
+                    tid, _ = self._spelled_type(
+                        peeled.group(1).strip(), iterator.start_byte
+                    )
+                    if tid is not None:
+                        name = next(
+                            (
+                                b.name
+                                for b in self.bindings
+                                if b.id == tid
+                            ),
+                            "",
+                        )
+                        return (
+                            TypeFact("named", name, 0, None, tid),
+                            None,
+                        )
                 return _UNKNOWN, elem_args.strip()
         # Spelled element names on `it` (`let it = v.iter()`) were
         # written in `it`'s annotation — resolve them there.
