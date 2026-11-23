@@ -56141,9 +56141,10 @@ def test_map_element_function_field_closures(go_types_helper):
     declarations = (
         "type S struct { F func() int64 }\n"
         "type A struct { F func() int64; B []int64 }\n"
-        "type W struct { M map[int]S; MM map[int]map[int]S }\n"
+        "type W struct { M map[int]S; MM map[int]map[int]S; MA map[int]A }\n"
         "func ap(cb func() int64) int64 { return cb() }\n"
         "func use(e S) int64 { return e.F() }\n"
+        "func usea(e A) int64 { return e.F() }\n"
         "func FLiteral(x, y int64) int64 {\n"
         "\tv := y; m := map[int]S{0: {F: func() int64 { return v }}}\n"
         "\tv = x; return m[0].F()\n"
@@ -56194,6 +56195,10 @@ def test_map_element_function_field_closures(go_types_helper):
         "\tv := y; s := W{MM: map[int]map[int]S{0: {1: {F: func() int64 { return v }}}}}\n"
         "\tv = x; return use(s.MM[0][1])\n"
         "}\n"
+        "func FMapAliasFieldArg(x, y int64) int64 {\n"
+        "\tv := y; s := W{MA: map[int]A{0: {F: func() int64 { return v }}}}\n"
+        "\tv = x; return usea(s.MA[0])\n"
+        "}\n"
     )
     files = {"a.go": "package p\n" + declarations}
     snapshot = _snapshot_for(go_types_helper, files)
@@ -56233,12 +56238,16 @@ def test_map_element_function_field_closures(go_types_helper):
         files, snapshot, summaries, "FNestedMapFieldArg"
     )
     assert not nested_map_elem.available, nested_map_elem.gaps
+    # An element whose struct carries an aliasing field stays closed
+    # as an argument too — matching the `e := m[0]` copy boundary.
+    alias_elem_arg = named_package(
+        files, snapshot, summaries, "FMapAliasFieldArg"
+    )
+    assert not alias_elem_arg.available, alias_elem_arg.gaps
 
 
-def test_map_element_value_fact_stops_at_container_elements(
-    go_types_helper,
-):
-    del go_types_helper  # pure fact shapes — no compiler needed
+def test_map_element_value_fact_stops_at_container_elements():
+    # Pure fact shapes — no compiler needed.
     struct_fact = GoType("named", "S", 0, None, "p.S")
     slice_elem = GoType(
         "slice", "", 0, None, "", elem=struct_fact

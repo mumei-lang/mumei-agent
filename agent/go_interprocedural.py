@@ -16072,10 +16072,19 @@ class _Builder:
                     and self._struct_value_fact(root_binding.type)
                     is not None
                     and root_member is not None
-                    and getattr(root_member.type, "kind", None)
-                    in (
-                        {"slice", "array"}
-                        | ({"map"} if index_depth == 1 else set())
+                    and (
+                        getattr(root_member.type, "kind", None)
+                        in {"slice", "array"}
+                        or (
+                            index_depth == 1
+                            and getattr(root_member.type, "kind", None)
+                            == "map"
+                            and getattr(root_member.type, "elem", None)
+                            is not None
+                            and self._alias_free_value_struct_supported(
+                                root_member.type.elem
+                            )
+                        )
                     )
                     and not self._scalar_container_field_pointer_crossing(
                         root
