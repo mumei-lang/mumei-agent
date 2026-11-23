@@ -2834,6 +2834,33 @@ class _RustBindings:
             record = _resolve(record.alias_node) or record
         return record
 
+    def _impl_target_covers(
+        self,
+        type_node: "Any | None",
+        head: "str | None",
+        container_id: "str | None",
+        position: int,
+    ) -> bool:
+        """Whether an impl whose target node spells `head` can cover a
+        receiver whose declared container is `container_id`. A locally
+        declared target (`struct ChunksExact`) must be the receiver's
+        own type — a same-named std type the receiver produces is not
+        it. An unresolved import (`use std::slice::ChunksExact`) keeps
+        the head name, so the spelled match stands."""
+        target = self._impl_target_record(type_node, position)
+        if target is None:
+            return True
+        if target.binding.id == container_id:
+            return True
+        if target.binding.kind in {
+            "struct",
+            "enum",
+            "union",
+            "type",
+        }:
+            return False
+        return target.binding.name == head
+
     def _impl_head_name(self, impl: "_Record") -> "str | None":
         """The impl TARGET's head name, normalized like
         `_trait_impl_heads`: `[`/`[T;N]` targets key as `[slice]`,
@@ -3198,17 +3225,8 @@ class _RustBindings:
                         pass
                     elif not any(
                         head in receiver_heads
-                        and (
-                            self._impl_target_record(tnode, position)
-                            is None
-                            or self._impl_target_record(
-                                tnode, position
-                            ).binding.name
-                            == head
-                            or self._impl_target_record(
-                                tnode, position
-                            ).binding.id
-                            == container_id
+                        and self._impl_target_covers(
+                            tnode, head, container_id, position
                         )
                         and self._impl_args_cover(
                             args, params, home, recv_args, position
@@ -3222,16 +3240,13 @@ class _RustBindings:
                     # An impl on an undeclared target (`impl T for
                     # [P]`/`for Vec<P>`) — its head and concrete args
                     # must both cover the receiver.
-                    target_record = self._impl_target_record(
-                        record.self_type_node, position
-                    )
                     if (
                         self._impl_head_name(record) not in receiver_heads
-                        or (
-                            target_record is not None
-                            and target_record.binding.name
-                            != self._impl_head_name(record)
-                            and target_record.binding.id != container_id
+                        or not self._impl_target_covers(
+                            record.self_type_node,
+                            self._impl_head_name(record),
+                            container_id,
+                            position,
                         )
                         or not self._impl_args_cover(
                             record.member_impl_args,
