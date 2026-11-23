@@ -8974,3 +8974,124 @@ fn f() {
     }
     assert bound.get("slice[0].pm()") == pm.id
     assert bound.get("slice2[0].pm()") == pm.id
+
+def test_entry_variant_bindings_bind_payloads():
+    source = """
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+struct P;
+impl P { fn pm(&self) {} }
+fn f(m: HashMap<u8, P>) {
+    if let Entry::Occupied(mut e) = m.entry(1) {
+        e.insert(P).pm();
+        e.get().pm();
+        e.get_mut().pm();
+        e.remove().pm();
+        let (k2, v2) = e.remove_entry();
+        v2.pm();
+        if let Entry::Vacant(v3) = m.entry(4) { v3.insert(P).pm(); }
+    }
+    if let Entry::Vacant(vv) = m.entry(2) {
+        vv.insert(P).pm();
+        vv.into_mut().pm();
+    }
+    match m.entry(3) {
+        Entry::Occupied(o) => { o.get().pm(); }
+        Entry::Vacant(v) => { v.insert(P).pm(); }
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    for name in (
+        "e.insert(P).pm()",
+        "e.get().pm()",
+        "e.get_mut().pm()",
+        "e.remove().pm()",
+        "v2.pm()",
+        "v3.insert(P).pm()",
+        "vv.insert(P).pm()",
+        "vv.into_mut().pm()",
+        "o.get().pm()",
+        "v.insert(P).pm()",
+    ):
+        assert bound.get(name) == pm.id, name
+
+
+def test_entry_args_resolve_in_the_annotation_scope() -> None:
+    source = """
+mod m {
+    pub struct P;
+    pub struct S { pub map: std::collections::HashMap<u32, P> }
+}
+struct P;
+impl P { fn pm(&self) {} }
+fn f(s: m::S) {
+    if let std::collections::hash_map::Entry::Occupied(e) = s.map.entry(1) {
+        e.get().pm();
+    }
+}
+type M = std::collections::HashMap<u32, P>;
+fn f2(mm: M) {
+    if let std::collections::hash_map::Entry::Occupied(e2) = mm.entry(1) {
+        e2.get().pm();
+    }
+}
+struct G<P> { pub map: std::collections::HashMap<u32, P> }
+fn f3(g: G<P>) {
+    if let std::collections::hash_map::Entry::Occupied(e3) = g.map.entry(1) {
+        e3.get().pm();
+    }
+}
+fn f4(h: std::collections::HashMap<u32, P, u8>) {
+    if let std::collections::hash_map::Entry::Occupied(e4) = h.entry(1) {
+        e4.get().pm();
+    }
+}
+fn f5(m2: std::collections::HashMap<u32, Option<P>>) {
+    if let std::collections::hash_map::Entry::Occupied(e5) = m2.entry(1) {
+        if let Some(p) = e5.get() { p.pm(); }
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `s.map` spells `HashMap<u32, P>` in `mod m` — `e.get()` yields
+    # `m::P`, which declares no `pm`.
+    assert not bound.get("e.get().pm()")
+    for name in (
+        "e2.get().pm()",
+        "e3.get().pm()",
+        "e4.get().pm()",
+        "p.pm()",
+    ):
+        assert bound.get(name) == pm.id, name
+
+
+def test_entry_into_entry_is_not_a_std_method() -> None:
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(m: std::collections::HashMap<u32, P>) {
+    if let std::collections::hash_map::Entry::Occupied(e) = m.entry(1) {
+        e.into_entry().pm();
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    assert not bound.get("e.into_entry().pm()")
