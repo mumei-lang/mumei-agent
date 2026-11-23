@@ -49651,6 +49651,133 @@ def test_bare_return_named_closure_result_resolves_current_captures(
         )
 
 
+def test_closures_handed_to_opaque_callees(go_types_helper):
+    files = {
+        "a.go": (
+            "package p\n"
+            "type K interface {\n"
+            "\tSet(func() int64); Get() int64; Do(func())\n"
+            "\tHold(func()); Fire(); Put(S)\n"
+            "}\n"
+            "type S struct { F func() int64 }\n"
+            "func F_setlit(x, y int64, k K) int64 {\n"
+            "\tv := y; k.Set(func() int64 { return v }); v = x\n"
+            "\treturn k.Get()\n"
+            "}\n"
+            "func F_setnamed(x, y int64, k K) int64 {\n"
+            "\tv := y; g := func() int64 { return v }; k.Set(g); v = x\n"
+            "\treturn k.Get()\n"
+            "}\n"
+            "func F_setfield(x, y int64, k K) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\tk.Set(s.F); v = x; return k.Get()\n"
+            "}\n"
+            "func F_putstruct(x, y int64, k K) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\tk.Put(s); v = x; return k.Get()\n"
+            "}\n"
+            "func F_getafter(x, y int64, k K) int64 {\n"
+            "\tv := y; k.Set(func() int64 { return v }); v = x\n"
+            "\tr := k.Get(); return r\n"
+            "}\n"
+            "func F_cbset(x, y int64, set func(func() int64), get func() int64) int64 {\n"
+            "\tv := y; set(func() int64 { return v }); v = x\n"
+            "\treturn get()\n"
+            "}\n"
+            "var opaqueHold func(func() int64)\n"
+            "var opaqueFire func() int64\n"
+            "func F_pkgvar(x, y int64) int64 {\n"
+            "\tv := y; opaqueHold(func() int64 { return v }); v = x\n"
+            "\treturn opaqueFire()\n"
+            "}\n"
+            "func F_replayw(x int64, k K) (w int64) {\n"
+            "\th := func() { w = x }; k.Hold(h); w = 0; k.Fire()\n"
+            "\treturn w\n"
+            "}\n"
+            "func F_replaylitw(x int64, k K) (w int64) {\n"
+            "\tk.Hold(func() { w = x }); w = 0; k.Fire(); return w\n"
+            "}\n"
+            "func F_replaycap(x, y int64, k K) (w int64) {\n"
+            "\tx2 := x; k.Hold(func() { w = x2 }); x2 = y\n"
+            "\tk.Fire(); return w\n"
+            "}\n"
+            "func F_cbreplay(x int64, hold func(func()), fire func()) (w int64) {\n"
+            "\thold(func() { w = x }); w = 0; fire(); return w\n"
+            "}\n"
+            "func fireK(k K) { k.Fire() }\n"
+            "func F_localfire(x int64, k K) (w int64) {\n"
+            "\tk.Hold(func() { w = x }); w = 0; fireK(k); return w\n"
+            "}\n"
+            "func F_loopwrite(x int64, k K) (w int64) {\n"
+            "\tfor i := 0; i < 2; i++ { k.Hold(func() { w = x }) }\n"
+            "\treturn w\n"
+            "}\n"
+            "func F_deferwrite(x int64, k K) (w int64) {\n"
+            "\tdefer k.Fire(); k.Hold(func() { w = x }); return w\n"
+            "}\n"
+            "func F_dowrite(x int64, k K) (w int64) {\n"
+            "\tk.Do(func() { w = x }); return w\n"
+            "}\n"
+            "func F_cbdo(x int64, do func(func())) (w int64) {\n"
+            "\tdo(func() { w = x }); return w\n"
+            "}\n"
+            "func F_noafter(x, y int64, k K) int64 {\n"
+            "\tv := y; k.Set(func() int64 { return v }); v = x; return v\n"
+            "}\n"
+            "func F_setptr(x, y int64, k K) int64 {\n"
+            "\tv := y; p := &v; _ = p\n"
+            "\tk.Set(func() int64 { return v }); v = x; return k.Get()\n"
+            "}\n"
+        )
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, {}),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    unavailable = {
+        "F_replayw",
+        "F_replaylitw",
+        "F_replaycap",
+        "F_cbreplay",
+        "F_localfire",
+        "F_loopwrite",
+        "F_deferwrite",
+    }
+    for function_name in unavailable:
+        result = named_package(files, snapshot, summaries, function_name)
+        assert not result.available, (
+            function_name,
+            result.return_dependencies,
+            result.gaps,
+        )
+        assert any(
+            gap.reason == "unsupported_expression" for gap in result.gaps
+        ), (function_name, result.gaps)
+
+    expected = {
+        "F_setlit": frozenset({0, 1, 2}),
+        "F_setnamed": frozenset({0, 1, 2}),
+        "F_setfield": frozenset({0, 1, 2}),
+        "F_putstruct": frozenset({0, 1, 2}),
+        "F_getafter": frozenset({0, 1, 2}),
+        "F_cbset": frozenset({0, 1, 2, 3}),
+        "F_pkgvar": frozenset({0, 1}),
+        "F_dowrite": frozenset({0}),
+        "F_cbdo": frozenset({0}),
+        "F_noafter": frozenset({0}),
+        "F_setptr": frozenset({0, 1, 2}),
+    }
+    for function_name, dependencies in expected.items():
+        result = named_package(files, snapshot, summaries, function_name)
+        assert result.available, (function_name, result.gaps)
+        assert result.return_dependencies == dependencies, (
+            function_name,
+            result.return_dependencies,
+        )
+
+
 def test_parenthesized_rhs_binds_closure_records(go_types_helper):
     files = {
         "a.go": (
