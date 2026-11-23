@@ -3105,6 +3105,15 @@ class _RustBindings:
                 or self._spelled_receiver_head(receiver)
                 or self._produced_head(receiver)
             )
+            if receiver_head is None and recv_args is not None:
+                # `v[0]` on `Vec<String>`/`a` iterating it — the
+                # spelled args hold the element's own type (`str`,
+                # `String`), which heads a bare spelled receiver.
+                bare = re.fullmatch(
+                    r"(?:'\w+\s+)?[A-Za-z_][\w:]*", recv_args.strip()
+                )
+                if bare is not None:
+                    receiver_head = bare.group(0).rsplit("::", 1)[-1]
             if receiver_head is not None:
                 receiver_heads.add(receiver_head)
             # `impl T for [P]` reaches `Vec`/`VecDeque`/… receivers
@@ -3193,6 +3202,8 @@ class _RustBindings:
                     receiver_heads.add(
                         "".join(part.title() for part in mname.split("_"))
                     )
+        trait_default = None
+        covered = None
         for record in self.records.values():
             if not (
                 record.member_trait is not None
@@ -3265,8 +3276,22 @@ class _RustBindings:
             if trait is not None and self._trait_visible(
                 trait, position
             ):
-                return record
-        return None
+                if record.member_of == record.member_trait:
+                    # A trait-declared default only applies when no
+                    # concrete impl member covers — remember it and
+                    # keep looking for the impl's own member.
+                    if trait_default is not None:
+                        # Defaults of several in-scope traits are
+                        # equally ambiguous.
+                        return None
+                    trait_default = record
+                else:
+                    if covered is not None:
+                        # Several impls spell `name` for covering
+                        # heads — Rust reports ambiguity.
+                        return None
+                    covered = record
+        return covered if covered is not None else trait_default
 
     def _resolve_trait_node(self, trait_node: Any) -> "_Record | None":
         """Trait record for a UFCS `as` qualifier — plain, scoped
@@ -3533,6 +3558,17 @@ class _RustBindings:
                     )
                     if inner is not None:
                         return inner, elem_id, elem_args
+        if record is None and type_id is None:
+            # Spelled receivers never produce a record (`s: String`,
+            # `v[0]` on `Vec<String>`) — a trait impl whose head
+            # covers the spelled receiver still applies. Resolved
+            # containers go through `_member_record`'s specialization
+            # and ambiguity rules instead.
+            cover = self._covering_trait_member(
+                name, node.start_byte, value
+            )
+            if cover is not None:
+                return cover, type_id, impl_args
         return record, type_id, impl_args
 
     def _unwrapped(
@@ -3906,7 +3942,7 @@ class _RustBindings:
                 # the whole `Vec<P>` type, not a container's element
                 # list — peel the head so `v[0]` is `P`.
                 elem_args = whole.group(1).strip()
-            if "," in elem_args:
+            if len(self._type_arg_list(elem_args)) > 1:
                 return None, None
             index = children[1] if len(children) > 1 else None
             while index is not None and index.type == "parenthesized_expression":
@@ -6327,7 +6363,21 @@ class _RustBindings:
             return None, elem_args
         # `_spelled_type` follows `use m::P` imports and scoped
         # `m::P` spellings — a bare `_lookup` would miss both.
-        return self._spelled_type(elem_args, position)
+        resolved = self._spelled_type(elem_args, position)
+        if resolved[0] is None and resolved[1] is None:
+            # `String`/`str`/`i32` elements resolve to no declared
+            # record — keep the spelled name so `impl T for String`
+            # /`for str` impl heads still cover the receiver.
+            prelude = re.fullmatch(
+                r"[A-Za-z_][\w:]*", elem_args.strip()
+            )
+            if (
+                prelude is not None
+                and prelude.group(0).rsplit("::", 1)[-1]
+                in _PRELUDE_TYPE_NAMES
+            ):
+                return None, elem_args.strip()
+        return resolved
 
     def _is_map_container(
         self, container_id: str | None, node: Any | None
@@ -7402,6 +7452,16 @@ class _RustBindings:
             spelled = args.strip() or None
             if spelled is None:
                 return None, None
+            if not self._verbatim_annotation_args(receiver):
+                # `make().unwrap()` produces the whole `Vec<P>`
+                # type spelled — peel the container head so the
+                # chunk element is `P`, not `Vec<P>`. An annotated
+                # `Vec<Vec<P>>` element stays whole.
+                whole = re.fullmatch(
+                    r"[A-Za-z_][\w:]*\s*<(.+)>", spelled, re.DOTALL
+                )
+                if whole is not None:
+                    spelled = whole.group(1).strip()
             # The element is a borrowed slice — `&[P]`/`&mut [P]`
             # reads `P` at the index/iter sites that consume it.
             prefix = (
@@ -8295,6 +8355,19 @@ class _RustBindings:
                 # not `&[P]`.
                 return _UNKNOWN, None
             spelled = args.strip() or None
+            if (
+                spelled is not None
+                and not self._verbatim_annotation_args(receiver)
+            ):
+                # `make().unwrap()` produces the whole `Vec<P>`
+                # type spelled — peel the container head so the
+                # chunk element is `P`, not `Vec<P>`. An annotated
+                # `Vec<Vec<P>>` element stays whole.
+                whole = re.fullmatch(
+                    r"[A-Za-z_][\w:]*\s*<(.+)>", spelled, re.DOTALL
+                )
+                if whole is not None:
+                    spelled = whole.group(1).strip()
             prefix = (
                 "&mut "
                 if method in _ITER_CHUNK_MUT_METHODS
@@ -9071,7 +9144,7 @@ class _RustBindings:
             # whole `Vec<P>` type — peel the head so `for p in v`
             # binds `P`.
             elem_args = whole.group(1).strip()
-        if "," in elem_args:
+        if len(self._type_arg_list(elem_args)) > 1:
             return _UNKNOWN, None
         # Iterating a map yields (K, V) pairs — index typing keeps
         # only the value type, so the pair's shape is unpinned here.

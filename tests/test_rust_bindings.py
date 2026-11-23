@@ -5547,9 +5547,12 @@ fn f(vd: std::collections::VecDeque<P>) {
 """
     report = build_rust_bindings(source, pointer_width=64)
     # A declared `as_slices` wins — the std `(&[P], &[P])` pair is
-    # not assumed, so `r` stays opaque rather than misbinding to P.
+    # not assumed: the impl member binds and its own `Option<&R>`
+    # return types `r`, rather than misbinding to P.
+    impl_member = _bindings(report, "as_slices", "associated_function")[1]
+    assert _call(report, source, "vd.as_slices()").target == impl_member.id
     r = next(b for b in report.bindings if b.name == "r")
-    assert r.type.kind == "unknown"
+    assert r.type.kind == "named"
 
 def test_option_iter_as_ref_and_split_at():
     source = """
@@ -9739,3 +9742,143 @@ fn f(v: &mut Vec<P>) {
     # must not be typed as the receiver's `P` element.
     assert not bound.get("q1.pm()")
     assert not bound.get("q2.pm()")
+
+
+def test_str_family_receivers_cover_trait_impls():
+    source = """
+trait T { fn t(&self); }
+impl T for String { fn t(&self) {} }
+impl T for str { fn t(&self) {} }
+fn f(s: String, r: &str, v: Vec<String>, w: Vec<&str>, z: &[String], x: &[str]) {
+    s.t();
+    r.t();
+    v[0].t();
+    w[0].t();
+    z[0].t();
+    x[0].t();
+    for a in v { a.t(); }
+    for b in w { b.t(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `String`/`str` elements and receivers resolve to no declared
+    # record, but the spelled name still covers `impl T for String`
+    # and `impl T for str` members.
+    impl_ts = _bindings(report, "t", "associated_function")
+    string_t, str_t = impl_ts[1].id, impl_ts[2].id
+    assert bound.get("s.t()") == string_t
+    assert bound.get("r.t()") == str_t
+    assert bound.get("v[0].t()") == string_t
+    assert bound.get("w[0].t()") == str_t
+    assert bound.get("z[0].t()") == string_t
+    assert bound.get("x[0].t()") == str_t
+    assert bound.get("a.t()") == string_t
+    assert bound.get("b.t()") == str_t
+
+
+def test_str_impl_member_beats_trait_default():
+    source = """
+trait T { fn t(&self) {} }
+impl T for String { fn t(&self) {} }
+fn f(s: String) { s.t(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    impl_t = _bindings(report, "t", "associated_function")[1]
+    assert _call(report, source, "s.t()").target == impl_t.id
+
+
+def test_ambiguous_impls_on_spelled_receiver_stay_opaque():
+    source = """
+trait T { fn t(&self); }
+trait U { fn t(&self); }
+impl T for String { fn t(&self) {} }
+impl U for String { fn t(&self) {} }
+fn f(s: String) { s.t(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    assert _call(report, source, "s.t()").target == ""
+
+
+def test_container_receiver_is_not_its_spelled_element():
+    source = """
+trait T { fn t(&self); }
+impl T for String { fn t(&self) {} }
+fn f(v: Vec<String>) { v.t(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    # `v` is a `Vec<String>` — `impl T for String` covers its
+    # elements, never the container itself.
+    assert _call(report, source, "v.t()").target == ""
+
+
+def test_tuple_index_element_receivers():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(v: Vec<(P, P)>) {
+    v[0].0.pm();
+    v[0].1.pm();
+    for p in v { p.0.pm(); p.1.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    pm = _bindings(report, "pm", "associated_function")[0]
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `v[0]` spells the `(P, P)` element — positional tuple fields
+    # keep `P` through indexing and iteration.
+    for site in ("v[0].0.pm()", "v[0].1.pm()", "p.0.pm()", "p.1.pm()"):
+        assert bound.get(site) == pm.id, site
+
+
+def test_inferred_return_remainder_elements():
+    source = """
+struct P;
+struct E;
+impl P { fn pm(&self) {} }
+fn make_o() -> Option<Vec<P>> { None }
+fn make_r() -> Result<Vec<P>, E> { todo!() }
+fn g() {
+    let a = make_o().unwrap().chunks_exact(2).remainder();
+    let q = a[0];
+    q.pm();
+    let b = make_r().unwrap().chunks_exact(2).remainder();
+    let s = b[0];
+    s.pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    pm = _bindings(report, "pm", "associated_function")[0]
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # A produced `Vec<P>` (`make().unwrap()`) spells its whole
+    # type — the chunks/remainder recipes peel the container head,
+    # so `a[0]`/`b[0]` are `P`, not `Vec<P>`.
+    assert bound.get("q.pm()") == pm.id
+    assert bound.get("s.pm()") == pm.id
+
+
+def test_annotated_nested_vec_chunks_stay_whole():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(v: Vec<Vec<P>>) {
+    for c in v.chunks(2) { c[0][0].pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    # `v`'s annotated element is `Vec<P>` — the chunk is `&[Vec<P>]`
+    # and `c[0][0]` reaches `P` through two index levels.
+    assert _call(report, source, "c[0][0].pm()").target == pm.id
