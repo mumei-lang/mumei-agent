@@ -10690,3 +10690,20 @@ fn f() {
     # field — `xs`'s `Vec<P>` was spelled at `v`'s annotation in
     # the caller's module.
     assert bound.get("xs[0].pm()") == pms[0].id
+
+
+def test_if_let_some_spelled_payload_elements_bind():
+    source = """
+mod m {
+    pub struct P;
+    impl P { pub fn pm(&self) {} }
+}
+fn f(o: Option<Vec<m::P>>) {
+    if let Some(v) = o { v[0].pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    # `v`'s payload keeps the whole `Vec<m::P>` spelling — the
+    # indexed element `v[0]` resolves `m::P`'s members.
+    assert _call(report, source, "v[0].pm()").target == pm.id

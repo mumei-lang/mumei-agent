@@ -3853,6 +3853,62 @@ class _RustBindings:
         if (
             record is None
             and type_id is None
+            and impl_args is not None
+            and value is not None
+            and value.type == "index_expression"
+        ):
+            # `v[0]` on a spelled `Vec<P>` keeps the element `P` as
+            # spelled args with no resolved id — resolve the bare
+            # element name so `v[0].pm()` reaches `P`'s members. A
+            # range/slice index (`v[..]`, `v[a..b]`) or an array
+            # element (`[P; N]`) names a different shape and stays
+            # spelled — their container args are not `Head<Arg>`.
+            container = (
+                value.named_children[0] if value.named_children else None
+            )
+            container_args = (
+                None
+                if container is None
+                else self._receiver_type(container)[1]
+            )
+            whole = (
+                None
+                if container_args is None
+                else re.fullmatch(
+                    r"[A-Za-z_][\w:]*\s*<(.+)>",
+                    container_args.strip(),
+                    re.DOTALL,
+                )
+            )
+            spelled_element = impl_args.strip()
+            if (
+                whole is not None
+                and len(
+                    self._type_arg_list(whole.group(1).strip())
+                )
+                == 1
+                and re.fullmatch(r"[A-Za-z_][\w:]*", spelled_element)
+            ):
+                element_pair = self._spelled_type(
+                    spelled_element,
+                    self._receiver_annotation_position(container)
+                    or node.start_byte,
+                )
+                if element_pair[0] is not None:
+                    inner = self._member_record(
+                        element_pair[0],
+                        name,
+                        kinds,
+                        element_pair[1],
+                        node.start_byte,
+                        borrowed=self._receiver_ref_kind(value)
+                        == "shared",
+                    )
+                    if inner is not None:
+                        return inner, element_pair[0], element_pair[1]
+        if (
+            record is None
+            and type_id is None
             and "associated_function" in kinds
             and value is not None
             and value.type
