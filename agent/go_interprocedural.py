@@ -10389,6 +10389,26 @@ class _Builder:
                 and self._alias_free_value_struct_supported(elem)
             )
         )
+        multi_index_struct_element_has_records = (
+            len(indexes) > 1
+            and self._multi_index_struct_element_has_field_records(node)
+        )
+        multi_index_struct_element_copy_context = (
+            self._multi_index_struct_element_copy_value_context(node)
+        )
+        if (
+            multi_index_struct_element_copy_context
+            and multi_index_struct_element_has_records
+            and elem is not None
+            and elem.kind == "pointer"
+            and not alias_free_value_copy
+        ):
+            raise _Unsupported("unsupported_expression", _span(node))
+        multi_index_struct_element_copy = (
+            alias_free_value_copy
+            and multi_index_struct_element_has_records
+            and multi_index_struct_element_copy_context
+        )
         struct_element_candidate = (
             (
                 len(indexes) == 1
@@ -10404,10 +10424,9 @@ class _Builder:
                 or self._multi_index_func_field_selector(node)
                 or (
                     len(indexes) == 2
-                    and not self._multi_index_struct_element_has_field_records(
-                        node
-                    )
+                    and not multi_index_struct_element_has_records
                 )
+                or multi_index_struct_element_copy
             )
             and call_operand is None
             and package_var is None
@@ -14055,13 +14074,29 @@ class _Builder:
         if value is None:
             return None
         binding_node = value
+        index_nodes: list[Any] = []
         if value.type == "index_expression":
-            binding_node = self._strip_parens(
-                value.child_by_field_name("operand")
-            )
+            binding_node = value
+            while (
+                binding_node is not None
+                and binding_node.type == "index_expression"
+            ):
+                index = binding_node.child_by_field_name("index")
+                if index is None:
+                    return None
+                index_nodes.append(index)
+                binding_node = self._strip_parens(
+                    binding_node.child_by_field_name("operand")
+                )
             if (
                 binding_node is None
                 or binding_node.type != "identifier"
+                or (
+                    len(index_nodes) > 1
+                    and not self._multi_index_struct_element_copy_value_context(
+                        value
+                    )
+                )
             ):
                 return None
         elif value.type != "identifier":
@@ -14088,15 +14123,21 @@ class _Builder:
                 )
                 else None
             )
-        if (
-            binding.type.kind not in {"slice", "array"}
-            or binding.type.elem is None
-            or not self._alias_free_value_struct_supported(
-                binding.type.elem
-            )
-        ):
-            return None
-        return ref.binding_id
+        element_fact = binding.type
+        for _ in index_nodes:
+            if (
+                element_fact is None
+                or element_fact.kind not in {"slice", "array"}
+                or element_fact.elem is None
+                or element_fact.elem.kind == "pointer"
+            ):
+                return None
+            element_fact = element_fact.elem
+        return (
+            ref.binding_id
+            if self._alias_free_value_struct_supported(element_fact)
+            else None
+        )
 
     def _slice_array_struct_element_parts(
         self,
@@ -14269,6 +14310,76 @@ class _Builder:
                 fact, anchor
             )
         )
+
+    def _multi_index_struct_element_copy_value_context(
+        self, node: Any
+    ) -> bool:
+        value = self._strip_parens(node)
+        if value is None or value.type != "index_expression":
+            return False
+        indexes = []
+        current = value
+        while current is not None and current.type == "index_expression":
+            index = current.child_by_field_name("index")
+            if (
+                index is None
+                or (
+                    index.type not in _INDEX_LITERALS
+                    and index.type != "identifier"
+                )
+            ):
+                return False
+            indexes.append(index)
+            current = self._strip_parens(
+                current.child_by_field_name("operand")
+            )
+        if (
+            len(indexes) < 2
+            or current is None
+            or current.type != "identifier"
+        ):
+            return False
+        expression = value
+        while (
+            expression.parent is not None
+            and expression.parent.type == "parenthesized_expression"
+        ):
+            expression = expression.parent
+        parent = expression.parent
+        if parent is None:
+            return False
+        if parent.type == "argument_list":
+            call = parent.parent
+            return (
+                call is not None and call.type == "call_expression"
+            )
+        if parent.type == "return_statement":
+            return True
+        if parent.type != "expression_list":
+            return False
+        owner = parent.parent
+        if owner is None:
+            return False
+        if owner.type == "return_statement":
+            return True
+        if owner.type in {
+            "assignment_statement",
+            "short_var_declaration",
+        }:
+            rhs = owner.child_by_field_name("right")
+            return (
+                rhs is not None
+                and rhs.start_byte <= value.start_byte
+                and value.end_byte <= rhs.end_byte
+            )
+        if owner.type == "var_spec":
+            return any(
+                owner.field_name_for_child(index) == "value"
+                and child.start_byte <= value.start_byte
+                and value.end_byte <= child.end_byte
+                for index, child in enumerate(owner.children)
+            )
+        return False
 
     def _struct_argument_field_record_ids(
         self, node: Any

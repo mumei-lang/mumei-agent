@@ -55089,6 +55089,7 @@ def test_alias_free_slice_array_struct_element_copies(go_types_helper):
         "FNoFunction": frozenset({0, 1}),
         "FRange": frozenset({0, 1}),
         "FPointerElement": frozenset({0, 1}),
+        "FMultiIndex": frozenset({0}),
     }
     for function_name, dependencies in expected.items():
         result = named_package(
@@ -55106,7 +55107,189 @@ def test_alias_free_slice_array_struct_element_copies(go_types_helper):
         "FMapElement",
         "FAliasField",
         "FPointerField",
-        "FMultiIndex",
+    ):
+        result = named_package(
+            files, snapshot, summaries, function_name
+        )
+        assert not result.available, (function_name, result.gaps)
+
+
+def test_multi_index_alias_free_struct_element_copies(go_types_helper):
+    declarations = (
+        "type S struct { F func() int64; V int64 }\n"
+        "type W struct { F func() }\n"
+        "type SS [][]S\n"
+        "type A struct { F func() int64; P []int64 }\n"
+        "type H struct { B [][]S }\n"
+        "type E struct { V int64 }\n"
+        "func ap(cb func() int64) int64 { return cb() }\n"
+        "func use(s S) int64 { return s.F() }\n"
+        "func (s S) Run() int64 { return s.F() }\n"
+        "func g() int { return 0 }\n"
+        "func FShort(x, y int64) int64 {\n"
+        "\tv := y; ss := make([][]S, 1); ss[0] = make([]S, 1)\n"
+        "\tss[0][0].F = func() int64 { return v }; e := ss[0][0]\n"
+        "\tv = x; return e.F()\n"
+        "}\n"
+        "func FLiteral(x, y int64) int64 {\n"
+        "\tv := y; ss := [][]S{{{F: func() int64 { return v }}}}\n"
+        "\te := ss[0][0]; v = x; return e.F()\n"
+        "}\n"
+        "func FVar(x, y int64) int64 {\n"
+        "\tv := y; ss := [][]S{{{F: func() int64 { return v }}}}\n"
+        "\tvar e S = ss[0][0]; v = x; return e.F()\n"
+        "}\n"
+        "func FAssign(x, y int64) int64 {\n"
+        "\tv := y; ss := [][]S{{{F: func() int64 { return v }}}}\n"
+        "\tvar e S; e = ss[0][0]; v = x; return e.F()\n"
+        "}\n"
+        "func FIndex(x, y int64, i int) int64 {\n"
+        "\tv := y; ss := [][]S{{{F: func() int64 { return v }}}}\n"
+        "\te := ss[0][i]; v = x; return e.F()\n"
+        "}\n"
+        "func FArray(x, y int64) int64 {\n"
+        "\tv := y; var a [2][2]S\n"
+        "\ta[0][1].F = func() int64 { return v }; e := a[0][1]\n"
+        "\tv = x; return e.F()\n"
+        "}\n"
+        "func FNamed(x, y int64) int64 {\n"
+        "\tv := y; ss := SS{{{F: func() int64 { return v }}}}\n"
+        "\te := ss[0][0]; v = x; return e.F()\n"
+        "}\n"
+        "func FExtract(x, y int64) int64 {\n"
+        "\tv := y; ss := [][]S{{{F: func() int64 { return v }}}}\n"
+        "\te := ss[0][0]; f := e.F; v = x; return f()\n"
+        "}\n"
+        "func FCallback(x, y int64) int64 {\n"
+        "\tv := y; ss := [][]S{{{F: func() int64 { return v }}}}\n"
+        "\te := ss[0][0]; v = x; return ap(e.F)\n"
+        "}\n"
+        "func FUse(x, y int64) int64 {\n"
+        "\tv := y; ss := [][]S{{{F: func() int64 { return v }}}}\n"
+        "\te := ss[0][0]; v = x; return use(e)\n"
+        "}\n"
+        "func FUseDirect(x, y int64) int64 {\n"
+        "\tv := y; ss := [][]S{{{F: func() int64 { return v }}}}\n"
+        "\tv = x; return use(ss[0][0])\n"
+        "}\n"
+        "func FRun(x, y int64) int64 {\n"
+        "\tv := y; ss := [][]S{{{F: func() int64 { return v }}}}\n"
+        "\te := ss[0][0]; v = x; return e.Run()\n"
+        "}\n"
+        "func FWrite(x int64) (w int64) {\n"
+        "\tws := [][]W{{{F: func() { w = x }}}}; e := ws[0][0]\n"
+        "\te.F(); return w\n"
+        "}\n"
+        "func FDefer(x int64) (r int64) {\n"
+        "\tws := [][]W{{{F: func() { r = x }}}}; e := ws[0][0]\n"
+        "\tdefer e.F(); return 0\n"
+        "}\n"
+        "func FThreeLevel(x, y int64) int64 {\n"
+        "\tv := y; s3 := [][][]S{{{{F: func() int64 { return v }}}}}\n"
+        "\te := s3[0][0][0]; v = x; return e.F()\n"
+        "}\n"
+        "func FParameterIndex(ss [][]S, i int) int64 {\n"
+        "\te := ss[0][i]; return e.F()\n"
+        "}\n"
+        "func FParameterUse(ss [][]S) int64 {\n"
+        "\treturn use(ss[0][0])\n"
+        "}\n"
+        "func GParameter(ss [][]S) S { return ss[0][0] }\n"
+        "func FParameterReturn(ss [][]S) int64 {\n"
+        "\treturn GParameter(ss).F()\n"
+        "}\n"
+        "func GReturnCopy(x, y int64) S {\n"
+        "\tv := y; ss := [][]S{{{F: func() int64 { return v }}}}\n"
+        "\tv = x; return ss[0][0]\n"
+        "}\n"
+        "func FReturnCopy(x, y int64) int64 {\n"
+        "\treturn GReturnCopy(x, y).F()\n"
+        "}\n"
+        "func FAfterInnerStore(x, y int64) int64 {\n"
+        "\tv := y; ss := [][]S{{{F: func() int64 { return v }}}}\n"
+        "\te := ss[0][0]\n"
+        "\tss[0] = []S{{F: func() int64 { return x }}}\n"
+        "\treturn e.F()\n"
+        "}\n"
+        "func FFieldRoot(x, y int64, i int) int64 {\n"
+        "\tv := y; o := H{B: [][]S{{{F: func() int64 { return v }}}}}\n"
+        "\tv = x; return o.B[0][i].F()\n"
+        "}\n"
+        "func FScalar(x int64) int64 {\n"
+        "\tes := [][]E{{{V: x}}}; e := es[0][0]; return e.V\n"
+        "}\n"
+        "func FAlias(x, y int64) int64 {\n"
+        "\tas := [][]A{{{F: func() int64 { return y }, P: []int64{x}}}}\n"
+        "\te := as[0][0]; return e.F()\n"
+        "}\n"
+        "func FMap(x, y int64) int64 {\n"
+        "\tv := y; m := map[int][]S{0: {{F: func() int64 { return v }}}}\n"
+        "\te := m[0][0]; v = x; return e.F()\n"
+        "}\n"
+        "func FPointer(x int64) int64 {\n"
+        "\tps := [][]*S{{{}}}; ps[0][0].F = func() int64 { return x }\n"
+        "\te := ps[0][0]; return e.F()\n"
+        "}\n"
+        "func FComputed(ss [][]S) int64 {\n"
+        "\te := ss[g()][0]; return e.F()\n"
+        "}\n"
+        "func FMethod(x, y int64) int64 {\n"
+        "\tv := y; ss := [][]S{{{F: func() int64 { return v }}}}\n"
+        "\tv = x; return ss[0][0].Run()\n"
+        "}\n"
+        "func FMethodValue(x, y int64) int64 {\n"
+        "\tv := y; ss := [][]S{{{F: func() int64 { return v }}}}\n"
+        "\tf := ss[0][0].Run; v = x; return f()\n"
+        "}\n"
+    )
+    files = {"a.go": "package p\n" + declarations}
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    expected = {
+        "FShort": frozenset({0, 1}),
+        "FLiteral": frozenset({0, 1}),
+        "FVar": frozenset({0, 1}),
+        "FAssign": frozenset({0, 1}),
+        "FIndex": frozenset({0, 1, 2}),
+        "FArray": frozenset({0, 1}),
+        "FNamed": frozenset({0, 1}),
+        "FExtract": frozenset({0, 1}),
+        "FCallback": frozenset({0, 1}),
+        "FUse": frozenset({0, 1}),
+        "FUseDirect": frozenset({0, 1}),
+        "FRun": frozenset({0, 1}),
+        "FWrite": frozenset({0}),
+        "FDefer": frozenset({0}),
+        "FThreeLevel": frozenset({0, 1}),
+        "FParameterIndex": frozenset({0, 1}),
+        "FParameterUse": frozenset({0}),
+        "FParameterReturn": frozenset({0}),
+        "GReturnCopy": frozenset({0, 1}),
+        "FReturnCopy": frozenset({0, 1}),
+        "FFieldRoot": frozenset({0, 1, 2}),
+        "FScalar": frozenset({0}),
+    }
+    for function_name, dependencies in expected.items():
+        result = named_package(
+            files, snapshot, summaries, function_name
+        )
+        assert result.available, (function_name, result.gaps)
+        assert result.return_dependencies == dependencies, function_name
+    after_inner_store = named_package(
+        files, snapshot, summaries, "FAfterInnerStore"
+    )
+    assert after_inner_store.available, after_inner_store.gaps
+    assert after_inner_store.return_dependencies in {
+        frozenset({1}),
+        frozenset({0, 1}),
+    }
+    for function_name in (
+        "FAlias",
+        "FMap",
+        "FPointer",
+        "FComputed",
+        "FMethod",
+        "FMethodValue",
     ):
         result = named_package(
             files, snapshot, summaries, function_name
@@ -55352,6 +55535,7 @@ def test_multi_index_slice_array_struct_element_func_fields(
         "FReturnSS": frozenset({0, 1}),
         "FThreeLevel": frozenset({0, 1}),
         "FPointerLevel": frozenset({0, 1}),
+        "FCopy": frozenset({0}),
         "sc_get": frozenset({0}),
         "sc_set": frozenset({0}),
         "sc_param": frozenset({0, 1}),
@@ -55372,7 +55556,6 @@ def test_multi_index_slice_array_struct_element_func_fields(
         "FPointerRoot",
         "FPackageRoot",
         "FComputedIndex",
-        "FCopy",
         "FMethod",
         "FMethodValue",
     ):

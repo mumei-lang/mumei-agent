@@ -5085,8 +5085,11 @@ fail-closed; closure-free pointer elements retain their existing analysis.
 
 Copies of named, alias-free value structs from local or parameter slices and
 arrays preserve their function-field closure records. Pointer, slice, map,
-channel and interface fields, map elements and nested-index copies remain
-fail-closed.
+channel and interface fields and map elements remain fail-closed.
+
+Multi-index copies through non-pointer slice/array chains also preserve these
+records in copy, argument and return contexts; indexed method calls and values
+remain fail-closed.
 
 Bound method values on a single indexed alias-free struct element of a local
 or parameter slice/array freeze the container and index dependencies and
