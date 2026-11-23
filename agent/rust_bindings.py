@@ -2667,6 +2667,25 @@ class _RustBindings:
                         return True
         return False
 
+    def _visible_trait_method(
+        self, name: str, position: int
+    ) -> bool:
+        """A trait in scope declares a method named `name` — a
+        `v.name(...)` call may be that trait's extension method,
+        not the std shape the caller's recipe assumes."""
+        for record in self.records.values():
+            if (
+                record.member_trait is not None
+                and record.binding.name == name
+                and record.binding.kind == "associated_function"
+            ):
+                trait = self.records.get(record.member_trait)
+                if trait is not None and self._trait_visible(
+                    trait, position
+                ):
+                    return True
+        return False
+
     def _resolve_trait_node(self, trait_node: Any) -> "_Record | None":
         """Trait record for a UFCS `as` qualifier — plain, scoped
         (`m::T`) or generic (`T<A>`) spellings all resolve."""
