@@ -2872,11 +2872,15 @@ class _TypeScriptBindings:
             return None
         if node.type in {
             "parenthesized_expression", "non_null_expression",
-            "as_expression", "satisfies_expression",
+            "satisfies_expression",
         }:
             return self._declared_type_node(
                 next(iter(self.children(node)), None), position
             )
+        if node.type == "as_expression":
+            # `u as P` — the asserted type is the declared type.
+            kids = self.children(node)
+            return kids[-1] if len(kids) > 1 else None
         return None
 
     def _pattern_slot_type_node(
@@ -3020,6 +3024,8 @@ class _TypeScriptBindings:
             "member_expression",
             "parenthesized_expression",
             "non_null_expression",
+            "as_expression",
+            "satisfies_expression",
         }:
             # `const q = arr[0]`/`f()`/`w.p` infer `q`'s type from
             # the initializer's declared result — resolved at the
@@ -3481,7 +3487,13 @@ class _TypeScriptBindings:
             return self._type_record_by_id(fact.type_id), False, False
         if node.type == "call_expression":
             return self._return_type_record(node), False, False
-        if node.type == "subscript_expression":
+        if node.type in {
+            "subscript_expression",
+            "as_expression",
+        }:
+            # `(u as P).pm()` — the asserted type declares the member;
+            # parenthesized/satisfies/await still recurse into the
+            # inner expression below.
             type_node = self._declared_type_node(node, position)
             fact = self._type_fact(type_node)
             if fact.kind != "named":
