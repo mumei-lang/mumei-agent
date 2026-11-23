@@ -39786,8 +39786,14 @@ class _Builder:
             ):
                 continue
             value = current.child_by_field_name("value")
+            operand_type = self._literal_channel_expression_type(channel)
             members = queue_send_members(
-                value, require_channel_type=(kind == "queue")
+                value,
+                require_channel_type=(
+                    operand_type is not None
+                    and getattr(operand_type, "elem", None) is not None
+                    and operand_type.elem.kind == "chan"
+                ),
             )
             if members is None:
                 captured_members = captured_send_members(value)
