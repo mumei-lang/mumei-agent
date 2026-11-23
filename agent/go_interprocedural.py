@@ -7467,6 +7467,9 @@ class _Builder:
                     imported=True,
                 )
             )
+        self._escape_opaque_closure_arguments(
+            node, inner_args, fn, params, locals_
+        )
         return result_deps
 
     def _func_elem_share(
@@ -36742,6 +36745,13 @@ class _Builder:
                                     imported=True,
                                 )
                             )
+                        self._escape_opaque_closure_arguments(
+                            call_node,
+                            inner_args,
+                            fn,
+                            params,
+                            locals_,
+                        )
                         return result_deps
                     self._pin_fact_identities(member.type)
                     transfers.append(

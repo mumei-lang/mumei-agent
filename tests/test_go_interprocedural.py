@@ -50046,6 +50046,52 @@ def test_imported_opaque_call_folds_escaped_callback_bindings(
     assert result.return_dependencies == frozenset({0, 1})
 
 
+def test_imported_composite_result_escapes_callback_bindings(
+    go_types_helper,
+):
+    files = {
+        "a.go": (
+            "package p\nimport \"lib\"\n"
+            "type K interface { Fire() }\n"
+            "func F(x int64, k K) (w int64) {\n"
+            "\t_ = lib.Hold(func() { w = x }); w = 0\n"
+            "\tk.Fire(); return w\n"
+            "}\n"
+            "func G(x int64, k K) (w int64) {\n"
+            "\tn := len(lib.Hold(func() { w = x })); _ = n; w = 0\n"
+            "\tk.Fire(); return w\n"
+            "}\n"
+        )
+    }
+    lib = {
+        "lib": {
+            "lib.go": (
+                "package lib\n"
+                "func Hold(f func()) []int { return nil }\n"
+            )
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    for function_name in ("F", "G"):
+        result = named_package(
+            files, snapshot, summaries, function_name
+        )
+        assert not result.available, (
+            function_name,
+            result.return_dependencies,
+            result.gaps,
+        )
+        assert any(
+            gap.reason == "unsupported_expression"
+            for gap in result.gaps
+        ), (function_name, result.gaps)
+
+
 def test_imported_func_result_binds_opaque(go_types_helper):
     # `f := lib.Mk()` — a func-typed imported result records
     # `direct_import` and the name binds an opaque func value;
