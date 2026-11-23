@@ -147,7 +147,27 @@ _OPTION_HEAD_METHODS = {
     # stays opaque.
     "cloned": ("", {"Option"}, 0),
     "copied": ("", {"Option"}, 0),
+    # `o1.zip(o2)` yields `Option<(P, Q)>` — the payload pairs the
+    # receiver's arg with the argument's, spelled below.
+    "zip": ("", {"Option"}, 0),
+    # `m.insert(k, v)` yields `Option<V>` — the pair's value arg.
+    "insert": ("", {"HashMap", "BTreeMap"}, -1),
 }
+
+# `o.insert(p)`/`o.get_or_insert(..)`/`o.or_insert(..)` yield
+# `&mut P` — the mutable borrow carries `Option`'s own payload.
+_OPTION_MUT_PAYLOAD_METHODS = frozenset(
+    {
+        "insert",
+        "get_or_insert",
+        "get_or_insert_with",
+        "get_or_insert_default",
+        "or_insert",
+        "or_insert_with",
+        "or_insert_else",
+        "or_insert_with_else",
+    }
+)
 
 _PRELUDE_NAMES = frozenset(
     {
@@ -1409,6 +1429,40 @@ class _RustBindings:
                     x, y, params, bindings, pattern_scope, position
                 )
                 for x, y in zip(sub_a, sub_b)
+            )
+        fn_a = re.fullmatch(
+            r"fn\s*\((.*)\)\s*(?:->\s*(.+))?", a, re.DOTALL
+        )
+        fn_b = re.fullmatch(
+            r"fn\s*\((.*)\)\s*(?:->\s*(.+))?", b, re.DOTALL
+        )
+        if (fn_a is None) != (fn_b is None):
+            return False
+        if fn_a is not None:
+            # `fn(P) -> Q` — parameter and return positions match
+            # structurally like tuple elements, so `fn(m::P)`
+            # covers the impl's `fn(P)`.
+            inner_a = fn_a.group(1).strip()
+            inner_b = fn_b.group(1).strip()
+            sub_a = [] if not inner_a else self._type_arg_list(inner_a)
+            sub_b = [] if not inner_b else self._type_arg_list(inner_b)
+            if len(sub_a) != len(sub_b):
+                return False
+            if not all(
+                self._type_arg_match(
+                    x, y, params, bindings, pattern_scope, position
+                )
+                for x, y in zip(sub_a, sub_b)
+            ):
+                return False
+            ret_a = (fn_a.group(2) or "").strip()
+            ret_b = (fn_b.group(2) or "").strip()
+            if bool(ret_a) != bool(ret_b):
+                return False
+            if not ret_a:
+                return True
+            return self._type_arg_match(
+                ret_a, ret_b, params, bindings, pattern_scope, position
             )
         if a.startswith("[") and a.endswith("]"):
             if not (b.startswith("[") and b.endswith("]")):
@@ -3148,6 +3202,89 @@ class _RustBindings:
                                         return None, None
                     if (
                         element is not None
+                        and self.text(field).strip() == "zip"
+                    ):
+                        # `o1.zip(o2)` yields `Option<(P, Q)>` —
+                        # `o2` must read as another `Option` so its
+                        # first arg spells the pair's second half.
+                        arg_list = node.child_by_field_name(
+                            "arguments"
+                        )
+                        other = (
+                            None
+                            if arg_list is None
+                            else next(
+                                (
+                                    c
+                                    for c in arg_list.named_children
+                                    if "comment" not in c.type
+                                ),
+                                None,
+                            )
+                        )
+                        _other_id, other_args = (
+                            (None, None)
+                            if other is None
+                            else self._receiver_type(other)
+                        )
+                        other_args = (
+                            None
+                            if other_args is None
+                            else other_args.strip()
+                        )
+                        if (
+                            other_args is None
+                            or self._container_head_name(other)
+                            != "Option"
+                        ):
+                            element = None
+                        else:
+                            pair = self._type_arg_list(other_args)
+                            # Each half keeps the scope its own
+                            # annotation was written in — qualify
+                            # both before joining the tuple.
+                            receiver = callee.child_by_field_name(
+                                "value"
+                            )
+                            left_args = (
+                                self._receiver_type(receiver)[1]
+                                if receiver is not None
+                                else None
+                            )
+                            left_arg = next(
+                                iter(
+                                    self._type_arg_list(
+                                        left_args or ""
+                                    )
+                                ),
+                                None,
+                            )
+                            left_pos = (
+                                self._receiver_annotation_position(
+                                    receiver
+                                )
+                                or node.start_byte
+                            )
+                            right_pos = (
+                                self._receiver_annotation_position(
+                                    other
+                                )
+                                or node.start_byte
+                            )
+                            element = (
+                                "({left}, {right})".format(
+                                    left=self._qualified_spelling(
+                                        left_arg.strip(), left_pos
+                                    ),
+                                    right=self._qualified_spelling(
+                                        pair[0].strip(), right_pos
+                                    ),
+                                )
+                                if pair and left_arg is not None
+                                else None
+                            )
+                    if (
+                        element is not None
                         and self.text(field).strip()
                         in {"cloned", "copied"}
                     ):
@@ -3305,6 +3442,28 @@ class _RustBindings:
                         # same `&[P]` — the Option case is handled
                         # by the prelude recipe above.
                         return None, "&[" + receiver[1] + "]"
+                    if (
+                        method_name in _OPTION_MUT_PAYLOAD_METHODS
+                        and receiver[1] is not None
+                        and self._container_head_name(
+                            callee.child_by_field_name("value")
+                        )
+                        == "Option"
+                    ):
+                        # `o.get_or_insert(d)`/`o.or_insert(d)`
+                        # yield `&mut P` — the payload resolves at
+                        # the receiver's own annotation.
+                        parts = self._type_arg_list(receiver[1])
+                        if len(parts) == 1:
+                            return self._spelled_type(
+                                "&mut " + parts[0].strip(),
+                                self._receiver_annotation_position(
+                                    callee.child_by_field_name(
+                                        "value"
+                                    )
+                                )
+                                or node.start_byte,
+                            )
                     return self._unwrapped(
                         callee, node.start_byte, receiver
                     )
