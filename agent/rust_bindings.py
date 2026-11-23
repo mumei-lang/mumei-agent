@@ -433,6 +433,28 @@ _ITER_INNER_ITER_HEADS = frozenset(
         "Filter", "SkipWhile", "TakeWhile", "Chain",
     }
 )
+def _spelled_slice_head(text: str) -> bool:
+    """`&[T]`/`[T]` spelled args mark a slice receiver. `[T; N]` is
+    an array, not a slice — but `[[T; N]]` (slice of arrays) IS, so
+    the `;` only disqualifies at bracket depth 1."""
+    t = text.strip()
+    if t.startswith("&"):
+        t = re.sub(r"^&\s*(?:'\w+\s+)?(?:mut\s+)?", "", t)
+    if not t.startswith("["):
+        return False
+    depth = 0
+    for ch in t:
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                break
+        elif ch == ";" and depth == 1:
+            return False
+    return True
+
+
 _TRY_HEADS = frozenset({"Option", "Result"})
 # Prelude constructors whose tuple payload position is fixed by the
 # container type — `Some(x)` binds `Option<T>`'s first arg, `Err(e)`
@@ -2733,7 +2755,7 @@ class _RustBindings:
             # own-slice producer like `remainder`.
             slice_args = (
                 recv_args is not None
-                and re.match(r"&?\s*\[[^;]*\]", recv_args.strip())
+                and _spelled_slice_head(recv_args.strip())
             )
             if slice_args and receiver.type == "call_expression":
                 rcallee = receiver.child_by_field_name("function")
@@ -2776,11 +2798,9 @@ class _RustBindings:
             annot_slice = False
             tnode = self._receiver_type_node(receiver)
             if tnode is not None:
-                annot_slice = re.sub(
-                    r"^&\s*(?:'\w+\s*)?(?:mut\s+)?",
-                    "",
-                    self.text(tnode).strip(),
-                ).startswith("[")
+                annot_slice = _spelled_slice_head(
+                    self.text(tnode).strip()
+                )
             if (
                 receiver_head
                 in {"Vec", "VecDeque", "BinaryHeap", "LinkedList"}
