@@ -14232,15 +14232,18 @@ class _Builder:
         )
 
     def _type_can_carry_func_value(
-        self, fact: Any, seen: frozenset[str] = frozenset()
+        self, fact: Any, seen: frozenset[object] = frozenset()
     ) -> bool:
         if fact is None:
             return False
         if fact.kind == "function":
             return True
         if fact.kind in {"slice", "array", "map", "chan", "pointer"}:
+            marker = getattr(fact, "type_id", "") or id(fact)
+            if marker in seen:
+                return False
             return self._type_can_carry_func_value(
-                getattr(fact, "elem", None), seen
+                getattr(fact, "elem", None), seen | {marker}
             )
         struct_fact = self._struct_value_fact(fact)
         if struct_fact is None:
@@ -14417,11 +14420,21 @@ class _Builder:
         self, fact: Any
     ) -> bool:
         current = fact
+        seen: set[tuple[str, object]] = set()
         while current is not None and current.kind in {
             "slice",
             "array",
             "map",
         }:
+            type_id = getattr(current, "type_id", "")
+            marker = (
+                ("type", type_id)
+                if type_id
+                else ("object", id(current))
+            )
+            if marker in seen:
+                return False
+            seen.add(marker)
             current = getattr(current, "elem", None)
         return current is not None and current.kind == "interface"
 
@@ -14431,9 +14444,18 @@ class _Builder:
         kind, element_type, file = self._local_literal_type_element(
             type_node, file
         )
+        seen: set[tuple[int, int, int]] = set()
         while kind in {"slice", "array", "map"}:
             if element_type is None:
                 return False
+            marker = (
+                file,
+                element_type.start_byte,
+                element_type.end_byte,
+            )
+            if marker in seen:
+                return False
+            seen.add(marker)
             if element_type.type == "interface_type":
                 return True
             if element_type.type == "selector_expression":
@@ -14452,6 +14474,65 @@ class _Builder:
                 self._local_literal_type_element(element_type, file)
             )
         return kind == "interface"
+
+    def _local_type_node_can_carry_func_value(
+        self,
+        type_node: Any,
+        file: int,
+        seen: frozenset[tuple[int, int, int]] = frozenset(),
+    ) -> bool:
+        current = type_node
+        while (
+            current is not None
+            and current.type == "parenthesized_type"
+        ):
+            current = next(
+                (
+                    child
+                    for child in current.named_children
+                    if child.type != "comment"
+                ),
+                None,
+            )
+        if current is None:
+            return True
+        marker = (file, current.start_byte, current.end_byte)
+        if marker in seen:
+            return False
+        seen = seen | {marker}
+        if current.type == "function_type":
+            return True
+        if current.type in {"slice_type", "array_type", "pointer_type"}:
+            child = (
+                current.child_by_field_name("element")
+                if current.type in {"slice_type", "array_type"}
+                else current.child_by_field_name("type")
+            )
+            return self._local_type_node_can_carry_func_value(
+                child, file, seen
+            )
+        if current.type == "map_type":
+            return self._local_type_node_can_carry_func_value(
+                current.child_by_field_name("value"), file, seen
+            )
+        if current.type == "type_identifier":
+            kind, element_type, type_file = (
+                self._local_literal_type_element(current, file)
+            )
+            if kind == "function":
+                return True
+            if kind in {"slice", "array", "map", "pointer"}:
+                return self._local_type_node_can_carry_func_value(
+                    element_type, type_file, seen
+                )
+            return kind not in {
+                "integer",
+                "boolean",
+                "float",
+                "complex",
+                "string",
+            }
+        return True
 
     def _interface_collection_expression_has_interface_element(
         self, node: Any
@@ -35440,6 +35521,61 @@ class _Builder:
                             )
                             scalar_cont = append_cont is not None
                         if append_cont is None:
+                            literal = self._strip_parens(
+                                arguments[0]
+                            ) if arguments else None
+                            literal_type_node = (
+                                literal.child_by_field_name("type")
+                                if literal is not None
+                                and literal.type == "composite_literal"
+                                else None
+                            )
+                            literal_kind, _, literal_file = (
+                                self._local_literal_type_element(
+                                    literal_type_node,
+                                    self.current_file,
+                                )
+                                if literal_type_node is not None
+                                else (None, None, self.current_file)
+                            )
+                            elements = []
+                            for extra in arguments[1:]:
+                                element = extra
+                                if element.type == "variadic_argument":
+                                    element = next(
+                                        iter(_children(element)), None
+                                    )
+                                elements.append(element)
+                            if (
+                                literal is not None
+                                and literal.type == "composite_literal"
+                                and literal_kind in {"slice", "array", "map"}
+                                and not self._interface_collection_type_node_has_interface_element(
+                                    literal_type_node, literal_file
+                                )
+                                and not self._local_type_node_can_carry_func_value(
+                                    literal_type_node, literal_file
+                                )
+                                and not self._value_carries_closure_records(
+                                    literal, params, locals_
+                                )
+                                and all(
+                                    not self._value_carries_closure_records(
+                                        element, params, locals_
+                                    )
+                                    for element in elements
+                                )
+                            ):
+                                deps = self.expression(
+                                    arguments[0], fn, params, locals_,
+                                    transfers, count, depth + 1,
+                                )
+                                for element in elements:
+                                    deps |= self.expression(
+                                        element, fn, params, locals_,
+                                        transfers, count, depth + 1,
+                                    )
+                                return deps
                             raise _Unsupported(
                                 "unresolved_or_opaque_call",
                                 _span(node),

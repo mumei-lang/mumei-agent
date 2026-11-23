@@ -57529,6 +57529,7 @@ def test_interface_slot_closure_values_fail_closed(go_types_helper):
             "type W struct { F func() }\n"
             "type Runner struct { F func() int64 }\n"
             "type FS []func() int64\n"
+            "type R []R\n"
             "func (s S) Run() int64 { return s.F() }\n"
             "func (s S) Get() int64 { return s.V }\n"
             "func (w W) Do() { w.F() }\n"
@@ -57556,6 +57557,9 @@ def test_interface_slot_closure_values_fail_closed(go_types_helper):
             "func F_gint(x, y int64) int64 {\n"
             "\tv := y; g := func() int64 { return v }\n"
             "\to := OG{I: S{V: g()}}; v = x; return o.I.Get()\n"
+            "}\n"
+            "func F_recappend(x int64) int64 {\n"
+            "\t_ = append(R{}, R{}); return x\n"
             "}\n"
             "func F_sfvar(x, y int64) int64 {\n"
             "\tv := y; s := S{F: func() int64 { return v }}; o := O{I: s}\n"
@@ -57729,6 +57733,7 @@ def test_interface_slot_closure_values_fail_closed(go_types_helper):
         "F_ifarg": frozenset({0, 1}),
         "F_plain": frozenset({0}),
         "F_gint": frozenset({1}),
+        "F_recappend": frozenset({0}),
     }
     for function_name, dependencies in expected.items():
         result = named_package(files, snapshot, summaries, function_name)
