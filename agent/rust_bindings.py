@@ -483,8 +483,12 @@ _EXACT_CHUNKS_INHERENT = {
 # Covering impls skip these names so the std recipe keeps its own
 # result (`(&[P], &[P])`) instead of the trait's return type.
 _SPELLED_STD_INHERENT = {
-    "VecDeque": {"as_slices", "as_mut_slices"},
-    "LinkedList": {"as_slices", "as_mut_slices"},
+    # `VecDeque::as_slices` takes `&self` — it beats any trait impl
+    # for every receiver kind. `as_mut_slices` takes `&mut self`,
+    # so it only outranks when the receiver can mutably borrow —
+    # an immutable `vd` or `&VecDeque` keeps the trait method.
+    # `LinkedList` has no `as_slices`/`as_mut_slices` in std.
+    "VecDeque": {"as_slices": None, "as_mut_slices": "mut"},
 }
 # Methods whose produced spelled args keep the PAYLOAD's own whole
 # spelling — `o.unwrap()` on `Option<Vec<P>>` spells `Vec<P>` (the
@@ -3162,6 +3166,51 @@ class _RustBindings:
                 )
         return None
 
+    def _receiver_ref_kind(self, receiver: "Any | None") -> "str | None":
+        """`shared` for an `&` receiver, `mut` for `&mut` or a
+        `mut` binding, `owned` for a bare value, None when unknown.
+        Method resolution tries `&self` one step before `self` on
+        a shared borrow; `&mut` and owned receivers keep the
+        by-value order."""
+        node = receiver
+        while node is not None and node.type in {
+            "reference_expression",
+            "parenthesized_expression",
+        }:
+            if node.type == "reference_expression":
+                text = self.text(node).strip()
+                return (
+                    "mut"
+                    if re.match(r"&\s*(?:'\w+\s+)?mut\b", text)
+                    else "shared"
+                )
+            node = next(iter(node.named_children), None)
+        if node is None:
+            return None
+        tnode = self._receiver_type_node(node)
+        if tnode is not None:
+            spelled = self.text(tnode).strip()
+            if spelled.startswith("&"):
+                return (
+                    "mut"
+                    if re.match(
+                        r"&\s*(?:'\w+\s+)?mut\b", spelled
+                    )
+                    else "shared"
+                )
+        if node.type == "identifier":
+            record = self._lookup(
+                self._normalize_identifier(self.text(node)),
+                node.start_byte,
+                "value",
+            )
+            if record is not None and record.binding.mutable:
+                # `mut vd` can mutably borrow for a `&mut self`
+                # call — the inherent method wins.
+                return "mut"
+            return "owned"
+        return None if tnode is None else "owned"
+
     def _member_self_by_value(self, record: "_Record") -> bool:
         """The covering member's receiver is by-value `self`/`mut self`
         — a by-value receiver outranks a `&self` inherent method on
@@ -3310,14 +3359,22 @@ class _RustBindings:
                     receiver_heads.add(
                         "".join(part.title() for part in mname.split("_"))
                     )
+        ref_kind = self._receiver_ref_kind(receiver)
         if any(
-            name in _SPELLED_STD_INHERENT.get(head, ())
+            need is None or ref_kind == need
             for head in receiver_heads
+            for method, need in _SPELLED_STD_INHERENT.get(
+                head, {}
+            ).items()
+            if method == name
         ):
             # `vd.as_slices()` calls the inherent
             # `VecDeque::as_slices` — inherent methods outrank
             # every trait impl, so no covering member may bind.
+            # A `&mut` inherent (`as_mut_slices`) only wins when
+            # the receiver can mutably borrow.
             return None
+        preferred_self = "value"
         trait_default = None
         trait_default_kind = None
         covered = None
@@ -3409,9 +3466,7 @@ class _RustBindings:
                             # Defaults of several in-scope traits
                             # are equally ambiguous.
                             return None
-                        if self_kind == "value":
-                            # `self` outranks `&self` — the later
-                            # candidate wins outright.
+                        if self_kind == preferred_self:
                             trait_default = record
                             trait_default_kind = self_kind
                     else:
@@ -3424,7 +3479,7 @@ class _RustBindings:
                             # covering heads — Rust reports
                             # ambiguity.
                             return None
-                        if self_kind == "value":
+                        if self_kind == preferred_self:
                             covered = record
                             covered_kind = self_kind
                     else:

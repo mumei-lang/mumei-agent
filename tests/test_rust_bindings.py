@@ -5654,6 +5654,44 @@ fn f(v: Vec<(P, P)>) {
     # body-local `struct P` must not steal it.
     assert _call(report, source, "v[0].0.pm()").target == pm[0].id
 
+def test_mut_inherent_wins_only_for_mutably_borrowed_receivers():
+    source = """
+trait Ext { fn as_mut_slices(&self) -> i32; }
+impl Ext for std::collections::VecDeque<P> {
+    fn as_mut_slices(&self) -> i32 { 0 }
+}
+struct P;
+fn f(vd: std::collections::VecDeque<P>) { vd.as_mut_slices(); }
+fn g(mut vd: std::collections::VecDeque<P>) { vd.as_mut_slices(); }
+fn h(vd: &mut std::collections::VecDeque<P>) { vd.as_mut_slices(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    member = _bindings(report, "as_mut_slices", "associated_function")[1]
+    calls = {
+        source[: c.span.start].count("\n"): c.target
+        for c in report.calls
+    }
+    # `mut vd`/`&mut vd` can mutably borrow — the inherent
+    # `VecDeque::as_mut_slices` wins and the trait impl stays
+    # unbound; an immutable `vd` keeps the trait method.
+    assert calls[6] == member.id
+    assert not calls[7]
+    assert not calls[8]
+
+def test_linked_list_trait_as_slices_covers():
+    source = """
+trait Ext { fn as_slices(&self) -> i32; }
+impl Ext for std::collections::LinkedList<P> {
+    fn as_slices(&self) -> i32 { 0 }
+}
+struct P;
+fn f(l: std::collections::LinkedList<P>) { l.as_slices(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    member = _bindings(report, "as_slices", "associated_function")[1]
+    # `LinkedList` has no std `as_slices` — the trait impl binds.
+    assert _call(report, source, "l.as_slices()").target == member.id
+
 def test_option_iter_as_ref_and_split_at():
     source = """
 struct P;
