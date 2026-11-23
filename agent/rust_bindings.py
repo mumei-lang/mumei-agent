@@ -4586,6 +4586,12 @@ class _RustBindings:
                             in {"inspect", "inspect_ok", "inspect_err"}
                             and head == "Result"
                             and len(recv_args) == 2
+                            # A declared `inspect*` (trait extension)
+                            # may return another type — only the std
+                            # recipe echoes the receiver.
+                            and not self._head_has_declared_method(
+                                method_name, "Result"
+                            )
                         ):
                             # `r.inspect*(f)` yields the receiver
                             # unchanged — `Result<T, E>`. A chained
@@ -9807,6 +9813,58 @@ class _RustBindings:
             or node.start_byte
         )
         return self._qualified_spelling(spelled, position)
+
+    def _head_has_declared_method(self, name: str, head: str) -> bool:
+        """True when an impl block declares `name` on a type whose
+        head spells `head` — `impl T for Result<P, E>` means
+        `r.inspect_ok(f)` uses the trait's return type, not the std
+        recipe that echoes the receiver. Needed for builtin heads
+        (`Result`, `Option`) that have no declared record for
+        `_field_member` to resolve through."""
+        for impl in self._descendants(self.root):
+            if impl.type != "impl_item":
+                continue
+            tn = impl.child_by_field_name("type")
+            while tn is not None and tn.type == "reference_type":
+                tn = next(
+                    (
+                        c
+                        for c in tn.named_children
+                        if c.type
+                        not in {"lifetime", "mutable_specifier"}
+                    ),
+                    None,
+                )
+            tn_head = (
+                None
+                if tn is None
+                else re.match(r"[A-Za-z_][\w:]*", self.text(tn).strip())
+            )
+            if (
+                tn_head is None
+                or tn_head.group(0).split("::")[-1] != head
+            ):
+                continue
+            body = next(
+                (
+                    c
+                    for c in impl.named_children
+                    if c.type == "declaration_list"
+                ),
+                None,
+            )
+            for item in [] if body is None else body.named_children:
+                if item.type in {
+                    "function_item",
+                    "function_signature_item",
+                }:
+                    name_node = self._item_name(item)
+                    if (
+                        name_node is not None
+                        and self.text(name_node).strip() == name
+                    ):
+                        return True
+        return False
 
     def _slice_has_declared_method(self, name: str) -> bool:
         """True when an impl block declares `name` on a slice/array
