@@ -192,6 +192,105 @@ class DispatchEnforcement:
 
 
 @dataclass(frozen=True)
+class _DispatchConfiguration:
+    isolate_network: bool
+    isolate_filesystem_write: bool
+    isolate_filesystem_read: bool
+    isolate_process_spawn: bool
+    enforcement: DispatchEnforcement
+
+    @property
+    def fully_enforced(self) -> bool:
+        return (
+            self.enforcement.memory_bound_mb is not None
+            and memory_bound_enforceable()
+            and all(
+                value != "unenforced"
+                for value in (
+                    self.enforcement.network,
+                    self.enforcement.filesystem_write,
+                    self.enforcement.filesystem_read,
+                    self.enforcement.process_spawn,
+                )
+            )
+        )
+
+
+def _dispatch_configuration(
+    plan: VerificationPlan,
+    memory_bound_mb: int | None,
+    environment_arg: dict[str, str] | None,
+) -> _DispatchConfiguration:
+    memory_arg = (
+        memory_bound_mb
+        if memory_bound_mb is not None
+        else (
+            plan.selected.memory_mb
+            if memory_bound_enforceable()
+            else None
+        )
+    )
+    network_isolation_required = _network_isolated(plan)
+    isolate_network = (
+        network_isolation_required and network_isolation_enforceable()
+    )
+    filesystem_write_isolation_required = _filesystem_write_isolated(plan)
+    isolate_filesystem_write = (
+        filesystem_write_isolation_required
+        and filesystem_write_isolation_enforceable()
+    )
+    filesystem_read_isolation_required = _filesystem_read_isolated(plan)
+    isolate_filesystem_read = (
+        filesystem_read_isolation_required
+        and filesystem_read_isolation_enforceable()
+    )
+    process_spawn_isolation_required = _process_spawn_isolated(plan)
+    isolate_process_spawn = (
+        process_spawn_isolation_required
+        and process_spawn_isolation_enforceable()
+    )
+    enforcement = DispatchEnforcement(
+        environment="inherited" if environment_arg is None else "minimal",
+        network=(
+            "permitted"
+            if not network_isolation_required
+            else "isolated"
+            if isolate_network
+            else "unenforced"
+        ),
+        filesystem_write=(
+            "permitted"
+            if not filesystem_write_isolation_required
+            else "isolated"
+            if isolate_filesystem_write
+            else "unenforced"
+        ),
+        filesystem_read=(
+            "permitted"
+            if not filesystem_read_isolation_required
+            else "isolated"
+            if isolate_filesystem_read
+            else "unenforced"
+        ),
+        process_spawn=(
+            "permitted"
+            if not process_spawn_isolation_required
+            else "isolated"
+            if isolate_process_spawn
+            else "unenforced"
+        ),
+        memory_bound_mb=memory_arg,
+    )
+    return _DispatchConfiguration(
+        isolate_network,
+        isolate_filesystem_write,
+        isolate_filesystem_read,
+        isolate_process_spawn,
+        enforcement,
+    )
+
+
+@dataclass(frozen=True)
 class ScheduledAttemptEntry:
     """One scheduled round: which adapter was tried and what terminal state
     the attempt reached — `not_dispatched` when the host declared no argv
@@ -586,6 +685,21 @@ def run_attempt_schedule(
             plan, source, expected_source_sha256
         )
         argv = argv_for(adapter_id)
+        dispatch_configuration = None
+        feed = None
+        descriptor = None
+        environment_arg = None
+        if argv is not None and policy.require_enforced_isolation:
+            feed = stdin_for(adapter_id) if stdin_for is not None else None
+            if feed is not None and type(feed) is not bytes:
+                raise ValueError("attempt stdin must be bytes or absent")
+            descriptor = registry.descriptor(adapter_id)
+            environment_arg = _adapter_environment(plan)
+            dispatch_configuration = _dispatch_configuration(
+                plan, memory_bound_mb, environment_arg
+            )
+            if not dispatch_configuration.fully_enforced:
+                argv = None
         if argv is None:
             entries.append(
                 ScheduledAttemptEntry(
@@ -600,76 +714,16 @@ def run_attempt_schedule(
             terminal = NOT_DISPATCHED
         else:
             sequence = AttemptSequence.from_prepared(prepared).begin_attempt()
-            feed = stdin_for(adapter_id) if stdin_for is not None else None
-            if feed is not None and type(feed) is not bytes:
-                raise ValueError("attempt stdin must be bytes or absent")
-            descriptor = registry.descriptor(adapter_id)
-            environment_arg = _adapter_environment(plan)
-            memory_arg = (
-                memory_bound_mb
-                if memory_bound_mb is not None
-                else (
-                    selected.memory_mb if memory_bound_enforceable() else None
+            if dispatch_configuration is None:
+                feed = stdin_for(adapter_id) if stdin_for is not None else None
+                if feed is not None and type(feed) is not bytes:
+                    raise ValueError("attempt stdin must be bytes or absent")
+                descriptor = registry.descriptor(adapter_id)
+                environment_arg = _adapter_environment(plan)
+                dispatch_configuration = _dispatch_configuration(
+                    plan, memory_bound_mb, environment_arg
                 )
-            )
-            network_isolation_required = _network_isolated(plan)
-            isolate = (
-                network_isolation_required
-                and network_isolation_enforceable()
-            )
-            filesystem_write_isolation_required = _filesystem_write_isolated(
-                plan
-            )
-            isolate_filesystem_write = (
-                filesystem_write_isolation_required
-                and filesystem_write_isolation_enforceable()
-            )
-            filesystem_read_isolation_required = _filesystem_read_isolated(
-                plan
-            )
-            isolate_filesystem_read = (
-                filesystem_read_isolation_required
-                and filesystem_read_isolation_enforceable()
-            )
-            process_spawn_isolation_required = _process_spawn_isolated(plan)
-            isolate_process_spawn = (
-                process_spawn_isolation_required
-                and process_spawn_isolation_enforceable()
-            )
-            enforcement = DispatchEnforcement(
-                environment=(
-                    "inherited" if environment_arg is None else "minimal"
-                ),
-                network=(
-                    "permitted"
-                    if not network_isolation_required
-                    else "isolated"
-                    if isolate
-                    else "unenforced"
-                ),
-                filesystem_write=(
-                    "permitted"
-                    if not filesystem_write_isolation_required
-                    else "isolated"
-                    if isolate_filesystem_write
-                    else "unenforced"
-                ),
-                filesystem_read=(
-                    "permitted"
-                    if not filesystem_read_isolation_required
-                    else "isolated"
-                    if isolate_filesystem_read
-                    else "unenforced"
-                ),
-                process_spawn=(
-                    "permitted"
-                    if not process_spawn_isolation_required
-                    else "isolated"
-                    if isolate_process_spawn
-                    else "unenforced"
-                ),
-                memory_bound_mb=memory_arg,
-            )
+            enforcement = dispatch_configuration.enforcement
             dispatch = dispatch_attempt(
                 sequence,
                 argv,
@@ -680,13 +734,19 @@ def run_attempt_schedule(
                 # max_memory_mb) is the child's ceiling. On a platform with
                 # no POSIX bound mechanism the fallback stays unenforced;
                 # an explicit host bound still fails statically there.
-                memory_bound_mb=memory_arg,
+                memory_bound_mb=enforcement.memory_bound_mb,
                 # Without a host namespace boundary this remains
                 # unenforced, like the memory-budget fallback.
-                isolate_network=isolate,
-                isolate_filesystem_write=isolate_filesystem_write,
-                isolate_process_spawn=isolate_process_spawn,
-                isolate_filesystem_read=isolate_filesystem_read,
+                isolate_network=dispatch_configuration.isolate_network,
+                isolate_filesystem_write=(
+                    dispatch_configuration.isolate_filesystem_write
+                ),
+                isolate_process_spawn=(
+                    dispatch_configuration.isolate_process_spawn
+                ),
+                isolate_filesystem_read=(
+                    dispatch_configuration.isolate_filesystem_read
+                ),
                 # No declared feed means a closed pipe — a scheduled child
                 # must never inherit the parent's stdin and block on it.
                 feed_bytes=feed if feed is not None else b"",

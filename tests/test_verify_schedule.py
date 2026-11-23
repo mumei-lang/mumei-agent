@@ -328,6 +328,41 @@ def test_policy_requires_explicit_allowed_permissions(inputs, tmp_path, capsys):
     assert capsys.readouterr().err.startswith("verify-schedule:")
 
 
+@pytest.mark.parametrize("value", [True, False])
+def test_policy_accepts_require_enforced_isolation_boolean(
+    inputs, tmp_path, capsys, value
+):
+    policy_document = json.loads(
+        Path(inputs["policy"]).read_text(encoding="utf-8")
+    )
+    policy_document["require_enforced_isolation"] = value
+    policy_path = tmp_path / "FAKE_PRIVATE_enforced-policy.json"
+    policy_path.write_text(json.dumps(policy_document), encoding="utf-8")
+
+    assert main_schedule(
+        args_for({**inputs, "policy": str(policy_path)})
+    ) == 0
+    document = json.loads(capsys.readouterr().out)
+    assert document["schema_version"] == "mumei.attempt-schedule/v1"
+
+
+def test_policy_rejects_non_boolean_require_enforced_isolation(
+    inputs, tmp_path, capsys
+):
+    policy_document = json.loads(
+        Path(inputs["policy"]).read_text(encoding="utf-8")
+    )
+    policy_document["require_enforced_isolation"] = 1
+    policy_path = tmp_path / "FAKE_PRIVATE_enforced-policy.json"
+    policy_path.write_text(json.dumps(policy_document), encoding="utf-8")
+
+    with pytest.raises(SystemExit):
+        main_schedule(args_for({**inputs, "policy": str(policy_path)}))
+    assert "enforced isolation must be explicit Boolean policy" in (
+        capsys.readouterr().err
+    )
+
+
 def test_empty_allowed_locations_is_rejected(inputs, capsys):
     policy = json.loads(open(inputs["policy"]).read())
     policy["allowed_locations"] = []

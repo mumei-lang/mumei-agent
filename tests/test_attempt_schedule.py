@@ -152,6 +152,38 @@ def schedule_with_runner_stub(monkeypatch, registry, ids, argv_map, **kwargs):
     return result, received
 
 
+def set_enforcement_capabilities(
+    monkeypatch,
+    *,
+    network=True,
+    filesystem_write=True,
+    filesystem_read=True,
+    process_spawn=True,
+    memory=True,
+):
+    monkeypatch.setattr(
+        attempt_schedule, "network_isolation_enforceable", lambda: network
+    )
+    monkeypatch.setattr(
+        attempt_schedule,
+        "filesystem_write_isolation_enforceable",
+        lambda: filesystem_write,
+    )
+    monkeypatch.setattr(
+        attempt_schedule,
+        "filesystem_read_isolation_enforceable",
+        lambda: filesystem_read,
+    )
+    monkeypatch.setattr(
+        attempt_schedule,
+        "process_spawn_isolation_enforceable",
+        lambda: process_spawn,
+    )
+    monkeypatch.setattr(
+        attempt_schedule, "memory_bound_enforceable", lambda: memory
+    )
+
+
 def test_first_adapter_success_selects_without_fallback():
     registry = registry_with("alpha", "beta")
     result = schedule(registry, ("alpha", "beta"), {"alpha": argv(0), "beta": argv(0)})
@@ -388,6 +420,191 @@ def test_schedule_records_and_dispatches_effective_enforcement(
     else:
         assert runner_calls[0]["environment"] is not None
         assert set(runner_calls[0]["environment"]) <= {"PATH", "SYSTEMROOT"}
+
+
+def test_required_unenforced_isolation_records_not_dispatched_and_falls_back(
+    monkeypatch,
+):
+    set_enforcement_capabilities(monkeypatch, network=False)
+    registry = AdapterRegistry()
+    registry.register(descriptor("alpha"))
+    registry.register(
+        descriptor("beta", required_permissions=frozenset({"network.connect"}))
+    )
+    result, runner_calls = schedule_with_runner_stub(
+        monkeypatch,
+        registry,
+        ("alpha", "beta"),
+        {"alpha": argv(0), "beta": argv(0)},
+        policy=policy(
+            selected_adapter="alpha",
+            allow_fallback=True,
+            allowed_permissions=frozenset({"network.connect"}),
+            require_enforced_isolation=True,
+        ),
+        memory_bound_mb=64,
+    )
+
+    first = result.entries[0]
+    assert first == ScheduledAttemptEntry(
+        1,
+        "alpha",
+        first.plan_fingerprint,
+        None,
+        NOT_DISPATCHED,
+        None,
+    )
+    assert result.selected_adapter_id == "beta"
+    assert len(result.entries) == 2
+    assert result.entries[1].enforcement.network == "permitted"
+    assert len(runner_calls) == 1
+
+
+def test_enforced_isolation_policy_preserves_fully_enforced_dispatch(monkeypatch):
+    set_enforcement_capabilities(monkeypatch)
+    registry = registry_with("alpha")
+    argv_map = {"alpha": argv(0)}
+    without_policy, _ = schedule_with_runner_stub(
+        monkeypatch,
+        registry,
+        ("alpha",),
+        argv_map,
+        policy=policy(require_enforced_isolation=False),
+        memory_bound_mb=64,
+    )
+    with_policy, _ = schedule_with_runner_stub(
+        monkeypatch,
+        registry,
+        ("alpha",),
+        argv_map,
+        policy=policy(require_enforced_isolation=True),
+        memory_bound_mb=64,
+    )
+
+    assert with_policy.entries == without_policy.entries
+    assert with_policy.entries[0].terminal_state == "exited"
+
+
+def test_disabled_enforced_isolation_policy_records_unenforced_network(
+    monkeypatch,
+):
+    set_enforcement_capabilities(monkeypatch, network=False)
+    result, runner_calls = schedule_with_runner_stub(
+        monkeypatch,
+        registry_with("alpha"),
+        ("alpha",),
+        {"alpha": argv(0)},
+        policy=policy(require_enforced_isolation=False),
+    )
+
+    assert result.outcome == "selected"
+    assert result.entries[0].enforcement.network == "unenforced"
+    assert len(runner_calls) == 1
+
+
+def test_missing_memory_enforcement_fails_closed(monkeypatch):
+    set_enforcement_capabilities(monkeypatch, memory=False)
+    result, runner_calls = schedule_with_runner_stub(
+        monkeypatch,
+        registry_with("alpha"),
+        ("alpha",),
+        {"alpha": argv(0)},
+        policy=policy(require_enforced_isolation=True),
+    )
+
+    entry = result.entries[0]
+    assert entry == ScheduledAttemptEntry(
+        1,
+        "alpha",
+        entry.plan_fingerprint,
+        None,
+        NOT_DISPATCHED,
+        None,
+    )
+    assert runner_calls == []
+
+
+def test_explicit_unenforceable_memory_bound_fails_closed_and_falls_back(
+    monkeypatch,
+):
+    set_enforcement_capabilities(monkeypatch, memory=False)
+    result, runner_calls = schedule_with_runner_stub(
+        monkeypatch,
+        registry_with("alpha", "beta"),
+        ("alpha", "beta"),
+        {"alpha": argv(0), "beta": argv(0)},
+        policy=policy(
+            selected_adapter="alpha",
+            allow_fallback=True,
+            require_enforced_isolation=True,
+        ),
+        memory_bound_mb=64,
+    )
+
+    first = result.entries[0]
+    assert first == ScheduledAttemptEntry(
+        1,
+        "alpha",
+        first.plan_fingerprint,
+        None,
+        NOT_DISPATCHED,
+        None,
+    )
+    assert result.outcome == "exhausted"
+    assert [entry.adapter_id for entry in result.entries] == ["alpha", "beta"]
+    assert all(entry.terminal_state == NOT_DISPATCHED for entry in result.entries)
+    assert runner_calls == []
+
+
+def test_permitted_unenforceable_dimension_does_not_fail_closed(monkeypatch):
+    set_enforcement_capabilities(monkeypatch, network=False)
+    registry = AdapterRegistry()
+    registry.register(
+        descriptor("alpha", required_permissions=frozenset({"network.connect"}))
+    )
+    result, runner_calls = schedule_with_runner_stub(
+        monkeypatch,
+        registry,
+        ("alpha",),
+        {"alpha": argv(0)},
+        policy=policy(
+            allowed_permissions=frozenset({"network.connect"}),
+            require_enforced_isolation=True,
+        ),
+        memory_bound_mb=64,
+    )
+
+    assert result.outcome == "selected"
+    assert result.entries[0].enforcement.network == "permitted"
+    assert len(runner_calls) == 1
+
+
+def test_fail_closed_explicit_selection_denies_fallback(monkeypatch):
+    set_enforcement_capabilities(monkeypatch, network=False)
+    result, runner_calls = schedule_with_runner_stub(
+        monkeypatch,
+        registry_with("alpha", "beta"),
+        ("alpha", "beta"),
+        {"alpha": argv(0), "beta": argv(0)},
+        policy=policy(
+            selected_adapter="alpha",
+            require_enforced_isolation=True,
+        ),
+        memory_bound_mb=64,
+    )
+
+    entry = result.entries[0]
+    assert result.outcome == "fallback_denied"
+    assert len(result.entries) == 1
+    assert entry == ScheduledAttemptEntry(
+        1,
+        "alpha",
+        entry.plan_fingerprint,
+        None,
+        NOT_DISPATCHED,
+        None,
+    )
+    assert runner_calls == []
 
 
 @pytest.mark.parametrize(

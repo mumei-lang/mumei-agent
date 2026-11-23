@@ -45,7 +45,8 @@ _CONTRACT_KEYS = frozenset(
 _POLICY_KEYS = frozenset(
     {"selected_adapter", "allow_fallback", "disabled_adapters", "allowed_locations",
      "tool_version_pins", "timeout_ms", "memory_mb", "allowed_permissions",
-     "allow_manifest_attempt_argv", "allow_manifest_attempt_stdin"}
+     "allow_manifest_attempt_argv", "allow_manifest_attempt_stdin",
+     "require_enforced_isolation"}
 )
 _OBSERVATION_KEYS = frozenset({"adapter_id", "availability", "tool_version", "stamp"})
 _ADAPTER_OVERLAY_HELP = (
@@ -137,6 +138,9 @@ def _load_policy(path: str) -> PlannerPolicy:
         ),
         allow_manifest_attempt_stdin=document.get(
             "allow_manifest_attempt_stdin", False
+        ),
+        require_enforced_isolation=document.get(
+            "require_enforced_isolation", False
         ),
         disabled_adapters=frozenset(document.get("disabled_adapters") or ()),
         allowed_locations=frozenset(
@@ -247,7 +251,10 @@ def build_schedule_parser(
         "--policy", required=True, metavar="PATH",
         help=(
             "Declared planner policy JSON. allowed_permissions must be "
-            "declared (an empty list permits only permission-free adapters)."
+            "declared (an empty list permits only permission-free adapters); "
+            "optional Boolean require_enforced_isolation defaults to false "
+            "and fails closed when required isolation or memory cannot be "
+            "enforced."
         ),
     )
     parser.add_argument(

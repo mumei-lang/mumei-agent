@@ -641,6 +641,7 @@ class PlannerPolicy:
     )
     allowed_permissions: frozenset[str] | None = None
     allow_manifest_attempt_argv: bool = False
+    require_enforced_isolation: bool = False
 
     def __post_init__(self) -> None:
         if self.allowed_permissions is not None:
@@ -657,6 +658,8 @@ class PlannerPolicy:
             raise ValueError(
                 "manifest attempt stdin must be explicit Boolean policy"
             )
+        if type(self.require_enforced_isolation) is not bool:
+            raise ValueError("enforced isolation must be explicit Boolean policy")
         _labels(self.disabled_adapters, empty=True)
         _labels(self.allowed_locations)
         if not self.allowed_locations <= LOCATIONS:

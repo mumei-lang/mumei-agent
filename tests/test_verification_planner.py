@@ -5,7 +5,7 @@ import json
 import os
 import subprocess
 import traceback
-from dataclasses import replace
+from dataclasses import fields, replace
 from pathlib import Path
 
 import pytest
@@ -242,6 +242,31 @@ def test_custom_registration_replacement_and_full_requirement_subset():
 def test_invalid_policy_budgets_are_rejected(value, field):
     with pytest.raises(ValueError):
         PlannerPolicy(**{field: value})
+
+
+def test_require_enforced_isolation_requires_an_explicit_boolean():
+    with pytest.raises(ValueError) as error:
+        PlannerPolicy(require_enforced_isolation=1)
+    assert str(error.value) == "enforced isolation must be explicit Boolean policy"
+
+
+def test_require_enforced_isolation_preserves_positional_field_order():
+    policy_fields = fields(PlannerPolicy)
+
+    assert policy_fields[-1].name == "require_enforced_isolation"
+    assert policy_fields[4].name == "disabled_adapters"
+
+
+def test_require_enforced_isolation_is_omitted_from_plan_fingerprint():
+    from agent.attempt_schedule import _plan_fingerprint
+
+    without_policy = plan(policy=PlannerPolicy())
+    with_policy = plan(
+        policy=PlannerPolicy(require_enforced_isolation=True)
+    )
+
+    assert with_policy.to_dict() == without_policy.to_dict()
+    assert _plan_fingerprint(with_policy) == _plan_fingerprint(without_policy)
 
 
 def test_invalid_metadata_fails_without_echoing_credential_like_input():
