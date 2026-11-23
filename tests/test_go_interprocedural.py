@@ -49678,14 +49678,15 @@ def test_closures_handed_to_opaque_callees(go_types_helper):
             "\tv := y; s := S{F: func() int64 { return v }}\n"
             "\tk.Put(s); v = x; return k.Get()\n"
             "}\n"
-            "func F_sliceargument(x, y int64, k K) int64 {\n"
-            "\tv := y; fs := []func() int64{func() int64 { return v }}\n"
-            "\tk.SetAll(fs[:]); v = x; return k.Get()\n"
+            "func F_sliceargument(x1, y1, x2, y2 int64, k K) int64 {\n"
+            "\tv1 := y1; v2 := y2\n"
+            "\tfs := []func() int64{func() int64 { return v1 }, func() int64 { return v2 }}\n"
+            "\tk.SetAll(fs[:]); v1 = x1; v2 = x2; return k.Get()\n"
             "}\n"
-            "func F_appendargument(x, y int64, k K) int64 {\n"
-            "\tv := y; g := func() int64 { return v }\n"
-            "\tfs := []func() int64{func() int64 { return v }}\n"
-            "\tk.SetAll(append(fs, g)); v = x; return k.Get()\n"
+            "func F_appendargument(x1, y1, x2, y2 int64, k K) int64 {\n"
+            "\tv1 := y1; v2 := y2; g := func() int64 { return v2 }\n"
+            "\tfs := []func() int64{func() int64 { return v1 }}\n"
+            "\tk.SetAll(append(fs, g)); v1 = x1; v2 = x2; return k.Get()\n"
             "}\n"
             "func F_getafter(x, y int64, k K) int64 {\n"
             "\tv := y; k.Set(func() int64 { return v }); v = x\n"
@@ -49805,8 +49806,8 @@ def test_closures_handed_to_opaque_callees(go_types_helper):
         "F_setnamed": frozenset({0, 1, 2}),
         "F_setfield": frozenset({0, 1, 2}),
         "F_putstruct": frozenset({0, 1, 2}),
-        "F_sliceargument": frozenset({0, 1, 2}),
-        "F_appendargument": frozenset({0, 1, 2}),
+        "F_sliceargument": frozenset({0, 1, 2, 3}),
+        "F_appendargument": frozenset({0, 1, 2, 3}),
         "F_getafter": frozenset({0, 1, 2}),
         "F_cbset": frozenset({0, 1, 2, 3}),
         "F_pkgvar": frozenset({0, 1}),
