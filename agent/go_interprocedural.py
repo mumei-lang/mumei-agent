@@ -14267,6 +14267,42 @@ class _Builder:
             for member in self._struct_fields_for_fact(struct_fact)
         )
 
+    def _type_can_carry_func_or_interface(
+        self, fact: Any, seen: frozenset[tuple[str, object]] = frozenset()
+    ) -> bool:
+        if fact is None:
+            return False
+        if fact.kind == "interface" or self._type_can_carry_func_value(
+            fact
+        ):
+            return True
+        if fact.kind in {"slice", "array", "map", "chan", "pointer"}:
+            marker = (
+                fact.kind,
+                getattr(fact, "type_id", "") or id(fact),
+            )
+            if marker in seen:
+                return False
+            return self._type_can_carry_func_or_interface(
+                getattr(fact, "elem", None), seen | {marker}
+            )
+        struct_fact = self._struct_value_fact(fact)
+        if struct_fact is None:
+            return False
+        marker = (
+            "struct",
+            getattr(struct_fact, "type_id", "") or id(struct_fact),
+        )
+        if marker in seen:
+            return False
+        seen |= {marker}
+        return any(
+            self._type_can_carry_func_or_interface(
+                getattr(member, "type", None), seen
+            )
+            for member in self._struct_fields_for_fact(struct_fact)
+        )
+
     def _closure_literal_result_can_carry_func_value(
         self, literal: Any
     ) -> bool:
@@ -14290,8 +14326,7 @@ class _Builder:
             fact = self._literal_type_fact(type_node, self.current_file)
             if (
                 fact is None
-                or fact.kind == "interface"
-                or self._type_can_carry_func_value(fact)
+                or self._type_can_carry_func_or_interface(fact)
             ):
                 return True
         return False
@@ -14506,7 +14541,9 @@ class _Builder:
                 )
             if (
                 result_type is not None
-                and not self._type_can_carry_func_value(result_type)
+                and not self._type_can_carry_func_or_interface(
+                    result_type
+                )
             ):
                 return False
             function = self._strip_parens(
@@ -15042,7 +15079,9 @@ class _Builder:
                 result_type = self._call_result_type(value)
                 if (
                     result_type is not None
-                    and not self._type_can_carry_func_value(result_type)
+                    and not self._type_can_carry_func_or_interface(
+                        result_type
+                    )
                 ):
                     return False
                 call = self.calls.get(self.node_key(value))
