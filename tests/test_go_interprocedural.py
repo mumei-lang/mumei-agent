@@ -18304,7 +18304,7 @@ def test_bound_closure_mutating_builtin_writes_carry_deps(
         (
             "func F(p int64, q int64) int64 {\n"
             "\ts := []int64{0}\n"
-            "\tf := func() { _ = append(s, p) }\n"
+            "\tf := func() { _ = append(s[:0], p) }\n"
             "\tf()\n"
             "\treturn s[0] + q\n}",
             {0, 1},
@@ -18323,6 +18323,32 @@ def test_bound_closure_mutating_builtin_writes_carry_deps(
         result = named(*data)
         assert result.available
         assert result.return_dependencies == frozenset(expected)
+
+
+def test_bound_closure_mutating_builtin_unresolvable_operand_stays_closed(
+    go_types_helper,
+):
+    # The builtin's first operand must resolve to a captured
+    # binding root — a call result (`identity` may return its own
+    # argument's backing) or an unresolvable `(*p)` could write
+    # caller memory that only a gap can report.
+    for body in (
+        "func id(s []int64) []int64 { return s }\n"
+        "func F(p int64, q int64) int64 {\n"
+        "\tsrc := []int64{p}\n"
+        "\tdst := []int64{q}\n"
+        "\tf := func() { _ = copy(id(dst), src) }\n"
+        "\tf()\n"
+        "\treturn dst[0]\n}",
+        "func F(p *[]int64, q int64) int64 {\n"
+        "\ts := []int64{q}\n"
+        "\tf := func() { _ = copy(*p, s) }\n"
+        "\tf()\n"
+        "\treturn (*p)[0]\n}",
+    ):
+        data = unit(go_types_helper, body)
+        result = named(*data)
+        assert not result.available
 
 
 def test_bound_closure_star_write_folds_escaped(

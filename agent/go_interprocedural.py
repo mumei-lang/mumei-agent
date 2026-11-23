@@ -39938,13 +39938,16 @@ class _Builder:
                                     )
                                 )
                                 if not written:
-                                    # A result call or composite
+                                    # A composite or literal
                                     # operand cannot name an
                                     # enclosing binding, so nothing
-                                    # is lost; a `(*p)` or
-                                    # unresolved operand could still
-                                    # write caller memory, which
-                                    # only a gap can report.
+                                    # is lost; a `(*p)`, an
+                                    # unresolved name, or a call
+                                    # result (`copy(f(dst), x)` —
+                                    # `f` may return its argument's
+                                    # own backing) could still write
+                                    # caller memory, which only a
+                                    # gap can report.
                                     mutroot = operand
                                     while mutroot.type in {
                                         "parenthesized_expression",
@@ -39952,11 +39955,34 @@ class _Builder:
                                         "index_expression",
                                         "slice_expression",
                                     }:
-                                        mutroot = mutroot.children[0]
-                                    if mutroot.type in {
-                                        "unary_expression",
-                                        "identifier",
-                                    }:
+                                        if (
+                                            mutroot.type
+                                            == "parenthesized_expression"
+                                        ):
+                                            mutroot = next(
+                                                (
+                                                    c
+                                                    for c in
+                                                    mutroot.named_children
+                                                    if c.type
+                                                    != "comment"
+                                                ),
+                                                None,
+                                            )
+                                        else:
+                                            mutroot = (
+                                                mutroot.children[0]
+                                            )
+                                        if mutroot is None:
+                                            break
+                                    if mutroot is not None and (
+                                        mutroot.type
+                                        in {
+                                            "unary_expression",
+                                            "identifier",
+                                            "call_expression",
+                                        }
+                                    ):
                                         raise _Unsupported(
                                             "unsupported_expression",
                                             _span(cur),
@@ -40159,7 +40185,21 @@ class _Builder:
             "index_expression",
             "slice_expression",
         }:
-            node = node.children[0]
+            if node.type == "parenthesized_expression":
+                # `children[0]` is the `(` token — the operand is the
+                # first named child.
+                node = next(
+                    (
+                        c
+                        for c in node.named_children
+                        if c.type != "comment"
+                    ),
+                    None,
+                )
+            else:
+                node = node.children[0]
+            if node is None:
+                return targets
         if node.type == "unary_expression":
             # `*p = e` — resolved through a `p := &x` alias when
             # one exists; the star_write flag still covers the
