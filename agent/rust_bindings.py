@@ -4376,15 +4376,24 @@ class _RustBindings:
                             # reach them through the existing
                             # `?`/`unwrap` path.
                             arg_src = receiver[1].strip()
-                            inner_match = re.fullmatch(
-                                r"[A-Za-z_][\w:]*\s*<([\s\S]*)>",
-                                arg_src,
-                            )
-                            if inner_match is not None:
-                                # `let w = rc.downgrade()` keeps
-                                # `Weak<P>` as the spelled args —
-                                # the payload is its inner arg.
-                                arg_src = inner_match.group(1)
+                            if (
+                                self._receiver_type_node(
+                                    callee.child_by_field_name("value")
+                                )
+                                is None
+                            ):
+                                inner_match = re.fullmatch(
+                                    r"[A-Za-z_][\w:]*\s*<([\s\S]*)>",
+                                    arg_src,
+                                )
+                                if inner_match is not None:
+                                    # `let w = rc.downgrade()` keeps
+                                    # `Weak<P>` as the spelled args —
+                                    # the payload is its inner arg. A
+                                    # declared `Cell<W<P>>` annotates
+                                    # `W<P>` as the payload itself —
+                                    # peeling it reads `P`.
+                                    arg_src = inner_match.group(1)
                             parts = self._type_arg_list(arg_src)
                             if len(parts) == 1:
                                 spelled_text = spelled.replace(
