@@ -1544,6 +1544,7 @@ class _RustBindings:
                                         member_args,
                                         impl_type_params,
                                         scope,
+                                        member_type_node,
                                     )
                                 )
                 if body is not None:
@@ -2788,6 +2789,49 @@ class _RustBindings:
             is None
         )
 
+    def _impl_target_id(
+        self, type_node: "Any | None", position: int
+    ) -> "str | None":
+        """Resolve the impl TARGET node to a declared type's record id
+        — `impl Rem for ChunksExact<R>` in a scope where `type
+        ChunksExact = Coll` is for `Coll`, not for receivers named
+        `ChunksExact`."""
+        if type_node is None:
+            return None
+
+        def _resolve(node: "Any | None") -> "_Record | None":
+            if node is None:
+                return None
+            record = self._through_import(
+                self._scoped_type(node), position
+            )
+            if record is None:
+                # A bare `T`/`T<A>` target has no path to resolve —
+                # look its head name up at the call site.
+                head = re.match(
+                    r"[A-Za-z_]\w*", self.text(node).strip()
+                )
+                if head is not None:
+                    record = self._through_import(
+                        self._lookup(
+                            head.group(0), position, "type"
+                        ),
+                        position,
+                    )
+            return record
+
+        record = _resolve(type_node)
+        seen: set[str] = set()
+        while (
+            record is not None
+            and record.binding.kind == "type_alias"
+            and record.alias_node is not None
+            and record.binding.id not in seen
+        ):
+            seen.add(record.binding.id)
+            record = _resolve(record.alias_node) or record
+        return None if record is None else record.binding.id
+
     def _impl_head_name(self, impl: "_Record") -> "str | None":
         """The impl TARGET's head name, normalized like
         `_trait_impl_heads`: `[`/`[T;N]` targets key as `[slice]`,
@@ -2820,31 +2864,39 @@ class _RustBindings:
         if recv_args is None or impl_args is None:
             return True
 
-        def _strip_borrow(arg: str) -> str:
+        def _peel_slice_brackets(t: str) -> str:
+            # `[T]` peels to `T`; `[T; N]` stays an array.
+            inner = t[1:-1]
+            depth = 0
+            for ch in inner:
+                if ch in "[<({":
+                    depth += 1
+                elif ch in "]>)}":
+                    depth -= 1
+                elif ch == ";" and depth == 0:
+                    return t
+            return inner.strip()
+
+        def _unspell_recv_arg(arg: str) -> str:
             t = arg.strip()
-            if re.match(r"^&\s*(?:'\w+\s*)?(?:mut\s+)?\[", t):
-                # `&[..]`/`&mut [..]` — the borrowed-slice wrapper
-                # around the element spelling: `&[&P]` spells
-                # element `&P`, `&[[P;2]]` element `[P;2]`.
+            if t.startswith("&"):
                 t = re.sub(
                     r"^&\s*(?:'\w+\s*)?(?:mut\s+)?", "", t
                 )
+                # `&[..]` unwraps to the element spelling — `&[&P]`
+                # spells `&P`, `&[P;3]` spells the array `[P;3]`.
                 if t.startswith("[") and t.endswith("]"):
-                    t = t[1:-1].strip()
+                    t = _peel_slice_brackets(t)
                 return t
             if t.startswith("[") and t.endswith("]"):
-                # A bare `[T]` arg (e.g. `Box<[P]>`'s content) peels
-                # to its element; `[T; N]` stays an array.
-                inner = t[1:-1]
-                depth = 0
-                for ch in inner:
-                    if ch in "[<({":
-                        depth += 1
-                    elif ch in "]>)}":
-                        depth -= 1
-                    elif ch == ";" and depth == 0:
-                        return t
-                return inner.strip()
+                # `Box<[P]>`'s spelled content peels to `P`.
+                return _peel_slice_brackets(t)
+            return t
+
+        def _unspell_impl_arg(arg: str) -> str:
+            t = arg.strip()
+            if t.startswith("[") and t.endswith("]"):
+                return _peel_slice_brackets(t)
             return t
 
         def _chase_alias(arg: str) -> str:
@@ -2866,12 +2918,12 @@ class _RustBindings:
             return t
 
         norm_recv = ", ".join(
-            _chase_alias(_strip_borrow(a))
+            _chase_alias(_unspell_recv_arg(a))
             for a in self._type_arg_list(recv_args)
             if not a.strip().startswith("'")
         )
         norm_impl = ", ".join(
-            _chase_alias(_strip_borrow(a))
+            _chase_alias(_unspell_impl_arg(a))
             for a in self._type_arg_list(impl_args)
             if not a.strip().startswith("'")
         )
@@ -2942,6 +2994,43 @@ class _RustBindings:
                 ):
                     return "borrow"
                 return "arbitrary"
+        return None
+
+    def _member_self_wrapper(self, record: "_Record") -> "str | None":
+        """For `self: T` receivers — the head name of `T` (`Box`,
+        `Rc`, ...); None when there is no arbitrary self type."""
+        pos = record.binding.span.start
+        node = self.root.descendant_for_byte_range(pos, pos)
+        while node is not None and node.type not in {
+            "function_item",
+            "function_signature_item",
+            "function",
+        }:
+            node = node.parent
+        params = (
+            node.child_by_field_name("parameters")
+            if node is not None
+            else None
+        )
+        if params is None:
+            return None
+        for ch in params.named_children:
+            if (
+                ch.type == "parameter"
+                and ch.child_by_field_name("pattern") is not None
+                and self.text(ch.child_by_field_name("pattern")).strip()
+                == "self"
+            ):
+                t = ch.child_by_field_name("type")
+                spelling = (
+                    self.text(t).strip() if t is not None else ""
+                )
+                head = re.match(r"[A-Za-z_][\w:]*", spelling)
+                return (
+                    head.group(0).rsplit("::", 1)[-1]
+                    if head is not None
+                    else None
+                )
         return None
 
     def _member_self_by_value(self, record: "_Record") -> bool:
@@ -3081,7 +3170,9 @@ class _RustBindings:
                     # `self: Box<Self>`/`self: Rc<Self>` methods only
                     # apply to a wrapped receiver — a bare value of
                     # the impl target never calls them.
-                    continue
+                    wrapper = self._member_self_wrapper(record)
+                    if wrapper not in receiver_heads:
+                        continue
                 if record.member_of == record.member_trait:
                     # A trait-declared member applies when the trait
                     # is implemented for a type whose head matches
@@ -3099,10 +3190,14 @@ class _RustBindings:
                         pass
                     elif not any(
                         head in receiver_heads
+                        and (
+                            self._impl_target_id(tnode, position)
+                            in {None, container_id}
+                        )
                         and self._impl_args_cover(
                             args, params, home, recv_args, position
                         )
-                        for head, args, params, home in self._trait_impl_heads.get(
+                        for head, args, params, home, tnode in self._trait_impl_heads.get(
                             record.member_trait, ()
                         )
                     ):
@@ -3111,14 +3206,22 @@ class _RustBindings:
                     # An impl on an undeclared target (`impl T for
                     # [P]`/`for Vec<P>`) — its head and concrete args
                     # must both cover the receiver.
-                    if self._impl_head_name(
-                        record
-                    ) not in receiver_heads or not self._impl_args_cover(
-                        record.member_impl_args,
-                        record.member_impl_type_params,
-                        record.home_scope,
-                        recv_args,
-                        position,
+                    target_id = self._impl_target_id(
+                        record.self_type_node, position
+                    )
+                    if (
+                        self._impl_head_name(record) not in receiver_heads
+                        or (
+                            target_id is not None
+                            and target_id != container_id
+                        )
+                        or not self._impl_args_cover(
+                            record.member_impl_args,
+                            record.member_impl_type_params,
+                            record.home_scope,
+                            recv_args,
+                            position,
+                        )
                     ):
                         continue
                 elif record.member_of == container_id:
