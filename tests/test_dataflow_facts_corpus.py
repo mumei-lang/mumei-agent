@@ -2,6 +2,8 @@
 
 Labels are corpus-declared expectations; counts measure agreement on this
 corpus only, not soundness or completeness. There is no single score.
+The corpus passes no contract outputs, so `contract_output_unassigned` is not
+measured here.
 """
 
 from __future__ import annotations
@@ -24,10 +26,9 @@ _CATEGORIES = (
     "close_nil_channel",
     "use_after_close",
     "unlock_of_unlocked",
-    "contract_output_unassigned",
     "double_lock",
 )
-_ALLOWED_CATEGORIES = frozenset(_CATEGORIES)
+_ALLOWED_CATEGORIES = frozenset((*_CATEGORIES, "contract_output_unassigned"))
 _ZERO = (0, 0, 0)
 
 
@@ -104,6 +105,9 @@ def _metrics_for_file(
     totals = {category: [0, 0, 0] for category in _CATEGORIES}
     unanalyzed: set[str] = set()
 
+    def counts_for(category: str) -> list[int]:
+        return totals.setdefault(category, [0, 0, 0])
+
     for function in units.functions:
         if function.body_span is None:
             continue
@@ -125,7 +129,7 @@ def _metrics_for_file(
             unanalyzed.add(function.name)
             for line_labels in function_labels.values():
                 for label in line_labels:
-                    totals[label.category][1] += 1
+                    counts_for(label.category)[1] += 1
             continue
 
         matched: dict[int, set[int]] = {
@@ -153,15 +157,15 @@ def _metrics_for_file(
                 None,
             )
             if match_index is None:
-                totals[issue.category][2] += 1
+                counts_for(issue.category)[2] += 1
             else:
                 matched[issue_line].add(match_index)
-                totals[issue.category][0] += 1
+                counts_for(issue.category)[0] += 1
 
         for line_number, line_labels in function_labels.items():
             for index, label in enumerate(line_labels):
                 if index not in matched[line_number]:
-                    totals[label.category][1] += 1
+                    counts_for(label.category)[1] += 1
 
     return {category: tuple(counts) for category, counts in totals.items()}, frozenset(
         unanalyzed
@@ -178,7 +182,6 @@ EXPECTED_METRICS: dict[str, dict[str, tuple[int, int, int]]] = {
         "close_nil_channel": (1, 0, 0),
         "use_after_close": _ZERO,
         "unlock_of_unlocked": _ZERO,
-        "contract_output_unassigned": _ZERO,
         "double_lock": _ZERO,
     },
     "locks.go": {
@@ -192,7 +195,6 @@ EXPECTED_METRICS: dict[str, dict[str, tuple[int, int, int]]] = {
         "close_nil_channel": _ZERO,
         "use_after_close": _ZERO,
         "unlock_of_unlocked": (2, 0, 0),
-        "contract_output_unassigned": _ZERO,
         "double_lock": (1, 0, 0),
     },
     "maps.go": {
@@ -204,7 +206,6 @@ EXPECTED_METRICS: dict[str, dict[str, tuple[int, int, int]]] = {
         "close_nil_channel": _ZERO,
         "use_after_close": _ZERO,
         "unlock_of_unlocked": _ZERO,
-        "contract_output_unassigned": _ZERO,
         "double_lock": _ZERO,
     },
     "nil_values.go": {
@@ -216,7 +217,6 @@ EXPECTED_METRICS: dict[str, dict[str, tuple[int, int, int]]] = {
         "close_nil_channel": _ZERO,
         "use_after_close": _ZERO,
         "unlock_of_unlocked": _ZERO,
-        "contract_output_unassigned": _ZERO,
         "double_lock": _ZERO,
     },
     "resources.go": {
@@ -228,7 +228,6 @@ EXPECTED_METRICS: dict[str, dict[str, tuple[int, int, int]]] = {
         "close_nil_channel": _ZERO,
         "use_after_close": (1, 0, 0),
         "unlock_of_unlocked": _ZERO,
-        "contract_output_unassigned": _ZERO,
         "double_lock": _ZERO,
     },
 }
@@ -247,7 +246,6 @@ EXPECTED_AGGREGATE: dict[str, tuple[int, int, int]] = {
     "close_nil_channel": (1, 0, 0),
     "use_after_close": (1, 0, 0),
     "unlock_of_unlocked": (2, 0, 0),
-    "contract_output_unassigned": _ZERO,
     "double_lock": (1, 0, 0),
 }
 
@@ -286,6 +284,20 @@ def test_dataflow_corpus_rejects_unknown_or_malformed_labels(source: str):
         _parse_labels(source)
 
 
+def test_unmeasured_contract_output_label_is_still_counted(tmp_path: Path):
+    path = tmp_path / "contract_output.go"
+    path.write_text(
+        "package p\nfunc f() int {\n\treturn 1 // want: "
+        "contract_output_unassigned result\n}\n",
+        encoding="utf-8",
+    )
+
+    metrics, unanalyzed = _metrics_for_file(path)
+
+    assert metrics["contract_output_unassigned"] == (0, 1, 0)
+    assert not unanalyzed
+
+
 def test_dataflow_corpus_metrics_match_the_pinned_measurements():
     paths = sorted(_CORPUS_DIR.glob("*.go"))
     assert {path.name for path in paths} == set(EXPECTED_METRICS)
@@ -298,6 +310,7 @@ def test_dataflow_corpus_metrics_match_the_pinned_measurements():
         )
         assert metrics == EXPECTED_METRICS[path.name], f"{path.name}: metrics differ"
         for category, counts in metrics.items():
+            aggregate.setdefault(category, [0, 0, 0])
             for index, count in enumerate(counts):
                 aggregate[category][index] += count
 

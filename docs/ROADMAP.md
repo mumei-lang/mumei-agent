@@ -2839,13 +2839,13 @@ issue checks:
 | `close_nil_channel` | 1 | 0 | 0 |
 | `use_after_close` | 1 | 0 | 0 |
 | `unlock_of_unlocked` | 2 | 0 | 0 |
-| `contract_output_unassigned` | 0 | 0 | 0 |
 | `double_lock` | 1 | 0 | 0 |
 
 The unexpected lock report is due to path-insensitive handling of repeated
 conditions in `locks.go`. These labels are corpus-declared expectations; the
 counts measure agreement on this corpus only, not soundness or completeness,
-and there is no single score.
+and there is no single score. The corpus passes no contract outputs, so
+`contract_output_unassigned` is not measured here.
 
 ### C05 labeled flow-hint corpus
 
