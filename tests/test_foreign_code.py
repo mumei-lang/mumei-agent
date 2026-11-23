@@ -5095,6 +5095,221 @@ func (z *Float) pow5(n uint64) *Float {
     assert not any("can index" in i.message for i in issues)
 
 
+def test_go_constant_slice_index_requires_nonempty_length() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package p
+
+func first(s []int) int {
+    return s[0]
+}
+
+func firstAfterLengthGuard(s []int) int {
+    if len(s) == 0 { return 0 }
+    return s[0]
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+
+    assert [
+        issue.message for issue in issues
+        if issue.function_name == "first" and "can index" in issue.message
+    ] == [
+        "Go function `first` can index `s[0]` without a bounds contract "
+        "(Z3 counterexample: len_s=0)"
+    ]
+    assert not any(
+        issue.function_name == "firstAfterLengthGuard" and "can index" in issue.message
+        for issue in issues
+    )
+
+
+def test_go_constant_slice_indices_use_length_lower_bound_facts() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package p
+
+func secondAfterLengthGuard(s []int) int {
+    if len(s) < 2 { return 0 }
+    return s[1]
+}
+
+func thirdAfterLengthGuard(s []int) int {
+    if len(s) < 2 { return 0 }
+    return s[2]
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+
+    assert not any(
+        issue.function_name == "secondAfterLengthGuard" and "can index" in issue.message
+        for issue in issues
+    )
+    assert [
+        issue.message for issue in issues
+        if issue.function_name == "thirdAfterLengthGuard" and "can index" in issue.message
+    ] == [
+        "Go function `thirdAfterLengthGuard` can index `s[2]` without a bounds "
+        "contract (Z3 counterexample: len_s=2)"
+    ]
+
+
+def test_go_constant_slice_index_len_minus_one_is_reported_when_unguarded() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package p
+
+func last(s []int) int {
+    return s[len(s)-1]
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+
+    assert [
+        issue.message for issue in issues if "can index" in issue.message
+    ] == [
+        "Go function `last` can index `s[len(s)-1]` without a bounds contract "
+        "(Z3 counterexample: len_s=0)"
+    ]
+
+
+def test_go_constant_indices_skip_maps_and_fixed_array_parameters() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package p
+
+func mapValue(m map[int]int) int {
+    return m[0]
+}
+
+func arrayValue(a [4]int) int {
+    return a[0]
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+
+    assert not any("can index" in issue.message for issue in issues)
+
+
+def test_go_constant_indices_skip_package_level_containers() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package p
+
+var table = []int{1, 2, 3}
+const digits = "0123456789"
+
+func firstTableEntry() int {
+    return table[0]
+}
+
+func lastTableEntry() int {
+    return table[len(table)-1]
+}
+
+func firstDigit() byte {
+    return digits[0]
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+
+    assert not any(
+        issue.function_name in {"firstTableEntry", "lastTableEntry", "firstDigit"}
+        and "can index" in issue.message
+        for issue in issues
+    )
+
+
+def test_go_constant_index_on_string_parameter_is_reported() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package p
+
+func first(s string) byte {
+    return s[0]
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+
+    assert [
+        issue.message for issue in issues if "can index" in issue.message
+    ] == [
+        "Go function `first` can index `s[0]` without a bounds contract "
+        "(Z3 counterexample: len_s=0)"
+    ]
+
+
+def test_go_constant_index_nested_in_another_access_is_reported() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package p
+
+var lookup = []int{1}
+
+func nested(s []int) int {
+    return lookup[s[0]]
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+
+    assert [
+        issue.message for issue in issues if "can index" in issue.message
+    ] == [
+        "Go function `nested` can index `s[0]` without a bounds contract "
+        "(Z3 counterexample: len_s=0)"
+    ]
+
+
+def test_go_constant_indices_respect_same_expression_length_guards() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package p
+
+func guardedZero(s []int) bool {
+    return len(s) > 0 && s[0] == 1
+}
+
+func guardedOne(s []int) bool {
+    return len(s) > 1 && s[1] == 1
+}
+
+func insufficientGuard(s []int) bool {
+    return len(s) > 0 && s[1] == 1
+}
+
+func disjunctionDoesNotGuard(s []int) bool {
+    return len(s) > 0 || s[0] == 1
+}
+
+func guardAfterAccessDoesNotGuard(s []int) bool {
+    return s[0] == 1 && len(s) > 0
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+
+    assert [
+        (issue.function_name, issue.message)
+        for issue in issues
+        if "can index" in issue.message
+    ] == [
+        (
+            "insufficientGuard",
+            "Go function `insufficientGuard` can index `s[1]` without a bounds "
+            "contract (Z3 counterexample: len_s=1)",
+        ),
+        (
+            "disjunctionDoesNotGuard",
+            "Go function `disjunctionDoesNotGuard` can index `s[0]` without a "
+            "bounds contract (Z3 counterexample: len_s=0)",
+        ),
+        (
+            "guardAfterAccessDoesNotGuard",
+            "Go function `guardAfterAccessDoesNotGuard` can index `s[0]` without "
+            "a bounds contract (Z3 counterexample: len_s=0)",
+        ),
+    ]
+
+
 def test_go_safety_suppresses_actor_act_builder_param_nil() -> None:
     """``Actor.Act`` implementations receive non-nil ``*Builder`` and ``*Action``."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues

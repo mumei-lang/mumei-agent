@@ -14,6 +14,7 @@ from typing import Iterable, Literal, Mapping
 import z3
 
 from agent import dataflow_facts, semantic_safety, tree_sitter_extract
+from agent.dataflow_facts import _split_top_level
 from agent.cross_validation_foreign import (
     SOLIDITY_UINT256_MAX,
     _addition_pairs_regex,
@@ -5309,6 +5310,23 @@ def _detect_go_safety_issues(
                 name for name, raw_type in param_types.items()
                 if raw_type.strip().lstrip("*") == "string"
             }
+            sequence_names = (
+                {
+                    name for name, raw_type in param_types.items()
+                    if raw_type.strip().lstrip("*").startswith("[")
+                    or raw_type.strip() == "string"
+                }
+                | known_strings
+                | _go_package_slice_names(package_source)
+            )
+            constant_index_containers = {
+                name
+                for name, raw_type in param_types.items()
+                if (
+                    normalized_type := re.sub(r"\s+", "", raw_type).lstrip("*")
+                ).startswith("[]")
+                or normalized_type == "string"
+            }
             ensures_names = _go_ensures_identifiers(orig_source, orig_start if orig_start >= 0 else fn.start_char)
             contract_results = _go_named_results(fn.return_type) & ensures_names
             contract_outputs = {
@@ -5323,12 +5341,7 @@ def _detect_go_safety_issues(
                 param_names=set(param_types),
                 nonneg_names=unsigned_vars,
                 nonzero_names=guaranteed_nonzero,
-                sequence_names={
-                    name for name, raw_type in param_types.items()
-                    if raw_type.strip().lstrip("*").startswith("[") or raw_type.strip() == "string"
-                }
-                | known_strings
-                | _go_package_slice_names(package_source),
+                sequence_names=sequence_names,
                 contract_results=contract_results,
                 contract_outputs=contract_outputs,
             )
@@ -5368,6 +5381,51 @@ def _detect_go_safety_issues(
                     source=source,
                     params_text=fn.params_text,
                 )
+                constant_index_conjuncts = (
+                    _split_top_level(expression, "&&")
+                    if len(_split_top_level(expression, "||")) == 1
+                    else ()
+                )
+                seen_constant_accesses: set[tuple[str, str]] = set()
+                for container, need, index_text in _go_constant_index_accesses(
+                    expression
+                ):
+                    if (
+                        container not in constant_index_containers
+                        or container in go_map_names
+                    ):
+                        continue
+                    if re.match(r"\s*\*?\s*\[\d+\]", param_types.get(container, "")):
+                        continue
+                    if facts is not None and facts.len_ge.get(container, 0) >= need:
+                        continue
+                    if (
+                        _go_constant_index_guard_length(
+                            constant_index_conjuncts, container, index_text
+                        )
+                        >= need
+                    ):
+                        continue
+                    constant_length = expr_constants.get(f"len({container})")
+                    if constant_length is not None and constant_length >= need:
+                        continue
+                    access = (container, index_text)
+                    if access in seen_constant_accesses:
+                        continue
+                    seen_constant_accesses.add(access)
+                    expr_issues.append(
+                        ForeignSafetyIssue(
+                            function_name=fn.name,
+                            message=(
+                                f"Go function `{fn.name}` can index "
+                                f"`{container}[{index_text}]` without a bounds "
+                                f"contract (Z3 counterexample: "
+                                f"len_{container}={need - 1})"
+                            ),
+                            required_contracts=(f"len_{container} >= {need}",),
+                            counterexample={f"len_{container}": need - 1},
+                        )
+                    )
                 # A final return after ``if x == nil { return }`` is known non-nil.
                 if index == len(expressions) - 1 and guarded:
                     expr_issues = [
@@ -5906,6 +5964,60 @@ def _go_sibling_guard_asymmetries(package_source: str) -> list[str]:
 def _go_index_accesses(expression: str) -> tuple[tuple[str, str], ...]:
     findings = tree_sitter_extract.analyze_expression(expression, "go")
     return findings.index_accesses if findings is not None else ()
+
+
+def _go_constant_index_accesses(
+    expression: str,
+) -> tuple[tuple[str, int, str], ...]:
+    findings = tree_sitter_extract.analyze_expression(
+        _strip_go_rust_literals_and_comments(expression), "go"
+    )
+    return findings.constant_index_accesses if findings is not None else ()
+
+
+def _go_constant_index_guard_length(
+    conjuncts: list[str] | tuple[str, ...],
+    container: str,
+    index_text: str,
+) -> int:
+    access_text = re.sub(r"\s+", "", f"{container}[{index_text}]")
+    access_conjunct = next(
+        (
+            index
+            for index, conjunct in enumerate(conjuncts)
+            if access_text in re.sub(r"\s+", "", conjunct)
+        ),
+        None,
+    )
+    if access_conjunct is None:
+        return 0
+
+    length_expr = rf"len\({re.escape(container)}\)"
+    decimal = r"(?:0|[1-9](?:_?[0-9])*)"
+    patterns = (
+        (rf"{length_expr}>(?P<value>{decimal})", 1),
+        (rf"{length_expr}>=(?P<value>{decimal})", 0),
+        (rf"{length_expr}!=0", None),
+        (rf"(?P<value>{decimal})<{length_expr}", 1),
+        (rf"(?P<value>{decimal})<={length_expr}", 0),
+        (rf"{length_expr}==(?P<value>{decimal})", 0),
+        (rf"0!={length_expr}", None),
+    )
+    minimum_length = 0
+    for conjunct in conjuncts[:access_conjunct]:
+        normalized = re.sub(r"\s+", "", conjunct)
+        for pattern, increment in patterns:
+            match = re.fullmatch(pattern, normalized)
+            if match is None:
+                continue
+            minimum = (
+                1
+                if increment is None
+                else int(match.group("value").replace("_", "")) + increment
+            )
+            minimum_length = max(minimum_length, minimum)
+            break
+    return minimum_length
 
 
 _DATAFLOW_ISSUE_MESSAGES = {

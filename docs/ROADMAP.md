@@ -2855,7 +2855,7 @@ index-out-of-bounds safety issues:
 | Category | Matched | Missed | Unexpected |
 | --- | ---: | ---: | ---: |
 | `division_by_zero` | 4 | 2 | 0 |
-| `index_out_of_bounds` | 3 | 2 | 0 |
+| `index_out_of_bounds` | 5 | 0 | 0 |
 
 Missed labels:
 - `division.go:4` (`Div`): `_go_div_nonzero_params` and
@@ -2863,10 +2863,6 @@ Missed labels:
   `foreign_code_strategy_helpers.py:5235-5236`.
 - `division.go:8` (`Mod`): the same non-zero parameter heuristics suppress
   the finding at `foreign_code_strategy_helpers.py:5235-5236`.
-- `bounds.go:8` (`IndexFirst`): the syntax extractor only records
-  identifier indices, omitting literal `0` at `tree_sitter_extract.py:980-985`.
-- `bounds.go:49` (`IndexLast`): the syntax extractor omits compound indices
-  such as `len(s)-1` at `tree_sitter_extract.py:980-985`.
 
 The labels mark runtime panics expected by this corpus, with no contracts
 supplied. Counts measure agreement on this corpus only, not soundness or
