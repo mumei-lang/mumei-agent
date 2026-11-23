@@ -8573,9 +8573,9 @@ class _Builder:
         `_imported_member_write`: the chain descends through
         parens/selectors/indexes/`*(saw_deref)` until a bare
         identifier names the var, whose own binding identity
-        records the mutation (the stored deps drop — package state
-        tracks no binding's contents). Index sub-expressions return
-        as `extras` for evaluation like the imported path's."""
+        records the mutation; stored value and index deps join
+        `indirect_writes` when the store lands. Index sub-expressions
+        return as `extras` for evaluation like the imported path's."""
         cur = node
         while cur is not None and cur.type == "parenthesized_expression":
             cur = next(
@@ -11609,9 +11609,9 @@ class _Builder:
         Bare-identifier stores into locals admit like any `=`/`:=`;
         `G = <-ch`, `G.V = <-ch` or `lib.V = <-ch` mutate external
         state the same way the ordinary assignment admits — the
-        var's or member's identity records the transfer and the
-        received deps drop. A composite local's field (`s.V = <-ch`)
-        stays closed.
+        var's or member's identity records the transfer, and the
+        received and index deps join `indirect_writes`. A composite
+        local's field (`s.V = <-ch`) stays closed.
         """
         # Go evaluates every LHS operand — index and call arguments
         # inside a composite write target — before any assignment
@@ -11630,18 +11630,22 @@ class _Builder:
             package_write = self._package_var_write(lhs)
             if package_write is not None:
                 binding, extras, _ = package_write
-                self._eval_write_extras(
+                index_deps = self._eval_write_extras(
                     extras, fn, params, locals_, transfers, count
                 )
-                pending.append(("package", lhs, binding, extras))
+                pending.append(
+                    ("package", lhs, binding, extras, index_deps)
+                )
                 continue
             member_write = self._imported_member_write(lhs)
             if member_write is not None:
                 member, extras, _ = member_write
-                self._eval_write_extras(
+                index_deps = self._eval_write_extras(
                     extras, fn, params, locals_, transfers, count
                 )
-                pending.append(("member", lhs, member, extras))
+                pending.append(
+                    ("member", lhs, member, extras, index_deps)
+                )
                 continue
             # `s.V = <-ch` / `*p = <-ch` — a field store through a
             # pointer-typed binding or a local composite admits the
@@ -11878,17 +11882,19 @@ class _Builder:
             if entry is None:
                 continue
             if entry[0] == "package":
-                _, lhs, binding, extras = entry
+                _, lhs, binding, extras, index_deps = entry
                 self._record_package_write(
                     lhs, binding, extras, fn, params, locals_,
                     transfers, count, eval_extras=False,
                 )
+                self.indirect_writes |= recv_deps | index_deps
             elif entry[0] == "member":
-                _, lhs, member, extras = entry
+                _, lhs, member, extras, index_deps = entry
                 self._record_member_write(
                     lhs, member, extras, fn, params, locals_,
                     transfers, count, eval_extras=False,
                 )
+                self.indirect_writes |= recv_deps | index_deps
             elif entry[0] == "field":
                 _, ref, bcast, nested = entry
                 base = (
@@ -17128,7 +17134,7 @@ class _Builder:
         transfers: list[CallTransfer],
         count: list[int],
         eval_extras: bool = True,
-    ) -> None:
+    ) -> frozenset[int]:
         """Record an imported member write's mutation and index calls."""
         if member.kind != "var":
             # `lib.F`, `lib.K` and `lib.T` name no writable storage —
@@ -17163,9 +17169,10 @@ class _Builder:
             )
         )
         if eval_extras:
-            self._eval_write_extras(
+            return self._eval_write_extras(
                 extras, fn, params, locals_, transfers, count
             )
+        return frozenset()
 
     def _eval_write_extras(
         self,
@@ -17175,12 +17182,13 @@ class _Builder:
         locals_: dict[str, frozenset[int]],
         transfers: list[CallTransfer],
         count: list[int],
-    ) -> None:
+    ) -> frozenset[int]:
         # Extras were collected outermost-first while descending the
         # operand chain; Go evaluates indices inside-out — the inner
         # index of `lib.V2[f()][g()]` runs before `g()` — so a write
         # `f()` performs must already be visible when `g()`'s call
         # arguments record their dependencies.
+        deps = frozenset()
         for extra in reversed(extras):
             # The write reads its index operands like the read side
             # does: every non-literal extra evaluates through the
@@ -17190,11 +17198,12 @@ class _Builder:
             # that `stale_dependents` later reads.
             if extra.type in _INDEX_LITERALS:
                 continue
-            self._record_read(
-                self.expression(
-                    extra, fn, params, locals_, transfers, count, 0
-                )
+            extra_deps = self.expression(
+                extra, fn, params, locals_, transfers, count, 0
             )
+            self._record_read(extra_deps)
+            deps |= extra_deps
+        return deps
 
     def _record_package_write(
         self,
@@ -17207,7 +17216,7 @@ class _Builder:
         transfers: list[CallTransfer],
         count: list[int],
         eval_extras: bool = True,
-    ) -> None:
+    ) -> frozenset[int]:
         """Record a package-level `var` write's mutation + index calls.
 
         Package state is external like an imported member's: the
@@ -17231,9 +17240,10 @@ class _Builder:
             # Same rule as `_record_member_write`: indices evaluate
             # inside-out, literals skip, and the read's dependencies
             # attribute to the statement.
-            self._eval_write_extras(
+            return self._eval_write_extras(
                 extras, fn, params, locals_, transfers, count
             )
+        return frozenset()
 
     def _opaque_write_target(
         self, node: Any, locals_: dict[str, frozenset[int]], params: dict[str, int]
@@ -22576,6 +22586,7 @@ class _Builder:
             # `(*p)[i]` store does. Ref indices collect here
             # because the RHS values evaluate after the LHS pass.
             external_write_targets: set[int] = set()
+            external_write_index_deps: dict[int, frozenset[int]] = {}
             external_chan_chan_write_targets: set[int] = set()
             # `*pp = x` on a `**S` root reseats the middle pointer —
             # the mark lands with the store (after every right-hand
@@ -22695,8 +22706,9 @@ class _Builder:
                             # A package-level `var` — `G = v` —
                             # mutates package state the same way:
                             # external state no binding tracks, so the
-                            # stored value's deps drop and the imported
-                            # transfer marks `effects` unknown. The
+                            # stored value's deps join indirect_writes
+                            # and the imported transfer marks `effects`
+                            # unknown. The
                             # target is the var's binding identity —
                             # in `known`, so redeclaring it flags
                             # `stale_dependents`.
@@ -22706,7 +22718,7 @@ class _Builder:
                                     "binding_unavailable", _span(lhs)
                                 )
                             binding, extras, _ = package_write
-                            self._record_package_write(
+                            write_index_deps = self._record_package_write(
                                 lhs, binding, extras,
                                 fn, params, locals_, transfers, count,
                             )
@@ -22735,10 +22747,13 @@ class _Builder:
                             # deps broadcast so a later `VA`/`VA[i]`
                             # read observes them.
                             external_write_targets.add(len(refs))
+                            external_write_index_deps[len(refs)] = (
+                                write_index_deps
+                            )
                             refs.append(None)
                             continue
                         member, extras, _ = member_write
-                        self._record_member_write(
+                        write_index_deps = self._record_member_write(
                             lhs, member, extras,
                             fn, params, locals_, transfers, count,
                         )
@@ -22761,6 +22776,9 @@ class _Builder:
                                 len(refs)
                             )
                         external_write_targets.add(len(refs))
+                        external_write_index_deps[len(refs)] = (
+                            write_index_deps
+                        )
                         refs.append(None)
                         continue
                     refs.append(ref)
@@ -22957,13 +22975,13 @@ class _Builder:
                 # `lib.VA[i] = v`, `lib.VS.f = v` — mutates package
                 # state like the field write above mutates caller
                 # state: external, so the recorded transfer marks
-                # `effects` unknown, and the stored value's
-                # dependencies drop with it because no binding
-                # tracks member contents.
+                # `effects` unknown, and the stored value and index
+                # dependencies join `indirect_writes` because no
+                # binding tracks member contents.
                 member_write = self._imported_member_write(lhs)
                 if member_write is not None:
                     member, extras, saw_deref = member_write
-                    self._record_member_write(
+                    write_index_deps = self._record_member_write(
                         lhs, member, extras,
                         fn, params, locals_, transfers, count,
                     )
@@ -22973,6 +22991,9 @@ class _Builder:
                     # dependencies into every escaped binding.
                     refs.append(_ALIAS_FOLD if saw_deref else None)
                     external_write_targets.add(len(refs) - 1)
+                    external_write_index_deps[len(refs) - 1] = (
+                        write_index_deps
+                    )
                     if (
                         not saw_deref
                         and self._scalar_chan_fact(member.type)
@@ -23008,19 +23029,23 @@ class _Builder:
                 # A package-level `var` — `G.V = v`, `G[i] = v`,
                 # `*GP = v` — mutates package state the same way: the
                 # var's binding identity records the mutation (in
-                # `known`, so `stale_dependents` stays honest) and the
-                # stored value's dependencies drop — unless the store
-                # crosses the var's pointer, which may aim at any
-                # escaped binding like `*lib.PV = v` does.
+                # `known`, so `stale_dependents` stays honest), and
+                # the stored value and index dependencies join
+                # `indirect_writes` — unless the store crosses the
+                # var's pointer, which may aim at any escaped binding
+                # like `*lib.PV = v` does.
                 package_write = self._package_var_write(lhs)
                 if package_write is not None:
                     binding, extras, saw_deref = package_write
-                    self._record_package_write(
+                    write_index_deps = self._record_package_write(
                         lhs, binding, extras,
                         fn, params, locals_, transfers, count,
                     )
                     refs.append(_ALIAS_FOLD if saw_deref else None)
                     external_write_targets.add(len(refs) - 1)
+                    external_write_index_deps[len(refs) - 1] = (
+                        write_index_deps
+                    )
                     if (
                         not saw_deref
                         and self._scalar_chan_binding(binding.id)
@@ -24619,7 +24644,12 @@ class _Builder:
                         # external memory — its value's deps join
                         # the external-write set a later member or
                         # pointee element read observes.
-                        self.indirect_writes |= value
+                        self.indirect_writes |= (
+                            value
+                            | external_write_index_deps.get(
+                                i, frozenset()
+                            )
+                        )
                         root_id = external_chan_chan_roots.get(i)
                         if root_id is not None:
                             group_deps = self._chan_group_read_deps(
@@ -27603,15 +27633,15 @@ class _Builder:
                             CallTransfer(
                                 FileSpan(
                                     self.current_file,
-                                right.start_byte,
-                                right.end_byte,
-                            ),
-                            target,
-                            computed_args,
-                            computed_result_deps,
-                            imported=True,
+                                    right.start_byte,
+                                    right.end_byte,
+                                ),
+                                target,
+                                computed_args,
+                                computed_result_deps,
+                                imported=True,
+                            )
                         )
-                    )
                     if computed_call is not None:
                         # `*G()` — the shared transfer above pins the
                         # result pointee's identity; the call itself
@@ -29225,11 +29255,11 @@ class _Builder:
                     return
             member_write = self._imported_member_write(operand)
             if member_write is not None:
-                member, extras, _ = member_write
+                member, extras, saw_deref = member_write
                 # `lib.V++` mutates package state like `lib.V = v` —
                 # the stored amount is external, so only the
                 # mutation records.
-                self._record_member_write(
+                index_deps = self._record_member_write(
                     operand,
                     member,
                     extras,
@@ -29239,6 +29269,8 @@ class _Builder:
                     transfers,
                     count,
                 )
+                if not saw_deref:
+                    self.indirect_writes |= index_deps
                 return
             # `G++`/`G--` (and `G.V++`, `G[i]++`, `(*GP)++`) on a
             # package-level `var` mutate package state like
@@ -29246,11 +29278,13 @@ class _Builder:
             # mutation records against the var's identity.
             package_write = self._package_var_write(operand)
             if package_write is not None:
-                binding, extras, _ = package_write
-                self._record_package_write(
+                binding, extras, saw_deref = package_write
+                index_deps = self._record_package_write(
                     operand, binding, extras,
                     fn, params, locals_, transfers, count,
                 )
+                if not saw_deref:
+                    self.indirect_writes |= index_deps
                 return
             # `(*p)++` — an increment through a bound pointer mutates
             # the same untracked memory `*p = v` does, but is
@@ -31504,9 +31538,9 @@ class _Builder:
                     and binding.type is not None
                 ):
                     # A package-level `var` — mutable state outside the
-                    # parameter set — is dep-free for the value but not
-                    # purity-proof, so the imported transfer marks
-                    # `effects` unknown.
+                    # parameter set — carries dependencies broadcast by
+                    # writes in this summary but is not purity-proof, so
+                    # the imported transfer marks `effects` unknown.
                     # The target is the var's own binding identity,
                     # which lives in `known` — a redeclared or removed
                     # var still flags `stale_dependents`, and the
@@ -31538,7 +31572,7 @@ class _Builder:
                             locals_.get(ref.binding_id, frozenset())
                             | self.indirect_writes
                         )
-                    return frozenset()
+                    return self.indirect_writes
             raise _Unsupported("non_parameter_reference", _span(node))
         if kind == "selector_expression":
             # `lib.K` — a package-qualified member read. Scalar constants
@@ -41198,9 +41232,9 @@ def summarize_go_package(
     the same way: reads and writes (`G`, `G = v`, `G += v`,
     `G++`/`G--`) record imported transfers against the var's binding
     identity — in `known`, so `stale_dependents` flags on
-    redeclaration. Package-local global reads remain dep-free for the
-    value; the imported-member read model does not propagate across
-    function summaries. Reports without the
+    redeclaration. Package-local reads and writes share the current
+    indirect-write pool; propagation does not cross function
+    summaries. Reports without the
     section load unchanged; the member record only widens what was
     already unmodelled.
     """

@@ -4263,16 +4263,13 @@ emission on every arch.
 
 `var G int64` declarations at package scope — shared mutable state
 outside the parameter set — now admit reads and writes, matching an
-imported `lib.V` in admission and transfer identity. The package-local
-read remains dep-free for the value (its contents derive from package
-state, not from any parameter), while imported member reads carry
-current intra-function `indirect_writes`; both record an imported
-transfer, so `effects` reports `unknown`. The write records the same transfer and drops the
-stored value's dependencies, since no binding tracks global
-contents — `G = x; return G` therefore reports no parameter deps,
-matching `lib.V = x; return lib.V`. `G += v` follows the same
-assignment gate, and `G++`/`G--` admit like `lib.V++` —
-provenance-preserving, only the external mutation records.
+imported `lib.V` in admission and transfer identity. Writes to either
+state source broadcast the stored value's dependencies into the shared
+intra-function `indirect_writes` pool, and reads carry that pool, so
+`G = x; return G` and `lib.V = x; return lib.V` both report `{0}`.
+`G += v` follows the same assignment gate, and `G++`/`G--` admit like
+`lib.V++` — provenance-preserving, with the external mutation
+recorded. Propagation does not cross function summaries.
 
 The recorded target is the var's own binding identity — a real
 declaration, so `stale_dependents` works honestly in both
