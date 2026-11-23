@@ -14740,23 +14740,204 @@ class _Builder:
                 )
         return tuple(dict.fromkeys(record_ids))
 
+    def _transitive_struct_collection_element_field_record_ids(
+        self,
+        fact: Any,
+        record_cache: dict[str, tuple[str, ...]],
+        in_progress: set[str],
+        anchor: Any | None = None,
+    ) -> tuple[str, ...]:
+        visited: set[int] = set()
+
+        def collect(current: Any) -> tuple[str, ...]:
+            if current is None or id(current) in visited:
+                return ()
+            visited.add(id(current))
+            if current.kind in {
+                "slice",
+                "array",
+                "map",
+                "chan",
+                "pointer",
+            }:
+                return collect(getattr(current, "elem", None))
+            struct_fact = self._struct_value_fact(current)
+            if struct_fact is None:
+                return ()
+            return self._transitive_struct_field_closure_record_ids(
+                struct_fact, record_cache, in_progress, anchor
+            )
+
+        return collect(fact)
+
+    def _transitive_struct_field_closure_record_ids(
+        self,
+        fact: Any,
+        record_cache: dict[str, tuple[str, ...]],
+        in_progress: set[str],
+        anchor: Any | None = None,
+    ) -> tuple[str, ...]:
+        struct_fact = self._struct_value_fact(fact)
+        if struct_fact is None:
+            return ()
+        marker = struct_fact.type_id or (
+            getattr(anchor, "id", "") if anchor is not None else ""
+        )
+        if marker:
+            if marker in record_cache:
+                return record_cache[marker]
+            if marker in in_progress:
+                return ()
+            in_progress.add(marker)
+        try:
+            record_ids: list[str] = []
+            for member in self._struct_fields_for_fact(struct_fact, anchor):
+                member_type = getattr(member, "type", None)
+                if (
+                    member.kind in {"var", "variable"}
+                    and member_type is not None
+                    and member_type.kind == "function"
+                    and self._has_closure_records(member.id)
+                ):
+                    record_ids.append(member.id)
+                nested = self._struct_value_fact(member_type)
+                if nested is not None:
+                    record_ids.extend(
+                        self._transitive_struct_field_closure_record_ids(
+                            nested, record_cache, in_progress, member
+                        )
+                    )
+                elif member_type is not None and member_type.kind in {
+                    "slice",
+                    "array",
+                }:
+                    collection_records = (
+                        self._transitive_struct_collection_element_field_record_ids(
+                            member_type,
+                            record_cache,
+                            in_progress,
+                            member,
+                        )
+                    )
+                    _, supported_path = (
+                        self._struct_collection_element_value_fact(member_type)
+                    )
+                    if collection_records and not supported_path:
+                        raise _Unsupported("unsupported_expression")
+                    record_ids.extend(collection_records)
+                elif member_type is not None and member_type.kind in {
+                    "map",
+                    "chan",
+                    "pointer",
+                }:
+                    if (
+                        self._transitive_struct_collection_element_field_record_ids(
+                            member_type,
+                            record_cache,
+                            in_progress,
+                            member,
+                        )
+                    ):
+                        raise _Unsupported("unsupported_expression")
+            records = tuple(dict.fromkeys(record_ids))
+            if marker:
+                record_cache[marker] = records
+            return records
+        finally:
+            if marker:
+                in_progress.discard(marker)
+
+    def _transitive_closure_records(
+        self, captured: frozenset[str]
+    ) -> tuple[
+        frozenset[str],
+        frozenset[str],
+        bool,
+        bool,
+        bool,
+    ]:
+        """Collect closure records reachable from captured bindings."""
+        captured_ids: set[str] = set()
+        writes: set[str] = set()
+        star_write = False
+        inner_calls = False
+        pointee = False
+        pending = list(captured)
+        seen: set[str] = set()
+        record_cache: dict[str, tuple[str, ...]] = {}
+        in_progress: set[str] = set()
+        while pending:
+            binding_id = pending.pop()
+            if binding_id in seen:
+                continue
+            seen.add(binding_id)
+            captured_ids.add(binding_id)
+            pending.extend(
+                self.closure_captures.get(binding_id, frozenset())
+            )
+            pending.extend(
+                self.bound_method_field_records.get(binding_id, ())
+            )
+            writes.update(
+                self.closure_writes.get(binding_id, frozenset())
+            )
+            star_write |= binding_id in self.closure_star_writes
+            inner_calls |= binding_id in self.closure_inner_calls
+            pointee |= binding_id in self.pointee_closures
+
+            binding = self.bindings.get(binding_id)
+            if binding is None:
+                binding = self.members.get(binding_id)
+            fact = getattr(binding, "type", None)
+            if fact is None:
+                continue
+            if fact.kind == "struct":
+                pending.extend(
+                    self._transitive_struct_field_closure_record_ids(
+                        fact, record_cache, in_progress, binding
+                    )
+                )
+            elif fact.kind in {"slice", "array"}:
+                record_ids = (
+                    self._transitive_struct_collection_element_field_record_ids(
+                        fact, record_cache, in_progress, binding
+                    )
+                )
+                _, supported_path = (
+                    self._struct_collection_element_value_fact(fact)
+                )
+                if record_ids and not supported_path:
+                    raise _Unsupported("unsupported_expression")
+                pending.extend(record_ids)
+            elif fact.kind in {"map", "chan", "pointer"}:
+                if self._transitive_struct_collection_element_field_record_ids(
+                    fact, record_cache, in_progress, binding
+                ):
+                    raise _Unsupported("unsupported_expression")
+        return (
+            frozenset(captured_ids),
+            frozenset(writes),
+            star_write,
+            inner_calls,
+            pointee,
+        )
+
     def _captured_current_deps(
         self,
         captured: frozenset[str],
         params: dict[str, int],
         locals_: dict[str, frozenset[int]],
-        *,
-        _seen: set[str] | None = None,
     ) -> frozenset[int]:
         """Resolve each captured binding's deps NOW — reassignments
         between the literal and the read move what a bound closure
         actually observes (`p := &a; h := func(){*p}; p = &b; h()`
         reads `b`, not `a`). `locals_` wins over the parameter index:
         `x = y` stores the param's current value under its binding id."""
-        if _seen is None:
-            _seen = set()
+        captured_ids, _, _, _, _ = self._transitive_closure_records(
+            captured
+        )
         resolved: frozenset[int] = frozenset()
-        for cbid in captured:
+        for cbid in captured_ids:
             # A captured channel name may have been reseated
             # between the literal and the read (`ch = ch2`) —
             # resolve the queue it names NOW, not the one its
@@ -14768,16 +14949,6 @@ class _Builder:
             )
             if root in locals_:
                 if self._is_tracked_literal_value(root, params):
-                    if root not in _seen:
-                        _seen.add(root)
-                        resolved |= self._captured_current_deps(
-                            self.closure_captures.get(
-                                root, frozenset()
-                            ),
-                            params,
-                            locals_,
-                            _seen=_seen,
-                        )
                     if root in self.closure_factory_results:
                         resolved |= locals_[root]
                 else:
@@ -15058,6 +15229,7 @@ class _Builder:
         locals_: dict[str, frozenset[int]],
         *,
         callee_id_override: str | None = None,
+        transitive: bool = True,
     ) -> tuple[
         frozenset[str], frozenset[str], frozenset[str], bool
     ]:
@@ -15280,6 +15452,20 @@ class _Builder:
                     )
                     if root_id is not None:
                         roots.add(root_id)
+        if transitive:
+            (
+                captured,
+                transitive_writes,
+                transitive_star_write,
+                transitive_inner_calls,
+                transitive_pointee,
+            ) = self._transitive_closure_records(captured)
+            writes |= transitive_writes
+            star_or_external |= (
+                transitive_star_write
+                or transitive_inner_calls
+                or transitive_pointee
+            )
         return captured, writes, frozenset(roots), star_or_external
 
     def _go_statement_races_later_stores(
@@ -15291,9 +15477,13 @@ class _Builder:
         locals_: dict[str, frozenset[int]],
     ) -> bool:
         call = self.calls.get(self.node_key(call_node))
-        captured, writes, roots, star = self._deferred_exit_shape(
-            call_node, call, params, locals_
+        direct_captured, direct_writes, roots, star = (
+            self._deferred_exit_shape(
+                call_node, call, params, locals_, transitive=False
+            )
         )
+        captured = direct_captured
+        writes = direct_writes
         arguments = call_node.child_by_field_name("arguments")
         if arguments is not None:
             for argument in _children(arguments):
@@ -15317,10 +15507,25 @@ class _Builder:
             ) = self._func_literal_capture(
                 function_node, params, locals_
             )
-            captured = frozenset(literal_captured)
-            writes = frozenset(literal_writes)
+            direct_captured = frozenset(literal_captured)
+            captured = direct_captured
+            direct_writes = frozenset(literal_writes)
+            writes = direct_writes
             roots = frozenset()
             star = captures_pointer or star_write or has_call
+        (
+            captured,
+            transitive_writes,
+            transitive_star_write,
+            transitive_inner_calls,
+            transitive_pointee,
+        ) = self._transitive_closure_records(direct_captured)
+        writes |= transitive_writes
+        star |= (
+            transitive_star_write
+            or transitive_inner_calls
+            or transitive_pointee
+        )
         local_param_ids = set(locals_) | set(params)
 
         def fact_may_contain_channel(
@@ -15845,7 +16050,10 @@ class _Builder:
                     params,
                     locals_,
                 )
-                written.update(deferred_shape[1] | deferred_shape[2])
+                deferred_writes = (
+                    deferred_shape[1] | deferred_shape[2]
+                )
+                written.update(deferred_writes)
 
         address_taken: set[str] = set()
         pointer_assignments: list[tuple[str, Any]] = []
@@ -15942,10 +16150,11 @@ class _Builder:
         for binding_id in tuple(written):
             written.update(address_targets.get(binding_id, set()))
 
-        return bool(touched & written) or (
+        races = bool(touched & written) or (
             reference_involved
             and (nonplain or bool(written & address_taken))
         )
+        return races
 
     def _record_deferred_exit(self, record: _DeferredExit) -> None:
         for index, existing in enumerate(self._deferred_exits):
@@ -15982,11 +16191,28 @@ class _Builder:
             indirect_before = self.indirect_writes
             for record in self._deferred_exits:
                 rec_deps = record.arg_deps
+                writes = record.writes
+                star_or_external = record.star_or_external
                 if record.captured:
-                    rec_deps |= self._captured_current_deps(
-                        record.captured, params, scratch
+                    (
+                        captured,
+                        transitive_writes,
+                        transitive_star_write,
+                        transitive_inner_calls,
+                        transitive_pointee,
+                    ) = self._transitive_closure_records(
+                        record.captured
                     )
-                if record.star_or_external:
+                    writes |= transitive_writes
+                    star_or_external |= (
+                        transitive_star_write
+                        or transitive_inner_calls
+                        or transitive_pointee
+                    )
+                    rec_deps |= self._captured_current_deps(
+                        captured, params, scratch
+                    )
+                if star_or_external:
                     for root_id in record.roots:
                         if root_id in scratch:
                             rec_deps |= scratch[root_id]
@@ -16021,7 +16247,7 @@ class _Builder:
                         if updated != target_deps:
                             scratch[escaped_id] = updated
                             changed = True
-                for target_id in record.writes:
+                for target_id in writes:
                     target_deps = scratch.get(
                         target_id,
                         frozenset({params[target_id]})
@@ -16033,9 +16259,9 @@ class _Builder:
                         scratch[target_id] = updated
                         changed = True
                 if (
-                    record.writes & named_results
+                    writes & named_results
                     or (
-                        record.star_or_external
+                        star_or_external
                         and named_results & self.escaped
                     )
                 ):
@@ -29963,7 +30189,9 @@ class _Builder:
                     node, inner[0], fn, params, locals_
                 )
             ):
-                raise _Unsupported("unsupported_statement", _span(node))
+                raise _Unsupported(
+                    "unsupported_statement", _span(node)
+                )
             defer_call = (
                 self.calls.get(self.node_key(inner[0]))
                 if kind == "defer_statement"
@@ -30028,6 +30256,7 @@ class _Builder:
                     params,
                     locals_,
                     callee_id_override=deferred_literal_id,
+                    transitive=False,
                 )
                 if kind == "defer_statement"
                 else None
@@ -31251,6 +31480,16 @@ class _Builder:
             self.node_key(node), frozenset()
         )
         for arg_node, binding_id, force_external in pending:
+            captured = self.closure_captures.get(binding_id)
+            (
+                transitive_captures,
+                transitive_writes,
+                transitive_star_write,
+                transitive_inner_calls,
+                transitive_pointee,
+            ) = self._transitive_closure_records(
+                captured or frozenset()
+            )
             field_value = (
                 force_external
                 or arg_node.type == "selector_expression"
@@ -31304,9 +31543,13 @@ class _Builder:
                     )
                     effectful = (
                         bool(self.closure_writes.get(binding_id))
+                        or bool(transitive_writes)
                         or binding_id in self.closure_star_writes
+                        or transitive_star_write
                         or binding_id in self.closure_inner_calls
+                        or transitive_inner_calls
                         or binding_id in self.pointee_closures
+                        or transitive_pointee
                         or any(
                             (
                                 self._chan_root(cbid) in params
@@ -31314,9 +31557,7 @@ class _Builder:
                                 in self.external_chan_locals
                             )
                             and self._scalar_chan_binding(cbid)
-                            for cbid in self.closure_captures.get(
-                                binding_id, ()
-                            )
+                            for cbid in transitive_captures
                         )
                     )
                     unbounded = (
@@ -31349,12 +31590,15 @@ class _Builder:
                 )
             )
             invocation_deps = arg_deps
-            captured = self.closure_captures.get(binding_id)
             if captured is not None:
                 invocation_deps |= self._captured_current_deps(
-                    captured, params, locals_
+                    transitive_captures, params, locals_
                 )
-            if external or binding_id in self.pointee_closures:
+            if (
+                external
+                or binding_id in self.pointee_closures
+                or transitive_pointee
+            ):
                 for escaped_id in self.escaped:
                     if escaped_id in locals_:
                         invocation_deps |= locals_[escaped_id]
@@ -31371,9 +31615,10 @@ class _Builder:
             # the generic `indirect_writes` broadcast alone misses
             # them because a captured target need not be an escaped
             # binding.
-            for target in self.closure_writes.get(
+            writes = self.closure_writes.get(
                 binding_id, frozenset()
-            ):
+            ) | transitive_writes
+            for target in writes:
                 self._store(
                     locals_, params, target, invocation_deps, True
                 )
@@ -31383,6 +31628,8 @@ class _Builder:
                 unbounded
                 or binding_id in self.closure_star_writes
                 or binding_id in self.closure_inner_calls
+                or transitive_star_write
+                or transitive_inner_calls
             ):
                 self.indirect_writes |= invocation_deps
                 for escaped_id in self.escaped:
@@ -38156,6 +38403,18 @@ class _Builder:
             else None
         )
         if func_arg_id is not None:
+            (
+                transitive_captured,
+                _,
+                _,
+                _,
+                _,
+            ) = self._transitive_closure_records(
+                frozenset(captured)
+            )
+            deps |= self._captured_current_deps(
+                transitive_captured, params, locals_
+            )
             self.closure_captures[func_arg_id] = frozenset(captured)
             self.closure_writes[func_arg_id] = frozenset(writes)
             if star_write:
@@ -38511,21 +38770,13 @@ class _Builder:
             or ref.binding_id in self.opaque_callees
             or bool(method_field_records)
         )
-        if captured is not None:
-            # Resolve each captured binding's deps at the call site —
-            # reassignments between the literal and the call move
-            # what the call actually reads.
-            deps = self._captured_current_deps(captured, params, locals_)
-            if ref.binding_id in self.closure_factory_results:
-                deps |= locals_.get(ref.binding_id, frozenset())
-        else:
-            deps = frozenset()
+        deps = frozenset()
         # The callee name itself reads its CURRENT deps — `f = g`
         # reseats `f` to g's dep set, and a branch-bound literal keeps
         # the parameter ordinal in the joined set. (A local
         # literal-bound callee skips this: `locals_[h]` holds the
         # literal-time dep set, which the captured resolution above
-        # already supersedes with the CURRENT ones.)
+        # below supersedes with the CURRENT ones.)
         callee_deps: frozenset[int] = frozenset()
         if external:
             if ref.binding_id in locals_:
@@ -38557,7 +38808,10 @@ class _Builder:
             for cbid in (captured or frozenset())
             | method_field_captures
         )
-        if ref.binding_id in self.pointee_closures or external:
+        if (
+            ref.binding_id in self.pointee_closures
+            or external
+        ):
             # The call may read caller memory — a pointer-captured
             # literal through its capture, an opaque external callee
             # through a pointer argument — so it reads like a `*p`
@@ -38619,6 +38873,35 @@ class _Builder:
             arg_deps |= self.expression(
                 arg, fn, params, locals_, transfers, count, depth + 1
             )
+        (
+            transitive_captures,
+            transitive_writes,
+            transitive_star_write,
+            transitive_inner_calls,
+            transitive_pointee,
+        ) = self._transitive_closure_records(
+            (captured or frozenset())
+            | frozenset(method_field_records)
+        )
+        writes |= transitive_writes
+        star_write |= transitive_star_write
+        inner_calls |= transitive_inner_calls
+        chan_captured_external |= any(
+            (
+                self._chan_root(cbid) in params
+                or self._chan_root(cbid)
+                in self.external_chan_locals
+            )
+            and (
+                self._scalar_chan_binding(cbid)
+                or self._chan_chan_fact(
+                    getattr(
+                        self.bindings.get(cbid), "type", None
+                    )
+                )
+            )
+            for cbid in transitive_captures
+        )
         deps |= arg_deps
         for field_binding_id in method_field_records:
             deps |= self._captured_current_deps(
@@ -38631,13 +38914,16 @@ class _Builder:
             self._queue_struct_field_invocation(
                 node, node, field_binding_id
             )
-        if captured is not None:
-            deps |= self._captured_current_deps(
-                captured, params, locals_
-            )
-            if ref.binding_id in self.closure_factory_results:
-                deps |= locals_.get(ref.binding_id, frozenset())
-        if ref.binding_id in self.pointee_closures or external:
+        deps |= self._captured_current_deps(
+            transitive_captures, params, locals_
+        )
+        if ref.binding_id in self.closure_factory_results:
+            deps |= locals_.get(ref.binding_id, frozenset())
+        if (
+            ref.binding_id in self.pointee_closures
+            or transitive_pointee
+            or external
+        ):
             for escaped_id in self.escaped:
                 if escaped_id in locals_:
                     deps |= locals_[escaped_id]
@@ -39102,30 +39388,7 @@ class _Builder:
                     deps |= self._dead_local_deps[did]
         else:
             captured = self.closure_captures.get(target_id)
-        if captured is not None:
-            # `s.f = func() { …x… }` stored a literal into this slot
-            # — re-resolve each captured binding at the CALL site so
-            # a `x = y` reseat between the store and `s.f()` reaches
-            # the result (the frozen bind-time set would report the
-            # old deps). Union rather than replace: the field may
-            # hold another value along paths this summary cannot
-            # see.
-            for cbid in captured:
-                root = (
-                    self._chan_root(cbid)
-                    if self._is_chan_binding(cbid)
-                    else cbid
-                )
-                if root in locals_:
-                    deps |= locals_[root]
-                    if root in self.external_chan_locals:
-                        deps |= self.indirect_writes
-                elif root in params:
-                    deps |= frozenset({params[root]})
-                elif root in self._dead_local_deps:
-                    # A captured branch-local died at the merge —
-                    # the stored element still reads its last value.
-                    deps |= self._dead_local_deps[root]
+        capture_roots = captured
         if pin_fact is not None:
             self._pin_fact_identities(pin_fact)
             member_or_binding = self.members.get(
@@ -39154,6 +39417,11 @@ class _Builder:
                 arg, fn, params, locals_, transfers, count, depth + 1
             )
         deps |= arg_deps
+        transitive_writes: frozenset[str] = frozenset()
+        if capture_roots is not None:
+            captured, transitive_writes, _, _, _ = (
+                self._transitive_closure_records(capture_roots)
+            )
         if captured is not None:
             deps |= self._captured_current_deps(
                 captured, params, locals_
@@ -39189,9 +39457,12 @@ class _Builder:
                     self.closure_writes.get(t, frozenset())
                     for t in nested_record_ids
                 )
-            )
+            ) | transitive_writes
         else:
-            nested_writes = self.closure_writes.get(target_id, ())
+            nested_writes = (
+                self.closure_writes.get(target_id, frozenset())
+                | transitive_writes
+            )
         self._fold_closure_channel_writes(
             nested_writes, write_deps, params, locals_, transfers, node
         )
@@ -40286,7 +40557,21 @@ class _Builder:
             star_write,
             has_call,
         ) = self._func_literal_capture(literal, params, locals_)
+        (
+            captured,
+            transitive_writes,
+            transitive_star_write,
+            transitive_inner_calls,
+            transitive_pointee,
+        ) = self._transitive_closure_records(captured)
+        writes |= transitive_writes
+        star_write |= transitive_star_write
+        has_call |= transitive_inner_calls
+        captures_pointer |= transitive_pointee
         deps |= self.indirect_writes | arg_deps
+        deps |= self._captured_current_deps(
+            captured, params, locals_
+        )
         pointer_capture = next(
             (
                 cbid
