@@ -3686,3 +3686,37 @@ function f(o: P | undefined, u: P | Q, w: P | undefined | Q) {
         source[c.span.start : c.span.end] for c in _calls(report) if c.target == member_pm.id
     }
     assert bound == {"o.pm()"}
+
+def test_switch_on_a_literal_discriminant_narrows_case_bodies():
+    # `switch (u.kind)` on `A | B` (each discriminated by a literal
+    # `kind`) narrows u inside each case body to that constituent;
+    # `default:` and post-switch uses keep the union opaque.
+    source = """
+interface A { kind: "a"; am(): void; }
+interface B { kind: "b"; bm(): void; }
+function f(u: A | B) {
+    switch (u.kind) {
+        case "a":
+            u.am();
+            break;
+        case "b":
+            u.bm();
+            u.am();
+            break;
+        default:
+            u.am();
+    }
+    u.am();
+}
+"""
+    report = build_ts_bindings(source)
+    member_am = _member_bindings(report, "am", "associated_function")[0]
+    member_bm = _member_bindings(report, "bm", "associated_function")[0]
+    bound_am = {
+        source[c.span.start : c.span.end] for c in _calls(report) if c.target == member_am.id
+    }
+    bound_bm = {
+        source[c.span.start : c.span.end] for c in _calls(report) if c.target == member_bm.id
+    }
+    assert bound_am == {"u.am()"}
+    assert bound_bm == {"u.bm()"}

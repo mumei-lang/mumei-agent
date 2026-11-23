@@ -4021,6 +4021,9 @@ class _TypeScriptBindings:
         narrowing and reassignment are out of scope (uses there fall
         back to the declared type)."""
         for node in self.walk(self.root):
+            if node.type == "switch_statement":
+                self._collect_switch_narrowings(node)
+                continue
             if node.type != "if_statement":
                 continue
             condition = node.child_by_field_name("condition")
@@ -4236,6 +4239,76 @@ class _TypeScriptBindings:
             ):
                 return child
         return None
+
+    def _collect_switch_narrowings(self, node: Any) -> None:
+        """`switch (u.kind)` on a `u: A | B` union discriminated by a
+        literal member maps each `case "a":` body's uses of `u` to
+        the matching constituent. `default:` bodies stay opaque."""
+        value = node.child_by_field_name("value")
+        while (
+            value is not None
+            and value.type == "parenthesized_expression"
+        ):
+            value = next(iter(self.children(value)), None)
+        if value is None or value.type != "member_expression":
+            return
+        discriminant = value.child_by_field_name("property")
+        obj = value.child_by_field_name("object")
+        if (
+            discriminant is None
+            or obj is None
+            or obj.type != "identifier"
+        ):
+            return
+        prop = self.text(discriminant)
+        record = self._lookup(self.text(obj), obj.start_byte, "value")
+        if record is None:
+            return
+        declared = self._unwrap_type(record.type_node)
+        if declared is None or declared.type != "union_type":
+            return
+        constituents = {}
+        for child in self.children(declared):
+            fact = self._type_fact(child)
+            if fact.kind != "named":
+                continue
+            type_record = self._type_record_by_id(fact.type_id)
+            if type_record is None:
+                continue
+            member = self._member_lookup(
+                type_record,
+                prop,
+                obj.start_byte,
+                static=False,
+                via_this=False,
+            )
+            if member is None:
+                continue
+            lit = self._unwrap_type(member.type_node)
+            if lit is not None and lit.type == "literal_type":
+                constituents[self.text(lit).strip()] = child
+        body = node.child_by_field_name("body")
+        if body is None:
+            return
+        name = self.text(obj)
+        for case in self.children(body):
+            if case.type != "switch_case":
+                continue
+            case_value = case.child_by_field_name("value")
+            if case_value is None:
+                continue
+            narrowed = constituents.get(
+                self.text(case_value).strip()
+            )
+            if narrowed is None:
+                continue
+            for desc in self.walk(case):
+                if (
+                    desc.type == "identifier"
+                    and self.text(desc) == name
+                    and desc.id != obj.id
+                ):
+                    self._narrowed.setdefault(desc.id, narrowed)
 
     def _non_nullable_declared(self, ident: Any) -> Any | None:
         """The non-null constituent of `ident`'s declared type —
