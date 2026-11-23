@@ -6316,6 +6316,7 @@ struct P;
 impl P { fn pm(&self) {} }
 use std::collections::BinaryHeap;
 use std::rc::Rc;
+use std::sync::Arc;
 fn f() {
     let mut h: BinaryHeap<P> = BinaryHeap::new();
     if let Some(m) = h.peek_mut() { m.pm(); }
@@ -6323,6 +6324,10 @@ fn f() {
     match Rc::try_unwrap(r) { Ok(inner) => inner.pm(), Err(e) => e.pm() }
     let b: Box<P> = Box::new(P);
     let inner2 = Box::into_inner(b); inner2.pm();
+    let a: Arc<P> = Arc::new(P);
+    if let Some(u) = Arc::into_inner(a) { u.pm(); }
+    let r2: Rc<P> = Rc::new(P);
+    if let Some(v) = Rc::into_inner(r2) { v.pm(); }
 }
 """
     report = build_rust_bindings(source, pointer_width=64)
@@ -6334,7 +6339,10 @@ fn f() {
         if raw[call.span.start:call.span.end].decode().endswith(".pm()")
         and call.target == pm.id
     )
-    assert resolved == ["e.pm()", "inner.pm()", "inner2.pm()", "m.pm()"]
+    assert resolved == [
+        "e.pm()", "inner.pm()", "inner2.pm()",
+        "m.pm()", "u.pm()", "v.pm()",
+    ]
 
 def test_guard_accessors_stay_opaque_for_custom_containers():
     source = """
