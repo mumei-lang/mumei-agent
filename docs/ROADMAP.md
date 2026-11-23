@@ -3935,9 +3935,13 @@ functions or bindings; the single-file loader rejects both kinds.
 
 Consumer semantics stay honest: `summarize_go_package` treats a
 `direct_import` call's result as potentially depending on every
-argument — a documented over-approximation, since the callee body is
-opaque and package-level state is not modelled — and records the
-transfer so staleness propagates. `call_not_summarized_direct_import`
+argument and current `indirect_writes` — an over-approximation, since
+the callee body is opaque — and broadcasts argument dependencies into
+that intra-function external-state set. Passing local channels promotes
+their queues; imported member reads union the current set. State does
+not propagate through a local caller into another function's summary.
+The call still records its transfer so staleness propagates.
+`call_not_summarized_direct_import`
 is therefore not a gap a resolved report emits. `direct_import` is only
 classified for callees whose results are all scalar — a composite
 result at any arity stays `external_or_bodyless` and fails closed (a
@@ -3993,26 +3997,30 @@ member declaration is absent.
 
 A package-qualified `var` read `lib.V` is admitted as an opaque
 state read: it records a zero-argument `CallTransfer` with
-`imported=True` — the value derives from package state, not from
-any parameter, so the result contributes no dependencies while
-`effects` reports `unknown`. The recorded target is the member's
-own imported identity, so a regenerated report for that unit still
-flags the reader through `stale_dependents`. The read is scalar
-only: a `var` whose type fact is not integer/boolean keeps
+`imported=True` and carries current `indirect_writes`. Opaque
+imported calls broadcast their argument dependencies into that set;
+passing a local channel promotes its queue and current contents to
+external state, and later sends and receives share that queue model.
+Opaque call results and admitted imported-member reads union the set.
+This propagation is intra-function: state does not flow through a
+local caller into another function's summary. The recorded target is
+the member's own imported identity, so a regenerated report for that
+unit still flags the reader through `stale_dependents`. The read is
+scalar only: a `var` whose type fact is not integer/boolean keeps
 `non_parameter_reference`, matching the fragment's value model.
 
 One level of dereference on such a var is admitted too: `*lib.PV`
 where `PV` is a pointer-typed `var` member reads the pointee as
 package state. The operand's own var read already records the
 imported transfer and pins the pointee identity the `*T` fact
-carries, so the dereference shares both — the result stays dep-free
-and `effects` reports `unknown`, and redeclaring the pointee type
+carries, so the dereference shares both — the result carries current
+`indirect_writes` and `effects` reports `unknown`, and redeclaring the pointee type
 flags the summary. Admission is pointee-gated: the named pointee
 must resolve to a `type` member whose fact is scalar or pointer —
 a struct or interface pointee stays closed because the dep model
 cannot represent the value. An unnamed pointee classifies by the
 member's `pointee_kind` declaration instead: `*lib.PU` on `*int64`
-reads an `integer` dep-free, `*lib.PPV` on `**T` reads a `*T` and
+reads an `integer` with current `indirect_writes`, `*lib.PPV` on `**T` reads a `*T` and
 pins `T` through `pointee_type_ids` — whose identities the producer
 now declares as members so a bound `*p` on the stored pointer
 resolves `T` too — while a non-scalar shape (`*lib.PA` on
@@ -4074,7 +4082,7 @@ references (and member declarations) for a `. "lib"` import's objects,
 so a bare `K`/`V`/`T(e)` in the source classifies by the declared
 member exactly like `lib.K`/`lib.V`/`lib.T(e)` — a scalar const read
 is dep-free, a scalar `var` read records the same opaque state-read
-transfer (with the same staleness propagation), and a scalar `type`
+transfer and carries current `indirect_writes` (with the same staleness propagation), and a scalar `type`
 member admits the conversion. The member name must still match the
 source token; function values, non-scalars, generic instantiations
 and reads without a matching record stay closed.
@@ -4084,8 +4092,8 @@ the member records the producer already emits: the field itself is a
 `var` member whose `import` reference classifies the selection, and
 the operand resolves like a member read (`lib.VS`, `VS` under a dot
 import, or parentheses around either). The field is external state
-like the member itself — the read is dep-free, reports `effects` as
-`unknown`, records the imported transfer against the *field's* own
+like the member itself — the read carries current `indirect_writes`,
+reports `effects` as `unknown`, records the imported transfer against the *field's* own
 identity, and pins both the struct var's and the field's declared
 type identities for `stale_dependents`. The field's declared type
 must be scalar or pointer — a composite field is a value the
@@ -4114,8 +4122,8 @@ through its `local` reference to the field's `variable` binding
 
 A field read through an index chain admits the same way:
 `lib.VSM[k].F` on `map[string]S` or `lib.VSS[i].F` on `[]S` reads a
-field of external state — dep-free apart from the indexes' own
-dependencies (literal indexes carry none, like `lib.VM["k"]`),
+field of external state — it carries current `indirect_writes` plus
+the indexes' own dependencies (literal indexes carry none, like `lib.VM["k"]`),
 recording the imported transfer against the field's identity and
 pinning the container member's whole fact tree so the element's
 named type flags `stale_dependents` too. The element of the whole
@@ -4254,16 +4262,14 @@ emission on every arch.
 ### C07 package-level scalar vars
 
 `var G int64` declarations at package scope — shared mutable state
-outside the parameter set — now admit reads and writes, modelled
-exactly like an imported `lib.V`: the read is dep-free for the
-value (its contents derive from package state, not from any
-parameter) but records an imported transfer, so `effects` reports
-`unknown`; the write records the same transfer and drops the
-stored value's dependencies, since no binding tracks global
-contents — `G = x; return G` therefore reports no parameter deps,
-matching `lib.V = x; return lib.V`. `G += v` follows the same
-assignment gate, and `G++`/`G--` admit like `lib.V++` —
-provenance-preserving, only the external mutation records.
+outside the parameter set — now admit reads and writes, matching an
+imported `lib.V` in admission and transfer identity. Writes to either
+state source broadcast the stored value's dependencies into the shared
+intra-function `indirect_writes` pool, and reads carry that pool, so
+`G = x; return G` and `lib.V = x; return lib.V` both report `{0}`.
+`G += v` follows the same assignment gate, and `G++`/`G--` admit like
+`lib.V++` — provenance-preserving, with the external mutation
+recorded. Propagation does not cross function summaries.
 
 The recorded target is the var's own binding identity — a real
 declaration, so `stale_dependents` works honestly in both

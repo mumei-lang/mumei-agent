@@ -2290,6 +2290,188 @@ def test_zero_argument_import_call(go_types_helper):
     assert transfer.result == frozenset()
 
 
+def _imported_state_result(
+    go_types_helper, function: str, *, package_var_type: str | None = None
+):
+    source = "package p\n"
+    if "lib." in function:
+        source += "import \"lib\"\n"
+    if package_var_type is not None:
+        source += f"var G {package_var_type}\n"
+    files = {
+        "a.go": source + function,
+    }
+    imports = {
+        "lib": {
+            "lib.go": (
+                "package lib\n"
+                "var GC chan int64\n"
+                "var GV int64\n"
+                "var VA []int64\n"
+                "func G(ch chan int64) { GC = ch }\n"
+                "func H() chan int64 { return GC }\n"
+                "func Set(v int64) { GV = v }\n"
+                "func Get() int64 { return GV }\n"
+                "func Id(v int64) int64 { return v }\n"
+            )
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, imports),
+        files,
+        target_arch="amd64",
+    )
+    return named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param(
+            "c := make(chan int64, 1); c <- x; lib.G(c); "
+            "return <-lib.GC",
+            id="imported-channel-after-local-send",
+        ),
+        pytest.param(
+            "c := make(chan int64, 1); lib.G(c); c <- x; "
+            "return <-lib.GC",
+            id="imported-channel-before-local-send",
+        ),
+        pytest.param(
+            "c := make(chan int64, 1); c <- x; lib.G(c); "
+            "d := lib.H(); return <-d",
+            id="imported-channel-return",
+        ),
+        pytest.param(
+            "c := make(chan int64, 1); lib.G(c); lib.GC <- x; "
+            "return <-c",
+            id="imported-channel-receive-local-queue",
+        ),
+        pytest.param(
+            "lib.Set(x); return lib.Get()",
+            id="imported-call-result-after-imported-call",
+        ),
+        pytest.param(
+            "lib.Set(x); return lib.GV",
+            id="imported-member-read-after-imported-call",
+        ),
+        pytest.param(
+            "lib.GV = x; return lib.GV",
+            id="imported-member-read-after-write",
+        ),
+        pytest.param(
+            "lib.GV = x; return lib.Get()",
+            id="imported-call-result-after-member-write",
+        ),
+        pytest.param(
+            "lib.GV += x; return lib.GV",
+            id="imported-member-compound-write",
+        ),
+        pytest.param(
+            "lib.GC <- x; return <-lib.GC",
+            id="existing-imported-channel-broadcast",
+        ),
+    ],
+)
+def test_imported_calls_and_reads_share_indirect_write_dependencies(
+    go_types_helper, body
+):
+    result = _imported_state_result(
+        go_types_helper, f"func F(x int64) int64 {{ {body} }}\n"
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "G = x; return G",
+        "G = x; return lib.Get()",
+    ],
+)
+def test_package_var_writes_share_imported_indirect_write_pool(
+    go_types_helper, body
+):
+    result = _imported_state_result(
+        go_types_helper,
+        f"func F(x int64) int64 {{ {body} }}\n",
+        package_var_type="int64",
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_imported_index_write_broadcasts_value_and_index_dependencies(
+    go_types_helper,
+):
+    result = _imported_state_result(
+        go_types_helper,
+        "func F(i, x int64) int64 { lib.VA[i] = x; return lib.Get() }\n",
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_package_var_index_write_broadcasts_value_and_index_dependencies(
+    go_types_helper,
+):
+    result = _imported_state_result(
+        go_types_helper,
+        "func F(i, x int64) int64 { G[i] = x; return lib.Get() }\n",
+        package_var_type="[]int64",
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_imported_state_reads_preserve_unrelated_parameter_precision(
+    go_types_helper,
+):
+    result = _imported_state_result(
+        go_types_helper,
+        "func F(x, y int64) int64 { lib.Set(y); return x }\n",
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_imported_member_write_preserves_unrelated_parameter_precision(
+    go_types_helper,
+):
+    result = _imported_state_result(
+        go_types_helper,
+        "func F(x, y int64) int64 { lib.GV = y; return x }\n",
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_imported_read_without_prior_imported_write_is_dep_free(
+    go_types_helper,
+):
+    result = _imported_state_result(
+        go_types_helper, "func F() int64 { return lib.Get() }\n"
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset()
+
+
+def test_imported_call_result_carries_prior_indirect_writes(
+    go_types_helper,
+):
+    result = _imported_state_result(
+        go_types_helper,
+        "func F(x, y int64) int64 { a := lib.Id(x); _ = a; "
+        "return lib.Id(y) }\n",
+    )
+    assert result.available, result.gaps
+    # Sound widening: later opaque calls may observe earlier arguments.
+    assert result.return_dependencies == frozenset({0, 1})
+
+
 def _declared_lib_set(helper: Path, lib: dict[str, str]):
     """The declared callee manifest `--summary-aware-calls` consumes:
 
@@ -10974,12 +11156,12 @@ def test_synthetic_pointee_target_does_not_flag_stale_dependents(
     "declarations,expected_deps",
     [
         # A package-level scalar `var` reads like an imported `lib.V`:
-        # dep-free for the value, `effects` unknown via the recorded
-        # imported transfer against the var's binding identity.
+        # it carries current indirect writes and records an imported
+        # transfer against the var's binding identity.
         ("var G int64\nfunc F(x int64) int64 { return x + G }", {0}),
         ("var G int64\nfunc F(x int64) int64 { return G }", set()),
-        # `G = v` mutates package state like `lib.V = v` — external,
-        # so the stored deps drop and `effects` stays unknown.
+        # `G = v` mutates package state like `lib.V = v`; its deps
+        # join the external-state pool and `effects` stays unknown.
         ("var G int64\nfunc F(x int64) int64 { G = x; return x }", {0}),
         ("var G int64\nfunc F(x int64) int64 { G += x; return x }", {0}),
         # `G++`/`G--` admit like `lib.V++` — provenance-preserving,
@@ -10991,7 +11173,7 @@ def test_synthetic_pointee_target_does_not_flag_stale_dependents(
         ("var iota int64\nfunc F(x int64) int64 { return iota }", set()),
         ("var true bool\nfunc F() bool { return true }", set()),
         # A cross-file package var resolves through the same binding.
-        ("func F(x int64) int64 { G = x; return G }", set()),
+        ("func F(x int64) int64 { G = x; return G }", {0}),
     ],
 )
 def test_package_level_scalar_vars_record_imported_transfers(
@@ -15767,8 +15949,8 @@ def test_package_composite_var_field_read_records_transfer(
     go_types_helper,
 ):
     # `G.V` on a package-level struct var reads external state like
-    # `lib.V` — dep-free for the value, and the imported transfer
-    # marks `effects` unknown. The target is the *field's* identity.
+    # `lib.V` — it carries current indirect writes, and the imported
+    # transfer marks `effects` unknown. The target is the field identity.
     files = {
         "a.go": "package p\n"
         "type P struct{ V int64; W int64 }\nvar G P\n"
@@ -15817,8 +15999,8 @@ def test_package_composite_var_writes_record_transfers(
     go_types_helper,
 ):
     # `G.V = v`, `G.A.N = v`, and `G = P{...}` all mutate package
-    # state: the stored deps drop and the var's identity records the
-    # mutation — nested selects resolve to the same var binding.
+    # state: stored deps join `indirect_writes`, and the var's identity
+    # records the mutation — nested selects resolve to the same binding.
     files = {
         "a.go": "package p\n"
         "type Q struct{ N int64 }\ntype P struct{ A Q; V int64 }\n"
@@ -15844,8 +16026,8 @@ def test_package_composite_var_writes_record_transfers(
 def test_package_container_var_index_write_and_read(
     go_types_helper,
 ):
-    # `GA[i] = v` stores into package state (deps drop, var identity
-    # records); `GA[i]` reads it (dep-free, same target).
+    # `GA[i] = v` stores value and index deps in `indirect_writes`;
+    # `GA[i]` reads that pool (empty in its separate summary).
     files = {
         "a.go": "package p\nvar GA [4]int64\n"
         "func F(x int64) int64 { GA[1] = x; return x }\n"
@@ -44459,8 +44641,8 @@ def test_select_receive_package_var_store_records_write(
     go_types_helper,
 ):
     # `G = <-ch` mutates package state like `G = v`: the var's own
-    # identity records the imported transfer and `effects` reports
-    # the external mutation — the receive store no longer drops it.
+    # identity records the imported transfer and the received deps
+    # join `indirect_writes`.
     result = named(
         *unit(
             go_types_helper,
@@ -54058,7 +54240,7 @@ def test_imported_value_receiver_does_not_write_its_receiver(go_types_helper):
         go_types_helper, body
     )
     assert result.available, result.gaps
-    assert result.return_dependencies == frozenset({0})
+    assert result.return_dependencies == frozenset({0, 1})
     calls = [call for call in snapshot.calls if call.method]
     assert [call.receiver_pointer for call in calls] == [False, True]
 
