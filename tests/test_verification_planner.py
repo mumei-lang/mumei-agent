@@ -253,7 +253,8 @@ def test_require_enforced_isolation_requires_an_explicit_boolean():
 def test_require_enforced_isolation_preserves_positional_field_order():
     policy_fields = fields(PlannerPolicy)
 
-    assert policy_fields[-1].name == "require_enforced_isolation"
+    assert policy_fields[-2].name == "require_enforced_isolation"
+    assert policy_fields[-1].name == "executable_sha256_pins"
     assert policy_fields[4].name == "disabled_adapters"
 
 
@@ -267,6 +268,37 @@ def test_require_enforced_isolation_is_omitted_from_plan_fingerprint():
 
     assert with_policy.to_dict() == without_policy.to_dict()
     assert _plan_fingerprint(with_policy) == _plan_fingerprint(without_policy)
+
+
+def test_executable_sha256_pins_are_omitted_from_plan_fingerprint():
+    from agent.attempt_schedule import _plan_fingerprint
+
+    without_pins = plan(policy=PlannerPolicy())
+    with_pins = plan(
+        policy=PlannerPolicy(
+            executable_sha256_pins=(("fixture", "a" * 64),)
+        )
+    )
+
+    assert with_pins.to_dict() == without_pins.to_dict()
+    assert _plan_fingerprint(with_pins) == _plan_fingerprint(without_pins)
+
+
+@pytest.mark.parametrize(
+    "pins",
+    [
+        [],
+        (["fixture", "a" * 64],),
+        (("fixture", "a" * 63),),
+        (("fixture", "A" * 64),),
+        (("fixture", "g" * 64),),
+        (("invalid adapter", "a" * 64),),
+        (("fixture", "a" * 64), ("fixture", "b" * 64)),
+    ],
+)
+def test_invalid_executable_sha256_pins_are_rejected(pins):
+    with pytest.raises(ValueError):
+        PlannerPolicy(executable_sha256_pins=pins)
 
 
 def test_invalid_metadata_fails_without_echoing_credential_like_input():

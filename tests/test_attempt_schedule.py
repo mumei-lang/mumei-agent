@@ -1,6 +1,8 @@
 import hashlib
 import json
+import os
 import shutil
+import signal
 import socket
 import sys
 import threading
@@ -1429,6 +1431,160 @@ def test_undeclared_argv_records_not_dispatched_and_falls_back():
     assert result.entries[0].to_dict()["enforcement"] is None
     # No argv → nothing was ever reserved, so no sequence exists for it.
     assert len(result.sequences) == 1
+
+
+def test_matching_executable_digest_pin_dispatches(monkeypatch):
+    with open(PY, "rb") as executable:
+        digest = hashlib.sha256(executable.read()).hexdigest()
+    result, runner_calls = schedule_with_runner_stub(
+        monkeypatch,
+        registry_with("alpha"),
+        ("alpha",),
+        {"alpha": argv(0)},
+        policy=policy(executable_sha256_pins=(("alpha", digest),)),
+    )
+
+    assert result.outcome == "selected"
+    assert result.entries[0].terminal_state == "exited"
+    assert len(runner_calls) == 1
+
+
+def test_matching_executable_digest_pin_without_nonblock_flag(
+    tmp_path, monkeypatch
+):
+    executable = tmp_path / "pinned-executable"
+    executable.write_bytes(b"pinned executable")
+    digest = hashlib.sha256(executable.read_bytes()).hexdigest()
+    monkeypatch.delattr(attempt_schedule.os, "O_NONBLOCK", raising=False)
+
+    assert attempt_schedule._executable_matches_pin(str(executable), digest)
+
+
+def test_mismatched_executable_digest_pin_falls_back(monkeypatch):
+    result, runner_calls = schedule_with_runner_stub(
+        monkeypatch,
+        registry_with("alpha", "beta"),
+        ("alpha", "beta"),
+        {"alpha": argv(0), "beta": argv(0)},
+        policy=policy(
+            selected_adapter="alpha",
+            allow_fallback=True,
+            executable_sha256_pins=(("alpha", hashlib.sha256(b"wrong").hexdigest()),),
+        ),
+    )
+
+    assert result.entries[0].terminal_state == NOT_DISPATCHED
+    assert result.selected_adapter_id == "beta"
+    assert len(runner_calls) == 1
+
+
+def test_mismatched_executable_digest_pin_denies_fallback():
+    result = schedule(
+        registry_with("alpha", "beta"),
+        ("alpha", "beta"),
+        {"alpha": argv(0), "beta": argv(0)},
+        policy=policy(
+            selected_adapter="alpha",
+            executable_sha256_pins=(
+                ("alpha", hashlib.sha256(b"wrong").hexdigest()),
+            ),
+        ),
+    )
+
+    assert result.outcome == "fallback_denied"
+    assert result.entries[0].terminal_state == NOT_DISPATCHED
+
+
+def test_executable_digest_pin_requires_registered_adapter():
+    with pytest.raises(
+        ValueError,
+        match="executable digest pin names an unregistered adapter",
+    ):
+        schedule(
+            registry_with("alpha"),
+            ("alpha",),
+            {"alpha": argv(0)},
+            policy=policy(
+                executable_sha256_pins=(("unregistered", "a" * 64),)
+            ),
+        )
+
+
+@pytest.mark.parametrize("path_kind", ["relative", "bare", "missing", "directory"])
+def test_invalid_pinned_executable_paths_are_not_dispatched(tmp_path, path_kind):
+    if path_kind == "relative":
+        executable = "relative/executable"
+    elif path_kind == "bare":
+        executable = "python3"
+    elif path_kind == "missing":
+        executable = str(tmp_path / "missing-executable")
+    else:
+        executable = str(tmp_path)
+
+    result = schedule(
+        registry_with("alpha"),
+        ("alpha",),
+        {"alpha": (executable, "-c", "pass")},
+        policy=policy(
+            executable_sha256_pins=(("alpha", "a" * 64),)
+        ),
+    )
+
+    assert result.entries[0].terminal_state == NOT_DISPATCHED
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or not hasattr(os, "mkfifo") or not hasattr(signal, "SIGALRM"),
+    reason="named pipe checks require POSIX",
+)
+def test_pinned_executable_swapped_for_fifo_is_not_dispatched_without_blocking(
+    tmp_path, monkeypatch
+):
+    executable = tmp_path / "pinned-fifo"
+    executable.write_bytes(b"pinned executable")
+    real_open = attempt_schedule.os.open
+    swapped = False
+
+    def replace_with_fifo(path, flags, *args, **kwargs):
+        nonlocal swapped
+        if os.fspath(path) == str(executable) and not swapped:
+            swapped = True
+            os.unlink(executable)
+            os.mkfifo(executable)
+        return real_open(path, flags, *args, **kwargs)
+
+    def fail_if_blocked(_signum, _frame):
+        raise AssertionError("opening a pinned FIFO blocked")
+
+    monkeypatch.setattr(attempt_schedule.os, "open", replace_with_fifo)
+    previous_handler = signal.signal(signal.SIGALRM, fail_if_blocked)
+    signal.alarm(3)
+    try:
+        result = schedule(
+            registry_with("alpha"),
+            ("alpha",),
+            {"alpha": (str(executable),)},
+            policy=policy(
+                executable_sha256_pins=(("alpha", "a" * 64),)
+            ),
+        )
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous_handler)
+
+    assert swapped
+    assert result.entries[0].terminal_state == NOT_DISPATCHED
+
+
+def test_unpinned_adapter_is_unaffected():
+    result = schedule(
+        registry_with("alpha"),
+        ("alpha",),
+        {"alpha": argv(0)},
+    )
+
+    assert result.outcome == "selected"
+    assert result.entries[0].terminal_state == "exited"
 
 
 def test_unstamped_observations_still_fall_back():

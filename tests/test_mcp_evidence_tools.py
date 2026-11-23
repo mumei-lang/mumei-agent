@@ -879,6 +879,34 @@ class TestVerifyScheduleTool:
         assert report["selected_adapter_id"] == "beta"
         assert "FAKE_PRIVATE" not in json.dumps(report)
 
+    def test_executable_digest_pin_mismatch_is_not_dispatched(self, tmp_path):
+        inputs = _schedule_inputs(tmp_path)
+        policy_path = Path(inputs["policy"])
+        policy = json.loads(policy_path.read_text(encoding="utf-8"))
+        policy["selected_adapter"] = "alpha"
+        policy["executable_sha256_pins"] = [
+            ["alpha", hashlib.sha256(b"wrong executable").hexdigest()]
+        ]
+        policy_path.write_text(json.dumps(policy), encoding="utf-8")
+
+        out = json.loads(
+            mcp_server.verify_schedule(
+                inputs["request"],
+                inputs["adapters"],
+                inputs["argv_map"],
+                inputs["policy"],
+                inputs["source"],
+                observations_path=inputs["observations"],
+            )
+        )
+
+        assert out["status"] == "ok"
+        report = out["report"]
+        assert report["schema_version"] == "mumei.attempt-schedule/v1"
+        assert report["outcome"] == "fallback_denied"
+        assert report["attempts"][0]["adapter_id"] == "alpha"
+        assert report["attempts"][0]["terminal_state"] == "not_dispatched"
+
     def test_core_path_records_evidence_check(self, tmp_path):
         inputs = _schedule_inputs(tmp_path)
         # The selected adapter emits declared bytes; the stub Core

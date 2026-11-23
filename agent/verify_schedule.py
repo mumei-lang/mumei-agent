@@ -54,7 +54,7 @@ _POLICY_KEYS = frozenset(
     {"selected_adapter", "allow_fallback", "disabled_adapters", "allowed_locations",
      "tool_version_pins", "timeout_ms", "memory_mb", "allowed_permissions",
      "allow_manifest_attempt_argv", "allow_manifest_attempt_stdin",
-     "require_enforced_isolation"}
+     "require_enforced_isolation", "executable_sha256_pins"}
 )
 _OBSERVATION_KEYS = frozenset({"adapter_id", "availability", "tool_version", "stamp"})
 _ADAPTER_OVERLAY_HELP = (
@@ -132,6 +132,19 @@ def _load_policy(path: str) -> PlannerPolicy:
         type(pin) is not list or len(pin) != 2 for pin in pins
     ):
         raise ValueError("invalid tool version pin declaration")
+    executable_pins = document.get("executable_sha256_pins", [])
+    if type(executable_pins) is not list or any(
+        type(pin) is not list or len(pin) != 2
+        for pin in executable_pins
+    ):
+        raise ValueError("invalid executable digest pin declaration")
+    try:
+        executable_pin_pairs = tuple(
+            tuple(pin) for pin in executable_pins
+        )
+        PlannerPolicy(executable_sha256_pins=executable_pin_pairs)
+    except (TypeError, ValueError):
+        raise ValueError("invalid executable digest pin declaration") from None
     if "allowed_permissions" not in document:
         raise ValueError(
             "planner policy requires an explicit allowed_permissions list"
@@ -155,6 +168,7 @@ def _load_policy(path: str) -> PlannerPolicy:
             {"local"} if locations is None else locations
         ),
         tool_version_pins=tuple(tuple(pin) for pin in pins),
+        executable_sha256_pins=executable_pin_pairs,
         timeout_ms=document.get("timeout_ms", 30_000),
         memory_mb=document.get("memory_mb", 1024),
         allowed_permissions=None if allowed is None else frozenset(allowed),
@@ -262,7 +276,9 @@ def build_schedule_parser(
             "declared (an empty list permits only permission-free adapters); "
             "optional Boolean require_enforced_isolation defaults to false "
             "and fails closed when required isolation or memory cannot be "
-            "enforced."
+            "enforced. Optional executable_sha256_pins pins argv[0] of "
+            "scheduled attempts to an absolute regular file's SHA-256; "
+            "probes and direct AttemptRunner calls are not gated."
         ),
     )
     parser.add_argument(
