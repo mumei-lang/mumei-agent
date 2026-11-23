@@ -7413,3 +7413,61 @@ fn f(o: Option<u8>) {
     assert bound.get("e.em()") == em.id
     assert not bound.get("e2.em2()")
 
+
+
+def test_map_key_value_views_bind_elements_through_let():
+    source = """
+struct K;
+impl K { fn km(&self) {} }
+struct P;
+impl P { fn pm(&self) {} }
+struct H;
+impl H { fn hm(&self) {} }
+struct S { map: std::collections::HashMap<K, P, H> }
+type M = std::collections::HashMap<K, P>;
+struct T { m: M }
+fn f(m: HashMap<K, P>, b: BTreeMap<K, P>, w: W<K, P>, s: S, t: T) {
+    let a = m.values(); for p in a { p.pm(); }
+    let c = m.keys(); for k in c { k.km(); }
+    let d = m.values_mut(); for p in d { p.pm(); }
+    let g = b.into_values(); for p in g { p.pm(); }
+    let h = b.into_keys(); for k in h { k.km(); }
+    for p in m.values_mut() { p.pm(); }
+    let e = m.get_key_value(&K); if let Some((k, val)) = e { val.pm(); }
+    let e2 = b.get_key_value(&K); if let Some((k2, val2)) = e2 { val2.pm(); }
+    let e3 = w.get_key_value(&K); if let Some((k3, val3)) = e3 { val3.pm(); }
+    // A trailing hasher arg never wins the value slot.
+    let hv = s.map.values(); for vp in hv { vp.pm(); }
+    // Field receivers spell the same <K, V> list.
+    let hk = s.map.keys(); for kk in hk { kk.km(); }
+    let ik = s.map.into_keys(); for ki in ik { ki.km(); }
+    if let Some((fk, fv)) = s.map.get_key_value(&K) { fk.km(); fv.pm(); }
+    // A field declared through a map alias spells it too.
+    if let Some((ak, av)) = t.m.get_key_value(&K) { ak.km(); av.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    km = _bindings(report, "km", "associated_function")[0]
+    raw = source.encode()
+    calls = [
+        (raw[c.span.start:c.span.end].decode(), c.target)
+        for c in report.calls
+    ]
+    targets = lambda name: [t for text, t in calls if text == name]
+    # `p.pm()` appears in every values-loop and through fields.
+    assert targets("p.pm()") == [pm.id] * 4
+    assert targets("vp.pm()") == [pm.id]
+    assert targets("k.km()") == [km.id] * 2
+    assert targets("kk.km()") == [km.id]
+    assert targets("ki.km()") == [km.id]
+    assert targets("val.pm()") == [pm.id]
+    assert targets("val2.pm()") == [pm.id]
+    assert targets("fk.km()") == [km.id]
+    assert targets("fv.pm()") == [pm.id]
+    assert targets("ak.km()") == [km.id]
+    assert targets("av.pm()") == [pm.id]
+    # A custom `W` map keeps `get_key_value` opaque.
+    assert targets("val3.pm()") == [""]
+    # `hm` is the hasher's method — never a values element target.
+    assert all(t != _bindings(report, "hm", "associated_function")[0].id for _, t in calls)
