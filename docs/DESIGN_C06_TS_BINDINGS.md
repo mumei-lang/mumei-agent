@@ -94,7 +94,7 @@ compiler option の `lib` は `lib.es2022.d.ts` 単独だが、host は同梱パ
 | バージン許可リスト | `{"5.9.3"}` のまま。追加時は pinned package + fixture + allowlist の3点セット |
 | lib の拡張 | 需要があるまで `lib.es2022.d.ts` 単独。拡張時は `(version, lib)` 組の許可リスト化 |
 | import / 複数ファイル | fail-closed のまま。拡張する場合は Rust LSIF slice と同じ「ソース同梱 + ハッシュ」方式で別設計 |
-| シンボルなしメンバ名 | 現行の「参照として出力しない」を維持（受信式自体が記録されるため検証可能情報を失わない） |
+| シンボルなしメンバ名 | 現行の「参照として出力しない」を維持。受信式が識別子を持つなら受信側の参照で追跡できるが、`(1 as any).foo` のように受信式に識別子がない場合はメンバ名が完全に抜ける。これを許容するか受信 span を記録する拡張とするかは次段階の論点 |
 | 型文字列の出力 | 現行の「参照→宣言 span のみ」を維持。追加するなら別 profile で |
 | trust への影響 | なし。compiler-backed で解決できても `complete` / trusted-safe / audit / Seal Grade / Lean の判定は変えない。不一致は gap として記録するのみ |
 
