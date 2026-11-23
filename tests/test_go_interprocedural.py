@@ -49651,6 +49651,145 @@ def test_bare_return_named_closure_result_resolves_current_captures(
         )
 
 
+def test_parenthesized_rhs_binds_closure_records(go_types_helper):
+    files = {
+        "a.go": (
+            "package p\n"
+            "type S struct { F func() int64 }\n"
+            "func F_short_paren(x, y int64) int64 {\n"
+            "\tv := y; g := func() int64 { return v }; f := (g)\n"
+            "\tv = x; return f()\n"
+            "}\n"
+            "func F_short_plain(x, y int64) int64 {\n"
+            "\tv := y; g := func() int64 { return v }; f := g\n"
+            "\tv = x; return f()\n"
+            "}\n"
+            "func F_assign_paren(x, y int64) int64 {\n"
+            "\tv := y; g := func() int64 { return v }\n"
+            "\tvar f func() int64; f = (g); v = x; return f()\n"
+            "}\n"
+            "func F_assign_plain(x, y int64) int64 {\n"
+            "\tv := y; g := func() int64 { return v }\n"
+            "\tvar f func() int64; f = g; v = x; return f()\n"
+            "}\n"
+            "func F_var_paren(x, y int64) int64 {\n"
+            "\tv := y; g := func() int64 { return v }; var f = (g)\n"
+            "\tv = x; return f()\n"
+            "}\n"
+            "func F_var_plain(x, y int64) int64 {\n"
+            "\tv := y; g := func() int64 { return v }; var f = g\n"
+            "\tv = x; return f()\n"
+            "}\n"
+            "func F_slice_paren(x, y int64) int64 {\n"
+            "\tv := y; g := func() int64 { return v }\n"
+            "\tfs := ([]func() int64{g}); v = x; return fs[0]()\n"
+            "}\n"
+            "func F_slice_plain(x, y int64) int64 {\n"
+            "\tv := y; g := func() int64 { return v }\n"
+            "\tfs := []func() int64{g}; v = x; return fs[0]()\n"
+            "}\n"
+            "func F_assign_slice_paren(x, y int64) int64 {\n"
+            "\tv := y; g := func() int64 { return v }; var fs []func() int64\n"
+            "\tfs = ([]func() int64{g}); v = x; return fs[0]()\n"
+            "}\n"
+            "func F_assign_slice_plain(x, y int64) int64 {\n"
+            "\tv := y; g := func() int64 { return v }; var fs []func() int64\n"
+            "\tfs = []func() int64{g}; v = x; return fs[0]()\n"
+            "}\n"
+            "func F_var_slice_paren(x, y int64) int64 {\n"
+            "\tv := y; g := func() int64 { return v }\n"
+            "\tvar fs = ([]func() int64{g}); v = x; return fs[0]()\n"
+            "}\n"
+            "func F_var_slice_plain(x, y int64) int64 {\n"
+            "\tv := y; g := func() int64 { return v }\n"
+            "\tvar fs = []func() int64{g}; v = x; return fs[0]()\n"
+            "}\n"
+            "func F_slice_field_paren(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\tfs := ([]func() int64{s.F}); v = x; return fs[0]()\n"
+            "}\n"
+            "func F_slice_field_plain(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\tfs := []func() int64{s.F}; v = x; return fs[0]()\n"
+            "}\n"
+            "func F_map_paren(x, y int64) int64 {\n"
+            "\tv := y; g := func() int64 { return v }\n"
+            "\tm := (map[int]func() int64{0: g}); v = x; return m[0]()\n"
+            "}\n"
+            "func F_map_plain(x, y int64) int64 {\n"
+            "\tv := y; g := func() int64 { return v }\n"
+            "\tm := map[int]func() int64{0: g}; v = x; return m[0]()\n"
+            "}\n"
+            "func F_write_paren(x int64) int64 {\n"
+            "\tw := int64(0); h := func() { w = x }; f := (h)\n"
+            "\tf(); return w\n"
+            "}\n"
+            "func F_write_plain(x int64) int64 {\n"
+            "\tw := int64(0); h := func() { w = x }; f := h\n"
+            "\tf(); return w\n"
+            "}\n"
+            "func F_nested_paren(x, y int64) int64 {\n"
+            "\tv := y; g := func() int64 { return v }; f := ((g))\n"
+            "\tv = x; return f()\n"
+            "}\n"
+            "func F_nested_plain(x, y int64) int64 {\n"
+            "\tv := y; g := func() int64 { return v }; f := g\n"
+            "\tv = x; return f()\n"
+            "}\n"
+        ),
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, {}),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    expected = {
+        "F_short_paren": frozenset({0}),
+        "F_short_plain": frozenset({0}),
+        "F_assign_paren": frozenset({0}),
+        "F_assign_plain": frozenset({0}),
+        "F_var_paren": frozenset({0}),
+        "F_var_plain": frozenset({0}),
+        "F_slice_paren": frozenset({0, 1}),
+        "F_slice_plain": frozenset({0, 1}),
+        "F_assign_slice_paren": frozenset({0, 1}),
+        "F_assign_slice_plain": frozenset({0, 1}),
+        "F_var_slice_paren": frozenset({0, 1}),
+        "F_var_slice_plain": frozenset({0, 1}),
+        "F_slice_field_paren": frozenset({0, 1}),
+        "F_slice_field_plain": frozenset({0, 1}),
+        "F_map_paren": frozenset({0, 1}),
+        "F_map_plain": frozenset({0, 1}),
+        "F_write_paren": frozenset({0}),
+        "F_write_plain": frozenset({0}),
+        "F_nested_paren": frozenset({0}),
+        "F_nested_plain": frozenset({0}),
+    }
+    results = {}
+    for function_name, dependencies in expected.items():
+        result = named_package(files, snapshot, summaries, function_name)
+        assert result.available, (function_name, result.gaps)
+        assert result.return_dependencies == dependencies, (
+            function_name,
+            result.return_dependencies,
+        )
+        results[function_name] = result.return_dependencies
+    for parenthesized, plain in (
+        ("F_short_paren", "F_short_plain"),
+        ("F_assign_paren", "F_assign_plain"),
+        ("F_var_paren", "F_var_plain"),
+        ("F_slice_paren", "F_slice_plain"),
+        ("F_assign_slice_paren", "F_assign_slice_plain"),
+        ("F_var_slice_paren", "F_var_slice_plain"),
+        ("F_slice_field_paren", "F_slice_field_plain"),
+        ("F_map_paren", "F_map_plain"),
+        ("F_write_paren", "F_write_plain"),
+        ("F_nested_paren", "F_nested_plain"),
+    ):
+        assert results[parenthesized] == results[plain]
+
+
 def test_func_result_captured_chan_send_after_bind(go_types_helper):
     # `f := mk(ch)` — the returned closure may capture `ch`, so the
     # queue escapes: `ch <- x` after the call broadcasts into the

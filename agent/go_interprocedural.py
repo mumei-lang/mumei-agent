@@ -2401,7 +2401,7 @@ class _Builder:
         right = statement.child_by_field_name("right")
         if right is None:
             return None
-        rhs_values = (
+        rhs_values = self._strip_parens_items(
             _children(right)
             if right.type == "expression_list"
             else [right]
@@ -14521,7 +14521,9 @@ class _Builder:
             "short_var_declaration",
         }:
             lefts = _children(container.child_by_field_name("left"))
-            rights = _children(container.child_by_field_name("right"))
+            rights = self._strip_parens_items(
+                _children(container.child_by_field_name("right"))
+            )
         elif container.type == "var_spec":
             lefts = []
             rights = []
@@ -14530,7 +14532,9 @@ class _Builder:
                 if field == "name":
                     lefts.append(child)
                 elif field == "value":
-                    rights.extend(_children(child))
+                    rights.extend(
+                        self._strip_parens_items(_children(child))
+                    )
         else:
             return False
         index = next(
@@ -16510,8 +16514,8 @@ class _Builder:
             lefts = expression_items(
                 current.child_by_field_name("left")
             )
-            rights = expression_items(
-                current.child_by_field_name("right")
+            rights = self._strip_parens_items(
+                expression_items(current.child_by_field_name("right"))
             )
             if len(lefts) != len(rights):
                 continue
@@ -20215,7 +20219,9 @@ class _Builder:
             left = node.child_by_field_name("left")
             right = node.child_by_field_name("right")
             lefts = _children(left) if left is not None else []
-            rights = _children(right) if right is not None else []
+            rights = self._strip_parens_items(
+                _children(right) if right is not None else []
+            )
             if not lefts or any(l.type != "identifier" for l in lefts):
                 raise _Unsupported("unsupported_statement", _span(node))
             locals_pre = dict(locals_)
@@ -21586,7 +21592,9 @@ class _Builder:
                     if field == "name":
                         names.append(child)
                     elif field == "value":
-                        value_nodes.extend(_children(child))
+                        value_nodes.extend(
+                            self._strip_parens_items(_children(child))
+                        )
                 multi = (
                     len(names) != len(value_nodes)
                     and len(value_nodes) == 1
@@ -22814,8 +22822,8 @@ class _Builder:
                         else:
                             self._drop_func_value_records(binding.id)
                     else:
-                        # `var h = (f)` / `var h = f()` / a
-                        # multi-valued RHS — same non-identifier drop
+                        # `var h = f()` / a multi-valued RHS — same
+                        # non-identifier drop
                         # the `:=` path applies.
                         self._drop_func_value_records(binding.id)
                     # `var p = G(x)` — an anonymous-struct result's
@@ -23038,7 +23046,9 @@ class _Builder:
             left = node.child_by_field_name("left")
             right = node.child_by_field_name("right")
             lefts = _children(left) if left is not None else []
-            rights = _children(right) if right is not None else []
+            rights = self._strip_parens_items(
+                _children(right) if right is not None else []
+            )
             compound = operator is not None and operator.type in _COMPOUND_ASSIGN
             multi = (
                 len(lefts) != len(rights)
@@ -27805,7 +27815,7 @@ class _Builder:
                             ref.binding_id, factory_sources[i]
                         )
                 elif i not in func_elem_targets:
-                    # `h = (f)` / `h = f()` — a non-identifier RHS
+                    # `h = f()` — a non-identifier RHS
                     # leaves the name holding a value the alias
                     # cannot resolve; an unconditional store loses
                     # the target outright and a maybe-skipped one
@@ -36673,7 +36683,7 @@ class _Builder:
             right = parent.child_by_field_name("right")
             if left is not None and right is not None:
                 names = _children(left)
-                values = _children(right)
+                values = self._strip_parens_items(_children(right))
                 index = next(
                     (
                         i
@@ -36692,7 +36702,7 @@ class _Builder:
                 if field == "name":
                     names.append(c)
                 elif field == "value":
-                    values.extend(_children(c))
+                    values.extend(self._strip_parens_items(_children(c)))
             index = next(
                 (i for i, v in enumerate(values) if v == node), None
             )
@@ -36753,6 +36763,13 @@ class _Builder:
                 None,
             )
         return node
+
+    def _strip_parens_items(self, nodes: list[Any]) -> list[Any]:
+        stripped_nodes = []
+        for node in nodes:
+            stripped = self._strip_parens(node)
+            stripped_nodes.append(node if stripped is None else stripped)
+        return stripped_nodes
 
     def _literal_channel_expression_type(self, node: Any) -> Any | None:
         node = self._strip_parens(node)
@@ -37143,7 +37160,9 @@ class _Builder:
                 rights = [
                     value_child
                     for value in values
-                    for value_child in _children(value)
+                    for value_child in self._strip_parens_items(
+                        _children(value)
+                    )
                 ]
             elif cur.type in {
                 "short_var_declaration",
@@ -37152,7 +37171,9 @@ class _Builder:
                 left = cur.child_by_field_name("left")
                 right = cur.child_by_field_name("right")
                 lefts = _children(left) if left is not None else []
-                rights = _children(right) if right is not None else []
+                rights = self._strip_parens_items(
+                    _children(right) if right is not None else []
+                )
             else:
                 lefts = []
                 rights = []
@@ -37284,7 +37305,9 @@ class _Builder:
                 left = parent.child_by_field_name("left")
                 right = parent.child_by_field_name("right")
                 lefts = _children(left) if left is not None else []
-                rights = _children(right) if right is not None else []
+                rights = self._strip_parens_items(
+                    _children(right) if right is not None else []
+                )
                 if (
                     len(lefts) == 1
                     and lefts[0].type == "identifier"
@@ -37313,7 +37336,9 @@ class _Builder:
                 rights = [
                     value_child
                     for value in values
-                    for value_child in _children(value)
+                    for value_child in self._strip_parens_items(
+                        _children(value)
+                    )
                 ]
                 if (
                     len(names) == 1
@@ -37459,7 +37484,9 @@ class _Builder:
                 vlefts = [n for n in vnames]
                 vrights: list[Any] = []
                 for v in vvals:
-                    vrights.extend(_children(v))
+                    vrights.extend(
+                        self._strip_parens_items(_children(v))
+                    )
                 if len(vlefts) == len(vrights):
                     for li, lnode in enumerate(vlefts):
                         if lnode.type != "identifier":
@@ -37534,7 +37561,7 @@ class _Builder:
                 if left is None or right is None:
                     continue
                 lefts = _children(left)
-                rights = _children(right)
+                rights = self._strip_parens_items(_children(right))
                 if len(lefts) != len(rights):
                     continue
                 for li, lnode in enumerate(lefts):
@@ -38673,7 +38700,7 @@ class _Builder:
             right = parent.child_by_field_name("right")
             if left is not None and right is not None:
                 names = _children(left)
-                values = _children(right)
+                values = self._strip_parens_items(_children(right))
                 index = next(
                     (
                         i
@@ -38712,9 +38739,11 @@ class _Builder:
                 value_node
                 for value in values
                 for value_node in (
-                    _children(value)
-                    if value.type == "expression_list"
-                    else [value]
+                    self._strip_parens_items(
+                        _children(value)
+                        if value.type == "expression_list"
+                        else [value]
+                    )
                 )
             ]
             index = next(
@@ -41064,7 +41093,9 @@ class _Builder:
                 left = cur.child_by_field_name("left")
                 right = cur.child_by_field_name("right")
                 lefts = _children(left) if left is not None else []
-                rights = _children(right) if right is not None else []
+                rights = self._strip_parens_items(
+                    _children(right) if right is not None else []
+                )
                 if (
                     len(lefts) == len(rights) == 1
                     and lefts[0].type == "identifier"
