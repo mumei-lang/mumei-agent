@@ -3126,7 +3126,8 @@ same way — the member carries a may-set of the
 queues it could name (`W{C: ch}` and `w.C = ch`
 union `ch`'s queue in), sends broadcast into the
 indirect writes and reads union `deps(w)`;
-computed bases stay closed.
+computed bases stay closed — nested paths
+(`s.W.C`) admit through the same member identity.
 The `chan chan` field slice (`w.C <- c`,
 `c := <-w.C`, `<-(<-w.C)`, `w.C = cc`,
 `WW{C: cc}`) admits the same way: the member IS
@@ -3136,9 +3137,13 @@ literal stores join it into the donor's share group,
 and a param's field queue is caller-provided memory
 (reads observe the param's origin). `for q := range w.C`
 admits the same way — the element name reads the member's
-queue deps. Nested container elements (`arr[i].C`,
-`s.W.C` one level deeper) and `chan chan` values nested in
-maps or two-level slices stay closed.
+queue deps. Nested field paths (`s.W.C`, `o.W.V.C`)
+resolve through the same member identity — each
+intermediate field must be a direct (non-promoted) struct
+member of a local value-struct root, and the leaf member's
+identity is still the may-set key / queue-of-queues root.
+Computed bases (`arr[i].C`, `m[k].W.C`) and `chan chan`
+values nested in maps or two-level slices stay closed.
 A `chan T` result now admits
 the same way a `chan` parameter does: `ch := g()` and
 `var ch = g()` bind a callee-produced queue when the

@@ -9550,6 +9550,75 @@ class _Builder:
             )
         return None
 
+    def _value_field_root(
+        self,
+        operand: Any,
+        locals_: dict[str, frozenset[int]],
+    ) -> tuple[Any, Any] | None:
+        """Resolve a selector's operand to `(root binding,
+        container)` — `w` → `(w, w)`, `s.W` → `(s, W member)`,
+        `s.W.V` → `(s, V member)` — where container is the
+        binding/member whose type declares the leaf field.
+
+        Every step must stay on local value-struct ground: the base
+        is a local identifier bound to a composite, and each
+        intermediate field resolves to a direct (non-promoted)
+        member of its parent type. Index/computed bases, `_`,
+        promoted members and non-struct parents stay closed.
+        """
+        inner = operand
+        while (
+            inner is not None
+            and inner.type == "parenthesized_expression"
+        ):
+            inner = next(
+                (c for c in inner.named_children if c.type != "comment"),
+                None,
+            )
+        if inner is None:
+            return None
+        if inner.type == "identifier":
+            if inner.text == b"_":
+                return None
+            ref = self.references.get(self.node_key(inner))
+            if ref is None or ref.binding_id not in locals_:
+                return None
+            binding = self.bindings.get(ref.binding_id)
+            if not self._is_local_composite(binding):
+                return None
+            return (binding, binding)
+        if inner.type != "selector_expression":
+            return None
+        sub_operand = inner.child_by_field_name("operand")
+        mid_field = inner.child_by_field_name("field")
+        if sub_operand is None or mid_field is None:
+            return None
+        parent = self._value_field_root(sub_operand, locals_)
+        if parent is None:
+            return None
+        root, container = parent
+        mid_ref = self.references.get(self.node_key(mid_field))
+        if mid_ref is not None and mid_ref.kind == "import":
+            mid_member = self.members.get(mid_ref.binding_id)
+        else:
+            mid_member = self._local_field(mid_ref)
+        if (
+            mid_member is None
+            or mid_member.name.encode("utf-8") != mid_field.text
+            or mid_member.kind not in {"var", "variable"}
+        ):
+            return None
+        if not any(
+            member.id == mid_member.id
+            for member in self._struct_fields_for_fact(
+                container.type, container
+            )
+        ):
+            # Promoted mid-field through an embedded member — stay
+            # closed like the leaf promotion gate.
+            return None
+        return (root, mid_member)
+
     def _value_field_chan(
         self,
         node: Any,
@@ -9584,19 +9653,12 @@ class _Builder:
             return None
         operand = inner.child_by_field_name("operand")
         field = inner.child_by_field_name("field")
-        if (
-            operand is None
-            or field is None
-            or operand.type != "identifier"
-            or operand.text == b"_"
-        ):
+        if operand is None or field is None:
             return None
-        ref = self.references.get(self.node_key(operand))
-        if ref is None or ref.binding_id not in locals_:
+        resolved = self._value_field_root(operand, locals_)
+        if resolved is None:
             return None
-        binding = self.bindings.get(ref.binding_id)
-        if not self._is_local_composite(binding):
-            return None
+        binding, container = resolved
         field_ref = self.references.get(self.node_key(field))
         field_member = None
         if field_ref is not None and field_ref.kind == "import":
@@ -9613,7 +9675,7 @@ class _Builder:
         if not any(
             member.id == field_member.id
             for member in self._struct_fields_for_fact(
-                binding.type, binding
+                container.type, container
             )
         ):
             # `w.C` where `C` promotes out of an embedded field —
@@ -9651,19 +9713,12 @@ class _Builder:
             return None
         operand = inner.child_by_field_name("operand")
         field = inner.child_by_field_name("field")
-        if (
-            operand is None
-            or field is None
-            or operand.type != "identifier"
-            or operand.text == b"_"
-        ):
+        if operand is None or field is None:
             return None
-        ref = self.references.get(self.node_key(operand))
-        if ref is None or ref.binding_id not in locals_:
+        resolved = self._value_field_root(operand, locals_)
+        if resolved is None:
             return None
-        binding = self.bindings.get(ref.binding_id)
-        if not self._is_local_composite(binding):
-            return None
+        binding, container = resolved
         field_ref = self.references.get(self.node_key(field))
         field_member = None
         if field_ref is not None and field_ref.kind == "import":
@@ -9680,7 +9735,7 @@ class _Builder:
         if not any(
             member.id == field_member.id
             for member in self._struct_fields_for_fact(
-                binding.type, binding
+                container.type, container
             )
         ):
             # Promoted member through an embedded field — same
