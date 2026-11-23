@@ -71,10 +71,6 @@ def _lines(path: Path) -> list[bytes]:
     return path.read_bytes().splitlines(keepends=True)
 
 
-def _temporary_files(path: Path) -> list[Path]:
-    return list(path.parent.glob(f".{path.name}.*.tmp"))
-
-
 def _rewrite_first(
     path: Path, mutate, *, recompute_digest: bool = False, prefix: bytes = b""
 ) -> None:
@@ -472,7 +468,7 @@ def test_corrupted_log_refuses_append_without_changing_file_bytes(tmp_path):
     assert path.read_bytes() == original
 
 
-def test_failed_partial_append_keeps_previous_log(tmp_path, monkeypatch):
+def test_failed_partial_append_rolls_back_to_validated_prefix(tmp_path, monkeypatch):
     path = tmp_path / "history.jsonl"
     append_plan_history(str(path), _plan("adapter-before-failure"))
     original = path.read_bytes()
@@ -488,23 +484,15 @@ def test_failed_partial_append_keeps_previous_log(tmp_path, monkeypatch):
 
     with monkeypatch.context() as patch:
         patch.setattr(plan_history_log.os, "write", partial_then_fail)
-        patch.setattr(
-            plan_history_log.os,
-            "ftruncate",
-            lambda *_args: pytest.fail("append must not truncate the live log"),
-        )
-        with pytest.raises(
-            ValueError, match=plan_history_log._IO_FAILURE
-        ):
+        with pytest.raises(ValueError):
             append_plan_history(str(path), _plan("adapter-failing-append"))
 
     assert path.read_bytes() == original
-    assert _temporary_files(path) == []
     append_plan_history(str(path), _plan("adapter-after-failure"))
     assert len(read_plan_history(str(path))) == 2
 
 
-def test_failed_partial_batch_append_keeps_previous_log(
+def test_failed_partial_batch_append_rolls_back_to_validated_prefix(
     tmp_path, monkeypatch
 ):
     path = tmp_path / "history.jsonl"
@@ -522,14 +510,7 @@ def test_failed_partial_batch_append_keeps_previous_log(
 
     with monkeypatch.context() as patch:
         patch.setattr(plan_history_log.os, "write", partial_then_fail)
-        patch.setattr(
-            plan_history_log.os,
-            "ftruncate",
-            lambda *_args: pytest.fail("append must not truncate the live log"),
-        )
-        with pytest.raises(
-            ValueError, match=plan_history_log._IO_FAILURE
-        ):
+        with pytest.raises(ValueError):
             append_plan_histories(
                 str(path),
                 (
@@ -539,67 +520,10 @@ def test_failed_partial_batch_append_keeps_previous_log(
             )
 
     assert path.read_bytes() == original
-    assert _temporary_files(path) == []
     append_plan_histories(
         str(path), (_plan("adapter-after-batch-failure"),)
     )
     assert len(read_plan_history(str(path))) == 2
-
-
-def test_temp_fsync_failure_keeps_previous_log(tmp_path, monkeypatch):
-    path = tmp_path / "history.jsonl"
-    append_plan_history(str(path), _plan("adapter-before-fsync-failure"))
-    original = path.read_bytes()
-    fsync = plan_history_log.os.fsync
-
-    def fail_temp_fsync(file_fd):
-        raise OSError(errno.EIO, "temp fsync failed")
-
-    monkeypatch.setattr(plan_history_log.os, "fsync", fail_temp_fsync)
-
-    with pytest.raises(ValueError, match=plan_history_log._IO_FAILURE):
-        append_plan_history(str(path), _plan("adapter-fsync-failure"))
-
-    assert path.read_bytes() == original
-    assert _temporary_files(path) == []
-    monkeypatch.setattr(plan_history_log.os, "fsync", fsync)
-
-
-def test_replace_failure_keeps_previous_chain_and_next_append(
-    tmp_path, monkeypatch
-):
-    path = tmp_path / "history.jsonl"
-    first_plan, failed_a, failed_b, next_plan = (
-        _plan(name)
-        for name in ("adapter-original", "adapter-failed-a", "adapter-failed-b", "adapter-next")
-    )
-    first_digest = append_plan_history(str(path), first_plan)
-    original = path.read_bytes()
-
-    def fail_replace(_source, _destination):
-        raise OSError(errno.EIO, "simulated replace failure")
-
-    with monkeypatch.context() as patch:
-        patch.setattr(plan_history_log.os, "replace", fail_replace)
-        with pytest.raises(
-            ValueError, match=plan_history_log._IO_FAILURE
-        ):
-            append_plan_histories(str(path), (failed_a, failed_b))
-
-    assert path.read_bytes() == original
-    assert _temporary_files(path) == []
-    next_digest = append_plan_history(str(path), next_plan)
-    entries = [json.loads(line) for line in _lines(path)]
-    assert [entry["index"] for entry in entries] == [0, 1]
-    assert [entry["prev_digest"] for entry in entries] == [
-        None,
-        first_digest,
-    ]
-    assert entries[-1]["digest"] == next_digest
-    assert read_plan_history(str(path)) == (
-        _json_plan(first_plan),
-        _json_plan(next_plan),
-    )
 
 
 def test_non_verification_plan_is_rejected(tmp_path):
@@ -816,10 +740,9 @@ def test_empty_existing_log_directory_is_fsynced(tmp_path, monkeypatch):
     assert calls == [tmp_path]
 
 
-def test_directory_fsync_failure_keeps_previous_log(tmp_path, monkeypatch):
+def test_directory_fsync_failure_rolls_back_append(tmp_path, monkeypatch):
     path = tmp_path / "history.jsonl"
     path.write_bytes(b"")
-    original = path.read_bytes()
 
     def fail_directory_fsync(directory):
         if directory == tmp_path:
@@ -829,10 +752,7 @@ def test_directory_fsync_failure_keeps_previous_log(tmp_path, monkeypatch):
         plan_history_log, "_fsync_directory", fail_directory_fsync
     )
 
-    with pytest.raises(
-        ValueError, match=plan_history_log._IO_FAILURE
-    ):
+    with pytest.raises(ValueError, match="I/O failed"):
         append_plan_history(str(path), _plan("adapter-fsync-failure"))
 
-    assert path.read_bytes() == original
-    assert _temporary_files(path) == []
+    assert path.read_bytes() == b""

@@ -8,9 +8,8 @@ The log is not a dispatch or acceptance record.
 
 Cross-process writer exclusion requires POSIX ``fcntl``; where it is
 unavailable, locking is process-local and hosts must use a single writer
-process. An append is written to a temp file and atomically renamed, so a
-failure or crash leaves the previous log intact. Entries use standard JSON;
-NaN and Infinity are rejected.
+process. A write or fsync failure triggers best-effort rollback to the
+validated prefix. Entries use standard JSON; NaN and Infinity are rejected.
 """
 
 from __future__ import annotations
@@ -19,10 +18,9 @@ import errno
 import hashlib
 import json
 import os
-import tempfile
 import threading
 from collections.abc import Iterator
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from pathlib import Path
 
 from agent.verification_planner import VerificationPlan
@@ -81,7 +79,7 @@ def _as_path(path: str) -> Path:
 
 def _read_entries(
     path: Path, expected_head: str | None = None
-) -> tuple[tuple[dict, ...], bytes, bool]:
+) -> tuple[tuple[dict, ...], int, bool]:
     if expected_head is not None and not _is_digest(expected_head):
         raise ValueError(_INVALID_HEAD)
 
@@ -91,7 +89,7 @@ def _read_entries(
     except FileNotFoundError:
         if expected_head is not None:
             raise ValueError(_HEAD_MISMATCH) from None
-        return (), b"", False
+        return (), 0, False
     except (OSError, ValueError):
         raise ValueError(_IO_FAILURE) from None
 
@@ -149,7 +147,7 @@ def _read_entries(
         not entries or entries[-1]["digest"] != expected_head
     ):
         raise ValueError(_HEAD_MISMATCH)
-    return tuple(entries), raw, True
+    return tuple(entries), len(raw), True
 
 
 def read_plan_history(
@@ -201,44 +199,6 @@ def _fsync_directory(directory: Path) -> None:
         os.close(directory_fd)
 
 
-def _write_temporary_file(path: Path, contents: bytes) -> Path:
-    file_fd, temporary_name = tempfile.mkstemp(
-        dir=path.parent,
-        prefix="." + path.name + ".",
-        suffix=".tmp",
-    )
-    temporary_path = Path(temporary_name)
-    try:
-        os.fchmod(file_fd, 0o600)
-        remaining = memoryview(contents)
-        while remaining:
-            try:
-                written = os.write(file_fd, remaining)
-            except InterruptedError:
-                continue
-            if written <= 0:
-                raise OSError
-            remaining = remaining[written:]
-        os.fsync(file_fd)
-        os.close(file_fd)
-        file_fd = -1
-        return temporary_path
-    except BaseException:
-        if file_fd >= 0:
-            with suppress(OSError):
-                os.close(file_fd)
-        with suppress(OSError):
-            temporary_path.unlink()
-        raise
-
-
-def _remove_temporary_file(path: Path | None) -> None:
-    if path is None:
-        return
-    with suppress(OSError):
-        path.unlink()
-
-
 def append_plan_histories(
     path: str,
     plans: tuple[VerificationPlan, ...],
@@ -265,12 +225,11 @@ def append_plan_histories(
         for directory in missing_directories:
             _fsync_directory(directory.parent)
         with _locked(history_path):
-            entries, existing_raw, existed = _read_entries(
-                history_path, expected_head
-            )
+            entries, current_size, _ = _read_entries(history_path, expected_head)
             previous_digest = entries[-1]["digest"] if entries else None
             lines = []
             digests = []
+            batch_size = 0
             for offset, plan in enumerate(plans):
                 unsigned = {
                     "schema_version": ENTRY_SCHEMA,
@@ -284,38 +243,44 @@ def append_plan_histories(
                 line = _canonical_json({**unsigned, "digest": digest}) + b"\n"
                 if len(line) > MAX_ENTRY_BYTES:
                     raise ValueError(_ENTRY_TOO_LARGE)
+                batch_size += len(line)
+                if current_size + batch_size > MAX_LOG_BYTES:
+                    raise ValueError(_LOG_TOO_LARGE)
                 lines.append(line)
                 digests.append(digest)
                 previous_digest = digest
             batch = b"".join(lines)
-            new = existing_raw + batch
-            if len(new) > MAX_LOG_BYTES:
-                raise ValueError(_LOG_TOO_LARGE)
 
-            temporary_path = None
-            replaced = False
+            flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
             try:
-                temporary_path = _write_temporary_file(history_path, new)
-                os.replace(temporary_path, history_path)
-                temporary_path = None
-                replaced = True
-                _fsync_directory(history_path.parent)
+                file_fd = os.open(history_path, flags | os.O_EXCL, 0o600)
+            except FileExistsError:
+                file_fd = os.open(history_path, flags, 0o600)
+            try:
+                remaining = memoryview(batch)
+                while remaining:
+                    try:
+                        written = os.write(file_fd, remaining)
+                    except InterruptedError:
+                        continue
+                    if written <= 0:
+                        raise OSError
+                    remaining = remaining[written:]
+                os.fsync(file_fd)
+                if current_size == 0:
+                    _fsync_directory(history_path.parent)
             except BaseException:
-                _remove_temporary_file(temporary_path)
-                if replaced:
-                    with suppress(OSError, RuntimeError, ValueError):
-                        if existed:
-                            restore_path = _write_temporary_file(
-                                history_path, existing_raw
-                            )
-                            try:
-                                os.replace(restore_path, history_path)
-                            finally:
-                                _remove_temporary_file(restore_path)
-                        else:
-                            history_path.unlink()
-                        _fsync_directory(history_path.parent)
+                try:
+                    os.ftruncate(file_fd, current_size)
+                except OSError:
+                    pass
+                try:
+                    os.fsync(file_fd)
+                except OSError:
+                    pass
                 raise
+            finally:
+                os.close(file_fd)
             return tuple(digests)
     except ValueError:
         raise
