@@ -25,6 +25,7 @@ FIXTURE_NAMES = (
     "external_stdlib",
     "macro_usage",
     "build_script",
+    "member_access",
 )
 _STATUSES = (
     "external",
@@ -601,3 +602,34 @@ def test_rejects_oversized_envelope():
         load_rust_compiler_snapshot(
             b"x" * (MAX_REPORT_BYTES + 1), _source("local_shadowing")
         )
+
+
+def test_member_access_references_agree_and_type_positions_report_missing():
+    # Member calls, field reads, `self` receivers and locals agree
+    # with rust-analyzer; struct names in type positions and field
+    # labels stay `lexical_missing` — the lexical side does not emit
+    # those reference positions (its honest coverage boundary).
+    envelope = _envelope("member_access")
+    source = _source("member_access")
+    snapshot = load_rust_compiler_snapshot(_payload(envelope), source)
+    report = build_rust_bindings(source.decode("utf-8"), pointer_width=64)
+
+    comparison = compare_with_lexical(snapshot, report)
+
+    agreed = {
+        item["name"] for item in comparison["references"]
+        if item["status"] == "agree"
+    }
+    missing = {
+        item["name"] for item in comparison["references"]
+        if item["status"] == "lexical_missing"
+    }
+    assert agreed >= {
+        "w", "p", "self", "inner", "value", "field", "read", "new", "pm",
+    }
+    assert missing == {"P", "V", "W", "inner", "value"}
+    assert all(
+        item["status"] != "disagree"
+        for item in comparison["references"]
+    )
+    assert comparison["summary"]["lexical_unresolved"] == 0

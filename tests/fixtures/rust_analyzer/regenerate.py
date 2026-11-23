@@ -17,6 +17,7 @@ FIXTURE_NAMES = (
     "external_stdlib",
     "macro_usage",
     "build_script",
+    "member_access",
 )
 TARGETS = {name: "src/main.rs" for name in FIXTURE_NAMES}
 
