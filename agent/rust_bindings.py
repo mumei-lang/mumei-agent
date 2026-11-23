@@ -1506,11 +1506,45 @@ class _RustBindings:
                 pattern_scope,
                 position,
             )
-        if a.startswith("(") and a.endswith(")"):
-            if not (b.startswith("(") and b.endswith(")")):
+        if (
+            a.startswith("(")
+            and a.endswith(")")
+            and self._paren_wraps(a)
+        ) or (
+            b.startswith("(")
+            and b.endswith(")")
+            and self._paren_wraps(b)
+        ):
+            # `(P)` is parenthesized `P`, not a 1-tuple — only a
+            # top-level comma makes a tuple. `(P, Q,)`'s trailing
+            # comma adds no element.
+            def _paren_args(text: str) -> "list[str] | None":
+                if (
+                    text.startswith("(")
+                    and text.endswith(")")
+                    and self._paren_wraps(text)
+                ):
+                    return self._type_arg_list(text[1:-1])
+                return None
+
+            a_raw = _paren_args(a)
+            b_raw = _paren_args(b)
+            a_tuple = a_raw is not None and len(a_raw) > 1
+            b_tuple = b_raw is not None and len(b_raw) > 1
+            if a_tuple != b_tuple:
+                # `(P,)` is a 1-tuple; `(P)` is `P` — no cover.
                 return False
-            sub_a = self._type_arg_list(a[1:-1])
-            sub_b = self._type_arg_list(b[1:-1])
+            if not a_tuple:
+                # `(P)` unwraps to `P`; tuples keep their elements.
+                sub_a = a_raw if a_raw is not None else [a]
+                sub_b = b_raw if b_raw is not None else [b]
+            else:
+                sub_a = a_raw
+                sub_b = b_raw
+            if len(sub_a) > 1 and sub_a[-1] == "":
+                sub_a = sub_a[:-1]
+            if len(sub_b) > 1 and sub_b[-1] == "":
+                sub_b = sub_b[:-1]
             return len(sub_a) == len(sub_b) and all(
                 self._type_arg_match(
                     x, y, params, bindings, pattern_scope, position
@@ -2711,6 +2745,29 @@ class _RustBindings:
         head, spelled_pos, args_scope = self._scrutinee_shape(
             value, value_id
         )
+        if value_args is not None:
+            # `r.as_ref()` produces args spelled `Result<&P, &E>`
+            # whole — the head the declared receiver carried is
+            # gone, so read it off the produced spelling and peel
+            # to the real payload args.
+            produced = re.match(
+                r"([A-Za-z_][\w:]*)\s*<(.+)>\s*$",
+                value_args.strip(),
+                re.DOTALL,
+            )
+            if produced is not None:
+                produced_head = self._normalize_identifier(
+                    produced.group(1).split("::")[-1]
+                )
+                if produced_head in heads and (
+                    head is None or head == produced_head
+                ):
+                    head = produced_head
+                    value_args = produced.group(2)
+                    spelled_pos = (
+                        self._receiver_annotation_position(value)
+                        or spelled_pos
+                    )
         if head not in heads:
             return None, None
         if spelled_pos is None:
@@ -2938,6 +2995,27 @@ class _RustBindings:
             head, spelled_pos, _ = self._scrutinee_shape(
                 inner, inner_id
             )
+            if inner_args is not None:
+                # `r.as_ref()?` — produced args spell the whole
+                # `Result<&P, &E>`; read the head off the spelling.
+                produced = re.match(
+                    r"([A-Za-z_][\w:]*)\s*<(.+)>\s*$",
+                    inner_args.strip(),
+                    re.DOTALL,
+                )
+                if produced is not None:
+                    produced_head = self._normalize_identifier(
+                        produced.group(1).split("::")[-1]
+                    )
+                    if produced_head in _TRY_HEADS and (
+                        head is None or head == produced_head
+                    ):
+                        head = produced_head
+                        inner_args = produced.group(2)
+                        spelled_pos = (
+                            self._receiver_annotation_position(inner)
+                            or spelled_pos
+                        )
             if head not in _TRY_HEADS:
                 return None, None
             if spelled_pos is None:
@@ -4081,6 +4159,21 @@ class _RustBindings:
                                 )
                                 recv_args = self._type_arg_list(
                                     spelled_head.group(2)
+                                )
+                        if head is None and value_expr is not None:
+                            # `make().as_ref()` — the callee's return
+                            # annotation spells the container head.
+                            produced_head = re.match(
+                                r"([A-Za-z_][\w:]*)\s*<",
+                                self._expr_type_spelling(
+                                    value_expr
+                                )
+                                or "",
+                            )
+                            if produced_head is not None:
+                                head = self._normalize_identifier(
+                                    produced_head.group(1)
+                                    .split("::")[-1]
                                 )
                         if (
                             method_name in {"and", "or"}
@@ -8522,15 +8615,25 @@ class _RustBindings:
         `&Q`/`&mut Q` give `Q`; anything else returns None."""
         spelled = spelled.strip()
         wrapper = re.fullmatch(
-            r"(Box|Rc|Arc|Pin)\s*<(.+)>", spelled, re.DOTALL
+            r"(?:[A-Za-z_]\w*::)*(Box|Rc|Arc|Pin)\s*<(.+)>",
+            spelled,
+            re.DOTALL,
         )
         if wrapper is not None:
-            return wrapper.group(2).strip()
+            inner = wrapper.group(2).strip()
+            if wrapper.group(1) == "Pin":
+                # `Pin<Box<P>>` derefs through the pointer to `P`,
+                # not to `Box<P>` — `Pin::deref` gives the
+                # pointer's own target.
+                deeper = _RustBindings._deref_layer(inner)
+                if deeper is not None:
+                    return deeper
+            return inner
         vector = re.fullmatch(r"Vec\s*<(.+)>", spelled, re.DOTALL)
         if vector is not None:
             return "[" + vector.group(1).strip() + "]"
         borrow = re.fullmatch(
-            r"&(?:mut\s+)?(.+)", spelled, re.DOTALL
+            r"&\s*(?:'\w+\s+)?(?:mut\s+)?(.+)", spelled, re.DOTALL
         )
         if borrow is not None:
             return borrow.group(1).strip()
@@ -8855,7 +8958,12 @@ class _RustBindings:
             return None
         if args is None:
             return None
-        match = re.match(r"[A-Za-z_]\w*", args.strip())
+        match = re.match(
+            r"[A-Za-z_]\w*",
+            re.sub(
+                r"^&\s*(?:'\w+\s+)?(?:mut\s+)?", "", args.strip()
+            ),
+        )
         return None if match is None else match.group(0)
 
     def _container_head_name(self, node: Any | None) -> "str | None":
@@ -8993,6 +9101,17 @@ class _RustBindings:
                     return self._qualified_spelling(
                         annotated, tn.start_byte
                     )
+        if head is None and targs is not None:
+            # `b.and(c)` produces args spelled `Result<Q, E>` whole —
+            # the head lives inside the produced text.
+            spelled_head = re.match(
+                r"([A-Za-z_][\w:]*)\s*<(.+)>\s*$",
+                targs.strip(),
+                re.DOTALL,
+            )
+            if spelled_head is not None:
+                head = spelled_head.group(1)
+                targs = spelled_head.group(2)
         if head is None:
             return None
         spelled = head if not targs else f"{head}<{targs}>"
@@ -9055,8 +9174,17 @@ class _RustBindings:
         if inner.type != "identifier":
             # `s.as_ref()`/`w.sref()` — the call result itself can
             # be a slice; its spelled args keep the `[` shape.
+            # `Result<[P; 2], E>`'s args also contain `[` — the
+            # whole args text must be one `[...]` form.
             _call_id, call_args = self._receiver_type(inner)
-            return call_args is not None and "[" in call_args
+            if call_args is None:
+                return False
+            stripped = call_args.strip().lstrip("&").strip()
+            if stripped.startswith("mut "):
+                stripped = stripped[4:].strip()
+            return stripped.startswith(
+                "["
+            ) and self._bracket_wraps(stripped)
         record = self._lookup(
             self._normalize_identifier(self.text(inner)),
             inner.start_byte,
@@ -9433,7 +9561,11 @@ class _RustBindings:
             # read the head so `Some(p)` on `x` still reaches the
             # prelude payload; the spelled args resolve at the
             # binding site.
-            spelled = (record.type_args or "").strip()
+            spelled = re.sub(
+                r"^&\s*(?:'\w+\s+)?(?:mut\s+)?",
+                "",
+                (record.type_args or "").strip(),
+            )
             head = re.match(r"[A-Za-z_][\w:]*(?=\s*<)", spelled)
             if head is not None:
                 return (
@@ -9492,7 +9624,11 @@ class _RustBindings:
             # one layer too deep.
             wrapped = re.fullmatch(
                 r"([A-Za-z_][\w:]*)\s*<(.+)>",
-                scrut_args.strip(),
+                re.sub(
+                    r"^&\s*(?:'\w+\s+)?(?:mut\s+)?",
+                    "",
+                    scrut_args.strip(),
+                ),
                 re.DOTALL,
             )
             if (
@@ -9507,8 +9643,17 @@ class _RustBindings:
         if entry[1] >= len(args):
             return None
         payload = args[entry[1]].strip()
+        payload_bare = re.sub(
+            r"^&\s*(?:'\w+\s+)?(?:mut\s+)?", "", payload
+        )
         payload_head = re.match(
-            r"[A-Za-z_][\w:]*(?=\s*<)", payload
+            r"[A-Za-z_][\w:]*(?=\s*<)", payload_bare
+        )
+        # The spelled arg refers to names visible where the
+        # scrutinee's type was annotated — resolving at the pattern
+        # position would pick up a same-named shadow.
+        type_id, fargs = self._spelled_type(
+            args[entry[1]], scrut_position
         )
         if (
             payload_head is not None
@@ -9516,18 +9661,16 @@ class _RustBindings:
                 payload_head.group(0).split("::")[-1]
             )
             in _TRY_HEADS
+            and type_id is None
         ):
             # `Result<Option<P>, E>`'s `Ok` payload is `Option<P>`
             # — keep the full spelled head (as the tuple-pattern
             # pin does) so `Some(q)` on the name still reaches `P`;
-            # `_spelled_type` would flatten it to bare `P`.
+            # `_spelled_type` would flatten it to bare `P`. A
+            # prelude-named head that resolves to a real record
+            # (`m::Option` on a custom type) keeps its type id —
+            # member resolution matters more than the pattern pin.
             return [(None, payload)]
-        # The spelled arg refers to names visible where the
-        # scrutinee's type was annotated — resolving at the pattern
-        # position would pick up a same-named shadow.
-        type_id, fargs = self._spelled_type(
-            args[entry[1]], scrut_position
-        )
         if (
             type_id is None
             and inner_args

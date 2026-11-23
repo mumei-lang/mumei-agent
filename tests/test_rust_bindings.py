@@ -7904,3 +7904,74 @@ fn f(r: Result<P, E>, rb: Result<Box<P>, E>, rm: Result<P, E>, re: Result<P, Box
     # both stay opaque.
     assert not bound.get("np.pm()")
     assert not bound.get("wp.pm()")
+
+
+def test_result_produced_spelling_peels_for_unwrap_and_nested_patterns():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct Q;
+impl Q { fn qm(&self) {} }
+struct E;
+impl E { fn em(&self) {} }
+struct W<T> { x: T }
+impl W<(P, Q)> { fn wq(&self) {} }
+struct S { r: Result<[P; 2], E> }
+fn make() -> Result<P, E> { todo!() }
+fn give() -> Option<Option<P>> { todo!() }
+fn f(r: Result<P, E>, w2: W<(P, Q,)>, s: S,
+     rp: Result<std::pin::Pin<Box<P>>, E>,
+     rl: Result<&'a mut P, E>,
+     ro: Result<&Option<P>, E>,
+     a: Result<P, E>, b: Result<P, E>, c: Result<Q, E>,
+     o: Option<Option<P>>) {
+    w2.wq();
+    let v = make().as_ref();
+    if let Ok(p) = v { p.pm(); }
+    let u = r.as_ref().unwrap();
+    u.pm();
+    let wq2 = r.as_ref()?;
+    wq2.pm();
+    if let Ok(x) = give() { x.pm(); }
+    if let Some(so) = o { if let Some(sp) = so { sp.pm(); } }
+    if let Ok(p2) = s.r.as_ref() { p2[0].pm(); }
+    if let Err(se) = s.r.as_ref() { se.em(); }
+    if let Ok(pp) = rp.as_deref() { pp.pm(); }
+    if let Ok(lp) = rl.as_deref_mut() { lp.pm(); }
+    if let Err(oe) = a.or(b.and(c)) { oe.em(); }
+    if let Ok(Some(sq)) = ro { sq.pm(); }
+    if let Ok(xo) = ro { xo.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    em = _bindings(report, "em", "associated_function")[0]
+    wq = _bindings(report, "wq", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `W<(P, Q,)>`'s trailing comma still finds `impl W<(P, Q)>`.
+    assert bound.get("w2.wq()") == wq.id
+    # `make().as_ref()`/`r.as_ref().unwrap()`/`r.as_ref()?` peel
+    # the produced `Result<...>` spelling to the payload.
+    assert bound.get("p.pm()") == pm.id
+    assert bound.get("u.pm()") == pm.id
+    assert bound.get("wq2.pm()") == pm.id
+    # `Option<Option<P>>`'s `Some(x)` binds the inner `Option<P>`
+    # — `x.pm()` is not `P`'s call.
+    assert not bound.get("x.pm()")
+    assert bound.get("sp.pm()") == pm.id
+    # A `Result<[P; 2], E>` field's args are not a slice receiver.
+    assert bound.get("p2[0].pm()") == pm.id
+    assert bound.get("se.em()") == em.id
+    # `Pin<Box<P>>`/`&'a mut P` deref to `P`.
+    assert bound.get("pp.pm()") == pm.id
+    assert bound.get("lp.pm()") == pm.id
+    # `a.or(b.and(c))` types the nested produced `Result`.
+    assert bound.get("oe.em()") == em.id
+    # `&Option<P>` payload — `Some(q)` peels the borrow to `P`;
+    # `Ok(x)` binds the whole `&Option<P>` (no `pm` member).
+    assert bound.get("sq.pm()") == pm.id
+    assert not bound.get("xo.pm()")
