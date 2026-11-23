@@ -56141,7 +56141,7 @@ def test_map_element_function_field_closures(go_types_helper):
     declarations = (
         "type S struct { F func() int64 }\n"
         "type A struct { F func() int64; B []int64 }\n"
-        "type W struct { M map[int]S; MM map[int]map[int]S; MA map[int]A }\n"
+        "type W struct { M map[int]S; MM map[int]map[int]S; MA map[int]A; MS map[int][]S }\n"
         "func ap(cb func() int64) int64 { return cb() }\n"
         "func use(e S) int64 { return e.F() }\n"
         "func usea(e A) int64 { return e.F() }\n"
@@ -56199,6 +56199,30 @@ def test_map_element_function_field_closures(go_types_helper):
         "\tv := y; s := W{MA: map[int]A{0: {F: func() int64 { return v }}}}\n"
         "\tv = x; return usea(s.MA[0])\n"
         "}\n"
+        "func FRangeElem(x, y int64) int64 {\n"
+        "\tv := y; m := map[int]S{0: {F: func() int64 { return v }}}\n"
+        "\tv = x; s := int64(0)\n"
+        "\tfor _, e := range m { s += e.F() }\n"
+        "\treturn s\n"
+        "}\n"
+        "func FRangeField(x, y int64) int64 {\n"
+        "\tv := y; s := W{M: map[int]S{0: {F: func() int64 { return v }}}}\n"
+        "\tv = x; r := int64(0)\n"
+        "\tfor _, e := range s.M { r += e.F() }\n"
+        "\treturn r\n"
+        "}\n"
+        "func FRangeSliceElem(x, y int64) int64 {\n"
+        "\tv := y; s := W{MS: map[int][]S{0: {{F: func() int64 { return v }}}}}\n"
+        "\tv = x; r := int64(0)\n"
+        "\tfor _, e := range s.MS { r += e[0].F() }\n"
+        "\treturn r\n"
+        "}\n"
+        "func FRangeNested(x, y int64) int64 {\n"
+        "\tv := y; s := W{MM: map[int]map[int]S{0: {1: {F: func() int64 { return v }}}}}\n"
+        "\tv = x; r := int64(0)\n"
+        "\tfor _, e := range s.MM { r += e[1].F() }\n"
+        "\treturn r\n"
+        "}\n"
     )
     files = {"a.go": "package p\n" + declarations}
     snapshot = _snapshot_for(go_types_helper, files)
@@ -56214,6 +56238,8 @@ def test_map_element_function_field_closures(go_types_helper):
         "FKeyedVar": frozenset({0, 1}),
         "FMethodValue": frozenset({0, 1}),
         "FMapFieldArg": frozenset({0, 1}),
+        "FRangeElem": frozenset({0, 1}),
+        "FRangeField": frozenset({0, 1}),
     }
     for function_name, dependencies in expected.items():
         result = named_package(
@@ -56244,6 +56270,26 @@ def test_map_element_function_field_closures(go_types_helper):
         files, snapshot, summaries, "FMapAliasFieldArg"
     )
     assert not alias_elem_arg.available, alias_elem_arg.gaps
+    # Range-by-copy over a `map[K][]S` hands each iteration a
+    # header-sharing slice — element field reads stay closed like
+    # the single-index form.
+    range_slice_elem = named_package(
+        files, snapshot, summaries, "FRangeSliceElem"
+    )
+    assert not range_slice_elem.available, range_slice_elem.gaps
+    assert {g.reason for g in range_slice_elem.gaps} == {
+        "binding_unavailable"
+    }
+    # Range over a nested map hands an aliased inner-map header —
+    # `e[1]` reads a different map copy's element, closed like the
+    # multi-index form.
+    range_nested = named_package(
+        files, snapshot, summaries, "FRangeNested"
+    )
+    assert not range_nested.available, range_nested.gaps
+    assert {g.reason for g in range_nested.gaps} == {
+        "unsupported_expression"
+    }
 
 
 def test_map_element_value_fact_stops_at_container_elements():
