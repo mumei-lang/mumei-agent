@@ -474,8 +474,8 @@ def _spelled_slice_head(text: str) -> bool:
 _EXACT_CHUNKS_INHERENT = {
     "ChunksExact": {"remainder"},
     "RChunksExact": {"remainder"},
-    "ChunksExactMut": {"remainder", "into_remainder"},
-    "RChunksExactMut": {"remainder", "into_remainder"},
+    "ChunksExactMut": {"into_remainder"},
+    "RChunksExactMut": {"into_remainder"},
 }
 _TRY_HEADS = frozenset({"Option", "Result"})
 # Prelude constructors whose tuple payload position is fixed by the
@@ -2787,10 +2787,46 @@ class _RustBindings:
     ) -> bool:
         """A trait in scope declares a method named `name` — a
         `v.name(...)` call may be that trait's extension method,
-        not the std shape the caller's recipe assumes. `receiver`
-        narrows the check to impls that can cover that receiver —
-        a trait implemented only for a different declared type
-        cannot be the callee."""
+        not the std shape the caller's recipe assumes."""
+        return (
+            self._covering_trait_member(name, position, receiver)
+            is not None
+        )
+
+    def _member_self_by_value(self, record: "_Record") -> bool:
+        """The covering member's receiver is by-value `self`/`mut self`
+        — a by-value receiver outranks a `&self` inherent method on
+        the same type, so std-inherent shortcuts must yield."""
+        pos = record.binding.span.start
+        node = self.root.descendant_for_byte_range(pos, pos)
+        while node is not None and node.type not in {
+            "function_item",
+            "function_signature_item",
+            "function",
+        }:
+            node = node.parent
+        params = (
+            node.child_by_field_name("parameters")
+            if node is not None
+            else None
+        )
+        if params is None:
+            return False
+        for ch in params.named_children:
+            if ch.type == "self_parameter":
+                return not self.text(ch).strip().startswith("&")
+        return False
+
+    def _covering_trait_member(
+        self,
+        name: str,
+        position: int,
+        receiver: "Any | None" = None,
+    ) -> "_Record | None":
+        """The trait member covering `name` on this receiver, or None.
+        `receiver` narrows candidates to impls that can cover it — a
+        trait implemented only for a different declared type cannot
+        be the callee."""
         container_id = None
         receiver_head = None
         receiver_heads: "set[str]" = set()
@@ -2944,8 +2980,8 @@ class _RustBindings:
             if trait is not None and self._trait_visible(
                 trait, position
             ):
-                return True
-        return False
+                return record
+        return None
 
     def _resolve_trait_node(self, trait_node: Any) -> "_Record | None":
         """Trait record for a UFCS `as` qualifier — plain, scoped
@@ -7100,20 +7136,36 @@ class _RustBindings:
             # alias to the chunks call. A trait impl covering this
             # receiver's head hides the std shape — except where the
             # method is already inherent on that iterator.
+            cover = self._covering_trait_member(
+                method, call.start_byte, receiver
+            )
             inner_call = self._chunks_exact_remainder_source(receiver)
-            if inner_call is None:
-                return None, None
-            prod_head = self._producing_call_head(inner_call)
-            if (
-                method
-                in _EXACT_CHUNKS_INHERENT.get(prod_head or "", ())
-                or not self._visible_trait_method(
-                    method, call.start_byte, receiver
+            if inner_call is not None:
+                prod_head = self._producing_call_head(inner_call)
+                inherent = method in _EXACT_CHUNKS_INHERENT.get(
+                    prod_head or "", ()
                 )
-            ):
-                return self._iterator_spelling_with_pos(
-                    inner_call, _depth + 1
-                )
+                if (
+                    inherent
+                    and cover is not None
+                    and self._member_self_by_value(cover)
+                ):
+                    # `fn remainder(self)` — a by-value receiver
+                    # outranks std's `&self` inherent, so the trait
+                    # shape wins.
+                    inherent = False
+                if inherent or cover is None:
+                    return self._iterator_spelling_with_pos(
+                        inner_call, _depth + 1
+                    )
+            # The covering member's shape applies — either a custom
+            # collection's own remainder, or a trait that outranks std
+            # — so the element spelling is its declared return.
+            if cover is not None and cover.type_node is not None:
+                ret = self.text(cover.type_node).strip()
+                if _spelled_slice_head(ret):
+                    return ret, cover.binding.span.start
+            return None, None
         if method == "flatten":
             # `v.iter().flatten()` unwraps the element's own args —
             # `Vec<Vec<P>>` iterates `Vec<P>`, flatten yields `P`
@@ -7978,47 +8030,78 @@ class _RustBindings:
             # A trait impl covering this receiver's head hides the
             # std shape — except where the method is already
             # inherent on that iterator.
+            cover = self._covering_trait_member(
+                method, call.start_byte, receiver
+            )
             inner_call = self._chunks_exact_remainder_source(receiver)
-            if inner_call is None:
-                return _UNKNOWN, None
-            prod_head = self._producing_call_head(inner_call)
-            if (
-                method
-                in _EXACT_CHUNKS_INHERENT.get(prod_head or "", ())
-                or not self._visible_trait_method(
-                    method, call.start_byte, receiver
+            if inner_call is not None:
+                prod_head = self._producing_call_head(inner_call)
+                inherent = method in _EXACT_CHUNKS_INHERENT.get(
+                    prod_head or "", ()
                 )
-            ):
-                spelled, spelled_pos = self._iterator_spelling_with_pos(
-                    inner_call
-                )
-                if spelled is None:
-                    return _UNKNOWN, None
+                if (
+                    inherent
+                    and cover is not None
+                    and self._member_self_by_value(cover)
+                ):
+                    inherent = False
+                if inherent or cover is None:
+                    spelled, spelled_pos = (
+                        self._iterator_spelling_with_pos(inner_call)
+                    )
+                    if spelled is None:
+                        return _UNKNOWN, None
+                    peeled = re.fullmatch(
+                        r"(&\s*(?:'\w+\s+)?mut\s+|&\s*(?:'\w+\s+)?)\[(.+)\]",
+                        spelled.strip(),
+                    )
+                    if peeled is None:
+                        return _UNKNOWN, None
+                    position = (
+                        spelled_pos if spelled_pos is not None
+                        else call.start_byte
+                    )
+                    elem_id, rest = self._element_of(
+                        None,
+                        peeled.group(2).strip(),
+                        position,
+                        self._literal_element_args(call),
+                    )
+                    if elem_id is None:
+                        return _UNKNOWN, rest
+                    name = next(
+                        (b.name for b in self.bindings if b.id == elem_id), ""
+                    )
+                    return (
+                        TypeFact("named", name, 0, None, elem_id),
+                        peeled.group(2).strip(),
+                    )
+            # The covering member's shape applies — element from its
+            # declared return (`-> &[R]` iterates `R`).
+            if cover is not None and cover.type_node is not None:
+                ret = self.text(cover.type_node).strip()
                 peeled = re.fullmatch(
-                    r"(&\s*(?:'\w+\s+)?mut\s+|&\s*(?:'\w+\s+)?)\[(.+)\]",
-                    spelled.strip(),
+                    r"&\s*(?:'\w+\s+)?(?:mut\s+)?\[\s*(.+?)\s*\]",
+                    ret,
                 )
-                if peeled is None:
-                    return _UNKNOWN, None
-                position = (
-                    spelled_pos if spelled_pos is not None
-                    else call.start_byte
-                )
-                elem_id, rest = self._element_of(
-                    None,
-                    peeled.group(2).strip(),
-                    position,
-                    self._literal_element_args(call),
-                )
-                if elem_id is None:
-                    return _UNKNOWN, rest
-                name = next(
-                    (b.name for b in self.bindings if b.id == elem_id), ""
-                )
-                return (
-                    TypeFact("named", name, 0, None, elem_id),
-                    peeled.group(2).strip(),
-                )
+                if peeled is not None:
+                    elem_id, rest = self._element_of(
+                        None,
+                        peeled.group(1),
+                        cover.binding.span.start,
+                        self._literal_element_args(call),
+                    )
+                    if elem_id is None:
+                        return _UNKNOWN, rest
+                    name = next(
+                        (b.name for b in self.bindings if b.id == elem_id),
+                        "",
+                    )
+                    return (
+                        TypeFact("named", name, 0, None, elem_id),
+                        peeled.group(1),
+                    )
+            return _UNKNOWN, None
         if method in _SET_ALGEBRA_METHODS | _MAP_RANGE_METHODS:
             # `a.union(&b)`/`intersection`/`difference`/
             # `symmetric_difference` and `s.range(..)`/`range_mut`
