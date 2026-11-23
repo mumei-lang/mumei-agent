@@ -3510,10 +3510,18 @@ class _RustBindings:
                             if first_arg is None
                             else self._expr_type_spelling(first_arg)
                         )
+                    # The `Ok` spelling was taken from the
+                    # receiver's annotation — qualify it there so a
+                    # body-local same-named type does not shadow it.
+                    ok_arg = self._qualified_spelling(
+                        ok_arg.strip(),
+                        self._receiver_annotation_position(receiver)
+                        or node.start_byte,
+                    )
                     return None, (
-                        ok_arg.strip()
+                        ok_arg
                         if err is None
-                        else f"{ok_arg.strip()}, {err}"
+                        else f"{ok_arg}, {err}"
                     )
                 if (
                     callee is not None

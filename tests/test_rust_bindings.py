@@ -7335,3 +7335,29 @@ fn f(m: HashMap<K, P>, b: BTreeMap<K, P>, v: Vec<P>) {
         assert bound.get(call) == pm.id, call
     # `Vec` has no `entry` API.
     assert not bound.get("e6.pm()")
+
+def test_ok_or_ok_payload_resolves_at_the_receiver_annotation():
+    # A body-local same-named type must not shadow the `Ok` payload —
+    # `o: Option<P>` spells `P` at the parameter's annotation, not
+    # inside the body where a second `P` is declared.
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct E;
+fn f(o: Option<P>) {
+    struct P;
+    impl P { fn pm2(&self) {} }
+    match o.ok_or(E) { Ok(x) => x.pm(), _ => {} }
+    match o.ok_or(E) { Ok(y) => y.pm2(), _ => {} }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    assert bound.get("x.pm()") == pm.id
+    assert not bound.get("y.pm2()")
+
