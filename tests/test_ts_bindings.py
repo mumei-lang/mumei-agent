@@ -3629,3 +3629,27 @@ function f() {
         "n.head.inner.pm()",
         "t.head[0].pm()",
     }
+
+def test_in_operator_narrows_to_the_constituent_declaring_the_member():
+    # `'pm' in u` narrows `P | Q` to the single constituent that
+    # declares `pm`; a check every part passes, or none, keeps the
+    # union opaque.
+    source = """
+interface P { pm(): void; }
+interface Q { qm(): void; }
+function f(u: P | Q) {
+    if ("pm" in u) {
+        u.pm();
+    }
+    u.pm();
+    if ("qm" in u) {
+        u.pm();
+    }
+}
+"""
+    report = build_ts_bindings(source)
+    member_pm = _member_bindings(report, "pm", "associated_function")[0]
+    bound = {
+        source[c.span.start : c.span.end] for c in _calls(report) if c.target == member_pm.id
+    }
+    assert bound == {"u.pm()"}

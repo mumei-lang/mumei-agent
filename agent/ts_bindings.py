@@ -294,8 +294,8 @@ class _TypeScriptBindings:
             if node.type == "decorator":
                 self.add_gap("decorator", node)
             self._predeclare_node(node)
-        self._collect_narrowings()
         self._link_members()
+        self._collect_narrowings()
         for record in list(self.records):
             if record.function_node is not None:
                 self._function_info(
@@ -4064,6 +4064,20 @@ class _TypeScriptBindings:
                     }:
                         return ((left, right),)
                     return ()
+                if "in" in operators:
+                    left, right = kids
+                    prop = (
+                        self.text(left).strip().strip("\"'")
+                        if left.type == "string"
+                        else None
+                    )
+                    if prop and right.type == "identifier":
+                        narrowed = self._member_union_constituent(
+                            right, prop
+                        )
+                        if narrowed is not None:
+                            return ((right, narrowed),)
+                    return ()
                 if "&&" in operators:
                     return self._condition_narrowings(
                         kids[0]
@@ -4175,6 +4189,42 @@ class _TypeScriptBindings:
             ):
                 return child
         return None
+
+    def _member_union_constituent(
+        self, ident: Any, prop: str
+    ) -> Any | None:
+        """The union constituent declaring member `prop` —
+        `'pm' in u` narrows `P | Q` to `P`. When every or no part
+        declares it the check does not discriminate, so the use
+        keeps the declared union."""
+        record = self._lookup(
+            self.text(ident), ident.start_byte, "value"
+        )
+        if record is None:
+            return None
+        declared = self._unwrap_type(record.type_node)
+        if declared is None or declared.type != "union_type":
+            return None
+        matches = []
+        for child in self.children(declared):
+            fact = self._type_fact(child)
+            if fact.kind != "named":
+                continue
+            type_record = self._type_record_by_id(fact.type_id)
+            if type_record is None:
+                continue
+            if (
+                self._member_lookup(
+                    type_record,
+                    prop,
+                    ident.start_byte,
+                    static=False,
+                    via_this=False,
+                )
+                is not None
+            ):
+                matches.append(child)
+        return matches[0] if len(matches) == 1 else None
 
     def _array_constituent_node(self, ident: Any) -> Any | None:
         """The array part of `ident`'s declared union —
