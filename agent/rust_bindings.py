@@ -2524,6 +2524,7 @@ class _RustBindings:
         kinds: tuple[str, ...] = (),
         impl_args: str | None = None,
         position: int | None = None,
+        borrowed: "bool | None" = None,
     ) -> _Record | None:
         """Member `name` of the type `type_id`.
 
@@ -2632,31 +2633,32 @@ class _RustBindings:
         if not candidates:
             return None
         first = candidates[0]
+        # On a shared-borrow receiver `&self` matches one autoderef
+        # step before `self`; owned and `&mut` receivers keep the
+        # by-value order. Same-kind collisions stay ambiguous.
+        preferred = "borrow" if borrowed else "value"
         if tier(first) == 1:
             top = [record for record in candidates if tier(record) == 1]
             if len(top) > 1:
-                # A by-value `self` receiver outranks `&self`/`&mut
-                # self` — `s.m()` picks it outright; only same-kind
-                # collisions stay ambiguous.
-                by_value = [
+                picks = [
                     record
                     for record in top
-                    if self._member_self_kind(record) == "value"
+                    if self._member_self_kind(record) == preferred
                 ]
-                if len(by_value) != 1:
+                if len(picks) != 1:
                     return None
-                first = by_value[0]
+                first = picks[0]
         elif tier(first) == 2:
             top = [record for record in candidates if tier(record) == 2]
             if len(top) > 1:
-                by_value = [
+                picks = [
                     record
                     for record in top
-                    if self._member_self_kind(record) == "value"
+                    if self._member_self_kind(record) == preferred
                 ]
-                if len(by_value) != 1:
+                if len(picks) != 1:
                     return None
-                first = by_value[0]
+                first = picks[0]
         return first
 
     def _concrete_type(
@@ -3374,7 +3376,12 @@ class _RustBindings:
             # A `&mut` inherent (`as_mut_slices`) only wins when
             # the receiver can mutably borrow.
             return None
-        preferred_self = "value"
+        # A shared-borrow receiver (`s: &S`, `r: &str`) matches
+        # `&self` one autoderef step before `self`; owned and
+        # `&mut` receivers keep the by-value order.
+        preferred_self = (
+            "borrow" if ref_kind == "shared" else "value"
+        )
         trait_default = None
         trait_default_kind = None
         covered = None
@@ -3611,7 +3618,12 @@ class _RustBindings:
             return None, None, None
         type_id, impl_args = self._receiver_type(value)
         record = self._member_record(
-            type_id, name, kinds, impl_args, node.start_byte
+            type_id,
+            name,
+            kinds,
+            impl_args,
+            node.start_byte,
+            borrowed=self._receiver_ref_kind(value) == "shared",
         )
         if record is None and impl_args is not None:
             head, _hp, _hs = self._scrutinee_shape(value, type_id)

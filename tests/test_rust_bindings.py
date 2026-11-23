@@ -5654,6 +5654,27 @@ fn f(v: Vec<(P, P)>) {
     # body-local `struct P` must not steal it.
     assert _call(report, source, "v[0].0.pm()").target == pm[0].id
 
+def test_borrowed_receiver_prefers_the_borrowed_impl():
+    source = """
+struct S;
+trait V { fn t(self); }
+trait B { fn t(&self); }
+impl V for S { fn t(self) {} }
+impl B for S { fn t(&self) {} }
+fn f(s: &S) { s.t(); }
+fn g(s: S) { s.t(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    impls = _bindings(report, "t", "associated_function")
+    calls = {
+        source[: c.span.start].count("\n"): c.target
+        for c in report.calls
+    }
+    # `s: &S` matches `&self` one autoderef step before `self`;
+    # the owned `s: S` keeps the by-value impl.
+    assert calls[6] == impls[3].id
+    assert calls[7] == impls[2].id
+
 def test_mut_inherent_wins_only_for_mutably_borrowed_receivers():
     source = """
 trait Ext { fn as_mut_slices(&self) -> i32; }
