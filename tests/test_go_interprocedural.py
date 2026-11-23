@@ -57573,6 +57573,18 @@ def test_interface_slot_closure_values_fail_closed(go_types_helper):
             "\tv := y; fs := FS{func() int64 { return v }}; o := O{I: fs}\n"
             "\tv = x; return o.I.Run()\n"
             "}\n"
+            "func F_sfelem(x, y int64) int64 {\n"
+            "\tv := y; ss := []S{{F: func() int64 { return v }}}\n"
+            "\to := O{I: ss[0]}; v = x; return o.I.Run()\n"
+            "}\n"
+            "func F_sfelemi(x, y int64, i int) int64 {\n"
+            "\tv := y; ss := []S{{F: func() int64 { return v }}}\n"
+            "\to := O{I: ss[i]}; v = x; return o.I.Run()\n"
+            "}\n"
+            "func F_sfelemasg(x, y int64) int64 {\n"
+            "\tv := y; ss := []S{{F: func() int64 { return v }}}\n"
+            "\tvar o O; o.I = ss[0]; v = x; return o.I.Run()\n"
+            "}\n"
             "func F_sfmv(x, y int64) int64 {\n"
             "\tv := y; o := O{I: S{F: func() int64 { return v }}}\n"
             "\tf := o.I.Run; v = x; return f()\n"
@@ -57662,6 +57674,9 @@ def test_interface_slot_closure_values_fail_closed(go_types_helper):
         "F_sfselector",
         "F_sfmethod",
         "F_sfcollection",
+        "F_sfelem",
+        "F_sfelemi",
+        "F_sfelemasg",
         "F_sfmv",
         "F_sfret",
         "F_sfassign",

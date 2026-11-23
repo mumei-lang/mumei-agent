@@ -14371,6 +14371,15 @@ class _Builder:
                 and bool(ref.binding_id)
                 and self._has_closure_records(ref.binding_id)
             )
+        if value.type == "index_expression":
+            root = value
+            while root is not None and root.type == "index_expression":
+                root = self._strip_parens(
+                    root.child_by_field_name("operand")
+                )
+            return self._value_carries_closure_records(
+                root, params, locals_
+            )
         if value.type == "composite_literal":
             value = value.child_by_field_name("body")
             if value is None:
