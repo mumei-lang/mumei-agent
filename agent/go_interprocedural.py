@@ -2169,10 +2169,12 @@ class _Builder:
             return ()
         return tuple(dict.fromkeys(source_ids))
 
-    def _elided_literal_value_kind(self, literal: Any) -> str | None:
+    def _elided_literal_value_kind(
+        self, literal: Any
+    ) -> tuple[str | None, Any | None, int]:
         value = self._strip_parens(literal)
         if value is None or value.type != "literal_value":
-            return None
+            return None, None, self.current_file
         current = value
         nested_levels = 0
         while (
@@ -2190,23 +2192,21 @@ class _Builder:
             current = current.parent
         outer = current.parent
         if outer is None or outer.type != "composite_literal":
-            return None
+            return None, None, self.current_file
         type_node = outer.child_by_field_name("type")
         type_file = self.current_file
         if type_node is None:
-            return None
+            return None, None, type_file
         for _ in range(nested_levels):
-            kind, type_node, type_file = self._local_literal_type_element(
+            kind, element_type, type_file = self._local_literal_type_element(
                 type_node, type_file
             )
             if kind not in {"slice", "array", "map"}:
-                return kind
-            if type_node is None:
-                return None
-        kind, _element, _file = self._local_literal_type_element(
-            type_node, type_file
-        )
-        return kind
+                return kind, element_type, type_file
+            if element_type is None:
+                return None, None, type_file
+            type_node = element_type
+        return self._local_literal_type_element(type_node, type_file)
 
     def _local_literal_type_element(
         self, type_node: Any, type_file: int
@@ -2240,7 +2240,21 @@ class _Builder:
             if current.type == "map_type":
                 return "map", current.child_by_field_name("value"), file
             if current.type == "pointer_type":
-                return "pointer", None, file
+                pointed_type = current.child_by_field_name("type")
+                if pointed_type is None:
+                    pointed_type = next(
+                        (
+                            child
+                            for child in current.named_children
+                            if child.type != "comment"
+                        ),
+                        None,
+                    )
+                return (
+                    "pointer",
+                    pointed_type,
+                    file,
+                )
             if current.type == "struct_type":
                 return "struct", None, file
             if current.type != "type_identifier":
@@ -2262,7 +2276,7 @@ class _Builder:
             ):
                 return None, None, file
             kind = binding.type.kind
-            if kind not in {"slice", "array", "map"}:
+            if kind not in {"slice", "array", "map", "pointer"}:
                 return kind, None, file
             if binding.id in seen or getattr(
                 binding.type, "has_type_args", False
@@ -5613,9 +5627,13 @@ class _Builder:
                 continue
             if value.type == "literal_value":
                 inferred = self._local_struct_literal_fact(value)
-                if inferred is not None or self._elided_literal_value_kind(
-                    value
-                ) in {"slice", "array"}:
+                elided_kind, element_type, element_file = (
+                    self._elided_literal_value_kind(value)
+                )
+                if inferred is not None or elided_kind in {
+                    "slice",
+                    "array",
+                }:
                     self._adopt_struct_composite_closure_records(
                         value, params, locals_, records_before
                     )
@@ -5629,9 +5647,25 @@ class _Builder:
                     calls,
                     pointee,
                 ):
-                    raise _Unsupported(
-                        "unsupported_expression", _span(value)
+                    if elided_kind not in {"map", "pointer"}:
+                        raise _Unsupported(
+                            "unsupported_expression", _span(value)
+                        )
+                    element_kind, element_target, target_file = (
+                        self._local_literal_type_element(
+                            element_type, element_file
+                        )
                     )
+                    if element_kind == "pointer":
+                        element_kind, _, _ = (
+                            self._local_literal_type_element(
+                                element_target, target_file
+                            )
+                        )
+                    if element_kind == "struct":
+                        raise _Unsupported(
+                            "unsupported_expression", _span(value)
+                        )
                 continue
             ref = (
                 self.references.get(self.node_key(value))

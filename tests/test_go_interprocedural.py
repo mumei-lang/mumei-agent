@@ -56784,6 +56784,16 @@ def test_cross_type_struct_function_field_value_copies(go_types_helper):
             "\tos := []map[int]O{{0: {F: s.F}}}\n"
             "\tv = x; return os[0][0].F()\n"
             "}\n"
+            "func MapFuncLiteralSource(x, y int64) int64 {\n"
+            "\tv := y\n"
+            "\tms := []map[int]func() int64{{0: func() int64 { return v }}}\n"
+            "\tv = x; return ms[0][0]()\n"
+            "}\n"
+            "func MapNamedFuncSource(x, y int64) int64 {\n"
+            "\tv := y; g := func() int64 { return v }\n"
+            "\tms := []map[int]func() int64{{0: g}}\n"
+            "\tv = x; return ms[0][0]()\n"
+            "}\n"
             "func ChannelSend(x, y int64) int64 {\n"
             "\tv := y; s := S{F: func() int64 { return v }}\n"
             "\tch := make(chan func() int64, 1); ch <- s.F\n"
@@ -56804,6 +56814,8 @@ def test_cross_type_struct_function_field_value_copies(go_types_helper):
         "NestedSliceField": frozenset({0, 1}),
         "NestedSliceWrite": frozenset({0}),
         "NestedArrayField": frozenset({0, 1}),
+        "MapFuncLiteralSource": frozenset({0, 1}),
+        "MapNamedFuncSource": frozenset({0, 1}),
         "NestedField": frozenset({0, 1}),
         "BoundFieldValue": frozenset({0, 1}),
         "IndexedField": frozenset({0, 1, 2}),
