@@ -613,6 +613,53 @@ def test_overlapping_backward_regions_extend_havoc_to_nested_target_end() -> Non
     assert "d" not in facts.nonzero
 
 
+def test_backward_goto_havocs_select_receive_target() -> None:
+    body = (
+        "d := 1\n"
+        "again:\n"
+        "select {\n"
+        "case d = <-ch:\n"
+        "}\n"
+        "if c {\n"
+        "    goto again\n"
+        "}\n"
+        "return n / d\n"
+    )
+    facts = _facts(body, "n / d", param_names={"n", "d", "c", "ch"})
+    assert "d" not in facts.nonzero
+
+
+def test_for_havocs_select_receive_target() -> None:
+    body = (
+        "d := 1\n"
+        "for {\n"
+        "    select {\n"
+        "    case d = <-ch:\n"
+        "    }\n"
+        "    break\n"
+        "}\n"
+        "return n / d\n"
+    )
+    facts = _facts(body, "n / d", param_names={"n", "d", "ch"})
+    assert "d" not in facts.nonzero
+
+
+def test_expression_switch_cases_are_not_assignment_targets_in_havoc() -> None:
+    body = (
+        "d := 1\n"
+        "again:\n"
+        "switch x {\n"
+        "case 1, 2:\n"
+        "}\n"
+        "if c {\n"
+        "    goto again\n"
+        "}\n"
+        "return n / d\n"
+    )
+    facts = _facts(body, "n / d", param_names={"n", "d", "x", "c"})
+    assert "d" in facts.nonzero
+
+
 def test_forward_and_backward_gotos_merge_at_the_label() -> None:
     body = (
         "if d == 0 {\n"

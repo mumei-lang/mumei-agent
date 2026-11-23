@@ -1437,7 +1437,15 @@ class _Walker:
     def _assigned_names(statements: tuple[tree_sitter_extract.Statement, ...]) -> set[str]:
         names: set[str] = set()
         for statement in statements:
-            if statement.kind in {"define", "assign", "inc", "dec", "var", "const"}:
+            if statement.kind in {
+                "define",
+                "assign",
+                "inc",
+                "dec",
+                "var",
+                "const",
+                "case",
+            }:
                 for target in statement.targets:
                     names.add(_norm(target))
                     names.add(_norm(target).split("[")[0].split(".")[0].lstrip("*"))
@@ -1460,7 +1468,14 @@ class _Walker:
 
         def collect(group: tuple[tree_sitter_extract.Statement, ...]) -> None:
             for statement in group:
-                if statement.kind in {"define", "assign", "var", "range", "closure"}:
+                if statement.kind in {
+                    "define",
+                    "assign",
+                    "var",
+                    "range",
+                    "closure",
+                    "case",
+                }:
                     for target in statement.targets:
                         normalized = _norm(target).lstrip("*")
                         if re.fullmatch(_IDENT, normalized):
