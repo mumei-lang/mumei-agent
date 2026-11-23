@@ -5260,6 +5260,56 @@ func nested(s []int) int {
     ]
 
 
+def test_go_constant_indices_respect_same_expression_length_guards() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package p
+
+func guardedZero(s []int) bool {
+    return len(s) > 0 && s[0] == 1
+}
+
+func guardedOne(s []int) bool {
+    return len(s) > 1 && s[1] == 1
+}
+
+func insufficientGuard(s []int) bool {
+    return len(s) > 0 && s[1] == 1
+}
+
+func disjunctionDoesNotGuard(s []int) bool {
+    return len(s) > 0 || s[0] == 1
+}
+
+func guardAfterAccessDoesNotGuard(s []int) bool {
+    return s[0] == 1 && len(s) > 0
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+
+    assert [
+        (issue.function_name, issue.message)
+        for issue in issues
+        if "can index" in issue.message
+    ] == [
+        (
+            "insufficientGuard",
+            "Go function `insufficientGuard` can index `s[1]` without a bounds "
+            "contract (Z3 counterexample: len_s=1)",
+        ),
+        (
+            "disjunctionDoesNotGuard",
+            "Go function `disjunctionDoesNotGuard` can index `s[0]` without a "
+            "bounds contract (Z3 counterexample: len_s=0)",
+        ),
+        (
+            "guardAfterAccessDoesNotGuard",
+            "Go function `guardAfterAccessDoesNotGuard` can index `s[0]` without "
+            "a bounds contract (Z3 counterexample: len_s=0)",
+        ),
+    ]
+
+
 def test_go_safety_suppresses_actor_act_builder_param_nil() -> None:
     """``Actor.Act`` implementations receive non-nil ``*Builder`` and ``*Action``."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
