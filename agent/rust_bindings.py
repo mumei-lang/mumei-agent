@@ -4572,10 +4572,21 @@ class _RustBindings:
                     or (
                         self.text(field).strip()
                         in _OPTION_HEAD_METHODS
-                        and self._map_spelled_args(
-                            option_head_value
+                        and (
+                            self._map_spelled_args(
+                                option_head_value
+                            )
+                            is not None
+                            or (
+                                option_head_value is not None
+                                and option_head_value.type
+                                == "call_expression"
+                                and self._produced_head(
+                                    option_head_value
+                                )
+                                is not None
+                            )
                         )
-                        is not None
                     )
                 ):
                     option_head = _OPTION_HEAD_METHODS.get(
@@ -4753,7 +4764,9 @@ class _RustBindings:
                         elements = self._type_arg_list(
                             receiver[1] or ""
                         )
-                        if not elements and (
+                        if not any(
+                            element.strip() for element in elements
+                        ) and (
                             option_head_value is not None
                         ):
                             # `s: S` via `type S = HashSet<P>` —
@@ -4766,6 +4779,30 @@ class _RustBindings:
                             if expanded_args is not None:
                                 elements = self._type_arg_list(
                                     expanded_args
+                                )
+                        if not any(
+                            element.strip() for element in elements
+                        ) and (
+                            option_head_value is not None
+                            and option_head_value.type
+                            == "call_expression"
+                        ):
+                            # `mr().ok()` — a produced receiver has
+                            # no spelled args; the callee's declared
+                            # return (`Result<Vec<P>, String>`)
+                            # supplies them, so `ok` keeps `Vec<P>`.
+                            produced_args = self._expr_type_spelling(
+                                option_head_value
+                            )
+                            if produced_args is not None:
+                                # `_expr_type_spelling` already
+                                # returns args-form (`Vec<P>` for
+                                # `mr().ok()`), not a whole
+                                # `Head<args>` — a further peel
+                                # would drop the element's own
+                                # container (`Vec<P>` -> `P`).
+                                elements = self._type_arg_list(
+                                    produced_args
                                 )
                         if (
                             not elements
@@ -5065,8 +5102,12 @@ class _RustBindings:
                         )
                         if (
                             other_args is None
-                            or self._container_head_name(other)
-                            != "Option"
+                            or (
+                                self._container_head_name(other)
+                                != "Option"
+                                and self._produced_head(other)
+                                != "Option"
+                            )
                         ):
                             element = None
                         else:
@@ -5203,10 +5244,10 @@ class _RustBindings:
                     in {"ok_or", "ok_or_else"}
                 ):
                     receiver = callee.child_by_field_name("value")
-                    if (
-                        receiver is None
-                        or self._container_head_name(receiver)
+                    if receiver is None or (
+                        self._container_head_name(receiver)
                         != "Option"
+                        and self._produced_head(receiver) != "Option"
                     ):
                         return _UNKNOWN, None
                     _, recv_args = self._receiver_type(receiver)
@@ -7150,6 +7191,11 @@ class _RustBindings:
             return self._receiver_annotation_position(
                 record.value_node
             )
+        if record.spell_position is not None:
+            # A pattern-bound name (`let Some(v) = m::make().ok()`)
+            # keeps the position its args were spelled at — the
+            # scope containing it resolves a same-named caller type.
+            return record.spell_position
         return None
 
     def _verbatim_annotation_args(self, value: Any | None) -> bool:
@@ -11975,7 +12021,10 @@ class _RustBindings:
         while node is not None and node.type == "call_expression":
             callee = node.child_by_field_name("function")
             if callee is None or callee.type != "field_expression":
-                return None
+                # `mr().ok()` bottoms out at a bare callee — keep an
+                # `Option`/`Result` head an upstream method already
+                # spelled rather than dropping the chain whole.
+                break
             field = callee.child_by_field_name("field")
             if field is None:
                 return None
@@ -11986,6 +12035,8 @@ class _RustBindings:
                 head = flow[method]
             node = callee.child_by_field_name("value")
         base = self._container_head_name(node)
+        if base is None:
+            base = self._produced_head(node)
         if base is not None and head is None:
             head = base
         return head
@@ -12484,6 +12535,18 @@ class _RustBindings:
                                     )
                                 )
                                 in option_head[1]
+                                or self._produced_head(
+                                    callee.child_by_field_name(
+                                        "value"
+                                    )
+                                )
+                                in option_head[1]
+                                or self._combinator_head(
+                                    callee.child_by_field_name(
+                                        "value"
+                                    )
+                                )
+                                in option_head[1]
                             )
                         )
                         or (
@@ -12520,6 +12583,29 @@ class _RustBindings:
                         self._receiver_annotation_position(_args_value)
                         or node.start_byte
                     )
+                    if self.text(field).strip() == "and":
+                        # `o.and(r)` yields `r`'s `Option` — the
+                        # spelled payload args were written in `r`'s
+                        # annotation, not in `o`'s.
+                        _arguments = node.child_by_field_name(
+                            "arguments"
+                        )
+                        _and_arg = (
+                            None
+                            if _arguments is None
+                            else next(
+                                iter(_arguments.named_children),
+                                None,
+                            )
+                        )
+                        if _and_arg is not None:
+                            _args_value = _and_arg
+                            _args_position = (
+                                self._receiver_annotation_position(
+                                    _args_value
+                                )
+                                or node.start_byte
+                            )
                     _args_scope = None
                     if (
                         _args_value is not None
@@ -12612,10 +12698,16 @@ class _RustBindings:
                     field is not None
                     and self.text(field).strip()
                     in {"ok_or", "ok_or_else"}
-                    and self._container_head_name(
-                        callee.child_by_field_name("value")
+                    and (
+                        self._container_head_name(
+                            callee.child_by_field_name("value")
+                        )
+                        == "Option"
+                        or self._produced_head(
+                            callee.child_by_field_name("value")
+                        )
+                        == "Option"
                     )
-                    == "Option"
                 ):
                     # `o.ok_or(e)`/`o.ok_or_else(f)` yield
                     # `Result<P, E>` — `Ok`/`Err` patterns read the
@@ -12953,7 +13045,9 @@ class _RustBindings:
             # `Option<P>`; decomposing it to args `P` would drop the
             # `Option` head and misbind `Some(q)` later.
             fargs = args[entry[1]]
-        return [(type_id, fargs)]
+        return [
+            (type_id, fargs, None, None, scrut_position)
+        ]
 
     def _pattern_type_map(
         self,
@@ -13131,7 +13225,11 @@ class _RustBindings:
                 if scrut_id is not None
                 else _UNKNOWN
             )
-            return {pattern.start_byte: (fact, scrut_args)}
+            return {
+                pattern.start_byte: (
+                    fact, scrut_args, None, None, scrut_position
+                )
+            }
         if kind in {"ref_pattern", "reference_pattern", "mut_pattern"}:
             inner = next(
                 (
@@ -13200,11 +13298,21 @@ class _RustBindings:
                         if field_type is not None
                         else (None, None)
                     )
+                    # `W { v: xs }` — `xs`'s args were spelled in
+                    # `v`'s own annotation inside the declaring
+                    # module; the outer scrutinee's position would
+                    # resolve them in the wrong module.
+                    field_spell = scrut_position
+                    if (
+                        field_type is not None
+                        and field_type[2] is not None
+                    ):
+                        field_spell = field_type[2].start_byte
                     mapping.update(
                         self._pattern_type_map(
                             bound, tid, fargs,
                             self._type_head_name(tid, fargs),
-                            scrut_position,
+                            field_spell,
                         )
                     )
                     if (
@@ -13215,11 +13323,13 @@ class _RustBindings:
                         # declared field annotation heads later
                         # prelude patterns (`if let Some(q) = opt`).
                         got = mapping.get(bound.start_byte)
-                        if got is not None and len(got) == 2:
+                        if got is not None and len(got) >= 2:
                             mapping[bound.start_byte] = (
-                                *got,
+                                got[0],
+                                got[1],
                                 field_type[2],
                                 field_type[3],
+                                *got[4:],
                             )
                     continue
                 if fname_node is not None and field_type is not None:
@@ -13305,7 +13415,7 @@ class _RustBindings:
                     position = index
                 if position < 0 or position >= len(payload):
                     continue
-                tid, fargs = payload[position]
+                tid, fargs = payload[position][:2]
                 mapping.update(
                     self._pattern_type_map(
                         child, tid, fargs,
@@ -13341,6 +13451,11 @@ class _RustBindings:
                 record.pattern_decl_node = decl_node
             if decl_scope is not None:
                 record.pattern_decl_scope = decl_scope
+            if len(entry) > 4 and entry[4] is not None:
+                # The payload's spelled args were written where the
+                # scrutinee's type was spelled — resolving a bare
+                # `P` at the pattern site could pick a shadow.
+                record.spell_position = entry[4]
             self._add_to_scope(scope, record)
 
     def _bind_pattern(
