@@ -21162,9 +21162,23 @@ def test_transitive_captured_closures_preserve_current_deps_and_writes(
         "\tdefer func() { r = s.F() }(); v = x; return 0\n"
         "}\n"
         "func GoCall(x, y int64) int64 {\n"
-        "\tv := y; s := S{F: func() int64 { return v }}; v = x\n"
-        "\tc := make(chan int64, 1)\n"
-        "\tgo func() { c <- s.F() }(); return <-c\n"
+        "\tv := y; s := S{F: func() int64 { return v }}\n"
+        "\tc := make(chan int64, 1); go func() { c <- s.F() }()\n"
+        "\tv = x; return <-c\n"
+        "}\n"
+        "func GoNamedLiteral(x, y int64) int64 {\n"
+        "\tv := y; h := func() int64 { return v }\n"
+        "\tc := make(chan int64, 1); go func() { c <- h() }()\n"
+        "\tv = x; return <-c\n"
+        "}\n"
+        "func GoNamedCall(x, y int64) int64 {\n"
+        "\tv := y; h := func() int64 { return v }\n"
+        "\tc := make(chan int64, 1); h2 := func() { c <- h() }\n"
+        "\tgo h2(); v = x; return <-c\n"
+        "}\n"
+        "func GoTransitiveWrite(x, y int64) int64 {\n"
+        "\tw := int64(0); h := func() { w = x }\n"
+        "\th2 := func() { h() }; go h2(); w = y; return w\n"
         "}\n"
         "func DeferredWrite(x int64) (r int64) {\n"
         "\tvar s W; s.F = func() { r = x }\n"
@@ -21198,7 +21212,7 @@ def test_transitive_captured_closures_preserve_current_deps_and_writes(
     )
     data = unit(go_types_helper, declarations)
     for name, expected in (
-        ("NamedRead", frozenset({0, 1})),
+        ("NamedRead", frozenset({0})),
         ("NamedWrite", frozenset({0})),
         ("StructField", frozenset({0, 1})),
         ("FieldValue", frozenset({0, 1})),
@@ -21211,6 +21225,8 @@ def test_transitive_captured_closures_preserve_current_deps_and_writes(
         ("Callback", frozenset({0, 1})),
         ("DeferredRead", frozenset({0, 1})),
         ("GoCall", frozenset({0, 1})),
+        ("GoNamedLiteral", frozenset({0, 1})),
+        ("GoNamedCall", frozenset({0, 1})),
         ("DeferredWrite", frozenset({0})),
         ("Factory", frozenset({0, 1})),
         ("Rebind", frozenset({1})),
@@ -21224,6 +21240,13 @@ def test_transitive_captured_closures_preserve_current_deps_and_writes(
     assert cycle.return_dependencies == frozenset()
     map_result = named(*data, name="MapClosed")
     assert not map_result.available
+
+    go_write_race = named(*data, name="GoTransitiveWrite")
+    assert not go_write_race.available
+    assert any(
+        gap.reason == "unsupported_statement"
+        for gap in go_write_race.gaps
+    )
 
 
 def test_chained_closure_values_resolve_shared_captures_once(
@@ -21248,7 +21271,7 @@ def test_chained_closure_values_resolve_shared_captures_once(
         *unit(go_types_helper, "\n".join(declarations))
     )
     assert result.available, result.gaps
-    assert result.return_dependencies == frozenset({0, 1})
+    assert result.return_dependencies == frozenset({0})
 
 
 @pytest.mark.parametrize(

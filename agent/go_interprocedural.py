@@ -14737,7 +14737,7 @@ class _Builder:
                     self._struct_field_closure_record_ids(
                         nested, member, seen
                     )
-                    )
+                )
         return tuple(dict.fromkeys(record_ids))
 
     def _transitive_closure_records(
@@ -14749,6 +14749,7 @@ class _Builder:
         bool,
         bool,
     ]:
+        """Collect closure records reachable from captured bindings."""
         captured_ids: set[str] = set()
         writes: set[str] = set()
         star_write = False
@@ -14804,8 +14805,6 @@ class _Builder:
                     fact, binding
                 ):
                     raise _Unsupported("unsupported_expression")
-            elif fact.kind == "interface":
-                raise _Unsupported("unsupported_expression")
         return (
             frozenset(captured_ids),
             frozenset(writes),
@@ -14840,7 +14839,11 @@ class _Builder:
                 else cbid
             )
             if root in locals_:
-                resolved |= locals_[root]
+                if self._is_tracked_literal_value(root, params):
+                    if root in self.closure_factory_results:
+                        resolved |= locals_[root]
+                else:
+                    resolved |= locals_[root]
                 binding = self.bindings.get(root)
                 if (
                     binding is not None
@@ -15363,11 +15366,15 @@ class _Builder:
         fn: Function,
         params: dict[str, int],
         locals_: dict[str, frozenset[int]],
-    ) -> bool:
+    ) -> tuple[bool, frozenset[int], frozenset[str], bool]:
         call = self.calls.get(self.node_key(call_node))
-        captured, writes, roots, star = self._deferred_exit_shape(
-            call_node, call, params, locals_
+        direct_captured, direct_writes, roots, star = (
+            self._deferred_exit_shape(
+                call_node, call, params, locals_, transitive=False
+            )
         )
+        captured = direct_captured
+        writes = direct_writes
         arguments = call_node.child_by_field_name("arguments")
         if arguments is not None:
             for argument in _children(arguments):
@@ -15391,10 +15398,25 @@ class _Builder:
             ) = self._func_literal_capture(
                 function_node, params, locals_
             )
-            captured = frozenset(literal_captured)
-            writes = frozenset(literal_writes)
+            direct_captured = frozenset(literal_captured)
+            captured = direct_captured
+            direct_writes = frozenset(literal_writes)
+            writes = direct_writes
             roots = frozenset()
             star = captures_pointer or star_write or has_call
+        (
+            captured,
+            transitive_writes,
+            transitive_star_write,
+            transitive_inner_calls,
+            transitive_pointee,
+        ) = self._transitive_closure_records(direct_captured)
+        writes |= transitive_writes
+        star |= (
+            transitive_star_write
+            or transitive_inner_calls
+            or transitive_pointee
+        )
         local_param_ids = set(locals_) | set(params)
 
         def fact_may_contain_channel(
@@ -15601,7 +15623,7 @@ class _Builder:
                     if root_id is not None:
                         argument_roots.add(root_id)
         touched = (
-            set(captured | writes | roots) & local_param_ids
+            set(direct_captured | writes | roots) & local_param_ids
         ) | received_roots
         opaque_touched = touched | (argument_roots & local_param_ids)
         reference_involved = star or bool(roots)
@@ -15622,7 +15644,7 @@ class _Builder:
             else None
         )
         if block is None:
-            return True
+            return True, frozenset(), frozenset(writes), star
         nodes = []
         pending = [block]
         while pending:
@@ -15708,6 +15730,47 @@ class _Builder:
             )
             return binding.id if binding is not None else None
 
+        def future_scalar_deps(expression: Any) -> frozenset[int] | None:
+            expression = self._strip_parens(expression)
+            if expression is None:
+                return None
+            if expression.type == "identifier":
+                ref = self.references.get(self.node_key(expression))
+                if ref is not None and ref.kind == "universe":
+                    return frozenset()
+                binding_id = identifier_binding_id(expression)
+                if binding_id is None:
+                    return None
+                if binding_id in params:
+                    return frozenset({params[binding_id]})
+                if binding_id in locals_:
+                    if binding_id in written:
+                        return None
+                    return locals_[binding_id]
+                return self._dead_local_deps.get(binding_id)
+            if expression.type in _INDEX_LITERALS:
+                return frozenset()
+            if expression.type not in {
+                "binary_expression",
+                "unary_expression",
+                "parenthesized_expression",
+            }:
+                return None
+            children = [
+                child
+                for child in expression.named_children
+                if child.type != "comment"
+            ]
+            if not children:
+                return None
+            deps: frozenset[int] = frozenset()
+            for child in children:
+                child_deps = future_scalar_deps(child)
+                if child_deps is None:
+                    return None
+                deps |= child_deps
+            return deps
+
         def lhs_items(current: Any) -> list[Any]:
             if current.type in {
                 "assignment_statement",
@@ -15761,8 +15824,30 @@ class _Builder:
             return True
 
         written: set[str] = set()
+        later_store_values: dict[str, list[Any]] = {}
+        later_unknown_writes: set[str] = set()
         nonplain = False
         for current in region.values():
+            if current.type in {
+                "assignment_statement",
+                "short_var_declaration",
+            }:
+                lefts = expression_items(
+                    current.child_by_field_name("left")
+                )
+                rights = expression_items(
+                    current.child_by_field_name("right")
+                )
+                if len(lefts) == len(rights):
+                    for lhs, rhs in zip(lefts, rights):
+                        root = root_identifier(lhs)
+                        if root is None:
+                            continue
+                        binding_id = identifier_binding_id(root)
+                        if binding_id is not None:
+                            later_store_values.setdefault(
+                                binding_id, []
+                            ).append(rhs)
             for lhs in lhs_items(current):
                 root = root_identifier(lhs)
                 if root is not None:
@@ -15853,7 +15938,12 @@ class _Builder:
                                 for binding_id in opaque_touched
                             )
                         ):
-                            return True
+                            return (
+                                True,
+                                frozenset(),
+                                frozenset(writes),
+                                star,
+                            )
                     else:
                         added = set(
                             deferred_shape[1] | deferred_shape[2]
@@ -15868,6 +15958,7 @@ class _Builder:
                             ):
                                 added.add(binding_id)
                         written.update(added)
+                        later_unknown_writes.update(added)
                         if (
                             added & touched
                             or deferred_shape[2]
@@ -15908,6 +15999,7 @@ class _Builder:
                         binding_id = identifier_binding_id(root)
                         if binding_id is not None:
                             written.add(binding_id)
+                            later_unknown_writes.add(binding_id)
             if current.type == "defer_statement":
                 deferred = _children(current)
                 if len(deferred) != 1 or deferred[0].type != "call_expression":
@@ -15919,7 +16011,11 @@ class _Builder:
                     params,
                     locals_,
                 )
-                written.update(deferred_shape[1] | deferred_shape[2])
+                deferred_writes = (
+                    deferred_shape[1] | deferred_shape[2]
+                )
+                written.update(deferred_writes)
+                later_unknown_writes.update(deferred_writes)
 
         address_taken: set[str] = set()
         pointer_assignments: list[tuple[str, Any]] = []
@@ -16016,10 +16112,30 @@ class _Builder:
         for binding_id in tuple(written):
             written.update(address_targets.get(binding_id, set()))
 
-        return bool(touched & written) or (
+        races = bool(touched & written) or (
             reference_involved
             and (nonplain or bool(written & address_taken))
         )
+        if races:
+            return True, frozenset(), frozenset(writes), star
+        late_capture_targets = (
+            set(captured) - set(direct_captured) - set(writes)
+        ) & written
+        late_deps: frozenset[int] = frozenset()
+        for binding_id in late_capture_targets:
+            if binding_id in later_unknown_writes:
+                return True, frozenset(), frozenset(writes), star
+            binding = self.bindings.get(binding_id)
+            if binding is None or not self._scalar_value_fact(
+                binding.type
+            ):
+                return True, frozenset(), frozenset(writes), star
+            for value in later_store_values.get(binding_id, ()):
+                value_deps = future_scalar_deps(value)
+                if value_deps is None:
+                    return True, frozenset(), frozenset(writes), star
+                late_deps |= value_deps
+        return False, late_deps, frozenset(writes), star
 
     def _record_deferred_exit(self, record: _DeferredExit) -> None:
         for index, existing in enumerate(self._deferred_exits):
@@ -30049,12 +30165,22 @@ class _Builder:
             inner = _children(node)
             if len(inner) != 1:
                 raise _Unsupported("unsupported_statement", _span(node))
-            if kind == "go_statement" and (
-                self._go_statement_races_later_stores(
+            go_late_deps: frozenset[int] = frozenset()
+            go_writes: frozenset[str] = frozenset()
+            go_indirect = False
+            if kind == "go_statement":
+                (
+                    races,
+                    go_late_deps,
+                    go_writes,
+                    go_indirect,
+                ) = self._go_statement_races_later_stores(
                     node, inner[0], fn, params, locals_
                 )
-            ):
-                raise _Unsupported("unsupported_statement", _span(node))
+                if races:
+                    raise _Unsupported(
+                        "unsupported_statement", _span(node)
+                    )
             defer_call = (
                 self.calls.get(self.node_key(inner[0]))
                 if kind == "defer_statement"
@@ -30128,6 +30254,15 @@ class _Builder:
             ret = self.expression(
                 inner[0], fn, params, locals_, transfers, count, 0
             )
+            if go_late_deps:
+                if go_indirect:
+                    self.indirect_writes |= go_late_deps
+                for target in go_writes:
+                    self._store(
+                        locals_, params, target, go_late_deps, True
+                    )
+                    self.func_aliases.pop(target, None)
+                    self.opaque_callees.add(target)
             if kind == "defer_statement":
                 # A deferred call runs at EVERY later `return` — after
                 # the result expressions evaluate — so a callee that
