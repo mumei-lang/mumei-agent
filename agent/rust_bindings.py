@@ -152,6 +152,8 @@ _OPTION_HEAD_METHODS = {
     "peek": ("&", {"BinaryHeap"}, -1),
     "remove": ("", {"HashMap", "BTreeMap", "VecDeque"}, -1),
     "next": ("&", None, -1),
+    # `it.next_back()` — the `DoubleEndedIterator` twin of `next`.
+    "next_back": ("&", None, -1),
     # `Option` exposes no `ok()` — only `Result::ok()` narrows to
     # `Option<T>`; an unresolved extension method on `Option` stays
     # opaque rather than pinning a payload.
@@ -3579,6 +3581,28 @@ class _RustBindings:
                                 spelled, node.start_byte
                             )
                         return None, spelled
+                    if (
+                        self.text(
+                            callee.child_by_field_name("field")
+                        ).strip()
+                        == "or_else"
+                    ):
+                        # `o.or_else(f)`/`r.or_else(f)` keep the
+                        # receiver's own payload — `f` only supplies
+                        # the fallback, so the `Some`/`Ok` arg is `P`
+                        # even when `f`'s return is unwritten.
+                        value = callee.child_by_field_name("value")
+                        _, keep_args = (
+                            (None, None)
+                            if value is None
+                            else self._receiver_type(value)
+                        )
+                        keep = next(
+                            iter(self._type_arg_list(keep_args or "")),
+                            None,
+                        )
+                        if keep is not None:
+                            return None, keep.strip()
                 if (
                     callee is not None
                     and callee.type == "field_expression"
@@ -4084,8 +4108,13 @@ class _RustBindings:
             body_pair = self._generic_head_args(
                 head.alias_node, head.alias_node.start_byte
             )
-            if body_pair is None or body_pair[0] is None:
+            if body_pair is None:
                 break
+            if body_pair[0] is None:
+                # `type N = M` — the body names another alias
+                # bare; keep unrolling into it.
+                head = body_pair[1]
+                continue
             item = head.alias_node.parent
             names = self._type_param_names(
                 None
@@ -8543,13 +8572,38 @@ class _RustBindings:
                 if (
                     field is not None
                     and self.text(field).strip() in _FN_PAYLOAD_METHODS
-                    and self._fn_return_payload(node) is not None
+                    and (
+                        self._fn_return_payload(node) is not None
+                        or self.text(field).strip() == "or_else"
+                    )
                 ):
                     method = self.text(field).strip()
                     if method == "find_map":
                         # Iterator-only consumer — always yields
                         # `Option<U>` whatever the receiver.
                         return "Option", node.start_byte, None
+                    if method == "or_else":
+                        # `o.or_else(f)`/`r.or_else(f)` keep the
+                        # receiver's head and `Some`/`Ok` payload —
+                        # `f` only supplies the fallback arm.
+                        value = callee.child_by_field_name("value")
+                        head = self._container_head_name(value)
+                        if head is None:
+                            # `o.map(f).or_else(g)` — the receiver
+                            # is itself a combinator chain.
+                            head = self._combinator_head(value)
+                        if head not in _TRY_HEADS:
+                            return None, None, None
+                        position = self._receiver_annotation_position(
+                            value
+                        )
+                        return (
+                            head,
+                            node.start_byte
+                            if position is None
+                            else position,
+                            None,
+                        )
                     if method in {"map_or", "map_or_else"}:
                         # `o.map_or(d, f)` yields `f`'s return `U`
                         # itself — a plain value, not a container.
