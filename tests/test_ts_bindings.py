@@ -3455,3 +3455,43 @@ function f(bag: Bag) {
         source[c.span.start : c.span.end] for c in _calls(report) if c.target == member_pm.id
     }
     assert bound == {"bag.flatMap(x => x)[0].pm()"}
+
+
+def test_std_callback_parameters_take_the_receiver_element():
+    # `forEach`/`map`/`filter`/`sort`/`flatMap`/`reduce`/`some`/
+    # `every`/`find*` callbacks type param 0 as the element —
+    # `sort` types both, `reduce` only `cur`, `Map.forEach` gives
+    # (value, key); the `number` index and `acc` stay opaque.
+    source = """
+class P { pm(): void {} }
+class K { km(): void {} }
+function f(arr: P[], m: Map<K, P>) {
+    arr.forEach(p => p.pm());
+    arr.map(p => p.pm());
+    arr.filter(p => { p.pm(); return true; });
+    arr.sort((a, b) => { a.pm(); b.pm(); return 0; });
+    arr.reduce((acc, cur) => { cur.pm(); acc.pm(); return acc; }, arr[0]);
+    arr.forEach((p2, i) => { i.pm(); p2.pm(); });
+    m.forEach((v, k) => { v.pm(); k.km(); });
+    arr.find(x => { x.pm(); return true; });
+}
+"""
+    report = build_ts_bindings(source)
+    member_pm = _member_bindings(report, "pm", "associated_function")[0]
+    member_km = _member_bindings(report, "km", "associated_function")[0]
+    bound_pm = {
+        source[c.span.start : c.span.end] for c in _calls(report) if c.target == member_pm.id
+    }
+    bound_km = {
+        source[c.span.start : c.span.end] for c in _calls(report) if c.target == member_km.id
+    }
+    assert bound_pm == {
+        "p.pm()",
+        "a.pm()",
+        "b.pm()",
+        "cur.pm()",
+        "p2.pm()",
+        "v.pm()",
+        "x.pm()",
+    }
+    assert bound_km == {"k.km()"}

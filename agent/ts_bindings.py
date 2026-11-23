@@ -823,7 +823,7 @@ class _TypeScriptBindings:
             parameter_nodes = [] if parameter is None else [parameter]
         else:
             parameter_nodes = self.children(parameters)
-        for parameter in parameter_nodes:
+        for index, parameter in enumerate(parameter_nodes):
             if parameter.type in {"required_parameter", "optional_parameter"}:
                 pattern = parameter.child_by_field_name("pattern")
                 type_node = self._pattern_type_node(parameter, pattern)
@@ -832,6 +832,8 @@ class _TypeScriptBindings:
                 type_node = None
             else:
                 continue
+            if type_node is None:
+                type_node = self._callback_param_type_node(node, index)
             names = self._pattern_names(pattern)
             for name in names:
                 self.add_binding(
@@ -2866,6 +2868,75 @@ class _TypeScriptBindings:
                 if args:
                     return next(iter(self.children(args[0])), None)
         return None
+
+    def _callback_param_type_node(
+        self, fn_node: Any, index: int
+    ) -> Any | None:
+        """Type node a callback parameter takes from the receiver's
+        element type — `arr.forEach(p => ...)`, `m.forEach((v, k)
+        => ...)`, `arr.filter/find/map/some/every/flatMap/sort/reduce`.
+        Only std array/Map receivers spell one; declared member
+        signatures keep their own annotation."""
+        parent = fn_node.parent
+        if parent is None or parent.type != "arguments":
+            return None
+        call = parent.parent
+        if call is None or call.type != "call_expression":
+            return None
+        callee = call.child_by_field_name("function")
+        if callee is None or callee.type != "member_expression":
+            return None
+        obj = callee.child_by_field_name("object")
+        prop = callee.child_by_field_name("property")
+        if obj is None or prop is None:
+            return None
+        member = self.text(prop)
+        declared = self._unwrap_type(
+            self._declared_type_node(obj, obj.start_byte)
+        )
+        if declared is None:
+            return None
+        if member == "forEach" and declared.type == "generic_type":
+            kids = self.children(declared)
+            if kids and self.text(kids[0]) in {"Map", "WeakMap"}:
+                args = [
+                    child
+                    for child in kids
+                    if child.type == "type_arguments"
+                ]
+                if args:
+                    # `Map<K, V>.forEach((value, key) => ...)`.
+                    elems = self.children(args[0])
+                    slot = {0: 1, 1: 0}.get(index)
+                    return (
+                        elems[slot]
+                        if slot is not None and slot < len(elems)
+                        else None
+                    )
+        if member not in {
+            "every",
+            "filter",
+            "find",
+            "findIndex",
+            "findLast",
+            "flatMap",
+            "forEach",
+            "map",
+            "some",
+            "sort",
+            "reduce",
+        }:
+            return None
+        if member == "sort":
+            if index > 1:
+                return None
+        elif member == "reduce":
+            # `reduce((acc, cur) => ...)` — only `cur` is `T`.
+            if index != 1:
+                return None
+        elif index != 0:
+            return None
+        return self._array_element_node(declared)
 
     def _is_arrayish(self, node: Any) -> bool:
         if node.type == "array_type":
