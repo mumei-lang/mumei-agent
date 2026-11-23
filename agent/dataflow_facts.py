@@ -44,9 +44,14 @@ exit, while held resources survive the block.
 Forward ``goto`` is analysed: a ``goto L`` records the current environment
 against the label and leaves the path dead, so the surviving paths continue
 uninterrupted and the recorded environments merge in when the labelled
-statement is reached. A ``goto`` that jumps backward (a real loop through a
-label), names an undeclared label, or targets a label outside its own
-statement list's ancestors stays unanalysed (``None``).
+statement is reached. Backward jumps are analysed in a single walk: at the
+label, facts for names assigned between it and the last backward jump are
+havoced; overlapping same-list regions are extended to a fixpoint, and a
+backward-target label the walk skips leaves the function unanalysed
+(``None``). Held resource sets are not joined from back edges, so this can miss
+resource findings but cannot add false ones. A ``goto`` with an undeclared
+label or a target outside its own statement list's ancestors stays unanalysed
+(``None``).
 """
 from __future__ import annotations
 
@@ -1032,54 +1037,109 @@ def _contains_kind(statements: tuple[tree_sitter_extract.Statement, ...], kind: 
     return False
 
 
-def _forward_goto_plan(statements: tuple[tree_sitter_extract.Statement, ...]) -> bool:
-    """True when every ``goto`` is admissible: it names a label that is
-    declared, comes later in document order (forward jump only), and lives
-    in the goto's own statement list or an enclosing one — the shapes the
-    carried-environment merge in ``_Walker`` models exactly."""
-    labels: dict[str, int] = {}
+def _forward_goto_plan(
+    statements: tuple[tree_sitter_extract.Statement, ...],
+) -> tuple[
+    dict[str, tuple[tree_sitter_extract.Statement, ...]], frozenset[int]
+] | None:
+    """Return backward-goto regions and jump offsets, or ``None`` if invalid.
+
+    Every jump must name one unique, declared label in its own statement
+    list or an enclosing one. Forward targets are carried to their labels;
+    backward targets record the label-to-last-jump region for havoc and
+    their offsets distinguish them from forward jumps to the same label.
+    """
+    labels: dict[str, tuple[tuple[int, int], int, int]] = {}
     label_frames: dict[str, int] = {}
-    gotos: list[tuple[int, str, frozenset[int]]] = []
+    groups: dict[int, tuple[tree_sitter_extract.Statement, ...]] = {}
+    gotos: list[
+        tuple[tuple[int, int], str, frozenset[int], dict[int, int], int]
+    ] = []
     counter = [0]
     ok = [True]
 
     def visit(
         group: tuple[tree_sitter_extract.Statement, ...],
         ancestors: tuple[int, ...],
+        parent_indices: dict[int, int],
     ) -> None:
-        for statement in group:
+        group_id = id(group)
+        groups[group_id] = group
+        for local_index, statement in enumerate(group):
             counter[0] += 1
             index = counter[0]
+            indices = dict(parent_indices)
+            indices[group_id] = local_index
             if statement.labeled and statement.label:
                 if statement.label in labels:
                     ok[0] = False
                     return
-                labels[statement.label] = index
-                label_frames[statement.label] = id(group)
+                labels[statement.label] = ((index, 0), group_id, local_index)
+                label_frames[statement.label] = group_id
             if statement.kind == "goto":
                 label = control_flow._jump_label(statement.text)
-                gotos.append((index, label or "", ancestors + (id(group),)))
+                gotos.append(
+                    (
+                        (index, 1),
+                        label or "",
+                        frozenset(ancestors + (group_id,)),
+                        indices,
+                        statement.start,
+                    )
+                )
             for sub in (
                 statement.init,
                 statement.body,
                 statement.orelse,
                 statement.post,
             ):
-                visit(sub, ancestors + (id(group),))
+                visit(sub, ancestors + (group_id,), indices)
                 if not ok[0]:
                     return
 
-    visit(statements, ())
+    visit(statements, (), {})
     if not ok[0]:
-        return False
-    for index, label, frames in gotos:
+        return None
+    backward_ends: dict[str, int] = {}
+    backward_gotos: set[int] = set()
+    for order, label, frames, indices, goto_start in gotos:
         if not label or label not in labels:
-            return False
-        if labels[label] <= index:
-            return False
+            return None
         if label_frames[label] not in frames:
-            return False
-    return True
+            return None
+        label_order, frame, label_start = labels[label]
+        if label_order < order:
+            end = indices.get(frame)
+            if end is None:
+                return None
+            backward_ends[label] = max(
+                backward_ends.get(label, label_start), end
+            )
+            backward_gotos.add(goto_start)
+    changed = True
+    while changed:
+        changed = False
+        for label, end in tuple(backward_ends.items()):
+            frame = label_frames[label]
+            start = labels[label][2]
+            extended = end
+            for nested_label, nested_end in tuple(backward_ends.items()):
+                nested_start = labels[nested_label][2]
+                if (
+                    label_frames[nested_label] == frame
+                    and start < nested_start <= end
+                ):
+                    extended = max(extended, nested_end)
+            if extended > end:
+                backward_ends[label] = extended
+                changed = True
+    return (
+        {
+            label: groups[label_frames[label]][labels[label][2] : end + 1]
+            for label, end in backward_ends.items()
+        },
+        frozenset(backward_gotos),
+    )
 
 
 def _absorb(target: _Env, source: _Env) -> None:
@@ -1278,6 +1338,10 @@ class _Walker:
         body: str,
         contract_results: set[str] | None = None,
         contract_outputs: set[str] | None = None,
+        backward_regions: dict[
+            str, tuple[tree_sitter_extract.Statement, ...]
+        ] | None = None,
+        backward_gotos: frozenset[int] = frozenset(),
     ) -> None:
         self.tree = tree
         self.constants = dict(constants)
@@ -1301,6 +1365,13 @@ class _Walker:
         # so a ``goto:`` termination propagates up to that frame only.
         self._label_frames: dict[str, int] = {}
         self._collect_label_frames(tree.statements)
+        self._backward_regions = dict(backward_regions or {})
+        self._backward_havoc = {
+            label: self._assigned_names(region)
+            for label, region in self._backward_regions.items()
+        }
+        self._backward_gotos = backward_gotos
+        self._skipped_backward_target = False
         # (statement-list id, names it declares) for every open frame —
         # a ``goto`` strips the names of the scopes it exits.
         self._scope_stack: list[
@@ -1368,7 +1439,15 @@ class _Walker:
     def _assigned_names(statements: tuple[tree_sitter_extract.Statement, ...]) -> set[str]:
         names: set[str] = set()
         for statement in statements:
-            if statement.kind in {"define", "assign", "inc", "dec", "var", "const"}:
+            if statement.kind in {
+                "define",
+                "assign",
+                "inc",
+                "dec",
+                "var",
+                "const",
+                "case",
+            }:
                 for target in statement.targets:
                     names.add(_norm(target))
                     names.add(_norm(target).split("[")[0].split(".")[0].lstrip("*"))
@@ -1391,7 +1470,14 @@ class _Walker:
 
         def collect(group: tuple[tree_sitter_extract.Statement, ...]) -> None:
             for statement in group:
-                if statement.kind in {"define", "assign", "var", "range", "closure"}:
+                if statement.kind in {
+                    "define",
+                    "assign",
+                    "var",
+                    "range",
+                    "closure",
+                    "case",
+                }:
                     for target in statement.targets:
                         normalized = _norm(target).lstrip("*")
                         if re.fullmatch(_IDENT, normalized):
@@ -1411,7 +1497,13 @@ class _Walker:
 
         ``terminated`` is ``""`` when control falls off the end, otherwise the
         kind of statement that left the block (``"return"``, ``"terminate"``,
-        ``"break"``, ``"continue"``, ``"fallthrough"``, ``"goto:<label>"``).
+        ``"break"``, ``"continue"``, ``"fallthrough"``, ``"goto:<label>"``,
+        or a non-fallthrough ``"loop"``).
+
+        A conditionless ``for`` with no ``break`` anywhere in its body is
+        non-fallthrough (reported as ``"loop"`` when no stronger termination
+        applies), so a path that only leaves it by a backward jump or return
+        is not checked as an implicit return.
         """
         self._scope_stack.append((id(statements), statements))
         self._descent_indices.append(0)
@@ -1439,10 +1531,16 @@ class _Walker:
                         and later.label
                         and self.goto_carried.get(later.label)
                     ):
+                        if self._contains_backward_target_label(
+                            statements[index:ahead]
+                        ):
+                            self._skipped_backward_target = True
                         env = None
                         index = ahead
                         break
                 else:
+                    if self._contains_backward_target_label(statements[index:]):
+                        self._skipped_backward_target = True
                     return env, terminated
             return env, ""
         finally:
@@ -1463,6 +1561,14 @@ class _Walker:
                 env = env.merge(carried)
         if env is None:
             env = _Env()
+        if statement.labeled and statement.label in self._backward_havoc:
+            before = env.copy()
+            env = env.copy()
+            for name in self._backward_havoc[statement.label]:
+                env.kill(name)
+            self._keep_nil_maps(
+                env, before, self._backward_regions[statement.label]
+            )
         kind = statement.kind
         if kind in {
             "define", "assign", "inc", "dec", "expr",
@@ -1510,8 +1616,10 @@ class _Walker:
         if kind == "goto":
             label = control_flow._jump_label(statement.text)
             if not label:
-                # ``_forward_goto_plan`` already rejects malformed operands.
+                # The goto plan already rejects malformed operands.
                 return env, "terminate"
+            if statement.start in self._backward_gotos:
+                return env, f"goto:{label}"
             carried = env.copy()
             # The label lives in this frame or an enclosing one, so every
             # scope the jump exits dies with it — facts about names
@@ -1549,7 +1657,7 @@ class _Walker:
         if kind == "if":
             return self._if(statement, env)
         if kind == "for":
-            return self._for(statement, env), ""
+            return self._for(statement, env)
         if kind == "range":
             return self._range(statement, env), ""
         if kind == "switch":
@@ -2004,7 +2112,9 @@ class _Walker:
             }
             env.defined = {d for d in env.defined if d != name}
 
-    def _for(self, statement: tree_sitter_extract.Statement, env: _Env) -> _Env:
+    def _for(
+        self, statement: tree_sitter_extract.Statement, env: _Env
+    ) -> tuple[_Env, str]:
         outer = env.copy()
         if statement.init:
             outer, _ = self.walk(statement.init, outer)
@@ -2041,7 +2151,14 @@ class _Walker:
         after = self._loop_exit(outer, body_end, terminated, statement, breaks)
         for name in self._assigned_names(statement.init):
             after.kill(name)
-        return after
+        if not statement.condition and not self._contains_break_statement(
+            statement.body
+        ):
+            # A ``continue`` belongs to this loop and must not escape it.
+            return after, (
+                "loop" if terminated in {"", "continue"} else terminated
+            )
+        return after, ""
 
     def _loop_exit(
         self,
@@ -2093,6 +2210,45 @@ class _Walker:
                 or self._has_break(statement.body)
                 or self._has_break(statement.orelse)
                 or self._has_break(statement.post)
+            ):
+                return True
+        return False
+
+    def _contains_break_statement(
+        self, statements: tuple[tree_sitter_extract.Statement, ...]
+    ) -> bool:
+        """True when an actual ``break`` statement appears anywhere inside."""
+        for statement in statements:
+            if statement.kind == "break":
+                return True
+            if statement.kind == "closure":
+                continue
+            if any(
+                self._contains_break_statement(nested)
+                for nested in (
+                    statement.init,
+                    statement.body,
+                    statement.orelse,
+                    statement.post,
+                )
+            ):
+                return True
+        return False
+
+    def _contains_backward_target_label(
+        self, statements: tuple[tree_sitter_extract.Statement, ...]
+    ) -> bool:
+        for statement in statements:
+            if statement.labeled and statement.label in self._backward_havoc:
+                return True
+            if any(
+                self._contains_backward_target_label(nested)
+                for nested in (
+                    statement.init,
+                    statement.body,
+                    statement.orelse,
+                    statement.post,
+                )
             ):
                 return True
         return False
@@ -2992,8 +3148,12 @@ def analyze_function(
     ``len(xs)``) seed the entry state. Only Go bodies are analysed for now.
     """
     tree = tree_sitter_extract.extract_statements(body, language)
-    if tree is None or not _forward_goto_plan(tree.statements):
+    if tree is None:
         return None
+    goto_plan = _forward_goto_plan(tree.statements)
+    if goto_plan is None:
+        return None
+    backward_regions, backward_gotos = goto_plan
     walker = _Walker(
         tree,
         constants or {},
@@ -3001,12 +3161,17 @@ def analyze_function(
         body,
         contract_results=contract_results,
         contract_outputs=contract_outputs,
+        backward_regions=backward_regions,
+        backward_gotos=backward_gotos,
     )
     seed = _Env()
     seed.nonneg |= {_norm(n) for n in nonneg_names or ()}
     seed.nonzero |= {_norm(n) for n in nonzero_names or ()}
     seed.slices |= {_norm(n) for n in sequence_names or ()}
     try:
-        return walker.run(seed)
+        result = walker.run(seed)
+        if walker._skipped_backward_target:
+            return None
+        return result
     except RecursionError:
         return None

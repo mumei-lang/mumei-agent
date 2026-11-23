@@ -2784,12 +2784,13 @@ fall-through `return`s first): the walk then resumes at the labelled
 sibling with the recorded environments as the only live state.
 
 Admissibility is checked up front (`_forward_goto_plan`): every `goto`
-must name a label that is declared later in document order inside the
-goto's own statement list or an enclosing one. Backward jumps (real
-loops through a label), undeclared or duplicate labels, malformed
-operands and jumps into a non-ancestor block still return `None` —
-unmodelled shapes stay unanalysed rather than partially correct, the
-same fail-closed posture the CFG layer keeps for its own gaps.
+must name a unique declared label in its own statement list or an
+enclosing one. Forward targets use carried environments; backward
+targets use the region-havoc analysis described below. Undeclared or
+duplicate labels, malformed operands and jumps into a non-ancestor block
+still return `None` — unmodelled shapes stay unanalysed rather than
+partially correct, the same fail-closed posture the CFG layer keeps for
+its own gaps.
 Dead-path continuation after an absorbed `goto` under-approximates
 must-facts, which is the safe direction for every consumer
 (`facts_for_expression`, resource-state and reaching-definition
@@ -2798,9 +2799,30 @@ issues).
 Tests cover the label merge (skipped assignments lose facts), the
 resume past a dead fall-through (the guarded env is the only live
 one), jumps out of loops, carried resource state across a jump, and
-each bail shape (backward / undeclared / into an inner block).
-Remaining limits: backward `goto` and labels crossed by non-ancestor
-frames stay unanalysed.
+each remaining bail shape (undeclared, duplicate, or into a non-ancestor
+block).
+
+### C05 backward `goto` in the dataflow walker
+
+Backward `goto` targets are analysed in one walk, without re-walking the
+body. For a label at index `k` in statement list `S`, the walker finds
+the last top-level statement of `S` that contains a backward jump to that
+label and havocs the names assigned in that inclusive region at the
+label. When another backward-target label in the same list lies inside
+that region, the region is extended to the end of that label's region
+(to a fixpoint), because a path looping through the later label reaches
+those assignments too; this only havocs more names. If the walk skips a
+backward-target label (reachable only through a back edge), the function
+is not analysed (`None`). Names not assigned in the region retain their
+facts. A backward jump
+leaves its path dead; it does not add a carried environment or join
+resource `held` sets from the back edge. Consequently, the held-set
+analysis may miss defects on a looped path, but does not add false held
+resource findings. These results remain conservative hints/facts for
+consumers, not proof. A conditionless `for` with no `break` anywhere in
+its body is also non-fallthrough (reported as `"loop"` when no stronger
+termination applies), so a path that only leaves it by a backward jump
+or return is not checked as an implicit return.
 
 ### C05 labeled flow-hint corpus
 

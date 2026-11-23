@@ -539,9 +539,284 @@ def test_goto_out_of_a_loop_to_a_later_label() -> None:
     assert facts is not None
 
 
-def test_backward_goto_stays_unanalysed() -> None:
+def test_backward_goto_is_analysed_without_implicit_return() -> None:
     body = "again:\n    x = 1\n    goto again\n"
-    assert dataflow_facts.analyze_function(body, "go", param_names={"x"}) is None
+    flow = _go(
+        body,
+        param_names={"x"},
+        contract_outputs={"out"},
+    )
+    assert not any(
+        issue.category == "contract_output_unassigned"
+        for issue in flow.issues
+    )
+
+
+def test_backward_goto_havocs_decremented_value_at_label() -> None:
+    body = (
+        "d := 1\n"
+        "again:\n"
+        "if c {\n"
+        "    d = d - 1\n"
+        "    goto again\n"
+        "}\n"
+        "return n / d\n"
+    )
+    facts = _facts(body, "n / d", param_names={"n", "c"})
+    assert "d" not in facts.nonzero
+
+
+def test_backward_goto_preserves_facts_not_assigned_in_region() -> None:
+    body = (
+        "if d == 0 {\n"
+        "    return 0\n"
+        "}\n"
+        "again:\n"
+        "x = x + 1\n"
+        "if x < 10 {\n"
+        "    goto again\n"
+        "}\n"
+        "return n / d\n"
+    )
+    facts = _facts(body, "n / d", param_names={"n", "d", "x"})
+    assert "d" in facts.nonzero
+
+
+def test_backward_goto_rechecks_guard_after_havoc() -> None:
+    body = (
+        "again:\n"
+        "if d == 0 {\n"
+        "    d = f()\n"
+        "    goto again\n"
+        "}\n"
+        "return n / d\n"
+    )
+    facts = _facts(body, "n / d", param_names={"n", "d"})
+    assert "d" in facts.nonzero
+
+
+def test_overlapping_backward_regions_extend_havoc_to_nested_target_end() -> None:
+    body = (
+        "d := 1\n"
+        "L1:\n"
+        "if c {\n"
+        "    return n / d\n"
+        "}\n"
+        "L2:\n"
+        "if e {\n"
+        "    goto L1\n"
+        "}\n"
+        "d = 0\n"
+        "goto L2\n"
+    )
+    facts = _facts(body, "n / d", param_names={"n", "d", "c", "e"})
+    assert "d" not in facts.nonzero
+
+
+def test_backward_goto_havocs_select_receive_target() -> None:
+    body = (
+        "d := 1\n"
+        "again:\n"
+        "select {\n"
+        "case d = <-ch:\n"
+        "}\n"
+        "if c {\n"
+        "    goto again\n"
+        "}\n"
+        "return n / d\n"
+    )
+    facts = _facts(body, "n / d", param_names={"n", "d", "c", "ch"})
+    assert "d" not in facts.nonzero
+
+
+def test_for_havocs_select_receive_target() -> None:
+    body = (
+        "d := 1\n"
+        "for {\n"
+        "    select {\n"
+        "    case d = <-ch:\n"
+        "    }\n"
+        "    break\n"
+        "}\n"
+        "return n / d\n"
+    )
+    facts = _facts(body, "n / d", param_names={"n", "d", "ch"})
+    assert "d" not in facts.nonzero
+
+
+def test_expression_switch_cases_are_not_assignment_targets_in_havoc() -> None:
+    body = (
+        "d := 1\n"
+        "again:\n"
+        "switch x {\n"
+        "case 1, 2:\n"
+        "}\n"
+        "if c {\n"
+        "    goto again\n"
+        "}\n"
+        "return n / d\n"
+    )
+    facts = _facts(body, "n / d", param_names={"n", "d", "x", "c"})
+    assert "d" in facts.nonzero
+
+
+def test_forward_and_backward_gotos_merge_at_the_label() -> None:
+    body = (
+        "if d == 0 {\n"
+        "    goto again\n"
+        "}\n"
+        "d = 1\n"
+        "again:\n"
+        "if e {\n"
+        "    goto again\n"
+        "}\n"
+        "return n / d\n"
+    )
+    facts = _facts(body, "n / d", param_names={"n", "c", "d", "e"})
+    assert "d" not in facts.nonzero
+
+
+def test_backward_goto_into_nonancestor_block_stays_unanalysed() -> None:
+    body = (
+        "if c {\n"
+        "inside:\n"
+        "    x = 1\n"
+        "}\n"
+        "goto inside\n"
+        "return 0\n"
+    )
+    assert dataflow_facts.analyze_function(
+        body, "go", param_names={"c", "x"}
+    ) is None
+
+
+def test_duplicate_goto_labels_stay_unanalysed() -> None:
+    body = "again:\nx = 1\ngoto again\nagain:\nreturn 0\n"
+    assert dataflow_facts.analyze_function(
+        body, "go", param_names={"x"}
+    ) is None
+
+
+def test_forward_resume_skipping_backward_target_stays_unanalysed() -> None:
+    body = (
+        "goto B\n"
+        "A:\n"
+        "m[\"x\"] = 1\n"
+        "B:\n"
+        "if c {\n"
+        "    goto A\n"
+        "}\n"
+        "return 0\n"
+    )
+    assert dataflow_facts.analyze_function(
+        body, "go", param_names={"c"}
+    ) is None
+
+
+def test_return_resume_skipping_backward_target_stays_unanalysed() -> None:
+    body = (
+        "if c {\n"
+        "    goto B\n"
+        "}\n"
+        "return 0\n"
+        "A:\n"
+        "m[\"x\"] = 1\n"
+        "B:\n"
+        "if e {\n"
+        "    goto A\n"
+        "}\n"
+        "return 0\n"
+    )
+    assert dataflow_facts.analyze_function(
+        body, "go", param_names={"c", "e"}
+    ) is None
+
+
+def test_backward_goto_does_not_join_held_resource_sets() -> None:
+    body = (
+        "mu.Lock()\n"
+        "again:\n"
+        "if c {\n"
+        "    goto again\n"
+        "}\n"
+        "return 0\n"
+    )
+    flow = _go(body, param_names={"c"})
+    assert any(issue.category == "lock_held_at_return" for issue in flow.issues)
+
+
+def test_backward_goto_out_of_for_body_havocs_loop_assignments() -> None:
+    body = (
+        "if x == 0 {\n"
+        "    return 0\n"
+        "}\n"
+        "again:\n"
+        "for {\n"
+        "    if c {\n"
+        "        x = 0\n"
+        "        goto again\n"
+        "    }\n"
+        "    out = 1\n"
+        "    return n / x\n"
+        "}\n"
+    )
+    flow = _go(
+        body,
+        param_names={"n", "x", "c"},
+        contract_results={"out"},
+    )
+    facts = flow.facts_for_expression("n / x")
+    assert facts is not None
+    assert "x" not in facts.nonzero
+    assert not any(
+        issue.category == "contract_output_unassigned"
+        for issue in flow.issues
+    )
+
+
+def test_labeled_break_from_nested_loop_keeps_outer_for_fallthrough() -> None:
+    body = (
+        "outer:\n"
+        "for {\n"
+        "    for {\n"
+        "        break outer\n"
+        "    }\n"
+        "}\n"
+        "if d == 0 {\n"
+        "    return 0\n"
+        "}\n"
+        "return n / d\n"
+    )
+    flow = _go(body, param_names={"n", "d"})
+    facts = flow.facts_for_expression("n / d")
+    assert facts is not None
+    assert "d" in facts.nonzero
+
+
+def test_plain_break_keeps_conditionless_for_fallthrough() -> None:
+    body = (
+        "for {\n"
+        "    if c {\n"
+        "        break\n"
+        "    }\n"
+        "}\n"
+        "if d == 0 {\n"
+        "    return 0\n"
+        "}\n"
+        "return n / d\n"
+    )
+    flow = _go(body, param_names={"n", "d", "c"})
+    facts = flow.facts_for_expression("n / d")
+    assert facts is not None
+    assert "d" in facts.nonzero
+
+
+def test_conditionless_for_without_break_has_no_implicit_exit() -> None:
+    flow = _go("for {}\nmu.Lock()\nreturn 0\n")
+    assert not any(
+        issue.category == "lock_held_at_return"
+        for issue in flow.issues
+    )
 
 
 def test_goto_to_an_undeclared_label_stays_unanalysed() -> None:
@@ -2524,3 +2799,22 @@ def test_stacked_label_does_not_scope_the_inner_statement() -> None:
     facts = flow.facts_for_expression("1 / x")
     assert facts is not None
     assert facts.consts.get("x") == 0
+
+
+def test_continue_inside_conditionless_loop_does_not_escape() -> None:
+    body = (
+        "for _, v := range xs {\n"
+        "    for {\n"
+        "        if v == 0 {\n"
+        "            return 0\n"
+        "        }\n"
+        "        continue\n"
+        "    }\n"
+        "}\n"
+        "if d == 0 {\n"
+        "    return 0\n"
+        "}\n"
+        "return n / d\n"
+    )
+    facts = _facts(body, "n / d", param_names={"n", "d", "xs"})
+    assert "d" in facts.nonzero
