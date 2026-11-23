@@ -50421,6 +50421,167 @@ def test_func_elem_container_adopts_identifier_element_records(
     assert result.return_dependencies == frozenset({0})
 
 
+def test_func_field_values_in_func_collection_literals(go_types_helper):
+    files = {
+        "a.go": (
+            "package p\n"
+            "type S struct { F func() int64 }\n"
+            "type W struct { F func() }\n"
+            "type Row struct { K int }\n"
+            "func (S) Run() int64 { return 0 }\n"
+            "func (S) Key() int { return 0 }\n"
+            "func ReadSliceLiteral(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\tfs := []func() int64{s.F}; v = x; return fs[0]()\n"
+            "}\n"
+            "func ReadArrayLiteral(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\tfs := [1]func() int64{s.F}; v = x; return fs[0]()\n"
+            "}\n"
+            "func ReadMapLiteral(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\tfs := map[int]func() int64{0: s.F}; v = x; return fs[0]()\n"
+            "}\n"
+            "func ReadNestedSliceLiteral(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\tfs := [][]func() int64{{s.F}}; v = x; return fs[0][0]()\n"
+            "}\n"
+            "func ReadNestedSliceMapLiteral(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\tfs := []map[int]func() int64{{0: s.F}}\n"
+            "\tv = x; return fs[0][0]()\n"
+            "}\n"
+            "func ReadNestedKeyLiteral(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\tfs := []map[int]func() int64{{s.Key(): s.F}}\n"
+            "\tv = x; return fs[0][0]()\n"
+            "}\n"
+            "func KeyIndexDoesNotAdoptRecordsFromKey(x, y int64) int64 {\n"
+            "\ts := S{F: func() int64 { return 0 }}; u := y\n"
+            "\tidx := func() int { return int(u) }; rows := []Row{{K: 0}}\n"
+            "\tfs := []map[int]func() int64{{rows[idx()].K: s.F}}\n"
+            "\tu = x; return fs[0][0]()\n"
+            "}\n"
+            "func ReadTopLevelKeyLiteral(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\tm := map[int]func() int64{s.Key(): s.F}\n"
+            "\tv = x; return m[0]()\n"
+            "}\n"
+            "func ReadStructElementLiteral(x, y int64) int64 {\n"
+            "\tv := y\n"
+            "\tss := []S{{F: func() int64 { return v }}}\n"
+            "\tfs := []func() int64{ss[0].F}; v = x; return fs[0]()\n"
+            "}\n"
+            "func ReadIndexedStructElementLiteral(x, y int64, i int) int64 {\n"
+            "\tv := y\n"
+            "\tss := []S{{F: func() int64 { return v }}}\n"
+            "\tfs := []func() int64{ss[i].F}; v = x; return fs[0]()\n"
+            "}\n"
+            "func WriteSliceLiteral(x int64) int64 {\n"
+            "\tw := int64(0); s := W{F: func() { w = x }}\n"
+            "\tfs := []func(){s.F}; fs[0](); return w\n"
+            "}\n"
+            "func WriteMapLiteral(x int64) int64 {\n"
+            "\tw := int64(0); s := W{F: func() { w = x }}\n"
+            "\tfs := map[int]func(){0: s.F}; fs[0](); return w\n"
+            "}\n"
+            "func StoreSliceElement(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\tfs := []func() int64{func() int64 { return 0 }}\n"
+            "\tfs[0] = s.F; v = x; return fs[0]()\n"
+            "}\n"
+            "func StoreMapElement(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\tfs := map[int]func() int64{0: func() int64 { return 0 }}\n"
+            "\tfs[0] = s.F; v = x; return fs[0]()\n"
+            "}\n"
+            "func StoreNestedSliceElement(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\tfs := [][]func() int64{{func() int64 { return 0 }}}\n"
+            "\tfs[0][0] = s.F; v = x; return fs[0][0]()\n"
+            "}\n"
+            "func AppendElement(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\tfs := []func() int64{}; fs = append(fs, s.F)\n"
+            "\tv = x; return fs[0]()\n"
+            "}\n"
+            "func BoundIdentifier(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\tg := s.F; fs := []func() int64{g}\n"
+            "\tv = x; return fs[0]()\n"
+            "}\n"
+            "func SimultaneousRead(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\tg := func() int64 { return 0 }; var fs []func() int64\n"
+            "\tfs, s.F = []func() int64{s.F}, g\n"
+            "\tv = x; return fs[0]()\n"
+            "}\n"
+            "func SimultaneousWrite(x int64) int64 {\n"
+            "\tw := int64(0); s := W{F: func() { w = x }}\n"
+            "\tg := func() {}; var fs []func()\n"
+            "\tfs, s.F = []func(){s.F}, g\n"
+            "\tfs[0](); return w\n"
+            "}\n"
+            "func ClosedMethodValue(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\tfs := []func() int64{s.Run}; v = x; return fs[0]()\n"
+            "}\n"
+            "func ClosedMapElement(x, y int64) int64 {\n"
+            "\tv := y\n"
+            "\tm := map[int]S{0: {F: func() int64 { return v }}}\n"
+            "\tfs := []func() int64{m[0].F}; v = x; return fs[0]()\n"
+            "}\n"
+            "func ClosedPointerRoot(x, y int64) int64 {\n"
+            "\tv := y; p := &S{F: func() int64 { return v }}\n"
+            "\tfs := []func() int64{p.F}; v = x; return fs[0]()\n"
+            "}\n"
+            "func ClosedPointerElement(x, y int64) int64 {\n"
+            "\tv := y\n"
+            "\tps := []*S{&S{F: func() int64 { return v }}}\n"
+            "\tfs := []func() int64{ps[0].F}; v = x; return fs[0]()\n"
+            "}\n"
+        ),
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    expected = {
+        "ReadSliceLiteral": frozenset({0, 1}),
+        "ReadArrayLiteral": frozenset({0, 1}),
+        "ReadMapLiteral": frozenset({0, 1}),
+        "ReadNestedSliceLiteral": frozenset({0, 1}),
+        "ReadNestedSliceMapLiteral": frozenset({0, 1}),
+        "ReadNestedKeyLiteral": frozenset({0, 1}),
+        "KeyIndexDoesNotAdoptRecordsFromKey": frozenset({1}),
+        "ReadTopLevelKeyLiteral": frozenset({0, 1}),
+        "ReadStructElementLiteral": frozenset({0, 1}),
+        "ReadIndexedStructElementLiteral": frozenset({0, 1, 2}),
+        "WriteSliceLiteral": frozenset({0}),
+        "WriteMapLiteral": frozenset({0}),
+        "StoreSliceElement": frozenset({0, 1}),
+        "StoreMapElement": frozenset({0, 1}),
+        "StoreNestedSliceElement": frozenset({0, 1}),
+        "AppendElement": frozenset({0, 1}),
+        "BoundIdentifier": frozenset({0, 1}),
+        "SimultaneousRead": frozenset({0, 1}),
+        "SimultaneousWrite": frozenset({0}),
+    }
+    for function_name, dependencies in expected.items():
+        result = named_package(files, snapshot, summaries, function_name)
+        assert result.available, (function_name, result.gaps)
+        assert result.return_dependencies == dependencies, (
+            function_name,
+            result.return_dependencies,
+        )
+    for function_name in (
+        "ClosedMethodValue",
+        "ClosedMapElement",
+        "ClosedPointerRoot",
+        "ClosedPointerElement",
+    ):
+        result = named_package(files, snapshot, summaries, function_name)
+        assert not result.available, (function_name, result.gaps)
+
+
 def test_func_elem_named_container_type_pins_identity(go_types_helper):
     # `type FM map[string]func() int64` — a bound `FM` local admits
     # like the anonymous form, and the named type's identity pins so

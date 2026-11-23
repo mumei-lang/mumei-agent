@@ -1766,7 +1766,12 @@ class _Builder:
         )
 
     def _adopt_container_element_records(
-        self, rhs_node: Any, bound_id: str
+        self,
+        rhs_node: Any,
+        bound_id: str,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+        records_before: dict[str, Any] | None = None,
     ) -> None:
         """`fs := []func(){cl}` — an element naming an existing func
         value carries that value's captures and write targets into
@@ -1776,6 +1781,31 @@ class _Builder:
         body = rhs_node.child_by_field_name("body")
         if body is None:
             return
+        captures = (
+            records_before["captures"]
+            if records_before is not None
+            else self.closure_captures
+        )
+        writes = (
+            records_before["writes"]
+            if records_before is not None
+            else self.closure_writes
+        )
+        star = (
+            records_before["star"]
+            if records_before is not None
+            else self.closure_star_writes
+        )
+        calls = (
+            records_before["calls"]
+            if records_before is not None
+            else self.closure_inner_calls
+        )
+        pointee = (
+            records_before["pointee"]
+            if records_before is not None
+            else self.pointee_closures
+        )
         stack = []
         # Go continues the implicit index after each keyed element —
         # `[]func{1: a, b}` puts `b` at index 2, not 1 — so the slot
@@ -1803,17 +1833,44 @@ class _Builder:
                         # `[]func{1: a, b}` puts `b` at index 2.
                         next_index = int(key_slot[2:]) + 1
                 if value_node is not None:
-                    stack.append((value_node, slot))
+                    stack.append((value_node, slot, False))
             else:
-                stack.append((element, slot))
+                stack.append((element, slot, False))
         while stack:
-            el, slot_key = stack.pop()
+            el, slot_key, in_key = stack.pop()
             if el.type == "func_literal":
                 # A literal element records under the container
                 # itself during eval — its inner identifiers are
                 # captures, not elements.
                 continue
-            if el.type in {"identifier", "selector_expression"}:
+            if el.type == "selector_expression":
+                if in_key:
+                    continue
+                source_ids = self._func_field_value_record_sources(
+                    el,
+                    params,
+                    locals_,
+                    captures,
+                    writes,
+                    star,
+                    calls,
+                    pointee,
+                )
+                for src in source_ids:
+                    if records_before is None:
+                        self._adopt_element_records(src, bound_id)
+                    else:
+                        self._adopt_element_records_from_snapshot(
+                            src,
+                            bound_id,
+                            captures,
+                            writes,
+                            star,
+                            calls,
+                            pointee,
+                        )
+                continue
+            if el.type == "identifier":
                 ref = self.references.get(self.node_key(el))
                 src = ref.binding_id if ref is not None else None
                 if src and src != bound_id:
@@ -1847,7 +1904,15 @@ class _Builder:
             child_slot = (
                 slot_key if el.type == "literal_element" else None
             )
-            stack.extend((c, child_slot) for c in el.children)
+            key_node = (
+                el.child_by_field_name("key")
+                if el.type == "keyed_element"
+                else None
+            )
+            stack.extend(
+                (c, child_slot, in_key or c == key_node)
+                for c in el.children
+            )
 
     def _adopt_element_records(self, src: str, bound_id: str) -> None:
         """Union one func value's captures and write targets into a
@@ -21334,7 +21399,7 @@ class _Builder:
                         # and adopt the func-value records an
                         # element identifier carries (`{cl}`).
                         self._adopt_container_element_records(
-                            rights[i], binding.id
+                            rights[i], binding.id, params, locals_
                         )
                     elif (
                         append_cont := self._func_elem_append_target(
@@ -22676,7 +22741,10 @@ class _Builder:
                             # element literals' capture records
                             # and adopt identifier elements'.
                             self._adopt_container_element_records(
-                                value_nodes[i], binding.id
+                                value_nodes[i],
+                                binding.id,
+                                params,
+                                locals_,
                             )
                         elif (
                             (
@@ -27678,6 +27746,15 @@ class _Builder:
                                 else rights[0]
                             ),
                             ref.binding_id,
+                            params,
+                            locals_,
+                            {
+                                "captures": captures_before,
+                                "writes": writes_before,
+                                "star": star_before,
+                                "calls": calls_before,
+                                "pointee": pointee_before,
+                            },
                         )
                     if factory_sources[i] is not None:
                         self._bind_closure_factory_result(
