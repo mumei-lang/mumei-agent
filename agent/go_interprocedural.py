@@ -15161,18 +15161,6 @@ class _Builder:
                 written_ids.update(
                     self.closure_writes.get(record_id, frozenset())
                 )
-                literal_record = self.closure_factory_literals.get(
-                    record_id
-                )
-                if literal_record is not None:
-                    written_ids.update(
-                        pointer_argument_writes(
-                            literal_record[0],
-                            self.closure_captures.get(
-                                record_id, frozenset()
-                            ),
-                        )
-                    )
                 star_write |= record_id in self.closure_star_writes
                 pending_records.extend(
                     self.bound_method_field_records.get(record_id, ())
