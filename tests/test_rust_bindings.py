@@ -8190,10 +8190,14 @@ fn f(s: std::collections::HashSet<P>, b: std::collections::BTreeSet<P>, v: Vec<P
     g.pm();
     let g2 = s.get_or_insert_owned(P);
     g2.pm();
-    let g3 = s.get_or_insert_with(|| P);
+    let g3 = s.get_or_insert_with(P, |p| p);
     g3.pm();
     let gb = b.get_or_insert(P);
     gb.pm();
+    let gb2 = b.get_or_insert_owned(P);
+    gb2.pm();
+    let gb3 = b.get_or_insert_with(P, |p| p);
+    gb3.pm();
     let gv = v.get_or_insert(P);
     gv.pm();
 }
@@ -8210,6 +8214,8 @@ fn f(s: std::collections::HashSet<P>, b: std::collections::BTreeSet<P>, v: Vec<P
     assert bound.get("g2.pm()") == pm.id
     assert bound.get("g3.pm()") == pm.id
     assert bound.get("gb.pm()") == pm.id
+    assert bound.get("gb2.pm()") == pm.id
+    assert bound.get("gb3.pm()") == pm.id
     # `Vec` names no `get_or_insert` — stays opaque.
     assert not bound.get("gv.pm()")
 
