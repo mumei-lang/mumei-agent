@@ -1537,13 +1537,26 @@ def test_invalid_pinned_executable_paths_are_not_dispatched(tmp_path, path_kind)
     os.name != "posix" or not hasattr(os, "mkfifo") or not hasattr(signal, "SIGALRM"),
     reason="named pipe checks require POSIX",
 )
-def test_pinned_fifo_is_not_dispatched_without_blocking(tmp_path):
+def test_pinned_executable_swapped_for_fifo_is_not_dispatched_without_blocking(
+    tmp_path, monkeypatch
+):
     executable = tmp_path / "pinned-fifo"
-    os.mkfifo(executable)
+    executable.write_bytes(b"pinned executable")
+    real_open = attempt_schedule.os.open
+    swapped = False
+
+    def replace_with_fifo(path, flags, *args, **kwargs):
+        nonlocal swapped
+        if os.fspath(path) == str(executable) and not swapped:
+            swapped = True
+            os.unlink(executable)
+            os.mkfifo(executable)
+        return real_open(path, flags, *args, **kwargs)
 
     def fail_if_blocked(_signum, _frame):
         raise AssertionError("opening a pinned FIFO blocked")
 
+    monkeypatch.setattr(attempt_schedule.os, "open", replace_with_fifo)
     previous_handler = signal.signal(signal.SIGALRM, fail_if_blocked)
     signal.alarm(3)
     try:
@@ -1559,6 +1572,7 @@ def test_pinned_fifo_is_not_dispatched_without_blocking(tmp_path):
         signal.alarm(0)
         signal.signal(signal.SIGALRM, previous_handler)
 
+    assert swapped
     assert result.entries[0].terminal_state == NOT_DISPATCHED
 
 
