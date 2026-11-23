@@ -47,7 +47,8 @@ pinned `typescript` 5.9.3 の `ts.createProgram`（`noResolve`, `strict`, `lib.e
 ## 3. reader の fail-closed 境界（`load_ts_compiler_snapshot`）
 
 1. envelope は `MAX_REPORT_BYTES` 以下、キー集合は固定の8キーのみ。
-2. `typescript_version` は許可リスト `{ "5.9.3" }` に一致。
+2. `typescript_version` は既定の許可リスト `ALLOWED_TYPESCRIPT_VERSIONS`（`{"5.9.3"}`）に一致
+   （呼び出し側が `allowed_versions` を指定すればその集合で検証する）。
 3. `compiler_options` は固定オブジェクトと完全一致（target/lib/types/noResolve/jsx 等の逸脱は拒否）。
 4. `file_name` は `input.ts` / `input.tsx` のみ。
 5. `source` は対象ソースと**完全一致**（stale 検出。真正性の主張ではない）。
