@@ -2813,7 +2813,10 @@ leaves its path dead; it does not add a carried environment or join
 resource `held` sets from the back edge. Consequently, the held-set
 analysis may miss defects on a looped path, but does not add false held
 resource findings. These results remain conservative hints/facts for
-consumers, not proof.
+consumers, not proof. A conditionless `for` with no `break` anywhere in
+its body is also non-fallthrough (reported as `"loop"` when no stronger
+termination applies), so a path that only leaves it by a backward jump
+or return is not checked as an implicit return.
 
 ### C05 labeled flow-hint corpus
 

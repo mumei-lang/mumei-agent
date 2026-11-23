@@ -1464,6 +1464,11 @@ class _Walker:
         kind of statement that left the block (``"return"``, ``"terminate"``,
         ``"break"``, ``"continue"``, ``"fallthrough"``, ``"goto:<label>"``,
         or a non-fallthrough ``"loop"``).
+
+        A conditionless ``for`` with no ``break`` anywhere in its body is
+        non-fallthrough (reported as ``"loop"`` when no stronger termination
+        applies), so a path that only leaves it by a backward jump or return
+        is not checked as an implicit return.
         """
         self._scope_stack.append((id(statements), statements))
         self._descent_indices.append(0)
@@ -2105,7 +2110,9 @@ class _Walker:
         after = self._loop_exit(outer, body_end, terminated, statement, breaks)
         for name in self._assigned_names(statement.init):
             after.kill(name)
-        if not statement.condition and not breaks:
+        if not statement.condition and not self._contains_break_statement(
+            statement.body
+        ):
             return after, terminated or "loop"
         return after, ""
 
@@ -2159,6 +2166,27 @@ class _Walker:
                 or self._has_break(statement.body)
                 or self._has_break(statement.orelse)
                 or self._has_break(statement.post)
+            ):
+                return True
+        return False
+
+    def _contains_break_statement(
+        self, statements: tuple[tree_sitter_extract.Statement, ...]
+    ) -> bool:
+        """True when an actual ``break`` statement appears anywhere inside."""
+        for statement in statements:
+            if statement.kind == "break":
+                return True
+            if statement.kind == "closure":
+                continue
+            if any(
+                self._contains_break_statement(nested)
+                for nested in (
+                    statement.init,
+                    statement.body,
+                    statement.orelse,
+                    statement.post,
+                )
             ):
                 return True
         return False

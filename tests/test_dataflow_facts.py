@@ -674,6 +674,51 @@ def test_backward_goto_out_of_for_body_havocs_loop_assignments() -> None:
     )
 
 
+def test_labeled_break_from_nested_loop_keeps_outer_for_fallthrough() -> None:
+    body = (
+        "outer:\n"
+        "for {\n"
+        "    for {\n"
+        "        break outer\n"
+        "    }\n"
+        "}\n"
+        "if d == 0 {\n"
+        "    return 0\n"
+        "}\n"
+        "return n / d\n"
+    )
+    flow = _go(body, param_names={"n", "d"})
+    facts = flow.facts_for_expression("n / d")
+    assert facts is not None
+    assert "d" in facts.nonzero
+
+
+def test_plain_break_keeps_conditionless_for_fallthrough() -> None:
+    body = (
+        "for {\n"
+        "    if c {\n"
+        "        break\n"
+        "    }\n"
+        "}\n"
+        "if d == 0 {\n"
+        "    return 0\n"
+        "}\n"
+        "return n / d\n"
+    )
+    flow = _go(body, param_names={"n", "d", "c"})
+    facts = flow.facts_for_expression("n / d")
+    assert facts is not None
+    assert "d" in facts.nonzero
+
+
+def test_conditionless_for_without_break_has_no_implicit_exit() -> None:
+    flow = _go("for {}\nmu.Lock()\nreturn 0\n")
+    assert not any(
+        issue.category == "lock_held_at_return"
+        for issue in flow.issues
+    )
+
+
 def test_goto_to_an_undeclared_label_stays_unanalysed() -> None:
     body = "goto nowhere\nreturn 0\n"
     assert dataflow_facts.analyze_function(body, "go") is None
