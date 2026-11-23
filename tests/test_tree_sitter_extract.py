@@ -73,6 +73,16 @@ def test_go_blocks_capture_nested_braces_and_methods() -> None:
     assert "return v[i]" in blocks["nth"]
 
 
+def test_go_expression_safety_records_constant_index_accesses() -> None:
+    findings = tree_sitter_extract.analyze_expression(
+        "s[0] + s[len(s) - 1] + s[i] + t[len(s)-1]", "go"
+    )
+
+    assert findings is not None
+    assert findings.constant_index_accesses == (("s", 1), ("s", 1))
+    assert findings.index_accesses == (("s", "i"),)
+
+
 def test_typescript_blocks_include_class_methods_and_nested_functions() -> None:
     source = (
         "export class S {\n"

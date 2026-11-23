@@ -861,6 +861,7 @@ class ExpressionSafety:
     member_access_values: tuple[str, ...]
     pointer_deref_values: tuple[str, ...]
     additions: tuple[tuple[str, str], ...]
+    constant_index_accesses: tuple[tuple[str, int], ...] = ()
 
 
 def _unwrap(node):
@@ -953,6 +954,7 @@ def analyze_expression(expression: str, language: str) -> ExpressionSafety | Non
     member_access_values: list[str] = []
     pointer_deref_values: list[str] = []
     additions: list[tuple[str, str]] = []
+    constant_index_accesses: list[tuple[str, int]] = []
 
     def visit(node) -> None:
         if node.type == _BINARY_NODE_TYPE:
@@ -983,6 +985,24 @@ def analyze_expression(expression: str, language: str) -> ExpressionSafety | Non
             index_name = _identifier_name(source_bytes, index)
             if base_name is not None and index_name is not None:
                 index_accesses.append((base_name, index_name))
+            if canonical == "go" and base_name is not None and index is not None:
+                index_text = re.sub(
+                    r"\s+", "", _decode(source_bytes, index).strip()
+                )
+                literal = re.fullmatch(r"(?:0|[1-9](?:_?[0-9])*)", index_text)
+                if literal:
+                    constant_index_accesses.append(
+                        (base_name, int(index_text.replace("_", "")) + 1)
+                    )
+                else:
+                    length_minus = re.fullmatch(
+                        rf"len\({re.escape(base_name)}\)-([1-9](?:_?[0-9])*)",
+                        index_text,
+                    )
+                    if length_minus:
+                        constant_index_accesses.append(
+                            (base_name, int(length_minus.group(1).replace("_", "")))
+                        )
         elif node.type == member_type:
             if any(child.type == "optional_chain" for child in node.children):
                 # TypeScript/JavaScript optional chaining (``a?.b``) is null-safe.
@@ -1014,6 +1034,7 @@ def analyze_expression(expression: str, language: str) -> ExpressionSafety | Non
         member_access_values=tuple(member_access_values),
         pointer_deref_values=tuple(pointer_deref_values),
         additions=tuple(additions),
+        constant_index_accesses=tuple(constant_index_accesses),
     )
 
 

@@ -5095,6 +5095,102 @@ func (z *Float) pow5(n uint64) *Float {
     assert not any("can index" in i.message for i in issues)
 
 
+def test_go_constant_slice_index_requires_nonempty_length() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package p
+
+func first(s []int) int {
+    return s[0]
+}
+
+func firstAfterLengthGuard(s []int) int {
+    if len(s) == 0 { return 0 }
+    return s[0]
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+
+    assert [
+        issue.message for issue in issues
+        if issue.function_name == "first" and "can index" in issue.message
+    ] == [
+        "Go function `first` can index `s[0]` without a bounds contract "
+        "(Z3 counterexample: len_s=0)"
+    ]
+    assert not any(
+        issue.function_name == "firstAfterLengthGuard" and "can index" in issue.message
+        for issue in issues
+    )
+
+
+def test_go_constant_slice_indices_use_length_lower_bound_facts() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package p
+
+func secondAfterLengthGuard(s []int) int {
+    if len(s) < 2 { return 0 }
+    return s[1]
+}
+
+func thirdAfterLengthGuard(s []int) int {
+    if len(s) < 2 { return 0 }
+    return s[2]
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+
+    assert not any(
+        issue.function_name == "secondAfterLengthGuard" and "can index" in issue.message
+        for issue in issues
+    )
+    assert [
+        issue.message for issue in issues
+        if issue.function_name == "thirdAfterLengthGuard" and "can index" in issue.message
+    ] == [
+        "Go function `thirdAfterLengthGuard` can index `s[2]` without a bounds "
+        "contract (Z3 counterexample: len_s=2)"
+    ]
+
+
+def test_go_constant_slice_index_len_minus_one_is_reported_when_unguarded() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package p
+
+func last(s []int) int {
+    return s[len(s)-1]
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+
+    assert [
+        issue.message for issue in issues if "can index" in issue.message
+    ] == [
+        "Go function `last` can index `s[len(s)-1]` without a bounds contract "
+        "(Z3 counterexample: len_s=0)"
+    ]
+
+
+def test_go_constant_indices_skip_maps_and_fixed_array_parameters() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package p
+
+func mapValue(m map[int]int) int {
+    return m[0]
+}
+
+func arrayValue(a [4]int) int {
+    return a[0]
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+
+    assert not any("can index" in issue.message for issue in issues)
+
+
 def test_go_safety_suppresses_actor_act_builder_param_nil() -> None:
     """``Actor.Act`` implementations receive non-nil ``*Builder`` and ``*Action``."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues

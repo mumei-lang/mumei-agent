@@ -5309,6 +5309,15 @@ def _detect_go_safety_issues(
                 name for name, raw_type in param_types.items()
                 if raw_type.strip().lstrip("*") == "string"
             }
+            sequence_names = (
+                {
+                    name for name, raw_type in param_types.items()
+                    if raw_type.strip().lstrip("*").startswith("[")
+                    or raw_type.strip() == "string"
+                }
+                | known_strings
+                | _go_package_slice_names(package_source)
+            )
             ensures_names = _go_ensures_identifiers(orig_source, orig_start if orig_start >= 0 else fn.start_char)
             contract_results = _go_named_results(fn.return_type) & ensures_names
             contract_outputs = {
@@ -5323,12 +5332,7 @@ def _detect_go_safety_issues(
                 param_names=set(param_types),
                 nonneg_names=unsigned_vars,
                 nonzero_names=guaranteed_nonzero,
-                sequence_names={
-                    name for name, raw_type in param_types.items()
-                    if raw_type.strip().lstrip("*").startswith("[") or raw_type.strip() == "string"
-                }
-                | known_strings
-                | _go_package_slice_names(package_source),
+                sequence_names=sequence_names,
                 contract_results=contract_results,
                 contract_outputs=contract_outputs,
             )
@@ -5368,6 +5372,36 @@ def _detect_go_safety_issues(
                     source=source,
                     params_text=fn.params_text,
                 )
+                seen_constant_accesses: set[tuple[str, str]] = set()
+                for container, need, index_text in _go_constant_index_accesses(
+                    expression
+                ):
+                    if container not in sequence_names or container in go_map_names:
+                        continue
+                    if re.match(r"\s*\*?\s*\[\d+\]", param_types.get(container, "")):
+                        continue
+                    if facts is not None and facts.len_ge.get(container, 0) >= need:
+                        continue
+                    constant_length = expr_constants.get(f"len({container})")
+                    if constant_length is not None and constant_length >= need:
+                        continue
+                    access = (container, index_text)
+                    if access in seen_constant_accesses:
+                        continue
+                    seen_constant_accesses.add(access)
+                    expr_issues.append(
+                        ForeignSafetyIssue(
+                            function_name=fn.name,
+                            message=(
+                                f"Go function `{fn.name}` can index "
+                                f"`{container}[{index_text}]` without a bounds "
+                                f"contract (Z3 counterexample: "
+                                f"len_{container}={need - 1})"
+                            ),
+                            required_contracts=(f"len_{container} >= {need}",),
+                            counterexample={f"len_{container}": need - 1},
+                        )
+                    )
                 # A final return after ``if x == nil { return }`` is known non-nil.
                 if index == len(expressions) - 1 and guarded:
                     expr_issues = [
@@ -5906,6 +5940,45 @@ def _go_sibling_guard_asymmetries(package_source: str) -> list[str]:
 def _go_index_accesses(expression: str) -> tuple[tuple[str, str], ...]:
     findings = tree_sitter_extract.analyze_expression(expression, "go")
     return findings.index_accesses if findings is not None else ()
+
+
+def _go_constant_index_accesses(
+    expression: str,
+) -> tuple[tuple[str, int, str], ...]:
+    findings = tree_sitter_extract.analyze_expression(
+        _strip_go_rust_literals_and_comments(expression), "go"
+    )
+    if findings is None or not findings.constant_index_accesses:
+        return ()
+    known_accesses = set(findings.constant_index_accesses)
+    accesses: list[tuple[str, int, str]] = []
+    seen: set[tuple[str, str]] = set()
+    pattern = re.compile(
+        r"\b(?P<container>[^\W\d]\w*)\s*\[\s*(?P<index>.*?)\s*\]",
+        re.DOTALL,
+    )
+    for match in pattern.finditer(expression):
+        container = match.group("container")
+        index_text = re.sub(r"\s+", "", match.group("index"))
+        literal = re.fullmatch(r"(?:0|[1-9](?:_?[0-9])*)", index_text)
+        if literal:
+            need = int(index_text.replace("_", "")) + 1
+        else:
+            length_minus = re.fullmatch(
+                rf"len\({re.escape(container)}\)-([1-9](?:_?[0-9])*)",
+                index_text,
+            )
+            if not length_minus:
+                continue
+            need = int(length_minus.group(1).replace("_", ""))
+        if (container, need) not in known_accesses:
+            continue
+        access = (container, index_text)
+        if access in seen:
+            continue
+        seen.add(access)
+        accesses.append((container, need, index_text))
+    return tuple(accesses)
 
 
 _DATAFLOW_ISSUE_MESSAGES = {
