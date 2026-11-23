@@ -5769,6 +5769,31 @@ class _RustBindings:
                 f"{prefix}[{spelled}]",
                 self._receiver_annotation_position(receiver),
             )
+        if method == "remainder":
+            # `v.chunks_exact(n).remainder()` — the trailing
+            # sub-slice, spelled `&[P]`/`&mut [P]` like the
+            # chunked elements.
+            if receiver.type != "call_expression":
+                return None, None
+            inner_callee = receiver.child_by_field_name("function")
+            inner_method = (
+                self.text(
+                    inner_callee.child_by_field_name("field")
+                ).strip()
+                if inner_callee is not None
+                and inner_callee.type == "field_expression"
+                else None
+            )
+            if inner_method not in {
+                "chunks_exact",
+                "rchunks_exact",
+                "chunks_exact_mut",
+                "rchunks_exact_mut",
+            }:
+                return None, None
+            return self._iterator_spelling_with_pos(
+                receiver, _depth + 1
+            )
         if method == "flatten":
             # `v.iter().flatten()` unwraps the element's own args —
             # `Vec<Vec<P>>` iterates `Vec<P>`, flatten yields `P`
@@ -6582,6 +6607,58 @@ class _RustBindings:
             return (
                 _UNKNOWN,
                 None if spelled is None else prefix + spelled,
+            )
+        if method == "remainder":
+            # `v.chunks_exact(n).remainder()` yields the trailing
+            # slice's `&P` elements — the spelled `&[P]` container
+            # peels to `P` (`&mut [P]` for the `_mut` forms).
+            if receiver.type != "call_expression":
+                return _UNKNOWN, None
+            inner_callee = receiver.child_by_field_name("function")
+            inner_method = (
+                self.text(
+                    inner_callee.child_by_field_name("field")
+                ).strip()
+                if inner_callee is not None
+                and inner_callee.type == "field_expression"
+                else None
+            )
+            if inner_method not in {
+                "chunks_exact",
+                "rchunks_exact",
+                "chunks_exact_mut",
+                "rchunks_exact_mut",
+            }:
+                return _UNKNOWN, None
+            spelled, spelled_pos = self._iterator_spelling_with_pos(
+                receiver
+            )
+            if spelled is None:
+                return _UNKNOWN, None
+            peeled = re.fullmatch(
+                r"(&\s*(?:'\w+\s+)?mut\s+|&\s*(?:'\w+\s+)?)\[(.+)\]",
+                spelled.strip(),
+            )
+            if peeled is None:
+                return _UNKNOWN, None
+            position = (
+                spelled_pos if spelled_pos is not None
+                else call.start_byte
+            )
+            elem_id, rest = self._element_of(
+                None,
+                peeled.group(2).strip(),
+                position,
+                self._literal_element_args(call),
+            )
+            if elem_id is None:
+                return _UNKNOWN, rest
+            name = next(
+                (b.name for b in self.bindings if b.id == elem_id), ""
+            )
+            return (
+                TypeFact("named", name, 0, None, elem_id),
+                peeled.group(2).strip(),
             )
         if method in _SET_ALGEBRA_METHODS | _MAP_RANGE_METHODS:
             # `a.union(&b)`/`intersection`/`difference`/
