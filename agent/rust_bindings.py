@@ -467,6 +467,16 @@ def _spelled_slice_head(text: str) -> bool:
     return True
 
 
+# Std inherent methods of the exact-chunks iterators — inherent
+# methods outrank trait impls on the same receiver, so a trait
+# `impl Rem for ChunksExact` cannot replace std `remainder` (std
+# has it), but DOES own `into_remainder` there (std lacks it).
+_EXACT_CHUNKS_INHERENT = {
+    "ChunksExact": {"remainder"},
+    "RChunksExact": {"remainder"},
+    "ChunksExactMut": {"remainder", "into_remainder"},
+    "RChunksExactMut": {"remainder", "into_remainder"},
+}
 _TRY_HEADS = frozenset({"Option", "Result"})
 # Prelude constructors whose tuple payload position is fixed by the
 # container type — `Some(x)` binds `Option<T>`'s first arg, `Err(e)`
@@ -6712,6 +6722,18 @@ class _RustBindings:
         what `_iterator_method_element` types instead."""
         return self._iterator_spelling_with_pos(call, _depth)[0]
 
+    def _producing_call_head(self, call: Any) -> "str | None":
+        """Pascal-case std type named after a producing call's
+        method — `v.chunks_exact(n)` yields `ChunksExact`."""
+        callee = call.child_by_field_name("function")
+        if callee is None or callee.type != "field_expression":
+            return None
+        field = callee.child_by_field_name("field")
+        if field is None:
+            return None
+        mname = self._normalize_identifier(self.text(field))
+        return "".join(part.title() for part in mname.split("_"))
+
     def _chunks_exact_remainder_source(
         self, receiver: Any
     ) -> "Any | None":
@@ -7070,24 +7092,28 @@ class _RustBindings:
                 f"{prefix}[{spelled}]",
                 self._receiver_annotation_position(receiver),
             )
-        if (
-            method in {"remainder", "into_remainder"}
-            and not self._visible_trait_method(
-                method, call.start_byte, receiver
-            )
-        ):
+        if method in {"remainder", "into_remainder"}:
             # `v.chunks_exact(n).remainder()`/`into_remainder()` —
             # the trailing sub-slice, spelled `&[P]`/`&mut [P]`
             # like the chunked elements. A `let it = v.chunks_exact
             # (n); it.remainder()` receiver resolves through the
             # alias to the chunks call. A trait impl covering this
-            # receiver's head hides the std shape.
+            # receiver's head hides the std shape — except where the
+            # method is already inherent on that iterator.
             inner_call = self._chunks_exact_remainder_source(receiver)
             if inner_call is None:
                 return None, None
-            return self._iterator_spelling_with_pos(
-                inner_call, _depth + 1
-            )
+            prod_head = self._producing_call_head(inner_call)
+            if (
+                method
+                in _EXACT_CHUNKS_INHERENT.get(prod_head or "", ())
+                or not self._visible_trait_method(
+                    method, call.start_byte, receiver
+                )
+            ):
+                return self._iterator_spelling_with_pos(
+                    inner_call, _depth + 1
+                )
         if method == "flatten":
             # `v.iter().flatten()` unwraps the element's own args —
             # `Vec<Vec<P>>` iterates `Vec<P>`, flatten yields `P`
@@ -7943,50 +7969,56 @@ class _RustBindings:
                 if spelled is None
                 else prefix + "[" + spelled + "]",
             )
-        if (
-            method in {"remainder", "into_remainder"}
-            and not self._visible_trait_method(
-                method, call.start_byte, receiver
-            )
-        ):
+        if method in {"remainder", "into_remainder"}:
             # `v.chunks_exact(n).remainder()`/`into_remainder()`
             # yields the trailing slice's `&P` elements — the
             # spelled `&[P]` container peels to `P` (`&mut [P]`
             # for the `_mut` forms). A `let it = v.chunks_exact(n);
             # it.remainder()` receiver resolves through the alias.
+            # A trait impl covering this receiver's head hides the
+            # std shape — except where the method is already
+            # inherent on that iterator.
             inner_call = self._chunks_exact_remainder_source(receiver)
             if inner_call is None:
                 return _UNKNOWN, None
-            spelled, spelled_pos = self._iterator_spelling_with_pos(
-                inner_call
-            )
-            if spelled is None:
-                return _UNKNOWN, None
-            peeled = re.fullmatch(
-                r"(&\s*(?:'\w+\s+)?mut\s+|&\s*(?:'\w+\s+)?)\[(.+)\]",
-                spelled.strip(),
-            )
-            if peeled is None:
-                return _UNKNOWN, None
-            position = (
-                spelled_pos if spelled_pos is not None
-                else call.start_byte
-            )
-            elem_id, rest = self._element_of(
-                None,
-                peeled.group(2).strip(),
-                position,
-                self._literal_element_args(call),
-            )
-            if elem_id is None:
-                return _UNKNOWN, rest
-            name = next(
-                (b.name for b in self.bindings if b.id == elem_id), ""
-            )
-            return (
-                TypeFact("named", name, 0, None, elem_id),
-                peeled.group(2).strip(),
-            )
+            prod_head = self._producing_call_head(inner_call)
+            if (
+                method
+                in _EXACT_CHUNKS_INHERENT.get(prod_head or "", ())
+                or not self._visible_trait_method(
+                    method, call.start_byte, receiver
+                )
+            ):
+                spelled, spelled_pos = self._iterator_spelling_with_pos(
+                    inner_call
+                )
+                if spelled is None:
+                    return _UNKNOWN, None
+                peeled = re.fullmatch(
+                    r"(&\s*(?:'\w+\s+)?mut\s+|&\s*(?:'\w+\s+)?)\[(.+)\]",
+                    spelled.strip(),
+                )
+                if peeled is None:
+                    return _UNKNOWN, None
+                position = (
+                    spelled_pos if spelled_pos is not None
+                    else call.start_byte
+                )
+                elem_id, rest = self._element_of(
+                    None,
+                    peeled.group(2).strip(),
+                    position,
+                    self._literal_element_args(call),
+                )
+                if elem_id is None:
+                    return _UNKNOWN, rest
+                name = next(
+                    (b.name for b in self.bindings if b.id == elem_id), ""
+                )
+                return (
+                    TypeFact("named", name, 0, None, elem_id),
+                    peeled.group(2).strip(),
+                )
         if method in _SET_ALGEBRA_METHODS | _MAP_RANGE_METHODS:
             # `a.union(&b)`/`intersection`/`difference`/
             # `symmetric_difference` and `s.range(..)`/`range_mut`
