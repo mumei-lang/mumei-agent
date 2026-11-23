@@ -3134,9 +3134,11 @@ the queue-of-queues root — ops init it lazily like a
 `cc := make(chan chan T)` binding, `w.C = cc` /
 literal stores join it into the donor's share group,
 and a param's field queue is caller-provided memory
-(reads observe the param's origin). Ranging over a
-`chan chan` field and nested container elements
-(`arr[i].C`, `s.W.C` one level deeper) stay closed.
+(reads observe the param's origin). `for q := range w.C`
+admits the same way — the element name reads the member's
+queue deps. Nested container elements (`arr[i].C`,
+`s.W.C` one level deeper) and `chan chan` values nested in
+maps or two-level slices stay closed.
 A `chan T` result now admits
 the same way a `chan` parameter does: `ch := g()` and
 `var ch = g()` bind a callee-produced queue when the

@@ -31313,6 +31313,16 @@ def test_value_struct_field_chan_chan_send_recv(go_types_helper):
         "func FTwoRoots(a WW, b WW) int64 {\n"
         "\t_ = <-(<-a.C)\n"
         "\treturn <-(<-b.C)\n}\n"
+        "func FRange(x int64) int64 {\n"
+        "\tw := WW{C: make(chan chan int64, 2)}\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tc <- x\n"
+        "\tw.C <- c\n"
+        "\ts := int64(0)\n"
+        "\tfor q := range w.C {\n"
+        "\t\ts += <-q\n"
+        "\t}\n"
+        "\treturn s\n}\n"
     }
     snapshot = _snapshot_for(go_types_helper, files)
     summaries = ip.summarize_go_package(files, snapshot)
@@ -31328,6 +31338,7 @@ def test_value_struct_field_chan_chan_send_recv(go_types_helper):
             "FParamDonor",
             "FParamDonorStore",
             "FTwoRoots",
+            "FRange",
         )
     }
     assert results["FSend"].available
@@ -31346,6 +31357,10 @@ def test_value_struct_field_chan_chan_send_recv(go_types_helper):
     ):
         assert results[name].available
         assert results[name].return_dependencies == frozenset({0, 1})
+    # `for q := range w.C` — the element name reads the member's
+    # queue deps like `cc`'s range element does.
+    assert results["FRange"].available
+    assert results["FRange"].return_dependencies == frozenset({0})
 
 
 def test_value_struct_field_channel_may_set_follows_reseat(
