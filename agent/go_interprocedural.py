@@ -9617,6 +9617,11 @@ class _Builder:
             # Promoted mid-field through an embedded member — stay
             # closed like the leaf promotion gate.
             return None
+        # Pin every container the path crosses — a redeclared
+        # intermediate struct must flag dependents like the leaf's
+        # own type does (`_bound_pointee_index_field` parity).
+        self.pinned.add(mid_member.id)
+        self._pin_fact_identities(mid_member.type)
         return (root, mid_member)
 
     def _value_field_chan(
