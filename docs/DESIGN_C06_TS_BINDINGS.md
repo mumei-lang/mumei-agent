@@ -55,7 +55,7 @@ pinned `typescript` 5.9.3 の `ts.createProgram`（`noResolve`, `strict`, `lib.e
 7. `unsupported` が非空なら拒否（import 系・triple-slash はここで落ちる）。
 8. 各参照: `name` 非空、参照 span が UTF-8 境界かつソース文字列と一致、
    `declarations` は全 span がソース内かつ同名、`library` と宣言リストは排他
-   （`library` なら宣言空、非 `library` なら宣言必須）、参照 span 同士は非重複でソート済み。
+   （`library` なら宣言空、非 `library` なら宣言必須）、参照 span 同士は非重複（reader が span でソートしてから検査するため、入力の並び順は受理条件ではない）。
 9. `compare_with_lexical` は lexical report の `source_sha256` と envelope のソースハッシュ
    （reader が再計算する `sha256:` 値）の一致を要求し、profile を `mumei.ts-lexical-bindings/v1` に固定する。
 
