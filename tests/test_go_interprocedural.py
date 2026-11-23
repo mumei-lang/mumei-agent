@@ -49790,6 +49790,70 @@ def test_parenthesized_rhs_binds_closure_records(go_types_helper):
         assert results[parenthesized] == results[plain]
 
 
+def test_opaque_func_value_reads_current_escaped_deps(go_types_helper):
+    files = {
+        "a.go": (
+            "package p\n"
+            "func mk(v *int64) func() int64 {\n"
+            "\treturn func() int64 { return *v }\n"
+            "}\n"
+            "func mkv(v int64) func() int64 {\n"
+            "\treturn func() int64 { return v }\n"
+            "}\n"
+            "func ap(cb func() int64) int64 { return cb() }\n"
+            "func pkgfn() int64 { return 7 }\n"
+            "func F_call(x, y int64) int64 {\n"
+            "\tv := y; h := mk(&v); v = x; return h()\n"
+            "}\n"
+            "func G_ret(x, y int64) func() int64 {\n"
+            "\tv := y; h := mk(&v); v = x; return h\n"
+            "}\n"
+            "func F_ret(x, y int64) int64 { return G_ret(x, y)() }\n"
+            "func G_named(x, y int64) (r func() int64) {\n"
+            "\tv := y; r = mk(&v); v = x; return r\n"
+            "}\n"
+            "func F_named(x, y int64) int64 {\n"
+            "\treturn G_named(x, y)()\n"
+            "}\n"
+            "func G_bare(x, y int64) (r func() int64) {\n"
+            "\tv := y; r = mk(&v); v = x; return\n"
+            "}\n"
+            "func F_bare(x, y int64) int64 { return G_bare(x, y)() }\n"
+            "func F_ap(x, y int64) int64 {\n"
+            "\tv := y; h := mk(&v); v = x; return ap(h)\n"
+            "}\n"
+            "func F_val(x, y int64) int64 {\n"
+            "\tv := y; h := mkv(v); v = x; return ap(h)\n"
+            "}\n"
+            "func F_alias(x int64) int64 {\n"
+            "\tw := x; p := &w; _ = p; h := pkgfn; return h()\n"
+            "}\n"
+        ),
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, {}),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    expected = {
+        "F_call": frozenset({0, 1}),
+        "F_ret": frozenset({0, 1}),
+        "F_named": frozenset({0, 1}),
+        "F_bare": frozenset({0, 1}),
+        "F_ap": frozenset({0, 1}),
+        "F_val": frozenset({1}),
+        "F_alias": frozenset(),
+    }
+    for function_name, dependencies in expected.items():
+        result = named_package(files, snapshot, summaries, function_name)
+        assert result.available, (function_name, result.gaps)
+        assert result.return_dependencies == dependencies, (
+            function_name,
+            result.return_dependencies,
+        )
+
+
 def test_func_result_captured_chan_send_after_bind(go_types_helper):
     # `f := mk(ch)` — the returned closure may capture `ch`, so the
     # queue escapes: `ch <- x` after the call broadcasts into the

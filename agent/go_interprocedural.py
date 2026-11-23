@@ -14167,6 +14167,37 @@ class _Builder:
             deps |= locals_[binding_id]
         return deps
 
+    def _is_opaque_func_value(
+        self, binding_id: str, params: dict[str, int]
+    ) -> bool:
+        binding = self.bindings.get(binding_id)
+        return (
+            binding is not None
+            and binding.kind == "variable"
+            and not self._package_level(binding)
+            and binding.type is not None
+            and binding.type.kind == "function"
+            and binding_id not in params
+            and not self._is_tracked_literal_value(binding_id, params)
+            and binding_id not in self.func_aliases
+            and binding_id not in self.bound_method_values
+            and binding_id not in self.bound_interface_methods
+        )
+
+    def _opaque_func_value_read_deps(
+        self,
+        binding_id: str,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+    ) -> frozenset[int]:
+        deps = self.indirect_writes
+        for escaped_id in self.escaped:
+            if escaped_id in locals_:
+                deps |= locals_[escaped_id]
+            elif escaped_id in params:
+                deps |= frozenset({params[escaped_id]})
+        return deps
+
     def _has_closure_records(self, binding_id: str) -> bool:
         return (
             binding_id in self.closure_captures
@@ -20151,6 +20182,14 @@ class _Builder:
                             result_deps |= locals_.get(
                                 result_root, frozenset()
                             )
+                            if self._is_opaque_func_value(
+                                result_id, params
+                            ):
+                                result_deps |= (
+                                    self._opaque_func_value_read_deps(
+                                        result_id, params, locals_
+                                    )
+                                )
                     extra = self._captured_current_deps(
                         self.closure_captures.get(
                             result_id, frozenset()
@@ -32364,6 +32403,12 @@ class _Builder:
                     ref.binding_id, params
                 ):
                     deps = self._tracked_literal_read_deps(
+                        ref.binding_id, params, locals_
+                    )
+                elif self._is_opaque_func_value(
+                    ref.binding_id, params
+                ):
+                    deps |= self._opaque_func_value_read_deps(
                         ref.binding_id, params, locals_
                     )
                 if ref.binding_id in self.external_chan_locals:
