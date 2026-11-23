@@ -2027,19 +2027,29 @@ class _RustBindings:
             # bindings carry the element spelling; an `impl Trait`
             # with no bindings names no payload and stays opaque.
             bound = [
-                re.sub(
-                    r"\s+",
-                    " ",
+                (
                     self.text(
-                        bound_node.child_by_field_name("type")
-                    ),
-                ).strip()
+                        bound_node.child_by_field_name("name")
+                    ).strip(),
+                    re.sub(
+                        r"\s+",
+                        " ",
+                        self.text(
+                            bound_node.child_by_field_name("type")
+                        ),
+                    ).strip(),
+                )
                 for bound_node in self._descendants(node)
                 if bound_node.type == "type_binding"
                 and bound_node.child_by_field_name("type") is not None
             ]
-            if bound:
-                return None, ", ".join(bound)
+            # `impl Iterator<Item = P> + Other<X = Q>` — only
+            # `Item` names the iterated element; other bounds'
+            # associated types are not the payload.
+            items = [text for name, text in bound if name == "Item"]
+            chosen = items or [text for _, text in bound]
+            if chosen:
+                return None, ", ".join(chosen)
             return None, None
         if node is not None and node.type in {
             "slice_type",
@@ -5438,17 +5448,14 @@ class _RustBindings:
                     ).strip()
                     if (
                         method_name == "deref"
-                        and receiver[1] is None
-                        and receiver[0] is not None
-                        and (
-                            (ph := self._produced_head(
-                                callee.child_by_field_name("value")
-                            )) is not None
-                            and ph.rsplit("::", 1)[-1]
-                            in _DEREF_WRAPPER_NAMES
-                        )
+                        and (ph := self._produced_head(
+                            callee.child_by_field_name("value")
+                        )) is not None
+                        and ph.rsplit("::", 1)[-1]
+                        in _DEREF_WRAPPER_NAMES
+                        and receiver != (None, None)
                     ):
-                        # `h.make().deref()` — `-> Box<P>`/`Rc<P>`
+                        # `h.make().deref()` — `-> Box<G<P>>`/`Rc<P>`
                         # peels at the call, so the receiver's
                         # resolved type IS the payload.
                         return receiver
@@ -6995,20 +7002,41 @@ class _RustBindings:
         )
         if pair is None and node is not None and node.type == "call_expression":
             # `m.entry(k)` on `h.make()` — a produced map receiver
-            # has no annotation node; its spelled return carries the
-            # full `K, V` key already scope-pinned.
-            spelled = self._expr_type_spelling(node)
-            produced = (
+            # has no annotation node of its own; the callee's
+            # declared return annotation keeps both `K` and `V`
+            # (`_expr_type_spelling` reduces a map to its value).
+            callee = node.child_by_field_name("function")
+            member = None
+            if callee is not None:
+                if callee.type == "field_expression":
+                    member = self._field_member(
+                        callee, ("associated_function",)
+                    )
+                elif callee.type == "identifier":
+                    member = self._through_import(
+                        self._lookup(
+                            self._normalize_identifier(
+                                self.text(callee)
+                            ),
+                            node.start_byte,
+                            "value",
+                        ),
+                        node.start_byte,
+                        "value",
+                    )
+                elif callee.type in {
+                    "scoped_identifier",
+                    "scoped_type_identifier",
+                }:
+                    member, _ = self._scoped_member(callee)
+            tnode = None if member is None else member.type_node
+            pair = (
                 None
-                if spelled is None
-                else re.fullmatch(
-                    r"[A-Za-z_][\w:]*\s*<([\s\S]*)>",
-                    spelled.strip(),
-                )
+                if tnode is None
+                else self._generic_head_args(tnode, tnode.start_byte)
             )
-            if produced is not None:
-                return produced.group(1)
-            return None
+            if pair is None:
+                return None
         if pair is None:
             return None
         key, head, _ = pair
@@ -7270,6 +7298,22 @@ class _RustBindings:
                     )
                     if arg is not None:
                         return self._receiver_annotation_position(arg)
+                produced = self._field_member(
+                    callee, ("associated_function",)
+                )
+                if (
+                    produced is not None
+                    and produced.type_node is not None
+                    and not getattr(
+                        produced, "member_impl_type_params", ()
+                    )
+                ):
+                    # `w.make()` — the spelled names were written
+                    # in the declared return annotation, not in
+                    # `w`'s; an impl-parameter return (`-> P`)
+                    # still resolves at the receiver so its
+                    # substitution applies.
+                    return produced.type_node.start_byte
                 return self._receiver_annotation_position(
                     callee.child_by_field_name("value")
                 )
