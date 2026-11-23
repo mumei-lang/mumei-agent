@@ -9566,3 +9566,38 @@ fn g(v: Vec<P>, a: &[P; 3], lt: &'a [P], lt2: &'a[P], rows: &[[P; 2]]) {
     assert bound.get("c2[0].pm()") == pms[0].id
 
 
+
+
+def test_chunks_exact_remainder_binds_slice_elements():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct W<T> { x: T }
+fn f(v: Vec<P>, s: &mut [P], w: W<P>) {
+    for x in v.chunks_exact(2).remainder() { x.pm(); }
+    let r = v.chunks_exact(2).remainder();
+    r[0].pm();
+    for y in s.chunks_exact_mut(3).remainder() { y.pm(); }
+    for z in w.chunks_exact(2).remainder() { z.pm(); }
+    for q in v.chunks(2).remainder() { q.pm(); }
+    for c in v.chunks_exact(2) { c.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `remainder()` is the trailing `&[P]`/`&mut [P]` slice —
+    # iterating it yields `&P` and indexing it reads `P`.
+    assert bound.get("x.pm()") == pm.id
+    assert bound.get("r[0].pm()") == pm.id
+    assert bound.get("y.pm()") == pm.id
+    # A custom `W` can name any `chunks_exact` — stays opaque.
+    assert not bound.get("z.pm()")
+    # `chunks` has no `remainder` method — stays opaque.
+    assert not bound.get("q.pm()")
+    # A chunk `&[P]` has no `pm` member — stays opaque.
+    assert not bound.get("c.pm()")
