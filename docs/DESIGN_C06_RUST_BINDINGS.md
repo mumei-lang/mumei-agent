@@ -55,8 +55,10 @@ CLI サブコマンド（`lsif` / `scip` / `analysis-stats` / `diagnostics` / `u
    `{"1.100.0 (0ef1bc3 2026-11-09)"}` に一致、`toolInfo.name == "rust-analyzer"`。
 2. `lsif` の label は許可リスト（`document`/`range`/`resultSet`/`item`/`moniker`/
    `textDocument/*` 等の固定集合）に限定。未知 label は拒否。
-3. `documents` に対象ソース・`Cargo.toml`・`Cargo.lock` の完全一致バイト列と
-   sha256 を要求し、対象ソースとの一致で stale を検出（真正性の主張ではない）。
+3. `documents` に対象ソース・`Cargo.toml`・`Cargo.lock` のバイト列と sha256 を要求する。
+   各 document の sha256 は同梱 content との内部一致の検査であり、呼び出し側の現行
+   バイト列と照合するのは対象ソースのみ（stale 検出は対象ソースに限り、
+   Cargo.toml/lock や別ファイルの事後変更は検出しない）。真正性の主張ではない。
 4. Cargo 境界: 単一 root package のみ。`dependencies` / `dev-dependencies` /
    `build-dependencies`、workspace member、build script、proc-macro crate は拒否。
    lock 内の package は local（path）のみ。
