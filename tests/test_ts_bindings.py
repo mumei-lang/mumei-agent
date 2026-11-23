@@ -3495,3 +3495,36 @@ function f(arr: P[], m: Map<K, P>) {
         "x.pm()",
     }
     assert bound_km == {"k.km()"}
+
+
+def test_optional_receiver_and_nullish_operands_narrow_the_union():
+    # `?.`/`!` narrow `T[] | undefined` receivers before the access;
+    # `??` operands keep the left's non-null constituent. A plain
+    # `.`/`[]` access on the union stays opaque.
+    source = """
+class P { pm(): void {} }
+function f(arr: P[] | undefined, m: Map<string, P> | undefined, bare: P[] | undefined) {
+    arr?.[0].pm();
+    arr?.find(x => true)?.pm();
+    arr?.forEach(p => p.pm());
+    m?.get("k")?.pm();
+    for (const x of arr ?? []) { x.pm(); }
+    const lit = arr ?? [];
+    lit[0].pm();
+    bare[0].pm();
+    bare.find(x => true);
+}
+"""
+    report = build_ts_bindings(source)
+    member_pm = _member_bindings(report, "pm", "associated_function")[0]
+    bound = {
+        source[c.span.start : c.span.end] for c in _calls(report) if c.target == member_pm.id
+    }
+    assert bound == {
+        "arr?.[0].pm()",
+        "arr?.find(x => true)?.pm()",
+        "p.pm()",
+        'm?.get("k")?.pm()',
+        "x.pm()",
+        "lit[0].pm()",
+    }

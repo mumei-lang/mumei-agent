@@ -3310,6 +3310,13 @@ class _TypeScriptBindings:
                 return None
             type_node = self._unwrap_type(record.type_node)
             if type_node is not None:
+                if (
+                    type_node.type == "union_type"
+                    and self._accessed_optionally(node)
+                ):
+                    # `arr?.[0]` — `?.`/`!` narrow the union to its
+                    # non-null constituent before the access.
+                    return self._non_nullable_type_node(type_node)
                 return type_node
             if (
                 record.node is not None
@@ -3321,9 +3328,12 @@ class _TypeScriptBindings:
                     and declarator.type == "variable_declarator"
                 ):
                     value = declarator.child_by_field_name("value")
-                    if value is not None and value.type == "array":
-                        # `const cp = [...arr]` — unannotated, the
-                        # array literal spells the element type.
+                    if value is not None and value.type in {
+                        "array", "binary_expression",
+                    }:
+                        # `const cp = [...arr]` / `lit = arr ?? []`
+                        # — unannotated, the initializer spells the
+                        # element type.
                         self._type_node_active.add(record.node.id)
                         try:
                             return self._declared_type_node(
@@ -3371,6 +3381,31 @@ class _TypeScriptBindings:
             if len(kids) == 1 and kids[0].type == "spread_element":
                 inner = next(iter(self.children(kids[0])), None)
                 return self._declared_type_node(inner, position)
+            return None
+        if node.type == "binary_expression":
+            kids = self.children(node)
+            if any(
+                child.type == "??" or self.text(child) == "??"
+                for child in node.children
+            ):
+                # `arr ?? []` — the left's non-null constituent; when
+                # the left spells nothing, the right's type is it.
+                left = next(iter(kids), None)
+                left_node = self._non_nullable_type_node(
+                    self._unwrap_type(
+                        self._declared_type_node(
+                            left,
+                            left.start_byte if left is not None else 0,
+                        )
+                    )
+                )
+                if left_node is not None:
+                    return left_node
+                right = kids[-1] if kids else None
+                return self._declared_type_node(
+                    right,
+                    right.start_byte if right is not None else position,
+                )
             return None
         if node.type in {
             "parenthesized_expression", "non_null_expression",
