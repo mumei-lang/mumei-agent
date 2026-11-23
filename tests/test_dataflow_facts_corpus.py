@@ -94,7 +94,11 @@ def _label_offsets(
 
 def _metrics_for_file(
     path: Path,
-) -> tuple[dict[str, tuple[int, int, int]], frozenset[str]]:
+) -> tuple[
+    dict[str, tuple[int, int, int]],
+    frozenset[str],
+    frozenset[tuple[str, int, str, str]],
+]:
     source = path.read_text(encoding="utf-8")
     labels = _parse_labels(source)
     line_offsets = _line_offsets(source)
@@ -104,6 +108,7 @@ def _metrics_for_file(
 
     totals = {category: [0, 0, 0] for category in _CATEGORIES}
     unanalyzed: set[str] = set()
+    unexpected: set[tuple[str, int, str, str]] = set()
 
     def counts_for(category: str) -> list[int]:
         return totals.setdefault(category, [0, 0, 0])
@@ -158,6 +163,9 @@ def _metrics_for_file(
             )
             if match_index is None:
                 counts_for(issue.category)[2] += 1
+                unexpected.add(
+                    (function.name, issue_line, issue.category, issue_subject)
+                )
             else:
                 matched[issue_line].add(match_index)
                 counts_for(issue.category)[0] += 1
@@ -167,8 +175,10 @@ def _metrics_for_file(
                 if index not in matched[line_number]:
                     counts_for(label.category)[1] += 1
 
-    return {category: tuple(counts) for category, counts in totals.items()}, frozenset(
-        unanalyzed
+    return (
+        {category: tuple(counts) for category, counts in totals.items()},
+        frozenset(unanalyzed),
+        frozenset(unexpected),
     )
 
 
@@ -236,6 +246,23 @@ EXPECTED_UNANALYSED: dict[str, frozenset[str]] = {
     filename: frozenset() for filename in EXPECTED_METRICS
 }
 
+EXPECTED_UNEXPECTED: dict[str, frozenset[tuple[str, int, str, str]]] = {
+    "channels.go": frozenset(),
+    "locks.go": frozenset(
+        {
+            (
+                "lockAndUnlockUnderSameCondition",
+                64,
+                "lock_held_at_return",
+                "mu",
+            )
+        }
+    ),
+    "maps.go": frozenset(),
+    "nil_values.go": frozenset(),
+    "resources.go": frozenset(),
+}
+
 EXPECTED_AGGREGATE: dict[str, tuple[int, int, int]] = {
     "nil_map_write": (2, 0, 0),
     # The single unexpected is the path-insensitive lock report in locks.go.
@@ -292,10 +319,11 @@ def test_unmeasured_contract_output_label_is_still_counted(tmp_path: Path):
         encoding="utf-8",
     )
 
-    metrics, unanalyzed = _metrics_for_file(path)
+    metrics, unanalyzed, unexpected = _metrics_for_file(path)
 
     assert metrics["contract_output_unassigned"] == (0, 1, 0)
     assert not unanalyzed
+    assert not unexpected
 
 
 def test_dataflow_corpus_metrics_match_the_pinned_measurements():
@@ -304,9 +332,12 @@ def test_dataflow_corpus_metrics_match_the_pinned_measurements():
     aggregate = {category: [0, 0, 0] for category in _CATEGORIES}
 
     for path in paths:
-        metrics, unanalyzed = _metrics_for_file(path)
+        metrics, unanalyzed, unexpected = _metrics_for_file(path)
         assert unanalyzed == EXPECTED_UNANALYSED[path.name], (
             f"{path.name}: unanalysed functions differ"
+        )
+        assert unexpected == EXPECTED_UNEXPECTED[path.name], (
+            f"{path.name}: unexpected issues differ"
         )
         assert metrics == EXPECTED_METRICS[path.name], f"{path.name}: metrics differ"
         for category, counts in metrics.items():
