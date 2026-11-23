@@ -3216,13 +3216,38 @@ class _RustBindings:
                     )
                 else:
                     option_head = None
+                option_head_value = (
+                    callee.child_by_field_name("value")
+                    if callee is not None
+                    else None
+                )
+                produced_head = None
+                if option_head is not None and option_head[1] is not None:
+                    # `make().inspect(f)`/`o.filter(f).inspect(g)` —
+                    # a call receiver has no declared head, so read the
+                    # head off the produced type spelling or the
+                    # combinator chain.
+                    produced_head = self._combinator_head(
+                        option_head_value
+                    )
+                    if produced_head is None:
+                        produced = re.match(
+                            r"[A-Za-z_][\w:]*(?=\s*<)",
+                            self._expr_type_spelling(option_head_value)
+                            or "",
+                        )
+                        if produced is not None:
+                            produced_head = self._normalize_identifier(
+                                produced.group(0).split("::")[-1]
+                            )
                 if (
                     option_head is not None
                     and (
                         option_head[1] is None
                         or self._container_head_name(
-                            callee.child_by_field_name("value")
+                            option_head_value
                         ) in option_head[1]
+                        or produced_head in option_head[1]
                         or (
                             map_pair
                             and self._is_map_container(
@@ -3611,6 +3636,26 @@ class _RustBindings:
                         else:
                             element = None
                     if element:
+                        if self.text(field).strip() == "inspect":
+                            # `o.inspect(f)` yields the receiver
+                            # unchanged — spell the whole container
+                            # so `Some(x)` on `Option<Option<P>>`
+                            # binds `x: Option<P>`, not `P`. A chained
+                            # `o.inspect(f).inspect(g)` arrives with
+                            # the whole `Option<P>` already spelled —
+                            # peel one layer for the payload.
+                            spelled = re.fullmatch(
+                                r"Option\s*<([\s\S]+)>",
+                                element.strip(),
+                            )
+                            if (
+                                spelled is not None
+                                and option_head_value is not None
+                                and option_head_value.type
+                                == "call_expression"
+                            ):
+                                element = spelled.group(1).strip()
+                            return None, "Option<" + element + ">"
                         return None, prefix + element
                 if (
                     callee is not None
@@ -4147,9 +4192,14 @@ class _RustBindings:
                         recv_args = self._type_arg_list(
                             receiver[1]
                         )
-                        if head is None:
+                        spelled_whole = False
+                        if head is None and len(recv_args) == 1:
                             # `r.and(s).or(t)` — the produced args
-                            # still spell `Result<...>`.
+                            # still spell `Result<...>`. A multi-arg
+                            # list (`Box<P>, Box<E>`) ends in `>`
+                            # too — the greedy head match would fuse
+                            # it into one `Box`, so only unwrap a
+                            # single spelled type.
                             spelled_head = re.fullmatch(
                                 r"([A-Za-z_][\w:]*)\s*<(.+)>",
                                 receiver[1].strip(),
@@ -4163,6 +4213,7 @@ class _RustBindings:
                                 recv_args = self._type_arg_list(
                                     spelled_head.group(2)
                                 )
+                                spelled_whole = True
                         if head is None and value_expr is not None:
                             # `make().as_ref()` — the callee's return
                             # annotation spells the container head.
@@ -4263,9 +4314,28 @@ class _RustBindings:
                         ):
                             # `r.inspect(f)`/`r.inspect_err(f)` yield
                             # the receiver unchanged — `Result<T, E>`.
+                            # A chained `r.inspect(f).inspect_err(g)`
+                            # already spells the whole `Result<T, E>`
+                            # — re-wrapping would fuse it into
+                            # `Result<Result<T, E>>`.
+                            if spelled_whole:
+                                return None, receiver[1]
+                            ann_pos = (
+                                self._receiver_annotation_position(
+                                    value_expr
+                                )
+                                or node.start_byte
+                            )
                             return (
                                 None,
-                                "Result<{}>".format(receiver[1]),
+                                "Result<{}, {}>".format(
+                                    self._qualified_spelling(
+                                        recv_args[0].strip(), ann_pos
+                                    ),
+                                    self._qualified_spelling(
+                                        recv_args[1].strip(), ann_pos
+                                    ),
+                                ),
                             )
                         if (
                             method_name

@@ -7983,13 +7983,26 @@ impl P { fn pm(&self) {} }
 struct E;
 impl E { fn em(&self) {} }
 struct W<T> { x: T }
-fn f(o: Option<P>, r: Result<P, E>, w: W<P>) {
+mod m { pub struct P; impl P { pub fn pm(&self) {} } }
+fn make() -> Option<P> { loop {} }
+fn f(o: Option<P>, r: Result<P, E>, w: W<P>, oo: Option<Option<P>>) {
     if let Some(x) = o.inspect(|s| {}) { x.pm(); }
     if let Ok(y) = r.inspect(|s| {}) { y.pm(); }
     if let Err(e1) = r.inspect_err(|s| {}) { e1.em(); }
     if let Ok(z) = r.inspect(|s| {}) { z.pm(); }
     let wi = w.inspect(|s| {});
     if let Ok(wp) = wi { wp.pm(); }
+    let oi = o.inspect(|s| {});
+    if let Some(q) = oi { q.pm(); }
+    if let Some(so) = oo.inspect(|s| {}) {
+        if let Some(sp) = so { sp.pm(); }
+    }
+    if let Err(e2) = r.inspect(|s| {}).inspect_err(|s| {}) { e2.em(); }
+    if let Some(mk) = make().inspect(|s| {}) { mk.pm(); }
+    if let Some(fl) = o.filter(|s| true).inspect(|s| {}) { fl.pm(); }
+    if let Some(ci) = o.inspect(|s| {}).inspect(|s| {}) { ci.pm(); }
+    let r2: Result<m::P, E> = loop {};
+    if let Ok(qr) = r2.inspect(|s| {}) { qr.pm(); }
 }
 """
     report = build_rust_bindings(source, pointer_width=64)
@@ -8008,3 +8021,17 @@ fn f(o: Option<P>, r: Result<P, E>, w: W<P>) {
     assert bound.get("z.pm()") == pm.id
     # A custom `W` names its own `inspect` — stays opaque.
     assert not bound.get("wp.pm()")
+    # An intermediate `let` keeps the payload too.
+    assert bound.get("q.pm()") == pm.id
+    # `Option<Option<P>>` — the inner `Option` stays a layer deep.
+    assert bound.get("sp.pm()") == pm.id
+    # A chained `inspect_err` does not re-wrap the `Result`.
+    assert bound.get("e2.em()") == em.id
+    # Produced receivers — return annotations and combinator chains.
+    assert bound.get("mk.pm()") == pm.id
+    assert bound.get("fl.pm()") == pm.id
+    assert bound.get("ci.pm()") == pm.id
+    # Spelled args resolve at the receiver's annotation scope —
+    # `m::P` reaches `m::P::pm`, not a same-named local `P`.
+    mod_pm = _bindings(report, "pm", "associated_function")[1]
+    assert bound.get("qr.pm()") == mod_pm.id
