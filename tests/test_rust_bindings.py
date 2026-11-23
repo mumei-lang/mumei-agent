@@ -7539,7 +7539,7 @@ fn f(m: HashMap<K, P>, b: BTreeMap<K, P>, v: Vec<P>) {
     let x2 = m.entry(K).into_mut(); x2.pm();
     let x3 = m.entry(K).key(); x3.km();
     let x9 = v.iter().map_while(mk); for p in x9 { p.qm(); }
-    let x10 = v.iter().scan(mk); for p in x10 { p.qm(); }
+    let x10 = v.iter().scan(0, mk); for p in x10 { p.qm(); }
     let x13 = v.split_off(1); for p in x13 { p.pm(); }
 }
 """
