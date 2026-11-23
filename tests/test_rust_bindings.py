@@ -9275,6 +9275,7 @@ fn f(m: BTreeMap<u8, P>, v: Vec<P>, q: std::collections::VecDeque<P>) {
     ):
         assert bound.get(name) == pm.id, name
 
+
 def test_first_entry_args_resolve_in_the_annotation_scope():
     source = """
 mod m {
@@ -9324,3 +9325,33 @@ fn f(b: BTreeMap<u32, P>) {
     # `OccupiedEntry::get`.
     assert bound.get("e.get().pm()") == pm.id
     assert not bound.get("e.get()")
+
+
+def test_for_inner_loop_over_chunk_pattern_binding():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(v: Vec<P>) {
+    for y in v.chunks(2) {
+        for z in y {
+            z.pm();
+        }
+        y[0].pm();
+        y.pm();
+    }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `z` iterates the borrowed element `&P` — resolves like a
+    # let-bound `v.chunks(2)` iterator does. `y[0]` reads the
+    # element through the spelled borrow.
+    assert bound.get("z.pm()") == pm.id
+    assert bound.get("y[0].pm()") == pm.id
+    # `y` itself is the `&[P]` slice — no `pm` member exists.
+    assert bound.get("y.pm()") != pm.id
