@@ -3084,3 +3084,85 @@ m(1_000n);
         and r.span.start > source.index(": string;")
     )
     assert ref.binding_id == literal_overload.id
+
+
+def test_optional_and_nonnull_member_access_narrows_union():
+    # `o?.pm()` and `o!.pm()` read `pm` on the non-null union part;
+    # plain `o.pm()` on the union stays opaque (tsc flags it).
+    source = """
+class P { pm(): void {} }
+declare const o: P | undefined;
+o!.pm();
+o?.pm();
+o.pm();
+"""
+    report = build_ts_bindings(source)
+    member_pm = _member_bindings(report, "pm", "associated_function")[0]
+    bound = {
+        source[c.span.start : c.span.end]
+        for c in _calls(report)
+        if c.target == member_pm.id
+    }
+    assert bound == {"o!.pm()", "o?.pm()"}
+
+
+def test_optional_member_access_keeps_multi_part_unions_opaque():
+    # `P | string` narrows to `P | string` — `pm` is not on `string`,
+    # so `u?.pm()` cannot resolve (tsc TS2339). The declared union
+    # stays authoritative over the `P`-typed initializer.
+    source = """
+class P { pm(): void {} }
+declare const arr: P[];
+const u: P | string = arr[0];
+u?.pm();
+"""
+    report = build_ts_bindings(source)
+    member_pm = _member_bindings(report, "pm", "associated_function")[0]
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == "u?.pm()"
+    )
+    assert call.target != member_pm.id
+
+
+def test_initializer_inference_types_subscript_and_call_results():
+    # Unannotated `const q = arr[0]`/`f()` infer `q`'s type from the
+    # initializer's declared result.
+    source = """
+class P { pm(): void {} }
+declare const arr: P[];
+function make(): P { return new P() }
+const q = arr[0];
+q.pm();
+const r = make();
+r.pm();
+arr[0]?.pm();
+"""
+    report = build_ts_bindings(source)
+    member_pm = _member_bindings(report, "pm", "associated_function")[0]
+    bound = {
+        source[c.span.start : c.span.end]
+        for c in _calls(report)
+        if c.target == member_pm.id
+    }
+    assert bound == {"q.pm()", "r.pm()", "arr[0]?.pm()"}
+
+
+def test_optional_access_peels_union_carried_through_initializer():
+    # `const v = o` carries `o`'s union through the initializer —
+    # `v?.pm()` narrows it; plain `v.pm()` stays opaque.
+    source = """
+class P { pm(): void {} }
+declare const o: P | undefined;
+const v = o;
+v?.pm();
+v.pm();
+"""
+    report = build_ts_bindings(source)
+    member_pm = _member_bindings(report, "pm", "associated_function")[0]
+    bound = {
+        source[c.span.start : c.span.end]
+        for c in _calls(report)
+        if c.target == member_pm.id
+    }
+    assert bound == {"v?.pm()"}
