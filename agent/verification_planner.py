@@ -631,6 +631,7 @@ class PlannerPolicy:
     allow_fallback: bool = False
     allow_manifest_attempt_argv: bool = False
     allow_manifest_attempt_stdin: bool = False
+    require_enforced_isolation: bool = False
     disabled_adapters: frozenset[str] = frozenset()
     allowed_locations: frozenset[str] = frozenset({"local"})
     tool_version_pins: tuple[tuple[str, str], ...] = ()
@@ -657,6 +658,8 @@ class PlannerPolicy:
             raise ValueError(
                 "manifest attempt stdin must be explicit Boolean policy"
             )
+        if type(self.require_enforced_isolation) is not bool:
+            raise ValueError("enforced isolation must be explicit Boolean policy")
         _labels(self.disabled_adapters, empty=True)
         _labels(self.allowed_locations)
         if not self.allowed_locations <= LOCATIONS:

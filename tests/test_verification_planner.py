@@ -244,6 +244,24 @@ def test_invalid_policy_budgets_are_rejected(value, field):
         PlannerPolicy(**{field: value})
 
 
+def test_require_enforced_isolation_requires_an_explicit_boolean():
+    with pytest.raises(ValueError) as error:
+        PlannerPolicy(require_enforced_isolation=1)
+    assert str(error.value) == "enforced isolation must be explicit Boolean policy"
+
+
+def test_require_enforced_isolation_is_omitted_from_plan_fingerprint():
+    from agent.attempt_schedule import _plan_fingerprint
+
+    without_policy = plan(policy=PlannerPolicy())
+    with_policy = plan(
+        policy=PlannerPolicy(require_enforced_isolation=True)
+    )
+
+    assert with_policy.to_dict() == without_policy.to_dict()
+    assert _plan_fingerprint(with_policy) == _plan_fingerprint(without_policy)
+
+
 def test_invalid_metadata_fails_without_echoing_credential_like_input():
     sentinel = "https://fake:obviously-fake-password@example.invalid/?secret=FAKE"
     constructors = [

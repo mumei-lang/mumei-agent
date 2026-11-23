@@ -266,6 +266,18 @@ allowlist, except when the target executable itself is in one of those
 directories. This is a host-dependent read-scope allowlist, not a sandbox
 or Evidence; `EXECUTE` is not restricted.
 
+### C04 fail-closed isolation policy
+
+`PlannerPolicy.require_enforced_isolation` is an opt-in Boolean policy,
+defaulting to `false`. When enabled, a scheduled attempt is
+`not_dispatched` if required network, filesystem.write, filesystem.read,
+or process.spawn isolation cannot be enforced, or if no memory bound is
+available. The schedule follows its existing fallback/denial path. The
+policy adds no schedule keys and is omitted from `VerificationPlan.to_dict()`,
+so plan fingerprints and Core-checked representations remain unchanged.
+Probes are not covered. This host enforcement gate is not a sandbox or
+Evidence.
+
 ### C11 declared memory bounds for attempted executions
 
 `AttemptRunner.run(request, argv, cancel_event=None, memory_bound_mb=None)`
