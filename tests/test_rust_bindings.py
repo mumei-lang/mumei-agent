@@ -5546,10 +5546,220 @@ fn f(vd: std::collections::VecDeque<P>) {
 }
 """
     report = build_rust_bindings(source, pointer_width=64)
-    # A declared `as_slices` wins — the std `(&[P], &[P])` pair is
-    # not assumed, so `r` stays opaque rather than misbinding to P.
+    # The inherent `VecDeque::as_slices` outranks the trait impl —
+    # the call stays unbound and `r` opaque rather than binding
+    # `Ext::as_slices` and misbiding `r` to the impl's `&R`.
+    assert not _call(report, source, "vd.as_slices()").target
     r = next(b for b in report.bindings if b.name == "r")
     assert r.type.kind == "unknown"
+
+def test_declared_make_return_args_stay_element_spelled():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct H;
+impl H { fn make(&self) -> Vec<Vec<P>> { vec![] } }
+fn f(h: H) {
+    for s in h.make().chunks(2) { s[0][0].pm(); }
+    let v = h.make()[0];
+    v[0].pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    # `make() -> Vec<Vec<P>>` spells `Vec<P>` as the element — the
+    # chunk element is `Vec<P>` itself, so `s[0]` is a `Vec<P>`
+    # and `s[0][0]`/`v[0]` are `P` (no double peel).
+    assert _call(report, source, "s[0][0].pm()").target == pm.id
+    assert _call(report, source, "v[0].pm()").target == pm.id
+
+def test_producing_call_args_never_head_the_receiver():
+    source = """
+struct P;
+trait T { fn len(&self); }
+impl T for String { fn len(&self) {} }
+fn f(v: Vec<String>) {
+    v.into_iter().len();
+    let it = v.iter();
+    it.len();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    # `v.into_iter()`/`v.iter()` yield iterators — the spelled `String`
+    # arg names the ELEMENT, never the receiver, so `impl T for
+    # String` cannot cover `len`.
+    assert not _call(report, source, "v.into_iter().len()").target
+    assert not _call(report, source, "it.len()").target
+
+def test_by_value_self_outranks_borrowed_self():
+    source = """
+struct S;
+trait V { fn t(self); }
+trait B { fn t(&self); }
+impl V for S { fn t(self) {} }
+impl B for S { fn t(&self) {} }
+fn f(s: S) { s.t(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    impls = _bindings(report, "t", "associated_function")
+    # The by-value `self` impl (third binding: two trait
+    # declarations, then `impl V`) wins over `&self` outright.
+    assert _call(report, source, "s.t()").target == impls[2].id
+
+def test_receiver_less_associated_fn_never_covers_a_call():
+    source = """
+trait T { fn len(); }
+impl T for String { fn len() {} }
+fn f(s: String) { s.len(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    # `fn len()` has no `self` parameter — `s.len()` cannot call it.
+    assert not _call(report, source, "s.len()").target
+
+def test_lifetime_borrowed_str_element_covers_str_impl():
+    source = """
+trait T { fn t(&self); }
+impl T for str { fn t(&self) {} }
+fn f<'a>(v: Vec<&'a str>) { v[0].t(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    member = _bindings(report, "t", "associated_function")[1]
+    assert _call(report, source, "v[0].t()").target == member.id
+
+def test_spelled_tuple_prelude_elements_keep_their_names():
+    source = """
+trait T { fn t(&self); }
+impl T for String { fn t(&self) {} }
+impl T for str { fn t(&self) {} }
+fn f(v: Vec<(String, &str)>) { v[0].0.t(); v[0].1.t(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    impls = _bindings(report, "t", "associated_function")
+    assert _call(report, source, "v[0].0.t()").target == impls[1].id
+    assert _call(report, source, "v[0].1.t()").target == impls[2].id
+
+def test_spelled_tuple_element_resolves_at_the_annotation_scope():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(v: Vec<(P, P)>) {
+    struct P;
+    impl P { fn pm(&self) {} }
+    v[0].0.pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")
+    # The tuple element `P` was spelled at `v`'s annotation — the
+    # body-local `struct P` must not steal it.
+    assert _call(report, source, "v[0].0.pm()").target == pm[0].id
+
+def test_borrowed_receiver_prefers_the_borrowed_impl():
+    source = """
+struct S;
+trait V { fn t(self); }
+trait B { fn t(&self); }
+impl V for S { fn t(self) {} }
+impl B for S { fn t(&self) {} }
+fn f(s: &S) { s.t(); }
+fn g(s: S) { s.t(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    impls = _bindings(report, "t", "associated_function")
+    calls = {
+        source[: c.span.start].count("\n"): c.target
+        for c in report.calls
+    }
+    # `s: &S` matches `&self` one autoderef step before `self`;
+    # the owned `s: S` keeps the by-value impl.
+    assert calls[6] == impls[3].id
+    assert calls[7] == impls[2].id
+
+def test_mut_inherent_wins_only_for_mutably_borrowed_receivers():
+    source = """
+trait Ext { fn as_mut_slices(&self) -> i32; }
+impl Ext for std::collections::VecDeque<P> {
+    fn as_mut_slices(&self) -> i32 { 0 }
+}
+struct P;
+fn f(vd: std::collections::VecDeque<P>) { vd.as_mut_slices(); }
+fn g(mut vd: std::collections::VecDeque<P>) { vd.as_mut_slices(); }
+fn h(vd: &mut std::collections::VecDeque<P>) { vd.as_mut_slices(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    member = _bindings(report, "as_mut_slices", "associated_function")[1]
+    calls = {
+        source[: c.span.start].count("\n"): c.target
+        for c in report.calls
+    }
+    # The trait's `&self` method matches at the `&VecDeque` step —
+    # before `&mut VecDeque` — so `vd` and `mut vd` both call the
+    # extension. Only a spelled `&mut VecDeque` receiver hits the
+    # inherent `VecDeque::as_mut_slices` first.
+    assert calls[6] == member.id
+    assert calls[7] == member.id
+    assert not calls[8]
+
+def test_mut_field_shadowed_by_mut_inherent():
+    source = """
+trait Ext { fn as_mut_slices(&mut self) -> i32; }
+impl Ext for std::collections::VecDeque<P> {
+    fn as_mut_slices(&mut self) -> i32 { 0 }
+}
+trait Peek { fn peek(&self) -> i32; }
+impl Peek for std::collections::VecDeque<P> {
+    fn peek(&self) -> i32 { 0 }
+}
+struct P;
+struct H { d: std::collections::VecDeque<P> }
+fn f(mut h: H) { h.d.as_mut_slices(); h.d.peek(); }
+fn g(mut vd: std::collections::VecDeque<P>) { vd.as_mut_slices(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    peek = _bindings(report, "peek", "associated_function")[1]
+    calls = {
+        source.encode()[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `h.d` on `mut h` mutably borrows — the inherent `&mut`
+    # method and the `&mut self` member meet at the same step,
+    # where the inherent method wins; same for `mut vd`. The
+    # `&self` member on the same field still binds, so the
+    # candidates were discovered and only shadowed.
+    assert calls["h.d.peek()"] == peek.id
+    assert not calls["h.d.as_mut_slices()"]
+    assert not calls["vd.as_mut_slices()"]
+
+def test_shared_ref_field_place_prefers_the_value_impl():
+    source = """
+struct S { f: P }
+struct P;
+trait V { fn t(self); }
+trait B { fn t(&self); }
+impl V for P { fn t(self) {} }
+impl B for P { fn t(&self) {} }
+fn f(s: &S) { s.f.t(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    impls = _bindings(report, "t", "associated_function")
+    # `s.f` is a place of type `P` — the call tries `self`
+    # before `&self`, like any value receiver, even through
+    # the shared `&S` borrow.
+    assert _call(report, source, "s.f.t()").target == impls[2].id
+
+def test_linked_list_trait_as_slices_covers():
+    source = """
+trait Ext { fn as_slices(&self) -> i32; }
+impl Ext for std::collections::LinkedList<P> {
+    fn as_slices(&self) -> i32 { 0 }
+}
+struct P;
+fn f(l: std::collections::LinkedList<P>) { l.as_slices(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    member = _bindings(report, "as_slices", "associated_function")[1]
+    # `LinkedList` has no std `as_slices` — the trait impl binds.
+    assert _call(report, source, "l.as_slices()").target == member.id
 
 def test_option_iter_as_ref_and_split_at():
     source = """
@@ -9739,3 +9949,143 @@ fn f(v: &mut Vec<P>) {
     # must not be typed as the receiver's `P` element.
     assert not bound.get("q1.pm()")
     assert not bound.get("q2.pm()")
+
+
+def test_str_family_receivers_cover_trait_impls():
+    source = """
+trait T { fn t(&self); }
+impl T for String { fn t(&self) {} }
+impl T for str { fn t(&self) {} }
+fn f(s: String, r: &str, v: Vec<String>, w: Vec<&str>, z: &[String], x: &[str]) {
+    s.t();
+    r.t();
+    v[0].t();
+    w[0].t();
+    z[0].t();
+    x[0].t();
+    for a in v { a.t(); }
+    for b in w { b.t(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `String`/`str` elements and receivers resolve to no declared
+    # record, but the spelled name still covers `impl T for String`
+    # and `impl T for str` members.
+    impl_ts = _bindings(report, "t", "associated_function")
+    string_t, str_t = impl_ts[1].id, impl_ts[2].id
+    assert bound.get("s.t()") == string_t
+    assert bound.get("r.t()") == str_t
+    assert bound.get("v[0].t()") == string_t
+    assert bound.get("w[0].t()") == str_t
+    assert bound.get("z[0].t()") == string_t
+    assert bound.get("x[0].t()") == str_t
+    assert bound.get("a.t()") == string_t
+    assert bound.get("b.t()") == str_t
+
+
+def test_str_impl_member_beats_trait_default():
+    source = """
+trait T { fn t(&self) {} }
+impl T for String { fn t(&self) {} }
+fn f(s: String) { s.t(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    impl_t = _bindings(report, "t", "associated_function")[1]
+    assert _call(report, source, "s.t()").target == impl_t.id
+
+
+def test_ambiguous_impls_on_spelled_receiver_stay_opaque():
+    source = """
+trait T { fn t(&self); }
+trait U { fn t(&self); }
+impl T for String { fn t(&self) {} }
+impl U for String { fn t(&self) {} }
+fn f(s: String) { s.t(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    assert _call(report, source, "s.t()").target == ""
+
+
+def test_container_receiver_is_not_its_spelled_element():
+    source = """
+trait T { fn t(&self); }
+impl T for String { fn t(&self) {} }
+fn f(v: Vec<String>) { v.t(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    # `v` is a `Vec<String>` — `impl T for String` covers its
+    # elements, never the container itself.
+    assert _call(report, source, "v.t()").target == ""
+
+
+def test_tuple_index_element_receivers():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(v: Vec<(P, P)>) {
+    v[0].0.pm();
+    v[0].1.pm();
+    for p in v { p.0.pm(); p.1.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    pm = _bindings(report, "pm", "associated_function")[0]
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `v[0]` spells the `(P, P)` element — positional tuple fields
+    # keep `P` through indexing and iteration.
+    for site in ("v[0].0.pm()", "v[0].1.pm()", "p.0.pm()", "p.1.pm()"):
+        assert bound.get(site) == pm.id, site
+
+
+def test_inferred_return_remainder_elements():
+    source = """
+struct P;
+struct E;
+impl P { fn pm(&self) {} }
+fn make_o() -> Option<Vec<P>> { None }
+fn make_r() -> Result<Vec<P>, E> { todo!() }
+fn g() {
+    let a = make_o().unwrap().chunks_exact(2).remainder();
+    let q = a[0];
+    q.pm();
+    let b = make_r().unwrap().chunks_exact(2).remainder();
+    let s = b[0];
+    s.pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    pm = _bindings(report, "pm", "associated_function")[0]
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # A produced `Vec<P>` (`make().unwrap()`) spells its whole
+    # type — the chunks/remainder recipes peel the container head,
+    # so `a[0]`/`b[0]` are `P`, not `Vec<P>`.
+    assert bound.get("q.pm()") == pm.id
+    assert bound.get("s.pm()") == pm.id
+
+
+def test_annotated_nested_vec_chunks_stay_whole():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(v: Vec<Vec<P>>) {
+    for c in v.chunks(2) { c[0][0].pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    # `v`'s annotated element is `Vec<P>` — the chunk is `&[Vec<P>]`
+    # and `c[0][0]` reaches `P` through two index levels.
+    assert _call(report, source, "c[0][0].pm()").target == pm.id

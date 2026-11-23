@@ -477,6 +477,39 @@ _EXACT_CHUNKS_INHERENT = {
     "ChunksExactMut": {"into_remainder"},
     "RChunksExactMut": {"into_remainder"},
 }
+# Std inherent methods on spelled prelude containers — a trait
+# `impl Ext for VecDeque` member named `as_slices` never wins the
+# call: Rust resolves the inherent `VecDeque::as_slices` first.
+# Covering impls skip these names so the std recipe keeps its own
+# result (`(&[P], &[P])`) instead of the trait's return type.
+_SPELLED_STD_INHERENT = {
+    # `VecDeque::as_slices` takes `&self` — it beats any trait impl
+    # for every receiver kind. `as_mut_slices` takes `&mut self`,
+    # so it only outranks when the receiver can mutably borrow —
+    # an immutable `vd` or `&VecDeque` keeps the trait method.
+    # `LinkedList` has no `as_slices`/`as_mut_slices` in std.
+    "VecDeque": {"as_slices": None, "as_mut_slices": "mut"},
+}
+# Methods whose produced spelled args keep the PAYLOAD's own whole
+# spelling — `o.unwrap()` on `Option<Vec<P>>` spells `Vec<P>` (the
+# produced type itself), unlike `v: Vec<P>` whose args `P` are the
+# element list. `?`/try expressions produce the same shape.
+_PAYLOAD_PRODUCER_METHODS = _UNWRAP_OK_METHODS | _UNWRAP_ERR_METHODS | {
+    "into_inner", "try_unwrap", "ok", "err", "as_ref", "as_mut",
+    "cloned", "copied", "and", "or", "xor", "and_then", "or_else",
+    "map", "map_err", "map_or", "map_or_else", "find_map",
+    "filter", "take_if", "inspect", "inspect_err",
+    "get", "first", "last", "get_mut", "first_mut", "last_mut",
+    "or_insert", "or_insert_with", "get_or_insert",
+    "get_or_insert_with", "split_first", "split_last",
+    "split_first_mut", "split_last_mut", "take", "zip",
+    "next", "pop", "remove", "swap_remove", "pop_first",
+    "pop_last", "first_entry", "last_entry", "first_key_value",
+    "last_key_value", "borrow", "borrow_mut", "lock", "try_lock",
+    "read", "write", "try_read", "try_write", "downgrade",
+    "upgrade", "nth", "find", "min", "max", "min_by", "max_by",
+    "min_by_key", "max_by_key", "reduce",
+}
 _TRY_HEADS = frozenset({"Option", "Result"})
 # Prelude constructors whose tuple payload position is fixed by the
 # container type — `Some(x)` binds `Option<T>`'s first arg, `Err(e)`
@@ -2491,6 +2524,7 @@ class _RustBindings:
         kinds: tuple[str, ...] = (),
         impl_args: str | None = None,
         position: int | None = None,
+        borrowed: "bool | None" = None,
     ) -> _Record | None:
         """Member `name` of the type `type_id`.
 
@@ -2599,16 +2633,32 @@ class _RustBindings:
         if not candidates:
             return None
         first = candidates[0]
+        # On a shared-borrow receiver `&self` matches one autoderef
+        # step before `self`; owned and `&mut` receivers keep the
+        # by-value order. Same-kind collisions stay ambiguous.
+        preferred = "borrow" if borrowed else "value"
         if tier(first) == 1:
-            # More than one trait impl can spell `name` — Rust reports
-            # ambiguity, so no single implementation is picked.
-            if sum(1 for record in candidates if tier(record) == 1) > 1:
-                return None
+            top = [record for record in candidates if tier(record) == 1]
+            if len(top) > 1:
+                picks = [
+                    record
+                    for record in top
+                    if self._member_self_kind(record) == preferred
+                ]
+                if len(picks) != 1:
+                    return None
+                first = picks[0]
         elif tier(first) == 2:
-            # Defaults from several in-scope traits are equally
-            # ambiguous — and an impl member would have shadowed them.
-            if sum(1 for record in candidates if tier(record) == 2) > 1:
-                return None
+            top = [record for record in candidates if tier(record) == 2]
+            if len(top) > 1:
+                picks = [
+                    record
+                    for record in top
+                    if self._member_self_kind(record) == preferred
+                ]
+                if len(picks) != 1:
+                    return None
+                first = picks[0]
         return first
 
     def _concrete_type(
@@ -2788,6 +2838,56 @@ class _RustBindings:
             self._field_member(callee, ("associated_function",))
             is None
         )
+
+    def _spelled_produced_whole_args(self, receiver: Any) -> bool:
+        """Whether `receiver`'s spelled args name its own whole
+        type. Payload producers (`o.unwrap()` → `Vec<P>`, `x?`,
+        `Box::into_inner(b)`) keep the payload's full spelling,
+        while annotated containers and declared returns keep
+        element args — `make() -> Vec<Vec<P>>` spells `Vec<P>` as
+        its element, not its whole type."""
+        node = receiver
+        while node is not None and node.type in {
+            "reference_expression",
+            "parenthesized_expression",
+        }:
+            node = next(iter(node.named_children), None)
+        if node is not None and node.type == "identifier":
+            record = self._lookup(
+                self._normalize_identifier(self.text(node)),
+                node.start_byte,
+                "value",
+            )
+            node = None if record is None else record.value_node
+            while node is not None and node.type in {
+                "reference_expression",
+                "parenthesized_expression",
+            }:
+                node = next(iter(node.named_children), None)
+        if node is None:
+            return False
+        if node.type == "try_expression":
+            return True
+        if node.type != "call_expression":
+            return False
+        callee = node.child_by_field_name("function")
+        if callee is None:
+            return False
+        if callee.type == "field_expression":
+            field = callee.child_by_field_name("field")
+            return field is not None and (
+                self._normalize_identifier(self.text(field))
+                in _PAYLOAD_PRODUCER_METHODS
+            )
+        if callee.type in {
+            "scoped_identifier",
+            "scoped_type_identifier",
+        }:
+            return self.text(callee).strip().rsplit("::", 1)[-1] in {
+                "into_inner",
+                "try_unwrap",
+            }
+        return False
 
     def _impl_target_record(
         self, type_node: "Any | None", position: int
@@ -3005,10 +3105,13 @@ class _RustBindings:
             return None
         for ch in params.named_children:
             if ch.type == "self_parameter":
+                spelled = self.text(ch).strip()
+                if not spelled.startswith("&"):
+                    return "value"
                 return (
-                    "borrow"
-                    if self.text(ch).strip().startswith("&")
-                    else "value"
+                    "borrow_mut"
+                    if re.match(r"&\s*(?:'\w+\s+)?mut\b", spelled)
+                    else "borrow"
                 )
             if (
                 ch.type == "parameter"
@@ -3025,7 +3128,11 @@ class _RustBindings:
                 if spelling == "Self":
                     return "value"
                 if re.fullmatch(
-                    r"&\s*(?:'\w+\s*)?(?:mut\s+)?Self", spelling
+                    r"&\s*(?:'\w+\s*)?mut\s+Self", spelling
+                ):
+                    return "borrow_mut"
+                if re.fullmatch(
+                    r"&\s*(?:'\w+\s*)?Self", spelling
                 ):
                     return "borrow"
                 return "arbitrary"
@@ -3068,6 +3175,76 @@ class _RustBindings:
                 )
         return None
 
+    def _receiver_ref_kind(self, receiver: "Any | None") -> "str | None":
+        """`shared` for an `&` receiver, `mut` for a spelled `&mut`
+        receiver, `mut_place` for a place that can mutably borrow
+        (`mut` binding, or a field/index of a `mut`/`&mut`-typed
+        root), `owned` for a bare value, None when unknown.
+        A spelled `&mut` receiver matches `&mut self` first; a
+        mutable place reaches it only at the `&mut` autoref step —
+        after `self` and `&self` — so `&mut` inherent methods win
+        there only against `&mut self` trait members."""
+        node = receiver
+        while node is not None and node.type in {
+            "reference_expression",
+            "parenthesized_expression",
+        }:
+            if node.type == "reference_expression":
+                text = self.text(node).strip()
+                return (
+                    "mut"
+                    if re.match(r"&\s*(?:'\w+\s+)?mut\b", text)
+                    else "shared"
+                )
+            node = next(iter(node.named_children), None)
+        if node is None:
+            return None
+        tnode = self._receiver_type_node(node)
+        if tnode is not None:
+            spelled = self.text(tnode).strip()
+            if spelled.startswith("&"):
+                return (
+                    "mut"
+                    if re.match(
+                        r"&\s*(?:'\w+\s+)?mut\b", spelled
+                    )
+                    else "shared"
+                )
+        base = node
+        while base is not None and base.type in {
+            "field_expression",
+            "index_expression",
+        }:
+            base = next(iter(base.named_children), None)
+        if base is not None and base.type == "identifier":
+            record = self._lookup(
+                self._normalize_identifier(self.text(base)),
+                base.start_byte,
+                "value",
+            )
+            if record is not None and record.binding.mutable:
+                return "mut_place"
+            if base is not node:
+                # A field/index place borrows through the root's
+                # own type — `s: &mut S` makes `s.field` mutable.
+                # Through `s: &S` the place `s.field` still types
+                # as `P` — the call site tries `self` before
+                # `&self`, like any value receiver.
+                btnode = self._receiver_type_node(base)
+                if btnode is not None:
+                    spelled = self.text(btnode).strip()
+                    if spelled.startswith("&"):
+                        return (
+                            "mut_place"
+                            if re.match(
+                                r"&\s*(?:'\w+\s+)?mut\b",
+                                spelled,
+                            )
+                            else "owned"
+                        )
+            return "owned"
+        return None if tnode is None else "owned"
+
     def _member_self_by_value(self, record: "_Record") -> bool:
         """The covering member's receiver is by-value `self`/`mut self`
         — a by-value receiver outranks a `&self` inherent method on
@@ -3105,6 +3282,29 @@ class _RustBindings:
                 or self._spelled_receiver_head(receiver)
                 or self._produced_head(receiver)
             )
+            if (
+                receiver_head is None
+                and recv_args is not None
+                and receiver.type
+                in {"identifier", "index_expression", "field_expression"}
+                and not self._bound_to_producing_call(receiver)
+            ):
+                # `v[0]` on `Vec<String>`/`a` iterating it — the
+                # spelled args hold the element's own type (`str`,
+                # `String`), which heads a bare spelled receiver.
+                # A producing call's args name its ELEMENT instead
+                # (`v.into_iter()` spells `String` but yields an
+                # `IntoIter`), and a `let` bound to one shares it.
+                bare = re.fullmatch(
+                    r"&?\s*(?:'\w+\s+)?[A-Za-z_][\w:]*",
+                    recv_args.strip(),
+                )
+                if bare is not None:
+                    receiver_head = re.sub(
+                        r"^&\s*(?:'\w+\s+)?|^'\w+\s+",
+                        "",
+                        bare.group(0).strip(),
+                    ).rsplit("::", 1)[-1]
             if receiver_head is not None:
                 receiver_heads.add(receiver_head)
             # `impl T for [P]` reaches `Vec`/`VecDeque`/… receivers
@@ -3193,6 +3393,17 @@ class _RustBindings:
                     receiver_heads.add(
                         "".join(part.title() for part in mname.split("_"))
                     )
+        ref_kind = self._receiver_ref_kind(receiver)
+        # A shared-borrow receiver (`s: &S`, `r: &str`) matches
+        # `&self` one autoderef step before `self`; owned and
+        # `&mut` receivers keep the by-value order.
+        preferred_self = (
+            "borrow" if ref_kind == "shared" else "value"
+        )
+        trait_default = None
+        trait_default_kind = None
+        covered = None
+        covered_kind = None
         for record in self.records.values():
             if not (
                 record.member_trait is not None
@@ -3200,8 +3411,14 @@ class _RustBindings:
                 and record.binding.kind == "associated_function"
             ):
                 continue
+            self_kind = None
             if receiver is not None:
-                if self._member_self_kind(record) == "arbitrary":
+                self_kind = self._member_self_kind(record)
+                if self_kind is None:
+                    # An associated function without a `self`
+                    # parameter is never a method-call candidate.
+                    continue
+                if self_kind == "arbitrary":
                     # `self: Box<Self>`/`self: Rc<Self>` methods only
                     # apply to a wrapped receiver — a bare value of
                     # the impl target never calls them.
@@ -3265,8 +3482,71 @@ class _RustBindings:
             if trait is not None and self._trait_visible(
                 trait, position
             ):
-                return record
-        return None
+                if record.member_of == record.member_trait:
+                    # A trait-declared default only applies when no
+                    # concrete impl member covers — remember it and
+                    # keep looking for the impl's own member.
+                    if trait_default is not None:
+                        if trait_default_kind == self_kind:
+                            # Defaults of several in-scope traits
+                            # are equally ambiguous.
+                            return None
+                        if self_kind == preferred_self:
+                            trait_default = record
+                            trait_default_kind = self_kind
+                    else:
+                        trait_default = record
+                        trait_default_kind = self_kind
+                else:
+                    if covered is not None:
+                        if covered_kind == self_kind:
+                            # Several impls spell `name` for
+                            # covering heads — Rust reports
+                            # ambiguity.
+                            return None
+                        if self_kind == preferred_self:
+                            covered = record
+                            covered_kind = self_kind
+                    else:
+                        covered = record
+                        covered_kind = self_kind
+        member = covered if covered is not None else trait_default
+        if member is not None:
+            inherent_need = next(
+                (
+                    need
+                    for head in receiver_heads
+                    for method, need in _SPELLED_STD_INHERENT.get(
+                        head, {}
+                    ).items()
+                    if method == name
+                ),
+                "absent",
+            )
+            if inherent_need != "absent":
+                member_kind = self._member_self_kind(member)
+                if inherent_need is None:
+                    # `VecDeque::as_slices(&self)` shadows the trait
+                    # member unless a by-value `self` member matched
+                    # at the value step first — a shared receiver
+                    # can never reach that step.
+                    if not (
+                        member_kind == "value"
+                        and ref_kind != "shared"
+                    ):
+                        return None
+                elif inherent_need == "mut":
+                    # `VecDeque::as_mut_slices(&mut self)` shadows
+                    # only when the receiver reaches `&mut` before
+                    # the member does — a spelled `&mut` receiver
+                    # always, a mutable place only against a
+                    # `&mut self` member.
+                    if ref_kind == "mut" or (
+                        ref_kind == "mut_place"
+                        and member_kind == "borrow_mut"
+                    ):
+                        return None
+        return member
 
     def _resolve_trait_node(self, trait_node: Any) -> "_Record | None":
         """Trait record for a UFCS `as` qualifier — plain, scoped
@@ -3392,7 +3672,12 @@ class _RustBindings:
             return None, None, None
         type_id, impl_args = self._receiver_type(value)
         record = self._member_record(
-            type_id, name, kinds, impl_args, node.start_byte
+            type_id,
+            name,
+            kinds,
+            impl_args,
+            node.start_byte,
+            borrowed=self._receiver_ref_kind(value) == "shared",
         )
         if record is None and impl_args is not None:
             head, _hp, _hs = self._scrutinee_shape(value, type_id)
@@ -3533,6 +3818,27 @@ class _RustBindings:
                     )
                     if inner is not None:
                         return inner, elem_id, elem_args
+        if (
+            record is None
+            and type_id is None
+            and "associated_function" in kinds
+            and value is not None
+            and value.type
+            in {"identifier", "index_expression", "field_expression"}
+        ):
+            # Spelled receivers never produce a record (`s: String`,
+            # `v[0]` on `Vec<String>`) — a trait impl whose head
+            # covers the spelled receiver still applies. Resolved
+            # containers go through `_member_record`'s specialization
+            # and ambiguity rules instead. Field reads (kinds like
+            # `struct_field`) never call a method. Call-chain
+            # receivers (`v.iter().m()`) keep their produced head —
+            # the spelled args name the element, not the receiver.
+            cover = self._covering_trait_member(
+                name, node.start_byte, value
+            )
+            if cover is not None:
+                return cover, type_id, impl_args
         return record, type_id, impl_args
 
     def _unwrapped(
@@ -3901,12 +4207,16 @@ class _RustBindings:
                 container_id is None
                 and whole is not None
                 and not self._verbatim_annotation_args(children[0])
+                and self._spelled_produced_whole_args(children[0])
             ):
-                # `let v = Box::into_inner(b)` — produced args spell
-                # the whole `Vec<P>` type, not a container's element
-                # list — peel the head so `v[0]` is `P`.
+                # `let v = Box::into_inner(b)`/`o.unwrap()[0]` —
+                # payload-produced args spell the whole `Vec<P>`
+                # type, not a container's element list — peel the
+                # head so `v[0]` is `P`. A declared return
+                # (`h.make() -> Vec<Vec<P>>`) already spells the
+                # element `Vec<P>` and must not peel again.
                 elem_args = whole.group(1).strip()
-            if "," in elem_args:
+            if len(self._type_arg_list(elem_args)) > 1:
                 return None, None
             index = children[1] if len(children) > 1 else None
             while index is not None and index.type == "parenthesized_expression":
@@ -3974,13 +4284,33 @@ class _RustBindings:
                         )
                         index = int(index_text)
                         if (wrapped or len(spelled) > 1) and index < len(spelled):
-                            return self._spelled_type(
-                                spelled[index],
+                            element = spelled[index].strip()
+                            pair = self._spelled_type(
+                                element,
                                 self._receiver_annotation_position(
                                     value_node
                                 )
                                 or node.start_byte,
                             )
+                            if pair == (None, None):
+                                # `String`/`str` inside the tuple
+                                # never resolves to a record — keep
+                                # the name spelled so its impl
+                                # members can still cover.
+                                prelude = re.fullmatch(
+                                    r"&?\s*(?:'\w+\s+)?[A-Za-z_][\w:]*",
+                                    element,
+                                )
+                                if prelude is not None and (
+                                    re.sub(
+                                        r"^&\s*(?:'\w+\s+)?|^'\w+\s+",
+                                        "",
+                                        prelude.group(0).strip(),
+                                    ).rsplit("::", 1)[-1]
+                                    in _PRELUDE_TYPE_NAMES
+                                ):
+                                    return None, element
+                            return pair
             return None, None
         if node.type == "call_expression":
             callee_node = node.child_by_field_name("function")
@@ -6327,7 +6657,21 @@ class _RustBindings:
             return None, elem_args
         # `_spelled_type` follows `use m::P` imports and scoped
         # `m::P` spellings — a bare `_lookup` would miss both.
-        return self._spelled_type(elem_args, position)
+        resolved = self._spelled_type(elem_args, position)
+        if resolved[0] is None and resolved[1] is None:
+            # `String`/`str`/`i32` elements resolve to no declared
+            # record — keep the spelled name so `impl T for String`
+            # /`for str` impl heads still cover the receiver.
+            prelude = re.fullmatch(
+                r"[A-Za-z_][\w:]*", elem_args.strip()
+            )
+            if (
+                prelude is not None
+                and prelude.group(0).rsplit("::", 1)[-1]
+                in _PRELUDE_TYPE_NAMES
+            ):
+                return None, elem_args.strip()
+        return resolved
 
     def _is_map_container(
         self, container_id: str | None, node: Any | None
@@ -6782,6 +7126,11 @@ class _RustBindings:
                 if record is not None and record.type_node is not None:
                     return record.type_node.start_byte
             return None
+        if node.type == "index_expression":
+            # `v[0]`/`h.make()[0]` — the spelled element names were
+            # written in the container's annotation.
+            inner = next(iter(node.named_children), None)
+            return self._receiver_annotation_position(inner)
         if node.type != "identifier":
             return None
         record = self._lookup(
@@ -7402,6 +7751,20 @@ class _RustBindings:
             spelled = args.strip() or None
             if spelled is None:
                 return None, None
+            if not self._verbatim_annotation_args(receiver) and (
+                self._spelled_produced_whole_args(receiver)
+            ):
+                # `o.unwrap()` produces the whole `Vec<P>` type
+                # spelled — peel the container head so the chunk
+                # element is `P`, not `Vec<P>`. An annotated
+                # `Vec<Vec<P>>` element stays whole, and so does a
+                # declared `make() -> Vec<Vec<P>>` return whose
+                # args already spell the element.
+                whole = re.fullmatch(
+                    r"[A-Za-z_][\w:]*\s*<(.+)>", spelled, re.DOTALL
+                )
+                if whole is not None:
+                    spelled = whole.group(1).strip()
             # The element is a borrowed slice — `&[P]`/`&mut [P]`
             # reads `P` at the index/iter sites that consume it.
             prefix = (
@@ -8295,6 +8658,22 @@ class _RustBindings:
                 # not `&[P]`.
                 return _UNKNOWN, None
             spelled = args.strip() or None
+            if (
+                spelled is not None
+                and not self._verbatim_annotation_args(receiver)
+                and self._spelled_produced_whole_args(receiver)
+            ):
+                # `o.unwrap()` produces the whole `Vec<P>` type
+                # spelled — peel the container head so the chunk
+                # element is `P`, not `Vec<P>`. An annotated
+                # `Vec<Vec<P>>` element stays whole, and so does a
+                # declared `make() -> Vec<Vec<P>>` return whose
+                # args already spell the element.
+                whole = re.fullmatch(
+                    r"[A-Za-z_][\w:]*\s*<(.+)>", spelled, re.DOTALL
+                )
+                if whole is not None:
+                    spelled = whole.group(1).strip()
             prefix = (
                 "&mut "
                 if method in _ITER_CHUNK_MUT_METHODS
@@ -9071,7 +9450,7 @@ class _RustBindings:
             # whole `Vec<P>` type — peel the head so `for p in v`
             # binds `P`.
             elem_args = whole.group(1).strip()
-        if "," in elem_args:
+        if len(self._type_arg_list(elem_args)) > 1:
             return _UNKNOWN, None
         # Iterating a map yields (K, V) pairs — index typing keeps
         # only the value type, so the pair's shape is unpinned here.
@@ -11672,6 +12051,11 @@ class _RustBindings:
             return self._alias_head_name(
                 member.type_node, node.start_byte
             )
+        if not self._spelled_produced_whole_args(node):
+            # An unresolved call's spelled args hold the ELEMENT
+            # (`v.iter()` spells `String`, yielding an `Iter`) —
+            # only a payload producer's args name the whole type.
+            return None
         return self._type_head_name(
             None, self._receiver_type(node)[1]
         )
