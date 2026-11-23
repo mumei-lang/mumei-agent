@@ -10772,3 +10772,28 @@ fn f() {
     }
     assert bound.get("r.unwrap_err().em()") == em.id
     assert bound.get("s.unwrap_err().em()") == em.id
+
+
+def test_vec_from_scoped_producers_resolve_elements():
+    source = """
+mod m {
+    pub struct P;
+    impl P { pub fn pm(&self) {} }
+    pub fn arr() -> [P; 2] { [P, P] }
+}
+fn f() {
+    let a = Vec::from([m::P, m::P]);
+    let b = Vec::from(m::arr());
+    a[0].pm();
+    b[0].pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    assert bound.get("a[0].pm()") == pm.id
+    assert bound.get("b[0].pm()") == pm.id

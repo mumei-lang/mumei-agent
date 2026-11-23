@@ -4644,6 +4644,145 @@ class _RustBindings:
                                     payload,
                                 ),
                             )
+                if s_head == "Vec" and s_method == "from":
+                    # `Vec::from([p, p])`/`Vec::from(m::arr())` — the
+                    # produced `Vec` carries the argument's element
+                    # type. A produced `Option`/`Result` spelled head
+                    # is not an array source and stays opaque.
+                    args_node = node.child_by_field_name("arguments")
+                    first = (
+                        next(iter(self._children(args_node)), None)
+                        if args_node is not None
+                        else None
+                    )
+                    element = None
+                    elem_pos = node.start_byte
+                    home = None
+                    if first is not None:
+                        elem_pos = first.start_byte
+                        if first.type == "array_expression":
+                            items = [
+                                c
+                                for c in self._children(first)
+                                if "comment" not in c.type
+                            ]
+                            item = items[0] if items else None
+                            if (
+                                item is not None
+                                and item.type
+                                in {
+                                    "scoped_identifier",
+                                    "scoped_type_identifier",
+                                    "struct_expression",
+                                }
+                            ):
+                                element = self.text(item).strip()
+                                elem_pos = item.start_byte
+                            elif item is not None:
+                                item_id, item_args = self._receiver_type(
+                                    item
+                                )
+                                if item_id is not None:
+                                    irec = self.records.get(item_id)
+                                    path = (
+                                        None
+                                        if irec is None
+                                        else self._record_scope_path(
+                                            irec
+                                        )
+                                    )
+                                    if path is not None:
+                                        element = "crate::" + path
+                                elif (
+                                    item_args is not None
+                                    and item_args.strip()
+                                ):
+                                    element = item_args.strip()
+                                elem_pos = item.start_byte
+                        else:
+                            _, arg_args = self._receiver_type(first)
+                            spelled_arg = (arg_args or "").strip()
+                            if spelled_arg:
+                                bracketed = re.fullmatch(
+                                    r"(?:&\s*(?:'\w+\s+)?"
+                                    r"(?:mut\s+)?)?"
+                                    r"\[([\s\S]+?)\s*"
+                                    r"(?:;[\s\S]*)?\]",
+                                    spelled_arg,
+                                )
+                                generic = re.fullmatch(
+                                    r"[A-Za-z_][\w:]*\s*<([\s\S]+)>",
+                                    spelled_arg,
+                                )
+                                head_name = (
+                                    self._container_head_name(first)
+                                    or self._produced_head(first)
+                                )
+                                head_tail = (
+                                    None
+                                    if head_name is None
+                                    else head_name.rsplit("::", 1)[-1]
+                                )
+                                if bracketed is not None:
+                                    element = bracketed.group(
+                                        1
+                                    ).strip()
+                                elif generic is not None:
+                                    arg_parts = self._type_arg_list(
+                                        generic.group(1)
+                                    )
+                                    if len(arg_parts) == 1:
+                                        element = arg_parts[
+                                            0
+                                        ].strip()
+                                elif (
+                                    head_tail is None
+                                    or head_tail
+                                    in {
+                                        "Vec",
+                                        "VecDeque",
+                                        "LinkedList",
+                                        "HashSet",
+                                        "BTreeSet",
+                                        "BinaryHeap",
+                                    }
+                                ) and re.fullmatch(
+                                    r"[A-Za-z_][\w:]*"
+                                    r"(?:\s*<[\s\S]+>)?",
+                                    spelled_arg,
+                                ):
+                                    # `Vec::from(m::arr())` — `arr`'s
+                                    # `-> [P; 2]` already spelled the
+                                    # element `P`; a declared
+                                    # `Vec<P>` keeps `P` as args.
+                                    element = spelled_arg
+                            if first.type == "call_expression":
+                                home = self._call_member(first)
+                            ann = self._receiver_annotation_position(
+                                first
+                            )
+                            if ann is not None:
+                                elem_pos = ann
+                    if element is not None:
+                        pushed_home = False
+                        if home is not None and (
+                            home.home_scope is not None
+                        ):
+                            self.scopes.append(home.home_scope)
+                            pushed_home = True
+                        try:
+                            qualified_element = (
+                                self._qualified_spelling(
+                                    element, elem_pos
+                                )
+                            )
+                        finally:
+                            if pushed_home:
+                                self.scopes.pop()
+                        return (
+                            None,
+                            "Vec<{}>".format(qualified_element),
+                        )
             if member is None:
                 field = (
                     callee.child_by_field_name("field")
