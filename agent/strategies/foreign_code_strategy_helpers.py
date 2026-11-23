@@ -5318,6 +5318,14 @@ def _detect_go_safety_issues(
                 | known_strings
                 | _go_package_slice_names(package_source)
             )
+            constant_index_containers = {
+                name
+                for name, raw_type in param_types.items()
+                if (
+                    normalized_type := re.sub(r"\s+", "", raw_type).lstrip("*")
+                ).startswith("[]")
+                or normalized_type == "string"
+            }
             ensures_names = _go_ensures_identifiers(orig_source, orig_start if orig_start >= 0 else fn.start_char)
             contract_results = _go_named_results(fn.return_type) & ensures_names
             contract_outputs = {
@@ -5376,7 +5384,10 @@ def _detect_go_safety_issues(
                 for container, need, index_text in _go_constant_index_accesses(
                     expression
                 ):
-                    if container not in sequence_names or container in go_map_names:
+                    if (
+                        container not in constant_index_containers
+                        or container in go_map_names
+                    ):
                         continue
                     if re.match(r"\s*\*?\s*\[\d+\]", param_types.get(container, "")):
                         continue

@@ -5191,6 +5191,54 @@ func arrayValue(a [4]int) int {
     assert not any("can index" in issue.message for issue in issues)
 
 
+def test_go_constant_indices_skip_package_level_containers() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package p
+
+var table = []int{1, 2, 3}
+const digits = "0123456789"
+
+func firstTableEntry() int {
+    return table[0]
+}
+
+func lastTableEntry() int {
+    return table[len(table)-1]
+}
+
+func firstDigit() byte {
+    return digits[0]
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+
+    assert not any(
+        issue.function_name in {"firstTableEntry", "lastTableEntry", "firstDigit"}
+        and "can index" in issue.message
+        for issue in issues
+    )
+
+
+def test_go_constant_index_on_string_parameter_is_reported() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package p
+
+func first(s string) byte {
+    return s[0]
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+
+    assert [
+        issue.message for issue in issues if "can index" in issue.message
+    ] == [
+        "Go function `first` can index `s[0]` without a bounds contract "
+        "(Z3 counterexample: len_s=0)"
+    ]
+
+
 def test_go_safety_suppresses_actor_act_builder_param_nil() -> None:
     """``Actor.Act`` implementations receive non-nil ``*Builder`` and ``*Action``."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
