@@ -21103,6 +21103,11 @@ def test_transitive_captured_closures_preserve_current_deps_and_writes(
     declarations = (
         "type S struct { F func() int64 }\n"
         "type W struct { F func() }\n"
+        "type OB struct { B [][]S }\n"
+        "type OW struct { B [][]W }\n"
+        "type O1 struct { B []S }\n"
+        "type OInner struct { B []S }\n"
+        "type OOuter struct { In OInner }\n"
         "func (s S) Run() int64 { return s.F() }\n"
         "func ap(f func() int64) int64 { return f() }\n"
         "func NamedRead(x, y int64) int64 {\n"
@@ -21147,6 +21152,29 @@ def test_transitive_captured_closures_preserve_current_deps_and_writes(
         "\tv := y; var a [2][2]S\n"
         "\ta[0][0].F = func() int64 { return v }\n"
         "\tg := func() int64 { return a[0][0].F() }\n"
+        "\tv = x; return g()\n"
+        "}\n"
+        "func OuterNestedSlice(x, y int64) int64 {\n"
+        "\tv := y; var o OB\n"
+        "\to.B = [][]S{{{F: func() int64 { return v }}}}\n"
+        "\tg := func() int64 { return o.B[0][0].F() }\n"
+        "\tv = x; return g()\n"
+        "}\n"
+        "func OuterNestedWrite(x int64) int64 {\n"
+        "\tw := int64(0); var o OW\n"
+        "\to.B = [][]W{{{F: func() { w = x }}}}\n"
+        "\tg := func() { o.B[0][0].F() }; g(); return w\n"
+        "}\n"
+        "func OuterSingleSlice(x, y int64) int64 {\n"
+        "\tv := y; var o O1\n"
+        "\to.B = []S{{F: func() int64 { return v }}}\n"
+        "\tg := func() int64 { return o.B[0].F() }\n"
+        "\tv = x; return g()\n"
+        "}\n"
+        "func OuterNestedStructSlice(x, y int64) int64 {\n"
+        "\tv := y; var o OOuter\n"
+        "\to.In.B = []S{{F: func() int64 { return v }}}\n"
+        "\tg := func() int64 { return o.In.B[0].F() }\n"
         "\tv = x; return g()\n"
         "}\n"
         "func Immediate(x, y int64) int64 {\n"
@@ -21231,6 +21259,10 @@ def test_transitive_captured_closures_preserve_current_deps_and_writes(
         ("SliceElement", frozenset({0, 1})),
         ("NestedSlice", frozenset({0, 1})),
         ("NestedArray", frozenset({0, 1})),
+        ("OuterNestedSlice", frozenset({0, 1})),
+        ("OuterNestedWrite", frozenset({0})),
+        ("OuterSingleSlice", frozenset({0, 1})),
+        ("OuterNestedStructSlice", frozenset({0, 1})),
         ("Immediate", frozenset({0, 1})),
         ("Callback", frozenset({0, 1})),
         ("DeferredRead", frozenset({0, 1})),
