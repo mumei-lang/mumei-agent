@@ -499,11 +499,73 @@ class _TypeScriptBindings:
                     declaration_function=declaration_function,
                 )
 
+    def _iterable_element_node(self, operand: Any | None) -> Any | None:
+        """Element type node of a `for..of` operand — `P[]` peels to
+        `P`; `Array<P>`/`Set<P>`/`Iterable<P>` take args[0]."""
+        declared = self._unwrap_type(
+            self._declared_type_node(operand, operand.start_byte)
+            if operand is not None
+            else None
+        )
+        if declared is None:
+            return None
+        if declared.type == "array_type":
+            return next(iter(self.children(declared)), None)
+        if declared.type == "generic_type":
+            kids = self.children(declared)
+            if kids and self.text(kids[0]) in {
+                "Array", "Set", "Iterable", "ReadonlyArray",
+            }:
+                args = [
+                    child
+                    for child in self.children(declared)
+                    if child.type == "type_arguments"
+                ]
+                if args:
+                    return next(iter(self.children(args[0])), None)
+        return None
+
     def _predeclare_for_in(self, node: Any) -> None:
         kind = node.child_by_field_name("kind")
         pattern = node.child_by_field_name("left")
+        operand = node.child_by_field_name("right")
+        if kind is None or pattern is None:
+            # tree-sitter-typescript leaves the loop kind, pattern and
+            # operand unfielded — `for (` `<kind>` `<pattern>` `of|in`
+            # `<operand>` `)` positionally instead.
+            all_children = list(node.children)
+            kind = next(
+                (
+                    child
+                    for child in all_children
+                    if child.type in {"var", "let", "const"}
+                ),
+                None,
+            )
+            op_index = next(
+                (
+                    index
+                    for index, child in enumerate(all_children)
+                    if child.type in {"of", "in"}
+                ),
+                -1,
+            )
+            if kind is None or op_index < 1:
+                return
+            if pattern is None and op_index - 1 >= 0:
+                pattern = all_children[op_index - 1]
+            if (
+                operand is None
+                and op_index + 1 < len(all_children)
+            ):
+                operand = all_children[op_index + 1]
         if kind is None or pattern is None:
             return
+        element_node = (
+            self._iterable_element_node(operand)
+            if any(child.type == "of" for child in node.children)
+            else None
+        )
         is_var = kind.type == "var"
         is_const = kind.type == "const"
         function = self._nearest_function(node)
@@ -515,6 +577,9 @@ class _TypeScriptBindings:
         )
         type_node = self._pattern_type_node(node, pattern)
         names = self._pattern_names(pattern)
+        if type_node is None and element_node is not None and len(names) == 1:
+            # `for (const x of arr: P[])` types `x` as the element.
+            type_node = element_node
         loop_binding_ids: set[str] = set()
         for name in names:
             record = self.add_binding(
@@ -2814,6 +2879,113 @@ class _TypeScriptBindings:
             )
         return None
 
+    def _pattern_slot_type_node(
+        self, pattern: Any, name: Any
+    ) -> Any | None:
+        """The type node a destructuring slot takes — `const [a, b]
+        = arr: P[]` types both `a`/`b` as `P`; tuple types take the
+        slot's index."""
+        declarator = pattern.parent
+        if (
+            declarator is not None
+            and declarator.type == "for_in_statement"
+            and any(child.type == "of" for child in declarator.children)
+        ):
+            # `for (const [k, v] of m)` — the slot peels the
+            # iterable's element type (`Map` entries give pairs).
+            operand = next(
+                (
+                    child
+                    for child in declarator.children
+                    if child.type not in {
+                        "for", "(", ")", "of", "in",
+                        "var", "let", "const",
+                    }
+                    and child.start_byte > pattern.end_byte
+                ),
+                None,
+            )
+            iterable = self._unwrap_type(
+                self._declared_type_node(
+                    operand,
+                    operand.start_byte if operand is not None else 0,
+                )
+            )
+            if (
+                iterable is not None
+                and iterable.type == "generic_type"
+                and self.children(iterable)
+                and self.text(self.children(iterable)[0]) == "Map"
+            ):
+                # `for (const [k, v] of m: Map<K, V>)` — entries are
+                # `[K, V]` pairs; take the slot from the type args.
+                args = [
+                    child
+                    for child in self.children(iterable)
+                    if child.type == "type_arguments"
+                ]
+                elems = (
+                    self.children(args[0]) if args else []
+                )
+                slots = self.children(pattern)
+                index = next(
+                    (
+                        i
+                        for i, slot in enumerate(slots)
+                        if slot.id == name.id
+                    ),
+                    -1,
+                )
+                return (
+                    elems[index]
+                    if 0 <= index < len(elems)
+                    else None
+                )
+            declared = self._unwrap_type(
+                self._iterable_element_node(operand)
+            )
+            if declared is None or declared.type != "tuple_type":
+                return None
+        elif (
+            declarator is None
+            or declarator.type != "variable_declarator"
+        ):
+            return None
+        else:
+            value = declarator.child_by_field_name("value")
+            declared = self._unwrap_type(
+                self._declared_type_node(value, value.start_byte)
+            )
+        if declared is None:
+            return None
+        if declared.type == "array_type":
+            return next(iter(self.children(declared)), None)
+        if declared.type == "tuple_type":
+            slots = self.children(pattern)
+            index = next(
+                (
+                    i
+                    for i, slot in enumerate(slots)
+                    if slot == name or slot.id == name.id
+                ),
+                -1,
+            )
+            elems = self.children(declared)
+            return elems[index] if 0 <= index < len(elems) else None
+        if declared.type == "generic_type":
+            kids = self.children(declared)
+            if kids and self.text(kids[0]) in {
+                "Array", "Set", "Iterable", "ReadonlyArray",
+            }:
+                args = [
+                    child
+                    for child in self.children(declared)
+                    if child.type == "type_arguments"
+                ]
+                if args:
+                    return next(iter(self.children(args[0])), None)
+        return None
+
     def _initializer_type_record(
         self, record: _Record, position: int
     ) -> _Record | None:
@@ -2821,6 +2993,24 @@ class _TypeScriptBindings:
         if record.binding.id in self._initializer_active:
             return None
         declarator = record.node.parent
+        if declarator is not None and declarator.type in {
+            "array_pattern", "object_pattern",
+        }:
+            # `const [a, b] = arr` — a pattern slot's type comes from
+            # the destructured value, not an initializer.
+            self._initializer_active.add(record.binding.id)
+            try:
+                slot_node = self._pattern_slot_type_node(
+                    declarator, record.node
+                )
+                fact = self._type_fact(slot_node)
+                return (
+                    self._type_record_by_id(fact.type_id)
+                    if fact.kind == "named"
+                    else None
+                )
+            finally:
+                self._initializer_active.discard(record.binding.id)
         if declarator is None or declarator.type != "variable_declarator":
             return None
         value = declarator.child_by_field_name("value")
