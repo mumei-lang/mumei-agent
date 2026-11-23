@@ -49828,6 +49828,9 @@ def test_opaque_func_value_reads_current_escaped_deps(go_types_helper):
             "func F_alias(x int64) int64 {\n"
             "\tw := x; p := &w; _ = p; h := pkgfn; return h()\n"
             "}\n"
+            "func F_alias_ap(x int64) int64 {\n"
+            "\tw := x; p := &w; _ = p; h := pkgfn; return ap(h)\n"
+            "}\n"
         ),
     }
     snapshot = load_go_package_snapshot(
@@ -49844,6 +49847,7 @@ def test_opaque_func_value_reads_current_escaped_deps(go_types_helper):
         "F_ap": frozenset({0, 1}),
         "F_val": frozenset({1}),
         "F_alias": frozenset(),
+        "F_alias_ap": frozenset(),
     }
     for function_name, dependencies in expected.items():
         result = named_package(files, snapshot, summaries, function_name)
