@@ -61,8 +61,14 @@ is not modelled. The pure builtins ``min``/``max`` union their
 arguments' dependencies; ``len``/``cap`` additionally admit an
 imported container ``var`` operand (``len(lib.VA)``) or an index
 chain reaching a container-typed element of one (``len(lib.V2[i])``)
-as a dep-free external read (the indexes' own dependencies carry),
-and every other builtin stays opaque.
+as an external read that also carries current indirect-write
+dependencies (plus the indexes' own dependencies), and every other
+builtin stays opaque. Opaque imported calls broadcast argument
+dependencies into the shared indirect-write set; local channels passed
+to them become external queues, with current queue contents included.
+Opaque imported results and admitted imported-member reads union that
+set. This propagation is intra-function only; calls through a local
+caller do not carry imported state between summaries.
 Compiler-resolved
 bindings/calls supply identity; tree-sitter supplies syntax, never resolution.
 ``stale_dependents`` maps callee replacement to the summaries that must be
@@ -9932,8 +9938,9 @@ class _Builder:
         # `lib.VA[i]` — an index read of an imported slice/array var,
         # and `lib.VM[k]` — the single-value read of an imported map
         # var. The element/value is external state like the container
-        # var itself, so the result carries only the index's own
-        # dependencies; the read still records the imported transfer
+        # var itself, so the result carries current indirect-write
+        # dependencies plus the index's own dependencies; the read
+        # still records the imported transfer
         # (`effects` reports `unknown`) and pins the declared
         # container, element and map-key identities so redeclaring any
         # flags the summary through `stale_dependents`. The element
@@ -10662,6 +10669,11 @@ class _Builder:
             result = (
                 frozenset().union(*actual) if actual else frozenset()
             )
+            channel_deps = self._promote_chan_call_args(
+                call_operand, "", locals_, params
+            )
+            self.indirect_writes |= result | channel_deps
+            result |= self.indirect_writes
             deps |= result
             call_node = self.calls.get(self.node_key(call_operand))
             if call_node is not None:
@@ -10689,9 +10701,7 @@ class _Builder:
             self._store_call_writes(
                 list(arg_nodes), result, locals_, params
             )
-            deps |= self._promote_chan_call_args(
-                call_operand, "", locals_, params
-            )
+            deps |= channel_deps
             self.pinned.update(
                 getattr(call_member, "signature_type_ids", ()) or ()
             )
@@ -27360,6 +27370,7 @@ class _Builder:
                         self.pinned.add(elem.type_id)
                     computed_args = ()
                     computed_call = None
+                    computed_result_deps = frozenset()
                     if computed is not None:
                         # `for range *G()` — the callee's body is
                         # opaque to the summary (a container result
@@ -27507,8 +27518,19 @@ class _Builder:
                             )
                             if call.kind == "external_or_bodyless":
                                 self._opaque_spans.add(_key3(call.span))
-                            self._promote_chan_call_args(
+                            channel_deps = self._promote_chan_call_args(
                                 call_node, "", scope, params
+                            )
+                            call_arg_deps = (
+                                frozenset().union(*computed_args)
+                                if computed_args
+                                else frozenset()
+                            )
+                            self.indirect_writes |= (
+                                call_arg_deps | channel_deps
+                            )
+                            computed_result_deps = (
+                                call_arg_deps | self.indirect_writes
                             )
                         if target_fn is not None:
                             for signature_param in (
@@ -27581,15 +27603,15 @@ class _Builder:
                             CallTransfer(
                                 FileSpan(
                                     self.current_file,
-                                    right.start_byte,
-                                    right.end_byte,
-                                ),
-                                target,
-                                computed_args,
-                                frozenset(),
-                                imported=True,
-                            )
+                                right.start_byte,
+                                right.end_byte,
+                            ),
+                            target,
+                            computed_args,
+                            computed_result_deps,
+                            imported=True,
                         )
+                    )
                     if computed_call is not None:
                         # `*G()` — the shared transfer above pins the
                         # result pointee's identity; the call itself
@@ -27611,7 +27633,7 @@ class _Builder:
                                     computed_call.span,
                                     second_target,
                                     computed_args,
-                                    frozenset(),
+                                    computed_result_deps,
                                     imported=True,
                                 )
                             )
@@ -27699,6 +27721,8 @@ class _Builder:
                                 value_deps |= scope[escaped_id]
                             elif escaped_id in params:
                                 value_deps |= {params[escaped_id]}
+                        value_deps |= self.indirect_writes
+                    if member is not None:
                         value_deps |= self.indirect_writes
                     # Each name's declared type comes from the
                     # compiler's binding — scalar-or-pointer, matching
@@ -31421,7 +31445,8 @@ class _Builder:
                 # A dot-imported `K`/`V` classifies by the declared
                 # member exactly like a package-qualified `lib.K`/`lib.V`
                 # read: a scalar constant is dep-free and a scalar `var`
-                # records an opaque state-read transfer. Everything else
+                # records an opaque state-read transfer whose value
+                # carries current indirect writes. Everything else
                 # — functions, types, non-scalars, a missing record or a
                 # record naming a different object — stays closed.
                 member = self.members.get(ref.binding_id)
@@ -31448,7 +31473,7 @@ class _Builder:
                                 imported=True,
                             )
                         )
-                        return frozenset()
+                        return self.indirect_writes
                 raise _Unsupported("non_parameter_reference", _span(node))
             binding = (
                 self.bindings.get(ref.binding_id)
@@ -31479,9 +31504,9 @@ class _Builder:
                     and binding.type is not None
                 ):
                     # A package-level `var` — mutable state outside the
-                    # parameter set — reads like an imported `lib.V`:
-                    # dep-free for the value but not purity-proof, so
-                    # the imported transfer marks `effects` unknown.
+                    # parameter set — is dep-free for the value but not
+                    # purity-proof, so the imported transfer marks
+                    # `effects` unknown.
                     # The target is the var's own binding identity,
                     # which lives in `known` — a redeclared or removed
                     # var still flags `stale_dependents`, and the
@@ -31518,10 +31543,9 @@ class _Builder:
         if kind == "selector_expression":
             # `lib.K` — a package-qualified member read. Scalar constants
             # are dep-free, exactly like local constants. A scalar `var`
-            # read is modelled like a zero-argument `direct_import`
-            # transfer: the value derives from package state, not from any
-            # parameter, and the `imported` flag reports `effects` as
-            # `unknown` — the read is not purity-proof. The recorded
+            # read is modelled as external state: its value carries
+            # current indirect writes, and the `imported` flag reports
+            # `effects` as `unknown` — the read is not purity-proof. The recorded
             # target is the member's own identity, so a regenerated report
             # for the imported unit still flags this summary via
             # `stale_dependents`. Non-scalar vars, functions and any read
@@ -31564,7 +31588,7 @@ class _Builder:
                         locals_.get(member.id, frozenset())
                         | self.indirect_writes
                     )
-                return frozenset()
+                return self.indirect_writes
             if member is None:
                 # `s.M` / `St.M` — a bound method value: the
                 # selector field resolves to a same-package method,
@@ -31595,7 +31619,7 @@ class _Builder:
                     )
                 # `lib.VS.F` / `VS.F` — a field of an imported struct
                 # var. The field is external state like the member
-                # itself: the read is dep-free but records the imported
+                # itself: the read carries indirect writes and records the imported
                 # transfer against the field's own identity and pins
                 # both records' named types, so redeclaring the struct
                 # or the field's type flags the summary.
@@ -31688,7 +31712,7 @@ class _Builder:
                             imported=True,
                         )
                     )
-                    return field_index_deps
+                    return field_index_deps | self.indirect_writes
                 # `t.F` — a field read through a bound `*S`. Same
                 # dep-free external-state model: the field's value is
                 # caller memory the dep model never tracks (a bound
@@ -34805,7 +34829,7 @@ class _Builder:
                             or ()
                         )
                         self._opaque_spans.add(_key3(inner_call.span))
-                        self._promote_chan_call_args(
+                        channel_deps = self._promote_chan_call_args(
                             call_node, "", locals_, params
                         )
                         # The container is callee-produced — its
@@ -34817,6 +34841,10 @@ class _Builder:
                             if computed_args
                             else frozenset()
                         )
+                        self.indirect_writes |= (
+                            result_deps | channel_deps
+                        )
+                        result_deps |= self.indirect_writes
                         self._store_call_writes(
                             list(inner_args),
                             result_deps,
@@ -34832,7 +34860,7 @@ class _Builder:
                                     inner_call.span,
                                     second_target,
                                     computed_args,
-                                    frozenset(),
+                                    result_deps,
                                     imported=True,
                                 )
                             )
@@ -34851,7 +34879,7 @@ class _Builder:
                             imported=True,
                         )
                     )
-                    return index_deps
+                    return self.indirect_writes | index_deps
                 deps = frozenset()
                 for arg in arguments:
                     deps |= self.expression(
@@ -39475,9 +39503,10 @@ class _Builder:
         # hand back a channel argument, so every `chan` argument
         # joins the external model and its queue contents may
         # reach the result.
-        deps |= self._promote_chan_call_args(
+        channel_deps = self._promote_chan_call_args(
             node, "", locals_, params
         )
+        deps |= channel_deps
         if receiver_node is not None:
             root_ref = self._receiver_root_ref(receiver_node)
             if (
@@ -39525,7 +39554,7 @@ class _Builder:
         # The callee may write `*p = y` or send `y` through an
         # argument — the same escaped/indirect fold every opaque
         # call does.
-        write_deps = arg_deps | receiver_deps
+        write_deps = arg_deps | receiver_deps | channel_deps
         self.indirect_writes |= write_deps
         for escaped_id in self.escaped:
             self._store(
@@ -40224,12 +40253,15 @@ class _Builder:
         receiver: Any = None,
     ) -> frozenset[int]:
         # The callee lives in a resolved imported unit; its body is
-        # opaque here. The result may depend on every argument — an
-        # over-approximation — and the recorded target is the imported
-        # unit's own binding identity, so a regenerated report for it
-        # still flags this summary via `stale_dependents`. Package-level
-        # state is not modelled. A method call also depends on its
-        # receiver expression, evaluated before the arguments. A
+        # opaque here. The result may depend on every argument and
+        # current indirect write — an over-approximation — while each
+        # argument's dependencies broadcast into that shared external
+        # state. A passed local channel becomes an external queue. The
+        # recorded target is the imported unit's own binding identity,
+        # so a regenerated report for it still flags this summary via
+        # `stale_dependents`. This propagation is intra-function only.
+        # A method call also depends on its receiver expression,
+        # evaluated before the arguments. A
         # composite imported var receiver (`lib.VS.PM(x)` on a struct
         # var) reads external state like the member itself — a plain
         # member read would reject it as unrepresentable, but as a
@@ -40422,9 +40454,19 @@ class _Builder:
             self._modeled_spans.add(_key3(call.span))
             return result
         self._opaque_spans.add(_key3(call.span))
-        result = (
+        argument_deps = (
             frozenset().union(*actual) if actual else frozenset()
-        ) | receiver_deps
+        )
+        call_arguments = (
+            ([receiver] if receiver is not None else []) + arguments
+        )
+        channel_deps = self._promote_chan_arg_roots(
+            call_arguments, "", locals_, params
+        )
+        self.indirect_writes |= (
+            argument_deps | receiver_deps | channel_deps
+        )
+        result = argument_deps | receiver_deps | self.indirect_writes
         transfers.append(
             CallTransfer(call.span, call.target, actual, result, imported=True)
         )
@@ -40444,48 +40486,6 @@ class _Builder:
                 locals_,
                 params,
                 pointer_receiver=True,
-            )
-        chan_chan_argument = bool(local_chan_chan_roots)
-        if not chan_chan_argument:
-            for arg in arguments:
-                inner = arg
-                while (
-                    inner is not None
-                    and inner.type == "parenthesized_expression"
-                ):
-                    inner = next(
-                        (
-                            child
-                            for child in inner.named_children
-                            if child.type != "comment"
-                        ),
-                        None,
-                    )
-                if inner is None or inner.type != "identifier":
-                    continue
-                ref = self.references.get(self.node_key(inner))
-                binding = (
-                    self.bindings.get(ref.binding_id)
-                    if ref is not None and ref.binding_id
-                    else None
-                )
-                fact = binding.type if binding is not None else None
-                if (
-                    self._chan_chan_fact(fact)
-                    or self._chan_chan_elem_collection(fact)
-                ):
-                    chan_chan_argument = True
-                    break
-        if (
-            chan_chan_argument
-            and not call.method
-            and not call.method_expr
-        ):
-            # An opaque queue call may send any argument into the queue
-            # and retain co-passed channels for later sends.
-            self.indirect_writes |= result
-            self._promote_chan_arg_roots(
-                arguments, "", locals_, params
             )
         # The callee's declared named/alias signature types are pinned
         # the same way a member read's declared type is: redeclaring one
@@ -41167,12 +41167,17 @@ def summarize_go_package(
 
     Calls into host-resolved imported units record `direct_import`
     transfers: the callee body is opaque, so the result is treated as
-    potentially depending on every argument — an over-approximation;
-    package-level state is not modelled. The target is the imported
-    unit's own binding identity, so regenerating that unit's report
-    churns it and `stale_dependents` still flags dependents. A summary
-    recording such a transfer reports `effects` as `unknown` — the
-    imported callee's side effects are outside the fragment. Only
+    potentially depending on every argument and current
+    `indirect_writes` — an over-approximation. Argument dependencies
+    broadcast into that intra-function external-state set, and a local
+    channel passed to the call becomes an external queue. Imported
+    member reads and opaque call results union the set; propagation
+    through a local caller into a different summary remains unmodelled.
+    The target is the imported unit's own binding identity, so
+    regenerating that unit's report churns it and `stale_dependents`
+    still flags dependents. A summary recording such a transfer reports
+    `effects` as `unknown` — the imported callee's side effects are
+    outside the fragment. Only
     imported calls whose results are all scalar are classified
     `direct_import`; composite results keep `external_or_bodyless` and
     fail closed. A multi-valued imported call declares its arity on the
@@ -41186,14 +41191,16 @@ def summarize_go_package(
     (`imported_members`). A package-qualified read of a scalar
     constant (`lib.K`) is admitted — constants carry no dependencies,
     like local constants. A scalar imported `var` read (`lib.V`)
-    records an imported transfer against the member identity —
-    external state like an imported call, so `effects` reports
-    `unknown`; non-scalar members and imported functions used as
+    records an imported transfer against the member identity and
+    carries current indirect writes — external state like an imported
+    call, so `effects` reports `unknown`; non-scalar members and imported functions used as
     values stay closed. The unit's own package-level `var`s admit
     the same way: reads and writes (`G`, `G = v`, `G += v`,
     `G++`/`G--`) record imported transfers against the var's binding
     identity — in `known`, so `stale_dependents` flags on
-    redeclaration. Reports without the
+    redeclaration. Package-local global reads remain dep-free for the
+    value; the imported-member read model does not propagate across
+    function summaries. Reports without the
     section load unchanged; the member record only widens what was
     already unmodelled.
     """

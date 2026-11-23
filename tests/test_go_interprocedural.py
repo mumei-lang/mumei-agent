@@ -2290,6 +2290,115 @@ def test_zero_argument_import_call(go_types_helper):
     assert transfer.result == frozenset()
 
 
+def _imported_state_result(go_types_helper, function: str):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n" + function,
+    }
+    imports = {
+        "lib": {
+            "lib.go": (
+                "package lib\n"
+                "var GC chan int64\n"
+                "var GV int64\n"
+                "func G(ch chan int64) { GC = ch }\n"
+                "func H() chan int64 { return GC }\n"
+                "func Set(v int64) { GV = v }\n"
+                "func Get() int64 { return GV }\n"
+                "func Id(v int64) int64 { return v }\n"
+            )
+        }
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, imports),
+        files,
+        target_arch="amd64",
+    )
+    return named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param(
+            "c := make(chan int64, 1); c <- x; lib.G(c); "
+            "return <-lib.GC",
+            id="imported-channel-after-local-send",
+        ),
+        pytest.param(
+            "c := make(chan int64, 1); lib.G(c); c <- x; "
+            "return <-lib.GC",
+            id="imported-channel-before-local-send",
+        ),
+        pytest.param(
+            "c := make(chan int64, 1); c <- x; lib.G(c); "
+            "d := lib.H(); return <-d",
+            id="imported-channel-return",
+        ),
+        pytest.param(
+            "c := make(chan int64, 1); lib.G(c); lib.GC <- x; "
+            "return <-c",
+            id="imported-channel-receive-local-queue",
+        ),
+        pytest.param(
+            "lib.Set(x); return lib.Get()",
+            id="imported-call-result-after-imported-call",
+        ),
+        pytest.param(
+            "lib.Set(x); return lib.GV",
+            id="imported-member-read-after-imported-call",
+        ),
+        pytest.param(
+            "lib.GC <- x; return <-lib.GC",
+            id="existing-imported-channel-broadcast",
+        ),
+    ],
+)
+def test_imported_calls_and_reads_share_indirect_write_dependencies(
+    go_types_helper, body
+):
+    result = _imported_state_result(
+        go_types_helper, f"func F(x int64) int64 {{ {body} }}\n"
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_imported_state_reads_preserve_unrelated_parameter_precision(
+    go_types_helper,
+):
+    result = _imported_state_result(
+        go_types_helper,
+        "func F(x, y int64) int64 { lib.Set(y); return x }\n",
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset({0})
+
+
+def test_imported_read_without_prior_imported_write_is_dep_free(
+    go_types_helper,
+):
+    result = _imported_state_result(
+        go_types_helper, "func F() int64 { return lib.Get() }\n"
+    )
+    assert result.available, result.gaps
+    assert result.return_dependencies == frozenset()
+
+
+def test_imported_call_result_carries_prior_indirect_writes(
+    go_types_helper,
+):
+    result = _imported_state_result(
+        go_types_helper,
+        "func F(x, y int64) int64 { a := lib.Id(x); _ = a; "
+        "return lib.Id(y) }\n",
+    )
+    assert result.available, result.gaps
+    # Sound widening: later opaque calls may observe earlier arguments.
+    assert result.return_dependencies == frozenset({0, 1})
+
+
 def _declared_lib_set(helper: Path, lib: dict[str, str]):
     """The declared callee manifest `--summary-aware-calls` consumes:
 
@@ -54058,7 +54167,7 @@ def test_imported_value_receiver_does_not_write_its_receiver(go_types_helper):
         go_types_helper, body
     )
     assert result.available, result.gaps
-    assert result.return_dependencies == frozenset({0})
+    assert result.return_dependencies == frozenset({0, 1})
     calls = [call for call in snapshot.calls if call.method]
     assert [call.receiver_pointer for call in calls] == [False, True]
 
