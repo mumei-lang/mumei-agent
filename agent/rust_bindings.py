@@ -2878,8 +2878,18 @@ class _RustBindings:
                     self._receiver_annotation_position(value)
                     or node.start_byte
                 )
+                arg_list = self._type_arg_list(impl_args.strip())
+                if any(part.strip().startswith("'") for part in arg_list):
+                    # `Ref<'_, P>`/`MutexGuard<'_, P>` — lifetimes are
+                    # not payload args; drop them so the element is
+                    # `P`, not the whole `'_, P` list.
+                    arg_list = [
+                        part
+                        for part in arg_list
+                        if not part.strip().startswith("'")
+                    ]
                 elem_id, elem_args = self._element_of(
-                    None, impl_args.strip(), spelled_pos
+                    None, ", ".join(arg_list), spelled_pos
                 )
                 if elem_id is None and elem_args is not None:
                     # `let r = c.borrow()` keeps `Ref<P>` as the
