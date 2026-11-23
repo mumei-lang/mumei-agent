@@ -2564,11 +2564,13 @@ writer of a name with no textual read.
 For names with reads, `unused_assignments` also applies backward
 fixed-point liveness over the explicit CFG: a store is reported when its
 name is not live out of that node. The liveness addition only applies to
-reachable stores of names declared exactly once in the body, and excludes
-names mentioned in function literals, address-taken names, and the
-extractor's unreliable names. It uses simple identifier names only; fields,
-elements, aliasing and shadowing are not modelled. Unreachable stores keep
-only the legacy name-wide behavior. These remain **hints, not verdicts**.
+reachable stores of names declared exactly once in the body, and only when
+the store span starts at or after that declaration and lies within its
+enclosing block, statement or clause scope. It excludes names mentioned in
+function literals, address-taken names, and the extractor's unreliable
+names. It uses simple identifier names only; fields, elements, aliasing and
+full lexical binding identity are not modelled. Unreachable stores keep only
+the legacy name-wide behavior. These remain **hints, not verdicts**.
 
 ### C05 one-pass flow-hint report and unreachable-statement hints
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 import pytest
 
@@ -630,6 +630,60 @@ def test_unused_assignments_report_final_store_after_earlier_read():
 @pytest.mark.parametrize(
     "body",
     [
+        "x := 1; switch { case x > 0: }; x = 2; _ = x",
+        "x := 1; switch x { case 1: }; x = 2; _ = x",
+        "x := 1; select { case ch <- x: }; x = 2; _ = x",
+        "x := 1; for x < 3 { break }; x = 2; _ = x",
+        "x := 1; for range x { break }; x = 2; _ = x",
+        "x := 1; if c { return x }; x = 2; _ = x",
+    ],
+    ids=(
+        "switch-without-tag",
+        "switch-tag",
+        "select-send",
+        "for-condition",
+        "range-expression",
+        "if-return",
+    ),
+)
+def test_unused_assignments_keep_structured_reads_live(body):
+    cfg, result = unuses(body)
+    first_store = nodes(cfg, "define")[0]
+    assert not any(
+        finding.node_id == first_store.node_id and finding.name == "x"
+        for finding in result
+    )
+
+
+def test_unused_assignments_treat_unmapped_span_node_as_reading_every_name():
+    body = "x := 1\n_ = x\nif c {}\nx = 2\nreturn 0"
+    cfg = graph(body)
+    assert {
+        node.kind for node in cfg.nodes if node.span is None
+    } == {"entry", "exit"}
+    return_node = nodes(cfg, "return")[0]
+    assert return_node.span is not None
+    cfg = replace(
+        cfg,
+        nodes=tuple(
+            replace(
+                node,
+                span=control_flow.SourceSpan(
+                    node.span.start + 1,
+                    node.span.end,
+                ),
+            )
+            if node.node_id == return_node.node_id
+            else node
+            for node in cfg.nodes
+        ),
+    )
+    assert control_flow.unused_assignments(body, cfg) == ()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
         "var x int\nx = 1\n_ = x\nx = 2",
         "if x := 1; x > 0 { _ = x; x = 2 }",
         "for x := 0; c; { _ = x; x = 2; break }",
@@ -670,6 +724,67 @@ def test_unused_assignments_store_read_on_one_branch_is_live():
 def test_unused_assignments_exclude_shadowed_name():
     _, result = unuses("x := 1\n{ x := 2; _ = x }\n_ = x")
     assert result == ()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "if c { x := 1; _ = x }; x = 5; return",
+        "if c { count := 0; _ = count }; count = 1; _ = count; count = 2",
+        "count = 1; count := 0; _ = count",
+    ],
+    ids=(
+        "named-result-after-inner-declaration",
+        "package-variable-after-inner-declaration",
+        "outer-store-before-declaration",
+    ),
+)
+def test_unused_assignments_exclude_stores_outside_declaration_scope(body):
+    _, result = unuses(body)
+    assert result == ()
+
+
+def test_unused_assignments_report_dead_store_in_inner_if_scope():
+    body = "if c { y := 1; y = 2; _ = y }"
+    cfg, result = unuses(body)
+    first_store = nodes(cfg, "define")[0]
+    assert result == (
+        control_flow.UnusedAssignment(
+            first_store.node_id,
+            "y",
+            first_store.span,
+        ),
+    )
+
+
+def test_unused_assignments_report_dead_store_for_for_init_scope():
+    body = "for i := 0; i < 3; i++ { j := i; j = 0; _ = j }"
+    cfg, result = unuses(body)
+    first_j_store = next(
+        node
+        for node in nodes(cfg, "define")
+        if body[node.span.start : node.span.end] == "j := i"
+    )
+    assert result == (
+        control_flow.UnusedAssignment(
+            first_j_store.node_id,
+            "j",
+            first_j_store.span,
+        ),
+    )
+
+
+def test_unused_assignments_convert_non_ascii_declaration_offsets():
+    body = "// é\nx := 1\nx = 2\n_ = x"
+    cfg, result = unuses(body)
+    first_store = nodes(cfg, "define")[0]
+    assert result == (
+        control_flow.UnusedAssignment(
+            first_store.node_id,
+            "x",
+            first_store.span,
+        ),
+    )
 
 
 def test_unused_assignments_exclude_closure_captured_name():
