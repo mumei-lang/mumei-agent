@@ -62,6 +62,14 @@ _ITER_SLICE_METHODS = frozenset({"as_slice", "as_mut_slice"})
 _ITER_CHUNK_METHODS = frozenset(
     {"chunks", "windows", "rchunks", "split", "split_inclusive"}
 )
+# The `_mut` counterparts iterate `&mut [T]` slices —
+# `v.chunks_mut(n)`/`v.split_mut(p)` spell `&mut P`.
+_ITER_CHUNK_MUT_METHODS = frozenset(
+    {
+        "chunks_mut", "rchunks_mut", "split_mut",
+        "split_inclusive_mut", "splitn_mut", "rsplitn_mut",
+    }
+)
 # Map entry points and the key they read — `m.keys()` yields `K`,
 # `m.values()` yields `V` of `HashMap<K, V>`/`BTreeMap<K, V>`.
 _MAP_ELEMENT_METHODS = {"keys": 0, "values": 1}
@@ -86,6 +94,8 @@ _SLICE_OPTION_METHODS = frozenset(
         "last_mut",
         "split_first",
         "split_last",
+        "split_first_mut",
+        "split_last_mut",
     }
 )
 
@@ -93,6 +103,11 @@ _SLICE_OPTION_METHODS = frozenset(
 # `Option<(&T, &[T])>` — the payload is the pair (element,
 # rest-slice), spelled `(P, &P)` so tuple patterns bind `f`/`rest`.
 _SPLIT_PAIR_METHODS = frozenset({"split_first", "split_last"})
+# `v.split_first_mut()`/`split_last_mut()` yield
+# `Option<(&mut T, &mut [T])>` — the same pair spelled mutable.
+_SPLIT_PAIR_MUT_METHODS = frozenset(
+    {"split_first_mut", "split_last_mut"}
+)
 
 # Prelude container methods that hand back `Option` — `v.get(i)`,
 # `v.first()` and `v.last()` yield `Option<&T>` while `v.pop()`
@@ -102,19 +117,24 @@ _SPLIT_PAIR_METHODS = frozenset({"split_first", "split_last"})
 # type arg that becomes Option's payload (`ok` reads P of
 # `Result<P, E>`, `err` reads E); -1 is the last arg.
 _OPTION_HEAD_METHODS = {
-    "get": ("&", {"Vec", "VecDeque", "HashMap", "BTreeMap"}, -1),
+    "get": ("&", {"Vec", "VecDeque", "HashMap", "BTreeMap",
+                  "HashSet", "BTreeSet"}, -1),
     "get_mut": ("&mut ", {"Vec", "VecDeque", "HashMap", "BTreeMap"}, -1),
-    "first": ("&", {"Vec"}, -1),
+    "first": ("&", {"Vec", "BTreeSet"}, -1),
     "first_mut": ("&mut ", {"Vec"}, -1),
-    "last": ("&", {"Vec"}, -1),
+    "last": ("&", {"Vec", "BTreeSet"}, -1),
     "last_mut": ("&mut ", {"Vec"}, -1),
-    "front_mut": ("&mut ", {"VecDeque"}, -1),
-    "back_mut": ("&mut ", {"VecDeque"}, -1),
-    "pop": ("", {"Vec"}, -1),
-    "front": ("&", {"VecDeque"}, -1),
-    "back": ("&", {"VecDeque"}, -1),
-    "pop_front": ("", {"VecDeque"}, -1),
-    "pop_back": ("", {"VecDeque"}, -1),
+    "front_mut": ("&mut ", {"VecDeque", "LinkedList"}, -1),
+    "back_mut": ("&mut ", {"VecDeque", "LinkedList"}, -1),
+    "pop": ("", {"Vec", "BinaryHeap"}, -1),
+    "front": ("&", {"VecDeque", "LinkedList"}, -1),
+    "back": ("&", {"VecDeque", "LinkedList"}, -1),
+    "pop_front": ("", {"VecDeque", "LinkedList"}, -1),
+    "pop_back": ("", {"VecDeque", "LinkedList"}, -1),
+    # `h.peek()` yields `Option<&P>` — `peek_mut` returns a
+    # `PeekMut` wrapper instead of a plain borrow and stays
+    # opaque.
+    "peek": ("&", {"BinaryHeap"}, -1),
     "remove": ("", {"HashMap", "BTreeMap", "VecDeque"}, -1),
     "next": ("&", None, -1),
     # `Option` exposes no `ok()` — only `Result::ok()` narrows to
@@ -122,7 +142,9 @@ _OPTION_HEAD_METHODS = {
     # opaque rather than pinning a payload.
     "ok": ("", {"Result"}, 0),
     "err": ("", {"Result"}, -1),
-    "take": ("", {"Option"}, 0),
+    # `s.take(&k)` removes and returns the element — `Option<P>`
+    # on both `Option` and the std sets.
+    "take": ("", {"Option", "HashSet", "BTreeSet"}, 0),
     # `o.as_ref()`/`o.as_mut()` keep `Option` with a borrowed
     # payload — spelled `&P`/`&mut P`.
     "as_ref": ("&", {"Option"}, 0),
@@ -137,6 +159,10 @@ _OPTION_HEAD_METHODS = {
     # `(element, rest-slice)` pair; `_SPLIT_PAIR_METHODS` spells it.
     "split_first": ("", {"Vec"}, -1),
     "split_last": ("", {"Vec"}, -1),
+    # `split_first_mut`/`split_last_mut` — `_SPLIT_PAIR_MUT_METHODS`
+    # spells the `(&mut T, &mut [T])` pair.
+    "split_first_mut": ("", {"Vec"}, -1),
+    "split_last_mut": ("", {"Vec"}, -1),
     # `o.as_deref()`/`o.as_deref_mut()` deref the payload —
     # `Option<Box<P>>` yields `Option<&P>`; the element is
     # post-processed below to peel the wrapper.
@@ -152,7 +178,31 @@ _OPTION_HEAD_METHODS = {
     "zip": ("", {"Option"}, 0),
     # `m.insert(k, v)` yields `Option<V>` — the pair's value arg.
     "insert": ("", {"HashMap", "BTreeMap"}, -1),
+    # `o.replace(v)` yields `Option<P>` — the old payload.
+    "replace": ("", {"Option"}, 0),
+    # `m.remove_entry(k)`/`m.pop_first()`/`m.pop_last()` yield
+    # `Option<(K, V)>` — `_MAP_PAIR_METHODS` spells the pair.
+    "remove_entry": ("", {"HashMap", "BTreeMap"}, 0),
+    # `pop_first`/`pop_last` on `BTreeMap` yield `Option<(K, V)>`
+    # (the `_MAP_PAIR_METHODS` pair below); on `BTreeSet` plain
+    # `Option<P>`.
+    "pop_first": ("", {"BTreeMap", "BTreeSet"}, 0),
+    "pop_last": ("", {"BTreeMap", "BTreeSet"}, 0),
+    # `q.swap_remove_front(i)`/`swap_remove_back(i)` yield
+    # `Option<P>`.
+    "swap_remove_front": ("", {"VecDeque"}, -1),
+    "swap_remove_back": ("", {"VecDeque"}, -1),
 }
+
+# Methods that yield `Option<(K, V)>` — the pair of the map's two
+# type args, spelled so `Some((k, v))` binds each name.
+_MAP_PAIR_METHODS = frozenset(
+    {"remove_entry", "pop_first", "pop_last"}
+)
+
+# `v.swap_remove(i)` yields `T` outright — a receiver payload, not
+# an Option.
+_SWAP_REMOVE_METHODS = frozenset({"swap_remove"})
 
 # `o.insert(p)`/`o.get_or_insert(..)`/`o.or_insert(..)` yield
 # `&mut P` — the mutable borrow carries `Option`'s own payload.
@@ -3080,11 +3130,58 @@ class _RustBindings:
                     else:
                         elements = self._type_arg_list(receiver[1])
                         index = option_head[2]
+                        if (
+                            self.text(field).strip() == "get"
+                            and self._container_head_name(
+                                callee.child_by_field_name("value")
+                            )
+                            in {"HashSet", "BTreeSet"}
+                        ):
+                            # `HashSet<P, S>`/`BTreeSet<P, A>`
+                            # carry a trailing hasher/allocator
+                            # arg — `get` reads the element `P`,
+                            # not the last arg.
+                            index = 0
                         element = (
                             elements[index].strip()
                             if -len(elements) <= index < len(elements)
                             else None
                         )
+                        if (
+                            self.text(field).strip()
+                            in _MAP_PAIR_METHODS
+                            and self._container_head_name(
+                                callee.child_by_field_name("value")
+                            )
+                            in _MAP_CONTAINER_NAMES
+                        ):
+                            # `m.pop_first()` yields
+                            # `Option<(K, V)>` — the map's raw args
+                            # spell the pair (`receiver[1]` already
+                            # reduced them to the value `V`), so
+                            # `Some((k, v))` binds each name.
+                            type_node = self._receiver_type_node(
+                                callee.child_by_field_name("value")
+                            )
+                            head_args = (
+                                self._generic_head_args(
+                                    type_node, node.start_byte
+                                )
+                                if type_node is not None
+                                else None
+                            )
+                            pair_args = (
+                                self._type_arg_list(head_args[0])
+                                if head_args is not None
+                                and head_args[0] is not None
+                                else []
+                            )
+                            element = (
+                                f"({pair_args[0].strip()},"
+                                f" {pair_args[1].strip()})"
+                                if len(pair_args) >= 2
+                                else None
+                            )
                     if (
                         self.text(field).strip() in {"get", "get_mut"}
                         and element
@@ -3111,17 +3208,24 @@ class _RustBindings:
                             # `s.get(0..1)` yields `Option<&[P]>`,
                             # not `Option<&P>`.
                             element = "[" + element + "]"
+                    method_text = self.text(field).strip()
                     if (
                         element is not None
-                        and self.text(field).strip()
-                        in _SPLIT_PAIR_METHODS
+                        and method_text
+                        in _SPLIT_PAIR_METHODS | _SPLIT_PAIR_MUT_METHODS
                     ):
                         # `split_first()`/`split_last()` yield
                         # `Option<(&T, &[T])>` — the tuple payload
                         # spells `(P, &[P])` so `Some((f, rest))`
                         # binds `f: P` and `rest: &[P]` (indexing
                         # `rest` still reads the slice element).
-                        element = f"({element}, &[{element}])"
+                        # The `_mut` variants spell the same pair
+                        # borrowed mutable.
+                        element = (
+                            f"({element}, &[{element}])"
+                            if method_text in _SPLIT_PAIR_METHODS
+                            else f"(&mut {element}, &mut [{element}])"
+                        )
                     if self.text(field).strip() == "and":
                         # `Option::and<U>(self, optb: Option<U>)`
                         # yields the ARGUMENT's payload, not the
@@ -3464,6 +3568,27 @@ class _RustBindings:
                                 )
                                 or node.start_byte,
                             )
+                    if (
+                        method_name in _SWAP_REMOVE_METHODS
+                        and receiver[1] is not None
+                        and self._container_head_name(
+                            callee.child_by_field_name("value")
+                        )
+                        in {"Vec"}
+                    ):
+                        # `v.swap_remove(i)` yields `T` — the
+                        # container's last type arg.
+                        parts = self._type_arg_list(receiver[1])
+                        if parts:
+                            return self._spelled_type(
+                                parts[-1].strip(),
+                                self._receiver_annotation_position(
+                                    callee.child_by_field_name(
+                                        "value"
+                                    )
+                                )
+                                or node.start_byte,
+                            )
                     return self._unwrapped(
                         callee, node.start_byte, receiver
                     )
@@ -3582,20 +3707,17 @@ class _RustBindings:
             return self._element_of(None, inner, position)
         # A slice or array element exposes its own element type —
         # `&[[P; 2]]` reads first to `[P; 2]`, then to `P`.
-        bracket = re.fullmatch(
-            r"\[(.+?)(?:\s*;.+)?\]", elem_args
-        )
-        if bracket is not None:
-            # The element is an anonymous slice/array — it is indexed
-            # further by its own element (`[P; 2]` → `P`), not `P`.
+        if elem_args.startswith("[") and self._bracket_wraps(
+            elem_args
+        ):
+            inner = elem_args[1:-1].strip()
+            elem = self._array_elem(inner)
             # A slice element `[P]` resolves to `P` so member calls
             # on `a[0]` reach `P`'s members; an array `[P; N]` keeps
             # the spelled element for deeper indexing (`a[0][1]`).
-            if ";" not in bracket.group(0):
-                return self._spelled_type(
-                    bracket.group(1).strip(), position
-                )
-            return None, bracket.group(1).strip()
+            if elem == inner:
+                return self._spelled_type(elem, position)
+            return None, elem
         match = re.fullmatch(
             r"([A-Za-z_][\w:]*)\s*(?:<(.+)>)?", elem_args
         )
@@ -4138,7 +4260,7 @@ class _RustBindings:
             return spelled, self._receiver_annotation_position(
                 receiver
             )
-        if method == "split_at":
+        if method in {"split_at", "split_at_mut"}:
             container_id, args = self._receiver_type(receiver)
             if args is None:
                 return None, None
@@ -4166,18 +4288,23 @@ class _RustBindings:
                 return None, None
             # `v.split_at(i)` yields `(&[P], &[P])` — a pair of
             # borrowed slices that feeds the tuple-pattern path.
-            # Re-splitting a `&[P]` keeps the same slice — the
-            # spelling is not wrapped a second time.
-            pair = (
-                spelled
-                if spelled.startswith("&[")
-                else f"&[{spelled}]"
-            )
+            # `split_at_mut` spells the same pair `&mut`.
+            # Re-splitting a `&[P]`/`&mut [P]` keeps the same
+            # slice — the spelling is not wrapped a second time.
+            prefix = "&mut " if method == "split_at_mut" else "&"
+            element = spelled
+            if element.startswith("&mut [") and element.endswith(
+                "]"
+            ):
+                element = element[6:-1]
+            elif element.startswith("&[") and element.endswith("]"):
+                element = element[2:-1]
+            pair = f"{prefix}[{element}]"
             return (
                 f"({pair}, {pair})",
                 self._receiver_annotation_position(receiver),
             )
-        if method in _ITER_CHUNK_METHODS:
+        if method in _ITER_CHUNK_METHODS | _ITER_CHUNK_MUT_METHODS:
             container_id, args = self._receiver_type(receiver)
             if args is None:
                 return None, None
@@ -4204,10 +4331,15 @@ class _RustBindings:
             spelled = args.strip() or None
             if spelled is None:
                 return None, None
-            # The element is a borrowed slice — `&[P]` reads `P`
-            # at the index/iter sites that consume it.
+            # The element is a borrowed slice — `&[P]`/`&mut [P]`
+            # reads `P` at the index/iter sites that consume it.
+            prefix = (
+                "&mut "
+                if method in _ITER_CHUNK_MUT_METHODS
+                else "&"
+            )
             return (
-                f"&[{spelled}]",
+                f"{prefix}[{spelled}]",
                 self._receiver_annotation_position(receiver),
             )
         if method == "flatten":
@@ -4260,11 +4392,18 @@ class _RustBindings:
                     and inner_callee.type == "field_expression"
                     else None
                 )
-                if inner_method in _ITER_CHUNK_METHODS:
+                if inner_method in (
+                    _ITER_CHUNK_METHODS | _ITER_CHUNK_MUT_METHODS
+                ):
                     # `v.chunks(n)`/`windows(n)` spell their `&[P]`
                     # item as `&P` — flatten yields the slice's
-                    # `&P` elements.
-                    return "&" + body, pos
+                    # `&P` elements; the `_mut` variants keep the
+                    # mutable borrow.
+                    return (
+                        "&mut " + body
+                        if inner_method in _ITER_CHUNK_MUT_METHODS
+                        else "&" + body
+                    ), pos
                 # `&Vec<P>`/`&Option<P>` — fall through to the
                 # generic head path on the un-borrowed spelling.
                 stripped = body
@@ -4940,6 +5079,7 @@ class _RustBindings:
             or method in _ITER_PRESERVING_METHODS
             or method in _ITER_SLICE_METHODS
             or method in _ITER_CHUNK_METHODS
+            or method in _ITER_CHUNK_MUT_METHODS
             or method == "enumerate"
             or method == "zip"
             or method == "flatten"
@@ -4966,9 +5106,10 @@ class _RustBindings:
                 (b.name for b in self.bindings if b.id == elem_id), ""
             )
             return TypeFact("named", name, 0, None, elem_id), rest
-        if method in _ITER_CHUNK_METHODS:
-            # `v.chunks(n)` yields `&[P]` slices — spell `&P`, which
-            # index/iter sites unwrap to `P`.
+        if method in _ITER_CHUNK_METHODS | _ITER_CHUNK_MUT_METHODS:
+            # `v.chunks(n)` yields `&[P]` slices — spell `&P`,
+            # which index/iter sites unwrap to `P`; the `_mut`
+            # variants spell `&mut P`.
             container_id, args = self._receiver_type(receiver)
             if args is None:
                 return _UNKNOWN, None
@@ -4993,7 +5134,15 @@ class _RustBindings:
                 # not `&[P]`.
                 return _UNKNOWN, None
             spelled = args.strip() or None
-            return _UNKNOWN, None if spelled is None else "&" + spelled
+            prefix = (
+                "&mut "
+                if method in _ITER_CHUNK_MUT_METHODS
+                else "&"
+            )
+            return (
+                _UNKNOWN,
+                None if spelled is None else prefix + spelled,
+            )
         if method == "flatten":
             # `v.iter().flatten()` unwraps the element's own args —
             # `Vec<Vec<P>>` iterates `Vec<P>`, flatten yields `P`
@@ -7193,12 +7342,11 @@ class _RustBindings:
                 spelled = spelled[1:-1].strip()
                 continue
             break
-        bracket = re.fullmatch(r"\[(.+?)(?:\s*;.+)?\]", spelled)
-        if bracket is not None:
-            # `[P; N]`/`[P]` — an anonymous array/slice carries its
-            # element type as the args spelling, same shape a resolved
-            # container's element keeps.
-            return None, bracket.group(1).strip()
+        if spelled.startswith("[") and self._bracket_wraps(spelled):
+            # `[P; N]`/`[P]`/`[[P; N]]` — an anonymous array/slice
+            # carries its element type as the args spelling, same
+            # shape a resolved container's element keeps.
+            return None, self._array_elem(spelled[1:-1])
         match = re.fullmatch(
             r"([A-Za-z_][\w:]*)\s*(?:<(.+)>)?", spelled
         )
@@ -7253,6 +7401,21 @@ class _RustBindings:
             if char == "(":
                 depth += 1
             elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    return index == len(spelled) - 1
+        return False
+
+    @staticmethod
+    def _bracket_wraps(spelled: str) -> bool:
+        """Whether `[...]` wraps the whole spelling — `[P], [Q]`
+        only starts and ends with brackets; the first one closes
+        early. Nested `[[P; N]]` counts as wrapped."""
+        depth = 0
+        for index, char in enumerate(spelled):
+            if char == "[":
+                depth += 1
+            elif char == "]":
                 depth -= 1
                 if depth == 0:
                     return index == len(spelled) - 1
@@ -7932,6 +8095,11 @@ class _RustBindings:
                         # `o.map_or(d, f)` yields `f`'s return `U`
                         # itself — a plain value, not a container.
                         return None, node.start_byte, None
+                    if method == "find_map":
+                        # `it.find_map(f)` is iterator-only and
+                        # yields `Option<U>` — the receiver has no
+                        # container head to gate on.
+                        return "Option", node.start_byte, None
                     # `o.map(f)`/`o.and_then(f)` keep the receiver's
                     # container — `Option<U>` on `Option<_>`,
                     # `Result<U, E>` on `Result<_, _>`.
