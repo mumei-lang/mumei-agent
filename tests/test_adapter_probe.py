@@ -292,6 +292,42 @@ def _registry(**kw):
     return registry
 
 
+def _network_probe_registry():
+    descriptors = (
+        AdapterDescriptor.from_manifest(
+            _manifest(
+                adapter_id="probe.network-isolated",
+                required_permissions=[],
+            )
+        ),
+        AdapterDescriptor.from_manifest(
+            _manifest(
+                adapter_id="probe.network-permitted",
+                required_permissions=["network.connect"],
+            )
+        ),
+    )
+    registry = AdapterRegistry()
+    for descriptor in descriptors:
+        registry.register(descriptor)
+    return registry, descriptors
+
+
+def _patch_probe_enforceability(monkeypatch, **overrides):
+    enforceability = {
+        "memory_bound_enforceable": True,
+        "network_isolation_enforceable": True,
+        "filesystem_write_isolation_enforceable": True,
+        "process_spawn_isolation_enforceable": True,
+        "filesystem_read_isolation_enforceable": True,
+    }
+    enforceability.update(overrides)
+    for name, result in enforceability.items():
+        monkeypatch.setattr(
+            f"agent.adapter_probe.{name}", lambda result=result: result
+        )
+
+
 def _route():
     return RouteRequirements(
         "zendingsol.host.lean_scaffold/v0",
@@ -309,6 +345,85 @@ def test_probe_requests_pick_observation_excluded_candidates():
     assert reqs[0].argv == ("lean", "--version")
     assert reqs[0].stamp == 3
     assert reqs[0].timeout_ms == 5_000
+
+
+def test_probe_requests_require_enforceable_network_isolation(monkeypatch):
+    _patch_probe_enforceability(
+        monkeypatch, network_isolation_enforceable=False
+    )
+    registry, _ = _network_probe_registry()
+    policy = PlannerPolicy(
+        allowed_permissions=frozenset({"network.connect"}),
+        require_enforced_isolation=True,
+    )
+
+    requests = probe_requests_for(
+        registry, _route(), policy, stamp=3
+    )
+
+    assert [request.adapter_id for request in requests] == [
+        "probe.network-permitted"
+    ]
+    assert requests[0].isolate_network is False
+
+
+def test_probe_requests_without_gate_preserve_requests(monkeypatch):
+    _patch_probe_enforceability(
+        monkeypatch, network_isolation_enforceable=False
+    )
+    registry, descriptors = _network_probe_registry()
+    policy = PlannerPolicy(
+        allowed_permissions=frozenset({"network.connect"}),
+        require_enforced_isolation=False,
+    )
+
+    requests = probe_requests_for(
+        registry, _route(), policy, stamp=3
+    )
+    expected = {
+        descriptor.adapter_id: probe_request_for(
+            descriptor, stamp=3, policy=policy
+        )
+        for descriptor in descriptors
+    }
+
+    assert {request.adapter_id: request for request in requests} == expected
+
+
+def test_probe_requests_require_enforceable_memory_bound(monkeypatch):
+    _patch_probe_enforceability(
+        monkeypatch, memory_bound_enforceable=False
+    )
+    registry = _registry()
+    policy = PlannerPolicy(require_enforced_isolation=True)
+
+    assert (
+        probe_requests_for(registry, _route(), policy, stamp=3) == ()
+    )
+
+
+def test_probe_requests_with_gate_match_when_enforceable(monkeypatch):
+    _patch_probe_enforceability(monkeypatch)
+    registry, _ = _network_probe_registry()
+    allowed_permissions = frozenset({"network.connect"})
+
+    gated = probe_requests_for(
+        registry,
+        _route(),
+        PlannerPolicy(
+            allowed_permissions=allowed_permissions,
+            require_enforced_isolation=True,
+        ),
+        stamp=3,
+    )
+    ungated = probe_requests_for(
+        registry,
+        _route(),
+        PlannerPolicy(allowed_permissions=allowed_permissions),
+        stamp=3,
+    )
+
+    assert gated == ungated
 
 
 def test_probe_requests_skip_undeclared_probe():
@@ -1015,6 +1130,27 @@ def test_plan_with_probes_no_requests_stops():
     assert out.observations == ()
 
 
+def test_plan_with_probes_skips_unenforceable_probe(monkeypatch):
+    _patch_probe_enforceability(
+        monkeypatch, network_isolation_enforceable=False
+    )
+    registry = _registry()
+    runner = _ConcurrencyStubRunner()
+    policy = PlannerPolicy(require_enforced_isolation=True)
+
+    out = plan_with_probes(
+        registry, _route(), policy, stamp=1, runner=runner
+    )
+
+    assert runner.max_seen == 0
+    assert out.plan.selected is None
+    assert out.observations == ()
+    assert any(
+        "availability_unknown" in decision.reasons
+        for decision in out.plan.decisions
+    )
+
+
 def test_plan_with_probes_validation():
     registry = _registry()
     with pytest.raises(ValueError):
@@ -1151,6 +1287,26 @@ def test_probe_retry_first_attempt_without_history():
     )
     assert len(reqs) == 1
     assert reqs[0].attempt_number == 1
+
+
+def test_probe_retry_skips_unenforceable_probe(monkeypatch):
+    _patch_probe_enforceability(
+        monkeypatch, network_isolation_enforceable=False
+    )
+    registry = _registry()
+    policy = PlannerPolicy(require_enforced_isolation=True)
+
+    requests = probe_retry_requests(
+        registry, _route(), policy, stamp=1
+    )
+    plan = registry.plan(_route(), policy, ())
+
+    assert requests == ()
+    assert plan.selected is None
+    assert any(
+        "availability_unknown" in decision.reasons
+        for decision in plan.decisions
+    )
 
 
 def test_probe_retry_emits_next_ordinal():
