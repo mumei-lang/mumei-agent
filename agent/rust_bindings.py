@@ -4323,10 +4323,16 @@ class _RustBindings:
                         # `Index::Output`, not the arg `P`.
                         return receiver
                     if receiver[1] is not None:
-                        guard_head = self._container_head_name(
-                            callee.child_by_field_name("value")
-                        ) or self._spelled_receiver_head(
-                            callee.child_by_field_name("value")
+                        guard_head = (
+                            self._container_head_name(
+                                callee.child_by_field_name("value")
+                            )
+                            or self._spelled_receiver_head(
+                                callee.child_by_field_name("value")
+                            )
+                            or self._produced_head(
+                                callee.child_by_field_name("value")
+                            )
                         )
                         spelled = (
                             _GUARD_ACCESSOR_SPELLINGS.get(
