@@ -74,6 +74,15 @@ _ITER_CHUNK_MUT_METHODS = frozenset(
 # `m.values()` yields `V` of `HashMap<K, V>`/`BTreeMap<K, V>`.
 _MAP_ELEMENT_METHODS = {"keys": 0, "values": 1}
 _MAP_CONTAINER_NAMES = frozenset({"HashMap", "BTreeMap"})
+# `BTreeMap::range(r)`/`range_mut(r)` iterate `(&K, &V)` pairs —
+# `HashMap` exposes no range view.
+_MAP_RANGE_METHODS = frozenset({"range", "range_mut"})
+# Set algebra iterators — `a.union(&b)`/`intersection`/`difference`/
+# `symmetric_difference` yield `&P` elements of the left set.
+_SET_ALGEBRA_METHODS = frozenset(
+    {"union", "intersection", "difference", "symmetric_difference"}
+)
+_SET_CONTAINER_NAMES = frozenset({"HashSet", "BTreeSet"})
 
 # Smart pointers that `Deref` straight to their payload — `b.pm()`
 # on `Box<P>`/`Rc<P>`/`Arc<P>` calls `P`'s members. `Mutex`/`Cell`/
@@ -4260,6 +4269,23 @@ class _RustBindings:
             return spelled, self._receiver_annotation_position(
                 receiver
             )
+        if method in _SET_ALGEBRA_METHODS:
+            # `a.union(&b)`/`intersection`/`difference`/
+            # `symmetric_difference` iterate `&P` elements of the
+            # left set — the same element `a.iter()` spells.
+            container_id, args = self._receiver_type(receiver)
+            if args is None:
+                return None, None
+            if self._container_head_name(receiver) not in (
+                _SET_CONTAINER_NAMES
+            ):
+                return None, None
+            spelled = args.strip() or None
+            if spelled is None:
+                return None, None
+            return spelled, self._receiver_annotation_position(
+                receiver
+            )
         if method in {"split_at", "split_at_mut"}:
             container_id, args = self._receiver_type(receiver)
             if args is None:
@@ -5080,6 +5106,7 @@ class _RustBindings:
             or method in _ITER_SLICE_METHODS
             or method in _ITER_CHUNK_METHODS
             or method in _ITER_CHUNK_MUT_METHODS
+            or method in _SET_ALGEBRA_METHODS
             or method == "enumerate"
             or method == "zip"
             or method == "flatten"
@@ -5143,6 +5170,34 @@ class _RustBindings:
                 _UNKNOWN,
                 None if spelled is None else prefix + spelled,
             )
+        if method in _SET_ALGEBRA_METHODS:
+            # `a.union(&b)`/`intersection`/`difference`/
+            # `symmetric_difference` yield `&P` elements of the
+            # left set — bind `P` like `a.iter()` does.
+            container_id, args = self._receiver_type(receiver)
+            if args is None:
+                return _UNKNOWN, None
+            if self._container_head_name(receiver) not in (
+                _SET_CONTAINER_NAMES
+            ):
+                return _UNKNOWN, None
+            arg0 = next(
+                iter(self._type_arg_list(args.strip())), ""
+            )
+            if not arg0:
+                return _UNKNOWN, None
+            elem_id, rest = self._element_of(
+                container_id,
+                arg0,
+                call.start_byte,
+                self._literal_element_args(call),
+            )
+            if elem_id is None:
+                return _UNKNOWN, rest
+            name = next(
+                (b.name for b in self.bindings if b.id == elem_id), ""
+            )
+            return TypeFact("named", name, 0, None, elem_id), rest
         if method == "flatten":
             # `v.iter().flatten()` unwraps the element's own args —
             # `Vec<Vec<P>>` iterates `Vec<P>`, flatten yields `P`
@@ -5191,10 +5246,38 @@ class _RustBindings:
             inner_receiver = inner_callee.child_by_field_name("value")
             if inner_method is None or inner_receiver is None:
                 return _UNKNOWN, None
-            if (
-                self._normalize_identifier(self.text(inner_method))
-                not in _ITER_ELEMENT_METHODS
-            ):
+            inner_name = self._normalize_identifier(
+                self.text(inner_method)
+            )
+            if inner_name in _SET_ALGEBRA_METHODS:
+                # `a.union(&b).enumerate()` yields (usize, &P) pairs
+                # — the element is the left set's arg 0 (the hasher
+                # arg on `HashSet<P, H>` is not the element).
+                if self._container_head_name(inner_receiver) not in (
+                    _SET_CONTAINER_NAMES
+                ):
+                    return _UNKNOWN, None
+                _set_container, inner_args = self._receiver_type(
+                    inner_receiver
+                )
+                if inner_args is None:
+                    return _UNKNOWN, None
+                spelled = next(
+                    iter(self._type_arg_list(inner_args.strip())), ""
+                ).strip()
+                if not spelled:
+                    return _UNKNOWN, None
+                return _UNKNOWN, f"(usize, {spelled})"
+            if inner_name in _MAP_RANGE_METHODS:
+                # `m.range(..).enumerate()` yields the (usize, pair)
+                # — the pair spelling comes from the range recipe.
+                _range_fact, range_rest = self._iterator_method_element(
+                    receiver
+                )
+                if range_rest is None:
+                    return _UNKNOWN, None
+                return _UNKNOWN, f"(usize, {range_rest.strip()})"
+            if inner_name not in _ITER_ELEMENT_METHODS:
                 return _UNKNOWN, None
             if (
                 self._field_member(
@@ -5278,6 +5361,14 @@ class _RustBindings:
         if method in _ITER_ELEMENT_METHODS:
             if self._is_map_container(container_id, receiver):
                 return _UNKNOWN, None
+            if self._container_head_name(receiver) in (
+                _SET_CONTAINER_NAMES
+            ):
+                # `HashSet<(P, Q), H>` spells the hasher after the
+                # element — a tuple destructure must read arg 0.
+                args = next(
+                    iter(self._type_arg_list(args.strip())), args
+                )
             if "," in args:
                 # The element is a tuple spelling like `(P, Q)` — an
                 # identifier binding stays unpinned, but the spelled
@@ -5325,6 +5416,32 @@ class _RustBindings:
             if arg is None:
                 return _UNKNOWN, None
             elem_id, rest = self._spelled_type(arg, position)
+        elif method in _MAP_RANGE_METHODS:
+            # `m.range(..)`/`range_mut(..)` on BTreeMap yield
+            # `(&K, &V)` pairs — the spelled pair feeds the
+            # tuple-pattern path, so `.rev()`/`.take(n)` carry it
+            # through the preserving adapters the same way
+            # `m.iter()` does.
+            if self._container_head_name(receiver) != "BTreeMap":
+                return _UNKNOWN, None
+            spelled = self._map_spelled_args(receiver)
+            if spelled is None:
+                return _UNKNOWN, None
+            pair_parts = self._type_arg_list(spelled)
+            if len(pair_parts) != 2:
+                return _UNKNOWN, None
+            borrow = (
+                "&mut "
+                if method == "range_mut"
+                else "&"
+            )
+            elem_id, rest = (
+                None,
+                "({}, {})".format(
+                    borrow + pair_parts[0].strip(),
+                    borrow + pair_parts[1].strip(),
+                ),
+            )
         elif method in _ITER_SLICE_METHODS:
             # `v.as_slice()` iterates the same element as `iter()`.
             if "," in args or self._is_map_container(
@@ -5378,15 +5495,25 @@ class _RustBindings:
         position = node.start_byte
         if node.type == "call_expression":
             callee = node.child_by_field_name("function")
+            if (
+                callee is not None
+                and callee.type == "generic_function"
+            ):
+                # `m.range::<str, _>(..)` wraps the callee in a
+                # generic_function — unwrap to the field expression.
+                callee = callee.child_by_field_name("function")
             if callee is None or callee.type != "field_expression":
                 return {}
             method_node = callee.child_by_field_name("field")
             receiver = callee.child_by_field_name("value")
             if method_node is None or receiver is None:
                 return {}
+            method = self._normalize_identifier(
+                self.text(method_node)
+            )
             if (
-                self._normalize_identifier(self.text(method_node))
-                not in _ITER_ELEMENT_METHODS
+                method
+                not in _ITER_ELEMENT_METHODS | _MAP_RANGE_METHODS
             ):
                 return {}
             if (
@@ -5394,8 +5521,17 @@ class _RustBindings:
                 is not None
             ):
                 return {}
+        else:
+            method = None
         container_id, _ = self._receiver_type(receiver)
         if not self._is_map_container(container_id, receiver):
+            return {}
+        if (
+            method in _MAP_RANGE_METHODS
+            and self._container_head_name(receiver) != "BTreeMap"
+        ):
+            # `range`/`range_mut` are `BTreeMap`-only — a `HashMap`
+            # receiver names no such std method.
             return {}
         spelled = self._map_spelled_args(receiver)
         if spelled is None:
