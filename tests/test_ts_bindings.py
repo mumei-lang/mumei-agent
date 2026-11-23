@@ -3338,3 +3338,99 @@ for (const [k, v] of m) { v.pm(); }
         for c in _calls(report)
         if c.target == member_pm.id
     }
+
+
+def test_object_static_methods_feed_record_values():
+    # `Object.entries/values/keys` on a `Record<K, P>` operand hand
+    # back the record's value/key types — `obj` is not a Map, so the
+    # Map recipe does not apply; a `Map`-typed `Object` variable and
+    # a user-declared `Object` stay honest.
+    source = """
+class P { pm(): void {} }
+class K { km(): void {} }
+function f(obj: Record<string, P>) {
+    for (const [k, v] of Object.entries(obj)) { k.pm(); v.pm(); }
+    for (const v2 of Object.values(obj)) { v2.pm(); }
+    for (const k2 of Object.keys(obj)) { k2.pm(); }
+}
+class Object {}
+function g(x: P) { for (const [k, v] of Object.entries(x)) { v.pm(); } }
+"""
+    report = build_ts_bindings(source)
+    member_pm = _member_bindings(report, "pm", "associated_function")[0]
+    bound = {
+        source[c.span.start : c.span.end] for c in _calls(report) if c.target == member_pm.id
+    }
+    assert bound == {"v.pm()", "v2.pm()"}
+
+
+def test_std_array_result_methods_type_the_element():
+    # `at`/`find`/`findLast` approximate `T | undefined` as `T`;
+    # `filter`/`slice`/`concat`/`sort`/`reverse`/`splice`/`fill`/
+    # `toReversed`/`toSorted`/`toSpliced`/`with` keep the array so
+    # indexing peels to the element; `flat` peels one nesting level;
+    # `flatMap` reads the callback's return array — identity
+    # `r => r`, typed `(r: P[]) => r`, and member `r => r.cells`.
+    source = """
+class P { pm(): void {} }
+interface Row { cells: P[] }
+function f(arr: P[][], flat: P[], rows: Row[], cb: (p: P) => boolean) {
+    arr.at(0)[0].pm();
+    arr.find(cb)[0].pm();
+    arr.findLast(cb)[0].pm();
+    flat.filter(cb)[0].pm();
+    flat.slice(1)[0].pm();
+    flat.concat(flat)[0].pm();
+    flat.sort()[0].pm();
+    flat.reverse()[0].pm();
+    flat.toReversed()[0].pm();
+    flat.with(0, flat[0])[0].pm();
+    for (const a of arr.flat()) { a.pm(); }
+    arr.flatMap(r => r)[0].pm();
+    arr.flatMap((r: P[]) => r)[0].pm();
+    rows.flatMap(r => r.cells)[0].pm();
+    for (const x of rows.flatMap(r => r.cells)) { x.pm(); }
+}
+"""
+    report = build_ts_bindings(source)
+    member_pm = _member_bindings(report, "pm", "associated_function")[0]
+    bound = {
+        source[c.span.start : c.span.end] for c in _calls(report) if c.target == member_pm.id
+    }
+    assert bound == {
+        "arr.at(0)[0].pm()",
+        "arr.find(cb)[0].pm()",
+        "arr.findLast(cb)[0].pm()",
+        "flat.filter(cb)[0].pm()",
+        "flat.slice(1)[0].pm()",
+        "flat.concat(flat)[0].pm()",
+        "flat.sort()[0].pm()",
+        "flat.reverse()[0].pm()",
+        "flat.toReversed()[0].pm()",
+        "flat.with(0, flat[0])[0].pm()",
+        "a.pm()",
+        "arr.flatMap(r => r)[0].pm()",
+        "arr.flatMap((r: P[]) => r)[0].pm()",
+        "rows.flatMap(r => r.cells)[0].pm()",
+        "x.pm()",
+    }
+
+
+def test_declared_array_method_wins_over_the_std_recipe():
+    # A declared `flatMap` on the receiver type keeps its own
+    # annotation — the std recipe must not override it.
+    source = """
+class P { pm(): void {} }
+class Bag {
+    flatMap(f: (x: unknown) => unknown): P[] { return []; }
+}
+function f(bag: Bag) {
+    bag.flatMap(x => x)[0].pm();
+}
+"""
+    report = build_ts_bindings(source)
+    member_pm = _member_bindings(report, "pm", "associated_function")[0]
+    bound = {
+        source[c.span.start : c.span.end] for c in _calls(report) if c.target == member_pm.id
+    }
+    assert bound == {"bag.flatMap(x => x)[0].pm()"}

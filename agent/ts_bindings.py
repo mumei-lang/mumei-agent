@@ -561,6 +561,36 @@ class _TypeScriptBindings:
             self._declared_type_node(obj, obj.start_byte)
         )
         if declared is None:
+            if self.text(obj) == "Object":
+                # `Object.entries(obj)` — `obj` is the call's argument;
+                # `Record<K, V>` iterates `[K, V]` pairs like a `Map`.
+                args_node = operand.child_by_field_name("arguments")
+                arg0 = (
+                    next(iter(self.children(args_node)), None)
+                    if args_node is not None
+                    else None
+                )
+                record = self._unwrap_type(
+                    self._declared_type_node(
+                        arg0,
+                        arg0.start_byte if arg0 is not None else 0,
+                    )
+                )
+                if record is None or record.type != "generic_type":
+                    return None
+                kids = self.children(record)
+                args = [
+                    child
+                    for child in kids
+                    if child.type == "type_arguments"
+                ]
+                if (
+                    not kids
+                    or not args
+                    or self.text(kids[0]) != "Record"
+                ):
+                    return None
+                return member, "Map", list(self.children(args[0]))
             constructed = self._new_container_args(obj)
             if constructed is None:
                 return None
@@ -607,6 +637,12 @@ class _TypeScriptBindings:
             else None
         )
         if declared is None:
+            if operand is not None and operand.type == "call_expression":
+                # `for (const x of arr.flatMap(f))` — the call's
+                # result array peels to its element.
+                result = self._array_method_result(operand)
+                if result is not None:
+                    return self._array_element_node(result)
             constructed = self._new_container_args(operand)
             if (
                 constructed is not None
@@ -2811,6 +2847,221 @@ class _TypeScriptBindings:
             extras = next_extras
         return record
 
+    def _array_element_node(self, declared: Any) -> Any | None:
+        """Element type node of an `array_type`/`Array<T>` node."""
+        if declared.type == "array_type":
+            return next(iter(self.children(declared)), None)
+        if declared.type == "generic_type":
+            kids = self.children(declared)
+            if kids and self.text(kids[0]) in {
+                "Array",
+                "ReadonlyArray",
+            }:
+                args = [
+                    child
+                    for child in kids
+                    if child.type == "type_arguments"
+                ]
+                if args:
+                    return next(iter(self.children(args[0])), None)
+        return None
+
+    def _is_arrayish(self, node: Any) -> bool:
+        if node.type == "array_type":
+            return True
+        return (
+            node.type == "generic_type"
+            and bool(self.children(node))
+            and self.text(self.children(node)[0])
+            in {"Array", "ReadonlyArray"}
+        )
+
+    def _callback_array_return(
+        self, node: Any, receiver_elem: Any
+    ) -> Any | None:
+        """Array type node an array-method callback returns — a
+        named function's return annotation, an arrow's annotated
+        return or body, or the identity `r => r` shorthand (the
+        receiver's own element)."""
+        args_node = node.child_by_field_name("arguments")
+        callback = (
+            next(iter(self.children(args_node)), None)
+            if args_node is not None
+            else None
+        )
+        if callback is None:
+            return None
+        if callback.type == "identifier":
+            record = self._lookup(
+                self.text(callback), node.start_byte, "value"
+            )
+            if record is None or record.function_node is None:
+                return None
+            return_node = record.function_node.child_by_field_name(
+                "return_type"
+            )
+            if return_node is None:
+                for child in self.children(record.function_node):
+                    if child.type in {"type_annotation", "return_type"}:
+                        return_node = child
+            ret = self._unwrap_type(
+                next(iter(self.children(return_node)), None)
+                if return_node is not None
+                else None
+            )
+            return ret if ret is not None and self._is_arrayish(ret) else None
+        if callback.type == "arrow_function":
+            return_node = callback.child_by_field_name("return_type")
+            if return_node is not None:
+                ret = self._unwrap_type(
+                    next(iter(self.children(return_node)), None)
+                )
+                return ret if self._is_arrayish(ret) else None
+            body = callback.child_by_field_name("body")
+            if body is None:
+                kids = self.children(callback)
+                body = kids[-1] if kids else None
+            if body is None:
+                return None
+            params = callback.child_by_field_name("parameters")
+            if params is not None:
+                names = [
+                    self.text(pattern)
+                    for child in self.children(params)
+                    for pattern in [
+                        child.child_by_field_name("pattern") or child
+                    ]
+                    if pattern.type == "identifier"
+                ]
+            else:
+                names = [
+                    self.text(child)
+                    for child in self.children(callback)
+                    if child.type == "identifier"
+                    and child.id != body.id
+                ]
+            if body.type == "identifier":
+                # `r => r` — identity on the callback's parameter:
+                # the result keeps the receiver's element array.
+                if self.text(body) in names:
+                    return receiver_elem
+                return None
+            if body.type == "member_expression":
+                # `r2 => r2.cells` — the object is the callback's
+                # parameter (the receiver's element type); resolve
+                # the member on that type record directly.
+                obj = body.child_by_field_name("object")
+                prop = body.child_by_field_name("property")
+                if (
+                    obj is not None
+                    and prop is not None
+                    and obj.type == "identifier"
+                    and self.text(obj) in names
+                ):
+                    fact = self._type_fact(receiver_elem)
+                    if fact.kind == "named":
+                        type_record = self._type_record_by_id(
+                            fact.type_id
+                        )
+                        if type_record is not None:
+                            # `_member_lookup` needs the member
+                            # records, which are bound in a later
+                            # pass — this runs while a for-in's
+                            # pattern is being predeclared, so the
+                            # declaration body's members are read
+                            # from the AST instead.
+                            ret = self._decl_member_type_node(
+                                type_record, self.text(prop)
+                            )
+                            if (
+                                ret is not None
+                                and self._is_arrayish(ret)
+                            ):
+                                return ret
+                return None
+            ret = self._unwrap_type(
+                self._declared_type_node(body, body.start_byte)
+            )
+            return ret if ret is not None and self._is_arrayish(ret) else None
+        return None
+
+    def _decl_member_type_node(
+        self, type_record: Any, name: str
+    ) -> Any | None:
+        """Type annotation node of member `name` on the declaration
+        body of `type_record` — read straight from the AST so it also
+        works before member records are bound."""
+        decl = None if type_record.node is None else type_record.node.parent
+        if decl is None:
+            return None
+        body = decl.child_by_field_name("body")
+        if body is None:
+            return None
+        for member in self.children(body):
+            name_node = member.child_by_field_name("name")
+            if name_node is None:
+                continue
+            if self.text(name_node) != name:
+                continue
+            if member.type in {
+                "property_signature",
+                "public_field_definition",
+                "abstract_method_signature",
+                "method_signature",
+                "method_definition",
+            } and not any(
+                self.text(child) == "static" for child in member.children
+            ):
+                ret = member.child_by_field_name("type") or (
+                    member.child_by_field_name("return_type")
+                )
+                return self._unwrap_type(ret) if ret is not None else None
+        return None
+
+    def _array_method_result(self, node: Any) -> Any | None:
+        """Result type node of a std array method call — `at`/`find`
+        approximate `T | undefined` as `T`; `filter`/`slice` keep
+        the array; `flat` peels one nesting level; `flatMap` reads
+        the callback's return array. Declared members always win —
+        this only runs when `_callee_return_node` found none."""
+        callee = node.child_by_field_name("function")
+        if callee is None or callee.type != "member_expression":
+            return None
+        obj = callee.child_by_field_name("object")
+        prop = callee.child_by_field_name("property")
+        if obj is None or prop is None:
+            return None
+        member = self.text(prop)
+        declared = self._unwrap_type(
+            self._declared_type_node(obj, obj.start_byte)
+        )
+        if declared is None:
+            return None
+        elem = self._array_element_node(declared)
+        if elem is None:
+            return None
+        if member in {"at", "find", "findLast"}:
+            return elem
+        if member in {
+            "concat",
+            "filter",
+            "fill",
+            "reverse",
+            "slice",
+            "sort",
+            "splice",
+            "toReversed",
+            "toSorted",
+            "toSpliced",
+            "with",
+        }:
+            return declared
+        if member == "flat":
+            return elem if self._is_arrayish(elem) else declared
+        if member == "flatMap":
+            return self._callback_array_return(node, elem)
+        return None
+
     def _callee_return_node(self, node: Any) -> Any | None:
         """Return-type annotation node of a call's resolved callee —
         the signature the arguments narrow to, so `make(1).method()`
@@ -2967,11 +3218,11 @@ class _TypeScriptBindings:
             return self._unwrap_type(member.type_node)
         if node.type == "call_expression":
             return_node = self._callee_return_node(node)
-            if return_node is None:
-                return None
-            return self._unwrap_type(
-                next(iter(self.children(return_node)), None)
-            )
+            if return_node is not None:
+                return self._unwrap_type(
+                    next(iter(self.children(return_node)), None)
+                )
+            return self._array_method_result(node)
         if node.type == "subscript_expression":
             inner = self._declared_type_node(
                 node.child_by_field_name("object"), position
