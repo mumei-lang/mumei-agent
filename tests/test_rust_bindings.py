@@ -7388,3 +7388,28 @@ fn f(m: &mut HashMap<i32, P>, k: i32) {
     }
     assert bound.get("m.entry(k).or_insert(P).qm()") == qm.id
     assert not bound.get("m.entry(k).or_insert(P).pm()")
+
+def test_ok_or_spells_qualified_literal_error_type():
+    # `o.ok_or(errors::E {})` — the literal's own `errors::` path
+    # qualifies the `Err` payload; a same-named root `E` must not
+    # steal it.
+    source = """
+mod errors { pub struct E; }
+struct E;
+impl errors::E { fn em(&self) {} }
+impl E { fn em2(&self) {} }
+fn f(o: Option<u8>) {
+    match o.ok_or(errors::E {}) { Err(e) => e.em(), _ => {} }
+    match o.ok_or(errors::E {}) { Err(e2) => e2.em2(), _ => {} }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    em = _bindings(report, "em", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    assert bound.get("e.em()") == em.id
+    assert not bound.get("e2.em2()")
+

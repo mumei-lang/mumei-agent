@@ -8134,6 +8134,28 @@ class _RustBindings:
                 head_part = annotated.split("<", 1)[0].strip()
                 if "::" in head_part:
                     head = head_part
+        if node.type == "struct_expression":
+            # `errors::E {}` — the literal's own path keeps the
+            # qualifier; the resolved name `E` alone would bind a
+            # same-named root type instead.
+            tn = next(
+                (
+                    c
+                    for c in node.children
+                    if c.type
+                    in {
+                        "type_identifier",
+                        "scoped_type_identifier",
+                        "generic_type",
+                    }
+                ),
+                None,
+            )
+            if tn is not None:
+                literal_head = self.text(tn).strip()
+                head_part = literal_head.split("<", 1)[0].strip()
+                if "::" in head_part:
+                    head = head_part
         if head is None:
             return None
         spelled = head if not targs else f"{head}<{targs}>"
