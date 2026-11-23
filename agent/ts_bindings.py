@@ -4040,14 +4040,30 @@ class _TypeScriptBindings:
         )
 
     def _collect_narrowings(self) -> None:
-        """Map each identifier use inside an `if` consequence to the
-        type a `x instanceof C`/`Array.isArray(x)` condition narrows
-        it to. Only the positive consequence is handled — else-side
-        narrowing and reassignment are out of scope (uses there fall
-        back to the declared type)."""
+        """Map identifier uses inside condition-controlled regions to
+        the narrowed type: `x instanceof C`/`'p' in x`/`Array.isArray(x)`
+        on the consequence (if/ternary/while/for bodies), and the union
+        minus the named part on else/alternative branches. Reassignment
+        stays out of scope (uses there fall back to the declared type)."""
         for node in self.walk(self.root):
             if node.type == "switch_statement":
                 self._collect_switch_narrowings(node)
+                continue
+            if node.type == "ternary_expression":
+                self._apply_condition_narrowings(
+                    node.child_by_field_name("condition"),
+                    node.child_by_field_name("consequence"),
+                    node.child_by_field_name("alternative"),
+                )
+                continue
+            if node.type in {"while_statement", "for_statement"}:
+                # The body runs only while the condition holds —
+                # same consequence-style narrowing as `if`.
+                self._apply_condition_narrowings(
+                    node.child_by_field_name("condition"),
+                    node.child_by_field_name("body"),
+                    None,
+                )
                 continue
             if node.type != "if_statement":
                 continue
@@ -4055,16 +4071,11 @@ class _TypeScriptBindings:
             consequence = node.child_by_field_name("consequence")
             if condition is None or consequence is None:
                 continue
-            for ident, narrowed in self._condition_narrowings(
-                condition
-            ):
-                name = self.text(ident)
-                for desc in self.walk(consequence):
-                    if (
-                        desc.type == "identifier"
-                        and self.text(desc) == name
-                    ):
-                        self._narrowed.setdefault(desc.id, narrowed)
+            self._apply_condition_narrowings(
+                condition,
+                consequence,
+                node.child_by_field_name("alternative"),
+            )
             for node in self.walk(condition):
                 # `x && x.pm()` — the left operand's narrowing also
                 # covers the right operand's uses.
@@ -4091,6 +4102,175 @@ class _TypeScriptBindings:
                                 desc.id, narrowed
                             )
 
+    def _apply_condition_narrowings(
+        self,
+        condition: Any | None,
+        consequence: Any | None,
+        alternative: Any | None,
+    ) -> None:
+        if consequence is not None:
+            for ident, narrowed in self._condition_narrowings(
+                condition
+            ):
+                name = self.text(ident)
+                for desc in self.walk(consequence):
+                    if (
+                        desc.type == "identifier"
+                        and self.text(desc) == name
+                        and desc.id != ident.id
+                    ):
+                        self._narrowed.setdefault(desc.id, narrowed)
+        if alternative is not None:
+            for ident, narrowed in self._else_narrowings(condition):
+                name = self.text(ident)
+                for desc in self.walk(alternative):
+                    if (
+                        desc.type == "identifier"
+                        and self.text(desc) == name
+                        and desc.id != ident.id
+                    ):
+                        self._narrowed.setdefault(desc.id, narrowed)
+
+    def _else_narrowings(self, condition: Any | None):
+        """(identifier, narrowed type node) pairs for the else /
+        alternative side — the union minus the constituent the
+        check names: `u instanceof A` excludes A's part,
+        `'p' in u` excludes constituents declaring `p`,
+        `Array.isArray(u)` excludes array parts, and `||` combines
+        the exclusions (`!(a || b)` is `!a && !b`). `&&` under
+        negation is a disjunction, so it spells nothing."""
+        while (
+            condition is not None
+            and condition.type == "parenthesized_expression"
+        ):
+            condition = next(iter(self.children(condition)), None)
+        if condition is None:
+            return ()
+        if condition.type == "call_expression":
+            function = condition.child_by_field_name("function")
+            args = condition.child_by_field_name("arguments")
+            kids = self.children(args) if args else []
+            if (
+                function is not None
+                and function.type == "member_expression"
+                and len(kids) == 1
+                and kids[0].type == "identifier"
+            ):
+                obj = function.child_by_field_name("object")
+                prop = function.child_by_field_name("property")
+                if (
+                    obj is not None
+                    and prop is not None
+                    and self.text(obj) == "Array"
+                    and self.text(prop) == "isArray"
+                ):
+                    narrowed = self._union_minus(
+                        kids[0],
+                        lambda c: c.type == "array_type",
+                    )
+                    if narrowed is not None:
+                        return ((kids[0], narrowed),)
+            return ()
+        if condition.type == "binary_expression":
+            kids = self.children(condition)
+            if len(kids) != 2:
+                return ()
+            operators = {
+                self.text(child) for child in condition.children
+            }
+            if "||" in operators:
+                return self._else_narrowings(
+                    kids[0]
+                ) + self._else_narrowings(kids[1])
+            if "instanceof" in operators:
+                left, right = kids
+                if (
+                    left.type == "identifier"
+                    and right.type == "identifier"
+                ):
+                    if self.text(right) == "Array":
+                        narrowed = self._union_minus(
+                            left, lambda c: c.type == "array_type"
+                        )
+                        if narrowed is not None:
+                            return ((left, narrowed),)
+                        return ()
+                    cls = self._lookup(
+                        self.text(right), right.start_byte, "value"
+                    )
+                    if cls is not None:
+                        narrowed = self._union_minus(
+                            left,
+                            lambda c: self._same_type_record(c, cls),
+                        )
+                        if narrowed is not None:
+                            return ((left, narrowed),)
+                return ()
+            if "in" in operators:
+                left, right = kids
+                prop = (
+                    self.text(left).strip().strip("\"'")
+                    if left.type == "string"
+                    else None
+                )
+                if prop and right.type == "identifier":
+                    narrowed = self._union_minus(
+                        right,
+                        lambda c: self._constituent_declares(
+                            c, prop, right.start_byte
+                        ),
+                    )
+                    if narrowed is not None:
+                        return ((right, narrowed),)
+            return ()
+        return ()
+
+    def _union_minus(self, ident: Any, predicate) -> Any | None:
+        """The single declared-union constituent left after
+        `predicate` drops the checked-out parts; None when the
+        identifier has no union or several parts remain."""
+        record = self._lookup(
+            self.text(ident), ident.start_byte, "value"
+        )
+        if record is None:
+            return None
+        declared = self._unwrap_type(record.type_node)
+        if declared is None or declared.type != "union_type":
+            return None
+        kept = [
+            child
+            for child in self.children(declared)
+            if not predicate(child)
+        ]
+        return kept[0] if len(kept) == 1 else None
+
+    def _same_type_record(self, child: Any, record: _Record) -> bool:
+        fact = self._type_fact(child)
+        if fact.kind != "named":
+            return False
+        type_record = self._type_record_by_id(fact.type_id)
+        return (
+            type_record is not None
+            and type_record.node.id == record.node.id
+        )
+
+    def _constituent_declares(
+        self, child: Any, prop: str, position: int
+    ) -> bool:
+        fact = self._type_fact(child)
+        if fact.kind != "named":
+            return False
+        type_record = self._type_record_by_id(fact.type_id)
+        if type_record is None:
+            return False
+        return (
+            self._member_lookup(
+                type_record, prop, position,
+                static=False, via_this=False,
+            )
+            is not None
+        )
+
     def _condition_narrowings(self, condition: Any | None):
         """(identifier, narrowed type node) pairs a condition spells:
         `x instanceof C` narrows to C's class expression;
@@ -4115,6 +4295,17 @@ class _TypeScriptBindings:
                         "identifier",
                         "member_expression",
                     }:
+                        if (
+                            right.type == "identifier"
+                            and self.text(right) == "Array"
+                        ):
+                            # `x instanceof Array` is Array.isArray.
+                            narrowed = self._array_constituent_node(
+                                left
+                            )
+                            if narrowed is not None:
+                                return ((left, narrowed),)
+                            return ()
                         return ((left, right),)
                     return ()
                 if "in" in operators:

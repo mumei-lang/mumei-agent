@@ -3722,3 +3722,35 @@ function f(u: A | B) {
     }
     assert bound_am == {"u.am()"}
     assert bound_bm == {"u.bm()"}
+
+def test_else_and_alternative_branches_narrow_by_exclusion():
+    # `u instanceof A` excludes A's part on else; `'p' in u` excludes
+    # constituents declaring p; `instanceof Array` excludes array
+    # parts; `||` combines exclusions. Ternary gets both sides, and
+    # while bodies use consequence narrowing.
+    source = """
+class A { am(): void {} }
+class B { bm(): void {} }
+class C { cm(): void {} }
+function f(u: A | B, w: A | B | C, s: A[] | B) {
+    if (u instanceof A) { u.am(); } else { u.bm(); }
+    u instanceof A ? u.am() : u.bm();
+    if ("am" in u) { u.am(); } else { u.bm(); }
+    if (s instanceof Array) { } else { s.bm(); }
+    while (u instanceof A) { u.am(); break; }
+    if (u instanceof A && u.am()) { } else { u.am(); }
+}
+"""
+    report = build_ts_bindings(source)
+    member_am = _member_bindings(report, "am", "associated_function")[0]
+    member_bm = _member_bindings(report, "bm", "associated_function")[0]
+    bound_am = {
+        source[c.span.start : c.span.end] for c in _calls(report) if c.target == member_am.id
+    }
+    bound_bm = {
+        source[c.span.start : c.span.end] for c in _calls(report) if c.target == member_bm.id
+    }
+    # `u.am()` occurs six times: if-consequence, ternary-true,
+    # in-consequence, while-body bound; else-of-&& and stays opaque.
+    assert bound_am == {"u.am()"}
+    assert bound_bm == {"u.bm()", "s.bm()"}
