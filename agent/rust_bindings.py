@@ -7122,6 +7122,30 @@ class _RustBindings:
             # the receiver's annotation — follow the call's value.
             callee = node.child_by_field_name("function")
             if callee is not None and callee.type == "field_expression":
+                member = callee.child_by_field_name("field")
+                if (
+                    member is not None
+                    and self.text(member).strip() == "and"
+                ):
+                    # `o.and(r)` yields `r`'s `Option` — the spelled
+                    # names were written in `r`'s annotation, not
+                    # the receiver's (nested `b.and(c)` follows the
+                    # chain to the innermost argument).
+                    arguments = node.child_by_field_name("arguments")
+                    arg = (
+                        next(
+                            (
+                                c
+                                for c in arguments.named_children
+                                if "comment" not in c.type
+                            ),
+                            None,
+                        )
+                        if arguments is not None
+                        else None
+                    )
+                    if arg is not None:
+                        return self._receiver_annotation_position(arg)
                 return self._receiver_annotation_position(
                     callee.child_by_field_name("value")
                 )
@@ -11640,6 +11664,74 @@ class _RustBindings:
         `_lookup_module_path`, the last segment reads that module's
         scope."""
         segments = name.split("::")
+        if segments[0] in {"self", "super"}:
+            # `self::x`/`super::x` — resolve against the module
+            # scopes enclosing `position` (source_file or a mod
+            # item's declaration_list), not the call-site stack.
+            scope = self._scope_at(position)
+            index = 0
+            while (
+                index < len(segments) - 1
+                and segments[index] in {"self", "super"}
+            ):
+                module_scope = scope
+                while module_scope is not None and not (
+                    module_scope.node.type == "source_file"
+                    or (
+                        module_scope.node.type == "declaration_list"
+                        and module_scope.node.parent is not None
+                        and module_scope.node.parent.type
+                        == "mod_item"
+                    )
+                ):
+                    module_scope = module_scope.parent
+                if module_scope is None:
+                    return None
+                scope = module_scope
+                if segments[index] == "super":
+                    scope = scope.parent
+                    while scope is not None and not (
+                        scope.node.type == "source_file"
+                        or (
+                            scope.node.type == "declaration_list"
+                            and scope.node.parent is not None
+                            and scope.node.parent.type == "mod_item"
+                        )
+                    ):
+                        scope = scope.parent
+                index += 1
+            if scope is None:
+                return None
+            for segment in segments[index:-1]:
+                module = (
+                    None
+                    if scope is None
+                    else next(
+                        (
+                            candidate
+                            for candidate in reversed(
+                                scope.bindings.get(segment, ())
+                            )
+                            if candidate.binding.kind == "module"
+                        ),
+                        None,
+                    )
+                )
+                if module is None or module.module_scope is None:
+                    return None
+                scope = module.module_scope
+            if scope is None:
+                return None
+            head = self._normalize_identifier(segments[-1])
+            return next(
+                (
+                    candidate
+                    for candidate in reversed(scope.bindings.get(head, ()))
+                    if self._in_namespace(candidate, "type")
+                    and candidate.binding.kind != "generic_parameter"
+                ),
+                None,
+            )
         if segments[0] == "crate":
             scope = self.scopes[0] if self.scopes else None
             for segment in segments[1:-1]:
@@ -11777,6 +11869,33 @@ class _RustBindings:
         record = self._pattern_head_record(head, scrut_id)
         if record is None:
             return None
+        if scrut_id is None and scrut_args:
+            # A produced scrutinee carries only a spelled payload
+            # (`crate::W`) — resolve it so the head's container is
+            # the struct itself, not the enclosing module.
+            spelled_head = scrut_args.strip().split("<", 1)[0].strip()
+            site = (
+                head.start_byte
+                if scrut_position is None
+                else scrut_position
+            )
+            resolved = (
+                self._through_import(
+                    self._scoped_spelled_type(spelled_head, site),
+                    site,
+                )
+                if "::" in spelled_head
+                else self._through_import(
+                    self._lookup(
+                        self._normalize_identifier(spelled_head),
+                        site,
+                        "type",
+                    ),
+                    site,
+                )
+            )
+            if resolved is not None:
+                scrut_id = resolved.binding.id
         container = (
             record
             if record.binding.id == scrut_id
@@ -12594,7 +12713,11 @@ class _RustBindings:
                             None
                             if _arguments is None
                             else next(
-                                iter(_arguments.named_children),
+                                (
+                                    c
+                                    for c in _arguments.named_children
+                                    if "comment" not in c.type
+                                ),
                                 None,
                             )
                         )
