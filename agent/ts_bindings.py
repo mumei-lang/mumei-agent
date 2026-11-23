@@ -3056,6 +3056,25 @@ class _TypeScriptBindings:
                     return source
             return None
         elem = self._array_element_node(declared)
+        if member == "get":
+            # `Map<K, V>.get(k)` / `WeakMap` — `V | undefined`
+            # spelled as `V`; `?.`/`!` do the narrowing.
+            if declared.type == "generic_type":
+                kids = self.children(declared)
+                if kids and self.text(kids[0]) in {
+                    "Map", "WeakMap",
+                }:
+                    args = [
+                        child
+                        for child in kids
+                        if child.type == "type_arguments"
+                    ]
+                    if args:
+                        elems = self.children(args[0])
+                        return (
+                            elems[1] if len(elems) > 1 else None
+                        )
+            return None
         if elem is None:
             return None
         if member in {"at", "find", "findLast"}:
@@ -3950,7 +3969,16 @@ class _TypeScriptBindings:
                 return None, False, False
             return self._type_record_by_id(fact.type_id), False, False
         if node.type == "call_expression":
-            return self._return_type_record(node), False, False
+            record = self._return_type_record(node)
+            if record is not None:
+                return record, False, False
+            # Undeclared callee — std array recipes (`arr.find(cb)
+            # ?.pm()`, `Array.from(...)`) still spell a result type.
+            type_node = self._declared_type_node(node, position)
+            fact = self._type_fact(type_node)
+            if fact.kind != "named":
+                return None, False, False
+            return self._type_record_by_id(fact.type_id), False, False
         if node.type in {
             "subscript_expression",
             "as_expression",

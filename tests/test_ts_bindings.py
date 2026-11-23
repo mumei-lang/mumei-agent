@@ -3373,6 +3373,8 @@ def test_std_array_result_methods_type_the_element():
     # `r => r`, typed `(r: P[]) => r`, and member `r => r.cells`.
     source = """
 class P { pm(): void {} }
+class K { km(): void {} }
+declare function mk(): K;
 interface Row { cells: P[] }
 function f(arr: P[][], flat: P[], rows: Row[], cb: (p: P) => boolean) {
     arr.at(0)[0].pm();
@@ -3396,6 +3398,12 @@ function f(arr: P[][], flat: P[], rows: Row[], cb: (p: P) => boolean) {
     for (const y of [...flat]) { y.pm(); }
     const mixed = [...flat, ...arr];
     mixed[0].pm();
+}
+function g(m: Map<K, P>, flat: P[]) {
+    m.get(mk())?.pm();
+    m.get(mk())!.pm();
+    flat.find(x => true)?.pm();
+    flat.filter(x => true).at(0)?.pm();
 }
 """
     report = build_ts_bindings(source)
@@ -3422,6 +3430,10 @@ function f(arr: P[][], flat: P[], rows: Row[], cb: (p: P) => boolean) {
         "xf.pm()",
         "cp[0].pm()",
         "y.pm()",
+        "m.get(mk())?.pm()",
+        "m.get(mk())!.pm()",
+        "flat.find(x => true)?.pm()",
+        "flat.filter(x => true).at(0)?.pm()",
     }
 
 
