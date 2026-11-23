@@ -31234,25 +31234,22 @@ def test_value_struct_field_channel_boundaries_stay_closed(
     go_types_helper,
 ):
     # A non-scalar `chan string` field and a computed base
-    # (`arr[i].C`, `s.W.C` nested one level deeper) stay closed.
+    # (`arr[i].C`) stay closed. `s.W.C` nested paths moved to
+    # `test_value_struct_nested_field_chan`.
     files = {
         "a.go": "package p\n"
         "type WS struct{ C chan string }\n"
         "type W struct{ C chan int64 }\n"
-        "type S struct{ W W }\n"
         "func FStr(w WS, x string) string {\n"
         "\tw.C <- x\n"
         "\treturn x\n}\n"
         "func FArr(arr []W, x int64) int64 {\n"
         "\tarr[0].C <- x\n"
         "\treturn x\n}\n"
-        "func FNested(s S, x int64) int64 {\n"
-        "\ts.W.C <- x\n"
-        "\treturn x\n}\n"
     }
     snapshot = _snapshot_for(go_types_helper, files)
     summaries = ip.summarize_go_package(files, snapshot)
-    for name in ("FStr", "FArr", "FNested"):
+    for name in ("FStr", "FArr"):
         assert not named_package(
             files, snapshot, summaries, name
         ).available
@@ -31390,6 +31387,100 @@ def test_value_struct_field_chan_chan_send_recv(go_types_helper):
     # queue deps like `cc`'s range element does.
     assert results["FRange"].available
     assert results["FRange"].return_dependencies == frozenset({0})
+
+
+def test_value_struct_nested_field_chan(go_types_helper):
+    # A field path deeper than one level resolves through the same
+    # member-identity model: `s.W.C` is still the member `C` (the
+    # may-set key / queue-of-queues root) reached via the local
+    # binding `s`. Intermediate fields must be direct (non-promoted)
+    # struct members; index/computed bases stay closed.
+    files = {
+        "a.go": "package p\n"
+        "type Inner struct{ C chan int64 }\n"
+        "type Outer struct{ W Inner }\n"
+        "type IC struct{ C chan chan int64 }\n"
+        "type OC struct{ W IC }\n"
+        "type VV struct{ C chan int64 }\n"
+        "type MM struct{ V VV }\n"
+        "type OO struct{ W MM }\n"
+        "func FSend(s Outer, x int64) int64 {\n"
+        "\ts.W.C <- x\n"
+        "\treturn 0\n}\n"
+        "func FRecv(s Outer) int64 {\n"
+        "\treturn <-s.W.C\n}\n"
+        "func FStore(s Outer, ch chan int64) int64 {\n"
+        "\ts.W.C = ch\n"
+        "\treturn <-s.W.C\n}\n"
+        "func FCC(s OC, c chan int64) int64 {\n"
+        "\ts.W.C <- c\n"
+        "\treturn <-(<-s.W.C)\n}\n"
+        "func FLocalCC(x int64) int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tc <- x\n"
+        "\tcc <- c\n"
+        "\tvar s OC\n"
+        "\ts.W.C = cc\n"
+        "\treturn <-(<-s.W.C)\n}\n"
+        "func FDeep(o OO, x int64) int64 {\n"
+        "\to.W.V.C <- x\n"
+        "\treturn <-o.W.V.C\n}\n"
+        "func FIdx(arr []Outer) int64 {\n"
+        "\treturn <-arr[0].W.C\n}\n"
+        "func FMap(m map[string]Outer) int64 {\n"
+        "\treturn <-m[\"k\"].W.C\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    results = {
+        name: named_package(files, snapshot, summaries, name)
+        for name in (
+            "FSend",
+            "FRecv",
+            "FStore",
+            "FCC",
+            "FLocalCC",
+            "FDeep",
+            "FIdx",
+            "FMap",
+        )
+    }
+    assert results["FSend"].available
+    assert results["FSend"].return_dependencies == frozenset()
+    assert results["FSend"].effects == "unknown"
+    for name in ("FRecv", "FLocalCC"):
+        assert results[name].available
+        assert results[name].return_dependencies == frozenset({0})
+    # `s.W.C = cc` on a LOCAL struct is a header copy — a
+    # single-function package keeps `effects` clean (the shared
+    # member identity can still observe `unknown` above).
+    solo_files = {
+        "a.go": "package p\n"
+        "type IC struct{ C chan chan int64 }\n"
+        "type OC struct{ W IC }\n"
+        "func F(x int64) int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tc <- x\n"
+        "\tcc <- c\n"
+        "\tvar s OC\n"
+        "\ts.W.C = cc\n"
+        "\treturn <-(<-s.W.C)\n}\n"
+    }
+    solo_snapshot = _snapshot_for(go_types_helper, solo_files)
+    solo_summaries = ip.summarize_go_package(solo_files, solo_snapshot)
+    solo = named_package(solo_files, solo_snapshot, solo_summaries, "F")
+    assert solo.available
+    assert solo.return_dependencies == frozenset({0})
+    assert solo.effects == "none_in_supported_fragment"
+    for name in ("FStore", "FCC", "FDeep"):
+        assert results[name].available
+        assert results[name].return_dependencies == frozenset({0, 1})
+    # Index and map bases are computed — the member path stays
+    # closed.
+    assert not results["FIdx"].available
+    assert not results["FMap"].available
 
 
 def test_value_struct_field_channel_may_set_follows_reseat(
