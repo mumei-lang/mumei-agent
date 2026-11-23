@@ -5620,6 +5620,14 @@ class _RustBindings:
             container_id, args = self._receiver_type(container_receiver)
             if args is None:
                 return None, None
+            if (
+                method == "splice"
+                and self._expanded_container_head(container_receiver)
+                != "Vec"
+            ):
+                # `splice` is Vec-only — an extension `splice` on
+                # another container need not iterate its args.
+                return None, None
             if self._is_map_container(container_id, receiver):
                 # `m.iter()` yields `(K, V)` — recover both halves
                 # from the annotation since index typing keeps V.
@@ -6854,6 +6862,14 @@ class _RustBindings:
             if inner_name not in _ITER_ELEMENT_METHODS:
                 return _UNKNOWN, None
             if (
+                inner_name == "splice"
+                and self._expanded_container_head(inner_receiver)
+                != "Vec"
+            ):
+                # `splice` is Vec-only — an extension `splice` on
+                # another container need not iterate its args.
+                return _UNKNOWN, None
+            if (
                 self._field_member(
                     inner_callee, ("associated_function",)
                 )
@@ -6934,6 +6950,13 @@ class _RustBindings:
             position = call.start_byte
         if method in _ITER_ELEMENT_METHODS:
             if self._is_map_container(container_id, receiver):
+                return _UNKNOWN, None
+            if (
+                method == "splice"
+                and self._expanded_container_head(receiver) != "Vec"
+            ):
+                # `splice` is Vec-only — an extension `splice` on
+                # another container need not yield its args.
                 return _UNKNOWN, None
 
             if self._container_head_name(receiver) in (
@@ -7107,6 +7130,10 @@ class _RustBindings:
                 | _MAP_RANGE_METHODS
                 | _EXTRACT_IF_METHODS
             ):
+                return {}
+            if method == "splice":
+                # `splice` is Vec-only — a `Map::splice` extension
+                # need not iterate `(K, V)` pairs.
                 return {}
             if (
                 self._field_member(callee, ("associated_function",))
