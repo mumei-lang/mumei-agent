@@ -10797,3 +10797,42 @@ fn f() {
     }
     assert bound.get("a[0].pm()") == pm.id
     assert bound.get("b[0].pm()") == pm.id
+
+
+def test_map_payload_stays_opaque_on_unannotated_receivers():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f() { Some(P).map(|p| p).unwrap().pm(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    # `Some(P)` has no annotation to spell the payload from —
+    # the closure result must not guess (nor crash).
+    assert _call(
+        report, source, "Some(P).map(|p| p).unwrap().pm()"
+    ).target == ""
+
+
+def test_spelled_payload_slice_and_array_indexes_stay_spelled():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(o: Option<Vec<P>>, a: Option<Vec<[P; 2]>>) {
+    if let Some(v) = o { v[..].pm(); v[0..2].pm(); v[0].pm(); }
+    if let Some(w) = a { w[0].pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # A range index yields the container slice (`Vec<P>` spelled),
+    # and `[P; 2]` spells the array — neither resolves `P`'s
+    # members through the spelled-element path.
+    assert not bound.get("v[..].pm()")
+    assert not bound.get("v[0..2].pm()")
+    assert not bound.get("w[0].pm()")
+    assert bound.get("v[0].pm()") == pm.id

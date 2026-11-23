@@ -7812,7 +7812,7 @@ class _RustBindings:
                 ).strip()
                 ret_pos = (
                     self._receiver_annotation_position(recv_node)
-                    or node.start_byte
+                    or call.start_byte
                 )
                 if recv_node is not None and (
                     recv_node.type == "call_expression"
