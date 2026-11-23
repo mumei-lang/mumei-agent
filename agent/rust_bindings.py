@@ -4180,6 +4180,7 @@ class _RustBindings:
                             and self._map_container_head(
                                 callee.child_by_field_name("value")
                             )
+                            in option_head[1]
                             and not (
                                 receiver[0] is not None
                                 and next(
@@ -4192,8 +4193,6 @@ class _RustBindings:
                                 )
                                 in {"struct", "enum"}
                             )
-
-                            in option_head[1]
                         ):
                             # `m.pop_first()` yields
                             # `Option<(K, V)>` — the map's spelled
