@@ -32,8 +32,8 @@ func DivByConstant(a int) int {
 	return a / width
 }
 
-func DivByZeroConstantExpr(a int) int {
-	const zero = width - 8
+func DivByZeroDerivedValue(a int) int {
+	zero := width - 8
 	return a / zero // want: division_by_zero zero
 }
 
