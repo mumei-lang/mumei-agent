@@ -5495,6 +5495,13 @@ class _RustBindings:
         position = node.start_byte
         if node.type == "call_expression":
             callee = node.child_by_field_name("function")
+            if (
+                callee is not None
+                and callee.type == "generic_function"
+            ):
+                # `m.range::<str, _>(..)` wraps the callee in a
+                # generic_function — unwrap to the field expression.
+                callee = callee.child_by_field_name("function")
             if callee is None or callee.type != "field_expression":
                 return {}
             method_node = callee.child_by_field_name("field")
