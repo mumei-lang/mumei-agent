@@ -56667,6 +56667,150 @@ def test_returned_structs_resolve_current_func_field_captures(
         )
 
 
+def test_cross_type_struct_function_field_value_copies(go_types_helper):
+    files = {
+        "a.go": (
+            "package p\n"
+            "type S struct { F func() int64; In I }\n"
+            "type I struct { F func() int64 }\n"
+            "type O struct { F func() int64 }\n"
+            "type W struct { F func() }\n"
+            "type OW struct { F func() }\n"
+            "func (S) Run() int64 { return 0 }\n"
+            "func gi(i int) int { return i }\n"
+            "func OLit(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\to := O{F: s.F}; v = x; return o.F()\n"
+            "}\n"
+            "func OSet(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\tvar o O; o.F = s.F; v = x; return o.F()\n"
+            "}\n"
+            "func OLitWrite(x int64) int64 {\n"
+            "\tw := int64(0); s := W{F: func() { w = x }}\n"
+            "\to := OW{F: s.F}; o.F(); return w\n"
+            "}\n"
+            "func OSetWrite(x int64) int64 {\n"
+            "\tw := int64(0); s := W{F: func() { w = x }}\n"
+            "\tvar o OW; o.F = s.F; o.F(); return w\n"
+            "}\n"
+            "func OOCopy(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\to := O{F: s.F}; p := O{F: o.F}\n"
+            "\tv = x; return p.F()\n"
+            "}\n"
+            "func ElemLit(x, y int64) int64 {\n"
+            "\tv := y; ss := []S{{F: func() int64 { return v }}}\n"
+            "\to := O{F: ss[0].F}; v = x; return o.F()\n"
+            "}\n"
+            "func ElemAssign(x, y int64) int64 {\n"
+            "\tv := y; ss := [][]S{{{F: func() int64 { return v }}}}\n"
+            "\tvar o O; o.F = ss[0][0].F; v = x; return o.F()\n"
+            "}\n"
+            "func NestedField(x, y int64) int64 {\n"
+            "\tv := y; s := S{In: I{F: func() int64 { return v }}}\n"
+            "\to := O{F: s.In.F}; v = x; return o.F()\n"
+            "}\n"
+            "func BoundFieldValue(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\tf := s.F; o := O{F: f}; v = x; return o.F()\n"
+            "}\n"
+            "func IndexedField(x, y int64, i int) int64 {\n"
+            "\tv := y; ss := []S{{F: func() int64 { return v }}}\n"
+            "\to := O{F: ss[i].F}; v = x; return o.F()\n"
+            "}\n"
+            "func ComputedIndexedField(x, y int64, i int) int64 {\n"
+            "\tv := y; ss := []S{{F: func() int64 { return v }}}\n"
+            "\to := O{F: ss[gi(i)].F}; v = x; return o.F()\n"
+            "}\n"
+            "func ReturnField(x, y int64) int64 {\n"
+            "\treturn makeReturnedField(x, y)()\n"
+            "}\n"
+            "func makeReturnedField(x, y int64) func() int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\tv = x; return s.F\n"
+            "}\n"
+            "func ReturnElementField(x, y int64) int64 {\n"
+            "\treturn makeReturnedElement(x, y)()\n"
+            "}\n"
+            "func makeReturnedElement(x, y int64) func() int64 {\n"
+            "\tv := y; ss := []S{{F: func() int64 { return v }}}\n"
+            "\tv = x; return ss[0].F\n"
+            "}\n"
+            "func MethodField(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\to := O{F: s.Run}; v = x; return o.F()\n"
+            "}\n"
+            "func MethodReturn(s S) func() int64 { return s.Run }\n"
+            "func MapField(x, y int64, k int) int64 {\n"
+            "\tv := y; m := map[int]S{k: {F: func() int64 { return v }}}\n"
+            "\to := O{F: m[k].F}; v = x; return o.F()\n"
+            "}\n"
+            "func PointerRoot(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}; p := &s\n"
+            "\to := O{F: p.F}; v = x; return o.F()\n"
+            "}\n"
+            "func PointerElement(x, y int64) int64 {\n"
+            "\tv := y; ps := []*S{&S{F: func() int64 { return v }}}\n"
+            "\to := O{F: ps[0].F}; v = x; return o.F()\n"
+            "}\n"
+            "func PointerToSlice(x, y int64) int64 {\n"
+            "\tv := y; p := new([]S)\n"
+            "\t*p = []S{{F: func() int64 { return v }}}\n"
+            "\to := O{F: (*p)[0].F}; v = x; return o.F()\n"
+            "}\n"
+            "func NestedPointerElement(x, y int64) int64 {\n"
+            "\tv := y; ps := [][]*S{{&S{F: func() int64 { return v }}}}\n"
+            "\to := O{F: ps[0][0].F}; v = x; return o.F()\n"
+            "}\n"
+            "func ChannelSend(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\tch := make(chan func() int64, 1); ch <- s.F\n"
+            "\tv = x; return (<-ch)()\n"
+            "}\n"
+        ),
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    expected = {
+        "OLit": frozenset({0, 1}),
+        "OSet": frozenset({0, 1}),
+        "OLitWrite": frozenset({0}),
+        "OSetWrite": frozenset({0}),
+        "OOCopy": frozenset({0, 1}),
+        "ElemLit": frozenset({0, 1}),
+        "ElemAssign": frozenset({0, 1}),
+        "NestedField": frozenset({0, 1}),
+        "BoundFieldValue": frozenset({0, 1}),
+        "IndexedField": frozenset({0, 1, 2}),
+        "ComputedIndexedField": frozenset({0, 1, 2}),
+        "ReturnField": frozenset({0}),
+        "ReturnElementField": frozenset({0}),
+    }
+    for function_name, dependencies in expected.items():
+        result = named_package(files, snapshot, summaries, function_name)
+        assert result.available, (function_name, result.gaps)
+        if function_name in {"ReturnField", "ReturnElementField"}:
+            assert dependencies <= result.return_dependencies, (
+                function_name,
+                result.return_dependencies,
+            )
+        else:
+            assert result.return_dependencies == dependencies, function_name
+    for function_name in (
+        "MethodField",
+        "MethodReturn",
+        "MapField",
+        "PointerRoot",
+        "PointerElement",
+        "PointerToSlice",
+        "NestedPointerElement",
+        "ChannelSend",
+    ):
+        result = named_package(files, snapshot, summaries, function_name)
+        assert not result.available, (function_name, result.gaps)
+
+
 def test_named_collection_elided_struct_function_fields(go_types_helper):
     declarations = (
         "type S struct { F func() int64 }\n"

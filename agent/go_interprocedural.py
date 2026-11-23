@@ -2060,6 +2060,115 @@ class _Builder:
         self.opaque_callees.add(bound_id)
         return True
 
+    def _struct_func_field_receiver_supported(
+        self,
+        receiver: Any,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+    ) -> bool:
+        value = self._strip_parens(receiver)
+        if value is None:
+            return False
+        if value.type == "identifier":
+            return self._local_struct_value_record_source_id(value) is not None
+        if value.type == "selector_expression":
+            member = self._field_member(value)
+            operand = value.child_by_field_name("operand")
+            return (
+                member is not None
+                and member.kind in {"var", "variable"}
+                and member.type is not None
+                and self._struct_value_fact(member.type) is not None
+                and self._struct_func_field_receiver_supported(
+                    operand, params, locals_
+                )
+            )
+        if value.type == "index_expression":
+            return (
+                self._local_struct_value_record_source_id(value)
+                is not None
+                or self._slice_array_struct_element_parts(
+                    value, params, locals_
+                )
+                is not None
+            )
+        return False
+
+    def _func_field_value_record_sources(
+        self,
+        source: Any,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+        captures: dict[str, frozenset[str]],
+        writes: dict[str, frozenset[str]],
+        star: set[str],
+        calls: set[str],
+        pointee: set[str],
+        *,
+        include_receiver: bool = False,
+    ) -> tuple[str, ...]:
+        value = self._strip_parens(source)
+        if value is None:
+            return ()
+
+        def has_records(source_id: str) -> bool:
+            return (
+                source_id in captures
+                or source_id in writes
+                or source_id in star
+                or source_id in calls
+                or source_id in pointee
+            )
+
+        if value.type == "identifier":
+            ref = self.references.get(self.node_key(value))
+            binding = (
+                self.bindings.get(ref.binding_id)
+                if ref is not None
+                else None
+            )
+            if (
+                ref is None
+                or binding is None
+                or binding.type is None
+                or binding.type.kind != "function"
+                or not has_records(ref.binding_id)
+            ):
+                return ()
+            return (ref.binding_id,)
+        if value.type != "selector_expression":
+            return ()
+        if self._method_value_parts(value) is not None:
+            raise _Unsupported("unsupported_expression", _span(value))
+        member = self._field_member(value)
+        if (
+            member is None
+            or member.kind not in {"var", "variable"}
+            or member.type is None
+            or member.type.kind != "function"
+        ):
+            return ()
+        receiver = value.child_by_field_name("operand")
+        source_ids = [member.id]
+        if include_receiver:
+            receiver_record_id = (
+                self._local_struct_value_record_source_id(receiver)
+                if receiver is not None
+                else None
+            )
+            if receiver_record_id is not None:
+                source_ids.append(receiver_record_id)
+        has_source_records = any(has_records(source_id) for source_id in source_ids)
+        if not self._struct_func_field_receiver_supported(
+            receiver, params, locals_
+        ):
+            if has_source_records:
+                raise _Unsupported("unsupported_expression", _span(value))
+            return ()
+        if not has_source_records:
+            return ()
+        return tuple(dict.fromkeys(source_ids))
+
     def _assignment_composite_record_snapshot(
         self, literal: Any
     ) -> dict[str, Any] | None:
@@ -5289,6 +5398,7 @@ class _Builder:
         self,
         literal: Any,
         params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
         records_before: dict[str, Any] | None = None,
     ) -> None:
         body = literal.child_by_field_name("body")
@@ -5363,31 +5473,31 @@ class _Builder:
                 and self._local_struct_literal_fact(value) is not None
             ):
                 self._adopt_struct_composite_closure_records(
-                    value, params, records_before
+                    value, params, locals_, records_before
                 )
                 continue
-            if value.type != "identifier":
-                continue
-            ref = self.references.get(self.node_key(value))
-            src_id = ref.binding_id if ref is not None else None
-            if src_id is None:
-                continue
-            tracked = (
-                self._is_prestate_tracked_local_closure(
-                    src_id,
-                    params,
-                    captures,
-                    opaque,
-                    aliases,
-                    methods,
-                    interface_methods,
-                )
-                if records_before is not None
-                else self._is_tracked_literal_value(src_id, params)
+            ref = (
+                self.references.get(self.node_key(value))
+                if value.type == "identifier"
+                else None
             )
+            src_id = ref.binding_id if ref is not None else None
+            tracked = False
+            if src_id is not None:
+                tracked = (
+                    self._is_prestate_tracked_local_closure(
+                        src_id,
+                        params,
+                        captures,
+                        opaque,
+                        aliases,
+                        methods,
+                        interface_methods,
+                    )
+                    if records_before is not None
+                    else self._is_tracked_literal_value(src_id, params)
+                )
             factory_result = src_id in factory_results
-            if not tracked and not factory_result:
-                continue
             is_struct, member = (
                 self._func_literal_struct_element_member(
                     literal, element, value
@@ -5395,6 +5505,17 @@ class _Builder:
             )
             if not is_struct:
                 continue
+            source_ids = self._func_field_value_record_sources(
+                value,
+                params,
+                locals_,
+                captures,
+                writes,
+                star,
+                calls,
+                pointee,
+                include_receiver=True,
+            )
             if member is not None and member.type is not None:
                 if member.type.kind != "function":
                     continue
@@ -5402,19 +5523,19 @@ class _Builder:
                     raise _Unsupported(
                         "unsupported_expression", _span(value)
                     )
-                if not tracked:
-                    continue
-                self._adopt_element_records_from_snapshot(
-                    src_id,
-                    member.id,
-                    captures,
-                    writes,
-                    star,
-                    calls,
-                    pointee,
-                )
+                for source_id in source_ids:
+                    self._adopt_element_records_from_snapshot(
+                        source_id,
+                        member.id,
+                        captures,
+                        writes,
+                        star,
+                        calls,
+                        pointee,
+                    )
                 continue
-            raise _Unsupported("unsupported_expression", _span(value))
+            if tracked or factory_result or source_ids:
+                raise _Unsupported("unsupported_expression", _span(value))
 
     def _struct_selector_container(
         self,
@@ -16420,6 +16541,23 @@ class _Builder:
             )
             deps |= extra
             self._record_read(extra)
+        for record_id in self._func_field_value_record_sources(
+            expr,
+            params,
+            locals_,
+            self.closure_captures,
+            self.closure_writes,
+            self.closure_star_writes,
+            self.closure_inner_calls,
+            self.pointee_closures,
+        ):
+            extra = self._captured_current_deps(
+                self.closure_captures.get(record_id, frozenset()),
+                params,
+                locals_,
+            )
+            deps |= extra
+            self._record_read(extra)
         idents = [expr] if expr.type == "identifier" else []
         if not idents and expr.type == "composite_literal":
             # `return []func(){cl}` — a closure returned as a
@@ -25068,7 +25206,7 @@ class _Builder:
             if not compound and len(lefts) == len(rights):
                 for i, member_id in field_func_member_targets.items():
                     rhs = self._strip_parens(rights[i])
-                    if rhs is None or rhs.type != "identifier":
+                    if rhs is None:
                         continue
                     src_ref = self.references.get(self.node_key(rhs))
                     src_id = (
@@ -25078,20 +25216,20 @@ class _Builder:
                         raise _Unsupported(
                             "unsupported_expression", _span(rhs)
                         )
-                    if (
-                        src_id is not None
-                        and self._is_prestate_tracked_local_closure(
-                            src_id,
-                            params,
-                            captures_before,
-                            opaque_before,
-                            aliases_before,
-                            mv_before,
-                            imv_before,
-                        )
-                    ):
+                    source_ids = self._func_field_value_record_sources(
+                        rhs,
+                        params,
+                        locals_,
+                        captures_before,
+                        writes_before,
+                        star_before,
+                        calls_before,
+                        pointee_before,
+                        include_receiver=True,
+                    )
+                    for source_id in source_ids:
                         self._adopt_element_records_from_snapshot(
-                            src_id,
+                            source_id,
                             member_id,
                             captures_before,
                             writes_before,
@@ -33088,6 +33226,7 @@ class _Builder:
             self._adopt_struct_composite_closure_records(
                 node,
                 params,
+                locals_,
                 self._assignment_composite_record_snapshot(node),
             )
             return self.expression(
