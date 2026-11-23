@@ -3456,8 +3456,13 @@ Synchronous literals also admit queue/container sends
 those operands. Queue groups must remain local and unescaped; plain
 containers must be tracked local scalar-leaf containers (not params,
 package values or escaped roots) and every enclosing reference must be
-a supported indexed channel operation. Aliases, enclosing channel
-values sent into a queue,
+a supported indexed channel operation. A captured queue also
+takes a send of a *fresh* queue value — `cc <- make(chan T)`,
+`cc[i] <- make(chan T)`, `m[k] <- make(chan T)`, or a call
+result — since an unaliased queue joining the group leaks no
+enclosing identity. Aliases, enclosing channel
+values sent into a queue (captured parameters, locals, or a
+container's element queue),
 non-operation uses (including call arguments, returns, assignments,
 composite values, range, address-of, and comparisons), `select`, and
 deferred or callback invocations stay closed. Goroutine-invoked bound and
