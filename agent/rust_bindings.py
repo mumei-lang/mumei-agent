@@ -1432,7 +1432,11 @@ class _RustBindings:
             else:
                 current.append(ch)
         parts.append("".join(current))
-        return [part.strip() for part in parts]
+        items = [part.strip() for part in parts]
+        if len(items) > 1 and items[-1] == "":
+            # `(P, Q,)` — a trailing comma names no third arg.
+            items.pop()
+        return items
 
     def _resolve_spelled_in_scope(
         self, spelled: str, scope: "_Scope | None", position: int
@@ -6199,7 +6203,7 @@ class _RustBindings:
                     elem_args.strip(),
                 )
                 if peeled is not None:
-                    tid, _ = self._spelled_type(
+                    tid, spelled_args = self._spelled_type(
                         peeled.group(1).strip(), iterator.start_byte
                     )
                     if tid is not None:
@@ -6213,7 +6217,7 @@ class _RustBindings:
                         )
                         return (
                             TypeFact("named", name, 0, None, tid),
-                            None,
+                            spelled_args or None,
                         )
                 return _UNKNOWN, elem_args.strip()
             else:
