@@ -18264,6 +18264,67 @@ def test_bound_closure_write_inside_carries_value_deps(
     assert result.return_dependencies == frozenset({0, 1})
 
 
+def test_bound_closure_mutating_builtin_writes_carry_deps(
+    go_types_helper,
+):
+    # Container-mutating builtins inside the literal write the
+    # operand's captured binding like an element store does —
+    # `copy(dst, src)` lands the source set on dst, `delete(m, k)`
+    # lands the key's deps on m, and a discarded `append(s, x)`
+    # still grows s's backing. Without the operand root in the
+    # literal's write set the post-call read reported only the
+    # binding's pre-call deps and the mutation was lost.
+    for body, expected in (
+        (
+            "func F(p int64, q int64) int64 {\n"
+            "\tsrc := []int64{p}\n"
+            "\tdst := []int64{q}\n"
+            "\tf := func() { _ = copy(dst, src) }\n"
+            "\tf()\n"
+            "\treturn dst[0]\n}",
+            {0, 1},
+        ),
+        (
+            "func F(p int64, q int64) int64 {\n"
+            "\tdst := []int64{q}\n"
+            "\tsrc := []int64{p}\n"
+            "\tf := func() { _ = copy(dst[:1], src) }\n"
+            "\tf()\n"
+            "\treturn dst[0]\n}",
+            {0, 1},
+        ),
+        (
+            "func F(p int64, q int64) int64 {\n"
+            "\tm := map[int]int64{0: q}\n"
+            "\tf := func() { delete(m, int(p)) }\n"
+            "\tf()\n"
+            "\treturn m[0]\n}",
+            {0, 1},
+        ),
+        (
+            "func F(p int64, q int64) int64 {\n"
+            "\ts := []int64{0}\n"
+            "\tf := func() { _ = append(s, p) }\n"
+            "\tf()\n"
+            "\treturn s[0] + q\n}",
+            {0, 1},
+        ),
+        (
+            "func F(p int64, q int64) int64 {\n"
+            "\tm := map[int]int64{0: q}\n"
+            "\tf := func() { clear(m) }\n"
+            "\tf()\n"
+            "\t_ = p\n"
+            "\treturn m[0]\n}",
+            {1},
+        ),
+    ):
+        data = unit(go_types_helper, body)
+        result = named(*data)
+        assert result.available
+        assert result.return_dependencies == frozenset(expected)
+
+
 def test_bound_closure_star_write_folds_escaped(
     go_types_helper,
 ):

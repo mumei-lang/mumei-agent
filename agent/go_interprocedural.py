@@ -39868,6 +39868,100 @@ class _Builder:
                 # conversion node but is a real element call —
                 # side effects count like any call.
                 has_call = True
+                if cur.type == "call_expression":
+                    call = self.calls.get(self.node_key(cur))
+                    function_node = cur.child_by_field_name(
+                        "function"
+                    )
+                    while (
+                        function_node is not None
+                        and function_node.type
+                        == "parenthesized_expression"
+                    ):
+                        function_node = next(
+                            (
+                                c
+                                for c in
+                                function_node.named_children
+                                if c.type != "comment"
+                            ),
+                            None,
+                        )
+                    builtin_name = (
+                        function_node.text.decode("utf-8")
+                        if function_node is not None
+                        and function_node.type == "identifier"
+                        else None
+                    )
+                    if builtin_name in {
+                        "copy",
+                        "delete",
+                        "clear",
+                        "append",
+                    }:
+                        # `copy(dst, src)` / `delete(m, k)` /
+                        # `clear(m)` / `_ = append(s, x)` mutate
+                        # their first operand's captured container —
+                        # without the operand root in `writes` the
+                        # fold keeps the binding's pre-call deps and
+                        # a later read loses the stored elements'
+                        # contribution, the way an unrecorded
+                        # element store would. A local binding can
+                        # shadow the name (`copy := f`), so only the
+                        # resolved builtin admits; a missing call
+                        # record cannot rule the shadow out and
+                        # closes instead.
+                        if call is None:
+                            raise _Unsupported(
+                                "unresolved_or_opaque_call",
+                                _span(cur),
+                            )
+                        if call.kind == "builtin":
+                            arguments_node = (
+                                cur.child_by_field_name("arguments")
+                            )
+                            operand = next(
+                                (
+                                    c
+                                    for c in
+                                    (arguments_node.named_children
+                                     if arguments_node is not None
+                                     else [])
+                                    if c.type != "comment"
+                                ),
+                                None,
+                            )
+                            if operand is not None:
+                                written = (
+                                    self._literal_write_target(
+                                        operand, ptr_alias
+                                    )
+                                )
+                                if not written:
+                                    # A result call or composite
+                                    # operand cannot name an
+                                    # enclosing binding, so nothing
+                                    # is lost; a `(*p)` or
+                                    # unresolved operand could still
+                                    # write caller memory, which
+                                    # only a gap can report.
+                                    mutroot = operand
+                                    while mutroot.type in {
+                                        "parenthesized_expression",
+                                        "selector_expression",
+                                        "index_expression",
+                                        "slice_expression",
+                                    }:
+                                        mutroot = mutroot.children[0]
+                                    if mutroot.type in {
+                                        "unary_expression",
+                                        "identifier",
+                                    }:
+                                        raise _Unsupported(
+                                            "unsupported_expression",
+                                            _span(cur),
+                                        )
+                                writes |= written
             elif cur.type in {
                 "assignment_statement",
                 "inc_statement",
@@ -40027,6 +40121,23 @@ class _Builder:
         itself a pointer alias (`p := &q`, then `p.V = e`) folds
         into the aliased pointee too."""
         targets: set[str] = set()
+        for name in lhs.named_children:
+            if name.type == "comment":
+                continue
+            targets |= self._literal_write_target(name, ptr_alias)
+        return targets
+
+    def _literal_write_target(
+        self, node: Any, ptr_alias: dict[str, set[str]] | None = None
+    ) -> set[str]:
+        """Binding ids one expression's root may write through.
+
+        Single-node form of `_literal_write_targets` — shared with
+        mutating builtin arguments, whose operand list is not an
+        assignment LHS. A `slice_expression` operand (`s[:n]` as a
+        `copy` destination) peels to the backing binding like an
+        index does; it never appears on an assignment LHS."""
+        targets: set[str] = set()
         alias = ptr_alias or {}
 
         def _chase(bid: str) -> set[str]:
@@ -40042,45 +40153,42 @@ class _Builder:
                 frontier.extend(alias.get(cur, ()))
             return out
 
-        for name in lhs.named_children:
-            if name.type == "comment":
-                continue
-            node = name
-            while node.type in {
-                "parenthesized_expression",
-                "selector_expression",
-                "index_expression",
-            }:
-                node = node.children[0]
-            if node.type == "unary_expression":
-                # `*p = e` — resolved through a `p := &x` alias when
-                # one exists; the star_write flag still covers the
-                # unresolvable case.
-                operand = node.child_by_field_name("operand")
-                while (
-                    operand is not None
-                    and operand.type == "parenthesized_expression"
-                ):
-                    operand = next(
-                        (
-                            c
-                            for c in operand.named_children
-                            if c.type != "comment"
-                        ),
-                        None,
-                    )
-                if operand is not None and operand.type == "identifier":
-                    ref = self.references.get(self.node_key(operand))
-                    if ref is not None and ref.binding_id in alias:
-                        targets |= _chase(ref.binding_id) - {
-                            ref.binding_id
-                        }
-                continue
-            if node.type != "identifier":
-                continue
-            ref = self.references.get(self.node_key(node))
-            if ref is not None:
-                targets |= _chase(ref.binding_id)
+        while node.type in {
+            "parenthesized_expression",
+            "selector_expression",
+            "index_expression",
+            "slice_expression",
+        }:
+            node = node.children[0]
+        if node.type == "unary_expression":
+            # `*p = e` — resolved through a `p := &x` alias when
+            # one exists; the star_write flag still covers the
+            # unresolvable case.
+            operand = node.child_by_field_name("operand")
+            while (
+                operand is not None
+                and operand.type == "parenthesized_expression"
+            ):
+                operand = next(
+                    (
+                        c
+                        for c in operand.named_children
+                        if c.type != "comment"
+                    ),
+                    None,
+                )
+            if operand is not None and operand.type == "identifier":
+                ref = self.references.get(self.node_key(operand))
+                if ref is not None and ref.binding_id in alias:
+                    targets |= _chase(ref.binding_id) - {
+                        ref.binding_id
+                    }
+            return targets
+        if node.type != "identifier":
+            return targets
+        ref = self.references.get(self.node_key(node))
+        if ref is not None:
+            targets |= _chase(ref.binding_id)
         return targets
 
     def _closure_factory_returned_literals(
