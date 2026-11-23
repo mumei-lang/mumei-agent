@@ -60,7 +60,19 @@ _CLOSURE_ELEMENT_METHODS = frozenset(
     {"map", "filter", "for_each", "inspect", "find", "any",
      "all", "position", "rposition", "filter_map", "flat_map",
      "map_while", "take_while", "skip_while", "find_map",
-     "partition"}
+     "partition", "rfind", "try_find", "try_for_each",
+     "retain", "retain_mut",
+     "sort_by", "sort_by_key", "sort_unstable_by",
+     "sort_unstable_by_key", "sort_by_cached_key",
+     "select_nth_unstable_by",
+     "dedup_by", "dedup_by_key",
+     "partition_point", "binary_search_by", "is_sorted_by"}
+)
+# Callbacks whose first TWO unannotated parameters take the
+# element — comparators and dedup pairs `|a, b|`.
+_CLOSURE_PAIR_ELEMENT_METHODS = frozenset(
+    {"sort_by", "sort_unstable_by", "select_nth_unstable_by",
+     "dedup_by", "is_sorted_by"}
 )
 _ITER_PRESERVING_METHODS = frozenset(
     {"rev", "skip", "take", "filter", "step_by", "chain",
@@ -12537,19 +12549,21 @@ class _RustBindings:
         if params is not None:
             pending = self.closure_element
             self.closure_element = None
-            first = True
+            remaining = pending[2] if pending is not None else 0
             for parameter in self._children(params):
                 ids = self._parameter(parameter, closure_scope, self.span(body))
-                if pending is not None and first and ids:
-                    # `for_each(|p| ...)` — an unannotated first
-                    # parameter takes the iterated element.
+                if pending is not None and remaining > 0 and ids:
+                    # `for_each(|p| ...)`/`sort_by(|a, b| ...)` — an
+                    # unannotated element parameter takes the
+                    # iterated element.
                     annotation = (
                         parameter.child_by_field_name("type")
                         if parameter.type == "parameter"
                         else None
                     )
                     if annotation is None:
-                        fact, spelled = pending
+                        remaining -= 1
+                        fact, spelled, _slots = pending
                         idset = set(ids)
                         for recs in closure_scope.bindings.values():
                             for record in recs:
@@ -12566,7 +12580,6 @@ class _RustBindings:
                                             record.binding = (
                                                 self.bindings[i]
                                             )
-                first = False
         self._expr(body)
         self.call_owner = old_owner
         self.scopes.pop()
@@ -12830,11 +12843,15 @@ class _RustBindings:
                 ):
                     # `v.iter().for_each(|p| ...)` — the receiver's
                     # iterated element types the closure's first
-                    # bare parameter. A declared or trait-inherited
-                    # `for_each` signs its own callback — typing the
-                    # parameter from the element would misbind it.
+                    # bare parameter (two for comparator pairs). A
+                    # declared or trait-inherited `for_each` signs
+                    # its own callback — typing the parameter from
+                    # the element would misbind it.
                     closure_element = self._for_element(
                         closure_callee.child_by_field_name("value")
+                    ) + (
+                        2 if method_name in _CLOSURE_PAIR_ELEMENT_METHODS
+                        else 1,
                     )
             for argument in arguments:
                 if (

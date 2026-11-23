@@ -9601,3 +9601,33 @@ fn f(v: Vec<P>, s: &mut [P], w: W<P>) {
     assert not bound.get("q.pm()")
     # A chunk `&[P]` has no `pm` member — stays opaque.
     assert not bound.get("c.pm()")
+
+
+def test_slice_and_comparator_closures_bind_the_element():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(v: Vec<P>, m: std::collections::HashMap<u8, P>) {
+    v.retain(|p| p.pm());
+    v.sort_by(|a, b| a.pm());
+    v.dedup_by(|a, b| { b.pm(); true });
+    let _ = v.partition_point(|p| p.pm());
+    m.retain(|k, val| k.pm());
+    v.iter().try_for_each(|p| p.pm());
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # Single-element callbacks — `retain`/`partition_point`/
+    # `try_for_each` receive `&P`.
+    assert bound.get("p.pm()") == pm.id
+    # Comparator pairs — `sort_by`/`dedup_by` bind both params.
+    assert bound.get("a.pm()") == pm.id
+    assert bound.get("b.pm()") == pm.id
+    # A map's `retain` key has no `pm` — stays opaque.
+    assert not bound.get("k.pm()")
