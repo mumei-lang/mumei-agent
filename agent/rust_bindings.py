@@ -3462,6 +3462,65 @@ class _RustBindings:
                     and self.text(
                         callee.child_by_field_name("field")
                     ).strip()
+                    in {"ok_or", "ok_or_else"}
+                ):
+                    receiver = callee.child_by_field_name("value")
+                    if (
+                        receiver is None
+                        or self._container_head_name(receiver)
+                        != "Option"
+                    ):
+                        return _UNKNOWN, None
+                    _, recv_args = self._receiver_type(receiver)
+                    ok_arg = next(
+                        iter(self._type_arg_list(recv_args or "")),
+                        None,
+                    )
+                    if ok_arg is None:
+                        return _UNKNOWN, None
+                    # `o.ok_or(e)` spells `E` from the value's type;
+                    # `ok_or_else(f)` reads `f() -> E` — a closure's
+                    # unwritten return keeps `Err` unpinned while
+                    # `Ok` still binds `P`.
+                    if (
+                        self.text(
+                            callee.child_by_field_name("field")
+                        ).strip()
+                        == "ok_or_else"
+                    ):
+                        err = self._fn_return_payload(node)
+                    else:
+                        arg_list = node.child_by_field_name(
+                            "arguments"
+                        )
+                        first_arg = (
+                            None
+                            if arg_list is None
+                            else next(
+                                (
+                                    c
+                                    for c in arg_list.named_children
+                                    if "comment" not in c.type
+                                ),
+                                None,
+                            )
+                        )
+                        err = (
+                            None
+                            if first_arg is None
+                            else self._expr_type_spelling(first_arg)
+                        )
+                    return None, (
+                        ok_arg.strip()
+                        if err is None
+                        else f"{ok_arg.strip()}, {err}"
+                    )
+                if (
+                    callee is not None
+                    and callee.type == "field_expression"
+                    and self.text(
+                        callee.child_by_field_name("field")
+                    ).strip()
                     in _FN_PAYLOAD_METHODS
                 ):
                     spelled = self._fn_return_payload(node)
@@ -7928,6 +7987,44 @@ class _RustBindings:
             head = base
         return head
 
+    def _expr_type_spelling(self, node: Any | None) -> "str | None":
+        """Spelled whole type of an expression — `Vec<P>` for `v`,
+        `m::E` for `e`. Used when a method argument's own type feeds
+        the result spelling (`o.ok_or(e)` spells `E`); None when the
+        expression's type is unknown."""
+        type_id, targs = self._receiver_type(node)
+        head = self._container_head_name(node)
+        if head is None and type_id is not None:
+            head = next(
+                (b.name for b in self.bindings if b.id == type_id),
+                None,
+            )
+        if node.type == "identifier":
+            # `e: m::E` — the binding's name is `E`, but the
+            # annotation's own path keeps the qualifier; spelled
+            # `E` would resolve a same-named root type instead.
+            record = self._lookup(
+                self._normalize_identifier(self.text(node)),
+                node.start_byte,
+                "value",
+            )
+            tn = None if record is None else record.type_node
+            if tn is not None:
+                annotated = re.sub(
+                    r"^&\s*(?:'\w+\s+)?(?:mut\s+)?", "", self.text(tn)
+                ).strip()
+                head_part = annotated.split("<", 1)[0].strip()
+                if "::" in head_part:
+                    head = head_part
+        if head is None:
+            return None
+        spelled = head if not targs else f"{head}<{targs}>"
+        position = (
+            self._receiver_annotation_position(node)
+            or node.start_byte
+        )
+        return self._qualified_spelling(spelled, position)
+
     def _slice_has_declared_method(self, name: str) -> bool:
         """True when an impl block declares `name` on a slice/array
         target — `impl T for [P]` means `s.first()` uses the trait's
@@ -8217,6 +8314,19 @@ class _RustBindings:
                             or node.start_byte,
                             None,
                         )
+                if (
+                    field is not None
+                    and self.text(field).strip()
+                    in {"ok_or", "ok_or_else"}
+                    and self._container_head_name(
+                        callee.child_by_field_name("value")
+                    )
+                    == "Option"
+                ):
+                    # `o.ok_or(e)`/`o.ok_or_else(f)` yield
+                    # `Result<P, E>` — `Ok`/`Err` patterns read the
+                    # payload.
+                    return "Result", node.start_byte, None
                 if (
                     field is not None
                     and self.text(field).strip() in _FN_PAYLOAD_METHODS

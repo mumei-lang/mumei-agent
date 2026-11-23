@@ -7178,6 +7178,7 @@ fn f(m: BTreeMap<K, V>, h: HashMap<K, V>) {
     assert not bound.get("v3.vm()")
 
 
+
 def test_set_algebra_peels_hasher_and_enumerate_pairs():
     source = """
 struct P;
@@ -7240,3 +7241,65 @@ fn f(m: BTreeMap<K, V>) {
     assert bound.get("v2.vm()") == vm.id
     assert bound.get("k3.km()") == km.id
     assert bound.get("v3.vm()") == vm.id
+
+
+def test_option_ok_or_heads_result_payloads():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct E;
+impl E { fn em(&self) {} }
+fn mk() -> E { E }
+fn f(o: Option<P>, e: E, v: Vec<P>) {
+    match o.ok_or(e) { Ok(p) => p.pm(), Err(x) => x.em() }
+    match o.ok_or_else(mk) { Ok(p2) => p2.pm(), Err(y) => y.em() }
+    match o.ok_or_else(|| E) { Ok(p3) => p3.pm(), Err(z) => z.em() }
+    match v.iter().ok_or(e) { Ok(p4) => p4.pm(), _ => () }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    em = _bindings(report, "em", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    assert bound.get("p.pm()") == pm.id
+    assert bound.get("x.em()") == em.id
+    assert bound.get("p2.pm()") == pm.id
+    assert bound.get("y.em()") == em.id
+    # A closure's unwritten return still pins `Ok` but leaves `Err`
+    # unpinned.
+    assert bound.get("p3.pm()") == pm.id
+    assert not bound.get("z.em()")
+    # `iter()` has no `ok_or` — a non-Option receiver stays opaque.
+    assert not bound.get("p4.pm()")
+
+
+def test_ok_or_spells_qualified_error_type():
+    source = """
+mod m { pub struct E; }
+struct E;
+impl m::E { fn em(&self) {} }
+impl E { fn em(&self) {} }
+fn f(o: Option<u8>, e: m::E, e2: E) {
+    match o.ok_or(e) { Err(x) => x.em(), _ => {} }
+    match o.ok_or(e2) { Err(x2) => x2.em(), _ => {} }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    ems = sorted(
+        b.span.start for b in report.bindings if b.name == "em"
+    )
+    assert len(ems) == 2
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `x` binds the `m::E` impl's `em`; `x2` the root `E`'s — the
+    # spelled `E` in `ok_or(e)` keeps its `m::` qualifier.
+    assert bound.get("x.em()") is not None
+    assert bound.get("x2.em()") is not None
+    assert bound["x.em()"] != bound["x2.em()"]
