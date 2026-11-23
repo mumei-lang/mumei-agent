@@ -5416,6 +5416,32 @@ class _RustBindings:
             if arg is None:
                 return _UNKNOWN, None
             elem_id, rest = self._spelled_type(arg, position)
+        elif method in _MAP_RANGE_METHODS:
+            # `m.range(..)`/`range_mut(..)` on BTreeMap yield
+            # `(&K, &V)` pairs — the spelled pair feeds the
+            # tuple-pattern path, so `.rev()`/`.take(n)` carry it
+            # through the preserving adapters the same way
+            # `m.iter()` does.
+            if self._container_head_name(receiver) != "BTreeMap":
+                return _UNKNOWN, None
+            spelled = self._map_spelled_args(receiver)
+            if spelled is None:
+                return _UNKNOWN, None
+            pair_parts = self._type_arg_list(spelled)
+            if len(pair_parts) != 2:
+                return _UNKNOWN, None
+            borrow = (
+                "&mut "
+                if method == "range_mut"
+                else "&"
+            )
+            elem_id, rest = (
+                None,
+                "({}, {})".format(
+                    borrow + pair_parts[0].strip(),
+                    borrow + pair_parts[1].strip(),
+                ),
+            )
         elif method in _ITER_SLICE_METHODS:
             # `v.as_slice()` iterates the same element as `iter()`.
             if "," in args or self._is_map_container(
