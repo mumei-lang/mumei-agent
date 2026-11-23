@@ -5049,6 +5049,7 @@ class _Builder:
                         "type_identifier",
                         "qualified_type",
                         "generic_type",
+                        "pointer_type",
                         "struct_type",
                     }
                 )

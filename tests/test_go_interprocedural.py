@@ -55114,6 +55114,98 @@ def test_alias_free_slice_array_struct_element_copies(go_types_helper):
         assert not result.available, (function_name, result.gaps)
 
 
+def test_elided_pointer_element_literals_with_func_closures_fail_closed(
+    go_types_helper,
+):
+    declarations = (
+        "type S struct { F func() int64; V int64 }\n"
+        "type W struct { F func() }\n"
+        "type E struct { V int64 }\n"
+        "type PS []*S\n"
+        "func FPointerSliceCall(x, y int64) int64 {\n"
+        "\tv := y; ps := []*S{{F: func() int64 { return v }}}\n"
+        "\tv = x; return ps[0].F()\n"
+        "}\n"
+        "func FPointerSliceCopy(x, y int64) int64 {\n"
+        "\tv := y; ps := []*S{{F: func() int64 { return v }}}\n"
+        "\te := ps[0]; v = x; return e.F()\n"
+        "}\n"
+        "func FPointerNestedCall(x, y int64) int64 {\n"
+        "\tv := y; ps := [][]*S{{{F: func() int64 { return v }}}}\n"
+        "\tv = x; return ps[0][0].F()\n"
+        "}\n"
+        "func FPointerNestedCopy(x, y int64) int64 {\n"
+        "\tv := y; ps := [][]*S{{{F: func() int64 { return v }}}}\n"
+        "\te := ps[0][0]; v = x; return e.F()\n"
+        "}\n"
+        "func FPointerMapValue(x, y int64) int64 {\n"
+        "\tv := y; m := map[int]*S{0: {F: func() int64 { return v }}}\n"
+        "\tv = x; return m[0].F()\n"
+        "}\n"
+        "func FNamedPointerSlice(x, y int64) int64 {\n"
+        "\tv := y; ps := PS{{F: func() int64 { return v }}}\n"
+        "\tv = x; return ps[0].F()\n"
+        "}\n"
+        "func FPointerWrite(x int64) (w int64) {\n"
+        "\tps := []*W{{F: func() { w = x }}}\n"
+        "\tps[0].F(); return w\n"
+        "}\n"
+        "func FPointerWriteCopy(x int64) (w int64) {\n"
+        "\tps := []*W{{F: func() { w = x }}}\n"
+        "\te := ps[0]; e.F(); return w\n"
+        "}\n"
+        "func FClosureFreePointerElement(x int64) int64 {\n"
+        "\tps := []*E{{V: x}}; return ps[0].V\n"
+        "}\n"
+        "func FExplicitPointerLiteral(x, y int64) int64 {\n"
+        "\tv := y; ps := []*S{&S{F: func() int64 { return v }}}\n"
+        "\tv = x; return ps[0].F()\n"
+        "}\n"
+        "func FPointerVariable(x, y int64) int64 {\n"
+        "\tv := y; p := &S{F: func() int64 { return v }}\n"
+        "\tv = x; return p.F()\n"
+        "}\n"
+        "func FValueElement(x, y int64) int64 {\n"
+        "\tv := y; ss := []S{{F: func() int64 { return v }}}\n"
+        "\te := ss[0]; v = x; return e.F()\n"
+        "}\n"
+    )
+    files = {"a.go": "package p\n" + declarations}
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    for function_name in (
+        "FPointerSliceCall",
+        "FPointerSliceCopy",
+        "FPointerNestedCall",
+        "FPointerNestedCopy",
+        "FPointerMapValue",
+        "FNamedPointerSlice",
+        "FPointerWrite",
+        "FPointerWriteCopy",
+    ):
+        result = named_package(files, snapshot, summaries, function_name)
+        assert not result.available, (function_name, result.gaps)
+        assert "unsupported_expression" in {
+            gap.reason for gap in result.gaps
+        }, (function_name, result.gaps)
+    for function_name in (
+        "FExplicitPointerLiteral",
+        "FPointerVariable",
+    ):
+        result = named_package(files, snapshot, summaries, function_name)
+        assert not result.available, (function_name, result.gaps)
+    closure_free = named_package(
+        files, snapshot, summaries, "FClosureFreePointerElement"
+    )
+    assert closure_free.available, closure_free.gaps
+    assert closure_free.return_dependencies == frozenset({0})
+    value_element = named_package(
+        files, snapshot, summaries, "FValueElement"
+    )
+    assert value_element.available, value_element.gaps
+    assert value_element.return_dependencies == frozenset({0, 1})
+
+
 def test_multi_index_slice_array_struct_element_func_fields(
     go_types_helper,
 ):
