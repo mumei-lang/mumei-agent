@@ -5733,7 +5733,7 @@ class _RustBindings:
             container_id, args = self._receiver_type(receiver)
             if args is None:
                 return None, None
-            if self._container_head_name(receiver) not in (
+            if self._expanded_container_head(receiver) not in (
                 _EXTRACT_IF_ELEMENT_CONTAINERS
             ):
                 return None, None
@@ -6833,7 +6833,7 @@ class _RustBindings:
                     return _UNKNOWN, None
                 inner_parts = self._type_arg_list(inner_spelled.strip())
                 expanded = self._expanded_container_head(inner_receiver)
-                if expanded in _SET_CONTAINER_NAMES:
+                if expanded in _EXTRACT_IF_ELEMENT_CONTAINERS:
                     elem = (
                         inner_parts[0].strip() if inner_parts else ""
                     )
