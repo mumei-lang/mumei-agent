@@ -7275,3 +7275,31 @@ fn f(o: Option<P>, e: E, v: Vec<P>) {
     assert not bound.get("z.em()")
     # `iter()` has no `ok_or` — a non-Option receiver stays opaque.
     assert not bound.get("p4.pm()")
+
+
+def test_ok_or_spells_qualified_error_type():
+    source = """
+mod m { pub struct E; }
+struct E;
+impl m::E { fn em(&self) {} }
+impl E { fn em(&self) {} }
+fn f(o: Option<u8>, e: m::E, e2: E) {
+    match o.ok_or(e) { Err(x) => x.em(), _ => {} }
+    match o.ok_or(e2) { Err(x2) => x2.em(), _ => {} }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    ems = sorted(
+        b.span.start for b in report.bindings if b.name == "em"
+    )
+    assert len(ems) == 2
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `x` binds the `m::E` impl's `em`; `x2` the root `E`'s — the
+    # spelled `E` in `ok_or(e)` keeps its `m::` qualifier.
+    assert bound.get("x.em()") is not None
+    assert bound.get("x2.em()") is not None
+    assert bound["x.em()"] != bound["x2.em()"]

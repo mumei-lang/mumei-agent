@@ -7999,6 +7999,23 @@ class _RustBindings:
                 (b.name for b in self.bindings if b.id == type_id),
                 None,
             )
+        if node.type == "identifier":
+            # `e: m::E` — the binding's name is `E`, but the
+            # annotation's own path keeps the qualifier; spelled
+            # `E` would resolve a same-named root type instead.
+            record = self._lookup(
+                self._normalize_identifier(self.text(node)),
+                node.start_byte,
+                "value",
+            )
+            tn = None if record is None else record.type_node
+            if tn is not None:
+                annotated = re.sub(
+                    r"^&\s*(?:'\w+\s+)?(?:mut\s+)?", "", self.text(tn)
+                ).strip()
+                head_part = annotated.split("<", 1)[0].strip()
+                if "::" in head_part:
+                    head = head_part
         if head is None:
             return None
         spelled = head if not targs else f"{head}<{targs}>"
