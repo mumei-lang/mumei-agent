@@ -3367,6 +3367,27 @@ class _TypeScriptBindings:
                 position,
             )
             if member is None:
+                object_node = node.child_by_field_name("object")
+                literal_value = self._object_literal_property(
+                    object_node,
+                    self.text(property_node),
+                    position,
+                )
+                if literal_value is not None:
+                    owner = self._literal_owner_record(
+                        object_node, position
+                    )
+                    if owner is None:
+                        return None
+                    self._type_node_active.add(owner.node.id)
+                    try:
+                        return self._declared_type_node(
+                            literal_value, position
+                        )
+                    finally:
+                        self._type_node_active.discard(
+                            owner.node.id
+                        )
                 return None
             return self._unwrap_type(member.type_node)
         if node.type == "call_expression":
@@ -3589,6 +3610,43 @@ class _TypeScriptBindings:
                 self._declared_type_node(value, value.start_byte)
             )
         if declared is None:
+            if pattern.type == "object_pattern" and value is not None:
+                # `const {head} = o` where `o = {head: arr[0]}` —
+                # the slot takes the literal pair's value type.
+                prop = name
+                if (
+                    name.parent is not None
+                    and name.parent.type == "pair_pattern"
+                ):
+                    key = name.parent.child_by_field_name("key")
+                    if key is not None:
+                        prop = key
+                prop_name = self.text(prop).strip("\"'")
+                record = (
+                    self._lookup(
+                        self.text(value), value.start_byte, "value"
+                    )
+                    if value.type == "identifier"
+                    else None
+                )
+                if (
+                    record is not None
+                    and record.node is not None
+                    and record.node.id not in self._type_node_active
+                ):
+                    pair_value = self._object_literal_property(
+                        value, prop_name, value.start_byte
+                    )
+                    if pair_value is not None:
+                        self._type_node_active.add(record.node.id)
+                        try:
+                            return self._declared_type_node(
+                                pair_value, value.start_byte
+                            )
+                        finally:
+                            self._type_node_active.discard(
+                                record.node.id
+                            )
             return None
         if declared.type == "array_type":
             return next(iter(self.children(declared)), None)
@@ -4036,6 +4094,88 @@ class _TypeScriptBindings:
             return ()
         return ()
 
+    def _literal_owner_record(
+        self, obj: Any | None, position: int
+    ) -> _Record | None:
+        """The record of the identifier at the base of a literal
+        member chain (`n` for `n.head.inner`) — the node the
+        `_type_node_active` guard marks during recursion."""
+        root = obj
+        while root is not None and root.type != "identifier":
+            if root.type == "member_expression":
+                root = root.child_by_field_name("object")
+            else:
+                root = None
+        if root is None:
+            return None
+        record = self._lookup(self.text(root), position, "value")
+        if record is None or record.node is None:
+            return None
+        return record
+
+    def _object_literal_node(
+        self, obj: Any | None, position: int
+    ) -> Any | None:
+        """The `object` literal an expression resolves to — a
+        declarator's `object` value for an identifier, or a nested
+        literal reached through member chains (`n.head`)."""
+        if obj is None:
+            return None
+        if obj.type == "identifier":
+            record = self._literal_owner_record(obj, position)
+            if (
+                record is None
+                or record.node.id in self._type_node_active
+            ):
+                return None
+            declarator = record.node.parent
+            if (
+                declarator is None
+                or declarator.type != "variable_declarator"
+            ):
+                return None
+            literal = declarator.child_by_field_name("value")
+            if literal is not None and literal.type == "object":
+                return literal
+            return None
+        if obj.type == "member_expression":
+            property_node = obj.child_by_field_name("property")
+            if property_node is None:
+                return None
+            inner = self._object_literal_property(
+                obj.child_by_field_name("object"),
+                self.text(property_node),
+                position,
+            )
+            if inner is not None and inner.type == "object":
+                return inner
+        return None
+
+    def _object_literal_property(
+        self, obj: Any | None, name: str, position: int
+    ) -> Any | None:
+        """The value node paired with `name` in `obj`'s object-literal
+        initializer — `const o = {head: arr[0]}` gives `o.head` the
+        pair's value expression. A self-referential literal stays
+        opaque via `_type_node_active`."""
+        literal = self._object_literal_node(obj, position)
+        if literal is None:
+            return None
+        for child in self.children(literal):
+            if child.type == "pair":
+                key = child.child_by_field_name("key")
+                if (
+                    key is not None
+                    and self.text(key).strip("\"'") == name
+                ):
+                    return child.child_by_field_name("value")
+            if (
+                child.type == "shorthand_property_identifier"
+                and self.text(child) == name
+            ):
+                return child
+        return None
+
     def _array_constituent_node(self, ident: Any) -> Any | None:
         """The array part of `ident`'s declared union —
         `Array.isArray` narrows `P[] | string` to `P[]`. Anything
@@ -4250,6 +4390,29 @@ class _TypeScriptBindings:
                 collect_extras=extras_out,
             )
             if member is None:
+                object_node = node.child_by_field_name("object")
+                literal_value = self._object_literal_property(
+                    object_node,
+                    self.text(property_node),
+                    position,
+                )
+                if literal_value is not None:
+                    # `o.head.pm()` on `const o = {head: arr[0]}` —
+                    # the pair's value expression spells the type.
+                    owner = self._literal_owner_record(
+                        object_node, position
+                    )
+                    if owner is None:
+                        return None, False, False
+                    self._type_node_active.add(owner.node.id)
+                    try:
+                        return self._object_type(
+                            literal_value, position
+                        )
+                    finally:
+                        self._type_node_active.discard(
+                            owner.node.id
+                        )
                 return None, False, False
             if member.class_like or member.binding.kind == "namespace":
                 return member, True, False

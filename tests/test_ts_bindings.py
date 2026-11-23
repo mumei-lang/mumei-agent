@@ -3594,3 +3594,38 @@ function f(v: P | C, w: P[] | string) {
     }
     assert bound_pm == {"w[0].pm()"}
     assert bound_cm == {"v.cm()", "u.cm()"}
+
+def test_object_literal_property_values_spell_member_types():
+    # `const o = {head: arr[0]}` gives `o.head` the pair value's
+    # type — nested literals and destructured slots follow the
+    # same path; non-typed values and self-references stay opaque.
+    source = """
+class P { pm(): void {} }
+declare const arr: P[];
+function f() {
+    const o = { head: arr[0], list: arr, other: 3 };
+    o.head.pm();
+    o.list[0].pm();
+    o.other.pm();
+    const { head } = o;
+    head.pm();
+    const s = { head: s.head };
+    s.head.pm();
+    const n = { head: { inner: arr[0] } };
+    n.head.inner.pm();
+    const t = { head: arr };
+    t.head[0].pm();
+}
+"""
+    report = build_ts_bindings(source)
+    member_pm = _member_bindings(report, "pm", "associated_function")[0]
+    bound = {
+        source[c.span.start : c.span.end] for c in _calls(report) if c.target == member_pm.id
+    }
+    assert bound == {
+        "o.head.pm()",
+        "o.list[0].pm()",
+        "head.pm()",
+        "n.head.inner.pm()",
+        "t.head[0].pm()",
+    }
