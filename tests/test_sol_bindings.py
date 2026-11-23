@@ -1947,6 +1947,33 @@ contract Vault {
     )
 
 
+def test_qualified_type_name_in_annotation_resolves_whole_path():
+    source = """
+contract Container { enum State { On, Off } }
+contract Vault {
+    function run() external {
+        Container.State cst = Container.State.On;
+        cst = Container.State.Off;
+    }
+}
+"""
+    report = build_sol_bindings(source)
+    state = next(
+        binding for binding in report.bindings if binding.name == "State"
+    )
+    # The type-position `Container.State` emits ONE whole-path
+    # reference bound to the enum declaration, matching solc's atomic
+    # IdentifierPath span.
+    assert any(
+        ref.binding_id == state.id
+        and ref.kind == "read"
+        and ref.span.start == source.index("Container.State cst")
+        and ref.span.end == source.index("Container.State cst")
+        + len("Container.State")
+        for ref in report.references
+    )
+
+
 def test_qualified_enum_member_resolves():
     source = """
 contract Container { enum State { On, Off } }
