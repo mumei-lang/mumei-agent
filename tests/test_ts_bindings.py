@@ -3284,3 +3284,57 @@ for (const x of s.values()) { x.pm(); }
         "v.pm()", "v2.pm()", "a.pm()", "b.pm()", "e.pm()", "x.pm()",
     }
     assert km_calls == {"k.km()", "k2.km()"}
+
+
+def test_new_container_initializers_type_the_for_of_elements():
+    # `const m = new Map<K, P>()` carries no annotation — the
+    # constructor's type args stand in for it, so pair slots and
+    # element slots still type. A user `class Map` shadows the
+    # builtin and stays opaque.
+    source = """
+class P { pm(): void {} }
+class K { km(): void {} }
+const m = new Map<K, P>();
+for (const [k, v] of m) { v.pm(); k.km(); }
+for (const [k2, v2] of m.entries()) { v2.pm(); k2.km(); }
+for (const k3 of m.keys()) { k3.km(); }
+for (const v3 of m.values()) { v3.pm(); }
+const s = new Set<P>();
+for (const x of s) { x.pm(); }
+const a = new Array<P>();
+for (const y of a) { y.pm(); }
+"""
+    report = build_ts_bindings(source)
+    member_pm = _member_bindings(report, "pm", "associated_function")[0]
+    member_km = _member_bindings(report, "km", "associated_function")[0]
+    pm_calls = {
+        source[c.span.start : c.span.end]
+        for c in _calls(report)
+        if c.target == member_pm.id
+    }
+    km_calls = {
+        source[c.span.start : c.span.end]
+        for c in _calls(report)
+        if c.target == member_km.id
+    }
+    assert pm_calls == {
+        "v.pm()", "v2.pm()", "v3.pm()", "x.pm()", "y.pm()",
+    }
+    assert km_calls == {"k.km()", "k2.km()", "k3.km()"}
+
+
+def test_new_container_shadowed_by_a_user_class_stays_opaque():
+    source = """
+class P { pm(): void {} }
+class K {}
+class Map<A, B> {}
+const m = new Map<K, P>();
+for (const [k, v] of m) { v.pm(); }
+"""
+    report = build_ts_bindings(source)
+    member_pm = _member_bindings(report, "pm", "associated_function")[0]
+    assert not {
+        source[c.span.start : c.span.end]
+        for c in _calls(report)
+        if c.target == member_pm.id
+    }

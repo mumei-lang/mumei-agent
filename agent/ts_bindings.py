@@ -499,6 +499,47 @@ class _TypeScriptBindings:
                     declaration_function=declaration_function,
                 )
 
+    def _new_container_args(
+        self, node: Any | None
+    ) -> tuple[str, list[Any]] | None:
+        """`const m = new Map<K, V>()` — the builtin container's head
+        and its type-arg nodes, when `m` carries no annotation. A
+        user-declared `class Map`/`Set`/`Array` shadows the builtin,
+        so it stays unbound."""
+        if node is None or node.type != "identifier":
+            return None
+        record = self._lookup(self.text(node), node.start_byte, "value")
+        if record is None or record.node is None:
+            return None
+        declarator = record.node.parent
+        if (
+            declarator is None
+            or declarator.type != "variable_declarator"
+        ):
+            return None
+        value = declarator.child_by_field_name("value")
+        if value is None or value.type != "new_expression":
+            return None
+        constructor = value.child_by_field_name("constructor")
+        if constructor is None or constructor.type not in {
+            "identifier", "type_identifier",
+        }:
+            return None
+        head = self.text(constructor)
+        if head not in {"Map", "WeakMap", "Set", "WeakSet", "Array"}:
+            return None
+        resolved = self._lookup(head, node.start_byte, "type")
+        if resolved is not None and resolved.binding.kind not in {
+            "import", "ambient",
+        }:
+            return None
+        args_node = value.child_by_field_name("type_arguments")
+        return head, (
+            list(self.children(args_node))
+            if args_node is not None
+            else []
+        )
+
     def _iterable_member_args(
         self, operand: Any | None
     ) -> tuple[str, str, list[Any]] | None:
@@ -520,7 +561,10 @@ class _TypeScriptBindings:
             self._declared_type_node(obj, obj.start_byte)
         )
         if declared is None:
-            return None
+            constructed = self._new_container_args(obj)
+            if constructed is None:
+                return None
+            return member, constructed[0], constructed[1]
         if declared.type == "array_type":
             elem = next(iter(self.children(declared)), None)
             return (
@@ -563,6 +607,16 @@ class _TypeScriptBindings:
             else None
         )
         if declared is None:
+            constructed = self._new_container_args(operand)
+            if (
+                constructed is not None
+                and constructed[0]
+                in {"Set", "WeakSet", "Array"}
+                and constructed[1]
+            ):
+                # `for (const x of new Set<P>())` — the element
+                # is the constructor's sole type argument.
+                return constructed[1][0]
             return None
         if declared.type == "array_type":
             return next(iter(self.children(declared)), None)
@@ -2999,6 +3053,29 @@ class _TypeScriptBindings:
                     operand.start_byte if operand is not None else 0,
                 )
             )
+            if iterable is None:
+                constructed = self._new_container_args(operand)
+                if (
+                    constructed is not None
+                    and constructed[0] in {"Map", "WeakMap"}
+                ):
+                    # `for (const [k, v] of new Map<K, V>())` —
+                    # the pair slots take the constructor's args.
+                    slots = self.children(pattern)
+                    index = next(
+                        (
+                            i
+                            for i, slot in enumerate(slots)
+                            if slot.id == name.id
+                        ),
+                        -1,
+                    )
+                    arg_nodes = constructed[1]
+                    return (
+                        arg_nodes[index]
+                        if 0 <= index < len(arg_nodes)
+                        else None
+                    )
             if (
                 iterable is not None
                 and iterable.type == "generic_type"
