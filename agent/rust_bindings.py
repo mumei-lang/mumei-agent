@@ -4108,8 +4108,13 @@ class _RustBindings:
             body_pair = self._generic_head_args(
                 head.alias_node, head.alias_node.start_byte
             )
-            if body_pair is None or body_pair[0] is None:
+            if body_pair is None:
                 break
+            if body_pair[0] is None:
+                # `type N = M` — the body names another alias
+                # bare; keep unrolling into it.
+                head = body_pair[1]
+                continue
             item = head.alias_node.parent
             names = self._type_param_names(
                 None
@@ -8581,12 +8586,24 @@ class _RustBindings:
                         # `o.or_else(f)`/`r.or_else(f)` keep the
                         # receiver's head and `Some`/`Ok` payload —
                         # `f` only supplies the fallback arm.
-                        head = self._container_head_name(
-                            callee.child_by_field_name("value")
-                        )
+                        value = callee.child_by_field_name("value")
+                        head = self._container_head_name(value)
+                        if head is None:
+                            # `o.map(f).or_else(g)` — the receiver
+                            # is itself a combinator chain.
+                            head = self._combinator_head(value)
                         if head not in _TRY_HEADS:
                             return None, None, None
-                        return head, node.start_byte, None
+                        position = self._receiver_annotation_position(
+                            value
+                        )
+                        return (
+                            head,
+                            node.start_byte
+                            if position is None
+                            else position,
+                            None,
+                        )
                     if method in {"map_or", "map_or_else"}:
                         # `o.map_or(d, f)` yields `f`'s return `U`
                         # itself — a plain value, not a container.

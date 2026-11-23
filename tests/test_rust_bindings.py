@@ -7477,12 +7477,28 @@ def test_next_back_and_or_else_keep_the_payload():
 struct P;
 impl P { fn pm(&self) {} }
 fn def() -> P { P }
+fn opt() -> Option<P> { Some(P) }
+fn cvt(o: Option<P>) -> Option<P> { o }
 fn f(v: Vec<P>, o: Option<P>, r: Result<P, E>, w: W<P>) {
     let x1 = v.iter().next_back(); if let Some(p1) = x1 { p1.pm(); }
     let x2 = o.or_else(|| Some(def())); if let Some(p2) = x2 { p2.pm(); }
     let x3 = r.or_else(|e| Err(e)); if let Ok(p3) = x3 { p3.pm(); }
     let x4 = o.or_else(def); if let Some(p4) = x4 { p4.pm(); }
     let x5 = w.or_else(|| w); if let Some(p5) = x5 { p5.pm(); }
+    // A named `Option<P>` fallback resolves through the
+    // function's own return annotation, not the closure path.
+    let x6 = o.or_else(opt); if let Some(p6) = x6 { p6.pm(); }
+    // `or_else` on a combinator chain keeps the Option head.
+    let x7 = o.map(cvt).or_else(opt); if let Some(p7) = x7 { p7.pm(); }
+}
+// A same-named `P` in the body must not steal `o`'s `Option<P>`
+// payload — spelled names resolve at the receiver's annotation.
+type M = std::collections::HashMap<i32, P>;
+type N = M;
+fn g(o: Option<P>, h: N) {
+    struct P { q: u8 }
+    let y = o.or_else(opt); if let Some(p) = y { p.pm(); }
+    for v in h.values() { v.pm(); }
 }
 """
     report = build_rust_bindings(source, pointer_width=64)
@@ -7492,7 +7508,19 @@ fn f(v: Vec<P>, o: Option<P>, r: Result<P, E>, w: W<P>) {
         raw[c.span.start:c.span.end].decode(): c.target
         for c in report.calls
     }
-    for call in ("p1.pm()", "p2.pm()", "p3.pm()", "p4.pm()"):
+    for call in (
+        "p1.pm()",
+        "p2.pm()",
+        "p3.pm()",
+        "p4.pm()",
+        "p6.pm()",
+        "p7.pm()",
+    ):
         assert bound.get(call) == pm.id, call
     # A custom `W` receiver keeps `or_else` opaque.
     assert not bound.get("p5.pm()")
+    # The body's `struct P` shadows the annotation's `P` — `p` is
+    # the outer `P`, so `pm` still binds; `h.values()` unrolls the
+    # `N -> M -> HashMap` alias chain to the outer `P` too.
+    assert bound.get("p.pm()") == pm.id
+    assert bound.get("v.pm()") == pm.id
