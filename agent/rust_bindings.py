@@ -2726,14 +2726,39 @@ class _RustBindings:
                 receiver_heads.add(receiver_head)
             # `impl T for [P]` reaches `Vec`/`VecDeque`/… receivers
             # through auto-deref, and spelled `&[P]`/`[P]` args mark
-            # a slice receiver directly.
+            # a slice receiver directly — but only for names bound
+            # to the value: a producing call's spelled args hold the
+            # ELEMENTS (`v.chunks(n)` spells `&[P]` per item, yet
+            # yields `Chunks`, not a slice), unless the method is an
+            # own-slice producer like `remainder`.
+            slice_args = (
+                recv_args is not None
+                and re.match(r"&?\s*\[", recv_args.strip())
+            )
+            if slice_args and receiver.type == "call_expression":
+                rcallee = receiver.child_by_field_name("function")
+                mname = (
+                    self._normalize_identifier(
+                        self.text(rcallee.child_by_field_name("field"))
+                    )
+                    if rcallee is not None
+                    and rcallee.type == "field_expression"
+                    else None
+                )
+                slice_args = mname in {"remainder", "into_remainder"}
+            annot_slice = False
+            tnode = self._receiver_type_node(receiver)
+            if tnode is not None:
+                annot_slice = re.sub(
+                    r"^&\s*(?:'\w+\s*)?(?:mut\s+)?",
+                    "",
+                    self.text(tnode).strip(),
+                ).startswith("[")
             if (
                 receiver_head
                 in {"Vec", "VecDeque", "BinaryHeap", "LinkedList"}
-                or (
-                    recv_args is not None
-                    and re.match(r"&?\s*\[", recv_args.strip())
-                )
+                or slice_args
+                or annot_slice
             ):
                 receiver_heads.add("[slice]")
         for record in self.records.values():

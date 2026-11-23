@@ -9521,6 +9521,7 @@ impl<P> Each for [P] { fn for_each(&self, f: impl Fn(&Q)) {} }
 fn g(v: Vec<P>) {
     v.for_each(|q| { q.qm(); q.pm(); });
     v.iter().for_each(|p| p.pm());
+    v.chunks(2).for_each(|c| { c[0].pm(); });
 }
 """
     report = build_rust_bindings(source, pointer_width=64)
@@ -9538,5 +9539,9 @@ fn g(v: Vec<P>) {
     # so `for_each` still types `p` as `&P`.
     pms = _bindings(report, "pm", "associated_function")
     assert bound.get("p.pm()") == pms[0].id
+    # `v.chunks(n)` yields `Chunks` whose ITEM is `&[P]` — spelled
+    # args are elements, not the receiver, so the slice impl must
+    # not block the std `for_each` either.
+    assert bound.get("c[0].pm()") == pms[0].id
 
 
