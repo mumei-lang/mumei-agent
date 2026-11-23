@@ -8461,3 +8461,48 @@ fn g(a: L) {
     assert not bound.get("ve.pm()")
     # `VecDeque` names no std `splice` either.
     assert not bound.get("de.pm()")
+
+def test_result_inspect_ok_keeps_the_payload():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(r: Result<P, u8>) {
+    let a = r.inspect_ok(|x| {});
+    if let Ok(p) = a { p.pm(); }
+    let b = r.inspect(|x| {});
+    if let Ok(q) = b { q.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    assert bound.get("p.pm()") == pm.id
+    assert bound.get("q.pm()") == pm.id
+
+
+def test_declared_inspect_ok_stays_opaque():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+trait Ext { fn inspect_ok(&self, f: fn(&i32)) -> Result<i32, u8>; }
+impl Ext for Result<P, u8> {
+    fn inspect_ok(&self, f: fn(&i32)) -> Result<i32, u8> { Ok(0) }
+}
+fn f(r: Result<P, u8>) {
+    let a = r.inspect_ok(|x| {});
+    if let Ok(p) = a { p.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # An extension `inspect_ok` need not echo the receiver — opaque.
+    assert not bound.get("p.pm()") or bound.get("p.pm()") != pm.id
