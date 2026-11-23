@@ -1431,6 +1431,91 @@ def test_undeclared_argv_records_not_dispatched_and_falls_back():
     assert len(result.sequences) == 1
 
 
+def test_matching_executable_digest_pin_dispatches(monkeypatch):
+    with open(PY, "rb") as executable:
+        digest = hashlib.sha256(executable.read()).hexdigest()
+    result, runner_calls = schedule_with_runner_stub(
+        monkeypatch,
+        registry_with("alpha"),
+        ("alpha",),
+        {"alpha": argv(0)},
+        policy=policy(executable_sha256_pins=(("alpha", digest),)),
+    )
+
+    assert result.outcome == "selected"
+    assert result.entries[0].terminal_state == "exited"
+    assert len(runner_calls) == 1
+
+
+def test_mismatched_executable_digest_pin_falls_back(monkeypatch):
+    result, runner_calls = schedule_with_runner_stub(
+        monkeypatch,
+        registry_with("alpha", "beta"),
+        ("alpha", "beta"),
+        {"alpha": argv(0), "beta": argv(0)},
+        policy=policy(
+            selected_adapter="alpha",
+            allow_fallback=True,
+            executable_sha256_pins=(("alpha", hashlib.sha256(b"wrong").hexdigest()),),
+        ),
+    )
+
+    assert result.entries[0].terminal_state == NOT_DISPATCHED
+    assert result.selected_adapter_id == "beta"
+    assert len(runner_calls) == 1
+
+
+def test_mismatched_executable_digest_pin_denies_fallback():
+    result = schedule(
+        registry_with("alpha", "beta"),
+        ("alpha", "beta"),
+        {"alpha": argv(0), "beta": argv(0)},
+        policy=policy(
+            selected_adapter="alpha",
+            executable_sha256_pins=(
+                ("alpha", hashlib.sha256(b"wrong").hexdigest()),
+            ),
+        ),
+    )
+
+    assert result.outcome == "fallback_denied"
+    assert result.entries[0].terminal_state == NOT_DISPATCHED
+
+
+@pytest.mark.parametrize("path_kind", ["relative", "bare", "missing", "directory"])
+def test_invalid_pinned_executable_paths_are_not_dispatched(tmp_path, path_kind):
+    if path_kind == "relative":
+        executable = "relative/executable"
+    elif path_kind == "bare":
+        executable = "python3"
+    elif path_kind == "missing":
+        executable = str(tmp_path / "missing-executable")
+    else:
+        executable = str(tmp_path)
+
+    result = schedule(
+        registry_with("alpha"),
+        ("alpha",),
+        {"alpha": (executable, "-c", "pass")},
+        policy=policy(
+            executable_sha256_pins=(("alpha", "a" * 64),)
+        ),
+    )
+
+    assert result.entries[0].terminal_state == NOT_DISPATCHED
+
+
+def test_unpinned_adapter_is_unaffected():
+    result = schedule(
+        registry_with("alpha"),
+        ("alpha",),
+        {"alpha": argv(0)},
+    )
+
+    assert result.outcome == "selected"
+    assert result.entries[0].terminal_state == "exited"
+
+
 def test_unstamped_observations_still_fall_back():
     # Unstamped declarations are not retained by the registry's stamped
     # record — the schedule must replay the caller's tuple at replan.

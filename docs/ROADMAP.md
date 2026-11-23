@@ -287,6 +287,24 @@ bound cannot be enforced, so the adapter stays excluded by observation;
 direct `probe_request_for`/`run_probe` calls are not gated. This host
 enforcement gate is not a sandbox or Evidence.
 
+### C04 executable digest pins
+
+`PlannerPolicy.executable_sha256_pins` is an opt-in host authorization gate
+for scheduled adapter execution. Before dispatch, a pinned adapter's
+`argv[0]` must be an absolute path resolving to a regular file whose
+streamed SHA-256 matches the configured digest. Bare command names, missing
+files, non-regular files, mismatches and I/O errors are `not_dispatched` and
+follow the schedule's existing fallback or denial path. Unpinned adapters
+are unaffected.
+
+The digest is checked before `exec`, so a file swapped after the check is
+not detected. Only `argv[0]` is pinned; pinning an interpreter does not pin
+the script it runs. This gate is not producer authentication, a sandbox,
+Evidence or a schedule record. Pins are omitted from
+`VerificationPlan.to_dict()`, preserving plan fingerprints and Core-checked
+schedule representations. Probe scheduling and direct `AttemptRunner` calls
+are not gated; probe gating is a follow-up.
+
 ### C11 declared memory bounds for attempted executions
 
 `AttemptRunner.run(request, argv, cancel_event=None, memory_bound_mb=None)`

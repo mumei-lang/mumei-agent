@@ -548,6 +548,68 @@ def test_policy_rejects_non_boolean_require_enforced_isolation(
     )
 
 
+def test_policy_loads_executable_digest_pin_for_real_executable(
+    inputs, tmp_path, capsys
+):
+    executable = tmp_path / "pinned-adapter"
+    executable.write_text(
+        f"#!{ATTEMPT_PY}\nimport sys\nsys.exit(0)\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+    digest = hashlib.sha256(executable.read_bytes()).hexdigest()
+
+    argv_document = json.loads(
+        Path(inputs["argv_map"]).read_text(encoding="utf-8")
+    )
+    argv_document["alpha"] = [str(executable)]
+    argv_path = tmp_path / "FAKE_PRIVATE_pinned-argv.json"
+    argv_path.write_text(json.dumps(argv_document), encoding="utf-8")
+
+    policy_document = json.loads(
+        Path(inputs["policy"]).read_text(encoding="utf-8")
+    )
+    policy_document["selected_adapter"] = "alpha"
+    policy_document["executable_sha256_pins"] = [["alpha", digest]]
+    policy_path = tmp_path / "FAKE_PRIVATE_pinned-policy.json"
+    policy_path.write_text(json.dumps(policy_document), encoding="utf-8")
+
+    assert main_schedule(
+        args_for(
+            {**inputs, "argv_map": str(argv_path), "policy": str(policy_path)}
+        )
+    ) == 0
+    document = json.loads(capsys.readouterr().out)
+    assert document["selected_adapter_id"] == "alpha"
+    assert document["attempts"][0]["terminal_state"] == "exited"
+    assert document["attempts"][0]["exit_code"] == 0
+
+
+@pytest.mark.parametrize(
+    "pins",
+    [
+        [["alpha"]],
+        [["alpha", "A" * 64]],
+        [["invalid adapter", "a" * 64]],
+        [["alpha", "a" * 64], ["alpha", "b" * 64]],
+        None,
+    ],
+)
+def test_policy_rejects_malformed_executable_digest_pin_declaration(
+    inputs, tmp_path, capsys, pins
+):
+    policy_document = json.loads(
+        Path(inputs["policy"]).read_text(encoding="utf-8")
+    )
+    policy_document["executable_sha256_pins"] = pins
+    policy_path = tmp_path / "FAKE_PRIVATE_malformed-pin-policy.json"
+    policy_path.write_text(json.dumps(policy_document), encoding="utf-8")
+
+    with pytest.raises(SystemExit):
+        main_schedule(args_for({**inputs, "policy": str(policy_path)}))
+    assert "invalid executable digest pin declaration" in capsys.readouterr().err
+
+
 def test_empty_allowed_locations_is_rejected(inputs, capsys):
     policy = json.loads(open(inputs["policy"]).read())
     policy["allowed_locations"] = []

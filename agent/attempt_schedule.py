@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import threading
 from dataclasses import dataclass, field
 
@@ -78,6 +79,21 @@ def _adapter_environment(plan: VerificationPlan) -> dict[str, str] | None:
     ):
         return None
     return minimal_environment()
+
+
+def _executable_matches_pin(path: str, digest: str) -> bool:
+    if not isinstance(path, str) or not os.path.isabs(path):
+        return False
+    try:
+        if not stat.S_ISREG(os.stat(path).st_mode):
+            return False
+        hasher = hashlib.sha256()
+        with open(path, "rb") as executable:
+            while chunk := executable.read(1024 * 1024):
+                hasher.update(chunk)
+    except (OSError, ValueError):
+        return False
+    return hasher.hexdigest() == digest
 
 
 def _network_isolated(plan: VerificationPlan) -> bool:
@@ -668,6 +684,7 @@ def run_attempt_schedule(
     selected_adapter_id: str | None = None
 
     plan = registry.plan(request, policy, current_observations)
+    executable_pins = dict(policy.executable_sha256_pins)
     plans.append(plan)
     while True:
         selected = plan.selected
@@ -685,6 +702,17 @@ def run_attempt_schedule(
             plan, source, expected_source_sha256
         )
         argv = argv_for(adapter_id)
+        if (
+            argv is not None
+            and adapter_id in executable_pins
+            and (
+                not argv
+                or not _executable_matches_pin(
+                    argv[0], executable_pins[adapter_id]
+                )
+            )
+        ):
+            argv = None
         dispatch_configuration = None
         feed = None
         descriptor = None

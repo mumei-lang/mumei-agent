@@ -642,6 +642,7 @@ class PlannerPolicy:
     allowed_permissions: frozenset[str] | None = None
     allow_manifest_attempt_argv: bool = False
     require_enforced_isolation: bool = False
+    executable_sha256_pins: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         if self.allowed_permissions is not None:
@@ -677,6 +678,21 @@ class PlannerPolicy:
             _version(version)
             if adapter_id in seen:
                 raise ValueError("duplicate tool version pin")
+            seen.add(adapter_id)
+        if not isinstance(self.executable_sha256_pins, tuple):
+            raise ValueError("invalid executable digest pins")  # noqa: TRY004
+        seen = set()
+        for pin in self.executable_sha256_pins:
+            if not isinstance(pin, tuple) or len(pin) != 2:
+                raise ValueError("invalid executable digest pin")
+            adapter_id, digest = pin
+            _label(adapter_id)
+            if not isinstance(digest, str) or re.fullmatch(
+                r"[0-9a-f]{64}", digest
+            ) is None:
+                raise ValueError("invalid executable digest pin")
+            if adapter_id in seen:
+                raise ValueError("duplicate executable digest pin")
             seen.add(adapter_id)
         if not isinstance(self.adapter_settings, tuple):
             raise ValueError("invalid adapter settings")
