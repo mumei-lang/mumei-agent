@@ -5181,9 +5181,14 @@ class _RustBindings:
                 _SET_CONTAINER_NAMES
             ):
                 return _UNKNOWN, None
+            arg0 = next(
+                iter(self._type_arg_list(args.strip())), ""
+            )
+            if not arg0:
+                return _UNKNOWN, None
             elem_id, rest = self._element_of(
                 container_id,
-                args.strip(),
+                arg0,
                 call.start_byte,
                 self._literal_element_args(call),
             )
@@ -5328,6 +5333,14 @@ class _RustBindings:
         if method in _ITER_ELEMENT_METHODS:
             if self._is_map_container(container_id, receiver):
                 return _UNKNOWN, None
+            if self._container_head_name(receiver) in (
+                _SET_CONTAINER_NAMES
+            ):
+                # `HashSet<(P, Q), H>` spells the hasher after the
+                # element — a tuple destructure must read arg 0.
+                args = next(
+                    iter(self._type_arg_list(args.strip())), args
+                )
             if "," in args:
                 # The element is a tuple spelling like `(P, Q)` — an
                 # identifier binding stays unpinned, but the spelled
