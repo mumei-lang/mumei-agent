@@ -6699,6 +6699,21 @@ func index(s []int, i int) int {
     assert any("can index" in issue.message for issue in issues)
 
 
+def test_go_lower_and_mirrored_upper_guards_suppress_bounds_issue() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package p
+
+func index(s []int, i int) int {
+    if i < 0 { return 0 }
+    if len(s) <= i { return 0 }
+    return s[i]
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("can index" in issue.message for issue in issues)
+
+
 def test_go_enum_param_index_num_fields_array() -> None:
     """Enum parameters of type ``Field`` indexing ``[numFields]`` arrays are guarded."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
