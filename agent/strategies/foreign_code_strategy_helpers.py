@@ -2740,12 +2740,44 @@ def _go_guarded_indices(
     # ``mapassign`` / ``mapdelete`` tables in ``cmd/compile/internal/walk``. Kept: the
     # ``mapfast`` result range (``< nmapfast``) is a domain invariant of the callee.
     guarded |= _go_mapfast_guarded_indices(body)
-    # Inverted guard: ``if idx >= len(arr) { return }`` before ``arr[idx]``.
+    # Inverted guard for an unsigned index: ``if idx >= len(arr) { return }``.
+    unsigned_index_conversions = {"uint", "uint64", "uintptr"}
+    # A uint64 above MaxInt64 is not modelled.
+    signed_index_conversions = {"int", "int64"}
+
+    def has_nonnegative_index_value(
+        index_conversion: str | None,
+        idx: str,
+        param_types: dict[str, str] | None,
+    ) -> bool:
+        if index_conversion in unsigned_index_conversions:
+            return True
+        if index_conversion in {"uint8", "uint16", "uint32", "byte"}:
+            declared_type = (param_types or {}).get(idx, "").replace("*", "").strip()
+            if index_conversion in {"uint8", "byte"}:
+                return declared_type in {"uint8", "byte"}
+            return declared_type == index_conversion
+        return (
+            idx in (unsigned_vars or set())
+            and (
+                index_conversion is None
+                or index_conversion in signed_index_conversions
+            )
+        )
+
     for match in re.finditer(
-        r"\bif\s+(?:(?:uint|int)(?:ptr|8|16|32|64)?\s*\(\s*)?(\w+)\s*(?:\s*\))?\s*>=\s*(?:(?:uint|int)(?:ptr|8|16|32|64)?\s*\(\s*)?len\(\s*(\w+)\s*\)(?:\s*\))?\s*\{",
+        r"\bif\s+"
+        r"(?:(?P<index_conversion>\w+)\s*\(\s*(?P<converted_index>\w+)\s*\)"
+        r"|(?P<plain_index>\w+))\s*>=\s*"
+        r"(?:(?P<length_conversion>(?:uint|int)(?:ptr|8|16|32|64)?)\s*\(\s*)?"
+        r"len\(\s*(?P<array>\w+)\s*\)(?:\s*\))?\s*\{",
         body,
     ):
-        idx, arr = match.group(1), match.group(2)
+        idx = match.group("converted_index") or match.group("plain_index")
+        arr = match.group("array")
+        index_conversion = match.group("index_conversion")
+        if not has_nonnegative_index_value(index_conversion, idx, param_types):
+            continue
         block_start = body.find("{", match.end() - 1)
         if block_start == -1:
             continue
@@ -2762,12 +2794,20 @@ def _go_guarded_indices(
             and re.search(rf"\b{re.escape(arr)}\s*\[\s*{re.escape(idx)}\s*\]", body)
         ):
             guarded.add(idx)
-    # ``if uint64(len(arr)) <= uint64(idx) { return }`` implies ``idx < len(arr)`` after the return.
+    # The symmetric inverted guard also requires an unsigned index value.
     for match in re.finditer(
-        r"\bif\s+(?:(?:uint|int)(?:ptr|8|16|32|64)?\s*\(\s*)?len\(\s*(\w+)\s*\)(?:\s*\))?\s*<=\s*(?:(?:uint|int)(?:ptr|8|16|32|64)?\s*\(\s*)?(\w+)(?:\s*\))?\s*\{",
+        r"\bif\s+"
+        r"(?:(?P<length_conversion>(?:uint|int)(?:ptr|8|16|32|64)?)\s*\(\s*)?"
+        r"len\(\s*(?P<array>\w+)\s*\)(?:\s*\))?\s*<=\s*"
+        r"(?:(?P<index_conversion>\w+)\s*\(\s*(?P<converted_index>\w+)\s*\)"
+        r"|(?P<plain_index>\w+))\s*\{",
         body,
     ):
-        arr, idx = match.group(1), match.group(2)
+        arr = match.group("array")
+        idx = match.group("converted_index") or match.group("plain_index")
+        index_conversion = match.group("index_conversion")
+        if not has_nonnegative_index_value(index_conversion, idx, param_types):
+            continue
         block_start = body.find("{", match.end() - 1)
         if block_start == -1:
             continue
@@ -3458,6 +3498,25 @@ def _go_unsigned_variables(
         r"\bfor\s+(\w+)\s*:=\s*(?:byte|uint(?:8|16|32|64|ptr)?)\s*\(", stripped
     ):
         unsigned.add(match.group(1))
+    copy_patterns = (
+        re.compile(
+            r"\b(?P<target>\w+)\s*:=\s*(?P<source>\w+)(?=[ \t]*(?:;|\r?\n|}|$))"
+        ),
+        re.compile(
+            r"\bvar\s+(?P<target>\w+)\s*=\s*(?P<source>\w+)(?=[ \t]*(?:;|\r?\n|}|$))"
+        ),
+    )
+    changed = True
+    while changed:
+        changed = False
+        for pattern in copy_patterns:
+            for match in pattern.finditer(stripped):
+                if (
+                    match.group("source") in unsigned
+                    and match.group("target") not in unsigned
+                ):
+                    unsigned.add(match.group("target"))
+                    changed = True
     return unsigned
 
 

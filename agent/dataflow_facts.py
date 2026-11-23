@@ -840,6 +840,13 @@ class _Facts:
         self._comparison(_norm(left), op, _norm(right), out)
 
     def _comparison(self, left: str, op: str, right: str, out: _Env) -> None:
+        if (
+            op in {"<", "<=", ">", ">="}
+            and self._length_of(left) is not None
+            and self._length_of(right) is None
+            and self.env.value_of(right, self.constants) is None
+        ):
+            left, right, op = right, left, _FLIP_OP[op]
         left_value = self.env.value_of(left, self.constants)
         right_value = self.env.value_of(right, self.constants)
         if left_value is not None and right_value is None:

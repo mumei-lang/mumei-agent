@@ -112,6 +112,12 @@ def test_loop_condition_bounds_index() -> None:
     assert facts.bounded_indices([("xs", "i")]) == {"i"}
 
 
+def test_len_on_left_guard_bounds_index() -> None:
+    body = "if len(s) > i {\n    return s[i]\n}\nreturn 0\n"
+    facts = _facts(body, "s[i]", param_names={"s", "i"}, sequence_names={"s"})
+    assert ("i", "s") in facts.lt_len
+
+
 def test_reverse_loop_bounds_index() -> None:
     body = "for i := len(xs) - 1; i >= 0; i-- {\n    return xs[i]\n}\nreturn 0\n"
     facts = _facts(body, "xs[i]", param_names={"xs"}, sequence_names={"xs"})

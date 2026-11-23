@@ -182,7 +182,7 @@ EXPECTED_METRICS: dict[str, dict[str, tuple[int, int, int]]] = {
     },
     "bounds.go": {
         "division_by_zero": _ZERO,
-        "index_out_of_bounds": (2, 3, 0),
+        "index_out_of_bounds": (3, 2, 0),
     },
 }
 
@@ -202,9 +202,6 @@ EXPECTED_MISSED: dict[str, frozenset[tuple[str, str, str]]] = {
             # bounds.go:8 — tree_sitter_extract.py:980-985 only records
             # identifier indices, so the literal index 0 is omitted.
             ("IndexFirst", "index_out_of_bounds", "s[0]"),
-            # bounds.go:29 — helpers.py:2743-2764 accepts the inverted upper
-            # guard without requiring a non-negative index.
-            ("IndexGuardedUpperOnly", "index_out_of_bounds", "s[i]"),
             # bounds.go:49 — tree_sitter_extract.py:980-985 omits the
             # compound index expression len(s)-1.
             ("IndexLast", "index_out_of_bounds", "s[len(s)-1]"),
@@ -235,7 +232,7 @@ EXPECTED_OTHER: dict[str, frozenset[tuple[str, str]]] = {
 
 EXPECTED_AGGREGATE: dict[str, tuple[int, int, int]] = {
     "division_by_zero": (4, 2, 0),
-    "index_out_of_bounds": (2, 3, 0),
+    "index_out_of_bounds": (3, 2, 0),
 }
 
 

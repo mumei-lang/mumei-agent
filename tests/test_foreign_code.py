@@ -6601,6 +6601,177 @@ func signame(sig uint32) string {
     assert not any("bounds" in issue.message for issue in issues)
 
 
+def test_go_inverted_len_guard_signed_index_reports_bounds() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package p
+
+func index(s []int, i int) int {
+    if i >= len(s) { return 0 }
+    return s[i]
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert any("can index" in issue.message for issue in issues)
+
+
+def test_go_inverted_len_guard_unsigned_index_is_guarded() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package p
+
+func index(s []int, i uint) int {
+    if i >= uint(len(s)) { return 0 }
+    return s[i]
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("can index" in issue.message for issue in issues)
+
+
+def test_go_inverted_len_guard_unsigned_conversion_is_guarded() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package p
+
+func index(s []int, i int) int {
+    if uint(i) >= uint(len(s)) { return 0 }
+    return s[i]
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("can index" in issue.message for issue in issues)
+
+
+def test_go_inverted_len_guard_int_conversion_of_unsigned_index_is_guarded() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package p
+
+func index(s []int, i uint16) int {
+    if int(i) >= len(s) { return 0 }
+    return s[i]
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("can index" in issue.message for issue in issues)
+
+
+def test_go_inverted_len_guard_narrow_conversion_reports_bounds() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package p
+
+func index(s []int, i int) int {
+    if uint8(i) >= uint8(len(s)) { return 0 }
+    return s[i]
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert any("can index" in issue.message for issue in issues)
+
+
+def test_go_inverted_len_guard_uint64_conversion_is_guarded() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package p
+
+func index(s []int, i int) int {
+    if uint64(i) >= uint64(len(s)) { return 0 }
+    return s[i]
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("can index" in issue.message for issue in issues)
+
+
+def test_go_inverted_len_guard_same_typed_uint32_conversion_is_guarded() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package p
+
+func index(s []int, i uint32) int {
+    if uint32(i) >= uint32(len(s)) { return 0 }
+    return s[i]
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("can index" in issue.message for issue in issues)
+
+
+def test_go_inverted_len_guard_narrower_than_unsigned_index_reports_bounds() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package p
+
+func index(s []int, i uint64) int {
+    if uint32(i) >= uint32(len(s)) { return 0 }
+    return s[i]
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert any("can index" in issue.message for issue in issues)
+
+
+def test_go_inverted_len_guard_unsigned_short_copy_is_guarded() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package p
+
+func index(s []int, offset uint) int {
+    i := offset
+    if i >= uint(len(s)) { return 0 }
+    return s[i]
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("can index" in issue.message for issue in issues)
+
+
+def test_go_inverted_len_guard_unsigned_var_copy_is_guarded() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package p
+
+func index(s []int, offset uint) int {
+    var i = offset
+    if i >= uint(len(s)) { return 0 }
+    return s[i]
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("can index" in issue.message for issue in issues)
+
+
+def test_go_inverted_len_le_signed_index_reports_bounds() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package p
+
+func index(s []int, i int) int {
+    if len(s) <= i { return 0 }
+    return s[i]
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert any("can index" in issue.message for issue in issues)
+
+
+def test_go_lower_and_mirrored_upper_guards_suppress_bounds_issue() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package p
+
+func index(s []int, i int) int {
+    if i < 0 { return 0 }
+    if len(s) <= i { return 0 }
+    return s[i]
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("can index" in issue.message for issue in issues)
+
+
 def test_go_enum_param_index_num_fields_array() -> None:
     """Enum parameters of type ``Field`` indexing ``[numFields]`` arrays are guarded."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
