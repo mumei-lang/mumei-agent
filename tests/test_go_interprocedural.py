@@ -56277,6 +56277,9 @@ def test_map_element_function_field_closures(go_types_helper):
         files, snapshot, summaries, "FRangeSliceElem"
     )
     assert not range_slice_elem.available, range_slice_elem.gaps
+    assert {g.reason for g in range_slice_elem.gaps} == {
+        "binding_unavailable"
+    }
     # Range over a nested map hands an aliased inner-map header —
     # `e[1]` reads a different map copy's element, closed like the
     # multi-index form.
@@ -56284,6 +56287,9 @@ def test_map_element_function_field_closures(go_types_helper):
         files, snapshot, summaries, "FRangeNested"
     )
     assert not range_nested.available, range_nested.gaps
+    assert {g.reason for g in range_nested.gaps} == {
+        "unsupported_expression"
+    }
 
 
 def test_map_element_value_fact_stops_at_container_elements():
