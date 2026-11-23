@@ -103,6 +103,20 @@ _EXTRACT_IF_METHODS = frozenset({"extract_if"})
 _EXTRACT_IF_ELEMENT_CONTAINERS = _SET_CONTAINER_NAMES | {
     "LinkedList"
 }
+# Methods that yield `&mut [T]` views of the container —
+# `v.leak()`, `q.make_contiguous()`, `v.rotate_left(n)`/
+# `rotate_right(n)` (slice rotation, stable via Vec/VecDeque
+# deref). Each names the container heads it exists on.
+_MUT_SLICE_VIEW_METHODS = {
+    "leak": {"Vec"},
+    "make_contiguous": {"VecDeque"},
+    "rotate_left": {"Vec", "VecDeque"},
+    "rotate_right": {"Vec", "VecDeque"},
+}
+# `BTreeMap::first_entry()`/`last_entry()` yield
+# `Option<OccupiedEntry<K, V>>` — `Some(e)` binds the Occupied
+# entry like `Entry::Occupied` does.
+_MAP_BOUND_ENTRY_METHODS = frozenset({"first_entry", "last_entry"})
 
 # Smart pointers that `Deref` straight to their payload — `b.pm()`
 # on `Box<P>`/`Rc<P>`/`Arc<P>` calls `P`'s members. `Mutex`/`Cell`/
@@ -4427,6 +4441,33 @@ class _RustBindings:
                                         entry_parts[1].strip(),
                                     )
                                 )
+                    if (
+                        method_name in _MAP_BOUND_ENTRY_METHODS
+                        and self._container_head_name(
+                            callee.child_by_field_name("value")
+                        )
+                        == "BTreeMap"
+                    ):
+                        bound_node = self._receiver_type_node(
+                            callee.child_by_field_name("value")
+                        )
+                        bound_args = (
+                            self._generic_head_args(
+                                bound_node, node.start_byte
+                            )[0]
+                            if bound_node is not None
+                            else None
+                        )
+                        if bound_args:
+                            # `Option<OccupiedEntry<K, V>>` —
+                            # verbatim spelling so `Some(e)` reads
+                            # the OccupiedEntry payload head.
+                            return (
+                                None,
+                                "Option<OccupiedEntry<"
+                                + bound_args
+                                + ">>",
+                            )
                     entry_binding = re.fullmatch(
                         r"(OccupiedEntry|VacantEntry)\s*<(.+)>",
                         (receiver[1] or "").strip(),
@@ -4476,7 +4517,7 @@ class _RustBindings:
                                     spelled, entry_pos
                                 )
                     if (
-                        method_name in {"leak", "make_contiguous"}
+                        method_name in _MUT_SLICE_VIEW_METHODS
                         and receiver[1] is not None
                         and (
                             self._container_head_name(
@@ -4486,8 +4527,7 @@ class _RustBindings:
                                 callee.child_by_field_name("value")
                             )
                         )
-                        == ("Vec" if method_name == "leak"
-                            else "VecDeque")
+                        in _MUT_SLICE_VIEW_METHODS[method_name]
                     ):
                         # `v.leak()` yields `&'a mut [T]` — the
                         # borrowed slice spelling feeds
@@ -4505,6 +4545,11 @@ class _RustBindings:
                         # `&'a mut [T]` — the borrowed slice
                         # spelling feeds `s[0]`/`for` element
                         # paths.
+
+                        # `v.leak()`/`q.make_contiguous()`/
+                        # `v.rotate_left(n)` yield `&mut [T]` —
+                        # the borrowed slice spelling feeds
+                        # `s[0]`/`for` element paths.
                         return self._spelled_type(
                             "&mut [" + receiver[1] + "]",
                             annotated,
@@ -11192,7 +11237,7 @@ class _RustBindings:
             and self._normalize_identifier(
                 payload_head.group(0).split("::")[-1]
             )
-            in _TRY_HEADS
+            in _TRY_HEADS | set(_PRELUDE_ENTRY_VARIANTS.values())
             and type_id is None
         ):
             # `Result<Option<P>, E>`'s `Ok` payload is `Option<P>`
