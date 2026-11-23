@@ -2855,7 +2855,7 @@ index-out-of-bounds safety issues:
 | Category | Matched | Missed | Unexpected |
 | --- | ---: | ---: | ---: |
 | `division_by_zero` | 4 | 2 | 0 |
-| `index_out_of_bounds` | 2 | 3 | 0 |
+| `index_out_of_bounds` | 3 | 2 | 0 |
 
 Missed labels:
 - `division.go:4` (`Div`): `_go_div_nonzero_params` and
@@ -2865,9 +2865,6 @@ Missed labels:
   the finding at `foreign_code_strategy_helpers.py:5235-5236`.
 - `bounds.go:8` (`IndexFirst`): the syntax extractor only records
   identifier indices, omitting literal `0` at `tree_sitter_extract.py:980-985`.
-- `bounds.go:29` (`IndexGuardedUpperOnly`): the inverted upper-bound guard
-  treats `if i >= len(s) { return }` as sufficient without checking that `i`
-  is non-negative at `foreign_code_strategy_helpers.py:2743-2764`.
 - `bounds.go:49` (`IndexLast`): the syntax extractor omits compound indices
   such as `len(s)-1` at `tree_sitter_extract.py:980-985`.
 
