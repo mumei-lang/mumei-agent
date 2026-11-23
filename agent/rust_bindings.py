@@ -2821,22 +2821,57 @@ class _RustBindings:
             return True
 
         def _strip_borrow(arg: str) -> str:
-            t = re.sub(
-                r"^&\s*(?:'\w+\s*)?(?:mut\s+)?",
-                "",
-                arg.strip(),
-            )
-            if t.startswith("[") and t.endswith("]") and ";" not in t:
-                t = t[1:-1].strip()
+            t = arg.strip()
+            if re.match(r"^&\s*(?:'\w+\s*)?(?:mut\s+)?\[", t):
+                # `&[..]`/`&mut [..]` — the borrowed-slice wrapper
+                # around the element spelling: `&[&P]` spells
+                # element `&P`, `&[[P;2]]` element `[P;2]`.
+                t = re.sub(
+                    r"^&\s*(?:'\w+\s*)?(?:mut\s+)?", "", t
+                )
+                if t.startswith("[") and t.endswith("]"):
+                    t = t[1:-1].strip()
+                return t
+            if t.startswith("[") and t.endswith("]"):
+                # A bare `[T]` arg (e.g. `Box<[P]>`'s content) peels
+                # to its element; `[T; N]` stays an array.
+                inner = t[1:-1]
+                depth = 0
+                for ch in inner:
+                    if ch in "[<({":
+                        depth += 1
+                    elif ch in "]>)}":
+                        depth -= 1
+                    elif ch == ";" and depth == 0:
+                        return t
+                return inner.strip()
+            return t
+
+        def _chase_alias(arg: str) -> str:
+            # `type Elem = P` — a bare-name arg means the aliased type.
+            seen: set[str] = set()
+            t = arg
+            while re.fullmatch(r"[A-Za-z_]\w*", t) and t not in seen:
+                seen.add(t)
+                record = self._through_import(
+                    self._lookup(t, position, "type"), position
+                )
+                if (
+                    record is None
+                    or record.binding.kind != "type_alias"
+                    or record.alias_node is None
+                ):
+                    break
+                t = self.text(record.alias_node).strip()
             return t
 
         norm_recv = ", ".join(
-            _strip_borrow(a)
+            _chase_alias(_strip_borrow(a))
             for a in self._type_arg_list(recv_args)
             if not a.strip().startswith("'")
         )
         norm_impl = ", ".join(
-            _strip_borrow(a)
+            _chase_alias(_strip_borrow(a))
             for a in self._type_arg_list(impl_args)
             if not a.strip().startswith("'")
         )
@@ -2862,10 +2897,10 @@ class _RustBindings:
             is not None
         )
 
-    def _member_self_by_value(self, record: "_Record") -> bool:
-        """The covering member's receiver is by-value `self`/`mut self`
-        — a by-value receiver outranks a `&self` inherent method on
-        the same type, so std-inherent shortcuts must yield."""
+    def _member_self_kind(self, record: "_Record") -> "str | None":
+        """`value` for `self`/`mut self`/`self: Self`, `borrow` for
+        `&self`/`self: &Self`, `arbitrary` for `self: Box<Self>`-style
+        receivers (the method only applies to a wrapped receiver)."""
         pos = record.binding.span.start
         node = self.root.descendant_for_byte_range(pos, pos)
         while node is not None and node.type not in {
@@ -2880,20 +2915,40 @@ class _RustBindings:
             else None
         )
         if params is None:
-            return False
+            return None
         for ch in params.named_children:
             if ch.type == "self_parameter":
-                return not self.text(ch).strip().startswith("&")
+                return (
+                    "borrow"
+                    if self.text(ch).strip().startswith("&")
+                    else "value"
+                )
             if (
                 ch.type == "parameter"
                 and ch.child_by_field_name("pattern") is not None
                 and self.text(ch.child_by_field_name("pattern")).strip()
                 == "self"
             ):
-                # `self: Self`/`self: Box<Self>` spell a by-value
-                # receiver but parse as a plain parameter.
-                return True
-        return False
+                # `self: T` parses as a plain parameter — only bare
+                # `Self`/`&Self` receivers apply to a bare receiver.
+                t = ch.child_by_field_name("type")
+                spelling = (
+                    self.text(t).strip() if t is not None else ""
+                )
+                if spelling == "Self":
+                    return "value"
+                if re.fullmatch(
+                    r"&\s*(?:'\w+\s*)?(?:mut\s+)?Self", spelling
+                ):
+                    return "borrow"
+                return "arbitrary"
+        return None
+
+    def _member_self_by_value(self, record: "_Record") -> bool:
+        """The covering member's receiver is by-value `self`/`mut self`
+        — a by-value receiver outranks a `&self` inherent method on
+        the same type, so std-inherent shortcuts must yield."""
+        return self._member_self_kind(record) == "value"
 
     def _covering_trait_member(
         self,
@@ -3022,6 +3077,11 @@ class _RustBindings:
             ):
                 continue
             if receiver is not None:
+                if self._member_self_kind(record) == "arbitrary":
+                    # `self: Box<Self>`/`self: Rc<Self>` methods only
+                    # apply to a wrapped receiver — a bare value of
+                    # the impl target never calls them.
+                    continue
                 if record.member_of == record.member_trait:
                     # A trait-declared member applies when the trait
                     # is implemented for a type whose head matches
