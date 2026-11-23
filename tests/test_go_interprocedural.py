@@ -57744,13 +57744,18 @@ def test_interface_slot_closure_values_fail_closed(go_types_helper):
             result.return_dependencies,
             result.gaps,
         )
+    recappend = named_package(files, snapshot, summaries, "F_recappend")
+    assert not recappend.available, recappend.gaps
+    assert any(
+        gap.reason == "unresolved_or_opaque_call"
+        for gap in recappend.gaps
+    ), recappend.gaps
     expected = {
         "F_sfnov": frozenset({0, 1}),
         "F_sffac": frozenset({0, 1}),
         "F_ifarg": frozenset({0, 1}),
         "F_plain": frozenset({0}),
         "F_gint": frozenset({1}),
-        "F_recappend": frozenset({0}),
     }
     for function_name, dependencies in expected.items():
         result = named_package(files, snapshot, summaries, function_name)
