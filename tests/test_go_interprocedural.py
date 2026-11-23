@@ -57674,6 +57674,10 @@ def test_interface_slot_closure_values_fail_closed(go_types_helper):
             "\tv := y; s := S{F: func() int64 { return v }}\n"
             "\ta := append([]I{}, s); v = x; return a[0].Run()\n"
             "}\n"
+            "func F_appendcopy(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\to := OS{}; a := append(o.A, s); v = x; return a[0].Run()\n"
+            "}\n"
             "func F_localappendspread(x, y int64) int64 {\n"
             "\tv := y; s := S{F: func() int64 { return v }}\n"
             "\ta := append([]I{}, []I{s}...); v = x; return a[0].Run()\n"
@@ -57730,6 +57734,7 @@ def test_interface_slot_closure_values_fail_closed(go_types_helper):
         "F_localsliceelem",
         "F_localmap",
         "F_localappend",
+        "F_appendcopy",
         "F_localappendspread",
     }
     for function_name in unavailable:
