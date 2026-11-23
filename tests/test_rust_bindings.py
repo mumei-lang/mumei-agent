@@ -7007,21 +7007,28 @@ fn f(v: Vec<P>) {
     assert _call(report, source, "q.qm()").target == qm.id
 
 
-def test_map_with_a_closure_stays_opaque():
+def test_map_with_identity_closure_keeps_the_payload():
     source = """
 struct P;
 impl P { fn pm(&self) {} }
-fn f(o: Option<P>) {
+fn f(o: Option<P>, u: Option<P>) {
     match o.map(|x| x) {
         Some(p) => p.pm(),
+        _ => {}
+    }
+    match u.map(|x| missing(x)) {
+        Some(q) => q.pm(),
         _ => {}
     }
 }
 """
     report = build_rust_bindings(source, pointer_width=64)
-    # The closure's return type is unwritten — the payload stays
-    # opaque rather than guessing.
-    assert _call(report, source, "p.pm()").target == ""
+    pm = _bindings(report, "pm", "associated_function")[0]
+    # `|x| x` passes the payload `P` straight through — `p.pm()`
+    # binds. An unwritten call body (`missing` resolves to nothing)
+    # stays opaque rather than guessing.
+    assert _call(report, source, "p.pm()").target == pm.id
+    assert _call(report, source, "q.pm()").target == ""
 
 
 def test_first_mut_yields_a_mut_borrowed_element():
@@ -10707,3 +10714,61 @@ fn f(o: Option<Vec<m::P>>) {
     # `v`'s payload keeps the whole `Vec<m::P>` spelling — the
     # indexed element `v[0]` resolves `m::P`'s members.
     assert _call(report, source, "v[0].pm()").target == pm.id
+
+
+def test_map_closure_result_keeps_the_payload_args():
+    source = """
+mod m {
+    pub struct P;
+    impl P { pub fn pm(&self) {} }
+    pub fn conv(a: P) -> P { a }
+    pub fn mo() -> Option<P> { Some(P) }
+}
+fn f(o: Option<Vec<m::P>>) {
+    let v = o.map(|a| a);
+    let w = m::mo().map(|a| a);
+    let x = m::mo().map(|a| m::conv(a));
+    v.unwrap()[0].pm();
+    w.unwrap().pm();
+    x.unwrap().pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `|a| a` passes the receiver's payload through; `|a| m::conv(a)`
+    # reads the named callee's return — both keep `m::P`'s scope.
+    assert bound.get("v.unwrap()[0].pm()") == pm.id
+    assert bound.get("w.unwrap().pm()") == pm.id
+    assert bound.get("x.unwrap().pm()") == pm.id
+
+
+def test_map_err_named_function_swaps_the_payload():
+    source = """
+mod m {
+    pub struct P;
+    pub struct E;
+    impl E { pub fn em(&self) {} }
+    pub fn ef(e: E) -> E { e }
+    pub fn mr() -> Result<P, E> { Ok(P) }
+}
+fn f() {
+    let r = m::mr().map_err(m::ef);
+    let s = m::mr().map_err(|e| e);
+    r.unwrap_err().em();
+    s.unwrap_err().em();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    em = _bindings(report, "em", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    assert bound.get("r.unwrap_err().em()") == em.id
+    assert bound.get("s.unwrap_err().em()") == em.id
