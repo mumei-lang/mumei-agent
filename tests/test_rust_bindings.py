@@ -9645,6 +9645,8 @@ fn f(v: Vec<P>, mut w: Vec<P>) {
     let r = it.remainder();
     r[0].pm();
     for q in w.chunks_exact_mut(2).into_remainder() { q.pm(); }
+    let r2 = v.chunks_exact(2).into_remainder();
+    for x in r2 { x.pm(); }
 }
 """
     report = build_rust_bindings(source, pointer_width=64)
@@ -9661,6 +9663,34 @@ fn f(v: Vec<P>, mut w: Vec<P>) {
     # `into_remainder()` is the `chunks_exact_mut` spelling of the
     # same trailing slice.
     assert bound.get("q.pm()") == pm.id
+    # A `let`-bound remainder keeps `&[P]` as its own args — the
+    # iterated element is `P`.
+    assert bound.get("x.pm()") == pm.id
+
+
+def test_trait_into_remainder_does_not_assume_the_std_slice():
+    source = """
+struct P;
+struct R;
+impl P { fn pm(&self) {} }
+impl R { fn rm(&self) {} }
+struct ChunksExact<P>;
+trait Rem { fn into_remainder(self) -> &'static [R]; }
+impl<P> Rem for ChunksExact<P> { fn into_remainder(self) -> &'static [R] { &[] } }
+fn f(v: Vec<P>) {
+    for q in v.chunks_exact(2).into_remainder() { q.rm(); q.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `impl Rem for ChunksExact<P>` hides the std `into_remainder`
+    # — its `&[R]` return means `q` is neither `P` nor `R` here.
+    assert not bound.get("q.pm()")
+    assert not bound.get("q.rm()")
 
 
 def test_turbofish_sort_by_key_types_the_closure_param():
