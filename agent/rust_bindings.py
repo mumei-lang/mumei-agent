@@ -6915,6 +6915,16 @@ class _RustBindings:
                 self.text(method_node)
             )
             if (
+                method in _ITER_PRESERVING_METHODS
+                and method != "chain"
+            ):
+                # `m.range(..).rev()`/`take(n)`/`filter(f)` keep the
+                # iterated item — the pair slots come from the
+                # adapted call, whose own method decides the pair.
+                if receiver.type != "call_expression":
+                    return {}
+                return self._for_pair_type_map(pattern, receiver)
+            if (
                 method
                 not in _ITER_ELEMENT_METHODS
                 | _MAP_RANGE_METHODS
