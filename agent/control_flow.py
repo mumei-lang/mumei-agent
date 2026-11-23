@@ -876,10 +876,12 @@ def unused_assignments(
     by_span = {
         (stmt.start, stmt.start + len(stmt.text)): stmt for stmt in walked
     }
-    declaration_sites, function_literal_names = (
+    declaration_sites, function_literal_names, syntax_address_taken = (
         _body_declaration_scopes_and_function_literal_names(body)
     )
-    unreliable = tree.closure_assigned | tree.address_taken
+    unreliable = (
+        tree.closure_assigned | tree.address_taken | syntax_address_taken
+    )
     statements_by_node = {
         node.node_id: by_span.get((node.span.start, node.span.end))
         for node in graph.nodes
@@ -953,17 +955,22 @@ class _DeclarationSite:
 
 def _body_declaration_scopes_and_function_literal_names(
     body: str,
-) -> tuple[dict[str, tuple[_DeclarationSite, ...]], frozenset[str]]:
+) -> tuple[
+    dict[str, tuple[_DeclarationSite, ...]],
+    frozenset[str],
+    frozenset[str],
+]:
     prefix = tree_sitter_extract._GO_BODY_PREFIX
     wrapped = f"{prefix}{body}\n}}\n"
     syntax_tree, source_bytes = tree_sitter_extract.parse(wrapped, "go")
     if syntax_tree is None or source_bytes is None or syntax_tree.root_node.has_error:
-        return {}, frozenset()
+        return {}, frozenset(), frozenset()
 
     offsets = tree_sitter_extract._char_offsets(source_bytes)
     body_start = len(prefix)
     declarations: dict[str, list[_DeclarationSite]] = defaultdict(list)
     function_literal_names: set[str] = set()
+    address_taken_names: set[str] = set()
 
     def body_offset(byte_offset: int) -> int:
         return max(0, min(len(body), offsets[byte_offset] - body_start))
@@ -1095,6 +1102,23 @@ def _body_declaration_scopes_and_function_literal_names(
                         alias.start_byte,
                         case_ends,
                     )
+        elif node.type == "unary_expression":
+            operator = node.child_by_field_name("operator")
+            operand = node.child_by_field_name("operand")
+            if operator is not None and operator.text == b"&":
+                while operand is not None and operand.type == "parenthesized_expression":
+                    operands = [
+                        child
+                        for child in operand.named_children
+                        if child.type != "comment"
+                    ]
+                    operand = operands[0] if len(operands) == 1 else None
+                if operand is not None and operand.type == "identifier":
+                    address_taken_names.add(
+                        source_bytes[
+                            operand.start_byte : operand.end_byte
+                        ].decode("utf-8")
+                    )
         elif node.type == "func_literal":
             literal_stack = [node]
             while literal_stack:
@@ -1125,6 +1149,7 @@ def _body_declaration_scopes_and_function_literal_names(
     return (
         {name: tuple(sites) for name, sites in declarations.items()},
         frozenset(function_literal_names),
+        frozenset(address_taken_names),
     )
 
 

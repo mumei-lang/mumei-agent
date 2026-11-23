@@ -671,6 +671,12 @@ def test_unused_assignments_bare_var_declaration_kills_liveness():
     ]
 
 
+def test_unused_assignments_parenthesized_address_taken_name_is_excluded():
+    body = "x := 1\n_ = x\np := &(x)\nx = 2\nreturn *p\n"
+    _, result = unuses(body)
+    assert result == ()
+
+
 @pytest.mark.parametrize(
     "body",
     [
