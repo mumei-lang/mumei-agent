@@ -9,7 +9,10 @@ The log is not a dispatch or acceptance record.
 Cross-process writer exclusion requires POSIX ``fcntl``; where it is
 unavailable, locking is process-local and hosts must use a single writer
 process. A write or fsync failure triggers best-effort rollback to the
-validated prefix. Entries use standard JSON; NaN and Infinity are rejected.
+validated prefix. A process killed mid-append is not rolled back: a torn last
+line makes the log invalid, and a multi-entry batch cut on a line boundary
+leaves a chain-valid prefix of that batch. Entries use standard JSON; NaN and
+Infinity are rejected.
 """
 
 from __future__ import annotations

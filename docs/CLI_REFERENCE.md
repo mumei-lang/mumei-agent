@@ -1066,7 +1066,7 @@ Run the declared plan/dispatch/observe/fallback schedule over declared adapter m
 | `--core-requirement-list` | `<PATH>` | no | — | Optional declared mumei.evidence-requirement-list/v1 document: requires --core and conflicts with --core-requirement; the selected attempt's check becomes the conjunctive requirement-declared `evidence accept` and the descriptor is promotable gate input. |
 | `--export-evidence-acceptance` | `<DIR>` | no | — | Optional export directory: requires --core-requirement-list; writes the promotable gate triple (requirement-list.json, evidence.json, acceptance.json) for `mumei claims --require-evidence-acceptance`. |
 | `--output` | `<PATH>` | no | — | Write the schedule document here instead of stdout. |
-| `--history-log` | `<PATH>` | no | — | Append every plan of the schedule (the initial plan, then each replan, in order) to an opt-in tamper-evident plan history log (mumei.verification-plan-history-entry/v1) as one all-or-nothing batch. Not Evidence, a dispatch record or authentication. |
+| `--history-log` | `<PATH>` | no | — | Append every plan of the schedule (the initial plan, then each replan, in order) to an opt-in tamper-evident plan history log (mumei.verification-plan-history-entry/v1) as one batch, rolled back on write failure (a killed process can leave a prefix of the batch). Not Evidence, a dispatch record or authentication. |
 | `--expected-history-head` | `<HEX>` | no | — | Refuse to append unless the log's last entry digest equals this pinned head. Requires --history-log. |
 
 

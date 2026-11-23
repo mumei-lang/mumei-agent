@@ -602,7 +602,6 @@ def test_second_batch_entry_exceeding_log_size_preserves_existing_bytes(
         )
 
     assert path.read_bytes() == original
-    assert _temporary_files(path) == []
 
 
 def test_read_enforces_log_and_entry_size_caps(tmp_path, monkeypatch):

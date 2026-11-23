@@ -334,8 +334,9 @@ def build_schedule_parser(
         help=(
             "Append every plan of the schedule (the initial plan, then each "
             "replan, in order) to an opt-in tamper-evident plan history log "
-            "(mumei.verification-plan-history-entry/v1) as one all-or-nothing "
-            "batch. Not Evidence, a dispatch record or authentication."
+            "(mumei.verification-plan-history-entry/v1) as one batch, rolled "
+            "back on write failure (a killed process can leave a prefix of "
+            "the batch). Not Evidence, a dispatch record or authentication."
         ),
     )
     parser.add_argument(
