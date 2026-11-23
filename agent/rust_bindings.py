@@ -12403,12 +12403,40 @@ class _RustBindings:
             self._expr(callee)
         if arguments_node is not None:
             closure_element = None
-            if callee is not None and callee.type == "field_expression":
-                method_field = callee.child_by_field_name("field")
+            closure_callee = callee
+            if (
+                closure_callee is not None
+                and closure_callee.type == "generic_function"
+            ):
+                # `v.iter().map::<(), _>(|p| ...)` — the method
+                # sits inside the turbofish's function field.
+                closure_callee = closure_callee.child_by_field_name(
+                    "function"
+                )
+            if (
+                closure_callee is not None
+                and closure_callee.type == "field_expression"
+            ):
+                method_field = closure_callee.child_by_field_name(
+                    "field"
+                )
+                method_name = (
+                    None
+                    if method_field is None
+                    else self._normalize_identifier(
+                        self.text(method_field)
+                    )
+                )
                 if (
-                    method_field is not None
-                    and self._normalize_identifier(self.text(method_field))
-                    in _CLOSURE_ELEMENT_METHODS
+                    method_name is not None
+                    and method_name in _CLOSURE_ELEMENT_METHODS
+                    and self._field_member(
+                        closure_callee, ("associated_function",)
+                    )
+                    is None
+                    and not self._visible_trait_method(
+                        method_name, closure_callee.start_byte
+                    )
                     and any(
                         argument.type == "closure_expression"
                         for argument in arguments
@@ -12416,9 +12444,11 @@ class _RustBindings:
                 ):
                     # `v.iter().for_each(|p| ...)` — the receiver's
                     # iterated element types the closure's first
-                    # bare parameter.
+                    # bare parameter. A declared or trait-inherited
+                    # `for_each` signs its own callback — typing the
+                    # parameter from the element would misbind it.
                     closure_element = self._for_element(
-                        callee.child_by_field_name("value")
+                        closure_callee.child_by_field_name("value")
                     )
             for argument in arguments:
                 if (
