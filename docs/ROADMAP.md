@@ -5104,8 +5104,10 @@ fail closed when they carry closure records or the method can write.
 
 Multi-index method calls and bound method values also preserve those records
 across non-pointer slice/array chains rooted in local or parameter containers.
-Map, pointer-element, computed-index and reseatable pointer-receiver method
-value shapes remain fail-closed.
+Computed indexes at each chain level are evaluated in source order with their
+dependencies and side effects applied before method reads. Map and
+pointer-element paths, plus pointer-receiver method values whose receiver can
+be reseated, remain fail-closed.
 
 ### C06 imported method calls on concrete named types
 

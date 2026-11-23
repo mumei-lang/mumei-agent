@@ -55446,6 +55446,7 @@ def test_multi_index_alias_free_struct_element_copies(go_types_helper):
         "FParameterIndex": frozenset({0, 1}),
         "FParameterUse": frozenset({0}),
         "FParameterReturn": frozenset({0}),
+        "FComputed": frozenset({0}),
         "GReturnCopy": frozenset({0, 1}),
         "FReturnCopy": frozenset({0, 1}),
         "FFieldRoot": frozenset({0, 1, 2}),
@@ -55471,7 +55472,6 @@ def test_multi_index_alias_free_struct_element_copies(go_types_helper):
         "FAlias",
         "FMap",
         "FPointer",
-        "FComputed",
     ):
         result = named_package(
             files, snapshot, summaries, function_name
@@ -55720,6 +55720,7 @@ def test_multi_index_slice_array_struct_element_func_fields(
         "FCopy": frozenset({0}),
         "FMethod": frozenset({0}),
         "FMethodValue": frozenset({0}),
+        "FComputedIndex": frozenset({0}),
         "sc_get": frozenset({0}),
         "sc_set": frozenset({0}),
         "sc_param": frozenset({0, 1}),
@@ -55739,7 +55740,6 @@ def test_multi_index_slice_array_struct_element_func_fields(
         "FPointerContainer",
         "FPointerRoot",
         "FPackageRoot",
-        "FComputedIndex",
     ):
         result = named_package(files, snapshot, summaries, function_name)
         assert not result.available, (function_name, result.gaps)
@@ -56125,6 +56125,7 @@ def test_multi_index_slice_array_struct_element_methods_and_method_values(
         "FValueReceiverCopy": frozenset({1}),
         "FIndexSimultaneous": frozenset({0, 1, 2}),
         "FEGetScalar": frozenset({0}),
+        "FComputedIndex": frozenset({0, 1}),
     }
     for function_name, dependencies in expected.items():
         result = named_package(files, snapshot, summaries, function_name)
@@ -56140,7 +56141,145 @@ def test_multi_index_slice_array_struct_element_methods_and_method_values(
         "FPointerRoot",
         "FPointerContainer",
         "FPackageRoot",
-        "FComputedIndex",
+    ):
+        result = named_package(files, snapshot, summaries, function_name)
+        assert not result.available, (function_name, result.gaps)
+
+
+def test_multi_index_computed_indexes_on_record_carrying_elements(
+    go_types_helper,
+):
+    declarations = (
+        "type S struct { F func() int64; V int64 }\n"
+        "type W struct { F func() }\n"
+        "type H struct { B [][]S }\n"
+        "func g() int { return 0 }\n"
+        "func gi(i int) int { return i }\n"
+        "func lenx(x int64) int { return int(x) & 0 }\n"
+        "func setv(p *int64, x int64) int { *p = x; return 0 }\n"
+        "func gc() int { return 0 }\n"
+        "func useSS(ss [][]S) int64 { return ss[g()][0].F() }\n"
+        "func (s S) Run() int64 { return s.F() }\n"
+        "func (s *S) PGet() int64 { return s.V }\n"
+        "func (s *S) PRun() int64 { return s.F() }\n"
+        "func FComputedG(x, y int64) int64 {\n"
+        "\tv := y; ss := [][]S{{{F: func() int64 { return v }}}}\n"
+        "\tv = x; return ss[g()][0].F()\n"
+        "}\n"
+        "func FComputedGI(x, y int64, i int) int64 {\n"
+        "\tv := y; ss := [][]S{{{F: func() int64 { return v }}}}\n"
+        "\tv = x; return ss[gi(i)][0].F()\n"
+        "}\n"
+        "func FComputedLenX(x, y int64) int64 {\n"
+        "\tv := y; ss := [][]S{{{F: func() int64 { return v }}}}\n"
+        "\tv = x; return ss[lenx(x)][0].F()\n"
+        "}\n"
+        "func FComputedSetV(x, y int64) int64 {\n"
+        "\tv := y; ss := [][]S{{{F: func() int64 { return v }}}}\n"
+        "\treturn ss[setv(&v, x)][0].F()\n"
+        "}\n"
+        "func FComputedArithmetic(x, y int64, i int) int64 {\n"
+        "\tv := y; ss := [][]S{{{F: func() int64 { return v }}}}\n"
+        "\tv = x; return ss[i+1-1][0].F()\n"
+        "}\n"
+        "func FComputedLength(x, y int64) int64 {\n"
+        "\tv := y; ss := [][]S{{{F: func() int64 { return v }}}}\n"
+        "\tv = x; return ss[len(ss)-1][0].F()\n"
+        "}\n"
+        "func FComputedGC(x, y int64) int64 {\n"
+        "\tv := y; ss := [][]S{{{F: func() int64 { return v }}}}\n"
+        "\tv = x; return ss[gc()][0].F()\n"
+        "}\n"
+        "func FComputedMethodValue(x, y int64) int64 {\n"
+        "\tv := y; ss := [][]S{{{F: func() int64 { return v }}}}\n"
+        "\tf := ss[g()][0].F; v = x; return f()\n"
+        "}\n"
+        "func FComputedRun(x, y int64) int64 {\n"
+        "\tv := y; ss := [][]S{{{F: func() int64 { return v }}}}\n"
+        "\tv = x; return ss[g()][0].Run()\n"
+        "}\n"
+        "func FComputedCopy(x, y int64) int64 {\n"
+        "\tv := y; ss := [][]S{{{F: func() int64 { return v }}}}\n"
+        "\te := ss[g()][0]; v = x; return e.F()\n"
+        "}\n"
+        "func FComputedWrite(x int64) (w int64) {\n"
+        "\tws := [][]W{{{F: func() { w = x }}}}; ws[g()][0].F()\n"
+        "\treturn w\n"
+        "}\n"
+        "func FComputedStore(x, y int64) int64 {\n"
+        "\tv := y; ss := [][]S{{{F: func() int64 { return v }}}}\n"
+        "\tss[g()][0].F = func() int64 { return x }\n"
+        "\treturn ss[0][0].F()\n"
+        "}\n"
+        "func FComputedInner(x, y int64, i int) int64 {\n"
+        "\tv := y; ss := [][]S{{{F: func() int64 { return v }}}}\n"
+        "\tv = x; return ss[0][gi(i)].F()\n"
+        "}\n"
+        "func FComputedThreeLevel(x, y int64, i int) int64 {\n"
+        "\tv := y; s3 := [][][]S{{{{F: func() int64 { return v }}}}}\n"
+        "\tv = x; return s3[0][gi(i)][0].Run()\n"
+        "}\n"
+        "func FComputedFieldRoot(x, y int64, i int) int64 {\n"
+        "\tv := y; var o H; o.B = make([][]S, 1); o.B[0] = make([]S, 1)\n"
+        "\to.B[0][0].F = func() int64 { return v }; v = x\n"
+        "\treturn o.B[g()][i].F()\n"
+        "}\n"
+        "func FComputedParameter(ss [][]S) int64 {\n"
+        "\treturn ss[g()][0].F()\n"
+        "}\n"
+        "func FComputedUse(x, y int64) int64 {\n"
+        "\tv := y; ss := [][]S{{{F: func() int64 { return v }}}}\n"
+        "\tv = x; return useSS(ss)\n"
+        "}\n"
+        "func FComputedPointerMethodValue(x, y int64) int64 {\n"
+        "\tss := [][]S{{{V: y}}}; f := ss[g()][0].PGet\n"
+        "\tss[0][0].V = x; return f()\n"
+        "}\n"
+        "func FComputedPointerReseat(x, y int64) int64 {\n"
+        "\tv := y; ss := [][]S{{{F: func() int64 { return v }}}}\n"
+        "\tf := ss[g()][0].PRun\n"
+        "\tss[0] = []S{{F: func() int64 { return x }}}; return f()\n"
+        "}\n"
+        "func FComputedMap(x, y int64) int64 {\n"
+        "\tv := y; m := map[int][]S{0: {{F: func() int64 { return v }}}}\n"
+        "\tv = x; return m[g()][0].Run()\n"
+        "}\n"
+        "func FComputedPointerElement(x int64) int64 {\n"
+        "\tvar s S; s.F = func() int64 { return x }; ps := [][]*S{{&s}}\n"
+        "\treturn ps[g()][0].Run()\n"
+        "}\n"
+    )
+    files = {"a.go": "package p\n" + declarations}
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    expected = {
+        "FComputedG": frozenset({0, 1}),
+        "FComputedGI": frozenset({0, 1, 2}),
+        "FComputedLenX": frozenset({0, 1}),
+        "FComputedSetV": frozenset({0, 1}),
+        "FComputedArithmetic": frozenset({0, 1, 2}),
+        "FComputedLength": frozenset({0, 1}),
+        "FComputedGC": frozenset({0, 1}),
+        "FComputedMethodValue": frozenset({0, 1}),
+        "FComputedRun": frozenset({0, 1}),
+        "FComputedCopy": frozenset({0, 1}),
+        "FComputedWrite": frozenset({0}),
+        "FComputedStore": frozenset({0, 1}),
+        "FComputedInner": frozenset({0, 1, 2}),
+        "FComputedThreeLevel": frozenset({0, 1, 2}),
+        "FComputedFieldRoot": frozenset({0, 1, 2}),
+        "FComputedParameter": frozenset({0}),
+        "FComputedUse": frozenset({0, 1}),
+        "FComputedPointerMethodValue": frozenset({0, 1}),
+    }
+    for function_name, dependencies in expected.items():
+        result = named_package(files, snapshot, summaries, function_name)
+        assert result.available, (function_name, result.gaps)
+        assert result.return_dependencies == dependencies, function_name
+    for function_name in (
+        "FComputedPointerReseat",
+        "FComputedMap",
+        "FComputedPointerElement",
     ):
         result = named_package(files, snapshot, summaries, function_name)
         assert not result.available, (function_name, result.gaps)

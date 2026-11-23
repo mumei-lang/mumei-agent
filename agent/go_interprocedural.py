@@ -7467,8 +7467,8 @@ class _Builder:
         The field must resolve to a same-package method record
         (receiver non-null). A bare identifier binds directly; an
         index chain into a supported local slice/array value struct
-        binds its container root, while a computed receiver stays
-        closed.
+        binds its container root, while a call-based receiver such as
+        `g().M` stays closed.
         """
         node = self._strip_parens(node)
         if node is None or node.type != "selector_expression":
@@ -7526,7 +7526,8 @@ class _Builder:
                 or any(
                     index is None
                     or (
-                        index.type not in _INDEX_LITERALS
+                        len(indexes) == 1
+                        and index.type not in _INDEX_LITERALS
                         and index.type != "identifier"
                     )
                     for index in indexes
@@ -14344,32 +14345,6 @@ class _Builder:
             return None
         return container, tuple(reversed(indexes))
 
-    def _multi_index_computed_index_has_field_records(
-        self, node: Any
-    ) -> bool:
-        current = self._strip_parens(node)
-        indexes = 0
-        computed_index = False
-        while current is not None and current.type == "index_expression":
-            indexes += 1
-            index = current.child_by_field_name("index")
-            if (
-                index is None
-                or (
-                    index.type not in _INDEX_LITERALS
-                    and index.type != "identifier"
-                )
-            ):
-                computed_index = True
-            current = self._strip_parens(
-                current.child_by_field_name("operand")
-            )
-        return (
-            indexes > 1
-            and computed_index
-            and bool(self._struct_argument_field_record_ids(node))
-        )
-
     def _multi_index_func_field_selector(self, node: Any) -> bool:
         current = self._strip_parens(node)
         indexes = []
@@ -14404,12 +14379,7 @@ class _Builder:
                 selector = parent
             break
         if selector is None or len(indexes) < 2 or any(
-            index is None
-            or (
-                index.type not in _INDEX_LITERALS
-                and index.type != "identifier"
-            )
-            for index in indexes
+            index is None for index in indexes
         ):
             return False
         member = self._field_member(selector)
@@ -14425,13 +14395,7 @@ class _Builder:
         indexes = []
         while current is not None and current.type == "index_expression":
             index = current.child_by_field_name("index")
-            if (
-                index is None
-                or (
-                    index.type not in _INDEX_LITERALS
-                    and index.type != "identifier"
-                )
-            ):
+            if index is None:
                 return False
             indexes.append(index)
             current = self._strip_parens(
@@ -14501,13 +14465,7 @@ class _Builder:
         current = value
         while current is not None and current.type == "index_expression":
             index = current.child_by_field_name("index")
-            if (
-                index is None
-                or (
-                    index.type not in _INDEX_LITERALS
-                    and index.type != "identifier"
-                )
-            ):
+            if index is None:
                 return False
             indexes.append(index)
             current = self._strip_parens(
@@ -38808,17 +38766,6 @@ class _Builder:
                     operand_member_import = candidate
         if callee_node.type == "selector_expression":
             member = self._field_member(callee_node)
-            if (
-                member is not None
-                and member.type is not None
-                and member.type.kind == "function"
-                and self._multi_index_computed_index_has_field_records(
-                    operand
-                )
-            ):
-                raise _Unsupported(
-                    "unsupported_expression", _span(node)
-                )
             if (
                 member is not None
                 and member.kind in {"var", "variable"}
