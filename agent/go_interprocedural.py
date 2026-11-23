@@ -14844,29 +14844,45 @@ class _Builder:
         params: dict[str, int],
         locals_: dict[str, frozenset[int]],
     ) -> None:
-        def pointer_argument_writes(
-            literal: Any, captured: Iterable[str]
-        ) -> set[str]:
+        def literal_may_write_captures(
+            literal: Any,
+            captured: Iterable[str],
+            captures_pointer: bool = False,
+        ) -> bool:
+            if captures_pointer:
+                return True
             captured_ids = set(captured)
-            written: set[str] = set()
             body = literal.child_by_field_name("body")
             pending = [body] if body is not None else []
             while pending:
                 current = pending.pop()
-                if current.type == "func_literal":
-                    continue
                 if current.type == "call_expression":
                     arguments = current.child_by_field_name("arguments")
                     for argument in _children(arguments):
-                        if not self._deferred_argument_is_pointer(argument):
-                            continue
+                        pointer_argument = argument
+                        while (
+                            pointer_argument is not None
+                            and pointer_argument.type == "variadic_argument"
+                        ):
+                            pointer_argument = next(
+                                iter(_children(pointer_argument)), None
+                            )
+                        if self._deferred_argument_is_pointer(
+                            pointer_argument
+                        ):
+                            return True
+                if current.type == "unary_expression":
+                    operator = current.child_by_field_name("operator")
+                    if operator is not None and operator.type == "&":
                         binding_id = self._deferred_root_binding(
-                            argument, params, locals_
+                            current.child_by_field_name("operand"),
+                            params,
+                            locals_,
                         )
                         if binding_id in captured_ids:
-                            written.add(binding_id)
+                            return True
                 pending.extend(_children(current))
-            return written
+            return False
 
         def collect(
             value: Any,
@@ -14890,16 +14906,17 @@ class _Builder:
                 (
                     _deps,
                     captures,
-                    _captures_pointer,
+                    captures_pointer,
                     writes,
                     writes_star,
                     _has_call,
                 ) = self._func_literal_capture(value, params, locals_)
                 captured_ids.update(captures)
                 written_ids.update(writes)
-                written_ids.update(
-                    pointer_argument_writes(value, captures)
-                )
+                if literal_may_write_captures(
+                    value, captures, captures_pointer
+                ):
+                    written_ids.update(captures)
                 return writes_star
             if value.type == "composite_literal":
                 return collect(
@@ -15134,6 +15151,22 @@ class _Builder:
             captured_ids.update(transitive_captures)
             written_ids.update(transitive_writes)
             star_write |= transitive_star_write
+            for record_id in seen_records | set(transitive_captures):
+                literal_record = self.closure_factory_literals.get(
+                    record_id
+                )
+                if literal_record is None:
+                    continue
+                record_captures = self.closure_captures.get(
+                    record_id, frozenset()
+                )
+                if literal_may_write_captures(
+                    literal_record[0],
+                    record_captures,
+                    record_id in self.pointee_closures,
+                ):
+                    captured_ids.update(record_captures)
+                    written_ids.update(record_captures)
 
             for binding_id in captured_ids | written_ids:
                 if binding_id in locals_ or binding_id in params:
