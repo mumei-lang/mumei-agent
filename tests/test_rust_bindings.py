@@ -4080,7 +4080,7 @@ struct P;
 impl P { fn m(&self) {} }
 struct W;
 impl W {
-    fn iter(&self) -> impl Iterator<Item = P> { std::iter::empty() }
+    fn iter(&self) -> impl Iterator { std::iter::empty() }
 }
 fn f() {
     for x in std::iter::once(1) {
@@ -4091,8 +4091,8 @@ fn f() {
     }
 }
 fn g(w: W) {
-    // `impl Iterator<Item = P>` hides the element inside an
-    // associated binding the model does not spell - opaque.
+    // A bare `impl Iterator` names no `Item` binding — the
+    // element stays opaque.
     for p in w.iter() {
         p.m();
     }
@@ -4103,7 +4103,8 @@ fn g(w: W) {
     # An unresolved extern method's element also stays opaque.
     calls = [
         c for c in report.calls
-        if source[c.span.start:c.span.end] == "p.m()"
+        if "m()" in source[c.span.start:c.span.end]
+        and source[c.span.start:c.span.end] != "x.m()"
     ]
     assert len(calls) == 2
     assert all(c.target == "" for c in calls)
@@ -10316,3 +10317,376 @@ fn f() {
     # was spelled at `right`'s declaration in the root module,
     # not at `m::left`.
     assert bound.get("v[0].pm()") == pms[0].id
+
+def test_nested_produced_and_resolves_at_the_innermost_decl():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+mod a { pub fn a() -> Option<Vec<super::P>> { None } }
+mod b {
+    pub struct P;
+    impl P { pub fn pm(&self) {} }
+    pub fn b() -> Option<Vec<P>> { None }
+}
+fn c() -> Option<Vec<P>> { None }
+fn f() {
+    if let Some(v) = a::a().and(b::b().and(c())) { v[0].pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    pms = _bindings(report, "pm", "associated_function")
+    assert len(pms) == 2
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `a.and(b.and(c))` yields `c`'s `Option<Vec<P>>` — `v`'s `P`
+    # was spelled at `c`'s declaration in the root module, not at
+    # `b`'s.
+    assert bound.get("v[0].pm()") == pms[0].id
+
+
+def test_produced_and_ignores_leading_comment_argument():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn right() -> Option<Vec<P>> { None }
+mod m {
+    pub struct P;
+    impl P { pub fn pm(&self) {} }
+    pub fn left() -> Option<Vec<P>> { None }
+}
+mod w {
+    pub struct P;
+    impl P { pub fn pm(&self) {} }
+    pub struct W;
+    impl W { pub fn f(&self) -> Option<Vec<P>> { None } }
+}
+fn f() {
+    use m::P;
+    if let Some(v) = m::left().and(/* c */ right()) { v[0].pm(); }
+}
+fn g(o: Option<Vec<P>>, w: w::W) {
+    if let Some(u) = o.and(/* d */ w.f()) { u[0].pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    pms = _bindings(report, "pm", "associated_function")
+    assert len(pms) == 3
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # The comment is not an argument — `v`'s `P` was spelled at
+    # `right`'s declaration, not at the call site where
+    # `use m::P` shadows it.
+    assert bound.get("v[0].pm()") == pms[0].id
+    # `o.and(/* d */ w.f())` follows `w.f()` — its `P` is `w`'s
+    # module's `P`; treating the comment as the argument would
+    # resolve `P` at the call site and bind the root `P`.
+    assert bound.get("u[0].pm()") == pms[2].id
+
+
+def test_impl_iterator_item_binding_ignores_other_bounds():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct Q;
+impl Q { fn qm(&self) {} }
+trait O { type X; }
+fn give() -> impl Iterator<Item = P> + O<X = Q> { todo!() }
+fn f() { give().next().unwrap().pm(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    pm = _bindings(report, "pm", "associated_function")[0]
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `Item` names the iterated element — `Other<X = Q>`'s
+    # associated type must not join the payload args.
+    assert bound.get("give().next().unwrap().pm()") == pm.id
+
+
+def test_box_of_generic_deref_yields_the_inner_type():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct G<T>(T);
+impl<T> G<T> { fn gm(&self) {} }
+fn make() -> Box<G<P>> { todo!() }
+fn f() { make().deref().gm(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    gm = _bindings(report, "gm", "associated_function")[0]
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `-> Box<G<P>>` peels to `G<P>` at the call — `deref()` must
+    # not unwrap `G`'s own `P` payload.
+    assert bound.get("make().deref().gm()") == gm.id
+
+
+def test_produced_vec_element_spells_at_the_return_annotation():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+mod m {
+    pub struct P;
+    impl P { pub fn pm(&self) {} }
+}
+struct W;
+impl W {
+    fn make(&self) -> Vec<m::P> { todo!() }
+    fn deq(&self) -> std::collections::VecDeque<m::P> { todo!() }
+}
+fn f(w: W) {
+    w.make().swap_remove(0).pm();
+    w.deq().as_slices().0[0].pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    pms = _bindings(report, "pm", "associated_function")
+    assert len(pms) == 2
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # The produced `Vec`/`VecDeque` element was spelled at the
+    # methods' return annotations, not at `w`'s declaration.
+    for text in (
+        "w.make().swap_remove(0).pm()",
+        "w.deq().as_slices().0[0].pm()",
+    ):
+        assert bound.get(text) == pms[1].id, text
+
+
+def test_map_returning_call_recovers_key_and_value_args():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+use std::collections::HashMap;
+fn mk() -> HashMap<i32, P> { HashMap::new() }
+struct H;
+impl H { fn mk(&self) -> HashMap<i32, P> { HashMap::new() } }
+fn f(h: H, d: P) {
+    mk().entry(1).or_insert(d).pm();
+    h.mk().entry(1).or_insert(d).pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    pm = _bindings(report, "pm", "associated_function")[0]
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # A produced map receiver has no annotation node — the callee's
+    # declared return keeps both `K` and `V`.
+    assert bound.get("mk().entry(1).or_insert(d).pm()") == pm.id
+    assert bound.get("h.mk().entry(1).or_insert(d).pm()") == pm.id
+
+
+def test_produced_impl_iterator_item_binds_element():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn make() -> impl Iterator<Item = P> { vec![].into_iter() }
+fn f() {
+    for x in make() { x.pm(); }
+    make().next().unwrap().pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    pm = _bindings(report, "pm", "associated_function")[0]
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `impl Iterator<Item = P>` carries the element spelling in
+    # its associated-type binding.
+    assert bound.get("x.pm()") == pm.id
+    assert bound.get("make().next().unwrap().pm()") == pm.id
+
+
+def test_produced_container_methods_spell_elements():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn vdq() -> VecDeque<P> { VecDeque::new() }
+fn hs() -> HashSet<P> { HashSet::new() }
+fn vec() -> Vec<P> { vec![] }
+fn opt() -> Option<P> { None }
+fn f(k: &P, d: P) {
+    let (a, b) = vdq().as_slices();
+    a[0].pm();
+    hs().get(k).unwrap().pm();
+    vec().as_ref()[0].pm();
+    opt().get_or_insert(d).pm();
+    vec().swap_remove(0).pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    pm = _bindings(report, "pm", "associated_function")[0]
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    for text in (
+        "a[0].pm()",
+        "hs().get(k).unwrap().pm()",
+        "vec().as_ref()[0].pm()",
+        "opt().get_or_insert(d).pm()",
+        "vec().swap_remove(0).pm()",
+    ):
+        assert bound.get(text) == pm.id, text
+
+
+def test_produced_wrapper_and_map_receivers_bind():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn bx() -> Box<P> { todo!() }
+fn rc() -> Rc<P> { todo!() }
+fn map() -> HashMap<i32, P> { HashMap::new() }
+fn f(d: P) {
+    bx().deref().pm();
+    map().entry(1).or_insert(d).pm();
+    if let Ok(p) = Rc::try_unwrap(rc()) { p.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    pm = _bindings(report, "pm", "associated_function")[0]
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `-> Box<P>`/`Rc<P>` peel at the call — the receiver's
+    # resolved type IS the payload.
+    assert bound.get("bx().deref().pm()") == pm.id
+    assert bound.get("map().entry(1).or_insert(d).pm()") == pm.id
+    # Pin the `Rc::try_unwrap` payload's own call — any `pm` ref
+    # would satisfy a loose check even if `try_unwrap` broke.
+    assert bound.get("p.pm()") == pm.id
+
+
+def test_custom_and_method_keeps_own_return_annotation():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+mod m {
+    pub struct P;
+    impl P { pub fn pm(&self) {} }
+    pub fn make() -> Option<Vec<P>> { None }
+}
+struct W;
+impl W { fn and(&self, o: Option<Vec<P>>) -> Option<Vec<P>> { o } }
+fn f(w: W) {
+    use m::P;
+    if let Some(v) = w.and(m::make()) { v[0].pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    pms = _bindings(report, "pm", "associated_function")
+    assert len(pms) == 2
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `W::and` is not `Option::and` — its declared `Option<Vec<P>>`
+    # spells `P` at `W`'s impl, not in the argument's module.
+    assert bound.get("v[0].pm()") == pms[0].id
+
+
+def test_produced_and_follows_parenthesized_argument():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn right() -> Option<Vec<P>> { None }
+mod m {
+    pub struct P;
+    impl P { pub fn pm(&self) {} }
+    pub fn left() -> Option<Vec<P>> { None }
+}
+fn f() {
+    use m::P;
+    if let Some(v) = m::left().and((right())) { v[0].pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    pms = _bindings(report, "pm", "associated_function")
+    assert len(pms) == 2
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `(right())` is `right()` — the spelled `P` resolves at
+    # `right`'s declaration, not at the shadowed call site.
+    assert bound.get("v[0].pm()") == pms[0].id
+
+
+def test_struct_pattern_field_spells_at_its_own_declaration():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct W { v: Vec<P> }
+mod m {
+    pub struct P;
+    impl P { pub fn pm(&self) {} }
+    pub fn pair() -> (super::W, i32) { (todo!(), 0) }
+}
+fn f() {
+    let (W { v: xs }, _) = m::pair();
+    xs[0].pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    pms = _bindings(report, "pm", "associated_function")
+    assert len(pms) == 2
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `v`'s `Vec<P>` is spelled inside `super::W`'s declaration —
+    # `P` resolves at the root, not in `m::pair`'s module.
+    assert bound.get("xs[0].pm()") == pms[0].id
+
+
+def test_struct_pattern_field_on_produced_plain_payload():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct W { v: Vec<P> }
+mod m {
+    pub struct P;
+    impl P { pub fn pm(&self) {} }
+    pub fn make() -> Result<super::W, String> { Ok(todo!()) }
+}
+fn f() {
+    if let Some(W { v: xs }) = m::make().ok() { xs[0].pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    pms = _bindings(report, "pm", "associated_function")
+    assert len(pms) == 2
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `Some(W { v: xs })` on `Option<super::W>` decomposes the
+    # field — `xs`'s `Vec<P>` was spelled at `v`'s annotation in
+    # the caller's module.
+    assert bound.get("xs[0].pm()") == pms[0].id

@@ -2020,6 +2020,38 @@ class _RustBindings:
                     args = key
             node = node.child_by_field_name("type")
         if node is not None and node.type in {
+            "abstract_type",
+            "bounded_type",
+        }:
+            # `impl Iterator<Item = P>` — the associated-type
+            # bindings carry the element spelling; an `impl Trait`
+            # with no bindings names no payload and stays opaque.
+            bound = [
+                (
+                    self.text(
+                        bound_node.child_by_field_name("name")
+                    ).strip(),
+                    re.sub(
+                        r"\s+",
+                        " ",
+                        self.text(
+                            bound_node.child_by_field_name("type")
+                        ),
+                    ).strip(),
+                )
+                for bound_node in self._descendants(node)
+                if bound_node.type == "type_binding"
+                and bound_node.child_by_field_name("type") is not None
+            ]
+            # `impl Iterator<Item = P> + Other<X = Q>` — only
+            # `Item` names the iterated element; other bounds'
+            # associated types are not the payload.
+            items = [text for name, text in bound if name == "Item"]
+            chosen = items or [text for _, text in bound]
+            if chosen:
+                return None, ", ".join(chosen)
+            return None, None
+        if node is not None and node.type in {
             "slice_type",
             "array_type",
         }:
@@ -4484,9 +4516,32 @@ class _RustBindings:
                     )
                     arg_head = self._container_head_name(
                         first_arg
-                    ) or self._spelled_receiver_head(first_arg)
+                    ) or self._spelled_receiver_head(first_arg) or self._produced_head(first_arg)
                     if arg_head == s_head:
                         arg_args = self._receiver_type(first_arg)[1]
+                        if arg_args is None:
+                            # `Rc::try_unwrap(h.make())` — `-> Rc<P>`
+                            # peels at the call, so recover the
+                            # payload off the produced spelling
+                            # (`Rc<crate::P>` — already scope-pinned).
+                            spelled_arg = self._expr_type_spelling(
+                                first_arg
+                            )
+                            wrapped_arg = (
+                                None
+                                if spelled_arg is None
+                                else re.fullmatch(
+                                    r"[A-Za-z_][\w:]*\s*<([\s\S]*)>",
+                                    spelled_arg.strip(),
+                                )
+                            )
+                            if wrapped_arg is not None:
+                                arg_args = wrapped_arg.group(1)
+                            elif spelled_arg is not None:
+                                # The produced spelling peeled the
+                                # wrapper already — `crate::P` IS
+                                # the payload.
+                                arg_args = spelled_arg.strip()
                         parts = self._type_arg_list(arg_args or "")
                         if len(parts) == 1:
                             payload = parts[0].strip()
@@ -4838,8 +4893,13 @@ class _RustBindings:
                         index = option_head[2]
                         if (
                             self.text(field).strip() == "get"
-                            and self._container_head_name(
-                                callee.child_by_field_name("value")
+                            and (
+                                self._container_head_name(
+                                    callee.child_by_field_name("value")
+                                )
+                                or self._produced_head(
+                                    callee.child_by_field_name("value")
+                                )
                             )
                             in {"HashSet", "BTreeSet"}
                         ):
@@ -5388,10 +5448,26 @@ class _RustBindings:
                     ).strip()
                     if (
                         method_name == "deref"
+                        and (ph := self._produced_head(
+                            callee.child_by_field_name("value")
+                        )) is not None
+                        and ph.rsplit("::", 1)[-1]
+                        in _DEREF_WRAPPER_NAMES
+                        and receiver != (None, None)
+                    ):
+                        # `h.make().deref()` — `-> Box<G<P>>`/`Rc<P>`
+                        # peels at the call, so the receiver's
+                        # resolved type IS the payload.
+                        return receiver
+                    if (
+                        method_name == "deref"
                         and receiver[1] is not None
                         and (
                             (
                                 head_name := self._container_head_name(
+                                    callee.child_by_field_name("value")
+                                )
+                                or self._produced_head(
                                     callee.child_by_field_name("value")
                                 )
                             )
@@ -5523,8 +5599,13 @@ class _RustBindings:
                             self._is_slice_receiver(
                                 callee.child_by_field_name("value")
                             )
-                            or self._container_head_name(
-                                callee.child_by_field_name("value")
+                            or (
+                                self._container_head_name(
+                                    callee.child_by_field_name("value")
+                                )
+                                or self._produced_head(
+                                    callee.child_by_field_name("value")
+                                )
                             ) in _INDEX_ELEMENT_CONTAINERS
                         )
                     ):
@@ -5595,6 +5676,10 @@ class _RustBindings:
                             )
                             == "Option"
                             or self._call_declared_head(
+                                callee.child_by_field_name("value")
+                            )
+                            == "Option"
+                            or self._produced_head(
                                 callee.child_by_field_name("value")
                             )
                             == "Option"
@@ -5711,8 +5796,11 @@ class _RustBindings:
                                 "value"
                             )
                             if (
-                                self._container_head_name(
-                                    map_recv
+                                (
+                                    self._container_head_name(
+                                        map_recv
+                                    )
+                                    or self._produced_head(map_recv)
                                 ) in _MAP_CONTAINER_NAMES
                                 # A declared `entry` wins — a custom
                                 # map's `fn entry(..) -> Option<Q>`
@@ -5807,6 +5895,10 @@ class _RustBindings:
                             )
                             == "BTreeMap"
                             or self._expanded_container_head(
+                                callee.child_by_field_name("value")
+                            )
+                            == "BTreeMap"
+                            or self._produced_head(
                                 callee.child_by_field_name("value")
                             )
                             == "BTreeMap"
@@ -6105,8 +6197,13 @@ class _RustBindings:
                     if (
                         method_name in {"as_slices", "as_mut_slices"}
                         and receiver[1] is not None
-                        and self._container_head_name(
-                            callee.child_by_field_name("value")
+                        and (
+                            self._container_head_name(
+                                callee.child_by_field_name("value")
+                            )
+                            or self._produced_head(
+                                callee.child_by_field_name("value")
+                            )
                         )
                         in {"VecDeque", "LinkedList"}
                         # A declared `as_slices` (trait extension,
@@ -6542,8 +6639,13 @@ class _RustBindings:
                     if (
                         method_name in _SWAP_REMOVE_METHODS
                         and receiver[1] is not None
-                        and self._container_head_name(
-                            callee.child_by_field_name("value")
+                        and (
+                            self._container_head_name(
+                                callee.child_by_field_name("value")
+                            )
+                            or self._produced_head(
+                                callee.child_by_field_name("value")
+                            )
                         )
                         in {"Vec"}
                     ):
@@ -6898,6 +7000,43 @@ class _RustBindings:
         pair = self._generic_head_args(
             tnode, None if tnode is None else tnode.start_byte
         )
+        if pair is None and node is not None and node.type == "call_expression":
+            # `m.entry(k)` on `h.make()` — a produced map receiver
+            # has no annotation node of its own; the callee's
+            # declared return annotation keeps both `K` and `V`
+            # (`_expr_type_spelling` reduces a map to its value).
+            callee = node.child_by_field_name("function")
+            member = None
+            if callee is not None:
+                if callee.type == "field_expression":
+                    member = self._field_member(
+                        callee, ("associated_function",)
+                    )
+                elif callee.type == "identifier":
+                    member = self._through_import(
+                        self._lookup(
+                            self._normalize_identifier(
+                                self.text(callee)
+                            ),
+                            node.start_byte,
+                            "value",
+                        ),
+                        node.start_byte,
+                        "value",
+                    )
+                elif callee.type in {
+                    "scoped_identifier",
+                    "scoped_type_identifier",
+                }:
+                    member, _ = self._scoped_member(callee)
+            tnode = None if member is None else member.type_node
+            pair = (
+                None
+                if tnode is None
+                else self._generic_head_args(tnode, tnode.start_byte)
+            )
+            if pair is None:
+                return None
         if pair is None:
             return None
         key, head, _ = pair
@@ -7102,7 +7241,10 @@ class _RustBindings:
         spelled element names resolve against the names visible
         there, not at the call site."""
         node = receiver
-        while node is not None and node.type == "reference_expression":
+        while node is not None and node.type in {
+            "reference_expression",
+            "parenthesized_expression",
+        }:
             node = next(iter(node.named_children), None)
         if node is None:
             return None
@@ -7122,6 +7264,56 @@ class _RustBindings:
             # the receiver's annotation — follow the call's value.
             callee = node.child_by_field_name("function")
             if callee is not None and callee.type == "field_expression":
+                member = callee.child_by_field_name("field")
+                value = callee.child_by_field_name("value")
+                if (
+                    member is not None
+                    and self.text(member).strip() == "and"
+                    and (
+                        self._container_head_name(value)
+                        or self._expanded_container_head(value)
+                        or self._produced_head(value)
+                        or self._combinator_head(value)
+                    )
+                    in {"Option", "Result"}
+                ):
+                    # `o.and(r)` yields `r`'s `Option`/`Result` —
+                    # the spelled names were written in `r`'s
+                    # annotation, not the receiver's (nested
+                    # `b.and(c)` follows the chain to the innermost
+                    # argument). A custom `and` on another type
+                    # keeps its own declared return.
+                    arguments = node.child_by_field_name("arguments")
+                    arg = (
+                        next(
+                            (
+                                c
+                                for c in arguments.named_children
+                                if "comment" not in c.type
+                            ),
+                            None,
+                        )
+                        if arguments is not None
+                        else None
+                    )
+                    if arg is not None:
+                        return self._receiver_annotation_position(arg)
+                produced = self._field_member(
+                    callee, ("associated_function",)
+                )
+                if (
+                    produced is not None
+                    and produced.type_node is not None
+                    and not getattr(
+                        produced, "member_impl_type_params", ()
+                    )
+                ):
+                    # `w.make()` — the spelled names were written
+                    # in the declared return annotation, not in
+                    # `w`'s; an impl-parameter return (`-> P`)
+                    # still resolves at the receiver so its
+                    # substitution applies.
+                    return produced.type_node.start_byte
                 return self._receiver_annotation_position(
                     callee.child_by_field_name("value")
                 )
@@ -10630,7 +10822,18 @@ class _RustBindings:
                     record.pattern_decl_scope = pinned[3]
             if whole:
                 record.value_node = value
-            if record.type_args is not None:
+            spell = (
+                pinned[4]
+                if pinned is not None and len(pinned) > 4
+                else None
+            )
+            if spell is not None:
+                # A field-bound name keeps the field annotation's
+                # own position — `let W { v: xs } = m::pair()`
+                # resolves `v`'s `Vec<P>` inside `W`'s module, not
+                # the scrutinee's.
+                record.spell_position = spell
+            elif record.type_args is not None:
                 record.spell_position = scrut_position
             self._add_to_scope(scope, record)
 
@@ -11640,6 +11843,74 @@ class _RustBindings:
         `_lookup_module_path`, the last segment reads that module's
         scope."""
         segments = name.split("::")
+        if segments[0] in {"self", "super"}:
+            # `self::x`/`super::x` — resolve against the module
+            # scopes enclosing `position` (source_file or a mod
+            # item's declaration_list), not the call-site stack.
+            scope = self._scope_at(position)
+            index = 0
+            while (
+                index < len(segments) - 1
+                and segments[index] in {"self", "super"}
+            ):
+                module_scope = scope
+                while module_scope is not None and not (
+                    module_scope.node.type == "source_file"
+                    or (
+                        module_scope.node.type == "declaration_list"
+                        and module_scope.node.parent is not None
+                        and module_scope.node.parent.type
+                        == "mod_item"
+                    )
+                ):
+                    module_scope = module_scope.parent
+                if module_scope is None:
+                    return None
+                scope = module_scope
+                if segments[index] == "super":
+                    scope = scope.parent
+                    while scope is not None and not (
+                        scope.node.type == "source_file"
+                        or (
+                            scope.node.type == "declaration_list"
+                            and scope.node.parent is not None
+                            and scope.node.parent.type == "mod_item"
+                        )
+                    ):
+                        scope = scope.parent
+                index += 1
+            if scope is None:
+                return None
+            for segment in segments[index:-1]:
+                module = (
+                    None
+                    if scope is None
+                    else next(
+                        (
+                            candidate
+                            for candidate in reversed(
+                                scope.bindings.get(segment, ())
+                            )
+                            if candidate.binding.kind == "module"
+                        ),
+                        None,
+                    )
+                )
+                if module is None or module.module_scope is None:
+                    return None
+                scope = module.module_scope
+            if scope is None:
+                return None
+            head = self._normalize_identifier(segments[-1])
+            return next(
+                (
+                    candidate
+                    for candidate in reversed(scope.bindings.get(head, ()))
+                    if self._in_namespace(candidate, "type")
+                    and candidate.binding.kind != "generic_parameter"
+                ),
+                None,
+            )
         if segments[0] == "crate":
             scope = self.scopes[0] if self.scopes else None
             for segment in segments[1:-1]:
@@ -12594,7 +12865,11 @@ class _RustBindings:
                             None
                             if _arguments is None
                             else next(
-                                iter(_arguments.named_children),
+                                (
+                                    c
+                                    for c in _arguments.named_children
+                                    if "comment" not in c.type
+                                ),
                                 None,
                             )
                         )
