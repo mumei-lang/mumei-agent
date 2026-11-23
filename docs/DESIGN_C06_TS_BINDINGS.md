@@ -68,6 +68,9 @@ pinned `typescript` 5.9.3 の `ts.createProgram`（`noResolve`, `strict`, `lib.e
 ## 5. 段階案
 
 1. **landed（現行）**: 単一ファイル・import なし・`lib.es2022.d.ts` のみ・メタデータ比較のみ。
+compiler option の `lib` は `lib.es2022.d.ts` 単独だが、host は同梱パッケージ内の
+   `lib*.d.ts` をすべて提供するため、`lib.es2022.d.ts` が推移参照する `lib.es5.d.ts`・
+   `lib.decorators.d.ts` 等も解決される（DOM / Node 型は es2022 の推移集合に含まれず到達しない）。
 2. **lib 拡張（小）**: `lib.dom.d.ts` 等を許可する場合は `(version, lib)` の組を許可リスト化し、
    envelope の `compiler_options.lib` をその組で fixture 化。DOM/Node 型の解決は
    「宣言はライブラリ側（source 外）→ `library: true`」のまま変わらないため、reader 側の
