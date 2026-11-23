@@ -22,8 +22,16 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from agent.attempt_schedule import MAX_SCHEDULE_ATTEMPTS, run_attempt_schedule
-from agent.plan_history_log import append_plan_history
+from agent.attempt_schedule import (
+    MAX_SCHEDULE_ATTEMPTS,
+    AttemptScheduleResult,
+    run_attempt_schedule,
+)
+from agent.plan_history_log import (
+    append_plan_histories,
+    append_plan_history,
+    read_plan_history,
+)
 from agent.verification_planner import (
     SOURCE_INPUT_FORMAT,
     AdapterRegistry,
@@ -321,10 +329,27 @@ def build_schedule_parser(
         "--output", metavar="PATH",
         help="Write the schedule document here instead of stdout.",
     )
+    parser.add_argument(
+        "--history-log", metavar="PATH",
+        help=(
+            "Append every plan of the schedule (the initial plan, then each "
+            "replan, in order) to an opt-in tamper-evident plan history log "
+            "(mumei.verification-plan-history-entry/v1) as one batch, rolled "
+            "back on write failure (a killed process can leave a prefix of "
+            "the batch). Not Evidence, a dispatch record or authentication."
+        ),
+    )
+    parser.add_argument(
+        "--expected-history-head", metavar="HEX",
+        help=(
+            "Refuse to append unless the log's last entry digest equals this "
+            "pinned head. Requires --history-log."
+        ),
+    )
     return parser
 
 
-def run_schedule(args: argparse.Namespace) -> dict:
+def _run_schedule_result(args: argparse.Namespace) -> AttemptScheduleResult:
     request = _load_request(args.request)
     if request.input_format != SOURCE_INPUT_FORMAT or request.result_contract is None:
         raise ValueError("verify-schedule requires the source input contract and format")
@@ -459,7 +484,11 @@ def run_schedule(args: argparse.Namespace) -> dict:
         core_requirement_list=requirement_list,
         export_dir=export_dir,
     )
-    return result.to_dict()
+    return result
+
+
+def run_schedule(args: argparse.Namespace) -> dict:
+    return _run_schedule_result(args).to_dict()
 
 
 def _declared_paths(args: argparse.Namespace) -> list[str]:
@@ -478,6 +507,8 @@ def _declared_paths(args: argparse.Namespace) -> list[str]:
         paths.append(args.observations)
     if args.output is not None:
         paths.append(args.output)
+    if getattr(args, "history_log", None) is not None:
+        paths.append(args.history_log)
     return paths
 
 
@@ -639,6 +670,34 @@ def main_schedule(args: argparse.Namespace | None = None) -> int:
         args = build_schedule_parser().parse_args()
     declared = _declared_paths(args)
     try:
+        history_log = getattr(args, "history_log", None)
+        expected_history_head = getattr(args, "expected_history_head", None)
+        if expected_history_head is not None and history_log is None:
+            raise ValueError("--expected-history-head requires --history-log")
+        if history_log is not None:
+            declared_inputs_and_outputs = _declared_paths(args)[:-1]
+            if any(
+                _same_file(history_log, path)
+                for path in declared_inputs_and_outputs
+            ):
+                raise ValueError(
+                    "--history-log must not overwrite a declared input or output"
+                )
+            export_dir = getattr(args, "export_evidence_acceptance", None)
+            if export_dir is not None and any(
+                _same_file(
+                    history_log,
+                    os.path.join(export_dir, filename),
+                )
+                for filename in (
+                    "requirement-list.json",
+                    "evidence.json",
+                    "acceptance.json",
+                )
+            ):
+                raise ValueError(
+                    "--history-log must not overwrite a declared input or output"
+                )
         if args.output is not None:
             target = os.path.realpath(args.output)
             inputs = [args.request, args.adapters, args.argv_map,
@@ -664,7 +723,22 @@ def main_schedule(args: argparse.Namespace | None = None) -> int:
                 raise ValueError(
                     "--output must not overwrite a declared input"
                 )
-        document = json.dumps(run_schedule(args), indent=2, sort_keys=True) + "\n"
+        if history_log is not None:
+            read_plan_history(
+                history_log, expected_head=expected_history_head
+            )
+        result = _run_schedule_result(args)
+        if history_log is not None:
+            digests = append_plan_histories(
+                history_log,
+                result.plans,
+                expected_head=expected_history_head,
+            )
+            print(
+                f"verify-schedule: history head {digests[-1]}",
+                file=sys.stderr,
+            )
+        document = json.dumps(result.to_dict(), indent=2, sort_keys=True) + "\n"
         if args.output is not None:
             Path(args.output).write_text(document, encoding="utf-8")
         else:

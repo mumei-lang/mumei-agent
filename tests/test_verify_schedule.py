@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from agent import verify_schedule as verify_schedule_module
+from agent.plan_history_log import append_plan_history, read_plan_history
 from agent.verify_schedule import (
     build_schedule_parser,
     main_schedule,
@@ -129,6 +131,189 @@ def test_schedule_runs_fallback_and_emits_descriptor(inputs, capsys):
     }
     assert "FAKE_PRIVATE" not in capsys.readouterr().out + repr(doc)
     assert SOURCE.decode() not in json.dumps(doc)
+
+
+def test_schedule_history_log_batches_all_plans_without_changing_document(
+    inputs, tmp_path, capsys, monkeypatch
+):
+    assert main_schedule(args_for(inputs)) == 0
+    expected_document = capsys.readouterr().out
+
+    history_log = tmp_path / "schedule-history.jsonl"
+    results = []
+    run_result = verify_schedule_module._run_schedule_result
+
+    def capture_result(args):
+        result = run_result(args)
+        results.append(result)
+        return result
+
+    monkeypatch.setattr(
+        verify_schedule_module, "_run_schedule_result", capture_result
+    )
+    assert main_schedule(
+        args_for(inputs, history_log=history_log)
+    ) == 0
+    output = capsys.readouterr()
+
+    assert output.out == expected_document
+    assert output.err.startswith("verify-schedule: history head ")
+    assert len(results) == 1
+    expected_plans = tuple(
+        json.loads(json.dumps(plan.to_dict()))
+        for plan in results[0].plans
+    )
+    assert len(expected_plans) == 2
+    assert read_plan_history(str(history_log)) == expected_plans
+
+
+def test_expected_history_head_requires_history_log_before_dispatch(
+    inputs, capsys, monkeypatch
+):
+    def unexpected_run(_args):
+        pytest.fail("schedule ran before history option validation")
+
+    monkeypatch.setattr(
+        verify_schedule_module, "_run_schedule_result", unexpected_run
+    )
+    with pytest.raises(SystemExit) as failure:
+        main_schedule(
+            args_for(inputs, expected_history_head="0" * 64)
+        )
+
+    output = capsys.readouterr()
+    assert failure.value.code == 1
+    assert "--expected-history-head requires --history-log" in output.err
+    assert output.out == ""
+
+
+@pytest.mark.parametrize("collision", ["output", "policy", "source"])
+def test_history_log_cannot_overwrite_declared_paths_before_dispatch(
+    inputs, tmp_path, capsys, monkeypatch, collision
+):
+    def unexpected_run(_args):
+        pytest.fail("schedule ran before history path validation")
+
+    monkeypatch.setattr(
+        verify_schedule_module, "_run_schedule_result", unexpected_run
+    )
+    target = (
+        str(tmp_path / "FAKE_PRIVATE_output.json")
+        if collision == "output"
+        else inputs[collision]
+    )
+    args = args_for(
+        inputs, **{collision: target, "history_log": target}
+    )
+
+    with pytest.raises(SystemExit) as failure:
+        main_schedule(args)
+
+    output = capsys.readouterr()
+    assert failure.value.code == 1
+    assert (
+        "--history-log must not overwrite a declared input or output"
+        in output.err
+    )
+    assert output.out == ""
+
+
+def test_wrong_schedule_history_head_leaves_log_unchanged(
+    inputs, tmp_path, capsys
+):
+    result = verify_schedule_module._run_schedule_result(args_for(inputs))
+    history_log = tmp_path / "schedule-history.jsonl"
+    append_plan_history(str(history_log), result.plans[0])
+    original = history_log.read_bytes()
+
+    with pytest.raises(SystemExit) as failure:
+        main_schedule(
+            args_for(
+                inputs,
+                history_log=history_log,
+                expected_history_head="0" * 64,
+            )
+        )
+
+    output = capsys.readouterr()
+    assert failure.value.code == 1
+    assert "plan history head mismatch" in output.err
+    assert output.out == ""
+    assert history_log.read_bytes() == original
+
+
+def test_wrong_history_head_preserves_export_before_dispatch(
+    inputs, tmp_path, capsys
+):
+    requirement_list = _requirement_list(tmp_path)
+    core = _accept_list_core(tmp_path, "accepted")
+    export = tmp_path / "promotable"
+    setup_args = args_for(
+        inputs,
+        core=str(core),
+        core_requirement_list=str(requirement_list),
+        export_evidence_acceptance=str(export),
+    )
+    result = verify_schedule_module._run_schedule_result(setup_args)
+    export_names = (
+        "requirement-list.json",
+        "evidence.json",
+        "acceptance.json",
+    )
+    original_export = {
+        name: (export / name).read_bytes() for name in export_names
+    }
+    history_log = tmp_path / "schedule-history.jsonl"
+    append_plan_history(str(history_log), result.plans[0])
+    original_log = history_log.read_bytes()
+    marker = tmp_path / "attempt-dispatched"
+    argv_map = tmp_path / "marker-argv.json"
+    argv_map.write_text(
+        json.dumps({
+            "alpha": [
+                ATTEMPT_PY,
+                "-c",
+                (
+                    "from pathlib import Path; import sys; "
+                    "Path(sys.argv[1]).write_text('dispatched')"
+                ),
+                str(marker),
+            ],
+        }),
+        encoding="utf-8",
+    )
+    args = args_for(
+        inputs,
+        argv_map=str(argv_map),
+        core=str(core),
+        core_requirement_list=str(requirement_list),
+        export_evidence_acceptance=str(export),
+        history_log=str(history_log),
+        expected_history_head="0" * 64,
+    )
+
+    with pytest.raises(SystemExit) as failure:
+        main_schedule(args)
+
+    output = capsys.readouterr()
+    assert failure.value.code == 1
+    assert "plan history head mismatch" in output.err
+    assert history_log.read_bytes() == original_log
+    assert {
+        name: (export / name).read_bytes() for name in export_names
+    } == original_export
+    assert not marker.exists()
+
+
+def test_run_schedule_accepts_namespace_without_history_attributes(inputs):
+    args = args_for(inputs)
+    del args.history_log
+    del args.expected_history_head
+
+    result = run_schedule(args)
+
+    assert type(result) is dict
+    assert result["schema_version"] == "mumei.attempt-schedule/v1"
 
 
 def test_adapter_overlay_path_is_redacted_and_protected_from_output(

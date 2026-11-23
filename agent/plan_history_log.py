@@ -9,7 +9,10 @@ The log is not a dispatch or acceptance record.
 Cross-process writer exclusion requires POSIX ``fcntl``; where it is
 unavailable, locking is process-local and hosts must use a single writer
 process. A write or fsync failure triggers best-effort rollback to the
-validated prefix. Entries use standard JSON; NaN and Infinity are rejected.
+validated prefix. A process killed mid-append is not rolled back: a torn last
+line makes the log invalid, and a multi-entry batch cut on a line boundary
+leaves a chain-valid prefix of that batch. Entries use standard JSON; NaN and
+Infinity are rejected.
 """
 
 from __future__ import annotations
@@ -39,6 +42,7 @@ _ENTRY_TOO_LARGE = "plan history entry exceeds size limit"
 _LOG_TOO_LARGE = "plan history log exceeds size limit"
 _IO_FAILURE = "plan history I/O failed"
 _PLAN_TYPE_ERROR = "plan history append requires a verification plan"
+_PLAN_BATCH_ERROR = "plan history append requires a nonempty plan tuple"
 
 _path_locks: dict[str, threading.Lock] = {}
 _path_locks_guard = threading.Lock()
@@ -198,14 +202,16 @@ def _fsync_directory(directory: Path) -> None:
         os.close(directory_fd)
 
 
-def append_plan_history(
+def append_plan_histories(
     path: str,
-    plan: VerificationPlan,
+    plans: tuple[VerificationPlan, ...],
     *,
     expected_head: str | None = None,
-) -> str:
-    """Append one plan projection and return its digest."""
-    if type(plan) is not VerificationPlan:
+) -> tuple[str, ...]:
+    """Append a batch of plan projections and return their digests."""
+    if type(plans) is not tuple or not plans:
+        raise ValueError(_PLAN_BATCH_ERROR)
+    if any(type(plan) is not VerificationPlan for plan in plans):
         raise ValueError(_PLAN_TYPE_ERROR)
     history_path = _as_path(path)
 
@@ -223,18 +229,30 @@ def append_plan_history(
             _fsync_directory(directory.parent)
         with _locked(history_path):
             entries, current_size, _ = _read_entries(history_path, expected_head)
-            unsigned = {
-                "schema_version": ENTRY_SCHEMA,
-                "index": len(entries),
-                "prev_digest": entries[-1]["digest"] if entries else None,
-                "plan": plan.to_dict(),
-            }
-            digest = hashlib.sha256(_canonical_json(unsigned)).hexdigest()
-            line = _canonical_json({**unsigned, "digest": digest}) + b"\n"
-            if len(line) > MAX_ENTRY_BYTES:
-                raise ValueError(_ENTRY_TOO_LARGE)
-            if current_size + len(line) > MAX_LOG_BYTES:
-                raise ValueError(_LOG_TOO_LARGE)
+            previous_digest = entries[-1]["digest"] if entries else None
+            lines = []
+            digests = []
+            batch_size = 0
+            for offset, plan in enumerate(plans):
+                unsigned = {
+                    "schema_version": ENTRY_SCHEMA,
+                    "index": len(entries) + offset,
+                    "prev_digest": previous_digest,
+                    "plan": plan.to_dict(),
+                }
+                digest = hashlib.sha256(
+                    _canonical_json(unsigned)
+                ).hexdigest()
+                line = _canonical_json({**unsigned, "digest": digest}) + b"\n"
+                if len(line) > MAX_ENTRY_BYTES:
+                    raise ValueError(_ENTRY_TOO_LARGE)
+                batch_size += len(line)
+                if current_size + batch_size > MAX_LOG_BYTES:
+                    raise ValueError(_LOG_TOO_LARGE)
+                lines.append(line)
+                digests.append(digest)
+                previous_digest = digest
+            batch = b"".join(lines)
 
             flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
             try:
@@ -242,7 +260,7 @@ def append_plan_history(
             except FileExistsError:
                 file_fd = os.open(history_path, flags, 0o600)
             try:
-                remaining = memoryview(line)
+                remaining = memoryview(batch)
                 while remaining:
                     try:
                         written = os.write(file_fd, remaining)
@@ -266,8 +284,22 @@ def append_plan_history(
                 raise
             finally:
                 os.close(file_fd)
-            return digest
+            return tuple(digests)
     except ValueError:
         raise
     except (OSError, RuntimeError):
         raise ValueError(_IO_FAILURE) from None
+
+
+def append_plan_history(
+    path: str,
+    plan: VerificationPlan,
+    *,
+    expected_head: str | None = None,
+) -> str:
+    """Append one plan projection and return its digest."""
+    if type(plan) is not VerificationPlan:
+        raise ValueError(_PLAN_TYPE_ERROR)
+    return append_plan_histories(
+        path, (plan,), expected_head=expected_head
+    )[0]
