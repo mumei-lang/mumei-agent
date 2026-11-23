@@ -28,7 +28,9 @@ pinned `typescript` 5.9.3 の `ts.createProgram`（`noResolve`, `strict`, `lib.e
   `checker.getSymbolAtLocation` / `getShorthandAssignmentValueSymbol` /
   `getExportSpecifierLocalTargetSymbol` / `getAliasedSymbol` で alias を剥がす。
 - メンバ名 `x.foo` は受信側の型から member symbol に解決し、宣言が入力内なら
-  span、標準ライブラリ側（`Math.max` 等）なら `library: true`。
+  span、標準ライブラリ側（`Math.max` 等）なら `library: true`。型チェッカーが
+  解決するもののソース宣言を持たないメンバ（`prototype`・mapped-type メンバ等）も
+  `library: true`（builtin 扱い、宣言一致とは扱わない）。
 - `undefined` / `globalThis` / `arguments` のような intrinsic は宣言なしで
   `library: true`（builtin として記録、宣言一致とは扱わない）。
 - シンボルを持たない非メンバ識別子は `declarations: null` で出力され、reader が拒否する
