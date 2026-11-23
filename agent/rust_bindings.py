@@ -6699,6 +6699,64 @@ class _RustBindings:
         what `_iterator_method_element` types instead."""
         return self._iterator_spelling_with_pos(call, _depth)[0]
 
+    def _visible_trait_method(
+        self, name: str, position: int
+    ) -> bool:
+        """A trait in scope declares a method named `name` — a
+        `v.name(...)` call may be that trait's extension method,
+        not the std shape the caller's recipe assumes."""
+        for record in self.records.values():
+            if (
+                record.member_trait is not None
+                and record.binding.name == name
+                and record.binding.kind == "associated_function"
+            ):
+                trait = self.records.get(record.member_trait)
+                if trait is not None and self._trait_visible(
+                    trait, position
+                ):
+                    return True
+        return False
+
+    def _chunks_exact_remainder_source(
+        self, receiver: Any
+    ) -> "Any | None":
+        """The `v.chunks_exact*(n)` call behind a `remainder`/
+        `into_remainder` receiver — direct (`v.chunks_exact(n)
+        .remainder()`) or through a `let it = v.chunks_exact(n)`
+        alias (`it.remainder()`)."""
+        inner_call = receiver
+        if receiver.type == "identifier":
+            record = self._lookup(
+                self._normalize_identifier(self.text(receiver)),
+                receiver.start_byte,
+                "value",
+            )
+            inner_call = (
+                record.value_node
+                if record is not None and record.value_node is not None
+                else None
+            )
+        if inner_call is None or inner_call.type != "call_expression":
+            return None
+        inner_callee = inner_call.child_by_field_name("function")
+        inner_method = (
+            self.text(
+                inner_callee.child_by_field_name("field")
+            ).strip()
+            if inner_callee is not None
+            and inner_callee.type == "field_expression"
+            else None
+        )
+        if inner_method not in {
+            "chunks_exact",
+            "rchunks_exact",
+            "chunks_exact_mut",
+            "rchunks_exact_mut",
+        }:
+            return None
+        return inner_call
+
     def _iterator_spelling_with_pos(
         self, call: Any, _depth: int = 0
     ) -> "tuple[str | None, int | None]":
@@ -7018,30 +7076,17 @@ class _RustBindings:
                 f"{prefix}[{spelled}]",
                 self._receiver_annotation_position(receiver),
             )
-        if method == "remainder":
-            # `v.chunks_exact(n).remainder()` — the trailing
-            # sub-slice, spelled `&[P]`/`&mut [P]` like the
-            # chunked elements.
-            if receiver.type != "call_expression":
-                return None, None
-            inner_callee = receiver.child_by_field_name("function")
-            inner_method = (
-                self.text(
-                    inner_callee.child_by_field_name("field")
-                ).strip()
-                if inner_callee is not None
-                and inner_callee.type == "field_expression"
-                else None
-            )
-            if inner_method not in {
-                "chunks_exact",
-                "rchunks_exact",
-                "chunks_exact_mut",
-                "rchunks_exact_mut",
-            }:
+        if method in {"remainder", "into_remainder"}:
+            # `v.chunks_exact(n).remainder()`/`into_remainder()` —
+            # the trailing sub-slice, spelled `&[P]`/`&mut [P]`
+            # like the chunked elements. A `let it = v.chunks_exact
+            # (n); it.remainder()` receiver resolves through the
+            # alias to the chunks call.
+            inner_call = self._chunks_exact_remainder_source(receiver)
+            if inner_call is None:
                 return None, None
             return self._iterator_spelling_with_pos(
-                receiver, _depth + 1
+                inner_call, _depth + 1
             )
         if method == "flatten":
             # `v.iter().flatten()` unwraps the element's own args —
@@ -7898,30 +7943,17 @@ class _RustBindings:
                 if spelled is None
                 else prefix + "[" + spelled + "]",
             )
-        if method == "remainder":
-            # `v.chunks_exact(n).remainder()` yields the trailing
-            # slice's `&P` elements — the spelled `&[P]` container
-            # peels to `P` (`&mut [P]` for the `_mut` forms).
-            if receiver.type != "call_expression":
-                return _UNKNOWN, None
-            inner_callee = receiver.child_by_field_name("function")
-            inner_method = (
-                self.text(
-                    inner_callee.child_by_field_name("field")
-                ).strip()
-                if inner_callee is not None
-                and inner_callee.type == "field_expression"
-                else None
-            )
-            if inner_method not in {
-                "chunks_exact",
-                "rchunks_exact",
-                "chunks_exact_mut",
-                "rchunks_exact_mut",
-            }:
+        if method in {"remainder", "into_remainder"}:
+            # `v.chunks_exact(n).remainder()`/`into_remainder()`
+            # yields the trailing slice's `&P` elements — the
+            # spelled `&[P]` container peels to `P` (`&mut [P]`
+            # for the `_mut` forms). A `let it = v.chunks_exact(n);
+            # it.remainder()` receiver resolves through the alias.
+            inner_call = self._chunks_exact_remainder_source(receiver)
+            if inner_call is None:
                 return _UNKNOWN, None
             spelled, spelled_pos = self._iterator_spelling_with_pos(
-                receiver
+                inner_call
             )
             if spelled is None:
                 return _UNKNOWN, None
