@@ -3390,6 +3390,12 @@ function f(arr: P[][], flat: P[], rows: Row[], cb: (p: P) => boolean) {
     arr.flatMap((r: P[]) => r)[0].pm();
     rows.flatMap(r => r.cells)[0].pm();
     for (const x of rows.flatMap(r => r.cells)) { x.pm(); }
+    for (const xf of Array.from(flat)) { xf.pm(); }
+    const cp = [...flat];
+    cp[0].pm();
+    for (const y of [...flat]) { y.pm(); }
+    const mixed = [...flat, ...arr];
+    mixed[0].pm();
 }
 """
     report = build_ts_bindings(source)
@@ -3413,6 +3419,9 @@ function f(arr: P[][], flat: P[], rows: Row[], cb: (p: P) => boolean) {
         "arr.flatMap((r: P[]) => r)[0].pm()",
         "rows.flatMap(r => r.cells)[0].pm()",
         "x.pm()",
+        "xf.pm()",
+        "cp[0].pm()",
+        "y.pm()",
     }
 
 

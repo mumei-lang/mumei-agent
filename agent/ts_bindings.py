@@ -163,6 +163,7 @@ class _TypeScriptBindings:
         self._tdz_binding_ids: frozenset[str] = frozenset()
         self._type_bases: dict[int, list[tuple[str, bool]]] = {}
         self._initializer_active: set[str] = set()
+        self._type_node_active: set[int] = set()
 
     def span(self, node: Any) -> ByteSpan:
         return ByteSpan(node.start_byte, node.end_byte)
@@ -3036,6 +3037,23 @@ class _TypeScriptBindings:
             self._declared_type_node(obj, obj.start_byte)
         )
         if declared is None:
+            if self.text(obj) == "Array" and member == "from":
+                # `Array.from(iterable)` keeps the iterable's
+                # element type.
+                args_node = node.child_by_field_name("arguments")
+                arg0 = (
+                    next(iter(self.children(args_node)), None)
+                    if args_node is not None
+                    else None
+                )
+                source = self._unwrap_type(
+                    self._declared_type_node(
+                        arg0,
+                        arg0.start_byte if arg0 is not None else 0,
+                    )
+                )
+                if source is not None and self._is_arrayish(source):
+                    return source
             return None
         elem = self._array_element_node(declared)
         if elem is None:
@@ -3200,7 +3218,32 @@ class _TypeScriptBindings:
             record = self._lookup(self.text(node), position, "value")
             if record is None:
                 return None
-            return self._unwrap_type(record.type_node)
+            type_node = self._unwrap_type(record.type_node)
+            if type_node is not None:
+                return type_node
+            if (
+                record.node is not None
+                and record.node.id not in self._type_node_active
+            ):
+                declarator = record.node.parent
+                if (
+                    declarator is not None
+                    and declarator.type == "variable_declarator"
+                ):
+                    value = declarator.child_by_field_name("value")
+                    if value is not None and value.type == "array":
+                        # `const cp = [...arr]` — unannotated, the
+                        # array literal spells the element type.
+                        self._type_node_active.add(record.node.id)
+                        try:
+                            return self._declared_type_node(
+                                value, position
+                            )
+                        finally:
+                            self._type_node_active.discard(
+                                record.node.id
+                            )
+            return None
         if node.type == "member_expression":
             property_node = node.child_by_field_name("property")
             if (
@@ -3229,6 +3272,15 @@ class _TypeScriptBindings:
             )
             if inner is not None and inner.type == "array_type":
                 return next(iter(self.children(inner)), None)
+            return None
+        if node.type == "array":
+            # `[...arr]` — a single spread keeps the operand's
+            # element type; mixed or multiple spreads form a union
+            # the syntax cannot spell, so they stay opaque.
+            kids = self.children(node)
+            if len(kids) == 1 and kids[0].type == "spread_element":
+                inner = next(iter(self.children(kids[0])), None)
+                return self._declared_type_node(inner, position)
             return None
         if node.type in {
             "parenthesized_expression", "non_null_expression",
