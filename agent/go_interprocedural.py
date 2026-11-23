@@ -1843,7 +1843,9 @@ class _Builder:
                 # itself during eval — its inner identifiers are
                 # captures, not elements.
                 continue
-            if el.type == "selector_expression" and not in_key:
+            if el.type == "selector_expression":
+                if in_key:
+                    continue
                 source_ids = self._func_field_value_record_sources(
                     el,
                     params,

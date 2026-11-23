@@ -50427,6 +50427,7 @@ def test_func_field_values_in_func_collection_literals(go_types_helper):
             "package p\n"
             "type S struct { F func() int64 }\n"
             "type W struct { F func() }\n"
+            "type Row struct { K int }\n"
             "func (S) Run() int64 { return 0 }\n"
             "func (S) Key() int { return 0 }\n"
             "func ReadSliceLiteral(x, y int64) int64 {\n"
@@ -50454,6 +50455,12 @@ def test_func_field_values_in_func_collection_literals(go_types_helper):
             "\tv := y; s := S{F: func() int64 { return v }}\n"
             "\tfs := []map[int]func() int64{{s.Key(): s.F}}\n"
             "\tv = x; return fs[0][0]()\n"
+            "}\n"
+            "func KeyIndexDoesNotAdoptRecordsFromKey(x, y int64) int64 {\n"
+            "\ts := S{F: func() int64 { return 0 }}; u := y\n"
+            "\tidx := func() int { return int(u) }; rows := []Row{{K: 0}}\n"
+            "\tfs := []map[int]func() int64{{rows[idx()].K: s.F}}\n"
+            "\tu = x; return fs[0][0]()\n"
             "}\n"
             "func ReadTopLevelKeyLiteral(x, y int64) int64 {\n"
             "\tv := y; s := S{F: func() int64 { return v }}\n"
@@ -50544,6 +50551,7 @@ def test_func_field_values_in_func_collection_literals(go_types_helper):
         "ReadNestedSliceLiteral": frozenset({0, 1}),
         "ReadNestedSliceMapLiteral": frozenset({0, 1}),
         "ReadNestedKeyLiteral": frozenset({0, 1}),
+        "KeyIndexDoesNotAdoptRecordsFromKey": frozenset({1}),
         "ReadTopLevelKeyLiteral": frozenset({0, 1}),
         "ReadStructElementLiteral": frozenset({0, 1}),
         "ReadIndexedStructElementLiteral": frozenset({0, 1, 2}),
