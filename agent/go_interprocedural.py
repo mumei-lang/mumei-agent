@@ -1833,17 +1833,17 @@ class _Builder:
                         # `[]func{1: a, b}` puts `b` at index 2.
                         next_index = int(key_slot[2:]) + 1
                 if value_node is not None:
-                    stack.append((value_node, slot))
+                    stack.append((value_node, slot, False))
             else:
-                stack.append((element, slot))
+                stack.append((element, slot, False))
         while stack:
-            el, slot_key = stack.pop()
+            el, slot_key, in_key = stack.pop()
             if el.type == "func_literal":
                 # A literal element records under the container
                 # itself during eval — its inner identifiers are
                 # captures, not elements.
                 continue
-            if el.type == "selector_expression":
+            if el.type == "selector_expression" and not in_key:
                 source_ids = self._func_field_value_record_sources(
                     el,
                     params,
@@ -1902,7 +1902,15 @@ class _Builder:
             child_slot = (
                 slot_key if el.type == "literal_element" else None
             )
-            stack.extend((c, child_slot) for c in el.children)
+            key_node = (
+                el.child_by_field_name("key")
+                if el.type == "keyed_element"
+                else None
+            )
+            stack.extend(
+                (c, child_slot, in_key or c == key_node)
+                for c in el.children
+            )
 
     def _adopt_element_records(self, src: str, bound_id: str) -> None:
         """Union one func value's captures and write targets into a

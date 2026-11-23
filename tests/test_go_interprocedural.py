@@ -50428,6 +50428,7 @@ def test_func_field_values_in_func_collection_literals(go_types_helper):
             "type S struct { F func() int64 }\n"
             "type W struct { F func() }\n"
             "func (S) Run() int64 { return 0 }\n"
+            "func (S) Key() int { return 0 }\n"
             "func ReadSliceLiteral(x, y int64) int64 {\n"
             "\tv := y; s := S{F: func() int64 { return v }}\n"
             "\tfs := []func() int64{s.F}; v = x; return fs[0]()\n"
@@ -50448,6 +50449,16 @@ def test_func_field_values_in_func_collection_literals(go_types_helper):
             "\tv := y; s := S{F: func() int64 { return v }}\n"
             "\tfs := []map[int]func() int64{{0: s.F}}\n"
             "\tv = x; return fs[0][0]()\n"
+            "}\n"
+            "func ReadNestedKeyLiteral(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\tfs := []map[int]func() int64{{s.Key(): s.F}}\n"
+            "\tv = x; return fs[0][0]()\n"
+            "}\n"
+            "func ReadTopLevelKeyLiteral(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\tm := map[int]func() int64{s.Key(): s.F}\n"
+            "\tv = x; return m[0]()\n"
             "}\n"
             "func ReadStructElementLiteral(x, y int64) int64 {\n"
             "\tv := y\n"
@@ -50492,6 +50503,18 @@ def test_func_field_values_in_func_collection_literals(go_types_helper):
             "\tg := s.F; fs := []func() int64{g}\n"
             "\tv = x; return fs[0]()\n"
             "}\n"
+            "func SimultaneousRead(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\tg := func() int64 { return 0 }; var fs []func() int64\n"
+            "\tfs, s.F = []func() int64{s.F}, g\n"
+            "\tv = x; return fs[0]()\n"
+            "}\n"
+            "func SimultaneousWrite(x int64) int64 {\n"
+            "\tw := int64(0); s := W{F: func() { w = x }}\n"
+            "\tg := func() {}; var fs []func()\n"
+            "\tfs, s.F = []func(){s.F}, g\n"
+            "\tfs[0](); return w\n"
+            "}\n"
             "func ClosedMethodValue(x, y int64) int64 {\n"
             "\tv := y; s := S{F: func() int64 { return v }}\n"
             "\tfs := []func() int64{s.Run}; v = x; return fs[0]()\n"
@@ -50520,6 +50543,8 @@ def test_func_field_values_in_func_collection_literals(go_types_helper):
         "ReadMapLiteral": frozenset({0, 1}),
         "ReadNestedSliceLiteral": frozenset({0, 1}),
         "ReadNestedSliceMapLiteral": frozenset({0, 1}),
+        "ReadNestedKeyLiteral": frozenset({0, 1}),
+        "ReadTopLevelKeyLiteral": frozenset({0, 1}),
         "ReadStructElementLiteral": frozenset({0, 1}),
         "ReadIndexedStructElementLiteral": frozenset({0, 1, 2}),
         "WriteSliceLiteral": frozenset({0}),
@@ -50529,6 +50554,8 @@ def test_func_field_values_in_func_collection_literals(go_types_helper):
         "StoreNestedSliceElement": frozenset({0, 1}),
         "AppendElement": frozenset({0, 1}),
         "BoundIdentifier": frozenset({0, 1}),
+        "SimultaneousRead": frozenset({0, 1}),
+        "SimultaneousWrite": frozenset({0}),
     }
     for function_name, dependencies in expected.items():
         result = named_package(files, snapshot, summaries, function_name)
