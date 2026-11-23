@@ -3074,13 +3074,17 @@ class _RustBindings:
                             spelled_pos = inner_pos
         spelled_args = value_args or ""
         inner_match = re.fullmatch(
-            r"[A-Za-z_][\w:]*\s*<([\s\S]*)>", spelled_args.strip()
+            r"([A-Za-z_][\w:]*)\s*<([\s\S]*)>", spelled_args.strip()
         )
-        if inner_match is not None:
-            # A spelled `Result<Ref<P>, BorrowError>` receiver
-            # carries the whole type in its args — split the
-            # inner list.
-            spelled_args = inner_match.group(1)
+        if inner_match is not None and self._normalize_identifier(
+            inner_match.group(1).split("::")[-1]
+        ) in heads:
+            # A spelled `Result<Ref<P>, BorrowError>`/`Option<W<P>>`
+            # receiver carries the whole type in its args — split the
+            # inner list once. A payload arg like `W<P>` or
+            # `MutexGuard<P>, PoisonError<...>` is the arg list
+            # itself — peeling again drops `W`/`MutexGuard`.
+            spelled_args = inner_match.group(2)
         args = self._type_arg_list(spelled_args)
         if len(args) <= index:
             return None, None
