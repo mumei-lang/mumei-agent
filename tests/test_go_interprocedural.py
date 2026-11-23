@@ -27607,6 +27607,10 @@ def test_chan_chan_boundaries_stay_closed(go_types_helper):
         "\treturn 0\n}\n",
         "func F(p chan chan []int64) int64 {\n"
         "\tq := p\n\t_ = q\n\treturn 0\n}\n",
+        "type St struct{ C chan chan int64 }\n"
+        "func F() St {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\treturn St{C: cc}\n}\n",
         "func F() any {\n"
         "\tcc := make(chan chan int64, 1)\n"
         "\treturn cc\n}\n",
@@ -31346,6 +31350,12 @@ def test_value_struct_field_chan_chan_send_recv(go_types_helper):
     for name in ("FRecv", "FLit", "FLocalDonor"):
         assert results[name].available
         assert results[name].return_dependencies == frozenset({0})
+    # `w.C = cc` on a LOCAL struct is a header copy — the store
+    # records no external transfer. (The member identity is shared
+    # package-wide, so this function may still observe `unknown`
+    # effects once a sibling marks the member external via a
+    # parameter root — same summary-level conflation as the
+    # shared may-set.)
     # A param donor's queue is caller-visible — reads carry its
     # origin alongside the sent value's.
     for name in (

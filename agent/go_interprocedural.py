@@ -25364,7 +25364,7 @@ class _Builder:
                             if value_field_cc is not None:
                                 field_chan_chan_lhs[
                                     len(refs) - 1
-                                ] = value_field_cc[0]
+                                ] = value_field_cc
                     continue
                 # An imported member write — `lib.V = v`,
                 # `lib.VA[i] = v`, `lib.VS.f = v` — mutates package
@@ -28289,9 +28289,9 @@ class _Builder:
                         )
                         for token in tokens:
                             self.external_chan_locals.add(token)
-                member_cc = field_chan_chan_lhs.get(i)
+                member_cc_slot = field_chan_chan_lhs.get(i)
                 if (
-                    member_cc is not None
+                    member_cc_slot is not None
                     and i < len(rights)
                     and len(lefts) == len(rights)
                 ):
@@ -28299,6 +28299,7 @@ class _Builder:
                     # of-queues: init the member root and join it
                     # into the RHS's group so sends on either
                     # name reach reads on the other.
+                    member_cc, root_cc = member_cc_slot
                     self._local_chan_chan_member_init(member_cc)
                     donor_cc = field_chan_chan_roots.get(i)
                     cc_root = (
@@ -28321,9 +28322,11 @@ class _Builder:
                                     ),
                                     True,
                                 )
-                    if member_cc.id in self.local_chan_chans or (
-                        cc_root is not None
-                    ):
+                    if params is not None and root_cc.id in params:
+                        # Storing into a PARAM's field writes
+                        # caller memory — record the transfer.
+                        # A local struct's header copy is a
+                        # purely local op.
                         transfers.append(
                             CallTransfer(
                                 FileSpan(
