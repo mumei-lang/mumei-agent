@@ -7007,21 +7007,28 @@ fn f(v: Vec<P>) {
     assert _call(report, source, "q.qm()").target == qm.id
 
 
-def test_map_with_a_closure_stays_opaque():
+def test_map_with_identity_closure_keeps_the_payload():
     source = """
 struct P;
 impl P { fn pm(&self) {} }
-fn f(o: Option<P>) {
+fn f(o: Option<P>, u: Option<P>) {
     match o.map(|x| x) {
         Some(p) => p.pm(),
+        _ => {}
+    }
+    match u.map(|x| missing(x)) {
+        Some(q) => q.pm(),
         _ => {}
     }
 }
 """
     report = build_rust_bindings(source, pointer_width=64)
-    # The closure's return type is unwritten — the payload stays
-    # opaque rather than guessing.
-    assert _call(report, source, "p.pm()").target == ""
+    pm = _bindings(report, "pm", "associated_function")[0]
+    # `|x| x` passes the payload `P` straight through — `p.pm()`
+    # binds. An unwritten call body (`missing` resolves to nothing)
+    # stays opaque rather than guessing.
+    assert _call(report, source, "p.pm()").target == pm.id
+    assert _call(report, source, "q.pm()").target == ""
 
 
 def test_first_mut_yields_a_mut_borrowed_element():
@@ -10690,3 +10697,166 @@ fn f() {
     # field — `xs`'s `Vec<P>` was spelled at `v`'s annotation in
     # the caller's module.
     assert bound.get("xs[0].pm()") == pms[0].id
+
+
+def test_if_let_some_spelled_payload_elements_bind():
+    source = """
+mod m {
+    pub struct P;
+    impl P { pub fn pm(&self) {} }
+}
+fn f(o: Option<Vec<m::P>>) {
+    if let Some(v) = o { v[0].pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    # `v`'s payload keeps the whole `Vec<m::P>` spelling — the
+    # indexed element `v[0]` resolves `m::P`'s members.
+    assert _call(report, source, "v[0].pm()").target == pm.id
+
+
+def test_map_closure_result_keeps_the_payload_args():
+    source = """
+mod m {
+    pub struct P;
+    impl P { pub fn pm(&self) {} }
+    pub fn conv(a: P) -> P { a }
+    pub fn mo() -> Option<P> { Some(P) }
+}
+fn f(o: Option<Vec<m::P>>) {
+    let v = o.map(|a| a);
+    let w = m::mo().map(|a| a);
+    let x = m::mo().map(|a| m::conv(a));
+    v.unwrap()[0].pm();
+    w.unwrap().pm();
+    x.unwrap().pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `|a| a` passes the receiver's payload through; `|a| m::conv(a)`
+    # reads the named callee's return — both keep `m::P`'s scope.
+    assert bound.get("v.unwrap()[0].pm()") == pm.id
+    assert bound.get("w.unwrap().pm()") == pm.id
+    assert bound.get("x.unwrap().pm()") == pm.id
+
+
+def test_map_err_named_function_swaps_the_payload():
+    source = """
+mod m {
+    pub struct P;
+    pub struct E;
+    impl E { pub fn em(&self) {} }
+    pub fn ef(e: E) -> E { e }
+    pub fn mr() -> Result<P, E> { Ok(P) }
+}
+fn f() {
+    let r = m::mr().map_err(m::ef);
+    let s = m::mr().map_err(|e| e);
+    r.unwrap_err().em();
+    s.unwrap_err().em();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    em = _bindings(report, "em", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    assert bound.get("r.unwrap_err().em()") == em.id
+    assert bound.get("s.unwrap_err().em()") == em.id
+
+
+def test_vec_from_scoped_producers_resolve_elements():
+    source = """
+mod m {
+    pub struct P;
+    impl P { pub fn pm(&self) {} }
+    pub fn arr() -> [P; 2] { [P, P] }
+}
+fn f() {
+    let a = Vec::from([m::P, m::P]);
+    let b = Vec::from(m::arr());
+    a[0].pm();
+    b[0].pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    assert bound.get("a[0].pm()") == pm.id
+    assert bound.get("b[0].pm()") == pm.id
+
+
+def test_map_payload_stays_opaque_on_unannotated_receivers():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f() { Some(P).map(|p| p).unwrap().pm(); }
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    # `Some(P)` has no annotation to spell the payload from —
+    # the closure result must not guess (nor crash).
+    assert _call(
+        report, source, "Some(P).map(|p| p).unwrap().pm()"
+    ).target == ""
+
+
+def test_spelled_payload_slice_and_array_indexes_stay_spelled():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(o: Option<Vec<P>>, a: Option<Vec<[P; 2]>>) {
+    if let Some(v) = o { v[..].pm(); v[0..2].pm(); v[0].pm(); }
+    if let Some(w) = a { w[0].pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # A range index yields the container slice (`Vec<P>` spelled),
+    # and `[P; 2]` spells the array — neither resolves `P`'s
+    # members through the spelled-element path.
+    assert not bound.get("v[..].pm()")
+    assert not bound.get("v[0..2].pm()")
+    assert not bound.get("w[0].pm()")
+    assert bound.get("v[0].pm()") == pm.id
+
+
+def test_async_map_results_stay_future_payloads():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+async fn af(p: P) -> P { p }
+fn g(o: Option<P>) {
+    let x = o.map(|p| af(p));
+    let y = o.map(async |p| p);
+    x.unwrap().pm();
+    y.unwrap().pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # Both closures produce `Future<P>` — the awaited type `P`
+    # is not the stored payload.
+    assert not bound.get("x.unwrap().pm()")
+    assert not bound.get("y.unwrap().pm()")

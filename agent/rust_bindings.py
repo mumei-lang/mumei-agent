@@ -3853,6 +3853,62 @@ class _RustBindings:
         if (
             record is None
             and type_id is None
+            and impl_args is not None
+            and value is not None
+            and value.type == "index_expression"
+        ):
+            # `v[0]` on a spelled `Vec<P>` keeps the element `P` as
+            # spelled args with no resolved id — resolve the bare
+            # element name so `v[0].pm()` reaches `P`'s members. A
+            # range/slice index (`v[..]`, `v[a..b]`) or an array
+            # element (`[P; N]`) names a different shape and stays
+            # spelled — their container args are not `Head<Arg>`.
+            container = (
+                value.named_children[0] if value.named_children else None
+            )
+            container_args = (
+                None
+                if container is None
+                else self._receiver_type(container)[1]
+            )
+            whole = (
+                None
+                if container_args is None
+                else re.fullmatch(
+                    r"[A-Za-z_][\w:]*\s*<(.+)>",
+                    container_args.strip(),
+                    re.DOTALL,
+                )
+            )
+            spelled_element = impl_args.strip()
+            if (
+                whole is not None
+                and len(
+                    self._type_arg_list(whole.group(1).strip())
+                )
+                == 1
+                and re.fullmatch(r"[A-Za-z_][\w:]*", spelled_element)
+            ):
+                element_pair = self._spelled_type(
+                    spelled_element,
+                    self._receiver_annotation_position(container)
+                    or node.start_byte,
+                )
+                if element_pair[0] is not None:
+                    inner = self._member_record(
+                        element_pair[0],
+                        name,
+                        kinds,
+                        element_pair[1],
+                        node.start_byte,
+                        borrowed=self._receiver_ref_kind(value)
+                        == "shared",
+                    )
+                    if inner is not None:
+                        return inner, element_pair[0], element_pair[1]
+        if (
+            record is None
+            and type_id is None
             and "associated_function" in kinds
             and value is not None
             and value.type
@@ -4588,6 +4644,145 @@ class _RustBindings:
                                     payload,
                                 ),
                             )
+                if s_head == "Vec" and s_method == "from":
+                    # `Vec::from([p, p])`/`Vec::from(m::arr())` — the
+                    # produced `Vec` carries the argument's element
+                    # type. A produced `Option`/`Result` spelled head
+                    # is not an array source and stays opaque.
+                    args_node = node.child_by_field_name("arguments")
+                    first = (
+                        next(iter(self._children(args_node)), None)
+                        if args_node is not None
+                        else None
+                    )
+                    element = None
+                    elem_pos = node.start_byte
+                    home = None
+                    if first is not None:
+                        elem_pos = first.start_byte
+                        if first.type == "array_expression":
+                            items = [
+                                c
+                                for c in self._children(first)
+                                if "comment" not in c.type
+                            ]
+                            item = items[0] if items else None
+                            if (
+                                item is not None
+                                and item.type
+                                in {
+                                    "scoped_identifier",
+                                    "scoped_type_identifier",
+                                    "struct_expression",
+                                }
+                            ):
+                                element = self.text(item).strip()
+                                elem_pos = item.start_byte
+                            elif item is not None:
+                                item_id, item_args = self._receiver_type(
+                                    item
+                                )
+                                if item_id is not None:
+                                    irec = self.records.get(item_id)
+                                    path = (
+                                        None
+                                        if irec is None
+                                        else self._record_scope_path(
+                                            irec
+                                        )
+                                    )
+                                    if path is not None:
+                                        element = "crate::" + path
+                                elif (
+                                    item_args is not None
+                                    and item_args.strip()
+                                ):
+                                    element = item_args.strip()
+                                elem_pos = item.start_byte
+                        else:
+                            _, arg_args = self._receiver_type(first)
+                            spelled_arg = (arg_args or "").strip()
+                            if spelled_arg:
+                                bracketed = re.fullmatch(
+                                    r"(?:&\s*(?:'\w+\s+)?"
+                                    r"(?:mut\s+)?)?"
+                                    r"\[([\s\S]+?)\s*"
+                                    r"(?:;[\s\S]*)?\]",
+                                    spelled_arg,
+                                )
+                                generic = re.fullmatch(
+                                    r"[A-Za-z_][\w:]*\s*<([\s\S]+)>",
+                                    spelled_arg,
+                                )
+                                head_name = (
+                                    self._container_head_name(first)
+                                    or self._produced_head(first)
+                                )
+                                head_tail = (
+                                    None
+                                    if head_name is None
+                                    else head_name.rsplit("::", 1)[-1]
+                                )
+                                if bracketed is not None:
+                                    element = bracketed.group(
+                                        1
+                                    ).strip()
+                                elif generic is not None:
+                                    arg_parts = self._type_arg_list(
+                                        generic.group(1)
+                                    )
+                                    if len(arg_parts) == 1:
+                                        element = arg_parts[
+                                            0
+                                        ].strip()
+                                elif (
+                                    head_tail is None
+                                    or head_tail
+                                    in {
+                                        "Vec",
+                                        "VecDeque",
+                                        "LinkedList",
+                                        "HashSet",
+                                        "BTreeSet",
+                                        "BinaryHeap",
+                                    }
+                                ) and re.fullmatch(
+                                    r"[A-Za-z_][\w:]*"
+                                    r"(?:\s*<[\s\S]+>)?",
+                                    spelled_arg,
+                                ):
+                                    # `Vec::from(m::arr())` — `arr`'s
+                                    # `-> [P; 2]` already spelled the
+                                    # element `P`; a declared
+                                    # `Vec<P>` keeps `P` as args.
+                                    element = spelled_arg
+                            if first.type == "call_expression":
+                                home = self._call_member(first)
+                            ann = self._receiver_annotation_position(
+                                first
+                            )
+                            if ann is not None:
+                                elem_pos = ann
+                    if element is not None:
+                        pushed_home = False
+                        if home is not None and (
+                            home.home_scope is not None
+                        ):
+                            self.scopes.append(home.home_scope)
+                            pushed_home = True
+                        try:
+                            qualified_element = (
+                                self._qualified_spelling(
+                                    element, elem_pos
+                                )
+                            )
+                        finally:
+                            if pushed_home:
+                                self.scopes.pop()
+                        return (
+                            None,
+                            "Vec<{}>".format(qualified_element),
+                        )
             if member is None:
                 field = (
                     callee.child_by_field_name("field")
@@ -7514,6 +7709,33 @@ class _RustBindings:
                 return False
         return True
 
+    def _call_member(self, call: Any) -> "_Record | None":
+        """The function/method record a call resolves to —
+        identifier, scoped path or field callee."""
+        callee = call.child_by_field_name("function")
+        inner = None if callee is None else self._callee(callee)
+        if inner is not None and inner.type == "generic_function":
+            inner = inner.child_by_field_name("function")
+        if inner is None:
+            return None
+        if inner.type == "identifier":
+            return self._through_import(
+                self._lookup(
+                    self._normalize_identifier(self.text(inner)),
+                    inner.start_byte,
+                    "value",
+                ),
+                inner.start_byte,
+                "value",
+            )
+        if inner.type in {"scoped_identifier", "scoped_type_identifier"}:
+            return self._scoped_member(inner)[0]
+        if inner.type == "field_expression":
+            return self._field_member_typed(
+                inner, ("associated_function",)
+            )[0]
+        return None
+
     def _fn_return_payload(self, call: Any) -> "str | None":
         """Payload spelling for `o.map(f)`/`o.and_then(f)`/`o.or_else(f)`
         /`o.map_or(_, f)`/`o.map_or_else(_, f)`/`r.map_err(f)` — `f`
@@ -7544,44 +7766,144 @@ class _RustBindings:
             if args
             else None
         )
-        if target is None or target.type != "identifier":
+        if target is None:
             return None
-        record = self._through_import(
-            self._lookup(
-                self._normalize_identifier(self.text(target)),
-                target.start_byte,
-                "value",
-            ),
-            target.start_byte,
-            "value",
-        )
-        if (
-            record is None
-            or record.binding.kind
-            not in {"function", "associated_function"}
-            or record.type_node is None
-        ):
-            return None
-        if record.is_async:
-            # `async fn f() -> U` returns a `Future<U>` — `o.map(f)`
-            # stores the future, not `U`.
-            return None
-        ret = (
-            record.type_node.child_by_field_name("return_type")
-            or record.type_node
-        )
-        text = self.text(ret).strip()
+        record = None
+        ret_pos: "int | None" = None
+        if target.type == "closure_expression":
+            if any(c.type == "async" for c in target.children):
+                # `async |a| ...` stores a `Future<U>` — `U`'s
+                # spelling would misresolve the stored payload.
+                return None
+            body = target.child_by_field_name("body")
+            params = target.child_by_field_name("parameters")
+            while (
+                body is not None
+                and body.type == "parenthesized_expression"
+            ):
+                body = next(iter(self._children(body)), None)
+            param_names = (
+                [
+                    self.text(param).split(":")[0].strip()
+                    for param in params.named_children
+                    if "comment" not in param.type
+                ]
+                if params is not None
+                else []
+            )
+            if body is None:
+                return None
+            if (
+                body.type == "identifier"
+                and self.text(body).strip() in param_names
+            ):
+                # `|a| a` — the payload passes through unchanged.
+                recv_node = call.child_by_field_name(
+                    "function"
+                ).child_by_field_name("value")
+                receiver = (
+                    (None, None)
+                    if recv_node is None
+                    else self._receiver_type(recv_node)
+                )
+                parts = self._type_arg_list(
+                    (receiver[1] or "").strip()
+                )
+                if not parts:
+                    return None
+                text = (
+                    parts[-1] if method == "map_err" else parts[0]
+                ).strip()
+                ret_pos = (
+                    self._receiver_annotation_position(recv_node)
+                    or call.start_byte
+                )
+                if recv_node is not None and (
+                    recv_node.type == "call_expression"
+                ):
+                    # `m::mo().map(|a| a)` — the spelled `P` was
+                    # written in `mo`'s return annotation, so it
+                    # resolves in `mo`'s module scope, not this
+                    # call's.
+                    producer = self._call_member(recv_node)
+                    if producer is not None and (
+                        producer.type_node is not None
+                    ):
+                        record = producer
+                        ret_pos = producer.type_node.start_byte
+            else:
+                member = None
+                if body.type == "call_expression":
+                    member = self._call_member(body)
+                if member is not None and member.is_async:
+                    # `|a| af(a)` stores `Future<U>` — `af`'s `-> U`
+                    # is the awaited type, not the payload.
+                    return None
+                if (
+                    member is not None
+                    and member.binding.kind
+                    in {"function", "associated_function"}
+                    and member.type_node is not None
+                ):
+                    ret = (
+                        member.type_node.child_by_field_name(
+                            "return_type"
+                        )
+                        or member.type_node
+                    )
+                    text = self.text(ret).strip()
+                    record = member
+                    ret_pos = ret.start_byte
+                else:
+                    spelled_body = self._expr_type_spelling(body)
+                    if spelled_body is None:
+                        return None
+                    text = spelled_body.strip()
+                    ret_pos = body.start_byte
+        else:
+            if target.type == "identifier":
+                record = self._through_import(
+                    self._lookup(
+                        self._normalize_identifier(self.text(target)),
+                        target.start_byte,
+                        "value",
+                    ),
+                    target.start_byte,
+                    "value",
+                )
+            elif target.type in {
+                "scoped_identifier",
+                "scoped_type_identifier",
+            }:
+                record, _ = self._scoped_member(target)
+            if (
+                record is None
+                or record.binding.kind
+                not in {"function", "associated_function"}
+                or record.type_node is None
+            ):
+                return None
+            if record.is_async:
+                # `async fn f() -> U` returns a `Future<U>` —
+                # `o.map(f)` stores the future, not `U`.
+                return None
+            ret = (
+                record.type_node.child_by_field_name("return_type")
+                or record.type_node
+            )
+            text = self.text(ret).strip()
+            ret_pos = ret.start_byte
         if method in {"and_then", "or_else", "find_map"}:
             wrap = re.fullmatch(r"(?:Option|Result)\s*<(.+)>", text)
             if wrap is None:
                 return None
             text = self._type_arg_list(wrap.group(1))[0].strip()
         pushed = False
-        if record.home_scope is not None:
+        if record is not None and record.home_scope is not None:
             self.scopes.append(record.home_scope)
             pushed = True
         try:
-            qualified = self._qualified_spelling(text, ret.start_byte)
+            qualified = self._qualified_spelling(text, ret_pos)
             if method == "map_err":
                 # `Result<P, E>` — replace the error arg with `f`'s
                 # return while the ok payload stays.
@@ -7609,7 +7931,7 @@ class _RustBindings:
                 r"\b(?:[A-Za-z_]\w*::)+[A-Za-z_]\w*", "", qualified
             )
             if not self._spelling_scope_stable(
-                bare, ret.start_byte, call.start_byte
+                bare, ret_pos, call.start_byte
             ):
                 # An unqualifiable name (a generic parameter of `f`,
                 # a function-local type) would re-resolve to a
