@@ -2113,7 +2113,10 @@ class _Walker:
         if not statement.condition and not self._contains_break_statement(
             statement.body
         ):
-            return after, terminated or "loop"
+            # A ``continue`` belongs to this loop and must not escape it.
+            return after, (
+                "loop" if terminated in {"", "continue"} else terminated
+            )
         return after, ""
 
     def _loop_exit(

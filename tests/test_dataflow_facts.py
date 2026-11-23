@@ -2699,3 +2699,22 @@ def test_stacked_label_does_not_scope_the_inner_statement() -> None:
     facts = flow.facts_for_expression("1 / x")
     assert facts is not None
     assert facts.consts.get("x") == 0
+
+
+def test_continue_inside_conditionless_loop_does_not_escape() -> None:
+    body = (
+        "for _, v := range xs {\n"
+        "    for {\n"
+        "        if v == 0 {\n"
+        "            return 0\n"
+        "        }\n"
+        "        continue\n"
+        "    }\n"
+        "}\n"
+        "if d == 0 {\n"
+        "    return 0\n"
+        "}\n"
+        "return n / d\n"
+    )
+    facts = _facts(body, "n / d", param_names={"n", "d", "xs"})
+    assert "d" in facts.nonzero
