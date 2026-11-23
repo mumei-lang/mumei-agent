@@ -2169,6 +2169,149 @@ class _Builder:
             return ()
         return tuple(dict.fromkeys(source_ids))
 
+    def _elided_literal_value_kind(self, literal: Any) -> str | None:
+        value = self._strip_parens(literal)
+        if value is None or value.type != "literal_value":
+            return None
+        current = value
+        nested_levels = 0
+        while (
+            current.parent is not None
+            and current.parent.type
+            in {
+                "keyed_element",
+                "literal_element",
+                "literal_value",
+                "parenthesized_expression",
+            }
+        ):
+            if current.parent.type == "literal_value":
+                nested_levels += 1
+            current = current.parent
+        outer = current.parent
+        if outer is None or outer.type != "composite_literal":
+            return None
+        type_node = outer.child_by_field_name("type")
+        type_file = self.current_file
+        if type_node is None:
+            return None
+        for _ in range(nested_levels):
+            kind, type_node, type_file = self._local_literal_type_element(
+                type_node, type_file
+            )
+            if kind not in {"slice", "array", "map"}:
+                return kind
+            if type_node is None:
+                return None
+        kind, _element, _file = self._local_literal_type_element(
+            type_node, type_file
+        )
+        return kind
+
+    def _local_literal_type_element(
+        self, type_node: Any, type_file: int
+    ) -> tuple[str | None, Any | None, int]:
+        seen: set[str] = set()
+        current = type_node
+        file = type_file
+        for _ in range(8):
+            while (
+                current is not None
+                and current.type == "parenthesized_type"
+            ):
+                current = next(
+                    (
+                        child
+                        for child in current.named_children
+                        if child.type != "comment"
+                    ),
+                    None,
+                )
+            if current is None:
+                return None, None, file
+            if current.type in {"slice_type", "array_type"}:
+                return (
+                    "slice"
+                    if current.type == "slice_type"
+                    else "array",
+                    current.child_by_field_name("element"),
+                    file,
+                )
+            if current.type == "map_type":
+                return "map", current.child_by_field_name("value"), file
+            if current.type == "pointer_type":
+                return "pointer", None, file
+            if current.type == "struct_type":
+                return "struct", None, file
+            if current.type != "type_identifier":
+                return None, None, file
+            ref = self.references.get(
+                (file, current.start_byte, current.end_byte)
+            )
+            binding = (
+                self.bindings.get(ref.binding_id)
+                if ref is not None
+                and ref.kind != "import"
+                and ref.binding_id
+                else None
+            )
+            if (
+                binding is None
+                or binding.kind != "type"
+                or binding.type is None
+            ):
+                return None, None, file
+            kind = binding.type.kind
+            if kind not in {"slice", "array", "map"}:
+                return kind, None, file
+            if binding.id in seen or getattr(
+                binding.type, "has_type_args", False
+            ):
+                return None, None, file
+            seen.add(binding.id)
+            self.pinned.add(binding.type.type_id or binding.id)
+            declared = self._local_type_declaration_type_node(binding)
+            if declared is None:
+                return None, None, file
+            current, file = declared
+        return None, None, file
+
+    def _literal_value_carries_func_records(
+        self,
+        literal: Any,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+        captures: dict[str, frozenset[str]],
+        writes: dict[str, frozenset[str]],
+        star: set[str],
+        calls: set[str],
+        pointee: set[str],
+    ) -> bool:
+        pending = [literal]
+        while pending:
+            current = pending.pop()
+            if current.type == "func_literal":
+                return True
+            if current.type in {"identifier", "selector_expression"}:
+                try:
+                    source_ids = self._func_field_value_record_sources(
+                        current,
+                        params,
+                        locals_,
+                        captures,
+                        writes,
+                        star,
+                        calls,
+                        pointee,
+                        include_receiver=True,
+                    )
+                except _Unsupported:
+                    return True
+                if source_ids:
+                    return True
+            pending.extend(_children(current))
+        return False
+
     def _assignment_composite_record_snapshot(
         self, literal: Any
     ) -> dict[str, Any] | None:
@@ -5468,13 +5611,27 @@ class _Builder:
             value = self._strip_parens(value)
             if value is None:
                 continue
-            if (
-                value.type == "literal_value"
-                and self._local_struct_literal_fact(value) is not None
-            ):
-                self._adopt_struct_composite_closure_records(
-                    value, params, locals_, records_before
-                )
+            if value.type == "literal_value":
+                inferred = self._local_struct_literal_fact(value)
+                if inferred is not None or self._elided_literal_value_kind(
+                    value
+                ) in {"slice", "array"}:
+                    self._adopt_struct_composite_closure_records(
+                        value, params, locals_, records_before
+                    )
+                elif self._literal_value_carries_func_records(
+                    value,
+                    params,
+                    locals_,
+                    captures,
+                    writes,
+                    star,
+                    calls,
+                    pointee,
+                ):
+                    raise _Unsupported(
+                        "unsupported_expression", _span(value)
+                    )
                 continue
             ref = (
                 self.references.get(self.node_key(value))

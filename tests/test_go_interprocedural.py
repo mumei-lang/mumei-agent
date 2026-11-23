@@ -56707,6 +56707,18 @@ def test_cross_type_struct_function_field_value_copies(go_types_helper):
             "\tv := y; ss := [][]S{{{F: func() int64 { return v }}}}\n"
             "\tvar o O; o.F = ss[0][0].F; v = x; return o.F()\n"
             "}\n"
+            "func NestedSliceField(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\tos := [][]O{{{F: s.F}}}; v = x; return os[0][0].F()\n"
+            "}\n"
+            "func NestedSliceWrite(x int64) int64 {\n"
+            "\tw := int64(0); s := W{F: func() { w = x }}\n"
+            "\tos := [][]OW{{{F: s.F}}}; os[0][0].F(); return w\n"
+            "}\n"
+            "func NestedArrayField(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\tos := [2][1]O{{{F: s.F}}}; v = x; return os[0][0].F()\n"
+            "}\n"
             "func NestedField(x, y int64) int64 {\n"
             "\tv := y; s := S{In: I{F: func() int64 { return v }}}\n"
             "\to := O{F: s.In.F}; v = x; return o.F()\n"
@@ -56763,6 +56775,15 @@ def test_cross_type_struct_function_field_value_copies(go_types_helper):
             "\tv := y; ps := [][]*S{{&S{F: func() int64 { return v }}}}\n"
             "\to := O{F: ps[0][0].F}; v = x; return o.F()\n"
             "}\n"
+            "func NestedPointerLiteral(x, y int64) int64 {\n"
+            "\tv := y; s := O{F: func() int64 { return v }}\n"
+            "\tos := [][]*O{{{F: s.F}}}; v = x; return os[0][0].F()\n"
+            "}\n"
+            "func NestedMapLiteral(x, y int64) int64 {\n"
+            "\tv := y; s := O{F: func() int64 { return v }}\n"
+            "\tos := []map[int]O{{0: {F: s.F}}}\n"
+            "\tv = x; return os[0][0].F()\n"
+            "}\n"
             "func ChannelSend(x, y int64) int64 {\n"
             "\tv := y; s := S{F: func() int64 { return v }}\n"
             "\tch := make(chan func() int64, 1); ch <- s.F\n"
@@ -56780,6 +56801,9 @@ def test_cross_type_struct_function_field_value_copies(go_types_helper):
         "OOCopy": frozenset({0, 1}),
         "ElemLit": frozenset({0, 1}),
         "ElemAssign": frozenset({0, 1}),
+        "NestedSliceField": frozenset({0, 1}),
+        "NestedSliceWrite": frozenset({0}),
+        "NestedArrayField": frozenset({0, 1}),
         "NestedField": frozenset({0, 1}),
         "BoundFieldValue": frozenset({0, 1}),
         "IndexedField": frozenset({0, 1, 2}),
@@ -56805,6 +56829,8 @@ def test_cross_type_struct_function_field_value_copies(go_types_helper):
         "PointerElement",
         "PointerToSlice",
         "NestedPointerElement",
+        "NestedPointerLiteral",
+        "NestedMapLiteral",
         "ChannelSend",
     ):
         result = named_package(files, snapshot, summaries, function_name)
