@@ -56141,8 +56141,9 @@ def test_map_element_function_field_closures(go_types_helper):
     declarations = (
         "type S struct { F func() int64 }\n"
         "type A struct { F func() int64; B []int64 }\n"
-        "type W struct { M map[int]S }\n"
+        "type W struct { M map[int]S; MM map[int]map[int]S }\n"
         "func ap(cb func() int64) int64 { return cb() }\n"
+        "func use(e S) int64 { return e.F() }\n"
         "func FLiteral(x, y int64) int64 {\n"
         "\tv := y; m := map[int]S{0: {F: func() int64 { return v }}}\n"
         "\tv = x; return m[0].F()\n"
@@ -56185,6 +56186,14 @@ def test_map_element_function_field_closures(go_types_helper):
         "\tv := y; m := map[int]A{0: {F: func() int64 { return v }}}\n"
         "\te := m[0]; v = x; return e.F()\n"
         "}\n"
+        "func FMapFieldArg(x, y int64) int64 {\n"
+        "\tv := y; s := W{M: map[int]S{0: {F: func() int64 { return v }}}}\n"
+        "\tv = x; return use(s.M[0])\n"
+        "}\n"
+        "func FNestedMapFieldArg(x, y int64) int64 {\n"
+        "\tv := y; s := W{MM: map[int]map[int]S{0: {1: {F: func() int64 { return v }}}}}\n"
+        "\tv = x; return use(s.MM[0][1])\n"
+        "}\n"
     )
     files = {"a.go": "package p\n" + declarations}
     snapshot = _snapshot_for(go_types_helper, files)
@@ -56199,6 +56208,7 @@ def test_map_element_function_field_closures(go_types_helper):
         "FStructField": frozenset({0, 1}),
         "FKeyedVar": frozenset({0, 1}),
         "FMethodValue": frozenset({0, 1}),
+        "FMapFieldArg": frozenset({0, 1}),
     }
     for function_name, dependencies in expected.items():
         result = named_package(
@@ -56216,6 +56226,39 @@ def test_map_element_function_field_closures(go_types_helper):
         files, snapshot, summaries, "FSliceFieldElem"
     )
     assert not alias_elem.available, alias_elem.gaps
+    # Elements of a nested map stay closed: `s.MM[0][1]` reads the
+    # element of a copied inner map, the multi-level boundary the
+    # single-index frontier excludes.
+    nested_map_elem = named_package(
+        files, snapshot, summaries, "FNestedMapFieldArg"
+    )
+    assert not nested_map_elem.available, nested_map_elem.gaps
+
+
+def test_map_element_value_fact_stops_at_container_elements(
+    go_types_helper,
+):
+    del go_types_helper  # pure fact shapes — no compiler needed
+    struct_fact = GoType("named", "S", 0, None, "p.S")
+    slice_elem = GoType(
+        "slice", "", 0, None, "", elem=struct_fact
+    )
+    map_of_struct = GoType(
+        "map", "", 0, None, "", elem=struct_fact, key=None
+    )
+    map_of_slice = GoType(
+        "map", "", 0, None, "", elem=slice_elem, key=None
+    )
+    value_fact = ip._Builder._struct_collection_element_value_fact
+    assert value_fact(None, map_of_struct) == (struct_fact, True)
+    assert value_fact(None, slice_elem) == (struct_fact, True)
+    # A map whose element is itself a container leaves the single-index
+    # frontier — `map[K][]S` elements alias shared slice headers.
+    assert value_fact(None, map_of_slice) == (slice_elem, False)
+    nested_map = GoType(
+        "map", "", 0, None, "", elem=map_of_struct, key=None
+    )
+    assert value_fact(None, nested_map) == (map_of_struct, False)
 
 
 def test_alias_free_slice_array_struct_element_copies(go_types_helper):

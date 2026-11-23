@@ -15587,9 +15587,21 @@ class _Builder:
         while current.kind in {"slice", "array"} or (
             first and current.kind == "map"
         ):
+            was_map = first and current.kind == "map"
             first = False
             element = getattr(current, "elem", None)
             if element is None or element.kind == "pointer":
+                return element, False
+            if was_map and element.kind in {
+                "slice",
+                "array",
+                "map",
+                "chan",
+            }:
+                # A peeled map only reaches the value frontier when its
+                # element is the struct itself — `map[K][]S` elements are
+                # shared slice headers (`m[k][i].F = x` compiles), matching
+                # the closed multi-level index boundary.
                 return element, False
             current = element
         if current.kind in {"map", "chan", "pointer"}:
@@ -16037,7 +16049,9 @@ class _Builder:
         )
         if record_source_id is None and value.type == "index_expression":
             root = value
+            index_depth = 0
             while root is not None and root.type == "index_expression":
+                index_depth += 1
                 root = self._strip_parens(
                     root.child_by_field_name("operand")
                 )
@@ -16059,7 +16073,10 @@ class _Builder:
                     is not None
                     and root_member is not None
                     and getattr(root_member.type, "kind", None)
-                    in {"slice", "array"}
+                    in (
+                        {"slice", "array"}
+                        | ({"map"} if index_depth == 1 else set())
+                    )
                     and not self._scalar_container_field_pointer_crossing(
                         root
                     )
