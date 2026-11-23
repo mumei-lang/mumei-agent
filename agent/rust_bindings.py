@@ -5246,10 +5246,38 @@ class _RustBindings:
             inner_receiver = inner_callee.child_by_field_name("value")
             if inner_method is None or inner_receiver is None:
                 return _UNKNOWN, None
-            if (
-                self._normalize_identifier(self.text(inner_method))
-                not in _ITER_ELEMENT_METHODS
-            ):
+            inner_name = self._normalize_identifier(
+                self.text(inner_method)
+            )
+            if inner_name in _SET_ALGEBRA_METHODS:
+                # `a.union(&b).enumerate()` yields (usize, &P) pairs
+                # — the element is the left set's arg 0 (the hasher
+                # arg on `HashSet<P, H>` is not the element).
+                if self._container_head_name(inner_receiver) not in (
+                    _SET_CONTAINER_NAMES
+                ):
+                    return _UNKNOWN, None
+                _set_container, inner_args = self._receiver_type(
+                    inner_receiver
+                )
+                if inner_args is None:
+                    return _UNKNOWN, None
+                spelled = next(
+                    iter(self._type_arg_list(inner_args.strip())), ""
+                ).strip()
+                if not spelled:
+                    return _UNKNOWN, None
+                return _UNKNOWN, f"(usize, {spelled})"
+            if inner_name in _MAP_RANGE_METHODS:
+                # `m.range(..).enumerate()` yields the (usize, pair)
+                # — the pair spelling comes from the range recipe.
+                _range_fact, range_rest = self._iterator_method_element(
+                    receiver
+                )
+                if range_rest is None:
+                    return _UNKNOWN, None
+                return _UNKNOWN, f"(usize, {range_rest.strip()})"
+            if inner_name not in _ITER_ELEMENT_METHODS:
                 return _UNKNOWN, None
             if (
                 self._field_member(
