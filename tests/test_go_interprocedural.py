@@ -49553,6 +49553,104 @@ def test_func_result_capture_updated_before_return(go_types_helper):
     assert f.available and f.return_dependencies == frozenset({0})
 
 
+def test_bare_return_named_closure_result_resolves_current_captures(
+    go_types_helper,
+):
+    files = {
+        "a.go": (
+            "package p\n"
+            "type S struct { F func() int64 }\n"
+            "func G_lit(x, y int64) (r func() int64) {\n"
+            "\tv := y; r = func() int64 { return v }; v = x; return\n"
+            "}\n"
+            "func F_lit(x, y int64) int64 { return G_lit(x, y)() }\n"
+            "func G_litexp(x, y int64) (r func() int64) {\n"
+            "\tv := y; r = func() int64 { return v }; v = x; return r\n"
+            "}\n"
+            "func F_litexp(x, y int64) int64 { return G_litexp(x, y)() }\n"
+            "func G_named(x, y int64) (r func() int64) {\n"
+            "\tv := y; g := func() int64 { return v }; r = g; v = x; return\n"
+            "}\n"
+            "func F_named(x, y int64) int64 { return G_named(x, y)() }\n"
+            "func G_namedexp(x, y int64) (r func() int64) {\n"
+            "\tv := y; g := func() int64 { return v }; r = g; v = x; return r\n"
+            "}\n"
+            "func F_namedexp(x, y int64) int64 { return G_namedexp(x, y)() }\n"
+            "func G_sf(x, y int64) (r func() int64) {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\tr = s.F; v = x; return\n"
+            "}\n"
+            "func F_sf(x, y int64) int64 { return G_sf(x, y)() }\n"
+            "func G_sfexp(x, y int64) (r func() int64) {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\tr = s.F; v = x; return r\n"
+            "}\n"
+            "func F_sfexp(x, y int64) int64 { return G_sfexp(x, y)() }\n"
+            "func G_multi(x, y int64) (r func() int64, n int64) {\n"
+            "\tv := y; r = func() int64 { return v }; v = x; return\n"
+            "}\n"
+            "func F_multi(x, y int64) int64 {\n"
+            "\tf, _ := G_multi(x, y); return f()\n"
+            "}\n"
+            "func G_multiexp(x, y int64) (r func() int64, n int64) {\n"
+            "\tv := y; r = func() int64 { return v }; v = x; return r, n\n"
+            "}\n"
+            "func F_multiexp(x, y int64) int64 {\n"
+            "\tf, _ := G_multiexp(x, y); return f()\n"
+            "}\n"
+            "func G_coll(x, y int64) (fs []func() int64) {\n"
+            "\tv := y; fs = []func() int64{func() int64 { return v }}\n"
+            "\tv = x; return\n"
+            "}\n"
+            "func F_coll(x, y int64) int64 { return G_coll(x, y)[0]() }\n"
+            "func G_collexp(x, y int64) (fs []func() int64) {\n"
+            "\tv := y; fs = []func() int64{func() int64 { return v }}\n"
+            "\tv = x; return fs\n"
+            "}\n"
+            "func F_collexp(x, y int64) int64 { return G_collexp(x, y)[0]() }\n"
+            "func G_wlit(x int64, w *int64) (r func()) {\n"
+            "\tr = func() { *w = x }; return\n"
+            "}\n"
+            "func F_wlit(x int64) int64 {\n"
+            "\tw := int64(0); G_wlit(x, &w)(); return w\n"
+            "}\n"
+            "func G_wlitexp(x int64, w *int64) (r func()) {\n"
+            "\tr = func() { *w = x }; return r\n"
+            "}\n"
+            "func F_wlitexp(x int64) int64 {\n"
+            "\tw := int64(0); G_wlitexp(x, &w)(); return w\n"
+            "}\n"
+        ),
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, {}),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    expected = {
+        "F_lit": frozenset({0}),
+        "F_litexp": frozenset({0}),
+        "F_named": frozenset({0}),
+        "F_namedexp": frozenset({0}),
+        "F_sf": frozenset({0, 1}),
+        "F_sfexp": frozenset({0, 1}),
+        "F_multi": frozenset({0}),
+        "F_multiexp": frozenset({0}),
+        "F_coll": frozenset({0, 1}),
+        "F_collexp": frozenset({0, 1}),
+        "F_wlit": frozenset({0}),
+        "F_wlitexp": frozenset({0}),
+    }
+    for function_name, dependencies in expected.items():
+        result = named_package(files, snapshot, summaries, function_name)
+        assert result.available, (function_name, result.gaps)
+        assert result.return_dependencies == dependencies, (
+            function_name,
+            result.return_dependencies,
+        )
+
+
 def test_func_result_captured_chan_send_after_bind(go_types_helper):
     # `f := mk(ch)` — the returned closure may capture `ch`, so the
     # queue escapes: `ch <- x` after the call broadcasts into the
