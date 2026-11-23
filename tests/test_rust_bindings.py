@@ -9686,10 +9686,12 @@ fn f(v: Vec<P>) {
         raw[c.span.start:c.span.end].decode(): c.target
         for c in report.calls
     }
-    # `impl Rem for ChunksExact<P>` hides the std `into_remainder`
-    # — its `&[R]` return means `q` is neither `P` nor `R` here.
+    # `impl Rem for ChunksExact<P>` owns `into_remainder` (std lacks
+    # it there) — its declared `&[R]` return means `q` iterates `R`,
+    # never the source Vec's `P`.
+    rm = _bindings(report, "rm", "associated_function")[0]
+    assert bound.get("q.rm()") == rm.id
     assert not bound.get("q.pm()")
-    assert not bound.get("q.rm()")
 
 
 def test_turbofish_sort_by_key_types_the_closure_param():
