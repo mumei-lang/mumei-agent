@@ -2824,6 +2824,29 @@ its body is also non-fallthrough (reported as `"loop"` when no stronger
 termination applies), so a path that only leaves it by a backward jump
 or return is not checked as an implicit return.
 
+### C05 dataflow issue corpus
+
+The labeled Go corpus measures per-category agreement for the dataflow
+issue checks:
+
+| Category | Matched | Missed | Unexpected |
+| --- | ---: | ---: | ---: |
+| `nil_map_write` | 2 | 0 | 0 |
+| `lock_held_at_return` | 1 | 0 | 1 |
+| `resource_leak` | 1 | 0 | 0 |
+| `uninitialized_use` | 4 | 0 | 0 |
+| `send_on_closed_channel` | 2 | 0 | 0 |
+| `close_nil_channel` | 1 | 0 | 0 |
+| `use_after_close` | 1 | 0 | 0 |
+| `unlock_of_unlocked` | 2 | 0 | 0 |
+| `double_lock` | 1 | 0 | 0 |
+
+The unexpected lock report is due to path-insensitive handling of repeated
+conditions in `locks.go`. These labels are corpus-declared expectations; the
+counts measure agreement on this corpus only, not soundness or completeness,
+and there is no single score. The corpus passes no contract outputs, so
+`contract_output_unassigned` is not measured here.
+
 ### C05 labeled flow-hint corpus
 
 The labeled Go corpus measures per-family agreement: `unassigned`
