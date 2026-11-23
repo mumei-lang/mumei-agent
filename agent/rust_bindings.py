@@ -326,6 +326,29 @@ _ITER_FN_ELEMENT_METHODS = frozenset(
     {"map", "flat_map", "filter_map", "map_while", "scan"}
 )
 _UNWRAP_ERR_METHODS = frozenset({"unwrap_err", "expect_err"})
+# Raw std iterators whose trailing generic arg is the item —
+# `Iter<P>`/`IntoIter<P>`/`Chunks<'a, P>` all end with `P`.
+_ITER_ITEM_ARG_HEADS = frozenset(
+    {
+        "Iter", "IterMut", "IntoIter",
+        "Chunks", "ChunksExact", "ChunksMut", "ChunksExactMut",
+        "RChunks", "RChunksExact", "RChunksMut", "RChunksExactMut",
+        "Windows", "Split", "SplitInclusive", "RSplit",
+        "SplitN", "RSplitN", "SplitAsciiWhitespace",
+        "SplitWhitespace", "Lines",
+    }
+)
+# Iterator adaptors whose first generic arg is the inner
+# iterator — `Peekable<I>`/`Cloned<I>` peel through `I`.
+# `Map`/`FlatMap`/`Enumerate`/`Zip` transform the item and stay
+# opaque.
+_ITER_INNER_ITER_HEADS = frozenset(
+    {
+        "Cloned", "Copied", "Fuse", "Inspect", "Peekable",
+        "Rev", "StepBy", "Take", "Skip", "Cycle",
+        "Filter", "SkipWhile", "TakeWhile", "Chain",
+    }
+)
 _TRY_HEADS = frozenset({"Option", "Result"})
 # Prelude constructors whose tuple payload position is fixed by the
 # container type — `Some(x)` binds `Option<T>`'s first arg, `Err(e)`
@@ -1439,6 +1462,35 @@ class _RustBindings:
                 current.append(ch)
         parts.append("".join(current))
         return [part.strip() for part in parts]
+
+    def _iterator_item(self, spelled: str) -> str:
+        """Peel a spelled std iterator type to its item — a
+        `Peekable<I>` receiver carries the iterator `I` as its
+        generic arg, but `peek()`/`next()` yield `I::Item`. Raw
+        iterators keep the item in the trailing arg (`Iter<P>`,
+        `Chunks<'a, P>`); adaptors lead with the inner iterator
+        (`Cloned<Iter<P>>`) and peel through it. Anything else —
+        or an unspellable arg — returns the input unchanged."""
+        current = spelled.strip()
+        peeled = False
+        for _ in range(4):
+            inner = re.fullmatch(
+                r"([A-Za-z_][\w:]*)\s*<([\s\S]+)>", current
+            )
+            if inner is None:
+                return current if peeled else spelled
+            head = self._normalize_identifier(
+                inner.group(1).split("::")[-1]
+            )
+            args = self._type_arg_list(inner.group(2))
+            if head in _ITER_ITEM_ARG_HEADS and args:
+                current = args[-1].strip()
+            elif head in _ITER_INNER_ITER_HEADS and args:
+                current = args[0].strip()
+            else:
+                return spelled
+            peeled = True
+        return current if peeled else spelled
 
     def _resolve_spelled_in_scope(
         self, spelled: str, scope: "_Scope | None", position: int
@@ -3212,19 +3264,36 @@ class _RustBindings:
                     and self.text(field).strip()
                     in _MAP_PAIR_METHODS | _MAP_BORROWED_PAIR_METHODS
                 )
+                option_head_value = (
+                    callee.child_by_field_name("value")
+                    if callee is not None
+                    else None
+                )
+                peekish = (
+                    field is not None
+                    and self.text(field).strip()
+                    in {
+                        "peek", "next_if", "next_if_eq",
+                        "next", "next_back",
+                    }
+                )
                 if field is not None and (
-                    receiver[1] is not None or map_pair
+                    receiver[1] is not None
+                    or map_pair
+                    or (
+                        peekish
+                        and self._container_head_name(
+                            option_head_value
+                        )
+                        in _ITER_INNER_ITER_HEADS
+                        | _ITER_ITEM_ARG_HEADS
+                    )
                 ):
                     option_head = _OPTION_HEAD_METHODS.get(
                         self.text(field).strip()
                     )
                 else:
                     option_head = None
-                option_head_value = (
-                    callee.child_by_field_name("value")
-                    if callee is not None
-                    else None
-                )
                 produced_head = None
                 if option_head is not None and option_head[1] is not None:
                     # `make().inspect(f)`/`o.filter(f).inspect(g)` —
@@ -3295,11 +3364,55 @@ class _RustBindings:
                         # element IS `&[P]` — never peeled either.
                         # Bare `[P; N]` args are an element spelling
                         # (`Vec<[P; 2]>`), never peeled.
-                        element = slice_args.group(1).strip()
+                        # `peek`/`next_if`/`next_if_eq` yield
+                        # `Option<&Item>` — on a `Peekable` over
+                        # `chunks` the item IS `&[P]`, spelled `&P`,
+                        # so the produced payload is `&&P`; `next`/
+                        # `next_back` yield `Option<Item>` → `&P`.
+                        if self.text(field).strip() in {
+                            "peek", "next_if", "next_if_eq",
+                        }:
+                            element = (
+                                "&"
+                                + slice_args.group(1).strip()
+                            )
+                        else:
+                            element = slice_args.group(1).strip()
                     else:
                         elements = self._type_arg_list(
                             receiver[1] or ""
                         )
+                        if (
+                            not elements
+                            and peekish
+                            and re.fullmatch(
+                                r"&\s*(?:'\w+\s+)?(?:mut\s+)?[\w:<>,()\[\]&\s]+",
+                                (receiver[1] or "").strip(),
+                            )
+                        ):
+                            # A spelled `&P` arg carries no `<>`
+                            # — `pk: v.chunks(n).peekable()` keeps
+                            # `&P` (the `&[P]` slice) as its element
+                            # spelling — use it whole so `pk.peek()`
+                            # yields `Option<&&P>`.
+                            elements = [receiver[1].strip()]
+                        if (
+                            not elements
+                            and option_head_value is not None
+                            and self.text(field).strip()
+                            in {
+                                "peek", "next_if", "next_if_eq",
+                                "next", "next_back",
+                            }
+                        ):
+                            # `it: Peekable<I>` is undeclared, so
+                            # `receiver[1]` is empty — recover the
+                            # spelled `I` from the annotation.
+                            spelled_recv = self._map_spelled_args(
+                                option_head_value
+                            )
+                            if spelled_recv is not None:
+                                elements = [spelled_recv]
                         index = option_head[2]
                         if (
                             self.text(field).strip() == "get"
@@ -3318,6 +3431,19 @@ class _RustBindings:
                             if -len(elements) <= index < len(elements)
                             else None
                         )
+                        if (
+                            element is not None
+                            and self.text(field).strip()
+                            in {
+                                "peek", "next_if", "next_if_eq",
+                                "next", "next_back",
+                            }
+                        ):
+                            # `Peekable<I>` carries the iterator `I`
+                            # as its generic arg — `it.peek()` yields
+                            # `Option<&I::Item>`, so peel a spelled
+                            # std iterator head to its item.
+                            element = self._iterator_item(element)
                         if (
                             element is not None
                             and self.text(field).strip() == "flatten"
@@ -9759,6 +9885,18 @@ class _RustBindings:
             # (`m::Option` on a custom type) keeps its type id —
             # member resolution matters more than the pattern pin.
             return [(None, payload)]
+        if (
+            payload.startswith("&&")
+            and re.fullmatch(
+                r"&+\s*(?:'\w+\s+)?(?:mut\s+)?[A-Za-z_\[][&\w:\s'\[\];,]*",
+                payload,
+            )
+        ):
+            # `Option<&&P>`/`Option<&&[P]>` — `Some(chunk)` on a
+            # peeked slice iterator spells `&&[P]`; peeling the
+            # outer borrow to `&P` (`&[P]`) lets `chunk[0]`
+            # yield `P` exactly like `for y in v.chunks(n)`.
+            return [(None, payload[1:])]
         if (
             type_id is None
             and inner_args

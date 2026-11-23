@@ -8047,6 +8047,9 @@ fn f(v: Vec<P>, h: std::collections::BinaryHeap<P>) {
     if let Some(c) = it.next_if_eq(&v[0]) { c.pm(); }
     if let Some(e) = v.iter().next_if(|x| true) { e.pm(); }
     if let Some(d) = h.peek() { d.pm(); }
+    let mut pk = v.chunks(2).peekable();
+    if let Some(chunk) = pk.peek() { chunk[0].pm(); }
+    while let Some(c2) = pk.next_if(|x| true) { c2[0].pm(); }
 }
 """
     report = build_rust_bindings(source, pointer_width=64)
@@ -8063,3 +8066,8 @@ fn f(v: Vec<P>, h: std::collections::BinaryHeap<P>) {
     assert bound.get("e.pm()") == pm.id
     # `BinaryHeap::peek` still spells `Option<&P>`.
     assert bound.get("d.pm()") == pm.id
+    # A `Peekable` over `chunks` carries `&[P]` items — `peek`/
+    # `next_if` yield `Option<&&[P]>` whose `Some(chunk)` spells
+    # `&[P]`, so `chunk[0]` still reads `P`.
+    assert bound.get("chunk[0].pm()") == pm.id
+    assert bound.get("c2[0].pm()") == pm.id
