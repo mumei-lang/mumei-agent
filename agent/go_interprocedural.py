@@ -7312,6 +7312,92 @@ class _Builder:
                 and binding_id(target) == root_binding_id
             )
 
+        selector = self._strip_parens(node)
+        receiver = (
+            self._strip_parens(
+                selector.child_by_field_name("operand")
+            )
+            if selector is not None
+            and selector.type == "selector_expression"
+            else None
+        )
+        receiver_indexes = []
+        current_receiver = receiver
+        while (
+            current_receiver is not None
+            and current_receiver.type == "index_expression"
+        ):
+            receiver_indexes.append(
+                self._strip_parens(
+                    current_receiver.child_by_field_name("index")
+                )
+            )
+            current_receiver = self._strip_parens(
+                current_receiver.child_by_field_name("operand")
+            )
+        receiver_indexes.reverse()
+
+        def index_path(value: Any) -> tuple[Any, ...] | None:
+            indexes = []
+            current = self._strip_parens(value)
+            while (
+                current is not None
+                and current.type == "index_expression"
+            ):
+                index = self._strip_parens(
+                    current.child_by_field_name("index")
+                )
+                if index is None:
+                    return None
+                indexes.append(index)
+                current = self._strip_parens(
+                    current.child_by_field_name("operand")
+                )
+            if (
+                current is None
+                or current.type != "identifier"
+                or binding_id(current) != root_binding_id
+            ):
+                return None
+            indexes.reverse()
+            return tuple(indexes)
+
+        def indexes_may_match(left: Any, right: Any) -> bool:
+            if left is None or right is None:
+                return True
+            if (
+                left.type == "identifier"
+                and right.type == "identifier"
+                and binding_id(left) == binding_id(right)
+            ):
+                return True
+            if (
+                left.type == "int_literal"
+                and right.type == "int_literal"
+            ):
+                try:
+                    return int(left.text.decode(), 0) == int(
+                        right.text.decode(), 0
+                    )
+                except ValueError:
+                    return left.text == right.text
+            return True
+
+        def reseats_receiver_container(target: Any) -> bool:
+            if is_root_identifier(target):
+                return True
+            path = index_path(target)
+            if (
+                path is None
+                or not path
+                or len(path) >= len(receiver_indexes)
+            ):
+                return False
+            return all(
+                indexes_may_match(left, right)
+                for left, right in zip(path, receiver_indexes)
+            )
+
         stack = [body]
         while stack:
             current = stack.pop()
@@ -7328,7 +7414,7 @@ class _Builder:
                     else [left]
                 )
                 for target in targets:
-                    if not is_root_identifier(target):
+                    if not reseats_receiver_container(target):
                         continue
                     declaration = self.bindings_by_span.get(
                         (
@@ -7352,7 +7438,10 @@ class _Builder:
                     and left.type == "expression_list"
                     else [left]
                 )
-                if any(is_root_identifier(target) for target in targets):
+                if any(
+                    reseats_receiver_container(target)
+                    for target in targets
+                ):
                     return True
             elif current.type == "unary_expression":
                 operator = current.child_by_field_name("operator")
@@ -7360,7 +7449,7 @@ class _Builder:
                 if (
                     operator is not None
                     and operator.text == b"&"
-                    and is_root_identifier(operand)
+                    and reseats_receiver_container(operand)
                 ):
                     return True
         return False
@@ -7376,9 +7465,10 @@ class _Builder:
         selector isn't one.
 
         The field must resolve to a same-package method record
-        (receiver non-null). A bare identifier binds directly; one
-        index into a supported local slice/array value struct binds
-        its container root, while a computed receiver stays closed.
+        (receiver non-null). A bare identifier binds directly; an
+        index chain into a supported local slice/array value struct
+        binds its container root, while a computed receiver stays
+        closed.
         """
         node = self._strip_parens(node)
         if node is None or node.type != "selector_expression":
@@ -7411,13 +7501,36 @@ class _Builder:
             source_id = self._local_struct_value_record_source_id(
                 operand
             )
-            index = self._strip_parens(
-                operand.child_by_field_name("index")
-            )
+            current = operand
+            indexes = []
+            while (
+                current is not None
+                and current.type == "index_expression"
+            ):
+                index = self._strip_parens(
+                    current.child_by_field_name("index")
+                )
+                indexes.append(index)
+                current = self._strip_parens(
+                    current.child_by_field_name("operand")
+                )
             if (
                 source_id is None
-                or index is None
-                or index.type not in {"identifier", "int_literal"}
+                or not indexes
+                or (
+                    len(indexes) > 1
+                    and not self._multi_index_struct_element_has_field_records(
+                        operand
+                    )
+                )
+                or any(
+                    index is None
+                    or (
+                        index.type not in _INDEX_LITERALS
+                        and index.type != "identifier"
+                    )
+                    for index in indexes
+                )
             ):
                 return None
             if (
@@ -10434,6 +10547,11 @@ class _Builder:
                     and not multi_index_struct_element_has_records
                 )
                 or multi_index_struct_element_copy
+                or (
+                    multi_index_struct_element_has_records
+                    and struct_element_parts is not None
+                    and self._multi_index_method_selector(node)
+                )
             )
             and call_operand is None
             and package_var is None
@@ -14112,6 +14230,7 @@ class _Builder:
                     and not self._multi_index_struct_element_copy_value_context(
                         value
                     )
+                    and not self._multi_index_method_selector(value)
                 )
             ):
                 return None
@@ -14300,6 +14419,51 @@ class _Builder:
             and member.type is not None
             and member.type.kind == "function"
         )
+
+    def _multi_index_method_selector(self, node: Any) -> bool:
+        current = self._strip_parens(node)
+        indexes = []
+        while current is not None and current.type == "index_expression":
+            index = current.child_by_field_name("index")
+            if (
+                index is None
+                or (
+                    index.type not in _INDEX_LITERALS
+                    and index.type != "identifier"
+                )
+            ):
+                return False
+            indexes.append(index)
+            current = self._strip_parens(
+                current.child_by_field_name("operand")
+            )
+        if len(indexes) < 2:
+            return False
+        receiver = node
+        while (
+            receiver.parent is not None
+            and receiver.parent.type == "parenthesized_expression"
+        ):
+            receiver = receiver.parent
+        selector = receiver.parent
+        if (
+            selector is None
+            or selector.type != "selector_expression"
+            or selector.child_by_field_name("operand") != receiver
+        ):
+            return False
+        field = selector.child_by_field_name("field")
+        field_ref = (
+            self.references.get(self.node_key(field))
+            if field is not None
+            else None
+        )
+        method = (
+            self.functions.get(field_ref.binding_id)
+            if field_ref is not None
+            else None
+        )
+        return method is not None and method.receiver is not None
 
     def _multi_index_struct_element_has_field_records(
         self, node: Any
@@ -14508,6 +14672,36 @@ class _Builder:
         record_source_id = (
             self._local_struct_value_record_source_id(value)
         )
+        if record_source_id is None and value.type == "index_expression":
+            root = value
+            while root is not None and root.type == "index_expression":
+                root = self._strip_parens(
+                    root.child_by_field_name("operand")
+                )
+            if root is not None and root.type == "selector_expression":
+                root_ref = self._receiver_root_ref(root)
+                root_binding = (
+                    self.bindings.get(root_ref.binding_id)
+                    if root_ref is not None
+                    else None
+                )
+                root_member = self._field_member(root)
+                if (
+                    root_ref is not None
+                    and root_ref.kind != "import"
+                    and root_binding is not None
+                    and not self._package_level(root_binding)
+                    and root_binding.type is not None
+                    and self._struct_value_fact(root_binding.type)
+                    is not None
+                    and root_member is not None
+                    and getattr(root_member.type, "kind", None)
+                    in {"slice", "array"}
+                    and not self._scalar_container_field_pointer_crossing(
+                        root
+                    )
+                ):
+                    record_source_id = root_member.id
         if record_source_id is None and collection_element:
             root_ref = self._receiver_root_ref(value)
             root_binding = (
@@ -35694,12 +35888,27 @@ class _Builder:
             receiver_value is not None
             and receiver_value.type == "index_expression"
         ):
-            index = self._strip_parens(
-                receiver_value.child_by_field_name("index")
-            )
-            if index is not None and index.type == "identifier":
-                index_ref = self.references.get(self.node_key(index))
-                if index_ref is not None:
+            current = receiver_value
+            indexes = []
+            while (
+                current is not None
+                and current.type == "index_expression"
+            ):
+                indexes.append(
+                    self._strip_parens(
+                        current.child_by_field_name("index")
+                    )
+                )
+                current = self._strip_parens(
+                    current.child_by_field_name("operand")
+                )
+            for index in reversed(indexes):
+                if index is not None and index.type == "identifier":
+                    index_ref = self.references.get(
+                        self.node_key(index)
+                    )
+                    if index_ref is None:
+                        continue
                     if index_ref.binding_id in locals_:
                         deps |= locals_[index_ref.binding_id]
                     elif index_ref.binding_id in params:
