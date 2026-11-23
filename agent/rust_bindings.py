@@ -62,7 +62,8 @@ _ITER_SLICE_METHODS = frozenset({"as_slice", "as_mut_slice"})
 # Iterators over `&[T]` slices — `v.chunks(n)`/`v.windows(n)`/
 # `v.split(p)` spell `&P`, which index/iter unwrap to `P`.
 _ITER_CHUNK_METHODS = frozenset(
-    {"chunks", "windows", "rchunks", "split", "split_inclusive"}
+    {"chunks", "windows", "rchunks", "split", "split_inclusive",
+     "splitn", "rsplitn", "rsplit"}
 )
 # The `_mut` counterparts iterate `&mut [T]` slices —
 # `v.chunks_mut(n)`/`v.split_mut(p)` spell `&mut P`.
@@ -3923,6 +3924,39 @@ class _RustBindings:
                             f"({pair}, {pair})",
                         )
                     if (
+                        method_name == "unzip"
+                        and receiver[1] is not None
+                        and self._container_head_name(
+                            callee.child_by_field_name("value")
+                        )
+                        == "Option"
+                    ):
+                        # `Option<(A, B)>::unzip` yields
+                        # `(Option<A>, Option<B>)` — the pair feeds
+                        # the tuple-pattern path so `x`/`y` keep
+                        # their own `Option` payloads.
+                        inner_args = next(
+                            iter(self._type_arg_list(receiver[1])),
+                            None,
+                        )
+                        inner = (
+                            "" if inner_args is None else inner_args.strip()
+                        )
+                        if (
+                            inner.startswith("(")
+                            and inner.endswith(")")
+                            and self._paren_wraps(inner)
+                        ):
+                            halves = self._type_arg_list(inner[1:-1])
+                            if len(halves) == 2:
+                                return (
+                                    None,
+                                    "Option<{}>, Option<{}>".format(
+                                        halves[0].strip(),
+                                        halves[1].strip(),
+                                    ),
+                                )
+                    if (
                         method_name in _SWAP_REMOVE_METHODS
                         and receiver[1] is not None
                         and self._container_head_name(
@@ -4632,6 +4666,21 @@ class _RustBindings:
                 # part of the spelled element.
                 return (
                     "&" + spelled,
+                    self._receiver_annotation_position(receiver),
+                )
+            if (
+                self._container_head_name(container_receiver)
+                == "Result"
+            ):
+                # `Result<P, E>::iter`/`iter_mut` iterate the `Ok`
+                # payload `&P` — the `E` arg is not the element.
+                ok_arg = next(
+                    iter(self._type_arg_list(spelled)), None
+                )
+                if ok_arg is None:
+                    return None, None
+                return (
+                    "&" + ok_arg.strip(),
                     self._receiver_annotation_position(receiver),
                 )
             return spelled, self._receiver_annotation_position(
@@ -5770,6 +5819,7 @@ class _RustBindings:
         if method in _ITER_ELEMENT_METHODS:
             if self._is_map_container(container_id, receiver):
                 return _UNKNOWN, None
+
             if self._container_head_name(receiver) in (
                 _SET_CONTAINER_NAMES
             ):
@@ -5778,7 +5828,20 @@ class _RustBindings:
                 args = next(
                     iter(self._type_arg_list(args.strip())), args
                 )
-            if "," in args:
+            
+            if (
+                method in {"iter", "iter_mut"}
+                and self._container_head_name(receiver) == "Result"
+            ):
+                # `Result<P, E>::iter`/`iter_mut` iterate the `Ok`
+                # payload `&P` — the `E` arg is not the element.
+                ok_arg = next(iter(self._type_arg_list(args)), None)
+                if ok_arg is None:
+                    return _UNKNOWN, None
+                elem_id, rest = self._spelled_type(
+                    "&" + ok_arg.strip(), position
+                )
+            elif "," in args:
                 # The element is a tuple spelling like `(P, Q)` — an
                 # identifier binding stays unpinned, but the spelled
                 # args feed the tuple-pattern path. Only a genuine
@@ -6061,6 +6124,32 @@ class _RustBindings:
             )
             if vmethod == "flatten":
                 pass
+            elif vmethod in {"iter", "iter_mut"}:
+                # `let it = r.iter()` — `it`'s spelled `&P` is the
+                # element itself; resolve the borrow's payload so
+                # `p` binds the `P` record like `o.iter()` does.
+                peeled = re.fullmatch(
+                    r"&\s*(?:'\w+\s+)?(?:mut\s+)?([^\[\s].*)",
+                    elem_args.strip(),
+                )
+                if peeled is not None:
+                    tid, _ = self._spelled_type(
+                        peeled.group(1).strip(), iterator.start_byte
+                    )
+                    if tid is not None:
+                        name = next(
+                            (
+                                b.name
+                                for b in self.bindings
+                                if b.id == tid
+                            ),
+                            "",
+                        )
+                        return (
+                            TypeFact("named", name, 0, None, tid),
+                            None,
+                        )
+                return _UNKNOWN, elem_args.strip()
             else:
                 producer_alias = False
                 probe = value
@@ -7056,6 +7145,14 @@ class _RustBindings:
             else self._pattern_type_map(
                 pattern, scrut_id, scrut_args, scrut_name,
                 scrut_position, scrut_scope,
+                inner_args=(
+                    annotation is not None
+                    or (
+                        value is not None
+                        and self._receiver_annotation_position(value)
+                        is not None
+                    )
+                ),
             )
         )
         for name_node, name_mutable in names:
@@ -7363,6 +7460,11 @@ class _RustBindings:
                 self._pattern_type_map(
                     pattern, scrut_id, scrut_args,
                     scrut_name, scrut_position, scrut_scope,
+                    inner_args=(
+                        value is not None
+                        and self._receiver_annotation_position(value)
+                        is not None
+                    ),
                 ),
             )
         if any(node.type == "let_condition" for node in self._descendants(condition)):
@@ -7572,6 +7674,11 @@ class _RustBindings:
             type_map = self._pattern_type_map(
                 pattern, scrut_id, scrut_args,
                 *self._scrutinee_shape(value, scrut_id),
+                inner_args=(
+                    value is not None
+                    and self._receiver_annotation_position(value)
+                    is not None
+                ),
             )
             self._bind_pattern_names(
                 names, arm_scope, self.span(arm), type_map=type_map
@@ -8244,6 +8351,7 @@ class _RustBindings:
         scrut_args: str | None,
         scrut_name: str | None = None,
         scrut_position: int | None = None,
+        inner_args: bool = False,
     ) -> "list[tuple[str | None, str | None]] | None":
         """Positional [(type id, args)] for `W(..)` / `E::V(..)`
         heads — None when the head does not name the scrutinee."""
@@ -8261,7 +8369,8 @@ class _RustBindings:
                 # need the annotation position to resolve args.
                 return None
             return self._prelude_pattern_payload(
-                head, scrut_name, scrut_args, scrut_position
+                head, scrut_name, scrut_args, scrut_position,
+                inner_args=inner_args,
             )
         container = (
             record
@@ -8876,6 +8985,23 @@ class _RustBindings:
             # (`Option` from `next`), which an args-only record
             # cannot spell.
             return self._scrutinee_shape(record.value_node, None)
+        if decl_node is None:
+            # A spelled container head survives in the bound args
+            # (`let (x, _) = o.unzip()` pins `x` as `Option<P>`) —
+            # read the head so `Some(p)` on `x` still reaches the
+            # prelude payload; the spelled args resolve at the
+            # binding site.
+            spelled = (record.type_args or "").strip()
+            head = re.match(r"[A-Za-z_][\w:]*(?=\s*<)", spelled)
+            if head is not None:
+                return (
+                    self._normalize_identifier(
+                        head.group(0).split("::")[-1]
+                    ),
+                    record.binding.span.start,
+                    record.home_scope,
+                )
+            return None, None, None
         position = (
             None
             if decl_node is None
@@ -8898,6 +9024,7 @@ class _RustBindings:
         scrut_name: str | None,
         scrut_args: str | None,
         scrut_position: int,
+        inner_args: bool = False,
     ) -> "list[tuple[str | None, str | None]] | None":
         """Positional payload for a prelude constructor
         (`Some(x)`/`Ok(x)`/`Err(e)`) when the scrutinee's declared
@@ -8911,6 +9038,29 @@ class _RustBindings:
         )
         if entry is None or scrut_name != entry[0]:
             return None
+        if scrut_args is not None and not inner_args:
+            # An args-only scrutinee spells the whole container —
+            # `Option<P>` unwraps to `P`, `Result<P, E>` to `P, E`,
+            # so `Err(e)` still reads the payload at index 1. The
+            # spelled head must match the pattern's container —
+            # `Some(w)` on `W<m::P>` payload args keeps `W<m::P>`.
+            # An annotated scrutinee's args are already inner —
+            # `Option<Option<P>>` spells `Option<P>` for the
+            # payload itself, and unwrapping it would bind `Some(p)`
+            # one layer too deep.
+            wrapped = re.fullmatch(
+                r"([A-Za-z_][\w:]*)\s*<(.+)>",
+                scrut_args.strip(),
+                re.DOTALL,
+            )
+            if (
+                wrapped is not None
+                and self._normalize_identifier(
+                    wrapped.group(1).split("::")[-1]
+                )
+                == scrut_name
+            ):
+                scrut_args = wrapped.group(2)
         args = self._type_arg_list(scrut_args or "")
         if entry[1] >= len(args):
             return None
@@ -8920,6 +9070,19 @@ class _RustBindings:
         type_id, fargs = self._spelled_type(
             args[entry[1]], scrut_position
         )
+        if (
+            type_id is None
+            and inner_args
+            and re.fullmatch(
+                r"[A-Za-z_][\w:]*\s*<.+>",
+                args[entry[1]].strip(),
+                re.DOTALL,
+            )
+        ):
+            # `Option<Option<P>>` — the payload's own spelling is
+            # `Option<P>`; decomposing it to args `P` would drop the
+            # `Option` head and misbind `Some(q)` later.
+            fargs = args[entry[1]]
         return [(type_id, fargs)]
 
     def _pattern_type_map(
@@ -8930,6 +9093,7 @@ class _RustBindings:
         scrut_name: str | None = None,
         scrut_position: int | None = None,
         scrut_scope: "_Scope | None" = None,
+        inner_args: bool = False,
     ) -> dict:
         """start_byte -> (TypeFact, args) for the names a destructuring
         pattern binds, resolved against the scrutinee's declared
@@ -8941,7 +9105,7 @@ class _RustBindings:
         try:
             return self._pattern_type_map_body(
                 pattern, scrut_id, scrut_args,
-                scrut_name, scrut_position,
+                scrut_name, scrut_position, inner_args,
             )
         finally:
             if push:
@@ -8954,6 +9118,7 @@ class _RustBindings:
         scrut_args: str | None,
         scrut_name: str | None = None,
         scrut_position: int | None = None,
+        inner_args: bool = False,
     ) -> dict:
         if pattern is None:
             return {}
@@ -9066,6 +9231,22 @@ class _RustBindings:
                         child, tid, fargs, head_name, scrut_position
                     )
                 )
+                if (
+                    tid is None
+                    and head_name in {"Option", "Result"}
+                    and child.type in {"identifier", "self"}
+                    and "<" in element
+                    and not borrowed
+                ):
+                    # An unresolvable prelude-container element keeps
+                    # its full spelling — `x` in `let (x, _) =
+                    # o.unzip()` stays `Option<P>` (not just `P`),
+                    # so `Some(p)`/`Ok`/`Err` on `x` still heads the
+                    # prelude payload.
+                    mapping[child.start_byte] = (
+                        _UNKNOWN,
+                        element.strip(),
+                    )
             return mapping
         if kind in {"identifier", "self"}:
             name = self._normalize_identifier(self.text(pattern))
@@ -9221,7 +9402,8 @@ class _RustBindings:
         if kind == "tuple_struct_pattern":
             head = pattern.child_by_field_name("type")
             payload = self._pattern_head_payload(
-                head, scrut_id, scrut_args, scrut_name, scrut_position
+                head, scrut_id, scrut_args, scrut_name, scrut_position,
+                inner_args,
             )
             if payload is None:
                 return {}
