@@ -7303,8 +7303,6 @@ fn f(o: Option<u8>, e: m::E, e2: E) {
     assert bound.get("x.em()") is not None
     assert bound.get("x2.em()") is not None
     assert bound["x.em()"] != bound["x2.em()"]
-||||||| parent of 1ae575d1 (C06: spell map entry().or_insert*/or_default payloads)
-=======
 
 def test_map_entry_or_insert_binds_mut_value_payload():
     source = """
