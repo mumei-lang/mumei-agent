@@ -14425,6 +14425,83 @@ class _Builder:
             current = getattr(current, "elem", None)
         return current is not None and current.kind == "interface"
 
+    def _interface_collection_type_node_has_interface_element(
+        self, type_node: Any, file: int
+    ) -> bool:
+        kind, element_type, file = self._local_literal_type_element(
+            type_node, file
+        )
+        while kind in {"slice", "array", "map"}:
+            if element_type is None:
+                return False
+            if element_type.type == "interface_type":
+                return True
+            if element_type.type == "selector_expression":
+                member = self._package_member(element_type)
+                member_type = getattr(member, "type", None)
+                return (
+                    member_type is not None
+                    and (
+                        member_type.kind == "interface"
+                        or self._interface_collection_has_interface_element(
+                            member_type
+                        )
+                    )
+                )
+            kind, element_type, file = (
+                self._local_literal_type_element(element_type, file)
+            )
+        return kind == "interface"
+
+    def _interface_collection_expression_has_interface_element(
+        self, node: Any
+    ) -> bool:
+        if self._interface_collection_has_interface_element(
+            self._deferred_expression_type(node)
+        ):
+            return True
+        value = self._strip_parens(node)
+        if value is None:
+            return False
+        type_node = None
+        if value.type == "composite_literal":
+            type_node = value.child_by_field_name("type")
+        elif value.type == "call_expression":
+            function = self._strip_parens(
+                value.child_by_field_name("function")
+            )
+            ref = (
+                self.references.get(self.node_key(function))
+                if function is not None and function.type == "identifier"
+                else None
+            )
+            if (
+                function is None
+                or function.type != "identifier"
+                or function.text != b"make"
+                or ref is None
+                or ref.kind != "universe"
+            ):
+                return False
+            arguments = _children(
+                value.child_by_field_name("arguments")
+            )
+            type_node = arguments[0] if arguments else None
+        else:
+            return False
+        if type_node is None:
+            return False
+        if type_node.type == "selector_expression":
+            member_type = getattr(
+                self._package_member(type_node), "type", None
+            )
+            return self._interface_collection_has_interface_element(
+                member_type
+            )
+        return self._interface_collection_type_node_has_interface_element(
+            type_node, self.current_file
+        )
+
     def _interface_element_store_target(
         self,
         node: Any,
@@ -23644,6 +23721,19 @@ class _Builder:
                             lhs, params, locals_
                         )
                         and self._value_carries_closure_records(
+                            rhs, params, locals_
+                        )
+                    ):
+                        raise _Unsupported(
+                            "unsupported_expression", _span(rhs)
+                        )
+                    elif (
+                        rhs is not None
+                        and lhs.type == "identifier"
+                        and self._interface_collection_has_interface_element(
+                            self._deferred_expression_type(lhs)
+                        )
+                        and self._interface_store_value_carries_closure_records(
                             rhs, params, locals_
                         )
                     ):
@@ -35230,6 +35320,21 @@ class _Builder:
                         )
                     return frozenset()
                 if name == b"append":
+                    if arguments and (
+                        self._interface_collection_expression_has_interface_element(
+                            arguments[0]
+                        )
+                    ):
+                        for extra in arguments[1:]:
+                            value = extra
+                            if value.type == "variadic_argument":
+                                value = next(iter(_children(value)), None)
+                            if self._value_carries_closure_records(
+                                value, params, locals_
+                            ):
+                                raise _Unsupported(
+                                    "unsupported_expression", _span(node)
+                                )
                     # `append(fs, f)` / `append(fs, fs2...)` on a
                     # bound func-element container — the result
                     # unions the container's deps and every appended

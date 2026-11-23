@@ -57644,6 +57644,26 @@ def test_interface_slot_closure_values_fail_closed(go_types_helper):
             "\tv := y; s := S{F: func() int64 { return v }}; o := OS{}\n"
             "\to.A = []I{s}; v = x; return o.A[0].Run()\n"
             "}\n"
+            "func F_localsliceassign(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\tvar a []I; a = []I{s}; v = x; return a[0].Run()\n"
+            "}\n"
+            "func F_localsliceelem(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\ta := make([]I, 1); a[0] = s; v = x; return a[0].Run()\n"
+            "}\n"
+            "func F_localmap(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\tm := map[int]I{}; m[0] = s; v = x; return m[0].Run()\n"
+            "}\n"
+            "func F_localappend(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\ta := append([]I{}, s); v = x; return a[0].Run()\n"
+            "}\n"
+            "func F_localappendspread(x, y int64) int64 {\n"
+            "\tv := y; s := S{F: func() int64 { return v }}\n"
+            "\ta := append([]I{}, []I{s}...); v = x; return a[0].Run()\n"
+            "}\n"
             "func F_sfnov(x, y int64) int64 {\n"
             "\to := O{I: S{V: x}}; return o.I.Run() + y\n"
             "}\n"
@@ -57690,6 +57710,11 @@ def test_interface_slot_closure_values_fail_closed(go_types_helper):
         "F_append",
         "F_map",
         "F_slice",
+        "F_localsliceassign",
+        "F_localsliceelem",
+        "F_localmap",
+        "F_localappend",
+        "F_localappendspread",
     }
     for function_name in unavailable:
         result = named_package(files, snapshot, summaries, function_name)
