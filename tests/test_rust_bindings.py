@@ -8035,3 +8035,39 @@ fn f(o: Option<P>, r: Result<P, E>, w: W<P>, oo: Option<Option<P>>) {
     # `m::P` reaches `m::P::pm`, not a same-named local `P`.
     mod_pm = _bindings(report, "pm", "associated_function")[1]
     assert bound.get("qr.pm()") == mod_pm.id
+
+
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(v: Vec<P>, h: std::collections::BinaryHeap<P>) {
+    let mut it = v.iter().peekable();
+    if let Some(a) = it.peek() { a.pm(); }
+    if let Some(b) = it.next_if(|x| true) { b.pm(); }
+    if let Some(c) = it.next_if_eq(&v[0]) { c.pm(); }
+    if let Some(e) = v.iter().next_if(|x| true) { e.pm(); }
+    if let Some(d) = h.peek() { d.pm(); }
+    let mut pk = v.chunks(2).peekable();
+    if let Some(chunk) = pk.peek() { chunk[0].pm(); }
+    while let Some(c2) = pk.next_if(|x| true) { c2[0].pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `peek`/`next_if`/`next_if_eq` borrow the element like `next`.
+    assert bound.get("a.pm()") == pm.id
+    assert bound.get("b.pm()") == pm.id
+    assert bound.get("c.pm()") == pm.id
+    assert bound.get("e.pm()") == pm.id
+    # `BinaryHeap::peek` still spells `Option<&P>`.
+    assert bound.get("d.pm()") == pm.id
+    # A `Peekable` over `chunks` carries `&[P]` items — `peek`/
+    # `next_if` yield `Option<&&[P]>` whose `Some(chunk)` spells
+    # `&[P]`, so `chunk[0]` still reads `P`.
+    assert bound.get("chunk[0].pm()") == pm.id
+    assert bound.get("c2[0].pm()") == pm.id
