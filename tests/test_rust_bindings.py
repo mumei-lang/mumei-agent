@@ -8816,3 +8816,78 @@ fn f(h: std::collections::BinaryHeap<P>) {
     # — `len` on it must not bind the user's method.
     assert not bound.get("h.into_vec().len()")
     assert not bound.get("v.len()")
+
+def test_concat_and_take_if_bind_elements():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn f(v: Vec<Vec<P>>, o: Option<P>, w: Vec<P>) {
+    let c = v.concat();
+    for a in c { a.pm(); }
+    let t = o.take_if(|x| true);
+    if let Some(y) = t { y.pm(); }
+    let d = w.concat();
+    for e in d { e.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `Vec<Vec<P>>::concat()` yields `Vec<P>`.
+    assert bound.get("a.pm()") == pm.id
+    # `o.take_if(f)` keeps `Option<P>`.
+    assert bound.get("y.pm()") == pm.id
+    # `Vec<P>::concat` does not exist — stays opaque.
+    assert not bound.get("e.pm()")
+
+
+def test_concat_call_iteration_and_shadowed_vec():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct Vec;
+impl Vec { fn len(&self) -> usize { 0 } }
+fn f(vv: Vec<Vec<P>>, svv: Vec<std::vec::Vec<P>>, vvv: Vec<Vec<Vec<P>>>) {
+    let c = vv.concat();
+    c.len();
+    c[0].pm();
+    for x in svv.concat() { x.pm(); }
+    for row in vvv.concat() { row[0].pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # The produced standard `Vec` is not the declared `struct Vec`.
+    assert not bound.get("c.len()")
+    assert bound.get("c[0].pm()") == pm.id
+    # `std::vec::Vec<P>` inners flatten the same way.
+    assert bound.get("x.pm()") == pm.id
+    # `Vec<Vec<Vec<P>>>::concat` keeps `Vec<P>` as the element.
+    assert bound.get("row[0].pm()") == pm.id
+
+
+def test_concat_foreign_field_stays_opaque():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+mod m { pub struct P; pub struct S { pub vv: Vec<Vec<P>> } }
+fn f(s: m::S) {
+    for x in s.vv.concat() { x.pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    assert not bound.get("x.pm()")

@@ -188,6 +188,9 @@ _OPTION_HEAD_METHODS = {
     # `o.and(o2)`/`o.or(o2)`/`o.xor(o2)` still yield `Option<P>` —
     # the payload index keeps the receiver's own first arg.
     "filter": ("", {"Option"}, 0),
+    # `o.take_if(f)` keeps the `Option<P>` receiver spelling —
+    # `f` only decides whether it becomes `None`.
+    "take_if": ("", {"Option"}, 0),
     "and": ("", {"Option"}, 0),
     "or": ("", {"Option"}, 0),
     "xor": ("", {"Option"}, 0),
@@ -4440,6 +4443,39 @@ class _RustBindings:
                             return None, None
                         return None, inner.strip()
                     if (
+                        method_name == "concat"
+                        and receiver[1] is not None
+                        and (
+                            self._container_head_name(
+                                callee.child_by_field_name("value")
+                            )
+                            or self._produced_head(
+                                callee.child_by_field_name("value")
+                            )
+                        )
+                        == "Vec"
+                    ):
+                        # `Vec<Vec<P>>::concat()` yields the
+                        # standard `Vec<P>` — flatten one `Vec`
+                        # level of the element spelling. The args
+                        # keep the element text so a declared
+                        # `struct Vec` in scope never takes over
+                        # the produced type.
+                        inner = re.fullmatch(
+                            r"([A-Za-z_][\w:]*)\s*<(.+)>",
+                            receiver[1].strip(),
+                        )
+                        if inner is not None and (
+                            inner.group(1).rsplit("::", 1)[-1]
+                            == "Vec"
+                        ):
+                            parts = self._type_arg_list(
+                                inner.group(2)
+                            )
+                            if parts:
+                                return None, parts[0].strip()
+                        return None, None
+                    if (
                         method_name in {"cloned", "copied"}
                         and receiver[1] is not None
                         and (
@@ -7368,17 +7404,7 @@ class _RustBindings:
             if call_args is None:
                 return _UNKNOWN, None
             spelled = call_args.strip()
-            produced = re.fullmatch(
-                r"(Vec|HashSet|BTreeSet|VecDeque|LinkedList|"
-                r"BinaryHeap|Option|Result)\s*<([\s\S]+)>",
-                spelled,
-            )
-            if produced is not None:
-                parts = self._type_arg_list(produced.group(2))
-                if not parts:
-                    return _UNKNOWN, None
-                spelled = parts[0].strip()
-            elif "," in spelled:
+            if "," in spelled or not spelled:
                 return _UNKNOWN, None
             if not spelled:
                 return _UNKNOWN, None
@@ -7392,12 +7418,11 @@ class _RustBindings:
                 self._push_scope(_scope)
             try:
                 elem_id, rest = self._element_of(
-                    None if produced is not None else call_id,
-                    spelled, _pos
+                    call_id, spelled, _pos
                 )
             finally:
                 if push:
-                    self._pop_scope()
+                    self.scopes.pop()
         if elem_id is None:
             return _UNKNOWN, rest
         name = next(
@@ -10032,12 +10057,15 @@ class _RustBindings:
             "and_then": None,
             "map_err": None,
             "or": None,
+            "or_else": None,
             "and": None,
             "xor": None,
             "filter": None,
+            "take_if": None,
             "cloned": None,
             "copied": None,
             "inspect": None,
+            "inspect_err": None,
             "ok": "Option",
             "err": "Option",
         }
