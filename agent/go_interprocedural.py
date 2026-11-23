@@ -39620,7 +39620,9 @@ class _Builder:
                 and self.node_key(scope) == self.node_key(node)
             )
 
-        def queue_send_members(value: Any) -> set[str] | None:
+        def queue_send_members(
+            value: Any, require_channel_type: bool = False
+        ) -> set[str] | None:
             channel_refs: list[str] = []
             value_stack = [value] if value is not None else []
             while value_stack:
@@ -39640,6 +39642,12 @@ class _Builder:
                         channel_refs.append(binding.id)
                 value_stack.extend(_children(current))
             channel_type = self._literal_channel_expression_type(value)
+            if channel_type is None and require_channel_type:
+                # A queue's send value must name a channel; a
+                # value whose type cannot be resolved (an
+                # element call's result, for one) may still
+                # return an enclosing queue, so it stays closed.
+                return None
             if channel_type is None or channel_type.kind != "chan":
                 if any(
                     not literal_local_channel(binding_id)
@@ -39666,7 +39674,93 @@ class _Builder:
                 return None
             return {self._chan_root(binding_id)}
 
+        def captured_queue_send_root(root: str) -> bool:
+            """A captured local queue/container root may take a
+            send whose value is not a literal-local channel when
+            every enclosing reference stays a supported channel
+            operation — mirroring the captured scalar-channel
+            arm: the send folds at the invocation site as an
+            opaque effectful call instead of sequencing its
+            operands at bind time."""
+            binding = self.bindings.get(root)
+            if (
+                binding is not None
+                and binding.type is not None
+                and binding.type.kind in {"slice", "array", "map"}
+            ):
+                return self._chan_container_only_operations(
+                    root, node
+                )
+            return self._chan_only_operations(root, node)
+
+        def captured_send_members(value: Any) -> set[str] | None:
+            """Channel ids the sent value names — every queue-
+            carrying one must be a literal-local channel. An
+            enclosing queue (or an enclosing container's element
+            queue) sent into a queue stays closed: it escapes into
+            the target's share group where later operations cannot
+            be attributed."""
+            members: set[str] = set()
+            stack = [value] if value is not None else []
+            while stack:
+                cur = stack.pop()
+                if cur.type == "call_expression":
+                    call = self.calls.get(self.node_key(cur))
+                    function_node = cur.child_by_field_name("function")
+                    while (
+                        function_node is not None
+                        and function_node.type == "parenthesized_expression"
+                    ):
+                        function_node = next(
+                            (
+                                c
+                                for c in function_node.named_children
+                                if c.type != "comment"
+                            ),
+                            None,
+                        )
+                    if not (
+                        call is not None
+                        and call.kind == "builtin"
+                        and function_node is not None
+                        and function_node.type == "identifier"
+                        and function_node.text.decode("utf-8") == "make"
+                    ):
+                        # A non-make call may return an enclosing
+                        # channel; folding it in as "fresh" would
+                        # hide its identity and drop the later
+                        # sends' dependencies. A local binding can
+                        # shadow `make`, so the resolved call
+                        # record must name the builtin.
+                        return None
+                    continue
+                if cur.type == "identifier":
+                    ref = self.references.get(self.node_key(cur))
+                    binding = (
+                        self.bindings.get(ref.binding_id)
+                        if ref is not None and ref.binding_id
+                        else None
+                    )
+                    if binding is None or binding.type is None:
+                        continue
+                    btype = binding.type
+                    leaf = btype
+                    while getattr(leaf, "elem", None) is not None and (
+                        leaf.kind in {"slice", "array", "map"}
+                    ):
+                        leaf = leaf.elem
+                    if (
+                        btype.kind == "chan"
+                        or leaf.kind == "chan"
+                    ):
+                        if not literal_local_channel(ref.binding_id):
+                            return None
+                        members.add(self._chan_root(ref.binding_id))
+                stack.extend(_children(cur))
+            return members
+
         queue_send_nodes: dict[Any, tuple[str, str]] = {}
+        captured_queue_sends: dict[Any, str] = {}
         allowed_send_value_refs: set[Any] = set()
         send_stack = [node]
         while send_stack:
@@ -39692,8 +39786,26 @@ class _Builder:
             ):
                 continue
             value = current.child_by_field_name("value")
-            members = queue_send_members(value)
+            operand_type = self._literal_channel_expression_type(channel)
+            members = queue_send_members(
+                value,
+                require_channel_type=(
+                    operand_type is not None
+                    and getattr(operand_type, "elem", None) is not None
+                    and operand_type.elem.kind == "chan"
+                ),
+            )
             if members is None:
+                captured_members = captured_send_members(value)
+                if (
+                    captured_members is not None
+                    and captured_queue_send_root(root)
+                ):
+                    captured_queue_sends[
+                        self.node_key(current)
+                    ] = root
+                    writes.add(root)
+                    writes.update(captured_members)
                 continue
             queue_send_nodes[self.node_key(current)] = target
             writes.add(root)
@@ -39744,6 +39856,8 @@ class _Builder:
             if (
                 operation_kind == "send"
                 and self.node_key(operation_node) not in queue_send_nodes
+                and self.node_key(operation_node)
+                not in captured_queue_sends
             ):
                 continue
             if kind == "container":
@@ -39770,7 +39884,10 @@ class _Builder:
                 channel = self._strip_parens(
                     cur.child_by_field_name("channel")
                 )
-                if self.node_key(cur) in queue_send_nodes:
+                if (
+                    self.node_key(cur) in queue_send_nodes
+                    or self.node_key(cur) in captured_queue_sends
+                ):
                     pass
                 else:
                     ref = (

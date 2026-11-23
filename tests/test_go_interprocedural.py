@@ -18595,6 +18595,25 @@ def test_bound_closure_local_channel_send_folds_dependencies(
             id="immediate-queue-write",
         ),
         pytest.param(
+            "func n() int64 { return 3 }\n"
+            "func F(x int64) int64 { "
+            "cc := make(chan chan int64, 1); "
+            "c := make(chan int64, 1); cc <- c; "
+            "g := func() { (<-cc) <- n() }; "
+            "g(); return x }",
+            id="queue-element-scalar-call-send",
+        ),
+        pytest.param(
+            "type Fi func() int64\n"
+            "func F(x int64) int64 { "
+            "fs := []Fi{nil}; "
+            "cc := make(chan chan int64, 1); "
+            "c := make(chan int64, 1); cc <- c; "
+            "g := func() { (<-cc) <- fs[0]() }; "
+            "g(); return x }",
+            id="queue-element-scalar-unresolved-call-send",
+        ),
+        pytest.param(
             "func F(x int64) int64 { "
             "s := []chan int64{make(chan int64, 1)}; "
             "g := func() { _ = len(s); _ = cap(s); "
@@ -18608,6 +18627,27 @@ def test_bound_closure_local_channel_send_folds_dependencies(
             "g := func() { _ = len(cc); _ = cap(cc); close(cc) }; "
             "g(); return x }",
             id="queue-builtins",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { "
+            "cc := make(chan chan int64, 1); "
+            "g := func() { cc <- make(chan int64) }; "
+            "g(); return x }",
+            id="queue-send-fresh-make",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { "
+            "cc := []chan chan int64{make(chan chan int64, 1)}; "
+            "g := func() { cc[0] <- make(chan int64) }; "
+            "g(); return x }",
+            id="nested-container-send-fresh-make",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { "
+            "m := map[int]chan chan int64{0: make(chan chan int64, 1)}; "
+            "g := func() { m[0] <- make(chan int64) }; "
+            "g(); return x }",
+            id="map-nested-container-send",
         ),
     ],
 )
@@ -18656,6 +18696,41 @@ def test_bound_closure_local_channel_container_operations_fold_dependencies(
             "c := make(chan int64, 1); "
             "g := func() { cc <- c }; g(); return x }",
             id="enclosing-channel-sent-to-queue",
+        ),
+        pytest.param(
+            "func F(d chan int64, x int64) int64 { "
+            "cc := make(chan chan int64, 1); "
+            "g := func() { cc <- d }; g(); return x }",
+            id="parameter-channel-sent-to-queue",
+        ),
+        pytest.param(
+            "func F(x int64) int64 { "
+            "cc := make(chan chan int64, 1); "
+            "cc2 := []chan int64{make(chan int64, 1)}; "
+            "g := func() { cc <- cc2[0] }; g(); return x }",
+            id="enclosing-container-element-sent-to-queue",
+        ),
+        pytest.param(
+            "func mk() chan int64 { return nil }\n"
+            "func F(x int64) int64 { "
+            "cc := make(chan chan int64, 1); "
+            "g := func() { cc <- mk() }; "
+            "g(); return x }",
+            id="queue-send-call-result",
+        ),
+        pytest.param(
+            "func fake(ch chan int64) chan int64 { return ch }\n"
+            "func F(x int64) int64 { "
+            "cc := make(chan chan int64, 1); make := fake; "
+            "g := func() { cc <- make(nil) }; g(); return x }",
+            id="queue-send-shadowed-make",
+        ),
+        pytest.param(
+            "type Fn func() chan int64\n"
+            "func F(x int64) int64 { "
+            "fs := []Fn{nil}; cc := make(chan chan int64, 1); "
+            "g := func() { cc <- fs[0]() }; g(); return x }",
+            id="queue-send-element-call",
         ),
         pytest.param(
             "func F(x int64) int64 { "
