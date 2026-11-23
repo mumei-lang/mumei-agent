@@ -119,8 +119,50 @@ _MAP_BOUND_ENTRY_METHODS = frozenset({"first_entry", "last_entry"})
 # Smart pointers that `Deref` straight to their payload — `b.pm()`
 # on `Box<P>`/`Rc<P>`/`Arc<P>` calls `P`'s members. `Mutex`/`Cell`/
 # `RefCell` guard their payload behind `lock()`/`get()` and stay
-# opaque.
-_DEREF_WRAPPER_NAMES = frozenset({"Box", "Rc", "Arc"})
+# opaque. The guard types those accessors hand out deref the same
+# way — `Ref<P>`/`MutexGuard<P>`/`RwLock*Guard<P>` reach `P`'s
+# members directly.
+_DEREF_WRAPPER_NAMES = frozenset(
+    {
+        "Box", "Rc", "Arc",
+        "Ref", "RefMut",
+        "MutexGuard", "RwLockReadGuard", "RwLockWriteGuard",
+    }
+)
+
+# Interior-mutability and lock accessors — each (container head,
+# method) spells its return type with `$P` standing for the
+# container's single payload arg. `Cell::get`/`take` keep `P`
+# itself; `RefCell::borrow*` hand out `Ref`/`RefMut` guards;
+# `Mutex`/`RwLock` wrap their guards in `Result` so `.unwrap()`
+# reaches the guard.
+_GUARD_ACCESSOR_SPELLINGS = {
+    ("RefCell", "borrow"): "Ref<$P>",
+    ("RefCell", "borrow_mut"): "RefMut<$P>",
+    ("RefCell", "try_borrow"): "Result<Ref<$P>, BorrowError>",
+    ("RefCell", "try_borrow_mut"): "Result<RefMut<$P>, BorrowMutError>",
+    ("RefCell", "get_mut"): "&mut $P",
+    ("RefCell", "into_inner"): "$P",
+    ("Cell", "get"): "$P",
+    ("Cell", "get_mut"): "&mut $P",
+    ("Cell", "take"): "$P",
+    ("Cell", "into_inner"): "$P",
+    ("Mutex", "lock"): "Result<MutexGuard<$P>, PoisonError<MutexGuard<$P>>>",
+    ("Mutex", "try_lock"): "Result<MutexGuard<$P>, TryLockError<MutexGuard<$P>>>",
+    ("Mutex", "into_inner"): "Result<$P, PoisonError<$P>>",
+    ("Mutex", "get_mut"): "Result<&mut $P, PoisonError<&mut $P>>",
+    ("RwLock", "read"): "Result<RwLockReadGuard<$P>, PoisonError<RwLockReadGuard<$P>>>",
+    ("RwLock", "write"): "Result<RwLockWriteGuard<$P>, PoisonError<RwLockWriteGuard<$P>>>",
+    ("RwLock", "try_read"): "Result<RwLockReadGuard<$P>, TryLockError<RwLockReadGuard<$P>>>",
+    ("RwLock", "try_write"): "Result<RwLockWriteGuard<$P>, TryLockError<RwLockWriteGuard<$P>>>",
+    ("RwLock", "into_inner"): "Result<$P, PoisonError<$P>>",
+    ("RwLock", "get_mut"): "Result<&mut $P, PoisonError<&mut $P>>",
+    ("Rc", "get_mut"): "Option<&mut $P>",
+    ("Arc", "get_mut"): "Option<&mut $P>",
+    ("Rc", "downgrade"): "Weak<$P>",
+    ("Arc", "downgrade"): "Weak<$P>",
+    ("Weak", "upgrade"): "Option<$P>",
+}
 
 # `Option` heads slices and arrays share with `Vec` — `s.get(i)`,
 # `s.first()`, `s.last()` yield `Option<&T>` on `&[T]`/`[T; N]` too.
@@ -2739,6 +2781,17 @@ class _RustBindings:
         if record is None and impl_args is not None:
             head, _hp, _hs = self._scrutinee_shape(value, type_id)
             spelled_head = head
+            if head is None:
+                # `let r = c.borrow()` keeps `Ref<P>` as the spelled
+                # args — the wrapper's own name heads the deref
+                # recipe. An args-only receiver (`Vec`'s `P`) has
+                # no spelled head and skips this.
+                spelled = re.match(
+                    r"[A-Za-z_][\w:]*(?=\s*<)", impl_args.strip()
+                )
+                if spelled is not None:
+                    spelled_head = spelled.group(0)
+                    head = spelled_head.rsplit("::", 1)[-1]
             if (
                 head is None
                 and value is not None
@@ -2825,9 +2878,26 @@ class _RustBindings:
                     self._receiver_annotation_position(value)
                     or node.start_byte
                 )
+                arg_list = self._type_arg_list(impl_args.strip())
+                if any(part.strip().startswith("'") for part in arg_list):
+                    # `Ref<'_, P>`/`MutexGuard<'_, P>` — lifetimes are
+                    # not payload args; drop them so the element is
+                    # `P`, not the whole `'_, P` list.
+                    arg_list = [
+                        part
+                        for part in arg_list
+                        if not part.strip().startswith("'")
+                    ]
                 elem_id, elem_args = self._element_of(
-                    None, impl_args.strip(), spelled_pos
+                    None, ", ".join(arg_list), spelled_pos
                 )
+                if elem_id is None and elem_args is not None:
+                    # `let r = c.borrow()` keeps `Ref<P>` as the
+                    # spelled args — peel the guard so `r.pm()`
+                    # reaches `P`'s members.
+                    elem_id, elem_args = self._element_of(
+                        None, elem_args, spelled_pos
+                    )
                 if elem_id is not None:
                     inner = self._member_record(
                         elem_id, name, kinds, elem_args,
@@ -3002,7 +3072,20 @@ class _RustBindings:
                         )
                         if inner_pos is not None:
                             spelled_pos = inner_pos
-        args = self._type_arg_list(value_args or "")
+        spelled_args = value_args or ""
+        inner_match = re.fullmatch(
+            r"([A-Za-z_][\w:]*)\s*<([\s\S]*)>", spelled_args.strip()
+        )
+        if inner_match is not None and self._normalize_identifier(
+            inner_match.group(1).split("::")[-1]
+        ) in heads:
+            # A spelled `Result<Ref<P>, BorrowError>`/`Option<W<P>>`
+            # receiver carries the whole type in its args — split the
+            # inner list once. A payload arg like `W<P>` or
+            # `MutexGuard<P>, PoisonError<...>` is the arg list
+            # itself — peeling again drops `W`/`MutexGuard`.
+            spelled_args = inner_match.group(2)
+        args = self._type_arg_list(spelled_args)
         if len(args) <= index:
             return None, None
         if (
@@ -3022,6 +3105,23 @@ class _RustBindings:
         # shadow, and the import's record id must not gate on
         # index-element containers.
         arg_pos = position if spelled_pos is None else spelled_pos
+        arg_text = args[index].strip()
+
+        def spelled_arg(scope=None):
+            # `Result<Ref<P>, BorrowError>` — an unresolvable
+            # spelled arg keeps its full text so the bound name's
+            # args still head `Ref` for the member deref.
+            if scope is not None:
+                self._push_scope(scope)
+            try:
+                pair = self._spelled_type(arg_text, arg_pos)
+            finally:
+                if scope is not None:
+                    self.scopes.pop()
+            if pair[0] is None and "<" in arg_text:
+                return None, arg_text
+            return pair
+
         if (
             decl_scope is not None
             and ret is not None
@@ -3030,12 +3130,8 @@ class _RustBindings:
             # A fixed arg (`E` in `Result<T, E>`) resolves in the
             # member's declaring scope — a call-site `struct E`
             # must not shadow it.
-            self._push_scope(decl_scope)
-            try:
-                return self._spelled_type(args[index].strip(), arg_pos)
-            finally:
-                self.scopes.pop()
-        return self._spelled_type(args[index].strip(), arg_pos)
+            return spelled_arg(decl_scope)
+        return spelled_arg()
 
     def _field_member(
         self, node: Any, kinds: tuple[str, ...] = ()
@@ -3298,6 +3394,76 @@ class _RustBindings:
                 "scoped_type_identifier",
             }:
                 member, _ = self._scoped_member(callee)
+                if member is None:
+                    segments = (
+                        self.text(callee).strip().split("::")
+                    )
+                    if (
+                        len(segments) >= 2
+                        and segments[-2] in {"Rc", "Arc"}
+                        and segments[-1] in {"downgrade", "get_mut"}
+                    ):
+                        # `Rc::downgrade(&rc)`/`Rc::get_mut(&mut rc)`
+                        # — the associated-function spelling of the
+                        # same accessors; a declared `struct Rc`/`Arc`
+                        # keeps its own record and stays opaque.
+                        head_record = self._through_import(
+                            self._lookup(
+                                segments[-2],
+                                callee.start_byte,
+                                "type",
+                            ),
+                            callee.start_byte,
+                        )
+                        if head_record is None or (
+                            head_record.binding.kind
+                            not in {"struct", "enum"}
+                        ):
+                            arguments = node.child_by_field_name(
+                                "arguments"
+                            )
+                            first = (
+                                next(
+                                    iter(arguments.named_children),
+                                    None,
+                                )
+                                if arguments is not None
+                                else None
+                            )
+                            while (
+                                first is not None
+                                and first.type == "reference_expression"
+                            ):
+                                first = next(
+                                    iter(first.named_children), None
+                                )
+                            _, rargs = (
+                                (None, None)
+                                if first is None
+                                else self._receiver_type(first)
+                            )
+                            parts = self._type_arg_list(
+                                (rargs or "").strip()
+                            )
+                            if len(parts) == 1:
+                                spelled_text = (
+                                    "Weak<$P>"
+                                    if segments[-1] == "downgrade"
+                                    else "Option<&mut $P>"
+                                ).replace("$P", parts[0].strip())
+                                spelled_pair = self._spelled_type(
+                                    spelled_text,
+                                    self._receiver_annotation_position(
+                                        first
+                                    )
+                                    or node.start_byte,
+                                )
+                                if (
+                                    spelled_pair[0] is None
+                                    and "<" in spelled_text
+                                ):
+                                    return None, spelled_text
+                                return spelled_pair
             elif callee is not None and callee.type == "identifier":
                 member = self._lookup(
                     self._normalize_identifier(self.text(callee)),
@@ -4156,6 +4322,105 @@ class _RustBindings:
                         # `w.clone()[0]` reads `W`'s declared
                         # `Index::Output`, not the arg `P`.
                         return receiver
+                    if receiver[1] is not None:
+                        guard_head = (
+                            self._container_head_name(
+                                callee.child_by_field_name("value")
+                            )
+                            or self._spelled_receiver_head(
+                                callee.child_by_field_name("value")
+                            )
+                            or self._produced_head(
+                                callee.child_by_field_name("value")
+                            )
+                        )
+                        spelled = (
+                            _GUARD_ACCESSOR_SPELLINGS.get(
+                                (guard_head, method_name)
+                            )
+                            if guard_head is not None
+                            else None
+                        )
+                        if spelled is not None:
+                            # A declared `struct RefCell`/`Mutex`
+                            # is a custom type — its own accessor
+                            # spellings may differ, so stay opaque
+                            # (the prelude head has no record).
+                            head_record = self._lookup(
+                                self._normalize_identifier(guard_head),
+                                callee.child_by_field_name(
+                                    "value"
+                                ).start_byte,
+                                "type",
+                            )
+                            head_record = (
+                                None
+                                if head_record is None
+                                else self._through_import(
+                                    head_record,
+                                    callee.child_by_field_name(
+                                        "value"
+                                    ).start_byte,
+                                )
+                            )
+                            if (
+                                head_record is not None
+                                and head_record.binding.kind
+                                in {"struct", "enum"}
+                            ):
+                                spelled = None
+                        if spelled is not None:
+                            # `c.borrow()`/`mu.lock()`/`cell.get()`
+                            # hand out the guard or payload — the
+                            # guards deref to it, `Result` unwraps
+                            # reach them through the existing
+                            # `?`/`unwrap` path.
+                            arg_src = receiver[1].strip()
+                            if (
+                                self._receiver_type_node(
+                                    callee.child_by_field_name("value")
+                                )
+                                is None
+                            ):
+                                inner_match = re.fullmatch(
+                                    r"[A-Za-z_][\w:]*\s*<([\s\S]*)>",
+                                    arg_src,
+                                )
+                                if inner_match is not None:
+                                    # `let w = rc.downgrade()` keeps
+                                    # `Weak<P>` as the spelled args —
+                                    # the payload is its inner arg. A
+                                    # declared `Cell<W<P>>` annotates
+                                    # `W<P>` as the payload itself —
+                                    # peeling it reads `P`.
+                                    arg_src = inner_match.group(1)
+                            parts = self._type_arg_list(arg_src)
+                            if len(parts) == 1:
+                                spelled_text = spelled.replace(
+                                    "$P", parts[0].strip()
+                                )
+                                spelled_pair = self._spelled_type(
+                                    spelled_text,
+                                    self._receiver_annotation_position(
+                                        callee.child_by_field_name(
+                                            "value"
+                                        )
+                                    )
+                                    or node.start_byte,
+                                )
+                                if (
+                                    spelled_pair[0] is None
+                                    and "<" in spelled_text
+                                ):
+                                    # An unresolvable guard head
+                                    # keeps its full spelling so the
+                                    # bound name's args still head
+                                    # `Ref`/`MutexGuard` for the
+                                    # member deref (as `Option<P>`
+                                    # already does for prelude
+                                    # patterns).
+                                    return None, spelled_text
+                                return spelled_pair
                     if (
                         method_name in {"as_ref", "as_mut"}
                         and receiver[1] is not None
@@ -10277,6 +10542,34 @@ class _RustBindings:
         if head is None:
             return None
         return head.group(0).split("::")[-1]
+
+    def _spelled_receiver_head(self, node: Any | None) -> "str | None":
+        """Container head kept in a let-bound name's spelled args —
+        `let w = rc.downgrade()` pins `w` as `Weak<P>`, so `w` reads
+        `Weak` for method recipes even without an annotation."""
+        while node is not None and node.type == "reference_expression":
+            node = next(iter(node.named_children), None)
+        if node is None or node.type != "identifier":
+            return None
+        record = self._lookup(
+            self._normalize_identifier(self.text(node)),
+            node.start_byte,
+            "value",
+        )
+        if record is None or record.type_node is not None:
+            return None
+        if record.type_args is not None:
+            args = record.type_args
+        elif record.value_node is not None:
+            # `let w = rc.downgrade()` — the spelled pair keeps the
+            # guard head in its args when it cannot resolve a record.
+            args = self._receiver_type(record.value_node)[1]
+        else:
+            args = None
+        if args is None:
+            return None
+        head = re.match(r"[A-Za-z_][\w:]*(?=\s*<)", args.strip())
+        return head.group(0).split("::")[-1] if head is not None else None
 
     def _combinator_head(self, node: Any | None) -> "str | None":
         """Container head a chain of Option/Result combinators yields —

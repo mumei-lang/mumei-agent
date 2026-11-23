@@ -6220,6 +6220,114 @@ fn f(b: Box<P>, v: Vec<P>, o: Option<P>, s: &[P]) {
     )
     assert resolved_index == 2
 
+def test_guard_accessors_spell_their_guard_and_payload():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+use std::cell::RefCell;
+use std::cell::Cell;
+use std::sync::Mutex;
+use std::sync::RwLock;
+use std::rc::Rc;
+fn f() {
+    let c: RefCell<P> = RefCell::new(P);
+    let r = c.borrow(); r.pm();
+    let rm = c.borrow_mut(); rm.pm();
+    let g = c.try_borrow().unwrap(); g.pm();
+    let mu: Mutex<P> = Mutex::new(P);
+    let l = mu.lock().unwrap(); l.pm();
+    let l2 = mu.try_lock().unwrap(); l2.pm();
+    let rw: RwLock<P> = RwLock::new(P);
+    let rd = rw.read().unwrap(); rd.pm();
+    let wr = rw.try_write().unwrap(); wr.pm();
+    let w: Rc<P> = Rc::new(P);
+    let weak = w.downgrade();
+    if let Some(p) = weak.upgrade() { p.pm(); }
+    let u = weak.upgrade(); let q = u.unwrap(); q.pm();
+    let ce: Cell<P> = Cell::new(P);
+    let t = ce.take(); t.pm();
+    let i = ce.into_inner(); i.pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    raw = source.encode()
+    resolved = sorted(
+        raw[call.span.start:call.span.end].decode()
+        for call in report.calls
+        if raw[call.span.start:call.span.end].decode().endswith(".pm()")
+        and call.target == pm.id
+    )
+    assert resolved == [
+        "g.pm()", "i.pm()", "l.pm()", "l2.pm()", "p.pm()",
+        "q.pm()", "r.pm()", "rd.pm()", "rm.pm()", "t.pm()", "wr.pm()",
+    ]
+
+def test_guard_accessor_edge_cases_stay_honest():
+    source = """
+struct P;
+struct W<T>(T);
+impl P { fn pm(&self) {} }
+impl<T> W<T> { fn wm(&self) {} }
+fn make() -> RefCell<P> { todo!() }
+fn f(c: Cell<W<P>>, r: Rc<P>, o: Option<W<P>>, mut m: Mutex<P>) {
+    let w = c.into_inner();
+    w.pm();
+    w.wm();
+    let wk = Rc::downgrade(&r);
+    let u = wk.upgrade().unwrap();
+    u.pm();
+    let x = o.unwrap();
+    x.pm();
+    x.wm();
+    let b = make().borrow();
+    b.pm();
+    let l = m.lock().unwrap();
+    l.pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    wm = _bindings(report, "wm", "associated_function")[0]
+    raw = source.encode()
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `Cell<W<P>>::into_inner` yields `W<P>` — `w.pm()` must not
+    # steal `P`'s method; `w.wm()` reaches `W<P>`'s own member.
+    assert not bound.get("w.pm()")
+    assert bound.get("w.wm()") == wm.id
+    # `Option<W<P>>::unwrap` keeps `W<P>` the same way.
+    assert not bound.get("x.pm()")
+    assert bound.get("x.wm()") == wm.id
+    # `Rc::downgrade(&r)` spells `Weak<P>` — `upgrade().unwrap()`
+    # reaches `P` through the produced args.
+    assert bound.get("u.pm()") == pm.id
+    # `make().borrow()` reads the factory's `RefCell<P>` return.
+    assert bound.get("b.pm()") == pm.id
+    # `m.lock().unwrap()` keeps `MutexGuard<P>` — `l.pm()` reaches P.
+    assert bound.get("l.pm()") == pm.id
+
+
+def test_guard_accessors_stay_opaque_for_custom_containers():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct RefCell<T> { v: T }
+struct Mutex<T> { v: T }
+fn f(c: RefCell<P>, mu: Mutex<P>) {
+    let x = c.borrow(); x.pm();
+    let l = mu.lock(); l.pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    pm = _bindings(report, "pm", "associated_function")[0]
+    # Both containers are user-declared — `borrow`/`lock` spell
+    # nothing, so the results stay opaque.
+    assert _call(report, source, "x.pm()").target != pm.id
+    assert _call(report, source, "l.pm()").target != pm.id
+
 def test_option_and_drops_an_unspellable_payload():
     source = """
 fn g<Q>(x: Option<Q>) -> Option<Q> { x }
