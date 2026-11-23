@@ -18700,6 +18700,20 @@ def test_bound_closure_local_channel_container_operations_fold_dependencies(
             id="queue-send-call-result",
         ),
         pytest.param(
+            "func fake(ch chan int64) chan int64 { return ch }\n"
+            "func F(x int64) int64 { "
+            "cc := make(chan chan int64, 1); make := fake; "
+            "g := func() { cc <- make(nil) }; g(); return x }",
+            id="queue-send-shadowed-make",
+        ),
+        pytest.param(
+            "type Fn func() chan int64\n"
+            "func F(x int64) int64 { "
+            "fs := []Fn{nil}; cc := make(chan chan int64, 1); "
+            "g := func() { cc <- fs[0]() }; g(); return x }",
+            id="queue-send-element-call",
+        ),
+        pytest.param(
             "func F(x int64) int64 { "
             "s := []chan int64{make(chan int64, 1)}; "
             "d := s[0]; _ = d; "

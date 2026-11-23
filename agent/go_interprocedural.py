@@ -39620,7 +39620,9 @@ class _Builder:
                 and self.node_key(scope) == self.node_key(node)
             )
 
-        def queue_send_members(value: Any) -> set[str] | None:
+        def queue_send_members(
+            value: Any, require_channel_type: bool = False
+        ) -> set[str] | None:
             channel_refs: list[str] = []
             value_stack = [value] if value is not None else []
             while value_stack:
@@ -39640,6 +39642,12 @@ class _Builder:
                         channel_refs.append(binding.id)
                 value_stack.extend(_children(current))
             channel_type = self._literal_channel_expression_type(value)
+            if channel_type is None and require_channel_type:
+                # A queue's send value must name a channel; a
+                # value whose type cannot be resolved (an
+                # element call's result, for one) may still
+                # return an enclosing queue, so it stays closed.
+                return None
             if channel_type is None or channel_type.kind != "chan":
                 if any(
                     not literal_local_channel(binding_id)
@@ -39697,6 +39705,7 @@ class _Builder:
             while stack:
                 cur = stack.pop()
                 if cur.type == "call_expression":
+                    call = self.calls.get(self.node_key(cur))
                     function_node = cur.child_by_field_name("function")
                     while (
                         function_node is not None
@@ -39711,14 +39720,18 @@ class _Builder:
                             None,
                         )
                     if not (
-                        function_node is not None
+                        call is not None
+                        and call.kind == "builtin"
+                        and function_node is not None
                         and function_node.type == "identifier"
                         and function_node.text.decode("utf-8") == "make"
                     ):
                         # A non-make call may return an enclosing
                         # channel; folding it in as "fresh" would
                         # hide its identity and drop the later
-                        # sends' dependencies.
+                        # sends' dependencies. A local binding can
+                        # shadow `make`, so the resolved call
+                        # record must name the builtin.
                         return None
                     continue
                 if cur.type == "identifier":
@@ -39773,7 +39786,9 @@ class _Builder:
             ):
                 continue
             value = current.child_by_field_name("value")
-            members = queue_send_members(value)
+            members = queue_send_members(
+                value, require_channel_type=(kind == "queue")
+            )
             if members is None:
                 captured_members = captured_send_members(value)
                 if (
