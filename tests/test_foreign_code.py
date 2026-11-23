@@ -5239,6 +5239,27 @@ func first(s string) byte {
     ]
 
 
+def test_go_constant_index_nested_in_another_access_is_reported() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package p
+
+var lookup = []int{1}
+
+func nested(s []int) int {
+    return lookup[s[0]]
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+
+    assert [
+        issue.message for issue in issues if "can index" in issue.message
+    ] == [
+        "Go function `nested` can index `s[0]` without a bounds contract "
+        "(Z3 counterexample: len_s=0)"
+    ]
+
+
 def test_go_safety_suppresses_actor_act_builder_param_nil() -> None:
     """``Actor.Act`` implementations receive non-nil ``*Builder`` and ``*Action``."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues

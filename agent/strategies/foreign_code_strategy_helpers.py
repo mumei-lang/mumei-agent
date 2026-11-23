@@ -5959,37 +5959,7 @@ def _go_constant_index_accesses(
     findings = tree_sitter_extract.analyze_expression(
         _strip_go_rust_literals_and_comments(expression), "go"
     )
-    if findings is None or not findings.constant_index_accesses:
-        return ()
-    known_accesses = set(findings.constant_index_accesses)
-    accesses: list[tuple[str, int, str]] = []
-    seen: set[tuple[str, str]] = set()
-    pattern = re.compile(
-        r"\b(?P<container>[^\W\d]\w*)\s*\[\s*(?P<index>.*?)\s*\]",
-        re.DOTALL,
-    )
-    for match in pattern.finditer(expression):
-        container = match.group("container")
-        index_text = re.sub(r"\s+", "", match.group("index"))
-        literal = re.fullmatch(r"(?:0|[1-9](?:_?[0-9])*)", index_text)
-        if literal:
-            need = int(index_text.replace("_", "")) + 1
-        else:
-            length_minus = re.fullmatch(
-                rf"len\({re.escape(container)}\)-([1-9](?:_?[0-9])*)",
-                index_text,
-            )
-            if not length_minus:
-                continue
-            need = int(length_minus.group(1).replace("_", ""))
-        if (container, need) not in known_accesses:
-            continue
-        access = (container, index_text)
-        if access in seen:
-            continue
-        seen.add(access)
-        accesses.append((container, need, index_text))
-    return tuple(accesses)
+    return findings.constant_index_accesses if findings is not None else ()
 
 
 _DATAFLOW_ISSUE_MESSAGES = {

@@ -75,11 +75,15 @@ def test_go_blocks_capture_nested_braces_and_methods() -> None:
 
 def test_go_expression_safety_records_constant_index_accesses() -> None:
     findings = tree_sitter_extract.analyze_expression(
-        "s[0] + s[len(s) - 1] + s[i] + t[len(s)-1]", "go"
+        "s[0] + s[len(s) - 1] + s[i] + t[len(s)-1] + lookup[s[0]]", "go"
     )
 
     assert findings is not None
-    assert findings.constant_index_accesses == (("s", 1), ("s", 1))
+    assert findings.constant_index_accesses == (
+        ("s", 1, "0"),
+        ("s", 1, "len(s)-1"),
+        ("s", 1, "0"),
+    )
     assert findings.index_accesses == (("s", "i"),)
 
 

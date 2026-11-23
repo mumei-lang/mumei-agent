@@ -861,7 +861,7 @@ class ExpressionSafety:
     member_access_values: tuple[str, ...]
     pointer_deref_values: tuple[str, ...]
     additions: tuple[tuple[str, str], ...]
-    constant_index_accesses: tuple[tuple[str, int], ...] = ()
+    constant_index_accesses: tuple[tuple[str, int, str], ...] = ()
 
 
 def _unwrap(node):
@@ -954,7 +954,7 @@ def analyze_expression(expression: str, language: str) -> ExpressionSafety | Non
     member_access_values: list[str] = []
     pointer_deref_values: list[str] = []
     additions: list[tuple[str, str]] = []
-    constant_index_accesses: list[tuple[str, int]] = []
+    constant_index_accesses: list[tuple[str, int, str]] = []
 
     def visit(node) -> None:
         if node.type == _BINARY_NODE_TYPE:
@@ -992,7 +992,11 @@ def analyze_expression(expression: str, language: str) -> ExpressionSafety | Non
                 literal = re.fullmatch(r"(?:0|[1-9](?:_?[0-9])*)", index_text)
                 if literal:
                     constant_index_accesses.append(
-                        (base_name, int(index_text.replace("_", "")) + 1)
+                        (
+                            base_name,
+                            int(index_text.replace("_", "")) + 1,
+                            index_text,
+                        )
                     )
                 else:
                     length_minus = re.fullmatch(
@@ -1001,7 +1005,11 @@ def analyze_expression(expression: str, language: str) -> ExpressionSafety | Non
                     )
                     if length_minus:
                         constant_index_accesses.append(
-                            (base_name, int(length_minus.group(1).replace("_", "")))
+                            (
+                                base_name,
+                                int(length_minus.group(1).replace("_", "")),
+                                index_text,
+                            )
                         )
         elif node.type == member_type:
             if any(child.type == "optional_chain" for child in node.children):
