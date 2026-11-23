@@ -14141,6 +14141,32 @@ class _Builder:
             and binding_id not in self.bound_interface_methods
         )
 
+    def _tracked_literal_read_deps(
+        self,
+        binding_id: str,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+    ) -> frozenset[int]:
+        deps = (
+            self._captured_current_deps(
+                self.closure_captures.get(
+                    binding_id, frozenset()
+                ),
+                params,
+                locals_,
+            )
+            | self.indirect_writes
+        )
+        if binding_id in self.pointee_closures:
+            for escaped_id in self.escaped:
+                if escaped_id in locals_:
+                    deps |= locals_[escaped_id]
+                elif escaped_id in params:
+                    deps |= frozenset({params[escaped_id]})
+        if binding_id in self.closure_factory_results:
+            deps |= locals_[binding_id]
+        return deps
+
     def _has_closure_records(self, binding_id: str) -> bool:
         return (
             binding_id in self.closure_captures
@@ -20109,9 +20135,27 @@ class _Builder:
                             | self.indirect_writes
                         )
                     else:
-                        result_deps |= locals_.get(
-                            result_root, frozenset()
-                        )
+                        if self._is_tracked_literal_value(
+                            result_id, params
+                        ):
+                            result_deps |= (
+                                self._tracked_literal_read_deps(
+                                    result_id, params, locals_
+                                )
+                            )
+                        else:
+                            result_deps |= locals_.get(
+                                result_root, frozenset()
+                            )
+                    extra = self._captured_current_deps(
+                        self.closure_captures.get(
+                            result_id, frozenset()
+                        ),
+                        params,
+                        locals_,
+                    )
+                    result_deps |= extra
+                    self._record_read(extra)
                     for record_id in (
                         self._struct_binding_field_record_ids(
                             result_id, node
@@ -32309,26 +32353,9 @@ class _Builder:
                 if self._is_tracked_literal_value(
                     ref.binding_id, params
                 ):
-                    deps = (
-                        self._captured_current_deps(
-                            self.closure_captures.get(
-                                ref.binding_id, frozenset()
-                            ),
-                            params,
-                            locals_,
-                        )
-                        | self.indirect_writes
+                    deps = self._tracked_literal_read_deps(
+                        ref.binding_id, params, locals_
                     )
-                    if ref.binding_id in self.pointee_closures:
-                        for escaped_id in self.escaped:
-                            if escaped_id in locals_:
-                                deps |= locals_[escaped_id]
-                            elif escaped_id in params:
-                                deps |= frozenset(
-                                    {params[escaped_id]}
-                                )
-                    if ref.binding_id in self.closure_factory_results:
-                        deps |= locals_[ref.binding_id]
                 if ref.binding_id in self.external_chan_locals:
                     # `ch := g()` names a callee-produced queue —
                     # contents live in `indirect_writes`, like a
