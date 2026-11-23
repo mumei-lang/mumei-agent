@@ -2733,7 +2733,7 @@ class _RustBindings:
             # own-slice producer like `remainder`.
             slice_args = (
                 recv_args is not None
-                and re.match(r"&?\s*\[", recv_args.strip())
+                and re.match(r"&?\s*\[[^;]*\]", recv_args.strip())
             )
             if slice_args and receiver.type == "call_expression":
                 rcallee = receiver.child_by_field_name("function")
