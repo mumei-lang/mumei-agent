@@ -216,9 +216,11 @@ _OPTION_HEAD_METHODS = {
     # `m.remove_entry(k)`/`m.pop_first()`/`m.pop_last()` yield
     # `Option<(K, V)>` — `_MAP_PAIR_METHODS` spells the pair.
     "remove_entry": ("", {"HashMap", "BTreeMap"}, 0),
-    # `m.get_key_value(k)` yields `Option<(&K, &V)>` — the
-    # borrowed pair spelled below.
+    # `m.get_key_value(k)`/`first_key_value`/`last_key_value`
+    # yield `Option<(&K, &V)>` — the borrowed pair spelled below.
     "get_key_value": ("", {"HashMap", "BTreeMap"}, 0),
+    "first_key_value": ("", {"BTreeMap"}, 0),
+    "last_key_value": ("", {"BTreeMap"}, 0),
     # `pop_first`/`pop_last` on `BTreeMap` yield `Option<(K, V)>`
     # (the `_MAP_PAIR_METHODS` pair below); on `BTreeSet` plain
     # `Option<P>`.
@@ -238,7 +240,9 @@ _MAP_PAIR_METHODS = frozenset(
 
 # `m.get_key_value(k)` yields `Option<(&K, &V)>` — the borrowed
 # variant of the `_MAP_PAIR_METHODS` pair.
-_MAP_BORROWED_PAIR_METHODS = frozenset({"get_key_value"})
+_MAP_BORROWED_PAIR_METHODS = frozenset(
+    {"get_key_value", "first_key_value", "last_key_value"}
+)
 
 # `v.swap_remove(i)` yields `T` outright — a receiver payload, not
 # an Option.
@@ -3325,6 +3329,15 @@ class _RustBindings:
                             produced_head = self._normalize_identifier(
                                 produced.group(0).split("::")[-1]
                             )
+                _spelled_head = self._expanded_container_head(
+                    option_head_value
+                )
+                _head_disallowed = (
+                    _spelled_head is not None
+                    and option_head is not None
+                    and option_head[1] is not None
+                    and _spelled_head not in option_head[1]
+                )
                 if (
                     option_head is not None
                     and (
@@ -3356,9 +3369,22 @@ class _RustBindings:
                         or produced_head in option_head[1]
                         or (
                             map_pair
+                            and not _head_disallowed
                             and self._is_map_container(
                                 None,
                                 callee.child_by_field_name("value"),
+                            )
+                            and not (
+                                receiver[0] is not None
+                                and next(
+                                    (
+                                        b.kind
+                                        for b in self.bindings
+                                        if b.id == receiver[0]
+                                    ),
+                                    None,
+                                )
+                                in {"struct", "enum"}
                             )
                         )
                         or (
@@ -3515,6 +3541,18 @@ class _RustBindings:
                             and self._is_map_container(
                                 None,
                                 callee.child_by_field_name("value"),
+                            )
+                            and not (
+                                receiver[0] is not None
+                                and next(
+                                    (
+                                        b.kind
+                                        for b in self.bindings
+                                        if b.id == receiver[0]
+                                    ),
+                                    None,
+                                )
+                                in {"struct", "enum"}
                             )
                         ):
                             # `m.pop_first()` yields
@@ -4905,19 +4943,27 @@ class _RustBindings:
                 )
                 if key is not None:
                     head = node.child_by_field_name("type")
-                    record = (
-                        None
-                        if head is None
-                        or head.type
-                        not in {"identifier", "type_identifier"}
-                        else self._lookup(
-                            self._normalize_identifier(
-                                self.text(head)
-                            ),
-                            position,
-                            "type",
+                    if head is not None and head.type in {
+                        "scoped_identifier",
+                        "scoped_type_identifier",
+                    }:
+                        # `m::A<P>` — the head lives inside `m`'s
+                        # module scope, not the caller's stack.
+                        record = self._scoped_type(head)
+                    else:
+                        record = (
+                            None
+                            if head is None
+                            or head.type
+                            not in {"identifier", "type_identifier"}
+                            else self._lookup(
+                                self._normalize_identifier(
+                                    self.text(head)
+                                ),
+                                position,
+                                "type",
+                            )
                         )
-                    )
                     name = (
                         None
                         if head is None
@@ -4928,11 +4974,18 @@ class _RustBindings:
         if node is not None and node.type in {
             "identifier",
             "type_identifier",
+            "scoped_identifier",
+            "scoped_type_identifier",
         }:
-            record = self._lookup(
-                self._normalize_identifier(self.text(node)),
-                position,
-                "type",
+            record = (
+                self._scoped_type(node)
+                if node.type
+                in {"scoped_identifier", "scoped_type_identifier"}
+                else self._lookup(
+                    self._normalize_identifier(self.text(node)),
+                    position,
+                    "type",
+                )
             )
             return None, record, self._normalize_identifier(
                 self.text(node)
@@ -4976,6 +5029,67 @@ class _RustBindings:
         if pair is None:
             return None
         key, head, _ = pair
+        if head is None and node is not None and node.type == "field_expression":
+            # `w.map` — the field's declared `BTreeMap<i32, V>`
+            # spells `W`'s own params; substitute the receiver's
+            # concrete args (`w: W<P>` reads `V` as `P`) and pin the
+            # field's scope names so a use-site same-named type
+            # cannot steal them.
+            value_node = node.child_by_field_name("value")
+            member = self._field_member(
+                node, ("struct_field", "associated_const")
+            )
+            container_id, impl_args = self._receiver_type(value_node)
+            container = (
+                None
+                if container_id is None
+                else self.records.get(container_id)
+            )
+            param_map = self._pattern_param_map(container, impl_args)
+            scope = (
+                None if container is None else container.home_scope
+            ) or (None if member is None else member.home_scope)
+            # Param names stay raw while decl-scope names are pinned
+            # to `crate::` paths — `BTreeMap<i32, V>` at `w: W<P>`
+            # yields `i32, P`, never `crate::V`; path tails like
+            # `a::T` are not substituted either.
+            marks = {
+                name: "__mumei_arg_%d__" % idx
+                for idx, name in enumerate(param_map)
+            }
+            push = scope is not None and scope not in self.scopes
+            if push:
+                self._push_scope(scope)
+            try:
+                qualified = ", ".join(
+                    self._qualified_spelling(
+                        (
+                            re.sub(
+                                r"\b("
+                                + "|".join(
+                                    re.escape(name) for name in marks
+                                )
+                                + r")\b",
+                                lambda m: marks[m.group(1)],
+                                part.strip(),
+                            )
+                            if marks
+                            else part.strip()
+                        ),
+                        tnode.start_byte,
+                    )
+                    for part in self._type_arg_list(key or "")
+                )
+            finally:
+                if push:
+                    self.scopes.pop()
+            for name, mark in marks.items():
+                qualified = re.sub(
+                    r"(?<![:\w])" + re.escape(mark) + r"\b",
+                    lambda _m: param_map[name],
+                    qualified,
+                )
+            return qualified
         seen: set[str] = set()
         # `type Flip<A, B> = HashMap<B, A>` — the alias's args must
         # be substituted into the body's spelling, not read raw.
@@ -5006,21 +5120,82 @@ class _RustBindings:
             if not names:
                 # `type M = HashMap<K, V>` — a non-generic alias
                 # carries its whole argument list in the body.
-                key = body_pair[0]
+                key = self._alias_scope_qualified_args(
+                    body_pair[0], head
+                )
                 head = body_pair[1]
                 continue
             if len(args) < len(names):
                 break
             mapping = dict(zip(names, args))
             key = re.sub(
-                r"\b(" + "|".join(
+                r"(?<![:\w])(" + "|".join(
                     re.escape(name) for name in mapping
                 ) + r")\b",
                 lambda m: mapping[m.group(1)],
-                body_pair[0],
+                self._alias_scope_qualified_args(
+                    body_pair[0], head
+                ),
             )
             head = body_pair[1]
         return key
+
+    def _alias_scope_qualified_args(
+        self, spelled_args: "str | None", alias_record: "_Record"
+    ) -> "str | None":
+        """`spelled_args` with each declared name pinned to the
+        alias's own scope — `type M = HashMap<K, V2>` used where a
+        different `V2` is in scope still binds the decl-site `V2`.
+        Substituted params stay raw (they spell use-site names)."""
+        if spelled_args is None:
+            return None
+        item = alias_record.alias_node.parent
+        params = self._type_param_names(
+            None
+            if item is None
+            else item.child_by_field_name("type_parameters")
+        )
+        # The alias's own params stay raw — they spell the USE-site
+        # arg, substituted later; qualifying would pin a root-scope
+        # `T` to `crate::T` and keep it from being substituted.
+        marks = {
+            name: "__mumei_alias_%d__" % idx
+            for idx, name in enumerate(params)
+        }
+        scope = alias_record.home_scope
+        push = scope is not None and scope not in self.scopes
+        if push:
+            self._push_scope(scope)
+        try:
+            qualified = ", ".join(
+                self._qualified_spelling(
+                    (
+                        re.sub(
+                            r"\b("
+                            + "|".join(
+                                re.escape(name) for name in marks
+                            )
+                            + r")\b",
+                            lambda m: marks[m.group(1)],
+                            part.strip(),
+                        )
+                        if marks
+                        else part.strip()
+                    ),
+                    alias_record.alias_node.start_byte,
+                )
+                for part in self._type_arg_list(spelled_args)
+            )
+        finally:
+            if push:
+                self.scopes.pop()
+        for name, mark in marks.items():
+            qualified = re.sub(
+                r"(?<![:\w])" + re.escape(mark) + r"\b",
+                name,
+                qualified,
+            )
+        return qualified
 
     def _expanded_container_head(self, node: Any | None) -> "str | None":
         """Container head of an annotation after type-alias
@@ -9857,6 +10032,15 @@ class _RustBindings:
                     ),
                     None,
                 ) in {"struct", "enum"}
+                _spelled_head = self._expanded_container_head(
+                    _head_value
+                )
+                _head_disallowed = (
+                    _spelled_head is not None
+                    and option_head is not None
+                    and option_head[1] is not None
+                    and _spelled_head not in option_head[1]
+                )
                 if (
                     option_head is not None
                     and (
@@ -9879,7 +10063,8 @@ class _RustBindings:
                             )
                         )
                         or (
-                            self.text(field).strip()
+                            not _head_disallowed
+                            and self.text(field).strip()
                             in _MAP_PAIR_METHODS
                             | _MAP_BORROWED_PAIR_METHODS
                             and self._is_map_container(
@@ -9906,12 +10091,73 @@ class _RustBindings:
                     # payload args were written in the receiver's
                     # annotation — resolve them there, not at the
                     # call site.
+                    _args_value = callee.child_by_field_name("value")
+                    _args_position = (
+                        self._receiver_annotation_position(_args_value)
+                        or node.start_byte
+                    )
+                    _args_scope = None
+                    if (
+                        _args_value is not None
+                        and _args_value.type == "field_expression"
+                    ):
+                        # `w.map.first_key_value()` — a field spelling
+                        # the container's params anywhere in its args
+                        # (`BTreeMap<i32, V>` at `w: W<P>`) resolves the
+                        # substituted names where `w` was annotated,
+                        # not inside `W`'s own scope; decl-scope names
+                        # are `crate::`-pinned by `_map_spelled_args`.
+                        _fmember = self._field_member(
+                            _args_value,
+                            ("struct_field", "associated_const"),
+                        )
+                        _fvalue = _args_value.child_by_field_name(
+                            "value"
+                        )
+                        _cid, _iargs = (
+                            (None, None)
+                            if _fvalue is None
+                            else self._receiver_type(_fvalue)
+                        )
+                        _fcontainer = (
+                            None
+                            if _cid is None
+                            else self.records.get(_cid)
+                        )
+                        _fpmap = self._pattern_param_map(
+                            _fcontainer, _iargs
+                        )
+                        if (
+                            _fmember is not None
+                            and _fmember.type_node is not None
+                            and _fpmap
+                            and any(
+                                re.search(
+                                    rf"\b{re.escape(p)}\b",
+                                    self.text(_fmember.type_node),
+                                )
+                                for p in _fpmap
+                            )
+                        ):
+                            _args_position = (
+                                self._receiver_annotation_position(
+                                    _fvalue
+                                )
+                                or _args_position
+                            )
+                        else:
+                            _fpos, _fscope = self._field_args_scope(
+                                _args_value
+                            )
+                            if _fpos is not None or _fscope is not None:
+                                _args_position = (
+                                    _fpos or _args_position
+                                )
+                                _args_scope = _fscope
                     return (
                         "Option",
-                        self._receiver_annotation_position(
-                            callee.child_by_field_name("value")
-                        ) or node.start_byte,
-                        None,
+                        _args_position,
+                        _args_scope,
                     )
                 if (
                     field is not None
