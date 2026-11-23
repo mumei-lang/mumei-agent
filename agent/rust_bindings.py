@@ -477,6 +477,35 @@ _EXACT_CHUNKS_INHERENT = {
     "ChunksExactMut": {"into_remainder"},
     "RChunksExactMut": {"into_remainder"},
 }
+# Std inherent methods on spelled prelude containers — a trait
+# `impl Ext for VecDeque` member named `as_slices` never wins the
+# call: Rust resolves the inherent `VecDeque::as_slices` first.
+# Covering impls skip these names so the std recipe keeps its own
+# result (`(&[P], &[P])`) instead of the trait's return type.
+_SPELLED_STD_INHERENT = {
+    "VecDeque": {"as_slices", "as_mut_slices"},
+    "LinkedList": {"as_slices", "as_mut_slices"},
+}
+# Methods whose produced spelled args keep the PAYLOAD's own whole
+# spelling — `o.unwrap()` on `Option<Vec<P>>` spells `Vec<P>` (the
+# produced type itself), unlike `v: Vec<P>` whose args `P` are the
+# element list. `?`/try expressions produce the same shape.
+_PAYLOAD_PRODUCER_METHODS = _UNWRAP_OK_METHODS | _UNWRAP_ERR_METHODS | {
+    "into_inner", "try_unwrap", "ok", "err", "as_ref", "as_mut",
+    "cloned", "copied", "and", "or", "xor", "and_then", "or_else",
+    "map", "map_err", "map_or", "map_or_else", "find_map",
+    "filter", "take_if", "inspect", "inspect_err",
+    "get", "first", "last", "get_mut", "first_mut", "last_mut",
+    "or_insert", "or_insert_with", "get_or_insert",
+    "get_or_insert_with", "split_first", "split_last",
+    "split_first_mut", "split_last_mut", "take", "zip",
+    "next", "pop", "remove", "swap_remove", "pop_first",
+    "pop_last", "first_entry", "last_entry", "first_key_value",
+    "last_key_value", "borrow", "borrow_mut", "lock", "try_lock",
+    "read", "write", "try_read", "try_write", "downgrade",
+    "upgrade", "nth", "find", "min", "max", "min_by", "max_by",
+    "min_by_key", "max_by_key", "reduce",
+}
 _TRY_HEADS = frozenset({"Option", "Result"})
 # Prelude constructors whose tuple payload position is fixed by the
 # container type — `Some(x)` binds `Option<T>`'s first arg, `Err(e)`
@@ -2600,15 +2629,30 @@ class _RustBindings:
             return None
         first = candidates[0]
         if tier(first) == 1:
-            # More than one trait impl can spell `name` — Rust reports
-            # ambiguity, so no single implementation is picked.
-            if sum(1 for record in candidates if tier(record) == 1) > 1:
-                return None
+            top = [record for record in candidates if tier(record) == 1]
+            if len(top) > 1:
+                # A by-value `self` receiver outranks `&self`/`&mut
+                # self` — `s.m()` picks it outright; only same-kind
+                # collisions stay ambiguous.
+                by_value = [
+                    record
+                    for record in top
+                    if self._member_self_kind(record) == "value"
+                ]
+                if len(by_value) != 1:
+                    return None
+                first = by_value[0]
         elif tier(first) == 2:
-            # Defaults from several in-scope traits are equally
-            # ambiguous — and an impl member would have shadowed them.
-            if sum(1 for record in candidates if tier(record) == 2) > 1:
-                return None
+            top = [record for record in candidates if tier(record) == 2]
+            if len(top) > 1:
+                by_value = [
+                    record
+                    for record in top
+                    if self._member_self_kind(record) == "value"
+                ]
+                if len(by_value) != 1:
+                    return None
+                first = by_value[0]
         return first
 
     def _concrete_type(
@@ -2788,6 +2832,56 @@ class _RustBindings:
             self._field_member(callee, ("associated_function",))
             is None
         )
+
+    def _spelled_produced_whole_args(self, receiver: Any) -> bool:
+        """Whether `receiver`'s spelled args name its own whole
+        type. Payload producers (`o.unwrap()` → `Vec<P>`, `x?`,
+        `Box::into_inner(b)`) keep the payload's full spelling,
+        while annotated containers and declared returns keep
+        element args — `make() -> Vec<Vec<P>>` spells `Vec<P>` as
+        its element, not its whole type."""
+        node = receiver
+        while node is not None and node.type in {
+            "reference_expression",
+            "parenthesized_expression",
+        }:
+            node = next(iter(node.named_children), None)
+        if node is not None and node.type == "identifier":
+            record = self._lookup(
+                self._normalize_identifier(self.text(node)),
+                node.start_byte,
+                "value",
+            )
+            node = None if record is None else record.value_node
+            while node is not None and node.type in {
+                "reference_expression",
+                "parenthesized_expression",
+            }:
+                node = next(iter(node.named_children), None)
+        if node is None:
+            return False
+        if node.type == "try_expression":
+            return True
+        if node.type != "call_expression":
+            return False
+        callee = node.child_by_field_name("function")
+        if callee is None:
+            return False
+        if callee.type == "field_expression":
+            field = callee.child_by_field_name("field")
+            return field is not None and (
+                self._normalize_identifier(self.text(field))
+                in _PAYLOAD_PRODUCER_METHODS
+            )
+        if callee.type in {
+            "scoped_identifier",
+            "scoped_type_identifier",
+        }:
+            return self.text(callee).strip().rsplit("::", 1)[-1] in {
+                "into_inner",
+                "try_unwrap",
+            }
+        return False
 
     def _impl_target_record(
         self, type_node: "Any | None", position: int
@@ -3105,15 +3199,29 @@ class _RustBindings:
                 or self._spelled_receiver_head(receiver)
                 or self._produced_head(receiver)
             )
-            if receiver_head is None and recv_args is not None:
+            if (
+                receiver_head is None
+                and recv_args is not None
+                and receiver.type
+                in {"identifier", "index_expression", "field_expression"}
+                and not self._bound_to_producing_call(receiver)
+            ):
                 # `v[0]` on `Vec<String>`/`a` iterating it — the
                 # spelled args hold the element's own type (`str`,
                 # `String`), which heads a bare spelled receiver.
+                # A producing call's args name its ELEMENT instead
+                # (`v.into_iter()` spells `String` but yields an
+                # `IntoIter`), and a `let` bound to one shares it.
                 bare = re.fullmatch(
-                    r"(?:'\w+\s+)?[A-Za-z_][\w:]*", recv_args.strip()
+                    r"&?\s*(?:'\w+\s+)?[A-Za-z_][\w:]*",
+                    recv_args.strip(),
                 )
                 if bare is not None:
-                    receiver_head = bare.group(0).rsplit("::", 1)[-1]
+                    receiver_head = re.sub(
+                        r"^&\s*(?:'\w+\s+)?|^'\w+\s+",
+                        "",
+                        bare.group(0).strip(),
+                    ).rsplit("::", 1)[-1]
             if receiver_head is not None:
                 receiver_heads.add(receiver_head)
             # `impl T for [P]` reaches `Vec`/`VecDeque`/… receivers
@@ -3202,8 +3310,18 @@ class _RustBindings:
                     receiver_heads.add(
                         "".join(part.title() for part in mname.split("_"))
                     )
+        if any(
+            name in _SPELLED_STD_INHERENT.get(head, ())
+            for head in receiver_heads
+        ):
+            # `vd.as_slices()` calls the inherent
+            # `VecDeque::as_slices` — inherent methods outrank
+            # every trait impl, so no covering member may bind.
+            return None
         trait_default = None
+        trait_default_kind = None
         covered = None
+        covered_kind = None
         for record in self.records.values():
             if not (
                 record.member_trait is not None
@@ -3211,8 +3329,14 @@ class _RustBindings:
                 and record.binding.kind == "associated_function"
             ):
                 continue
+            self_kind = None
             if receiver is not None:
-                if self._member_self_kind(record) == "arbitrary":
+                self_kind = self._member_self_kind(record)
+                if self_kind is None:
+                    # An associated function without a `self`
+                    # parameter is never a method-call candidate.
+                    continue
+                if self_kind == "arbitrary":
                     # `self: Box<Self>`/`self: Rc<Self>` methods only
                     # apply to a wrapped receiver — a bare value of
                     # the impl target never calls them.
@@ -3281,16 +3405,31 @@ class _RustBindings:
                     # concrete impl member covers — remember it and
                     # keep looking for the impl's own member.
                     if trait_default is not None:
-                        # Defaults of several in-scope traits are
-                        # equally ambiguous.
-                        return None
-                    trait_default = record
+                        if trait_default_kind == self_kind:
+                            # Defaults of several in-scope traits
+                            # are equally ambiguous.
+                            return None
+                        if self_kind == "value":
+                            # `self` outranks `&self` — the later
+                            # candidate wins outright.
+                            trait_default = record
+                            trait_default_kind = self_kind
+                    else:
+                        trait_default = record
+                        trait_default_kind = self_kind
                 else:
                     if covered is not None:
-                        # Several impls spell `name` for covering
-                        # heads — Rust reports ambiguity.
-                        return None
-                    covered = record
+                        if covered_kind == self_kind:
+                            # Several impls spell `name` for
+                            # covering heads — Rust reports
+                            # ambiguity.
+                            return None
+                        if self_kind == "value":
+                            covered = record
+                            covered_kind = self_kind
+                    else:
+                        covered = record
+                        covered_kind = self_kind
         return covered if covered is not None else trait_default
 
     def _resolve_trait_node(self, trait_node: Any) -> "_Record | None":
@@ -3558,12 +3697,22 @@ class _RustBindings:
                     )
                     if inner is not None:
                         return inner, elem_id, elem_args
-        if record is None and type_id is None:
+        if (
+            record is None
+            and type_id is None
+            and "associated_function" in kinds
+            and value is not None
+            and value.type
+            in {"identifier", "index_expression", "field_expression"}
+        ):
             # Spelled receivers never produce a record (`s: String`,
             # `v[0]` on `Vec<String>`) — a trait impl whose head
             # covers the spelled receiver still applies. Resolved
             # containers go through `_member_record`'s specialization
-            # and ambiguity rules instead.
+            # and ambiguity rules instead. Field reads (kinds like
+            # `struct_field`) never call a method. Call-chain
+            # receivers (`v.iter().m()`) keep their produced head —
+            # the spelled args name the element, not the receiver.
             cover = self._covering_trait_member(
                 name, node.start_byte, value
             )
@@ -3937,10 +4086,14 @@ class _RustBindings:
                 container_id is None
                 and whole is not None
                 and not self._verbatim_annotation_args(children[0])
+                and self._spelled_produced_whole_args(children[0])
             ):
-                # `let v = Box::into_inner(b)` — produced args spell
-                # the whole `Vec<P>` type, not a container's element
-                # list — peel the head so `v[0]` is `P`.
+                # `let v = Box::into_inner(b)`/`o.unwrap()[0]` —
+                # payload-produced args spell the whole `Vec<P>`
+                # type, not a container's element list — peel the
+                # head so `v[0]` is `P`. A declared return
+                # (`h.make() -> Vec<Vec<P>>`) already spells the
+                # element `Vec<P>` and must not peel again.
                 elem_args = whole.group(1).strip()
             if len(self._type_arg_list(elem_args)) > 1:
                 return None, None
@@ -4010,13 +4163,33 @@ class _RustBindings:
                         )
                         index = int(index_text)
                         if (wrapped or len(spelled) > 1) and index < len(spelled):
-                            return self._spelled_type(
-                                spelled[index],
+                            element = spelled[index].strip()
+                            pair = self._spelled_type(
+                                element,
                                 self._receiver_annotation_position(
                                     value_node
                                 )
                                 or node.start_byte,
                             )
+                            if pair == (None, None):
+                                # `String`/`str` inside the tuple
+                                # never resolves to a record — keep
+                                # the name spelled so its impl
+                                # members can still cover.
+                                prelude = re.fullmatch(
+                                    r"&?\s*(?:'\w+\s+)?[A-Za-z_][\w:]*",
+                                    element,
+                                )
+                                if prelude is not None and (
+                                    re.sub(
+                                        r"^&\s*(?:'\w+\s+)?|^'\w+\s+",
+                                        "",
+                                        prelude.group(0).strip(),
+                                    ).rsplit("::", 1)[-1]
+                                    in _PRELUDE_TYPE_NAMES
+                                ):
+                                    return None, element
+                            return pair
             return None, None
         if node.type == "call_expression":
             callee_node = node.child_by_field_name("function")
@@ -6832,6 +7005,11 @@ class _RustBindings:
                 if record is not None and record.type_node is not None:
                     return record.type_node.start_byte
             return None
+        if node.type == "index_expression":
+            # `v[0]`/`h.make()[0]` — the spelled element names were
+            # written in the container's annotation.
+            inner = next(iter(node.named_children), None)
+            return self._receiver_annotation_position(inner)
         if node.type != "identifier":
             return None
         record = self._lookup(
@@ -7452,11 +7630,15 @@ class _RustBindings:
             spelled = args.strip() or None
             if spelled is None:
                 return None, None
-            if not self._verbatim_annotation_args(receiver):
-                # `make().unwrap()` produces the whole `Vec<P>`
-                # type spelled — peel the container head so the
-                # chunk element is `P`, not `Vec<P>`. An annotated
-                # `Vec<Vec<P>>` element stays whole.
+            if not self._verbatim_annotation_args(receiver) and (
+                self._spelled_produced_whole_args(receiver)
+            ):
+                # `o.unwrap()` produces the whole `Vec<P>` type
+                # spelled — peel the container head so the chunk
+                # element is `P`, not `Vec<P>`. An annotated
+                # `Vec<Vec<P>>` element stays whole, and so does a
+                # declared `make() -> Vec<Vec<P>>` return whose
+                # args already spell the element.
                 whole = re.fullmatch(
                     r"[A-Za-z_][\w:]*\s*<(.+)>", spelled, re.DOTALL
                 )
@@ -8358,11 +8540,14 @@ class _RustBindings:
             if (
                 spelled is not None
                 and not self._verbatim_annotation_args(receiver)
+                and self._spelled_produced_whole_args(receiver)
             ):
-                # `make().unwrap()` produces the whole `Vec<P>`
-                # type spelled — peel the container head so the
-                # chunk element is `P`, not `Vec<P>`. An annotated
-                # `Vec<Vec<P>>` element stays whole.
+                # `o.unwrap()` produces the whole `Vec<P>` type
+                # spelled — peel the container head so the chunk
+                # element is `P`, not `Vec<P>`. An annotated
+                # `Vec<Vec<P>>` element stays whole, and so does a
+                # declared `make() -> Vec<Vec<P>>` return whose
+                # args already spell the element.
                 whole = re.fullmatch(
                     r"[A-Za-z_][\w:]*\s*<(.+)>", spelled, re.DOTALL
                 )
@@ -11745,6 +11930,11 @@ class _RustBindings:
             return self._alias_head_name(
                 member.type_node, node.start_byte
             )
+        if not self._spelled_produced_whole_args(node):
+            # An unresolved call's spelled args hold the ELEMENT
+            # (`v.iter()` spells `String`, yielding an `Iter`) —
+            # only a payload producer's args name the whole type.
+            return None
         return self._type_head_name(
             None, self._receiver_type(node)[1]
         )
