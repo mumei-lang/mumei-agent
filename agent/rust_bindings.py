@@ -4338,6 +4338,82 @@ class _RustBindings:
                             annotated,
                         )
                     if (
+                        method_name == "into_boxed_slice"
+                        and receiver[1] is not None
+                        and (
+                            self._container_head_name(
+                                callee.child_by_field_name("value")
+                            )
+                            or self._produced_head(
+                                callee.child_by_field_name("value")
+                            )
+                        )
+                        == "Vec"
+                    ):
+                        # `v.into_boxed_slice()` yields
+                        # `Box<[T]>` — `b[0]` peels the `Box` and
+                        # the slice to `P`. Without the
+                        # annotation's site the element name
+                        # would re-resolve at the caller's scope.
+                        annotated = self._receiver_annotation_position(
+                            callee.child_by_field_name("value")
+                        )
+                        if annotated is None:
+                            return _UNKNOWN, None
+                        return self._spelled_type(
+                            "Box<[" + receiver[1] + "]>",
+                            annotated,
+                        )
+                    if (
+                        method_name in {"cloned", "copied"}
+                        and receiver[1] is not None
+                        and (
+                            self._container_head_name(
+                                callee.child_by_field_name("value")
+                            )
+                            or self._produced_head(
+                                callee.child_by_field_name("value")
+                            )
+                        )
+                        == "Result"
+                    ):
+                        # `Result<&P, E>::cloned()`/`copied()`
+                        # yield `Result<P, E>` — the borrow peels
+                        # off the `Ok` arg only; a non-borrowed
+                        # `Result` names no such method and stays
+                        # opaque. A call receiver spells the whole
+                        # `Result<...>` — unwrap its args.
+                        cloned_args = receiver[1]
+                        produced = re.fullmatch(
+                            r"Result\s*<([\s\S]*)>",
+                            cloned_args.strip(),
+                        )
+                        if produced is not None:
+                            cloned_args = produced.group(1)
+                        cloned_parts = self._type_arg_list(
+                            cloned_args
+                        )
+                        if len(cloned_parts) == 2:
+                            ok_arg = cloned_parts[0].strip()
+                            peeled = re.sub(
+                                r"^&\s*(?:'\w+\s+)?(?:mut\s+)?",
+                                "",
+                                ok_arg,
+                            )
+                            if peeled != ok_arg:
+                                # The full `Result<...>` spelling
+                                # keeps the head for the
+                                # `_scrutinee_shape` args-head
+                                # fallback (`if let Ok(p) = a`).
+                                return (
+                                    None,
+                                    "Result<{}, {}>".format(
+                                        peeled,
+                                        cloned_parts[1].strip(),
+                                    ),
+                                )
+                        return None, None
+                    if (
                         method_name in {"as_slices", "as_mut_slices"}
                         and receiver[1] is not None
                         and self._container_head_name(
@@ -9871,6 +9947,42 @@ class _RustBindings:
             head = base
         return head
 
+    def _produced_head(self, node: Any | None) -> "str | None":
+        """Container head a call result names — the callee's declared
+        return annotation (`fn make_vec() -> Vec<P>`) or a produced
+        spelling (`r.as_ref()` -> `Result<...>`). None for non-calls."""
+        if node is None or node.type != "call_expression":
+            return None
+        callee = node.child_by_field_name("function")
+        member = None
+        if callee is not None:
+            if callee.type == "field_expression":
+                member = self._field_member(
+                    callee, ("associated_function",)
+                )
+            elif callee.type == "identifier":
+                member = self._through_import(
+                    self._lookup(
+                        self._normalize_identifier(self.text(callee)),
+                        node.start_byte,
+                        "value",
+                    ),
+                    node.start_byte,
+                    "value",
+                )
+            elif callee.type in {
+                "scoped_identifier",
+                "scoped_type_identifier",
+            }:
+                member, _ = self._scoped_member(callee)
+        if member is not None and member.type_node is not None:
+            return self._alias_head_name(
+                member.type_node, node.start_byte
+            )
+        return self._type_head_name(
+            None, self._receiver_type(node)[1]
+        )
+
     def _expr_type_spelling(self, node: Any | None) -> "str | None":
         """Spelled whole type of an expression — `Vec<P>` for `v`,
         `m::E` for `e`. Used when a method argument's own type feeds
@@ -10515,12 +10627,20 @@ class _RustBindings:
                         )
                         in _TRY_HEADS
                     ):
+                        value_node = (
+                            callee.child_by_field_name("value")
+                            if callee is not None
+                            else None
+                        )
+                        _pos, _scope = self._field_args_scope(
+                            value_node
+                        )
                         return (
                             self._normalize_identifier(
                                 head.group(0).split("::")[-1]
                             ),
-                            node.start_byte,
-                            None,
+                            _pos or node.start_byte,
+                            _scope,
                         )
                 return None, None, None
             if member.type_node is None:
