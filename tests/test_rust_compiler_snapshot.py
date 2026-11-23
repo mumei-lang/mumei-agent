@@ -25,6 +25,7 @@ FIXTURE_NAMES = (
     "external_stdlib",
     "macro_usage",
     "build_script",
+    "member_access",
 )
 _STATUSES = (
     "external",
@@ -601,3 +602,69 @@ def test_rejects_oversized_envelope():
         load_rust_compiler_snapshot(
             b"x" * (MAX_REPORT_BYTES + 1), _source("local_shadowing")
         )
+
+
+def test_member_access_references_agree_and_type_positions_report_missing():
+    # Member calls, field reads, `self` receivers, locals, loop
+    # bindings and match/if-let scrutinee payload bindings agree
+    # with rust-analyzer; struct names in type positions and field
+    # labels stay `lexical_missing` — the lexical side does not emit
+    # those reference positions (its honest coverage boundary).
+    envelope = _envelope("member_access")
+    source = _source("member_access")
+    snapshot = load_rust_compiler_snapshot(_payload(envelope), source)
+    report = build_rust_bindings(source.decode("utf-8"), pointer_width=64)
+
+    comparison = compare_with_lexical(snapshot, report)
+
+    agreed = {
+        item["name"] for item in comparison["references"]
+        if item["status"] == "agree"
+    }
+    missing_sites = [
+        (item["name"], item["span"]["start"])
+        for item in comparison["references"]
+        if item["status"] == "lexical_missing"
+    ]
+    assert agreed >= {
+        "w", "p", "self", "inner", "value", "field", "read", "new", "pm",
+        "vec", "p2", "r", "q", "m", "g",
+    }
+    # Name sets alone cannot tell a missed `w.inner` read from the
+    # field labels that are legitimately unreferenced — pin the
+    # missing sites by (name, byte offset) instead.
+    assert missing_sites == [
+        ("V", 33),
+        ("P", 44),
+        ("V", 66),
+        ("P", 72),
+        ("value", 88),
+        ("P", 131),
+        ("P", 179),
+        ("W", 190),
+        ("P", 218),
+        ("P", 272),
+        ("inner", 345),
+        ("P", 352),
+        ("P", 475),
+    ]
+    assert all(
+        item["status"] != "disagree"
+        for item in comparison["references"]
+    )
+    assert comparison["summary"]["lexical_unresolved"] == 0
+
+    # rust-analyzer 1.100 does not emit a reference for `g.pm()`
+    # inside the `if let` arm, so the call is outside the
+    # comparison's coverage — assert the lexical side resolves it
+    # directly instead.
+    raw = source
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    pm = next(
+        b for b in report.bindings
+        if b.name == "pm" and b.kind == "associated_function"
+    )
+    assert bound.get("g.pm()") == pm.id
