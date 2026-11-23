@@ -7213,7 +7213,10 @@ class _RustBindings:
         spelled element names resolve against the names visible
         there, not at the call site."""
         node = receiver
-        while node is not None and node.type == "reference_expression":
+        while node is not None and node.type in {
+            "reference_expression",
+            "parenthesized_expression",
+        }:
             node = next(iter(node.named_children), None)
         if node is None:
             return None
@@ -7234,14 +7237,24 @@ class _RustBindings:
             callee = node.child_by_field_name("function")
             if callee is not None and callee.type == "field_expression":
                 member = callee.child_by_field_name("field")
+                value = callee.child_by_field_name("value")
                 if (
                     member is not None
                     and self.text(member).strip() == "and"
+                    and (
+                        self._container_head_name(value)
+                        or self._expanded_container_head(value)
+                        or self._produced_head(value)
+                        or self._combinator_head(value)
+                    )
+                    in {"Option", "Result"}
                 ):
-                    # `o.and(r)` yields `r`'s `Option` — the spelled
-                    # names were written in `r`'s annotation, not
-                    # the receiver's (nested `b.and(c)` follows the
-                    # chain to the innermost argument).
+                    # `o.and(r)` yields `r`'s `Option`/`Result` —
+                    # the spelled names were written in `r`'s
+                    # annotation, not the receiver's (nested
+                    # `b.and(c)` follows the chain to the innermost
+                    # argument). A custom `and` on another type
+                    # keeps its own declared return.
                     arguments = node.child_by_field_name("arguments")
                     arg = (
                         next(
@@ -10765,7 +10778,18 @@ class _RustBindings:
                     record.pattern_decl_scope = pinned[3]
             if whole:
                 record.value_node = value
-            if record.type_args is not None:
+            spell = (
+                pinned[4]
+                if pinned is not None and len(pinned) > 4
+                else None
+            )
+            if spell is not None:
+                # A field-bound name keeps the field annotation's
+                # own position — `let W { v: xs } = m::pair()`
+                # resolves `v`'s `Vec<P>` inside `W`'s module, not
+                # the scrutinee's.
+                record.spell_position = spell
+            elif record.type_args is not None:
                 record.spell_position = scrut_position
             self._add_to_scope(scope, record)
 
@@ -11980,33 +12004,6 @@ class _RustBindings:
         record = self._pattern_head_record(head, scrut_id)
         if record is None:
             return None
-        if scrut_id is None and scrut_args:
-            # A produced scrutinee carries only a spelled payload
-            # (`crate::W`) — resolve it so the head's container is
-            # the struct itself, not the enclosing module.
-            spelled_head = scrut_args.strip().split("<", 1)[0].strip()
-            site = (
-                head.start_byte
-                if scrut_position is None
-                else scrut_position
-            )
-            resolved = (
-                self._through_import(
-                    self._scoped_spelled_type(spelled_head, site),
-                    site,
-                )
-                if "::" in spelled_head
-                else self._through_import(
-                    self._lookup(
-                        self._normalize_identifier(spelled_head),
-                        site,
-                        "type",
-                    ),
-                    site,
-                )
-            )
-            if resolved is not None:
-                scrut_id = resolved.binding.id
         container = (
             record
             if record.binding.id == scrut_id

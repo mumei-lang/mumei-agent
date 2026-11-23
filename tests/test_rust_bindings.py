@@ -10461,6 +10461,91 @@ fn f(d: P) {
     assert any(ref.binding_id == pm.id for ref in refs)
 
 
+def test_custom_and_method_keeps_own_return_annotation():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+mod m {
+    pub struct P;
+    impl P { pub fn pm(&self) {} }
+    pub fn make() -> Option<Vec<P>> { None }
+}
+struct W;
+impl W { fn and(&self, o: Option<Vec<P>>) -> Option<Vec<P>> { o } }
+fn f(w: W) {
+    use m::P;
+    if let Some(v) = w.and(m::make()) { v[0].pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    pms = _bindings(report, "pm", "associated_function")
+    assert len(pms) == 2
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `W::and` is not `Option::and` — its declared `Option<Vec<P>>`
+    # spells `P` at `W`'s impl, not in the argument's module.
+    assert bound.get("v[0].pm()") == pms[0].id
+
+
+def test_produced_and_follows_parenthesized_argument():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+fn right() -> Option<Vec<P>> { None }
+mod m {
+    pub struct P;
+    impl P { pub fn pm(&self) {} }
+    pub fn left() -> Option<Vec<P>> { None }
+}
+fn f() {
+    use m::P;
+    if let Some(v) = m::left().and((right())) { v[0].pm(); }
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    pms = _bindings(report, "pm", "associated_function")
+    assert len(pms) == 2
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `(right())` is `right()` — the spelled `P` resolves at
+    # `right`'s declaration, not at the shadowed call site.
+    assert bound.get("v[0].pm()") == pms[0].id
+
+
+def test_struct_pattern_field_spells_at_its_own_declaration():
+    source = """
+struct P;
+impl P { fn pm(&self) {} }
+struct W { v: Vec<P> }
+mod m {
+    pub struct P;
+    impl P { pub fn pm(&self) {} }
+    pub fn pair() -> (super::W, i32) { (todo!(), 0) }
+}
+fn f() {
+    let (W { v: xs }, _) = m::pair();
+    xs[0].pm();
+}
+"""
+    report = build_rust_bindings(source, pointer_width=64)
+    raw = source.encode()
+    pms = _bindings(report, "pm", "associated_function")
+    assert len(pms) == 2
+    bound = {
+        raw[c.span.start:c.span.end].decode(): c.target
+        for c in report.calls
+    }
+    # `v`'s `Vec<P>` is spelled inside `super::W`'s declaration —
+    # `P` resolves at the root, not in `m::pair`'s module.
+    assert bound.get("xs[0].pm()") == pms[0].id
+
+
 def test_struct_pattern_field_on_produced_plain_payload():
     source = """
 struct P;
