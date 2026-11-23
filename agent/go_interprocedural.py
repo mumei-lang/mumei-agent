@@ -14272,135 +14272,29 @@ class _Builder:
     ) -> bool:
         result = literal.child_by_field_name("result")
         if result is None:
-            return False
-
-        scalar_types = {
-            "bool",
-            "byte",
-            "complex64",
-            "complex128",
-            "float32",
-            "float64",
-            "int",
-            "int8",
-            "int16",
-            "int32",
-            "int64",
-            "rune",
-            "string",
-            "uint",
-            "uint8",
-            "uint16",
-            "uint32",
-            "uint64",
-            "uintptr",
-        }
-
-        def can_carry(
-            type_node: Any, seen: frozenset[str] = frozenset()
-        ) -> bool:
-            type_node = self._strip_parens(type_node)
-            if type_node is None:
-                return True
-            if type_node.type in {"function_type", "interface_type"}:
-                return True
-            if type_node.type == "type_identifier":
-                name = type_node.text.decode()
-                if name in scalar_types:
-                    return False
-                ref = self.references.get(self.node_key(type_node))
-                binding_id = (
-                    ref.binding_id
-                    if ref is not None
-                    else None
-                )
-                binding = (
-                    self.bindings.get(binding_id)
-                    if binding_id is not None
-                    else None
-                )
-                if binding is not None and binding.kind == "type":
-                    if binding.id in seen:
-                        return False
-                    fact = binding.type
-                    if fact.kind == "interface":
-                        return True
-                    if self._type_can_carry_func_value(fact):
-                        return True
-                    if fact.kind != "unsupported":
-                        return False
-                    declared = self._local_type_declaration_type_node(
-                        binding
-                    )
-                    if declared is not None:
-                        return can_carry(
-                            declared[0], seen | {binding.id}
-                        )
-                member = (
-                    self.members.get(binding_id)
-                    if binding_id is not None
-                    else None
-                )
-                if member is not None and member.type is not None:
-                    return (
-                        member.type.kind == "interface"
-                        or self._type_can_carry_func_value(member.type)
-                    )
-                if name in {"any", "error"}:
-                    return True
-                return True
-            if type_node.type == "qualified_type":
-                member = self._package_member(type_node)
-                return (
-                    member is None
-                    or member.type is None
-                    or member.type.kind == "interface"
-                    or self._type_can_carry_func_value(member.type)
-                )
-            if type_node.type in {"slice_type", "array_type"}:
-                return can_carry(
-                    type_node.child_by_field_name("element"), seen
-                )
-            if type_node.type == "map_type":
-                return can_carry(
-                    type_node.child_by_field_name("value"), seen
-                )
-            if type_node.type == "struct_type":
-                return any(
-                    can_carry(
-                        field.child_by_field_name("type"), seen
-                    )
-                    for field in _children(type_node)
-                    if field.type == "field_declaration"
-                )
-            if type_node.type in {
-                "pointer_type",
-                "channel_type",
-                "parenthesized_type",
-            }:
-                children = [
-                    child
-                    for child in type_node.named_children
-                    if child.type != "comment"
-                ]
-                return can_carry(children[-1], seen) if children else True
-            if type_node.type == "parameter_list":
-                return any(
-                    can_carry(
-                        declaration.child_by_field_name("type"), seen
-                    )
-                    for declaration in type_node.named_children
-                    if declaration.type
-                    in {
-                        "parameter_declaration",
-                        "variadic_parameter_declaration",
-                    }
-                )
             return True
-
-        if result.type == "parameter_list":
-            return can_carry(result)
-        return can_carry(result)
+        type_nodes = (
+            [
+                declaration.child_by_field_name("type")
+                for declaration in result.named_children
+                if declaration.type
+                in {
+                    "parameter_declaration",
+                    "variadic_parameter_declaration",
+                }
+            ]
+            if result.type == "parameter_list"
+            else [result]
+        )
+        for type_node in type_nodes:
+            fact = self._literal_type_fact(type_node, self.current_file)
+            if (
+                fact is None
+                or fact.kind == "interface"
+                or self._type_can_carry_func_value(fact)
+            ):
+                return True
+        return False
 
     def _composite_literal_member_type_for_value(
         self, node: Any
