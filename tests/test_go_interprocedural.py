@@ -27585,12 +27585,6 @@ def test_chan_chan_boundaries_stay_closed(go_types_helper):
         "\tf(cc)\n"
         "\treturn 0\n"
         "}\n",
-        "type St struct{ C chan chan int64 }\n"
-        "func F() int64 {\n"
-        "\tcc := make(chan chan int64, 1)\n"
-        "\tst := St{}\n"
-        "\tst.C = cc\n"
-        "\treturn 0\n}\n",
         "func F() int64 {\n"
         "\tcc := make(chan chan int64, 1)\n"
         "\th := func() chan chan int64 { return cc }\n"
@@ -31239,19 +31233,13 @@ def test_value_struct_field_channel_range_and_close(go_types_helper):
 def test_value_struct_field_channel_boundaries_stay_closed(
     go_types_helper,
 ):
-    # `chan chan` members (the queue-of-queues model has no field
-    # slot yet), a non-scalar `chan string` field, and a computed
-    # base (`arr[i].C`, `s.W.C` nested one level deeper) all stay
-    # closed.
+    # A non-scalar `chan string` field and a computed base
+    # (`arr[i].C`, `s.W.C` nested one level deeper) stay closed.
     files = {
         "a.go": "package p\n"
-        "type WC struct{ C chan chan int64 }\n"
         "type WS struct{ C chan string }\n"
         "type W struct{ C chan int64 }\n"
         "type S struct{ W W }\n"
-        "func FChanChan(w WC, c chan int64) int64 {\n"
-        "\tw.C <- c\n"
-        "\treturn 0\n}\n"
         "func FStr(w WS, x string) string {\n"
         "\tw.C <- x\n"
         "\treturn x\n}\n"
@@ -31264,10 +31252,144 @@ def test_value_struct_field_channel_boundaries_stay_closed(
     }
     snapshot = _snapshot_for(go_types_helper, files)
     summaries = ip.summarize_go_package(files, snapshot)
-    for name in ("FChanChan", "FStr", "FArr", "FNested"):
+    for name in ("FStr", "FArr", "FNested"):
         assert not named_package(
             files, snapshot, summaries, name
         ).available
+
+
+def test_value_struct_field_chan_chan_send_recv(go_types_helper):
+    # `w.C` on a `chan chan` field — the member IS the queue-of-
+    # queues root: `w.C <- c` joins `c` to the member's group and
+    # `c := <-w.C` / `<-(<-w.C)` read the member's deps. `w.C = cc`
+    # and `WW{C: cc}` join the member into `cc`'s share group, so
+    # sends on either name reach reads on the other. A param's
+    # field queue is caller-provided memory — reads observe the
+    # param's origin.
+    files = {
+        "a.go": "package p\n"
+        "type WW struct{ C chan chan int64 }\n"
+        "func FSend(w WW, c chan int64) int64 {\n"
+        "\tw.C <- c\n"
+        "\treturn 0\n}\n"
+        "func FRecv(w WW) int64 {\n"
+        "\treturn <-(<-w.C)\n}\n"
+        "func FLit(x int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tc <- x\n"
+        "\tw := WW{C: make(chan chan int64, 1)}\n"
+        "\tw.C <- c\n"
+        "\treturn <-(<-w.C)\n}\n"
+        "func FStore(cc chan chan int64, x int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tc <- x\n"
+        "\tcc <- c\n"
+        "\tvar w WW\n"
+        "\tw.C = cc\n"
+        "\treturn <-(<-w.C)\n}\n"
+        "func FLitStore(cc chan chan int64, x int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tc <- x\n"
+        "\tcc <- c\n"
+        "\tw := WW{C: cc}\n"
+        "\treturn <-(<-w.C)\n}\n"
+        "func FLocalDonor(x int64) int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tc <- x\n"
+        "\tcc <- c\n"
+        "\tvar w WW\n"
+        "\tw.C = cc\n"
+        "\treturn <-(<-w.C)\n}\n"
+        "func FParamDonor(cc chan chan int64, x int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tc <- x\n"
+        "\tcc <- c\n"
+        "\tw := WW{C: cc}\n"
+        "\treturn <-(<-w.C)\n}\n"
+        "func FParamDonorStore(cc chan chan int64, x int64) int64 {\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tc <- x\n"
+        "\tcc <- c\n"
+        "\tvar w WW\n"
+        "\tw.C = cc\n"
+        "\treturn <-(<-w.C)\n}\n"
+        "func FTwoRoots(a WW, b WW) int64 {\n"
+        "\t_ = <-(<-a.C)\n"
+        "\treturn <-(<-b.C)\n}\n"
+        "func FRange(x int64) int64 {\n"
+        "\tw := WW{C: make(chan chan int64, 2)}\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tc <- x\n"
+        "\tw.C <- c\n"
+        "\ts := int64(0)\n"
+        "\tfor q := range w.C {\n"
+        "\t\ts += <-q\n"
+        "\t}\n"
+        "\treturn s\n}\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    results = {
+        name: named_package(files, snapshot, summaries, name)
+        for name in (
+            "FSend",
+            "FRecv",
+            "FLit",
+            "FStore",
+            "FLitStore",
+            "FLocalDonor",
+            "FParamDonor",
+            "FParamDonorStore",
+            "FTwoRoots",
+            "FRange",
+        )
+    }
+    assert results["FSend"].available
+    assert results["FSend"].return_dependencies == frozenset()
+    for name in ("FRecv", "FLit", "FLocalDonor"):
+        assert results[name].available
+        assert results[name].return_dependencies == frozenset({0})
+    # `w.C = cc` on a LOCAL struct is a header copy — the store
+    # records no external transfer. A single-function package keeps
+    # `effects` clean (the member identity is shared package-wide,
+    # so the multi-function package above can still observe
+    # `unknown` once a sibling marks the member external via a
+    # parameter root — same summary-level conflation as the
+    # shared may-set).
+    solo_files = {
+        "a.go": "package p\n"
+        "type WW struct{ C chan chan int64 }\n"
+        "func F(x int64) int64 {\n"
+        "\tcc := make(chan chan int64, 1)\n"
+        "\tc := make(chan int64, 1)\n"
+        "\tc <- x\n"
+        "\tcc <- c\n"
+        "\tvar w WW\n"
+        "\tw.C = cc\n"
+        "\treturn <-(<-w.C)\n}\n"
+    }
+    solo_snapshot = _snapshot_for(go_types_helper, solo_files)
+    solo_summaries = ip.summarize_go_package(solo_files, solo_snapshot)
+    solo = named_package(solo_files, solo_snapshot, solo_summaries, "F")
+    assert solo.available
+    assert solo.return_dependencies == frozenset({0})
+    assert solo.effects == "none_in_supported_fragment"
+    # A param donor's queue is caller-visible — reads carry its
+    # origin alongside the sent value's.
+    for name in (
+        "FStore",
+        "FLitStore",
+        "FParamDonor",
+        "FParamDonorStore",
+        "FTwoRoots",
+    ):
+        assert results[name].available
+        assert results[name].return_dependencies == frozenset({0, 1})
+    # `for q := range w.C` — the element name reads the member's
+    # queue deps like `cc`'s range element does.
+    assert results["FRange"].available
+    assert results["FRange"].return_dependencies == frozenset({0})
 
 
 def test_value_struct_field_channel_may_set_follows_reseat(
