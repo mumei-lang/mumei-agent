@@ -5049,27 +5049,44 @@ class _RustBindings:
             scope = (
                 None if container is None else container.home_scope
             ) or (None if member is None else member.home_scope)
+            # Param names stay raw while decl-scope names are pinned
+            # to `crate::` paths — `BTreeMap<i32, V>` at `w: W<P>`
+            # yields `i32, P`, never `crate::V`; path tails like
+            # `a::T` are not substituted either.
+            marks = {
+                name: "__mumei_arg_%d__" % idx
+                for idx, name in enumerate(param_map)
+            }
             push = scope is not None and scope not in self.scopes
             if push:
                 self._push_scope(scope)
             try:
                 qualified = ", ".join(
                     self._qualified_spelling(
-                        part.strip(), tnode.start_byte
+                        (
+                            re.sub(
+                                r"\b("
+                                + "|".join(
+                                    re.escape(name) for name in marks
+                                )
+                                + r")\b",
+                                lambda m: marks[m.group(1)],
+                                part.strip(),
+                            )
+                            if marks
+                            else part.strip()
+                        ),
+                        tnode.start_byte,
                     )
                     for part in self._type_arg_list(key or "")
                 )
             finally:
                 if push:
                     self.scopes.pop()
-            if param_map:
+            for name, mark in marks.items():
                 qualified = re.sub(
-                    r"\b("
-                    + "|".join(
-                        re.escape(name) for name in param_map
-                    )
-                    + r")\b",
-                    lambda m: param_map[m.group(1)],
+                    r"(?<![:\w])" + re.escape(mark) + r"\b",
+                    lambda _m: param_map[name],
                     qualified,
                 )
             return qualified
@@ -5112,7 +5129,7 @@ class _RustBindings:
                 break
             mapping = dict(zip(names, args))
             key = re.sub(
-                r"\b(" + "|".join(
+                r"(?<![:\w])(" + "|".join(
                     re.escape(name) for name in mapping
                 ) + r")\b",
                 lambda m: mapping[m.group(1)],
@@ -5132,20 +5149,53 @@ class _RustBindings:
         Substituted params stay raw (they spell use-site names)."""
         if spelled_args is None:
             return None
+        item = alias_record.alias_node.parent
+        params = self._type_param_names(
+            None
+            if item is None
+            else item.child_by_field_name("type_parameters")
+        )
+        # The alias's own params stay raw — they spell the USE-site
+        # arg, substituted later; qualifying would pin a root-scope
+        # `T` to `crate::T` and keep it from being substituted.
+        marks = {
+            name: "__mumei_alias_%d__" % idx
+            for idx, name in enumerate(params)
+        }
         scope = alias_record.home_scope
         push = scope is not None and scope not in self.scopes
         if push:
             self._push_scope(scope)
         try:
-            return ", ".join(
+            qualified = ", ".join(
                 self._qualified_spelling(
-                    part.strip(), alias_record.alias_node.start_byte
+                    (
+                        re.sub(
+                            r"\b("
+                            + "|".join(
+                                re.escape(name) for name in marks
+                            )
+                            + r")\b",
+                            lambda m: marks[m.group(1)],
+                            part.strip(),
+                        )
+                        if marks
+                        else part.strip()
+                    ),
+                    alias_record.alias_node.start_byte,
                 )
                 for part in self._type_arg_list(spelled_args)
             )
         finally:
             if push:
                 self.scopes.pop()
+        for name, mark in marks.items():
+            qualified = re.sub(
+                r"(?<![:\w])" + re.escape(mark) + r"\b",
+                name,
+                qualified,
+            )
+        return qualified
 
     def _expanded_container_head(self, node: Any | None) -> "str | None":
         """Container head of an annotation after type-alias
