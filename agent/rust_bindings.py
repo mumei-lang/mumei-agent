@@ -3329,6 +3329,15 @@ class _RustBindings:
                             produced_head = self._normalize_identifier(
                                 produced.group(0).split("::")[-1]
                             )
+                _spelled_head = self._expanded_container_head(
+                    option_head_value
+                )
+                _head_disallowed = (
+                    _spelled_head is not None
+                    and option_head is not None
+                    and option_head[1] is not None
+                    and _spelled_head not in option_head[1]
+                )
                 if (
                     option_head is not None
                     and (
@@ -3360,6 +3369,7 @@ class _RustBindings:
                         or produced_head in option_head[1]
                         or (
                             map_pair
+                            and not _head_disallowed
                             and self._is_map_container(
                                 None,
                                 callee.child_by_field_name("value"),
@@ -9861,6 +9871,15 @@ class _RustBindings:
                     ),
                     None,
                 ) in {"struct", "enum"}
+                _spelled_head = self._expanded_container_head(
+                    _head_value
+                )
+                _head_disallowed = (
+                    _spelled_head is not None
+                    and option_head is not None
+                    and option_head[1] is not None
+                    and _spelled_head not in option_head[1]
+                )
                 if (
                     option_head is not None
                     and (
@@ -9883,7 +9902,8 @@ class _RustBindings:
                             )
                         )
                         or (
-                            self.text(field).strip()
+                            not _head_disallowed
+                            and self.text(field).strip()
                             in _MAP_PAIR_METHODS
                             | _MAP_BORROWED_PAIR_METHODS
                             and self._is_map_container(
