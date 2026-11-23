@@ -3330,6 +3330,7 @@ class _TypeScriptBindings:
                     value = declarator.child_by_field_name("value")
                     if value is not None and value.type in {
                         "array", "binary_expression",
+                        "ternary_expression",
                     }:
                         # `const cp = [...arr]` / `lit = arr ?? []`
                         # — unannotated, the initializer spells the
@@ -3406,6 +3407,35 @@ class _TypeScriptBindings:
                     right,
                     right.start_byte if right is not None else position,
                 )
+            return None
+        if node.type == "ternary_expression":
+            # `c ? a : b` — both alternatives must spell the same
+            # named type; differing types form a union the syntax
+            # cannot spell and stay opaque.
+            kids = self.children(node)
+            if len(kids) >= 3:
+                left = self._declared_type_node(
+                    kids[-2], kids[-2].start_byte
+                )
+                right = self._declared_type_node(
+                    kids[-1], kids[-1].start_byte
+                )
+                if left is not None and right is not None:
+                    lf = self._type_fact(left)
+                    rf = self._type_fact(right)
+                    if (
+                        lf.kind == "named"
+                        and rf.kind == "named"
+                        and lf.type_id == rf.type_id
+                    ):
+                        return left
+                    if self.text(left).strip() == self.text(
+                        right
+                    ).strip():
+                        # Non-named but identical spellings —
+                        # `P[]`/`Map<K, V>`/`(A, B)` — resolve to the
+                        # shared shape.
+                        return left
             return None
         if node.type in {
             "parenthesized_expression", "non_null_expression",
@@ -3615,6 +3645,9 @@ class _TypeScriptBindings:
             "non_null_expression",
             "as_expression",
             "satisfies_expression",
+            "array",
+            "binary_expression",
+            "ternary_expression",
         }:
             # `const q = arr[0]`/`f()`/`w.p` infer `q`'s type from
             # the initializer's declared result — resolved at the

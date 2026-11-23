@@ -3528,3 +3528,27 @@ function f(arr: P[] | undefined, m: Map<string, P> | undefined, bare: P[] | unde
         "x.pm()",
         "lit[0].pm()",
     }
+
+
+def test_ternary_alternatives_with_a_shared_type_resolve():
+    # `c ? a : b` resolves when both alternatives spell the same
+    # type — same named type or the same non-named spelling; a
+    # `P | Q` alternative stays an honest union.
+    source = """
+class P { pm(): void {} }
+class Q { qm(): void {} }
+function f(arr: P[], arr2: P[], tern: boolean, pq: P | Q) {
+    const sel = tern ? arr[0] : arr[1];
+    sel.pm();
+    const mixed = tern ? arr[0] : pq;
+    mixed.pm();
+    const selarr = tern ? arr : arr2;
+    selarr[0].pm();
+}
+"""
+    report = build_ts_bindings(source)
+    member_pm = _member_bindings(report, "pm", "associated_function")[0]
+    bound = {
+        source[c.span.start : c.span.end] for c in _calls(report) if c.target == member_pm.id
+    }
+    assert bound == {"sel.pm()", "selarr[0].pm()"}
