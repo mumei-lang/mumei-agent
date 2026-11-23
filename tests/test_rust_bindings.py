@@ -9518,10 +9518,15 @@ impl P { fn pm(&self) {} }
 impl Q { fn qm(&self) {} }
 trait Each { fn for_each(&self, f: impl Fn(&Q)); }
 impl<P> Each for [P] { fn for_each(&self, f: impl Fn(&Q)) {} }
-fn g(v: Vec<P>) {
+fn g(v: Vec<P>, a: &[P; 3], lt: &'a [P], rows: &[[P; 2]]) {
     v.for_each(|q| { q.qm(); q.pm(); });
     v.iter().for_each(|p| p.pm());
     v.chunks(2).for_each(|c| { c[0].pm(); });
+    a.for_each(|qa| { qa.qm(); qa.pm(); });
+    lt.for_each(|ql| { ql.qm(); ql.pm(); });
+    rows.for_each(|row| { row[0].qm(); row[0].pm(); });
+    let it = v.chunks_mut(2);
+    it.for_each(|c2| { c2[0].pm(); });
 }
 """
     report = build_rust_bindings(source, pointer_width=64)
@@ -9543,5 +9548,18 @@ fn g(v: Vec<P>) {
     # args are elements, not the receiver, so the slice impl must
     # not block the std `for_each` either.
     assert bound.get("c[0].pm()") == pms[0].id
+    # `a: &[P; 3]` is an array — unsize-coerces to `[P]`, so the
+    # slice impl covers it too.
+    assert not bound.get("qa.pm()")
+    assert not bound.get("qa.qm()")
+    # `&'a [P]` — lifetime spelling keeps the slice gate.
+    assert not bound.get("ql.pm()")
+    # `&[[P; 2]]` — a slice OF arrays: the `;` sits at bracket
+    # depth 2, so the slice impl still covers the receiver.
+    assert not bound.get("row[0].pm()")
+    # `let it = v.chunks_mut(n)` — spelled `&mut [P]` args are the
+    # chunk ELEMENTS, not `it`'s own type — the slice impl must
+    # not block the std `for_each` on `ChunksMut`.
+    assert bound.get("c2[0].pm()") == pms[0].id
 
 

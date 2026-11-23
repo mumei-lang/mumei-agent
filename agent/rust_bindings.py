@@ -439,7 +439,7 @@ def _spelled_slice_head(text: str) -> bool:
     the `;` only disqualifies at bracket depth 1."""
     t = text.strip()
     if t.startswith("&"):
-        t = re.sub(r"^&\s*(?:'\w+\s+)?(?:mut\s+)?", "", t)
+        t = re.sub(r"^&\s*(?:'\w+\s*)?(?:mut\s+)?", "", t)
     if not t.startswith("["):
         return False
     depth = 0
@@ -2711,6 +2711,34 @@ class _RustBindings:
                         return True
         return False
 
+    def _bound_to_producing_call(self, receiver: Any) -> bool:
+        """`let it = v.chunks_mut(n)`-style receivers: bound to an
+        unresolved method call's result, so their spelled args hold
+        the ELEMENT spelling (`&mut [P]` chunks), not the binding's
+        own type. Declared callees (`C::make()`, `w.m()`) return
+        whole values — those args ARE the type."""
+        if receiver.type not in {"identifier", "field_expression"}:
+            return False
+        record = self._lookup(
+            self._normalize_identifier(self.text(receiver)),
+            receiver.start_byte,
+            "value",
+        )
+        value = (
+            record.value_node
+            if record is not None and record.value_node is not None
+            else None
+        )
+        if value is None or value.type != "call_expression":
+            return False
+        callee = value.child_by_field_name("function")
+        if callee is None or callee.type != "field_expression":
+            return False
+        return (
+            self._field_member(callee, ("associated_function",))
+            is None
+        )
+
     def _visible_trait_method(
         self,
         name: str,
@@ -2753,54 +2781,65 @@ class _RustBindings:
             # ELEMENTS (`v.chunks(n)` spells `&[P]` per item, yet
             # yields `Chunks`, not a slice), unless the method is an
             # own-slice producer like `remainder`.
-            slice_args = (
-                recv_args is not None
-                and _spelled_slice_head(recv_args.strip())
-            )
-            if slice_args and receiver.type == "call_expression":
-                rcallee = receiver.child_by_field_name("function")
-                mname = (
-                    self._normalize_identifier(
-                        self.text(rcallee.child_by_field_name("field"))
+            slice_args = False
+            if recv_args is not None and re.match(
+                r"&?\s*(?:'\w+\s*)?(?:mut\s+)?\[",
+                recv_args.strip(),
+            ):
+                if receiver.type == "call_expression":
+                    rcallee = receiver.child_by_field_name("function")
+                    mname = (
+                        self._normalize_identifier(
+                            self.text(rcallee.child_by_field_name("field"))
+                        )
+                        if rcallee is not None
+                        and rcallee.type == "field_expression"
+                        else None
                     )
-                    if rcallee is not None
-                    and rcallee.type == "field_expression"
-                    else None
-                )
-                slice_args = (
-                    mname in {"remainder", "into_remainder"}
-                    or self._field_member(
-                        rcallee, ("associated_function",)
-                    )
-                    is not None
-                    or (
-                        rcallee is not None
-                        and rcallee.type
-                        in {
-                            "scoped_identifier",
-                            "scoped_type_identifier",
-                        }
-                        and self._scoped_member(rcallee)[0] is not None
-                    )
-                    or (
-                        rcallee is not None
-                        and rcallee.type == "identifier"
-                        and self._lookup(
-                            self._normalize_identifier(
-                                self.text(rcallee)
-                            ),
-                            rcallee.start_byte,
-                            "value",
+                    slice_args = _spelled_slice_head(
+                        recv_args.strip()
+                    ) and (
+                        mname in {"remainder", "into_remainder"}
+                        or self._field_member(
+                            rcallee, ("associated_function",)
                         )
                         is not None
+                        or (
+                            rcallee is not None
+                            and rcallee.type
+                            in {
+                                "scoped_identifier",
+                                "scoped_type_identifier",
+                            }
+                            and self._scoped_member(rcallee)[0] is not None
+                        )
+                        or (
+                            rcallee is not None
+                            and rcallee.type == "identifier"
+                            and self._lookup(
+                                self._normalize_identifier(
+                                    self.text(rcallee)
+                                ),
+                                rcallee.start_byte,
+                                "value",
+                            )
+                            is not None
+                        )
                     )
-                )
+                else:
+                    slice_args = not self._bound_to_producing_call(
+                        receiver
+                    )
             annot_slice = False
             tnode = self._receiver_type_node(receiver)
             if tnode is not None:
                 annot_slice = _spelled_slice_head(
                     self.text(tnode).strip()
-                )
+                ) or re.sub(
+                    r"^&\s*(?:'\w+\s*)?(?:mut\s+)?",
+                    "",
+                    self.text(tnode).strip(),
+                ).startswith("[")
             if (
                 receiver_head
                 in {"Vec", "VecDeque", "BinaryHeap", "LinkedList"}
