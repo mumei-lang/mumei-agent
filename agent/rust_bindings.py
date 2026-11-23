@@ -3394,6 +3394,76 @@ class _RustBindings:
                 "scoped_type_identifier",
             }:
                 member, _ = self._scoped_member(callee)
+                if member is None:
+                    segments = (
+                        self.text(callee).strip().split("::")
+                    )
+                    if (
+                        len(segments) >= 2
+                        and segments[-2] in {"Rc", "Arc"}
+                        and segments[-1] in {"downgrade", "get_mut"}
+                    ):
+                        # `Rc::downgrade(&rc)`/`Rc::get_mut(&mut rc)`
+                        # — the associated-function spelling of the
+                        # same accessors; a declared `struct Rc`/`Arc`
+                        # keeps its own record and stays opaque.
+                        head_record = self._through_import(
+                            self._lookup(
+                                segments[-2],
+                                callee.start_byte,
+                                "type",
+                            ),
+                            callee.start_byte,
+                        )
+                        if head_record is None or (
+                            head_record.binding.kind
+                            not in {"struct", "enum"}
+                        ):
+                            arguments = node.child_by_field_name(
+                                "arguments"
+                            )
+                            first = (
+                                next(
+                                    iter(arguments.named_children),
+                                    None,
+                                )
+                                if arguments is not None
+                                else None
+                            )
+                            while (
+                                first is not None
+                                and first.type == "reference_expression"
+                            ):
+                                first = next(
+                                    iter(first.named_children), None
+                                )
+                            _, rargs = (
+                                (None, None)
+                                if first is None
+                                else self._receiver_type(first)
+                            )
+                            parts = self._type_arg_list(
+                                (rargs or "").strip()
+                            )
+                            if len(parts) == 1:
+                                spelled_text = (
+                                    "Weak<$P>"
+                                    if segments[-1] == "downgrade"
+                                    else "Option<&mut $P>"
+                                ).replace("$P", parts[0].strip())
+                                spelled_pair = self._spelled_type(
+                                    spelled_text,
+                                    self._receiver_annotation_position(
+                                        first
+                                    )
+                                    or node.start_byte,
+                                )
+                                if (
+                                    spelled_pair[0] is None
+                                    and "<" in spelled_text
+                                ):
+                                    return None, spelled_text
+                                return spelled_pair
             elif callee is not None and callee.type == "identifier":
                 member = self._lookup(
                     self._normalize_identifier(self.text(callee)),
