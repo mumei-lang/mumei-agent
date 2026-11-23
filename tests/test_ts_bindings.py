@@ -3084,3 +3084,361 @@ m(1_000n);
         and r.span.start > source.index(": string;")
     )
     assert ref.binding_id == literal_overload.id
+
+
+def test_optional_and_nonnull_member_access_narrows_union():
+    # `o?.pm()` and `o!.pm()` read `pm` on the non-null union part;
+    # plain `o.pm()` on the union stays opaque (tsc flags it).
+    source = """
+class P { pm(): void {} }
+declare const o: P | undefined;
+o!.pm();
+o?.pm();
+o.pm();
+"""
+    report = build_ts_bindings(source)
+    member_pm = _member_bindings(report, "pm", "associated_function")[0]
+    bound = {
+        source[c.span.start : c.span.end]
+        for c in _calls(report)
+        if c.target == member_pm.id
+    }
+    assert bound == {"o!.pm()", "o?.pm()"}
+
+
+def test_optional_member_access_keeps_multi_part_unions_opaque():
+    # `P | string` narrows to `P | string` — `pm` is not on `string`,
+    # so `u?.pm()` cannot resolve (tsc TS2339). The declared union
+    # stays authoritative over the `P`-typed initializer.
+    source = """
+class P { pm(): void {} }
+declare const arr: P[];
+const u: P | string = arr[0];
+u?.pm();
+"""
+    report = build_ts_bindings(source)
+    member_pm = _member_bindings(report, "pm", "associated_function")[0]
+    call = next(
+        c for c in _calls(report)
+        if source[c.span.start : c.span.end] == "u?.pm()"
+    )
+    assert call.target != member_pm.id
+
+
+def test_initializer_inference_types_subscript_and_call_results():
+    # Unannotated `const q = arr[0]`/`f()` infer `q`'s type from the
+    # initializer's declared result.
+    source = """
+class P { pm(): void {} }
+declare const arr: P[];
+function make(): P { return new P() }
+const q = arr[0];
+q.pm();
+const r = make();
+r.pm();
+arr[0]?.pm();
+"""
+    report = build_ts_bindings(source)
+    member_pm = _member_bindings(report, "pm", "associated_function")[0]
+    bound = {
+        source[c.span.start : c.span.end]
+        for c in _calls(report)
+        if c.target == member_pm.id
+    }
+    assert bound == {"q.pm()", "r.pm()", "arr[0]?.pm()"}
+
+
+def test_optional_access_peels_union_carried_through_initializer():
+    # `const v = o` carries `o`'s union through the initializer —
+    # `v?.pm()` narrows it; plain `v.pm()` stays opaque.
+    source = """
+class P { pm(): void {} }
+declare const o: P | undefined;
+const v = o;
+v?.pm();
+v.pm();
+"""
+    report = build_ts_bindings(source)
+    member_pm = _member_bindings(report, "pm", "associated_function")[0]
+    bound = {
+        source[c.span.start : c.span.end]
+        for c in _calls(report)
+        if c.target == member_pm.id
+    }
+    assert bound == {"v?.pm()"}
+
+
+def test_for_of_and_array_destructuring_bind_element_types():
+    # `for (const x of arr)` and `const [a, b] = arr` take `P[]`'s
+    # element type; `Set<P>` and tuple positionals work the same.
+    source = """
+class P { pm(): void {} }
+class K { km(): void {} }
+declare const arr: P[];
+declare const pset: Set<P>;
+declare const tup: [K, P];
+for (const x of arr) { x.pm(); }
+const [a, b] = arr;
+a.pm();
+b.pm();
+const [k0, p0] = tup;
+k0.km();
+p0.pm();
+for (const s of pset) { s.pm(); }
+"""
+    report = build_ts_bindings(source)
+    pm = _member_bindings(report, "pm", "associated_function")[0]
+    km = _member_bindings(report, "km", "associated_function")[0]
+    bound_pm = {
+        source[c.span.start : c.span.end]
+        for c in _calls(report)
+        if c.target == pm.id
+    }
+    bound_km = {
+        source[c.span.start : c.span.end]
+        for c in _calls(report)
+        if c.target == km.id
+    }
+    assert bound_pm == {"x.pm()", "a.pm()", "b.pm()", "p0.pm()", "s.pm()"}
+    assert bound_km == {"k0.km()"}
+
+
+def test_for_of_map_pair_destructuring_takes_type_args():
+    # `for (const [k, v] of m: Map<K, P>)` destructures the `[K, P]`
+    # entry pair — `k` is `K`, `v` is `P`.
+    source = """
+class P { pm(): void {} }
+class K { km(): void {} }
+declare const m: Map<K, P>;
+for (const [kk, vv] of m) {
+  kk.km();
+  vv.pm();
+}
+"""
+    report = build_ts_bindings(source)
+    pm = _member_bindings(report, "pm", "associated_function")[0]
+    km = _member_bindings(report, "km", "associated_function")[0]
+    bound = {
+        source[c.span.start : c.span.end]: c.target
+        for c in _calls(report)
+    }
+    assert bound["kk.km()"] == km.id
+    assert bound["vv.pm()"] == pm.id
+
+
+def test_as_assertion_declares_the_member_type():
+    # `u as P` asserts the declared type — both `const a = u as P`
+    # and `(u as P).pm()` see `P`; `satisfies` keeps the operand's
+    # own type (`unknown` stays opaque).
+    source = """
+class P { pm(): void {} }
+declare const u: unknown;
+const a = u as P;
+a.pm();
+(u as P).pm();
+const s = u satisfies unknown;
+s.pm();
+"""
+    report = build_ts_bindings(source)
+    member_pm = _member_bindings(report, "pm", "associated_function")[0]
+    bound = {
+        source[c.span.start : c.span.end]
+        for c in _calls(report)
+        if c.target == member_pm.id
+    }
+    assert bound == {"a.pm()", "(u as P).pm()"}
+
+
+def test_for_of_map_set_view_calls_type_elements():
+    # `for (const x of m.keys()/values())` and
+    # `for (const [k, v] of m.entries())` type the loop slots from
+    # the receiver's container args; `arr.entries()` pairs a `number`
+    # index (honestly unbound) with the element.
+    source = """
+class P { pm(): void {} }
+class K { km(): void {} }
+declare const m: Map<K, P>;
+declare const s: Set<P>;
+declare const arr: P[];
+for (const k of m.keys()) { k.km(); }
+for (const v of m.values()) { v.pm(); }
+for (const [k2, v2] of m.entries()) { k2.km(); v2.pm(); }
+for (const [a, b] of s.entries()) { a.pm(); b.pm(); }
+for (const [i, e] of arr.entries()) { e.pm(); i.pm(); }
+for (const x of s.values()) { x.pm(); }
+"""
+    report = build_ts_bindings(source)
+    member_pm = _member_bindings(report, "pm", "associated_function")[0]
+    member_km = _member_bindings(report, "km", "associated_function")[0]
+    pm_calls = {
+        source[c.span.start : c.span.end]
+        for c in _calls(report)
+        if c.target == member_pm.id
+    }
+    km_calls = {
+        source[c.span.start : c.span.end]
+        for c in _calls(report)
+        if c.target == member_km.id
+    }
+    assert pm_calls == {
+        "v.pm()", "v2.pm()", "a.pm()", "b.pm()", "e.pm()", "x.pm()",
+    }
+    assert km_calls == {"k.km()", "k2.km()"}
+
+
+def test_new_container_initializers_type_the_for_of_elements():
+    # `const m = new Map<K, P>()` carries no annotation — the
+    # constructor's type args stand in for it, so pair slots and
+    # element slots still type. A user `class Map` shadows the
+    # builtin and stays opaque.
+    source = """
+class P { pm(): void {} }
+class K { km(): void {} }
+const m = new Map<K, P>();
+for (const [k, v] of m) { v.pm(); k.km(); }
+for (const [k2, v2] of m.entries()) { v2.pm(); k2.km(); }
+for (const k3 of m.keys()) { k3.km(); }
+for (const v3 of m.values()) { v3.pm(); }
+const s = new Set<P>();
+for (const x of s) { x.pm(); }
+const a = new Array<P>();
+for (const y of a) { y.pm(); }
+"""
+    report = build_ts_bindings(source)
+    member_pm = _member_bindings(report, "pm", "associated_function")[0]
+    member_km = _member_bindings(report, "km", "associated_function")[0]
+    pm_calls = {
+        source[c.span.start : c.span.end]
+        for c in _calls(report)
+        if c.target == member_pm.id
+    }
+    km_calls = {
+        source[c.span.start : c.span.end]
+        for c in _calls(report)
+        if c.target == member_km.id
+    }
+    assert pm_calls == {
+        "v.pm()", "v2.pm()", "v3.pm()", "x.pm()", "y.pm()",
+    }
+    assert km_calls == {"k.km()", "k2.km()", "k3.km()"}
+
+
+def test_new_container_shadowed_by_a_user_class_stays_opaque():
+    source = """
+class P { pm(): void {} }
+class K {}
+class Map<A, B> {}
+const m = new Map<K, P>();
+for (const [k, v] of m) { v.pm(); }
+"""
+    report = build_ts_bindings(source)
+    member_pm = _member_bindings(report, "pm", "associated_function")[0]
+    assert not {
+        source[c.span.start : c.span.end]
+        for c in _calls(report)
+        if c.target == member_pm.id
+    }
+
+def test_destructure_without_initializer_uses_pattern_annotation():
+    source = """
+declare class P { m(): void }
+let [x]: [P];
+x.m();
+"""
+    report = build_ts_bindings(source)
+    m = _bindings(report, "m")[0]
+    bound = {source[c.span.start:c.span.end]: c.target for c in report.calls}
+    assert bound.get("x.m()") == m.id
+
+
+def test_destructure_elision_counts_the_slot():
+    source = """
+declare const pair: [P, Q];
+declare class P { pm(): void }
+declare class Q { qm(): void }
+const [, v] = pair;
+v.qm();
+v.pm();
+"""
+    report = build_ts_bindings(source)
+    qm = _bindings(report, "qm")[0]
+    bound = {source[c.span.start:c.span.end]: c.target for c in report.calls}
+    assert bound.get("v.qm()") == qm.id
+    assert not bound.get("v.pm()")
+
+
+def test_value_binding_shadows_builtin_container():
+    source = """
+declare class Other { entries(): [string, Q][] }
+declare class P { pm(): void }
+declare class Q { qm(): void }
+const Map = Other;
+const m = new Map<string, P>();
+for (const [k, v] of m.entries()) { v.pm(); }
+"""
+    report = build_ts_bindings(source)
+    pm = _bindings(report, "pm")[0]
+    bound = {source[c.span.start:c.span.end]: c.target for c in report.calls}
+    # `const Map = Other` shadows the builtin — `m.entries()`
+    # must not take Map's [K, V] pair typing.
+    assert bound.get("v.pm()") != pm.id
+
+
+def test_optional_chain_peels_nested_union():
+    source = """
+declare class P { m(): void }
+declare const o: P | null | undefined;
+o?.m();
+o!.m();
+"""
+    report = build_ts_bindings(source)
+    m = _bindings(report, "m")[0]
+    bound = {source[c.span.start:c.span.end]: c.target for c in report.calls}
+    assert bound.get("o?.m()") == m.id
+    assert bound.get("o!.m()") == m.id
+
+
+def test_optional_chain_non_identifier_receivers():
+    source = """
+declare class P { m(): void }
+declare const o: P | undefined;
+declare class W { p: P | undefined }
+declare const w: W;
+declare function f(): P | undefined;
+(o)?.m();
+w.p?.m();
+f()?.m();
+"""
+    report = build_ts_bindings(source)
+    m = _bindings(report, "m")[0]
+    bound = {source[c.span.start:c.span.end]: c.target for c in report.calls}
+    for name in ("(o)?.m()", "w.p?.m()", "f()?.m()"):
+        assert bound.get(name) == m.id, name
+
+
+def test_for_of_inline_new_container():
+    source = """
+declare class P { m(): void }
+for (const x of new Set<P>()) { x.m(); }
+"""
+    report = build_ts_bindings(source)
+    m = _bindings(report, "m")[0]
+    bound = {source[c.span.start:c.span.end]: c.target for c in report.calls}
+    assert bound.get("x.m()") == m.id
+
+
+def test_self_referential_initializer_stays_opaque_not_recursive():
+    source = """
+declare class P { m(): void }
+declare function mk(x?: P | undefined): P | undefined;
+function outer(v: P | undefined) {
+  {
+    const v = v;
+    const w = mk(v);
+    w?.m();
+  }
+}
+"""
+    # must not raise/recurse — `const v = v` self-init stays opaque.
+    report = build_ts_bindings(source)
+    assert report is not None
