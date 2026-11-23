@@ -3374,6 +3374,18 @@ class _RustBindings:
                                 None,
                                 callee.child_by_field_name("value"),
                             )
+                            and not (
+                                receiver[0] is not None
+                                and next(
+                                    (
+                                        b.kind
+                                        for b in self.bindings
+                                        if b.id == receiver[0]
+                                    ),
+                                    None,
+                                )
+                                in {"struct", "enum"}
+                            )
                         )
                         or (
                             self.text(field).strip()
