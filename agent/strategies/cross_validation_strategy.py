@@ -103,16 +103,69 @@ _C_COMMENT_RE = re.compile(r"/\*[\s\S]*?\*/")
 _STRING_LITERAL_RE = re.compile(
     r'''(?P<pre>[A-Za-z]{0,3})(?P<q>["'`])(?P<inner>(?:\\.|[^\\])*?)(?P=q)'''
 )
-# Interpolation may nest one level of braces (``f"{x:{w}}"``,
-# ``${fn({a: 1})}``), so the inner pattern allows a single ``{...}``.
-_INTERPOLATION_RE = re.compile(r"\{((?:[^{}]|\{[^{}]*\})*)\}")
-_TS_INTERPOLATION_RE = re.compile(r"\$\{((?:[^{}]|\{[^{}]*\})*)\}")
+def _py_interp_exprs(s: str) -> list[str]:
+    """Interpolated expressions of a Python f-string body.
+
+    ``{{``/``}}`` are literal-brace escapes outside a replacement field,
+    while braces inside one nest normally — ``f"{x:{w}}"`` yields
+    ``x:{w}``, ``f"{{name}}"`` yields nothing, ``f"{{{name}}}"`` yields
+    ``name``."""
+    exprs: list[str] = []
+    i, n = 0, len(s)
+    while i < n:
+        if s[i : i + 2] in ("{{", "}}"):
+            i += 2
+            continue
+        if s[i] == "{":
+            depth, j = 1, i + 1
+            while j < n and depth:
+                if s[j] == "{":
+                    depth += 1
+                elif s[j] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j += 1
+            if depth == 0:
+                exprs.append(s[i + 1 : j])
+                i = j + 1
+                continue
+        i += 1
+    return exprs
+
+
+def _ts_interp_exprs(s: str) -> list[str]:
+    """``${...}`` expressions of a template literal, braces nesting.
+    ``${{ k: v }}`` yields the object literal ``{ k: v }``."""
+    exprs: list[str] = []
+    i, n = 0, len(s)
+    while i + 1 < n:
+        if s[i] == "$" and s[i + 1] == "{":
+            depth, j = 1, i + 2
+            while j < n and depth:
+                if s[j] == "{":
+                    depth += 1
+                elif s[j] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j += 1
+            if depth == 0:
+                exprs.append(s[i + 2 : j])
+                i = j + 1
+                continue
+        i += 1
+    return exprs
 # Lines that gate execution (as opposed to `raise`/`throw`/`except`, whose
 # strings are error messages) keep interpolation expressions visible:
 # `if amount > int(f"{limit}")` really does check `limit`.
 _CONDITIONAL_LINE_RE = re.compile(
     r"^\s*(?:if|elif|assert|while|match|guard|require|ensure|when)\b"
 )
+# A ``{...}`` group inside a TS interpolation — object literals, where a
+# ``key:`` name is a label, not a variable read.
+_TS_BRACED_GROUP_RE = re.compile(r"\{[^{}]*\}")
+_TS_OBJECT_KEY_RE = re.compile(r"\b[A-Za-z_]\w*\s*:")
 
 
 def _mask_string_literal(match: re.Match[str]) -> str:
@@ -133,22 +186,29 @@ def _mask_string_literal_keep_interp(match: re.Match[str]) -> str:
     prefix = match.group("pre").lower()
     quote = match.group("q")
     exprs: list[str] = []
-    # Drop escaped braces first (``{{``/``}}`` are literal text in Python
-    # f-strings); ``f"{{{name}}}"`` then correctly still yields the real
-    # ``{name}`` reference. Backtick templates interpolate ``${...}``
-    # only — a bare ``{x}`` there is literal text.
-    unescaped = inner.replace("{{", "").replace("}}", "")
     if quote == "`":
-        found = _TS_INTERPOLATION_RE.findall(unescaped)
+        found = _ts_interp_exprs(inner)
     elif "f" in prefix:
-        found = _INTERPOLATION_RE.findall(unescaped)
+        found = _py_interp_exprs(inner)
     else:
         found = []
     for expr in found:
         # Nested literals inside the expression (``f"{d['balance']}"``)
         # hold literal text, not references — mask them out too.
         expr = _STRING_LITERAL_RE.sub(_mask_string_literal, expr)
-        if quote != "`":
+        if quote == "`":
+            # Object-literal keys are labels, not reads — ``${{balance: 1}}``
+            # mentions ``balance`` without reading it. Strip ``key:`` inside
+            # each braced group (repeated for nesting) before the braces
+            # themselves are blanked below. A ternary ``? a : b`` has no
+            # braces and is unaffected.
+            prev = None
+            while prev != expr:
+                prev = expr
+                expr = _TS_BRACED_GROUP_RE.sub(
+                    lambda m: _TS_OBJECT_KEY_RE.sub(":", m.group(0)), expr
+                )
+        else:
             expr = _strip_format_spec(expr)
         # Blank comment-, comma- and depth-significant characters
         # (``#``, ``/``, ``,``, brackets) so the comment stripping,
@@ -164,7 +224,9 @@ def _strip_format_spec(expr: str) -> str:
     """Drop an f-string format specifier — the ``:...`` suffix — so its
     characters (``{y:#x}``'s ``x``) are not counted as variable references.
     Colons inside brackets/braces (slices, dicts) stay.``!r``-style
-    conversions are dropped too."""
+    conversions are dropped too. A dynamic spec still *reads* variables
+    (``f"{x:{width}}"`` reads ``width``), so interpolations nested in the
+    spec are kept."""
     depth = 0
     for i, ch in enumerate(expr):
         if ch in "([{":
@@ -172,7 +234,9 @@ def _strip_format_spec(expr: str) -> str:
         elif ch in ")]}":
             depth -= 1
         elif ch == ":" and depth == 0:
-            return expr[:i]
+            head, spec = expr[:i], expr[i + 1 :]
+            inner = " ".join(_py_interp_exprs(spec))
+            return head + (" " + inner if inner.strip() else "")
         elif ch == "!" and depth == 0 and i + 1 < len(expr) and expr[i + 1] in "rsa":
             return expr[:i]
     return expr

@@ -848,6 +848,73 @@ class TestValidateSpecVsImpl:
         )
         assert "withdraw" not in report.spec_stronger_than_impl
 
+    def test_assert_interpolation_comma_is_not_message_separator(self):
+        """`assert f"{fmt(amount, balance)}", f"{other}"` — the first comma
+        sits inside the interpolation; the real separator is the second.
+        Without comma blanking the condition loses `balance`."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "ic.py"
+        impl_path.write_text(
+            "def withdraw(balance, amount):\n"
+            '    assert f"{fmt(amount, balance)}", f"{other}"\n'
+            "    return balance - amount\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert "withdraw" not in report.spec_stronger_than_impl
+
+    def test_ts_object_literal_key_is_not_a_variable_read(self):
+        """`${{ balance: 1, amount }}` — `balance` appears only as an
+        object-literal key, so the guard does not enforce the clause."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "tk.ts"
+        impl_path.write_text(
+            "function withdraw(balance: number, amount: number): number {\n"
+            "  if (`${{ balance: 1, amount }}`.length > 0) {\n"
+            "    return balance - amount;\n"
+            "  }\n"
+            "  throw new Error();\n"
+            "}\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="typescript"
+        )
+        assert "withdraw" in report.spec_stronger_than_impl
+
+    def test_ts_object_literal_value_is_a_variable_read(self):
+        """`${{ k: balance }}` reads `balance` — only the *key* position
+        is stripped."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "tv.ts"
+        impl_path.write_text(
+            "function withdraw(balance: number, amount: number): number {\n"
+            "  if (`${{ k: balance, amount }}`.length > 0) {\n"
+            "    return balance - amount;\n"
+            "  }\n"
+            "  throw new Error();\n"
+            "}\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="typescript"
+        )
+        assert "withdraw" not in report.spec_stronger_than_impl
+
+    def test_fstring_dynamic_width_keeps_variable(self):
+        """`f"{balance:{width}}"` reads `width` — a dynamic format spec's
+        nested interpolation is still a reference."""
+        spec_path = self._write_spec("withdraw", "width <= balance")
+        impl_path = Path(self.tmpdir) / "dw.py"
+        impl_path.write_text(
+            "def withdraw(balance, amount, width):\n"
+            '    assert len(f"{balance:{width}}") > 0\n'
+            "    return balance - amount\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert "withdraw" not in report.spec_stronger_than_impl
+
     def test_python_annotated_signature_body_is_extracted(self):
         """`def f(x: int) -> int:` must produce a body — previously the regex
         required `)` immediately before `:` so annotated functions were
