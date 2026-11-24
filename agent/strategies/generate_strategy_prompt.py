@@ -280,11 +280,17 @@ def _identify_failing_atoms(
 
     return unique if unique else list(atom_names)
 
-_CLAUSE_KEYWORD_RE = re.compile(r"^(\s*)(requires|ensures|invariant|effects)(\s*:)?(\s+)")
+_CLAUSE_KEYWORD_RE = re.compile(r"^(\s*)(requires|ensures|invariant|effects|effect_pre|effect_post)(\s*:\s*|\s+)")
 _BARE_BRACE_RE = re.compile(r"^(\s*)\{\s*$")
 _CLAUSE_HEAD_RE = re.compile(
     r"^\s*(requires|ensures|invariant|effects|effect_pre|effect_post)\s*[: ]"
 )
+
+
+def _code_part(line: str) -> str:
+    """The line with any trailing ``//`` comment removed."""
+    idx = line.find("//")
+    return line[:idx] if idx >= 0 else line
 
 
 def _normalize_clause_syntax(code: str) -> str:
@@ -315,18 +321,18 @@ def _normalize_clause_syntax(code: str) -> str:
             # A clause head ends any continuation of the previous clause.
             continuation = False
             rest = line[m.end():]
-            if not m.group(3):
+            if ":" not in m.group(3):
                 line = f"{m.group(1)}{m.group(2)}: {rest}"
             if m.group(2) == "effects":
                 rstripped = line.rstrip()
                 if rstripped.endswith("]"):
                     line = rstripped + ";"
-            if not line.rstrip().endswith(";"):
+            if not _code_part(line).rstrip().endswith(";"):
                 continuation = True
             out.append(line)
             continue
         if in_header and continuation:
-            if stripped.endswith(";"):
+            if _code_part(line).rstrip().endswith(";"):
                 continuation = False
                 out.append(line)
                 continue

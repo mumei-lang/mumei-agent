@@ -495,3 +495,44 @@ def test_skeleton_and_structure_example_carry_semicolons():
     assert "};" in skeleton
     prompt = build_prompt('{"name": "op"}', "", {})
     assert "effects: [<effect_list>];" in prompt
+
+
+def test_normalize_clause_syntax_no_double_colon_on_spaced_colon():
+    """`requires :true;` / `requires:true;` keep exactly one colon."""
+    from agent.strategies.generate_strategy_prompt import _normalize_clause_syntax
+
+    for variant in ("requires :true;", "requires:true;", "requires : true;", "requires: true;"):
+        broken = (
+            "atom f(a: i64) -> i64\n"
+            f"    {variant}\n"
+            "    ensures result > 0;\n"
+            "    {\n"
+            "        a\n"
+            "    };\n"
+        )
+        out = _normalize_clause_syntax(broken)
+        assert ": :" not in out, out
+        assert out.count("requires") == 1
+        first = [ln for ln in out.splitlines() if "requires" in ln][0]
+        assert first.count(":") == 1, first
+        # later colon-less clauses are still repaired after any variant
+        assert "ensures: result > 0;" in out
+        assert "body: {" in out
+
+
+def test_normalize_clause_syntax_continuation_ending_with_comment():
+    """A multi-line clause ending in `; // comment` still ends continuation."""
+    from agent.strategies.generate_strategy_prompt import _normalize_clause_syntax
+
+    broken = (
+        "atom f(a: i64, b: i64) -> i64\n"
+        "    requires: a > 0 &&\n"
+        "        b > 0; // both positive\n"
+        "    ensures result > 0;\n"
+        "    {\n"
+        "        a + b\n"
+        "    };\n"
+    )
+    out = _normalize_clause_syntax(broken)
+    assert "ensures: result > 0;" in out
+    assert "body: {" in out

@@ -417,7 +417,7 @@ def _generate_multi_atom_inner(
         model,
     )
 
-    generated_code = _extract_code(content)
+    generated_code = _normalize_clause_syntax(_extract_code(content))
     if not generated_code:
         _logger.warning("LLM returned empty multi-atom generation result")
         return "", False
@@ -910,7 +910,7 @@ def _generate_code_inner(
         model,
     )
 
-    generated_code = _extract_code(content)
+    generated_code = _normalize_clause_syntax(_extract_code(content))
     if not generated_code:
         _logger.warning("LLM returned empty generation result")
         return "", False
