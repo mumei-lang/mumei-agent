@@ -268,11 +268,12 @@ def _mask_line_strings(
         del out[len(out) - (i - p) :]
         prefix = line[p:i].lower()
         q = line[i]
-        # A quote immediately after an identifier char is an apostrophe
+        # A ' or " immediately after an identifier char is an apostrophe
         # inside text (``don't``, ``it's fine \``), never a literal
         # start — even with a trailing backslash that would otherwise
-        # open a line continuation.
-        if p > 0 and (line[p - 1].isalnum() or line[p - 1] == "_"):
+        # open a line continuation. A backtick after an identifier is a
+        # TS tagged template, which still is a literal.
+        if q != "`" and p > 0 and (line[p - 1].isalnum() or line[p - 1] == "_"):
             out.append(q)
             i += 1
             continue
@@ -393,6 +394,13 @@ def _mask_ts_regexes(expr: str) -> str:
     i, n = 0, len(expr)
     while i < n:
         c = expr[i]
+        if c == "/" and expr[i : i + 2] == "//":
+            # A line comment, never a regex — the // stripping pass
+            # after this removes its body.
+            out.append(c)
+            prev = c
+            i += 1
+            continue
         if c == "/" and (
             not prev
             or (prev in _TS_REGEX_START_CHARS and not _postfix_incdec_before(expr, i))

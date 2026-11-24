@@ -1205,6 +1205,44 @@ class TestValidateSpecVsImpl:
         )
         assert "withdraw" not in report.spec_stronger_than_impl
 
+    def test_ts_tagged_template_is_still_masked(self):
+        """`tag\\`amount <= balance\\`` — a tagged template's fixed text
+        is literal, not a comparison, even though the tag is an
+        identifier right before the backtick."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "tg.ts"
+        impl_path.write_text(
+            "function withdraw(balance: number, amount: number): number {\n"
+            "  if (tag`amount <= balance check`.length > 0) {\n"
+            "    return 0;\n"
+            "  }\n"
+            "  throw new Error();\n"
+            "}\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="typescript"
+        )
+        assert "withdraw" in report.spec_stronger_than_impl
+
+    def test_ts_line_comment_at_expr_start(self):
+        """`${// amount <= balance}` — a `//` at expression start is a
+        comment, not an empty regex."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "lc.ts"
+        impl_path.write_text(
+            "function withdraw(balance: number, amount: number): number {\n"
+            "  if (`${x // amount <= balance\n"
+            "       }`.length > 0) {\n"
+            "    return 0;\n"
+            "  }\n"
+            "  throw new Error();\n"
+            "}\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="typescript"
+        )
+        assert "withdraw" in report.spec_stronger_than_impl
+
     def test_apostrophe_comment_ending_in_backslash(self):
         """`# don\\'t allow overdrafts \\` — the apostrophe plus trailing
         backslash does not swallow the guard below."""
