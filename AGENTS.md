@@ -2,6 +2,22 @@
 
 These rules are for coding agents and harnesses that work in this repository (Devin, Codex, Claude Code, Cursor and others). [`.claude/CLAUDE.md`](.claude/CLAUDE.md) covers MCP setup and the forge workflow. The rules below apply in addition to it.
 
+## Fast path
+
+```bash
+uv sync --all-extras            # tree-sitter Rust/Solidity/TS parsers need all extras
+uvx ruff check                  # lint baseline ([tool.ruff.lint] in pyproject.toml)
+PYTHONPATH=$PWD .venv/bin/python -m pytest -q tests/          # unit suite
+```
+
+Known gotchas:
+
+- `uv run pytest` fails to collect tests in this repo; use `PYTHONPATH=$PWD .venv/bin/python -m pytest`. On a branch/worktree, `PYTHONPATH` must point at that checkout — the `.venv` has the main checkout installed editable.
+- Tests marked `integration` need a *trusted absolute* `MUMEI_BIN` plus `--run-integration`; they silently skip otherwise. Check `-rs` skip reasons before claiming real-CLI evidence.
+- Optional Go tests (`tests/test_go_*.py`) need Go 1.26+ at `~/.local/go/bin` (not on PATH): `PATH="$HOME/.local/go/bin:$PATH"`.
+- Parametrized tests with large inputs need short explicit `ids=` — pytest embeds values in test IDs and stalls the verbose CI run.
+- Pre-commit hooks (ruff + hygiene) are configured in `.pre-commit-config.yaml`; `pre-commit install` once.
+
 ## Secrets and sensitive data
 
 These rules follow the OWASP Logging and Secrets Management cheat sheets, CWE-200, CWE-532 and CWE-798.

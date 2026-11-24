@@ -78,3 +78,13 @@ markers = [
     "integration: marks tests requiring mumei binary (deselect with '-m \"not integration\"')",
     "benchmark: marks LLM model-quality benchmarks (opt-in with '-m benchmark'; skipped by default because they call real LLM APIs)",
 ]
+
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint]
+# Baseline rule set: only rules that currently pass repo-wide. Widen in
+# follow-ups (mumei-lang/mumei#1449): I (import sort), UP (pyupgrade),
+# B (bugbear), the rest of F, and `ruff format` are all deferred — each
+# needs its own mechanical-fix PR.
+select = ["E9", "F63", "F7", "F82", "W6"]

@@ -2,11 +2,15 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from agent.strategies import generate_strategy
+
+if TYPE_CHECKING:
+    from agent.forge import MumeiForge
 
 
 SAMPLE_CORE_MM = """\

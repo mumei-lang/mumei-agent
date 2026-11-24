@@ -12,6 +12,16 @@ permissions:
   contents: read
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+      - name: Ruff check (baseline rules; see [tool.ruff.lint] in pyproject.toml)
+        run: uvx ruff check
+
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 20
