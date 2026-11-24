@@ -127,6 +127,10 @@ def test_reproduced_run_selects_output(tmp_path, capsys):
     assert report["checks_not_performed"] == [
         "file_identity",
         "freshness",
+        "function_count",
+        "function_coverage",
+        "hir_llvm_model_correspondence",
+        "llvm_ir_object_equivalence",
         "machine_code_acyclic_branch_function_tv",
         "machine_code_bounded_loop_function_tv",
         "machine_code_callee_saved_preservation_assumed_for_external_callees",
@@ -142,10 +146,16 @@ def test_reproduced_run_selects_output(tmp_path, capsys):
         "machine_code_tv_nan_payload_bits",
         "machine_code_tv_sysv_memory_class_aggregate_abi",
         "object_call_edge_correspondence",
+        "object_data_correspondence",
         "object_link_correspondence",
+        "object_symbol_attribute_correspondence",
         "object_symbol_correspondence",
         "object_translation_correspondence",
         "producer_authenticity",
+        "relocation_applied_values",
+        "relocation_bounds",
+        "relocation_resolved_values",
+        "relocation_targets",
         "semantic_correspondence",
     ]
     _assert_check_partition(report, DischargedChecks.REPRODUCED)

@@ -2400,6 +2400,28 @@ OBJECT_CHECK_VOCABULARY = frozenset(
     }
 )
 
+# Item names of Core's `object_translation.correspondence.checks` record
+# (DESIGN_OBJECT_ACCEPTANCE.md §5): the object-translation acceptance
+# descriptor enumerates them in `checks_performed` instead of a single
+# source-to-object name, so they join the shared object-check vocabulary
+# for the accept/recheck routes to credit item by item.
+OBJECT_TRANSLATION_CORRESPONDENCE_ITEMS = frozenset(
+    {
+        "function_coverage",
+        "function_count",
+        "llvm_ir_object_equivalence",
+        "hir_llvm_model_correspondence",
+        "relocation_targets",
+        "relocation_bounds",
+        "relocation_resolved_values",
+        "relocation_applied_values",
+        "object_data_correspondence",
+        "object_symbol_attribute_correspondence",
+    }
+)
+
+OBJECT_CHECK_VOCABULARY = OBJECT_CHECK_VOCABULARY | OBJECT_TRANSLATION_CORRESPONDENCE_ITEMS
+
 MACHINE_TV_ASSUMPTION_MARKERS = frozenset(
     {
         "machine_code_callee_saved_preservation_assumed_for_external_callees",

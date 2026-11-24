@@ -10,7 +10,10 @@ from pathlib import Path
 
 import pytest
 
-from agent.core_evidence import OBJECT_CHECK_VOCABULARY
+from agent.core_evidence import (
+    OBJECT_CHECK_VOCABULARY,
+    OBJECT_TRANSLATION_CORRESPONDENCE_ITEMS,
+)
 from agent.native_object_recheck import (
     CHECK_VOCABULARY,
     FILE_MEMBERS,
@@ -72,6 +75,9 @@ BOUNDED_OBJECT_CHECKS = OBJECT_CHECK_VOCABULARY - {
     "machine_code_tv_nan_payload_bits",
     "machine_code_tv_sysv_memory_class_aggregate_abi",
     "object_translation_correspondence",
+    # Acceptance-descriptor items; the recheck descriptor family does not
+    # emit them.
+    *OBJECT_TRANSLATION_CORRESPONDENCE_ITEMS,
 }
 EXPECTED_DISCHARGED = BASE_DISCHARGED | BOUNDED_OBJECT_CHECKS
 

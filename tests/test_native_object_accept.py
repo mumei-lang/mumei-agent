@@ -12,12 +12,15 @@ import pytest
 from agent.core_evidence import (
     MACHINE_TV_ASSUMPTION_MARKERS,
     OBJECT_CHECK_VOCABULARY,
+    OBJECT_TRANSLATION_CORRESPONDENCE_ITEMS,
 )
 from agent.native_bundle import FILE_MEMBERS, RECORD_FILE
 from agent.native_object_accept import (
     CHECK_VOCABULARY,
     NATIVE_EVIDENCE_ACCEPTANCE_SCHEMA,
     OBJECT_ACCEPT_CHECKS,
+    OBJECT_ACCEPT_TRANSLATION_WITH_LINK_SCOPE,
+    OBJECT_ACCEPT_TRANSLATION_WITHOUT_LINK_SCOPE,
     OBJECT_ACCEPT_WITH_LINK_SCOPE,
     OBJECT_ACCEPT_WITHOUT_LINK_SCOPE,
     OBJECT_SOURCE_MACHINE_CODE_CHECK,
@@ -683,6 +686,80 @@ def test_invalid_descriptor_claims_nothing(tmp_path, capsys, mutate):
     assert report["sequence"]["selected_result"] is not None
     assert "candidate" not in report
     assert "certificate" not in report
+
+
+@pytest.mark.parametrize(
+    ("scope", "with_link"),
+    [
+        (OBJECT_ACCEPT_TRANSLATION_WITH_LINK_SCOPE, True),
+        (OBJECT_ACCEPT_TRANSLATION_WITHOUT_LINK_SCOPE, False),
+    ],
+    ids=("translation-with-link", "translation-without-link"),
+)
+def test_translation_acceptance_scope_admitted_ahead_of_emit_switch(
+    tmp_path, capsys, scope, with_link
+):
+    performed = [
+        check
+        for check in DESCRIPTOR["checks_performed"]
+        if check != "object_link_correspondence" or with_link
+    ] + sorted(OBJECT_TRANSLATION_CORRESPONDENCE_ITEMS)
+    descriptor = {
+        **DESCRIPTOR,
+        "scope": scope,
+        "checks_performed": performed,
+    }
+    core = _write_core(tmp_path, descriptor)
+    bundle = _write_bundle(tmp_path)
+    source = _write_source(tmp_path)
+    code, out, err = _run(capsys, _args(core, bundle, source))
+    assert code == 0 and err == ""
+    report = json.loads(out)
+    assert report["acceptance"] == "accepted"
+    assert report["scope"] == scope
+    for item in OBJECT_TRANSLATION_CORRESPONDENCE_ITEMS:
+        assert item in report["discharged_checks"]
+    assert ("object_link_correspondence" in report["discharged_checks"]) is (
+        with_link
+    )
+    _assert_partition(
+        report, BASE_DISCHARGED | (set(performed) & OBJECT_ACCEPT_CHECKS)
+    )
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param(
+            lambda descriptor: descriptor.update(
+                scope=OBJECT_ACCEPT_TRANSLATION_WITH_LINK_SCOPE
+            )
+            or descriptor["checks_performed"].remove(
+                "object_link_correspondence"
+            ),
+            id="translation-link-required-but-absent",
+        ),
+        pytest.param(
+            lambda descriptor: descriptor.update(
+                scope=OBJECT_ACCEPT_TRANSLATION_WITHOUT_LINK_SCOPE
+            ),
+            id="translation-link-present-but-forbidden",
+        ),
+    ],
+)
+def test_translation_scope_link_consistency_enforced(tmp_path, capsys, mutate):
+    descriptor = json.loads(json.dumps(DESCRIPTOR))
+    mutate(descriptor)
+    core = _write_core(tmp_path, descriptor)
+    bundle = _write_bundle(tmp_path)
+    source = _write_source(tmp_path)
+    code, out, err = _run(capsys, _args(core, bundle, source))
+    assert code == 0 and err == ""
+    report = json.loads(out)
+    assert report["descriptor_invalid"] is True
+    assert "acceptance" not in report
+    assert "discharged_checks" not in report
+    assert report["checks_not_performed"] == sorted(ALL_CHECKS)
 
 
 def test_agent_owned_translation_name_does_not_replace_core_check(tmp_path, capsys):

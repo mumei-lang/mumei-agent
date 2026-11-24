@@ -98,6 +98,31 @@ OBJECT_ACCEPT_WITH_LINK_SCOPE = (
 OBJECT_ACCEPT_WITHOUT_LINK_SCOPE = (
     "native_bundle_object_machine_code_translation_correspondence_without_object_link"
 )
+# Object-translation acceptance scopes from DESIGN_OBJECT_ACCEPTANCE.md
+# (mumei#1433): Core switches `accept-object`'s emitted scope to these
+# once the agent admits both, so they are admitted ahead of the emit
+# switch — an old-scope descriptor stays valid afterward.
+OBJECT_ACCEPT_TRANSLATION_WITH_LINK_SCOPE = (
+    "native_bundle_object_translation_correspondence"
+)
+OBJECT_ACCEPT_TRANSLATION_WITHOUT_LINK_SCOPE = (
+    "native_bundle_object_translation_correspondence_without_object_link"
+)
+OBJECT_ACCEPT_WITH_LINK_SCOPES = frozenset(
+    {
+        OBJECT_ACCEPT_WITH_LINK_SCOPE,
+        OBJECT_ACCEPT_TRANSLATION_WITH_LINK_SCOPE,
+    }
+)
+OBJECT_ACCEPT_WITHOUT_LINK_SCOPES = frozenset(
+    {
+        OBJECT_ACCEPT_WITHOUT_LINK_SCOPE,
+        OBJECT_ACCEPT_TRANSLATION_WITHOUT_LINK_SCOPE,
+    }
+)
+OBJECT_ACCEPT_SCOPES = (
+    OBJECT_ACCEPT_WITH_LINK_SCOPES | OBJECT_ACCEPT_WITHOUT_LINK_SCOPES
+)
 OBJECT_SOURCE_MACHINE_CODE_CHECK = "object_source_machine_code_correspondence"
 
 DEFAULT_ATTEMPT_TIMEOUT_MS = 60_000
@@ -237,10 +262,7 @@ def _valid_acceptance_descriptor(descriptor: object, expected_build_id: str) -> 
     ):
         return False
     scope = descriptor.get("scope")
-    if scope not in (
-        OBJECT_ACCEPT_WITH_LINK_SCOPE,
-        OBJECT_ACCEPT_WITHOUT_LINK_SCOPE,
-    ):
+    if not isinstance(scope, str) or scope not in OBJECT_ACCEPT_SCOPES:
         return False
     performed = descriptor.get("checks_performed")
     not_performed = descriptor.get("checks_not_performed")
@@ -254,7 +276,7 @@ def _valid_acceptance_descriptor(descriptor: object, expected_build_id: str) -> 
     if OBJECT_SOURCE_MACHINE_CODE_CHECK not in performed:
         return False
     has_object_link = "object_link_correspondence" in performed
-    if has_object_link != (scope == OBJECT_ACCEPT_WITH_LINK_SCOPE):
+    if has_object_link != (scope in OBJECT_ACCEPT_WITH_LINK_SCOPES):
         return False
     if set(performed) & set(not_performed):
         return False

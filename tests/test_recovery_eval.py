@@ -9,6 +9,7 @@ import pytest
 from agent.core_evidence import (
     _CHECK_PERFORMERS,
     OBJECT_CHECK_VOCABULARY,
+    OBJECT_TRANSLATION_CORRESPONDENCE_ITEMS,
     RUNTIME_CHECK_VOCABULARY,
     RUNTIME_OBSERVATION_SCHEMA,
     UNPERFORMED_CHECK_RECOVERY_SCHEMA,
@@ -84,6 +85,7 @@ def test_native_check_vocabularies_are_pairwise_disjoint():
             "machine_code_tv_nan_payload_bits",
             "machine_code_tv_sysv_memory_class_aggregate_abi",
         }
+        | OBJECT_TRANSLATION_CORRESPONDENCE_ITEMS
     )
     assert "os_exit_status_observation" in RUNTIME_CHECK_VOCABULARY
     assert "os_exit_status_observation" not in OBJECT_CHECK_VOCABULARY
