@@ -57,7 +57,10 @@ import os
 import sys
 from pathlib import Path
 
-from agent.core_evidence import OBJECT_CHECK_VOCABULARY
+from agent.core_evidence import (
+    OBJECT_CHECK_VOCABULARY,
+    OBJECT_TRANSLATION_CORRESPONDENCE_ITEMS,
+)
 from agent.native_bundle import (
     FILE_MEMBERS,  # noqa: F401 — re-exported for route consumers/tests
     MAX_RECORD_BYTES,
@@ -88,6 +91,9 @@ OBJECT_RECHECK_CHECKS = OBJECT_CHECK_VOCABULARY - {
     "machine_code_tv_nan_payload_bits",
     "machine_code_tv_sysv_memory_class_aggregate_abi",
     "object_translation_correspondence",
+    # Acceptance-descriptor items (DESIGN_OBJECT_ACCEPTANCE.md): the
+    # recheck-object descriptor family does not emit them.
+    *OBJECT_TRANSLATION_CORRESPONDENCE_ITEMS,
 }
 
 OBJECT_RECHECK_OUTCOMES = {0: "corresponds", 3: "inconclusive"}

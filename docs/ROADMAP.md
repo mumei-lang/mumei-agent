@@ -10322,6 +10322,34 @@ positions, builtin members and the `for *` target are unchanged.
 
 **回帰ゲート**: `uv run pytest tests/test_sol_bindings.py tests/test_sol_compiler_snapshot.py -q`
 
+### Object-stage acceptance — translation-correspondence vocabulary
+
+`agent/core_evidence.py` adds `OBJECT_TRANSLATION_CORRESPONDENCE_ITEMS` —
+the ten item names Core's `object_translation.correspondence.checks`
+record enumerates (`llvm_ir_object_equivalence`,
+`object_data_correspondence`, `object_symbol_attribute_correspondence`,
+`hir_llvm_model_correspondence`, the four `relocation_*` names,
+`function_coverage`, `function_count`) — into the shared
+`OBJECT_CHECK_VOCABULARY`, so `OBJECT_ACCEPT_CHECKS` and the pinned-equal
+`MACHINE_TV_OBJECT_CHECKS` credit them when a descriptor lists them
+(`OBJECT_RECHECK_CHECKS` keeps excluding them: the `recheck-object`
+descriptor family does not emit acceptance items).
+`agent/native_object_accept.py` admits the new scopes
+`native_bundle_object_translation_correspondence` and
+`..._without_object_link` in `_valid_acceptance_descriptor`, with the
+scope↔`object_link_correspondence` consistency check covering both
+scope generations — the machine-TV scopes stay accepted unchanged, so
+the agent admits both vocabulary generations before Core switches the
+emitted scope (DESIGN_OBJECT_ACCEPTANCE.md §6 Step 3). Under the
+translation scopes the descriptor must list every correspondence item
+in `checks_performed` — an `accepted` descriptor is only emitted once
+all items are checked, so a descriptor missing one is rejected rather
+than partially credited. Unknown scopes stay rejected; unknown check
+names in `checks_performed` remain admissible in the descriptor but
+are never credited (fail-closed crediting, unchanged).
+
+**回帰ゲート**: `uv run pytest tests/test_native_object_accept.py tests/test_native_check_partitions.py tests/test_native_accept.py tests/test_native_artifact_recheck.py tests/test_native_object_recheck.py tests/test_recovery_eval.py -q`
+
 ### C10 object-stage acceptance — producer decision mapping
 
 `docs/DESIGN_OBJECT_TV_CONSUMPTION.md` section 4 maps each landed
