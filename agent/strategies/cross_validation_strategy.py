@@ -202,24 +202,69 @@ _TS_BRACED_GROUP_RE = re.compile(r"\{[^{}]*\}")
 _TS_OBJECT_KEY_RE = re.compile(r"(?<=[{,])\s*[A-Za-z_]\w*\s*:")
 
 
-def _mask_line_strings(line: str, keep_interp: bool) -> str:
+def _literal_close(s: str, start: int, q: str, is_f: bool) -> int:
+    """Index just past the closing quote of a literal whose inner text
+    starts at ``s[start]``; ``-1`` when unterminated. For f-strings and
+    template literals the close only counts at replacement-field depth 0,
+    and literals nested inside a field (or a stray ``'`` in a regex) are
+    skipped."""
+    k, field_depth, ts = start, 0, q == "`"
+    n = len(s)
+    while k < n:
+        c = s[k]
+        if c == "\\":
+            k += 2
+            continue
+        if is_f or ts:
+            if ts and s[k : k + 2] == "${":
+                field_depth += 1
+                k += 2
+                continue
+            if is_f and c == "{":
+                if s[k : k + 2] == "{{":
+                    k += 2
+                    continue
+                field_depth += 1
+                k += 1
+                continue
+            if c == "}" and field_depth > 0:
+                field_depth -= 1
+                k += 1
+                continue
+            if field_depth > 0 and c in "'\"`":
+                nxt = _skip_literal(s, k)
+                k = nxt if nxt < n else k + 1
+                continue
+        if c == q and field_depth == 0:
+            return k + 1
+        k += 1
+    return -1
+
+
+def _mask_line_strings(
+    line: str, keep_interp: bool
+) -> tuple[str, tuple[str, bool] | None]:
     """Mask every string literal in ``line`` to empty quotes.
 
-    Unlike the regex approach, the scan tolerates the literal's own quote
-    char inside ``{...}`` replacement fields (PEP 701), skips string
-    literals nested inside fields, and treats an unterminated quote
-    inside a field (e.g. a ``'`` inside a regex literal) as plain text.
-    """
+    Returns the masked text plus ``(quote, is_f)`` when a literal ran to
+    the end of the line unterminated (a multiline template/triple
+    literal) — the caller resumes the close-scan on the next line.
+    Unlike a regex approach, the literal's own quote inside ``{...}``
+    fields (PEP 701) does not end it early."""
     out: list[str] = []
     i, n = 0, len(line)
+    open_lit: tuple[str, bool] | None = None
     while i < n:
         if line[i] not in "'\"`":
             out.append(line[i])
             i += 1
             continue
+        # A quote's prefix letters (r/b/f/u) are part of the literal —
+        # drop them so `r"x"` does not leave `r` as an identifier.
         p = i
-        while p > 0 and line[p - 1].isalpha():
+        while p > 0 and line[p - 1] in "rbufRBUF":
             p -= 1
+        del out[len(out) - (i - p) :]
         prefix = line[p:i].lower()
         q = line[i]
         is_f = "f" in prefix and q != "`"
@@ -228,37 +273,19 @@ def _mask_line_strings(line: str, keep_interp: bool) -> str:
             inner = line[i + 3 : n if end < 0 else end]
             i = n if end < 0 else end + 3
             out.append(q * 6 + _kept_exprs(inner, q, is_f, keep_interp))
+            if end < 0:
+                open_lit = (q * 3, is_f)
             continue
-        k = i + 1
-        inner_start = k
-        field_depth = 0
-        while k < n:
-            c = line[k]
-            if c == "\\":
-                k += 2
-                continue
-            if is_f and c == "{":
-                if line[k : k + 2] == "{{":
-                    k += 2
-                    continue
-                field_depth += 1
-                k += 1
-                continue
-            if is_f and c == "}" and field_depth > 0:
-                field_depth -= 1
-                k += 1
-                continue
-            if field_depth > 0 and c in "'\"`":
-                nxt = _skip_literal(line, k)
-                k = nxt if nxt < n else k + 1
-                continue
-            if c == q and field_depth == 0:
-                break
-            k += 1
-        inner = line[inner_start:k]
-        i = k + 1 if k < n else n
+        end = _literal_close(line, i + 1, q, is_f)
+        if end < 0:
+            inner = line[i + 1 :]
+            i = n
+            open_lit = (q, is_f)
+        else:
+            inner = line[i + 1 : end - 1]
+            i = end
         out.append(q * 2 + _kept_exprs(inner, q, is_f, keep_interp))
-    return "".join(out)
+    return "".join(out), open_lit
 
 
 def _kept_exprs(inner: str, quote: str, is_f: bool, keep_interp: bool) -> str:
@@ -277,7 +304,7 @@ def _kept_exprs(inner: str, quote: str, is_f: bool, keep_interp: bool) -> str:
         # hold literal text, not references — mask them out too.
         expr = _STRING_LITERAL_RE.sub(_mask_string_literal, expr)
         if quote == "`":
-            expr = _strip_ts_object_keys(expr)
+            expr = _mask_ts_regexes(_strip_ts_object_keys(expr))
         else:
             expr = _strip_format_spec(expr)
         # Blank comment-, comma- and depth-significant characters
@@ -301,19 +328,57 @@ def _mask_string_literal(match: re.Match[str]) -> str:
 
 
 _TS_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/")
+_TS_REGEX_START_CHARS = "(,=:!?&|[{~^+*%-<>;"
+
+
+def _mask_ts_regexes(expr: str) -> str:
+    """Blank ``/.../`` regex-literal contents so pattern text
+    (``/balance|amount/``) is not read as variable references. A ``/``
+    opens a regex only after an operator-ish char — ``a / b`` division
+    is left alone."""
+    out: list[str] = []
+    prev = ""  # last non-space char seen
+    i, n = 0, len(expr)
+    while i < n:
+        c = expr[i]
+        if c == "/" and (not prev or prev in _TS_REGEX_START_CHARS):
+            j = i + 1
+            in_class = False
+            while j < n:
+                if expr[j] == "\\":
+                    j += 2
+                    continue
+                if expr[j] == "[":
+                    in_class = True
+                elif expr[j] == "]":
+                    in_class = False
+                elif expr[j] == "/" and not in_class:
+                    break
+                j += 1
+            if j < n:
+                out.append("//")
+                prev = "/"
+                i = j + 1
+                continue
+        out.append(c)
+        if not c.isspace():
+            prev = c
+        i += 1
+    return "".join(out)
 
 
 def _strip_ts_object_keys(expr: str) -> str:
     """Object-literal keys are labels, not reads — ``${{balance: 1}}``
     mentions ``balance`` without reading it. Strip ``key:`` inside each
     braced group (repeated for nesting), after dropping ``/* */``
-    comments that could sit between the ``{`` and the key."""
+    comments (replaced by a space so tokens stay separated) that could
+    sit between the ``{`` and the key."""
     prev = None
     while prev != expr:
         prev = expr
         expr = _TS_BRACED_GROUP_RE.sub(
             lambda m: _TS_OBJECT_KEY_RE.sub(
-                ":", _TS_BLOCK_COMMENT_RE.sub("", m.group(0))
+                ":", _TS_BLOCK_COMMENT_RE.sub(" ", m.group(0))
             ),
             expr,
         )
@@ -385,8 +450,19 @@ def _guard_source_lines(body: str, language: str = "") -> list[str]:
     cleaned: list[str] = []
     in_docstring: str | None = None
     in_block_comment = False
+    cont_literal: tuple[str, bool] | None = None
     for raw in body.splitlines():
         line = raw
+        if cont_literal is not None:
+            # A literal from a previous line is still open — its contents
+            # are not code. Resume the close-scan; the closing quote's
+            # line may carry real comparisons after it.
+            cq, cisf = cont_literal
+            end = _literal_close(line, 0, cq[0], cisf or cq[0] == "`")
+            if end < 0:
+                continue
+            line = line[end:]
+            cont_literal = None
         if in_block_comment:
             if "*/" in line:
                 line = line.split("*/", 1)[1]
@@ -411,12 +487,15 @@ def _guard_source_lines(body: str, language: str = "") -> list[str]:
                     break
         # Mask string-literal contents so a `#`, `//` or `/*` inside a
         # string ("/api/*", "a # b") is never read as a comment opener.
-        line = _mask_line_strings(line, _CONDITIONAL_LINE_RE.match(line) is not None)
+        line, cont_literal = _mask_line_strings(
+            line, _CONDITIONAL_LINE_RE.match(line) is not None
+        )
         if lang != "python":
             while "/*" in line:
                 head, _, tail = line.partition("/*")
                 if "*/" in tail:
-                    line = head + tail.split("*/", 1)[1]
+                    # A space keeps the comment from joining two tokens.
+                    line = head + " " + tail.split("*/", 1)[1]
                 else:
                     line = head
                     in_block_comment = True

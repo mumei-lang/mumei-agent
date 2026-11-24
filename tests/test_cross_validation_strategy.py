@@ -998,17 +998,77 @@ class TestValidateSpecVsImpl:
         assert "withdraw" not in report.spec_stronger_than_impl
 
     def test_fstring_same_quote_fill_char_keeps_field(self):
-        """`f"{x:\">5}"`` — PEP 701 allows the literal's own quote inside
-        a replacement field; the literal must not end early."""
+        """`f"{x:{"|"}>5}"` — PEP 701 allows the literal's own quote char
+        inside a nested literal in a replacement field; the outer literal
+        must not end early."""
         spec_path = self._write_spec("withdraw", "amount <= balance")
         impl_path = Path(self.tmpdir) / "qf.py"
         impl_path.write_text(
             "def withdraw(balance, amount):\n"
-            '    assert len(f"{balance:\">5}{amount:\">5}") > 0\n'
+            '    assert len(f"{balance:{"|"}>5}{amount:{"|"}>5}") > 0\n'
             "    return balance - amount\n"
         )
         report = self.validator.validate_spec_vs_impl(
             spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        # Not just unflagged: the function must actually have been parsed
+        # and scanned (an unparsed function lands in uncovered_atoms and
+        # would pass the other assertion vacuously).
+        assert "withdraw" not in report.uncovered_atoms
+        assert "withdraw" not in report.spec_stronger_than_impl
+
+    def test_multiline_template_keeps_tail_after_close(self):
+        """A template literal spanning lines: the closing backtick's line
+        still carries a real comparison after it."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "ml.ts"
+        impl_path.write_text(
+            "function withdraw(balance: number, amount: number): number {\n"
+            "  if (`start\n"
+            "      end`.length > 0 && amount <= balance) {\n"
+            "    return balance - amount;\n"
+            "  }\n"
+            "  throw new Error();\n"
+            "}\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="typescript"
+        )
+        assert "withdraw" not in report.spec_stronger_than_impl
+
+    def test_ts_regex_pattern_names_are_not_variables(self):
+        """`${s.match(/balance|amount/)}` — the pattern's names are not
+        variable reads."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "rx.ts"
+        impl_path.write_text(
+            "function withdraw(balance: number, amount: number): number {\n"
+            "  if (`${s.match(/balance|amount/)}`.length > 0) {\n"
+            "    return balance - amount;\n"
+            "  }\n"
+            "  throw new Error();\n"
+            "}\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="typescript"
+        )
+        assert "withdraw" in report.spec_stronger_than_impl
+
+    def test_ts_block_comment_separates_tokens(self):
+        """`amount/**/as number` — the comment must not glue tokens into
+        `amountas`."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "cj.ts"
+        impl_path.write_text(
+            "function withdraw(balance: number, amount: number): number {\n"
+            "  if (`${{ a: balance, b: amount /**/ as number }}`.length > 0) {\n"
+            "    return balance - amount;\n"
+            "  }\n"
+            "  throw new Error();\n"
+            "}\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="typescript"
         )
         assert "withdraw" not in report.spec_stronger_than_impl
 
