@@ -1081,29 +1081,14 @@ class TestValidateSpecVsImpl:
         assert "withdraw" not in report.spec_stronger_than_impl
 
     def test_ts_nested_template_text_is_not_a_guard(self):
-        """``${`if amount <= balance`}`` — the nested template's text is
-        a string, not a real conditional."""
+        """``${`if amount <= balance`}`` on a conditional line — the
+        interpolation is kept, but the nested template's text is a
+        string, not a real conditional."""
         spec_path = self._write_spec("withdraw", "amount <= balance")
         impl_path = Path(self.tmpdir) / "nt.ts"
         impl_path.write_text(
             "function withdraw(balance: number, amount: number): number {\n"
-            "  const tag = `chk ${`if amount <= balance`} x`;\n"
-            "  return balance - amount;\n"
-            "}\n"
-        )
-        report = self.validator.validate_spec_vs_impl(
-            spec_path=str(spec_path), impl_path=str(impl_path), language="typescript"
-        )
-        assert "withdraw" in report.spec_stronger_than_impl
-
-    def test_ts_postfix_increment_then_division(self):
-        """`counter++ / amount / balance` — the `/` after postfix `++`
-        is division, not a regex open."""
-        spec_path = self._write_spec("withdraw", "amount <= balance")
-        impl_path = Path(self.tmpdir) / "pd.ts"
-        impl_path.write_text(
-            "function withdraw(balance: number, amount: number): number {\n"
-            "  if (`${counter++ / amount / balance}`.length > 0) {\n"
+            "  if (`chk ${`if amount <= balance`} x`.length > 0) {\n"
             "    return 0;\n"
             "  }\n"
             "  throw new Error();\n"
@@ -1112,9 +1097,77 @@ class TestValidateSpecVsImpl:
         report = self.validator.validate_spec_vs_impl(
             spec_path=str(spec_path), impl_path=str(impl_path), language="typescript"
         )
-        # `amount` and `balance` are read by the division — the guard is
-        # counted as enforcing the precondition.
+        assert "withdraw" in report.spec_stronger_than_impl
+
+    def test_ts_comment_inside_interpolation(self):
+        """`${/* amount <= balance */}` — comment text inside an
+        interpolation is not a variable read."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "ic.ts"
+        impl_path.write_text(
+            "function withdraw(balance: number, amount: number): number {\n"
+            "  if (`${/* amount <= balance */ x}`.length > 0) {\n"
+            "    return 0;\n"
+            "  }\n"
+            "  throw new Error();\n"
+            "}\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="typescript"
+        )
+        assert "withdraw" in report.spec_stronger_than_impl
+
+    def test_backslash_continued_string_keeps_next_line_literal(self):
+        """`"balance \\\n amount"` — a backslash-continued log string's
+        second line is literal text, not a comparison."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "bc.py"
+        impl_path.write_text(
+            "def withdraw(balance, amount):\n"
+            '    logger.info("checking amount <= \\\n'
+            '              balance")\n'
+            "    return balance - amount\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert "withdraw" in report.spec_stronger_than_impl
+
+    def test_ts_postfix_increment_then_division(self):
+        """`counter++ / amount <= balance` — the `/` after postfix `++`
+        is division, not a regex open, so both operands stay visible."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "pd.ts"
+        impl_path.write_text(
+            "function withdraw(balance: number, amount: number): number {\n"
+            "  if (`${counter++ / amount <= balance}`) {\n"
+            "    return 0;\n"
+            "  }\n"
+            "  throw new Error();\n"
+            "}\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="typescript"
+        )
         assert "withdraw" not in report.spec_stronger_than_impl
+
+    def test_ts_binary_plus_unary_plus_then_regex(self):
+        """`x + +/balance|amount/` — spaced `+ +` is not postfix `++`,
+        so the `/` opens a regex whose names are not variable reads."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "bp.ts"
+        impl_path.write_text(
+            "function withdraw(balance: number, amount: number): number {\n"
+            "  if (`${x + +/balance|amount/}`.length > 0) {\n"
+            "    return 0;\n"
+            "  }\n"
+            "  throw new Error();\n"
+            "}\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="typescript"
+        )
+        assert "withdraw" in report.spec_stronger_than_impl
 
     def test_ts_regex_pattern_names_are_not_variables(self):
         """`${s.match(/balance|amount/)}` — the pattern's names are not

@@ -282,9 +282,10 @@ def _mask_line_strings(
                 out.append(q * 6 + _kept_exprs(inner, q, is_f, keep_interp))
             continue
         end = _literal_close(line, i + 1, q, is_f)
-        if end < 0 and q == "`":
-            # A template literal can span lines — its continuation state
-            # keeps the inner text for the caller to finish masking.
+        if end < 0 and (q == "`" or line[i + 1 :].rstrip().endswith("\\")):
+            # A template literal can span lines, and a ' or " literal may
+            # continue onto the next line via a trailing backslash — the
+            # continuation state keeps the inner text for the caller.
             inner = line[i + 1 :]
             i = n
             out.append(q * 2)
@@ -322,6 +323,10 @@ def _kept_exprs(inner: str, quote: str, is_f: bool, keep_interp: bool) -> str:
             # (``${`if cond`}``) holds text, not code — mask it whole so
             # its contents are not read as guards or variable reads.
             expr = _TS_NESTED_TEMPLATE_RE.sub("``", expr)
+            # Comments inside the interpolation (``${/* c */ x}``,
+            # ``${x // c}``) hold names that are not reads.
+            expr = _TS_BLOCK_COMMENT_RE.sub(" ", expr)
+            expr = _TS_LINE_COMMENT_RE.sub(" ", expr)
             expr = _mask_ts_regexes(_strip_ts_object_keys(expr))
         else:
             expr = _strip_format_spec(expr)
@@ -345,9 +350,25 @@ def _mask_string_literal(match: re.Match[str]) -> str:
     return match.group("q") * 2
 
 
-_TS_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/")
+_TS_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+_TS_LINE_COMMENT_RE = re.compile(r"//[^\n]*")
 _TS_NESTED_TEMPLATE_RE = re.compile(r"`(?:\\.|[^`\\])*`")
 _TS_REGEX_START_CHARS = "(,=:!?&|[{~^+*%-<>;"
+
+
+def _postfix_incdec_before(expr: str, i: int) -> bool:
+    """Whether ``expr[i]`` sits right after a postfix ``++``/``--`` —
+    the two operator chars are adjacent and follow an operand, unlike
+    spaced binary+unary ``a + +``."""
+    k = i - 1
+    while k >= 0 and expr[k] == " ":
+        k -= 1
+    return (
+        k >= 2
+        and expr[k] in "+-"
+        and expr[k - 1] == expr[k]
+        and (expr[k - 2].isalnum() or expr[k - 2] in "_)]}")
+    )
 
 
 def _mask_ts_regexes(expr: str) -> str:
@@ -358,13 +379,12 @@ def _mask_ts_regexes(expr: str) -> str:
     (``counter++ / amount``)."""
     out: list[str] = []
     prev = ""  # last non-space char seen
-    prev2 = ""  # the char before it
     i, n = 0, len(expr)
     while i < n:
         c = expr[i]
         if c == "/" and (
             not prev
-            or (prev in _TS_REGEX_START_CHARS and prev2 + prev not in ("++", "--"))
+            or (prev in _TS_REGEX_START_CHARS and not _postfix_incdec_before(expr, i))
         ):
             j = i + 1
             in_class = False
@@ -381,12 +401,12 @@ def _mask_ts_regexes(expr: str) -> str:
                 j += 1
             if j < n:
                 out.append("//")
-                prev2, prev = "/", "/"
+                prev = "/"
                 i = j + 1
                 continue
         out.append(c)
         if not c.isspace():
-            prev2, prev = prev, c
+            prev = c
         i += 1
     return "".join(out)
 
