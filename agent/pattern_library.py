@@ -12,6 +12,10 @@ import json
 import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from agent.mumei_client import MumeiClient
 
 # Default storage location
 DEFAULT_PATTERN_DIR = Path.home() / ".mumei-agent"

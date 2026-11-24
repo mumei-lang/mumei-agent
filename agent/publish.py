@@ -20,6 +20,7 @@ The emit targets generate **FFI glue code** (not transpiled code):
 
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 import os
@@ -230,6 +231,8 @@ def publish(
     generated_file = target_file_rel
     generated_path = cwd / generated_file
     generated_path.parent.mkdir(parents=True, exist_ok=True)
+    if not code.endswith("\n"):
+        code += "\n"
     with open(generated_path, "w", encoding="utf-8") as f:
         f.write(code)
     extra_file_paths: list[tuple[str, Path]] = []
@@ -505,8 +508,6 @@ def publish(
 
 def build_parser(parser: "argparse.ArgumentParser") -> None:
     """Add publish-specific arguments to an argparse parser."""
-    import argparse  # noqa: F811
-
     parser.add_argument(
         "--spec",
         required=True,

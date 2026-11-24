@@ -2,11 +2,15 @@
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
 from openai import OpenAI
 
 from agent.llm_provider import complete_text
 from agent.strategies.generate_strategy_prompt import _extract_code
+
+if TYPE_CHECKING:
+    from agent.config import AgentConfig
 
 _logger = logging.getLogger(__name__)
 

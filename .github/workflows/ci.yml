@@ -16,6 +16,16 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+      - name: Ruff check (baseline rules; see [tool.ruff.lint] in pyproject.toml)
+        run: uvx ruff==0.17.6 check
+
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 20
