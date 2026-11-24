@@ -596,14 +596,88 @@ class TestValidateSpecVsImpl:
         )
         assert "withdraw" not in report.spec_stronger_than_impl
 
+    def test_method_call_does_not_pull_nested_function(self):
+        """`self.check()` calls a method, not a nested `def check` — the
+        nested block's guard lines must not count."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "m.py"
+        impl_path.write_text(
+            "class A:\n"
+            "    def withdraw(self, balance, amount):\n"
+            "        def check():\n"
+            "            if balance < amount:\n"
+            "                raise ValueError()\n"
+            "        self.check()\n"
+            "        return balance - amount\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        # self.check() passes no arguments, so it cannot be the delegated
+        # check for {amount, balance} either — the precondition is
+        # genuinely unenforced.
+        assert "withdraw" in report.spec_stronger_than_impl
+
+    def test_nested_return_does_not_exempt_outer_body(self):
+        """A called one-line helper containing `return f(x)` must not make
+        the outer function look like a pure call-forward."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "n.py"
+        impl_path.write_text(
+            "def withdraw(balance, amount):\n"
+            "    def helper(): return round(amount)\n"
+            "    helper()\n"
+            "    return balance - amount\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert "withdraw" in report.spec_stronger_than_impl
+
+    def test_annotated_one_line_nested_def_uses_real_body(self):
+        """`def check(amount: int, balance: int):` must split at `):` — the
+        annotation's identifier list is not a guard. The helper is called
+        without the identifiers so the delegation channel stays out of the
+        way and only the tail split decides coverage."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "an.py"
+        impl_path.write_text(
+            "def withdraw(balance, amount):\n"
+            "    def check(amount: int, balance: int): assert amount > 0\n"
+            "    check()\n"
+            "    return balance - amount\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert "withdraw" in report.spec_stronger_than_impl
+
+    def test_conditional_line_keeps_interpolated_variables(self):
+        """An f-string inside an `if` condition may interpolate the checked
+        identifier — masking must keep it visible on that line."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "c.py"
+        impl_path.write_text(
+            "def withdraw(balance, amount):\n"
+            '    if amount > int(f"{balance}"):\n'
+            "        raise ValueError()\n"
+            "    return balance - amount\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert "withdraw" not in report.spec_stronger_than_impl
+
     def test_unterminated_quote_with_escapes_terminates(self):
         """A comment holding an unclosed quote followed by escapes must not
-        stall the string masker."""
+        stall the string masker. The run is long enough that the previous
+        backtracking pattern would take centuries here — a regression makes
+        the suite hang (CI timeout) rather than pass unnoticed."""
         spec_path = self._write_spec("withdraw", "amount <= balance")
         impl_path = Path(self.tmpdir) / "u.py"
         impl_path.write_text(
             "def withdraw(balance, amount):\n"
-            "    if balance < amount:  # don't \\\\\\\\\\\\\\\\n"
+            "    if balance < amount:  # don't " + "\\\\" * 400 + "\n"
             "        raise ValueError()\n"
             "    return balance - amount\n"
         )

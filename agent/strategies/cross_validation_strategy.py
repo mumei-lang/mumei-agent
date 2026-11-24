@@ -103,16 +103,37 @@ _C_COMMENT_RE = re.compile(r"/\*[\s\S]*?\*/")
 _STRING_LITERAL_RE = re.compile(
     r'''(?P<pre>[A-Za-z]{0,3})(?P<q>["'`])(?P<inner>(?:\\.|[^\\])*?)(?P=q)'''
 )
+_INTERPOLATION_RE = re.compile(r"\{([^{}]*)\}")
+# Lines that gate execution (as opposed to `raise`/`throw`/`except`, whose
+# strings are error messages) keep interpolation expressions visible:
+# `if amount > int(f"{limit}")` really does check `limit`.
+_CONDITIONAL_LINE_RE = re.compile(
+    r"^\s*(?:if|elif|assert|while|match|guard|require|ensure|when)\b"
+)
 
 
 def _mask_string_literal(match: re.Match[str]) -> str:
     """Replace a literal with empty quotes.
 
-    Interpolation expressions (``f"{x}"``, ``${x}``) are deliberately
-    dropped too: they most often sit inside an error *message* such as
-    ``raise ValueError(f"balance {balance} < amount {amount}")`` and
-    would let a guard pass on identifiers it never actually checks."""
+    Interpolation expressions (``f"{x}"``, ``${x}``) are dropped: on a
+    non-conditional line they most often sit inside an error *message*
+    such as ``raise ValueError(f"balance {balance} < amount {amount}")``
+    and would let a guard pass on identifiers it never checks."""
     return match.group("q") * 2
+
+
+def _mask_string_literal_keep_interp(match: re.Match[str]) -> str:
+    """Like :func:`_mask_string_literal` but keeps f-string/template
+    interpolation expressions visible; used on conditional lines whose
+    comparisons may legitimately interpolate the checked identifiers."""
+    inner = match.group("inner")
+    prefix = match.group("pre").lower()
+    quote = match.group("q")
+    exprs: list[str] = []
+    if "f" in prefix or quote == "`":
+        for raw in _INTERPOLATION_RE.findall(inner):
+            exprs.append(raw[1:] if raw.startswith("$") else raw)
+    return quote + quote + (" " + " ".join(exprs) if exprs else "")
 
 
 def _guard_source_lines(body: str, language: str = "") -> list[str]:
@@ -152,7 +173,12 @@ def _guard_source_lines(body: str, language: str = "") -> list[str]:
                     break
         # Mask string-literal contents so a `#`, `//` or `/*` inside a
         # string ("/api/*", "a # b") is never read as a comment opener.
-        line = _STRING_LITERAL_RE.sub(_mask_string_literal, line)
+        mask = (
+            _mask_string_literal_keep_interp
+            if _CONDITIONAL_LINE_RE.match(line)
+            else _mask_string_literal
+        )
+        line = _STRING_LITERAL_RE.sub(mask, line)
         if lang != "python":
             while "/*" in line:
                 head, _, tail = line.partition("/*")
@@ -235,13 +261,20 @@ def _is_pure_call_forward(lines: list[str], language: str = "") -> bool:
 _NESTED_DEF_RE = re.compile(r"(?:async\s+)?(?:def|class)\s+([A-Za-z_]\w*)")
 
 
-def _include_called_nested_guards(lines: list[str]) -> list[str]:
+def _include_called_nested_guards(
+    lines: list[str],
+) -> tuple[list[str], list[str]]:
     """Keep a nested ``def``/``class`` block's guard lines only when the
     enclosing body actually calls it.
 
     A nested helper that is never called cannot enforce anything, so its
     ``if``/``raise`` lines must not count as the outer function's
     enforcement; a called helper's lines do count.
+
+    Returns ``(outer, merged)``: ``outer`` is the enclosing body's own
+    lines, ``merged`` adds the called nested blocks' lines. Callers that
+    judge the outer function itself (e.g. the pure call-forward check)
+    must use ``outer``; enforcement scanning uses ``merged``.
     """
     main: list[str] = []
     nested: dict[str, list[str]] = {}
@@ -256,8 +289,12 @@ def _include_called_nested_guards(lines: list[str]) -> list[str]:
             nested_indent = indent
             nested.setdefault(current, [])
             # A one-line nested def (``def check(): assert x``) carries its
-            # guard on the def line itself — keep the part after ``:``.
-            _, _, tail = stripped.partition(":")
+            # guard on the def line itself — keep the body after the
+            # signature's closing ``):``, or after the last ``:`` when the
+            # return type is annotated (``-> int:``).
+            _, _, tail = stripped.partition("):")
+            if not tail.strip():
+                _, _, tail = stripped.rpartition(":")
             if tail.strip():
                 nested[current].append(tail)
             continue
@@ -269,19 +306,23 @@ def _include_called_nested_guards(lines: list[str]) -> list[str]:
     out = list(main)
     # Re-add a nested block's lines when the body calls it — directly from
     # the outer level or transitively through another included helper.
+    # A dotted call (``self.check()``, ``obj.check()``) is a method, not the
+    # local function, so it must not pull the nested block in.
     pending = dict(nested)
     while pending:
         progressed = False
         for name, nested_lines in list(pending.items()):
-            if any(
-                re.search(rf"\b{re.escape(name)}\s*\(", line) for line in out
-            ):
+            call_re = rf"(?<![\w.]){re.escape(name)}\s*\("
+            if any(re.search(call_re, line) for line in out):
                 out.extend(nested_lines)
                 del pending[name]
                 progressed = True
         if not progressed:
             break
-    return out
+    # The forward-check exemption applies to the audited function's own
+    # lines only — a nested helper's ``return f(...)`` must not make the
+    # outer body look like a pure call-forward.
+    return main, out
 
 
 def _has_unenforced_precondition(requires: str, body: str, language: str = "") -> bool:
@@ -297,9 +338,10 @@ def _has_unenforced_precondition(requires: str, body: str, language: str = "") -
         return False
     lines = _guard_source_lines(body, language)
     lang = _canonical_language(language) or language.lower()
+    outer_lines = lines
     if lang == "python":
-        lines = _include_called_nested_guards(lines)
-    if _is_pure_call_forward(lines, language):
+        outer_lines, lines = _include_called_nested_guards(lines)
+    if _is_pure_call_forward(outer_lines, language):
         return False
     # Guard statements (if/assert/raise/throw/...) plus validation-named call
     # sites that may delegate the check (``self._ensure_balance(amount)``).
