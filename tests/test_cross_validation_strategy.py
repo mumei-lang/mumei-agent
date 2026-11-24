@@ -532,18 +532,85 @@ class TestValidateSpecVsImpl:
 
     def test_ts_assignment_in_call_is_not_a_forward(self):
         """`save(state.balance = nextBalance)` mutates; it is not a keyword
-        argument and must not exempt the body."""
+        argument and must not exempt the body. The RHS is a lone identifier
+        so the test fails if `=` args are wrongly read as kwarg forwards."""
         spec_path = self._write_spec("withdraw", "amount <= balance")
         impl_path = Path(self.tmpdir) / "a.ts"
         impl_path.write_text(
             "function withdraw(balance: number, amount: number): number {\n"
-            "  return save(state.balance = balance - amount);\n"
+            "  const nextBalance = balance - amount;\n"
+            "  return save(state.balance = nextBalance);\n"
             "}\n"
         )
         report = self.validator.validate_spec_vs_impl(
             spec_path=str(spec_path), impl_path=str(impl_path), language="typescript"
         )
         assert "withdraw" in report.spec_stronger_than_impl
+
+    def test_fstring_message_does_not_count_as_enforcement(self):
+        """`raise ValueError(f"{amount} > {balance}")` interpolates both
+        identifiers without checking them — masking must not surface the
+        message's variables."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "fs.py"
+        impl_path.write_text(
+            "def withdraw(balance, amount):\n"
+            "    if amount <= 0:\n"
+            '        raise ValueError(f"{amount} exceeds {balance}")\n'
+            "    return balance - amount\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert "withdraw" in report.spec_stronger_than_impl
+
+    def test_transitively_called_nested_function_enforces(self):
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "t.py"
+        impl_path.write_text(
+            "def withdraw(balance, amount):\n"
+            "    def check():\n"
+            "        if balance < amount:\n"
+            "            raise ValueError()\n"
+            "    def mid():\n"
+            "        check()\n"
+            "    mid()\n"
+            "    return balance - amount\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert "withdraw" not in report.spec_stronger_than_impl
+
+    def test_one_line_nested_def_enforces_when_called(self):
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "o.py"
+        impl_path.write_text(
+            "def withdraw(balance, amount):\n"
+            "    def check(): assert balance >= amount\n"
+            "    check()\n"
+            "    return balance - amount\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert "withdraw" not in report.spec_stronger_than_impl
+
+    def test_unterminated_quote_with_escapes_terminates(self):
+        """A comment holding an unclosed quote followed by escapes must not
+        stall the string masker."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "u.py"
+        impl_path.write_text(
+            "def withdraw(balance, amount):\n"
+            "    if balance < amount:  # don't \\\\\\\\\\\\\\\\n"
+            "        raise ValueError()\n"
+            "    return balance - amount\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert "withdraw" not in report.spec_stronger_than_impl
 
     def test_python_annotated_signature_body_is_extracted(self):
         """`def f(x: int) -> int:` must produce a body — previously the regex

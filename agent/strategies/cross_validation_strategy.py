@@ -97,26 +97,22 @@ def _condition_identifiers(condition: str) -> set[str]:
 
 _C_COMMENT_RE = re.compile(r"/\*[\s\S]*?\*/")
 # Masks string-literal contents before comment stripping so `"/api/*"` or
-# `"a # b"` is never misread as a comment opener. Escaped quotes inside
-# keep the literal balanced.
+# `"a # b"` is never misread as a comment opener. The inner alternation is
+# disjoint (`\\.` vs a non-backslash char) so it cannot backtrack
+# exponentially on unterminated literals like `'\\\\\\\\`.
 _STRING_LITERAL_RE = re.compile(
-    r"""(?P<pre>[A-Za-z]{0,3})(?P<q>["'`])(?P<inner>(?:\\.|(?!\2).)*?)(?P=q)"""
+    r'''(?P<pre>[A-Za-z]{0,3})(?P<q>["'`])(?P<inner>(?:\\.|[^\\])*?)(?P=q)'''
 )
-_INTERPOLATION_RE = re.compile(r"\{([^{}]*)\}")
 
 
 def _mask_string_literal(match: re.Match[str]) -> str:
-    """Replace a literal with empty quotes, keeping f-string/template
-    interpolation expressions (``f"{x}"``, ``${x}``) visible so guards
-    that only reference their variables still match."""
-    inner = match.group("inner")
-    prefix = match.group("pre").lower()
-    quote = match.group("q")
-    exprs: list[str] = []
-    if "f" in prefix or quote == "`":
-        for raw in _INTERPOLATION_RE.findall(inner):
-            exprs.append(raw[1:] if raw.startswith("$") else raw)
-    return quote + quote + (" " + " ".join(exprs) if exprs else "")
+    """Replace a literal with empty quotes.
+
+    Interpolation expressions (``f"{x}"``, ``${x}``) are deliberately
+    dropped too: they most often sit inside an error *message* such as
+    ``raise ValueError(f"balance {balance} < amount {amount}")`` and
+    would let a guard pass on identifiers it never actually checks."""
+    return match.group("q") * 2
 
 
 def _guard_source_lines(body: str, language: str = "") -> list[str]:
@@ -259,6 +255,11 @@ def _include_called_nested_guards(lines: list[str]) -> list[str]:
             current = match.group(1)
             nested_indent = indent
             nested.setdefault(current, [])
+            # A one-line nested def (``def check(): assert x``) carries its
+            # guard on the def line itself — keep the part after ``:``.
+            _, _, tail = stripped.partition(":")
+            if tail.strip():
+                nested[current].append(tail)
             continue
         if current is not None and indent > nested_indent:
             nested[current].append(line)
@@ -266,12 +267,20 @@ def _include_called_nested_guards(lines: list[str]) -> list[str]:
         current = None
         main.append(line)
     out = list(main)
-    for name, nested_lines in nested.items():
-        called = any(
-            re.search(rf"\b{re.escape(name)}\s*\(", line) for line in main
-        )
-        if called:
-            out.extend(nested_lines)
+    # Re-add a nested block's lines when the body calls it — directly from
+    # the outer level or transitively through another included helper.
+    pending = dict(nested)
+    while pending:
+        progressed = False
+        for name, nested_lines in list(pending.items()):
+            if any(
+                re.search(rf"\b{re.escape(name)}\s*\(", line) for line in out
+            ):
+                out.extend(nested_lines)
+                del pending[name]
+                progressed = True
+        if not progressed:
+            break
     return out
 
 
