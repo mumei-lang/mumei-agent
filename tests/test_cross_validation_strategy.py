@@ -1298,7 +1298,7 @@ class TestValidateSpecVsImpl:
         assert "withdraw" not in report.spec_stronger_than_impl
 
     def test_ts_slashed_comment_delimiter_keeps_block(self):
-        """`/*/ \`x */` — the / after /* is not the start of */ — a
+        r"""`/*/ `x */` — the / after /* is not the start of */ — a
         lone backtick inside is comment text, not a template opener."""
         spec_path = self._write_spec("withdraw", "amount <= balance")
         impl_path = Path(self.tmpdir) / "sd.ts"
