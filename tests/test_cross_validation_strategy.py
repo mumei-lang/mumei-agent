@@ -915,6 +915,87 @@ class TestValidateSpecVsImpl:
         )
         assert "withdraw" not in report.spec_stronger_than_impl
 
+    def test_ts_escaped_dollar_is_literal(self):
+        r"""`\${amount}` is literal text in a template — it reads neither
+        `amount` nor anything else."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "te.ts"
+        impl_path.write_text(
+            "function withdraw(balance: number, amount: number): number {\n"
+            "  if (`\\${ amount, balance }`.length > 0 && amount > 0) {\n"
+            "    return balance - amount;\n"
+            "  }\n"
+            "  throw new Error();\n"
+            "}\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="typescript"
+        )
+        assert "withdraw" in report.spec_stronger_than_impl
+
+    def test_ts_ternary_value_in_object_keeps_branch(self):
+        """`${{ k: cond ? allowed : false }}` — `allowed` is a ternary
+        branch value, not an object key."""
+        spec_path = self._write_spec("withdraw", "allowed <= balance")
+        impl_path = Path(self.tmpdir) / "tt.ts"
+        impl_path.write_text(
+            "function withdraw(balance: number, allowed: number): number {\n"
+            "  if (`${{ k: balance > 0 ? allowed : 0 }}`.length > 0) {\n"
+            "    return balance - allowed;\n"
+            "  }\n"
+            "  throw new Error();\n"
+            "}\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="typescript"
+        )
+        assert "withdraw" not in report.spec_stronger_than_impl
+
+    def test_fstring_spec_type_char_is_not_a_variable(self):
+        """`f"{value:{width:d}}"` — the `d` is a format type character,
+        not a variable read."""
+        spec_path = self._write_spec("withdraw", "value >= d")
+        impl_path = Path(self.tmpdir) / "fc.py"
+        impl_path.write_text(
+            "def withdraw(value, d, width):\n"
+            '    assert len(f"{value:{width:d}}") > 0\n'
+            "    return value - d\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert "withdraw" in report.spec_stronger_than_impl
+
+    def test_fstring_conversion_with_dynamic_spec_keeps_variable(self):
+        """`f"{balance!r:{width}}"` — conversion `!r` does not hide the
+        dynamic spec's `width` read."""
+        spec_path = self._write_spec("withdraw", "width <= balance")
+        impl_path = Path(self.tmpdir) / "cv.py"
+        impl_path.write_text(
+            "def withdraw(balance, amount, width):\n"
+            '    assert len(f"{balance!r:{width}}") > 0\n'
+            "    return balance - amount\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert "withdraw" not in report.spec_stronger_than_impl
+
+    def test_brace_inside_nested_literal_does_not_end_field(self):
+        """`f"{a if '}}' else b}"` — the `}}` sits inside a string literal
+        inside the field and must not close it early."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "nb.py"
+        impl_path.write_text(
+            "def withdraw(balance, amount):\n"
+            "    assert f\"{'y' if '}}' else balance}\" and amount <= balance\n"
+            "    return balance - amount\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert "withdraw" not in report.spec_stronger_than_impl
+
     def test_python_annotated_signature_body_is_extracted(self):
         """`def f(x: int) -> int:` must produce a body — previously the regex
         required `)` immediately before `:` so annotated functions were
