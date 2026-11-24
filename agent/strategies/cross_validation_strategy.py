@@ -100,8 +100,23 @@ _C_COMMENT_RE = re.compile(r"/\*[\s\S]*?\*/")
 # `"a # b"` is never misread as a comment opener. Escaped quotes inside
 # keep the literal balanced.
 _STRING_LITERAL_RE = re.compile(
-    r'"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'|`(?:[^`\\]|\\.)*`'
+    r"""(?P<pre>[A-Za-z]{0,3})(?P<q>["'`])(?P<inner>(?:\\.|(?!\2).)*?)(?P=q)"""
 )
+_INTERPOLATION_RE = re.compile(r"\{([^{}]*)\}")
+
+
+def _mask_string_literal(match: re.Match[str]) -> str:
+    """Replace a literal with empty quotes, keeping f-string/template
+    interpolation expressions (``f"{x}"``, ``${x}``) visible so guards
+    that only reference their variables still match."""
+    inner = match.group("inner")
+    prefix = match.group("pre").lower()
+    quote = match.group("q")
+    exprs: list[str] = []
+    if "f" in prefix or quote == "`":
+        for raw in _INTERPOLATION_RE.findall(inner):
+            exprs.append(raw[1:] if raw.startswith("$") else raw)
+    return quote + quote + (" " + " ".join(exprs) if exprs else "")
 
 
 def _guard_source_lines(body: str, language: str = "") -> list[str]:
@@ -141,7 +156,7 @@ def _guard_source_lines(body: str, language: str = "") -> list[str]:
                     break
         # Mask string-literal contents so a `#`, `//` or `/*` inside a
         # string ("/api/*", "a # b") is never read as a comment opener.
-        line = _STRING_LITERAL_RE.sub('""', line)
+        line = _STRING_LITERAL_RE.sub(_mask_string_literal, line)
         if lang != "python":
             while "/*" in line:
                 head, _, tail = line.partition("/*")
@@ -166,21 +181,27 @@ def _guard_source_lines(body: str, language: str = "") -> list[str]:
             logical[-1] += " " + line.strip()
         else:
             logical.append(line)
-        # Only parens and brackets continue a logical line — a `{` opens a
-        # block, and joining `if cond {` with the next line would merge the
-        # condition with the block's body.
-        depth += line.count("(") + line.count("[")
-        depth -= line.count(")") + line.count("]")
+        # Only parens/brackets continue a logical line in brace languages —
+        # a `{` opens a block there, and joining `if cond {` with the next
+        # line would merge the condition with the block's body. Python has
+        # no block braces: `{` is always a dict/set literal, so a multi-line
+        # set in `if value not in {\n  a,\n  b\n}:` still joins.
+        openers = "([{" if lang == "python" else "(["
+        closers = ")]}" if lang == "python" else ")]"
+        depth += sum(line.count(c) for c in openers)
+        depth -= sum(line.count(c) for c in closers)
     return logical
 
 
 _FORWARD_RETURN_RE = re.compile(
     r"\breturn\s+[A-Za-z_][\w.]*\s*\((?P<args>[^()]*)\)"
 )
-# An argument is a plain identifier (``balance``, ``s.balance``) or a
-# keyword-argument form of one (``balance=balance``) — both forward the raw
-# value. Anything else (arithmetic, literals, nested calls) computes.
-_FORWARD_ARG_RE = re.compile(r"^(?:[A-Za-z_][\w.]*\s*=\s*)?[A-Za-z_][\w.]*$")
+# An argument is a plain identifier (``balance``, ``s.balance``). Python
+# also has keyword-argument forwards (``balance=balance``); in C-family
+# languages ``a = b`` inside a call is an assignment, not a kwarg, so it
+# is only accepted when the language is Python.
+_FORWARD_ARG_RE = re.compile(r"^[A-Za-z_][\w.]*$")
+_FORWARD_KWARG_RE = re.compile(r"^[A-Za-z_][\w.]*\s*=\s*[A-Za-z_][\w.]*$")
 _CALL_SITE_RE = re.compile(r"(?P<callee>[A-Za-z_][\w.]*)\s*\(")
 _VALIDATION_TOKENS = (
     "check", "valid", "ensure", "verify", "require", "guard",
@@ -193,19 +214,65 @@ def _is_validation_call(callee: str) -> bool:
     return any(token in lowered for token in _VALIDATION_TOKENS)
 
 
-def _is_pure_call_forward(lines: list[str]) -> bool:
+def _is_pure_call_forward(lines: list[str], language: str = "") -> bool:
     """True when the body is only ``return callee(ident, ident, ...)``.
 
     A forward that passes raw identifiers may delegate the check to the
     callee; ``return round(balance - amount, 2)`` computes instead and does
-    not get the exemption.
+    not get the exemption. Python keyword arguments (``x=x``) count as
+    forwards; in C-family languages the same text is an assignment and
+    must not exempt the body.
     """
+    lang = _canonical_language(language) or language.lower()
     text = " ".join(lines)
     match = _FORWARD_RETURN_RE.search(text)
     if not match:
         return False
     args = [a.strip() for a in match.group("args").split(",") if a.strip()]
-    return bool(args) and all(_FORWARD_ARG_RE.match(a) for a in args)
+    return bool(args) and all(
+        _FORWARD_ARG_RE.match(a)
+        or (lang == "python" and _FORWARD_KWARG_RE.match(a))
+        for a in args
+    )
+
+
+_NESTED_DEF_RE = re.compile(r"(?:async\s+)?(?:def|class)\s+([A-Za-z_]\w*)")
+
+
+def _include_called_nested_guards(lines: list[str]) -> list[str]:
+    """Keep a nested ``def``/``class`` block's guard lines only when the
+    enclosing body actually calls it.
+
+    A nested helper that is never called cannot enforce anything, so its
+    ``if``/``raise`` lines must not count as the outer function's
+    enforcement; a called helper's lines do count.
+    """
+    main: list[str] = []
+    nested: dict[str, list[str]] = {}
+    current: str | None = None
+    nested_indent = -1
+    for line in lines:
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip())
+        match = _NESTED_DEF_RE.match(stripped)
+        if match:
+            current = match.group(1)
+            nested_indent = indent
+            nested.setdefault(current, [])
+            continue
+        if current is not None and indent > nested_indent:
+            nested[current].append(line)
+            continue
+        current = None
+        main.append(line)
+    out = list(main)
+    for name, nested_lines in nested.items():
+        called = any(
+            re.search(rf"\b{re.escape(name)}\s*\(", line) for line in main
+        )
+        if called:
+            out.extend(nested_lines)
+    return out
 
 
 def _has_unenforced_precondition(requires: str, body: str, language: str = "") -> bool:
@@ -220,7 +287,10 @@ def _has_unenforced_precondition(requires: str, body: str, language: str = "") -
     if not requires or requires.strip() in _TRIVIAL_REQUIRES:
         return False
     lines = _guard_source_lines(body, language)
-    if _is_pure_call_forward(lines):
+    lang = _canonical_language(language) or language.lower()
+    if lang == "python":
+        lines = _include_called_nested_guards(lines)
+    if _is_pure_call_forward(lines, language):
         return False
     # Guard statements (if/assert/raise/throw/...) plus validation-named call
     # sites that may delegate the check (``self._ensure_balance(amount)``).

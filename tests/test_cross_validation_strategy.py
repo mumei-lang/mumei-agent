@@ -471,6 +471,80 @@ class TestValidateSpecVsImpl:
         )
         assert "withdraw" not in report.spec_stronger_than_impl
 
+    def test_async_def_body_is_extracted(self):
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "a.py"
+        impl_path.write_text(
+            "async def withdraw(balance, amount):\n"
+            "    return balance - amount\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert "withdraw" in report.spec_stronger_than_impl
+
+    def test_uncalled_nested_function_does_not_enforce(self):
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "n.py"
+        impl_path.write_text(
+            "def withdraw(balance, amount):\n"
+            "    def check():\n"
+            "        if balance < amount:\n"
+            "            raise ValueError()\n"
+            "    return balance - amount\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert "withdraw" in report.spec_stronger_than_impl
+
+    def test_called_nested_function_enforces(self):
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "n2.py"
+        impl_path.write_text(
+            "def withdraw(balance, amount):\n"
+            "    def check():\n"
+            "        if balance < amount:\n"
+            "            raise ValueError()\n"
+            "    check()\n"
+            "    return balance - amount\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert "withdraw" not in report.spec_stronger_than_impl
+
+    def test_column_zero_comment_does_not_truncate_body(self):
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "c.py"
+        impl_path.write_text(
+            "def withdraw(balance, amount):\n"
+            "    x = 1\n"
+            "# a comment at column zero\n"
+            "    if balance < amount:\n"
+            "        raise ValueError()\n"
+            "    return balance - amount\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert "withdraw" not in report.spec_stronger_than_impl
+
+    def test_ts_assignment_in_call_is_not_a_forward(self):
+        """`save(state.balance = nextBalance)` mutates; it is not a keyword
+        argument and must not exempt the body."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "a.ts"
+        impl_path.write_text(
+            "function withdraw(balance: number, amount: number): number {\n"
+            "  return save(state.balance = balance - amount);\n"
+            "}\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="typescript"
+        )
+        assert "withdraw" in report.spec_stronger_than_impl
+
     def test_python_annotated_signature_body_is_extracted(self):
         """`def f(x: int) -> int:` must produce a body — previously the regex
         required `)` immediately before `:` so annotated functions were
