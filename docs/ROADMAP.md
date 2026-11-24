@@ -10321,3 +10321,18 @@ the lookup reason rather than silently dropping the position. Value
 positions, builtin members and the `for *` target are unchanged.
 
 **回帰ゲート**: `uv run pytest tests/test_sol_bindings.py tests/test_sol_compiler_snapshot.py -q`
+
+### C10 object-stage acceptance — producer decision mapping
+
+`docs/DESIGN_OBJECT_TV_CONSUMPTION.md` section 4 maps each landed
+`DESIGN_OBJECT_ACCEPTANCE.md` producer decision (mumei#1433) to the
+agent-fold conditions surveyed in section 2: schema reuse needs nothing;
+the new `native_bundle_object_translation_correspondence` scope and the
+correspondence item names in `checks_performed` are vocabulary updates
+to `_valid_acceptance_descriptor` and `OBJECT_ACCEPT_CHECKS` that must
+land before Core switches the emitted scope; the recommended
+whole-correspondence fingerprint pin is a new `_NATIVE_ACCEPTANCE_EXTRA_FIELDS`
+admission that also supplies the record pin `attempt_bound` lacks;
+signature extras and the agent-owned name stay unchanged. Docs only.
+
+**回帰ゲート**: `uv run pytest tests/test_native_object_accept.py tests/test_core_evidence.py -q`
