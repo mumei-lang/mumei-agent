@@ -643,7 +643,7 @@ class TestValidateSpecVsImpl:
         impl_path = Path(self.tmpdir) / "an.py"
         impl_path.write_text(
             "def withdraw(balance, amount):\n"
-            "    def check(amount: int, balance: int): assert amount > 0\n"
+            "    def check(amount: int = 1, balance: int = 0): assert amount > 0\n"
             "    check()\n"
             "    return balance - amount\n"
         )
@@ -661,6 +661,68 @@ class TestValidateSpecVsImpl:
             "def withdraw(balance, amount):\n"
             '    if amount > int(f"{balance}"):\n'
             "        raise ValueError()\n"
+            "    return balance - amount\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert "withdraw" not in report.spec_stronger_than_impl
+
+    def test_assert_message_variables_do_not_count(self):
+        """`assert cond, f"...{balance}..."` only checks `cond` — the
+        message's identifiers are not enforcement."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "am.py"
+        impl_path.write_text(
+            "def withdraw(balance, amount):\n"
+            '    assert amount > 0, f"{balance} too low for {amount}"\n'
+            "    return balance - amount\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert "withdraw" in report.spec_stronger_than_impl
+
+    def test_escaped_braces_are_not_interpolation(self):
+        """`f"{{balance}}"` renders literal text — `balance` is not
+        referenced and must not count as checked."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "eb.py"
+        impl_path.write_text(
+            "def withdraw(balance, amount):\n"
+            '    if amount > 0: assert f"{{balance}}" != ""\n'
+            "    return balance - amount\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert "withdraw" in report.spec_stronger_than_impl
+
+    def test_format_specifier_hash_is_not_a_comment(self):
+        """`f"{limit:#x}"` inside a condition must survive — the `#` is a
+        format flag, not a comment opener."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "fh.py"
+        impl_path.write_text(
+            "def withdraw(balance, amount):\n"
+            '    if amount > int(f"{balance:#x}", 16):\n'
+            "        raise ValueError()\n"
+            "    return balance - amount\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert "withdraw" not in report.spec_stronger_than_impl
+
+    def test_annotated_nested_def_with_dict_body(self):
+        """`def check() -> int: assert ...; d = {"a": 1}` — a last-colon
+        split would clip at the dict's colon and drop the assert."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "ad.py"
+        impl_path.write_text(
+            "def withdraw(balance, amount):\n"
+            '    def check() -> int: assert balance >= amount; d = {"a": 1}\n'
+            "    check()\n"
             "    return balance - amount\n"
         )
         report = self.validator.validate_spec_vs_impl(

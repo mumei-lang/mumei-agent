@@ -103,7 +103,7 @@ _C_COMMENT_RE = re.compile(r"/\*[\s\S]*?\*/")
 _STRING_LITERAL_RE = re.compile(
     r'''(?P<pre>[A-Za-z]{0,3})(?P<q>["'`])(?P<inner>(?:\\.|[^\\])*?)(?P=q)'''
 )
-_INTERPOLATION_RE = re.compile(r"\{([^{}]*)\}")
+_INTERPOLATION_RE = re.compile(r"(?<!\{)\{([^{}]*)\}(?!\})")
 # Lines that gate execution (as opposed to `raise`/`throw`/`except`, whose
 # strings are error messages) keep interpolation expressions visible:
 # `if amount > int(f"{limit}")` really does check `limit`.
@@ -132,8 +132,33 @@ def _mask_string_literal_keep_interp(match: re.Match[str]) -> str:
     exprs: list[str] = []
     if "f" in prefix or quote == "`":
         for raw in _INTERPOLATION_RE.findall(inner):
-            exprs.append(raw[1:] if raw.startswith("$") else raw)
+            expr = raw[1:] if raw.startswith("$") else raw
+            # Format specifiers and expressions may carry `#` or `/`
+            # (``{x:#x}``, ``{a//b}``) which the comment stripping after
+            # masking would read as a comment opener — blank them out.
+            exprs.append(expr.replace("#", " ").replace("/", " "))
     return quote + quote + (" " + " ".join(exprs) if exprs else "")
+
+
+def _drop_assert_message(line: str) -> str:
+    """Cut an ``assert`` line at the first top-level ``,``.
+
+    The part after the comma is the failure *message*, not the condition:
+    ``assert amount > 0, f"{balance} too low"`` only checks ``amount``.
+    Runs on the string-masked line, so commas inside literals are gone and
+    commas inside kept interpolation expressions sit at brace depth > 0.
+    """
+    if not re.match(r"^\s*assert\b", line):
+        return line
+    depth = 0
+    for i, ch in enumerate(line):
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            return line[:i]
+    return line
 
 
 def _guard_source_lines(body: str, language: str = "") -> list[str]:
@@ -179,6 +204,7 @@ def _guard_source_lines(body: str, language: str = "") -> list[str]:
             else _mask_string_literal
         )
         line = _STRING_LITERAL_RE.sub(mask, line)
+        line = _drop_assert_message(line)
         if lang != "python":
             while "/*" in line:
                 head, _, tail = line.partition("/*")
@@ -290,11 +316,15 @@ def _include_called_nested_guards(
             nested.setdefault(current, [])
             # A one-line nested def (``def check(): assert x``) carries its
             # guard on the def line itself — keep the body after the
-            # signature's closing ``):``, or after the last ``:`` when the
-            # return type is annotated (``-> int:``).
+            # signature's closing ``):``, or after the return annotation's
+            # ``-> T:`` (a bare last-``:`` split would clip a body holding
+            # a dict or slice).
             _, _, tail = stripped.partition("):")
             if not tail.strip():
-                _, _, tail = stripped.rpartition(":")
+                ret = re.search(r"->[^:]*:", stripped)
+                tail = stripped[ret.end():] if ret else ""
+                if not tail.strip():
+                    _, _, tail = stripped.rpartition(":")
             if tail.strip():
                 nested[current].append(tail)
             continue
