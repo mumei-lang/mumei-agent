@@ -279,3 +279,51 @@ def _identify_failing_atoms(
             unique.append(f)
 
     return unique if unique else list(atom_names)
+
+_CLAUSE_KEYWORD_RE = re.compile(r"^(\s*)(requires|ensures|invariant|effects)(\s+)")
+_BARE_BRACE_RE = re.compile(r"^(\s*)\{\s*$")
+_CLAUSE_HEAD_RE = re.compile(
+    r"^\s*(requires|ensures|invariant|effects|effect_pre|effect_post)\s*[: ]"
+)
+
+
+def _normalize_clause_syntax(code: str) -> str:
+    """Repair the colon-less clause syntax LLMs sometimes regress to.
+
+    Mumei clauses are ``requires:``/``ensures:``/``effects:``/``body:``
+    with a colon, and clauses end with ``;``. Generations occasionally
+    drop the colons (``requires x > 0;``), drop the ``effects`` clause's
+    trailing semicolon, or open the body with a bare ``{``. All three are
+    parse errors the retry loop then has to fix through the LLM; this
+    pass repairs them mechanically. It is conservative and idempotent:
+    valid files come out byte-identical, and a bare ``{`` is only
+    rewritten to ``body: {`` in the clause-header region of an atom
+    (right after a clause line, before any ``body:``), never inside a
+    body block."""
+    out: list[str] = []
+    in_header = False  # between an atom signature and its body opener
+    for line in code.splitlines():
+        stripped = line.strip()
+        if re.match(r"^\s*atom\s+[A-Za-z_]", line):
+            in_header = True
+        m = _CLAUSE_KEYWORD_RE.match(line)
+        if m and in_header:
+            rest = line[m.end():]
+            if not rest.startswith(":"):
+                line = f"{m.group(1)}{m.group(2)}: {rest}"
+            rstripped = line.rstrip()
+            if m.group(2) == "effects" and rstripped.endswith("]"):
+                line = rstripped + ";"
+        brace = _BARE_BRACE_RE.match(line)
+        if brace and in_header:
+            line = f"{brace.group(1)}body: {{"
+            in_header = False
+        elif in_header and "body:" in line:
+            in_header = False
+        elif in_header and stripped and not _CLAUSE_HEAD_RE.match(line) and not stripped.startswith("//"):
+            # A non-clause line before the body means the header is
+            # over (or was malformed); stop looking for a bare brace.
+            if not re.match(r"^\s*atom\s", line) and not stripped.startswith("->") and not stripped.startswith(")"):
+                in_header = False
+        out.append(line)
+    return "\n".join(out) + ("\n" if code.endswith("\n") else "")

@@ -319,11 +319,9 @@ def test_generate_multi_atom_all_retries_exhausted():
     """Test that generate_multi_atom returns verified=False when all retries fail."""
     generated_bad = "atom bad() body: ;\n"
     client = MagicMock()
-    client.chat.completions.create.side_effect = [
-        _make_response(f"```mumei\n{generated_bad}\n```"),
-        _make_response(f"```mumei\n{generated_bad}\n```"),
-        _make_response(f"```mumei\n{generated_bad}\n```"),
-    ]
+    client.chat.completions.create.side_effect = (
+        lambda *args, **kwargs: _make_response(f"```mumei\n{generated_bad}\n```")
+    )
 
     mumei = MagicMock()
     mumei.check.return_value = {"success": True, "stdout": "", "stderr": ""}
@@ -362,3 +360,73 @@ def test_multi_atom_spec_fixture_is_valid():
     for atom in spec["atoms"]:
         assert "name" in atom
         assert "inputs" in atom
+
+
+# ---------------------------------------------------------------------------
+# _normalize_clause_syntax regression tests
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_clause_syntax_inserts_missing_colons():
+    """The colon-less clause regression (nl_to_verified live failure) is
+    repaired mechanically: `requires x;` -> `requires: x;` etc."""
+    from agent.strategies.generate_strategy_prompt import _normalize_clause_syntax
+
+    broken = (
+        "atom debit(sender_balance: i64, amount: i64) -> i64\n"
+        "    requires sender_balance >= 0 && sender_balance >= amount;\n"
+        "    ensures result == sender_balance - amount;\n"
+        "    effects [State]\n"
+        "{\n"
+        "    sender_balance - amount\n"
+        "}\n"
+    )
+    fixed = _normalize_clause_syntax(broken)
+    assert "requires: sender_balance >= 0" in fixed
+    assert "ensures: result ==" in fixed
+    assert "effects: [State];" in fixed
+    assert "body: {" in fixed
+
+
+def test_normalize_clause_syntax_is_idempotent_on_valid_input():
+    from agent.strategies.generate_strategy_prompt import _normalize_clause_syntax
+
+    valid = (
+        "atom safe_add(a: i64, b: i64) -> i64\n"
+        "    requires: a >= 0 && b >= 0;\n"
+        "    ensures: result == a + b;\n"
+        "    body: {\n"
+        "        a + b\n"
+        "    };\n"
+    )
+    assert _normalize_clause_syntax(valid) == valid
+    # twice for good measure
+    assert _normalize_clause_syntax(_normalize_clause_syntax(valid)) == valid
+
+
+def test_normalize_clause_syntax_keeps_block_braces_inside_body():
+    """A bare `{` inside a body (block expression) is not a body opener."""
+    from agent.strategies.generate_strategy_prompt import _normalize_clause_syntax
+
+    code = (
+        "atom f(x: i64) -> i64\n"
+        "    requires: x >= 0;\n"
+        "    ensures: result >= 0;\n"
+        "    body: {\n"
+        "        let y = {\n"
+        "            x + 1\n"
+        "        };\n"
+        "        y\n"
+        "    };\n"
+    )
+    assert _normalize_clause_syntax(code) == code
+
+
+def test_generate_prompt_contains_syntax_contract_and_example():
+    from agent.prompts.generate_atom import build_prompt
+
+    prompt = build_prompt('{"name": "x", "params": []}', "", {})
+    assert "requires: <cond>;" in prompt
+    assert "missing colon" in prompt
+    assert "safe_add" in prompt
+    assert "Do not invent effects" in prompt
