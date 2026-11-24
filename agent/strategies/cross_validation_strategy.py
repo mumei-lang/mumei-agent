@@ -268,6 +268,14 @@ def _mask_line_strings(
         del out[len(out) - (i - p) :]
         prefix = line[p:i].lower()
         q = line[i]
+        # A quote immediately after an identifier char is an apostrophe
+        # inside text (``don't``, ``it's fine \``), never a literal
+        # start — even with a trailing backslash that would otherwise
+        # open a line continuation.
+        if p > 0 and (line[p - 1].isalnum() or line[p - 1] == "_"):
+            out.append(q)
+            i += 1
+            continue
         is_f = "f" in prefix and q != "`"
         if line[i : i + 3] == q * 3:
             end = line.find(q * 3, i + 3)
@@ -324,10 +332,12 @@ def _kept_exprs(inner: str, quote: str, is_f: bool, keep_interp: bool) -> str:
             # its contents are not read as guards or variable reads.
             expr = _TS_NESTED_TEMPLATE_RE.sub("``", expr)
             # Comments inside the interpolation (``${/* c */ x}``,
-            # ``${x // c}``) hold names that are not reads.
+            # ``${x // c}``) hold names that are not reads. Regexes are
+            # masked before ``//`` stripping: a pattern ending in
+            # ``\//`` (``/a\/\//``) must not lose its closing slash.
             expr = _TS_BLOCK_COMMENT_RE.sub(" ", expr)
-            expr = _TS_LINE_COMMENT_RE.sub(" ", expr)
             expr = _mask_ts_regexes(_strip_ts_object_keys(expr))
+            expr = _TS_LINE_COMMENT_RE.sub(" ", expr)
         else:
             expr = _strip_format_spec(expr)
         # Blank comment-, comma- and depth-significant characters
@@ -358,17 +368,18 @@ _TS_REGEX_START_CHARS = "(,=:!?&|[{~^+*%-<>;"
 
 def _postfix_incdec_before(expr: str, i: int) -> bool:
     """Whether ``expr[i]`` sits right after a postfix ``++``/``--`` —
-    the two operator chars are adjacent and follow an operand, unlike
-    spaced binary+unary ``a + +``."""
+    the two operator chars are adjacent and follow an operand (spaces
+    allowed between operand and operator, and between operator and the
+    ``/``), unlike spaced binary+unary ``a + +``."""
     k = i - 1
-    while k >= 0 and expr[k] == " ":
+    while k >= 0 and expr[k].isspace():
         k -= 1
-    return (
-        k >= 2
-        and expr[k] in "+-"
-        and expr[k - 1] == expr[k]
-        and (expr[k - 2].isalnum() or expr[k - 2] in "_)]}")
-    )
+    if k < 2 or expr[k] not in "+-" or expr[k - 1] != expr[k]:
+        return False
+    k -= 2
+    while k >= 0 and expr[k].isspace():
+        k -= 1
+    return k >= 0 and (expr[k].isalnum() or expr[k] in "_)]}")
 
 
 def _mask_ts_regexes(expr: str) -> str:
@@ -400,7 +411,9 @@ def _mask_ts_regexes(expr: str) -> str:
                     break
                 j += 1
             if j < n:
-                out.append("//")
+                # Spaces (not ``//``): the masked regex must not look
+                # like a comment to the ``//`` stripping pass later.
+                out.append(" " * (j + 1 - i))
                 prev = "/"
                 i = j + 1
                 continue

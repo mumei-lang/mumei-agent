@@ -1124,8 +1124,8 @@ class TestValidateSpecVsImpl:
         impl_path = Path(self.tmpdir) / "bc.py"
         impl_path.write_text(
             "def withdraw(balance, amount):\n"
-            '    logger.info("checking amount <= \\\n'
-            '              balance")\n'
+            '    logger.info("checking guard: \\\n'
+            '              if amount <= balance")\n'
             "    return balance - amount\n"
         )
         report = self.validator.validate_spec_vs_impl(
@@ -1168,6 +1168,59 @@ class TestValidateSpecVsImpl:
             spec_path=str(spec_path), impl_path=str(impl_path), language="typescript"
         )
         assert "withdraw" in report.spec_stronger_than_impl
+
+    def test_ts_regex_ending_in_escaped_slashes(self):
+        """`${s.match(/a\\/\\//)}` — a pattern ending in `\\//` keeps its
+        closing slash; the `//` is not a comment."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "rs.ts"
+        impl_path.write_text(
+            "function withdraw(balance: number, amount: number): number {\n"
+            "  if (`${s.match(/amount\\/\\//)}`.length > 0) {\n"
+            "    return 0;\n"
+            "  }\n"
+            "  throw new Error();\n"
+            "}\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="typescript"
+        )
+        assert "withdraw" in report.spec_stronger_than_impl
+
+    def test_ts_spaced_postfix_increment_then_division(self):
+        """`counter ++ \\t/ amount <= balance` — whitespace around
+        postfix `++` and before `/` still means division."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "spd.ts"
+        impl_path.write_text(
+            "function withdraw(balance: number, amount: number): number {\n"
+            "  if (`${counter ++ \t/ amount <= balance}`) {\n"
+            "    return 0;\n"
+            "  }\n"
+            "  throw new Error();\n"
+            "}\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="typescript"
+        )
+        assert "withdraw" not in report.spec_stronger_than_impl
+
+    def test_apostrophe_comment_ending_in_backslash(self):
+        """`# don\\'t allow overdrafts \\` — the apostrophe plus trailing
+        backslash does not swallow the guard below."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "apb.py"
+        impl_path.write_text(
+            "def withdraw(balance, amount):\n"
+            "    # don't allow overdrafts \\\n"
+            "    if amount <= balance:\n"
+            "        return 0\n"
+            "    raise ValueError()\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert "withdraw" not in report.spec_stronger_than_impl
 
     def test_ts_regex_pattern_names_are_not_variables(self):
         """`${s.match(/balance|amount/)}` — the pattern's names are not
