@@ -55,3 +55,10 @@ When a change adds or widens an output surface, check it against the rules above
 - Register every environment variable in `agent/env_reference.py` with its category, default, description, and `sensitive` classification; regenerate references with `PYTHONPATH=$PWD .venv/bin/python scripts/gen_reference_docs.py`.
 - Run `PYTHONPATH=$PWD .venv/bin/python -m pytest tests/test_naming.py tests/test_reference_docs.py tests/test_config_report.py -q`.
 - Use the [adding CLI flags and environment variables skill](.agents/skills/adding-cli-flags-and-env-vars/SKILL.md).
+
+## Agent skills layout
+
+Two skill directories exist and they serve different audiences:
+
+- [`.github/skills/`](.github/skills/README.md) — the public skill catalog (heal, generate, forge, extract-spec, proliferate, health). These ship with the repository for agents *using* mumei-agent workflows.
+- [`.agents/skills/`](.agents/skills/) — contributor-facing skills for working *on* this repository (testing recipes, authoring guides). Internal only.
