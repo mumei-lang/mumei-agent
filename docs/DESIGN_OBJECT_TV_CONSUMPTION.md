@@ -288,3 +288,115 @@ profile.
 - Core #1228 が `accept-object` と `mumei.native-evidence-acceptance/v1` を出し、
   agent はその名前をそのまま採用した（スライス3着地）。
 - スライス1（語彙の予約と、境界ルートでの「未実施」明示）は先行して着地済み。
+
+---
+
+## Object-stage acceptance producer survey (audit backlog item 4)
+
+Survey of the agent side ahead of Core's `DESIGN_OBJECT_ACCEPTANCE.md`
+producer design. Recorded so the producer's emitted descriptor can be
+checked against the consumption conditions below; no code change is
+required by the survey itself.
+
+### 1. Current `native-object-accept` inventory (landed, #1081)
+
+The route dispatches `<core> native-bundle accept-object
+--expected-build-id <id> --json <bundle> <source>` inside the C11 dispatch
+lifecycle: the request fingerprint binds the Core executable hash, every
+declared bundle member hash, the source hash, and the trusted-channel
+build ID; exactly one fresh attempt is dispatched; declared inputs are
+re-hashed after exit (drift invalidates the result); the reconciled
+sequence is published compare-and-set.
+
+What the route folds as acceptance metadata — only when exit code is 0,
+no input drift occurred, and the stdout descriptor passes
+`_valid_acceptance_descriptor`: `acceptance: "accepted"`, the schema
+name, `scope`, `llvm_sha256`/`object_sha256`, bounded
+`register_convention_assumed`/`input_domain` strings, aggregated
+`function_outcomes`, and a `discharged_checks` list computed as
+`DischargedChecks.ACCEPTED ∪ (checks_performed ∩ OBJECT_ACCEPT_CHECKS) ∪
+{object_translation_correspondence}`.
+
+Current `object_translation_correspondence` claim boundary: the check is
+discharged only under a valid descriptor that lists Core's
+`object_source_machine_code_correspondence` in `checks_performed`
+(Core does not emit the agent name — the route maps it). The claim is
+profile-bounded source-to-object machine-code correspondence, not
+universal object TV: machine-TV assumption markers are never discharged
+even if listed; scope ↔ `object_link_correspondence` membership must be
+consistent; no CRT/loader/ABI/runtime/OS-exit-status claim; no evidence
+candidate, certificate, grade promotion, or recovery performer.
+
+Descriptor shape the route requires: schema
+`mumei.native-evidence-acceptance/v1`, `acceptance: "evaluated"`,
+`accepted: true`, `build_id` equal to the declared expected pin, `scope`
+in {`native_bundle_object_machine_code_translation_correspondence`,
+`..._without_object_link`}, both check fields string lists,
+`object_source_machine_code_correspondence ∈ checks_performed`,
+`object_link_correspondence` membership ⇔ with-link scope, disjoint
+performed/not-performed, valid `llvm_sha256`/`object_sha256`
+fingerprints. This is a minimum-requirement check, not a closed shape —
+`_valid_acceptance_descriptor` ignores fields it does not name, whereas
+`evaluate_core_acceptance`'s stored-carrier fold rejects any field
+outside its admitted set; the producer should not assume the two routes
+share one acceptance condition.
+
+### 2. Agent-fold requirements for a Core object-stage acceptance
+   descriptor emitted as a stored carrier
+
+The route's current consumption gets three things free from the dispatch
+lifecycle that a stored descriptor does not carry: freshness (the
+descriptor came out of *this* attempt), input binding (the fingerprint
+re-hash ties it to declared inputs), and producer identity (the Core
+executable hash is in the fingerprint). Folding a persisted descriptor
+through the `evidence-acceptance-eval` family (#1105–#1107 patterns)
+enumerates these requirements:
+
+1. **Carrier registration.** `mumei.native-evidence-acceptance/v1` is
+   already in `CORE_ACCEPTANCE_SCHEMAS` and the eval route folds it
+   representationally (closed shape via
+   `_CORE_ACCEPTANCE_REQUIRED_FIELDS` + `_NATIVE_ACCEPTANCE_EXTRA_FIELDS`:
+   `invocation`, `host`, `pin_envelope`, `build_id`, `llvm_sha256`,
+   `object_sha256`, `register_convention_assumed`, `input_domain`,
+   `functions`). A new schema name would need registration there and in
+   the eval's matcher table.
+2. **Digest pins.** `build_id`, `llvm_sha256`, `object_sha256` already
+   pin the compared artifacts; the route additionally pins the caller's
+   `expected_build_id`. The eval's `attempt_bound` compares
+   `expected_fingerprint` only against `evidence_fingerprint` /
+   `sidecar_fingerprint` — neither exists on the object descriptor, so a
+   stored object descriptor reports `attempt_bound: false` unless Core
+   also emits a record pin over the acceptance subject.
+3. **Signature rules.** `producer_signature` /
+   `produced_at_signed` extras are admitted only on
+   `mumei.source-evidence-acceptance/v1`
+   (`_PRODUCER_SIGNATURE_DESCRIPTOR_EXTRAS`); the native schema admits
+   neither. For the descriptor to travel as a signed carrier
+   (`signature-verify` binding via `subject_digest`), Core must emit it
+   as a persisted document AND the extras must be admitted on this
+   schema — or the signature binds the descriptor through a separate
+   carrier, the way `descriptor_digest` on the eval doc already names
+   the assessed bytes.
+4. **Scope and check vocabulary.** Unchanged: `scope` names the bounded
+   claim, `checks_performed`/`checks_not_performed` bound what any
+   consumer may credit; the agent never discharges
+   `MACHINE_TV_ASSUMPTION_MARKERS` even if listed, and
+   `object_translation_correspondence` stays agent-owned vocabulary the
+   Core descriptor does not spell.
+5. **Freshness/authenticity boundary.** Stored-carrier folds are
+   representation-level: `descriptor_authenticity`,
+   `descriptor_freshness`, `unperformed_check_recovery` stay in
+   `checks_not_performed` — a stored descriptor can describe an
+   acceptance but cannot by itself prove this attempt produced it.
+
+### 3. Overlap with Core's design memo
+
+Once `DESIGN_OBJECT_ACCEPTANCE.md` lands, each producer-side decision
+(schema name, pinned fields, signature envelope, freshness marker) maps
+to one enumerated consumption condition above; the corresponding
+agent-side adoption is a small slice: extend `_NATIVE_ACCEPTANCE_EXTRA_FIELDS`
+or the per-schema extras, wire `attempt_bound` if a record pin is added,
+and admit `producer_signature` on the native schema only when Core signs
+the descriptor document.
+
+**回帰ゲート**: `uv run pytest tests/test_native_object_accept.py tests/test_core_evidence.py -q`
