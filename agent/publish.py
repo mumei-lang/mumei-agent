@@ -247,8 +247,6 @@ def publish(
                 return result
             extra_path = cwd / relative
             extra_path.parent.mkdir(parents=True, exist_ok=True)
-            if not contents.endswith("\n"):
-                contents += "\n"
             extra_path.write_text(contents, encoding="utf-8")
             extra_file_paths.append((relative.as_posix(), extra_path))
     result["generated_file"] = generated_file
