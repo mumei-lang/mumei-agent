@@ -103,8 +103,10 @@ _C_COMMENT_RE = re.compile(r"/\*[\s\S]*?\*/")
 _STRING_LITERAL_RE = re.compile(
     r'''(?P<pre>[A-Za-z]{0,3})(?P<q>["'`])(?P<inner>(?:\\.|[^\\])*?)(?P=q)'''
 )
-_INTERPOLATION_RE = re.compile(r"\{([^{}]*)\}")
-_TS_INTERPOLATION_RE = re.compile(r"\$\{([^{}]*)\}")
+# Interpolation may nest one level of braces (``f"{x:{w}}"``,
+# ``${fn({a: 1})}``), so the inner pattern allows a single ``{...}``.
+_INTERPOLATION_RE = re.compile(r"\{((?:[^{}]|\{[^{}]*\})*)\}")
+_TS_INTERPOLATION_RE = re.compile(r"\$\{((?:[^{}]|\{[^{}]*\})*)\}")
 # Lines that gate execution (as opposed to `raise`/`throw`/`except`, whose
 # strings are error messages) keep interpolation expressions visible:
 # `if amount > int(f"{limit}")` really does check `limit`.
@@ -148,10 +150,11 @@ def _mask_string_literal_keep_interp(match: re.Match[str]) -> str:
         expr = _STRING_LITERAL_RE.sub(_mask_string_literal, expr)
         if quote != "`":
             expr = _strip_format_spec(expr)
-        # Blank comment- and depth-significant characters (``#``, ``/``,
-        # brackets) so the comment stripping and logical-line joining
-        # after masking are not affected by the expression's syntax.
-        expr = re.sub(r"[#/()\[\]{}]", " ", expr)
+        # Blank comment-, comma- and depth-significant characters
+        # (``#``, ``/``, ``,``, brackets) so the comment stripping,
+        # assert-message splitting and logical-line joining after
+        # masking are not affected by the expression's syntax.
+        expr = re.sub(r"[#/,()\[\]{}]", " ", expr)
         if expr.strip():
             exprs.append(expr)
     return quote + quote + (" " + " ".join(exprs) if exprs else "")

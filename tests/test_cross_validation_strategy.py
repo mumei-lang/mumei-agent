@@ -803,7 +803,7 @@ class TestValidateSpecVsImpl:
         impl_path = Path(self.tmpdir) / "ti.ts"
         impl_path.write_text(
             "function withdraw(balance: number, amount: number): number {\n"
-            "  if (`${balance}`.length > 0 && amount <= balance) {\n"
+            "  if (`${balance}`.length > 0 && amount > 0) {\n"
             "    return balance - amount;\n"
             "  }\n"
             "  throw new Error();\n"
