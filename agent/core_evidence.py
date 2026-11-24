@@ -733,6 +733,13 @@ _NATIVE_ACCEPTANCE_EXTRA_FIELDS = {
     "register_convention_assumed": lambda value: type(value) is str,
     "input_domain": lambda value: type(value) is str,
     "functions": lambda value: type(value) is dict,
+    # Object-route descriptor records (`object_translation` and
+    # `source_machine_tv` are emitted on every accept-object descriptor
+    # since mumei#1357/#1439): admitted as opaque records — the stored
+    # fold stays representation-level and does not interpret their
+    # contents, so shape admission is dict-type only.
+    "object_translation": lambda value: type(value) is dict,
+    "source_machine_tv": lambda value: type(value) is dict,
 }
 
 _OBSERVATION_EXTRA_FIELDS = frozenset(

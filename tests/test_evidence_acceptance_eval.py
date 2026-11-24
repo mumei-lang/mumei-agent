@@ -276,6 +276,66 @@ def test_native_object_route_extra_fields(tmp_path):
     assert evaluation["accepted"] is True
 
 
+def test_native_object_route_descriptor_records_admitted(tmp_path):
+    # The accept-object descriptor emits `object_translation` and
+    # `source_machine_tv` records on every run; a stored descriptor
+    # carrying them folds representationally rather than failing the
+    # closed shape.
+    evaluation = evaluate_core_acceptance(
+        _descriptor(
+            schema_version=_NATIVE,
+            scope="native_bundle_object_translation_correspondence",
+            build_id="e" * 64,
+            llvm_sha256="f" * 64,
+            object_sha256="1" * 64,
+            register_convention_assumed="sysv_amd64",
+            input_domain="loops_unrolled_refined_signatures",
+            functions={"main": {"outcome": "equivalent"}},
+            object_translation={
+                "status": "checked_correspondence",
+                "transformations": [],
+            },
+            source_machine_tv={"status": "checked_source_machine_tv_within_profile"},
+        )
+    )
+    assert evaluation["descriptor_match"] is True
+    assert evaluation["accepted"] is True
+
+
+def test_real_core_object_acceptance_descriptor_folds_unbound(tmp_path):
+    # Golden descriptor matching the shape real Core
+    # `native-bundle accept-object --json` emits under the
+    # `native_bundle_object_translation_correspondence` scope —
+    # regenerate with a built mumei when the descriptor shape changes.
+    fixture = (
+        Path(__file__).parent
+        / "fixtures"
+        / "evidence_native_object_acceptance.json"
+    )
+    descriptor = json.loads(fixture.read_text())
+    evaluation = evaluate_core_acceptance(descriptor)
+    assert evaluation["descriptor_match"] is True
+    assert evaluation["accepted"] is True
+
+    # The object schema pins no `evidence_fingerprint` — a stored
+    # descriptor can be accepted yet never bound to an attempt.
+    bound = evaluate_core_acceptance(
+        descriptor, expected_fingerprint="b" * 64
+    )
+    assert bound["descriptor_match"] is True
+    assert bound["attempt_bound"] is False
+
+    # The route accepts the real-shaped descriptor end to end.
+    evaluation = run_eval(
+        __import__("argparse").Namespace(
+            descriptor=str(fixture),
+            expected_fingerprint=None,
+            output=None,
+        )
+    )
+    assert evaluation["descriptor_match"] is True
+
+
 def test_native_observation_extras_malformed_checks_never_raise(tmp_path):
     # Observation pins beside a malformed checks_performed must fold to
     # descriptor_match=False, never raise — the evaluation JSON is
@@ -317,6 +377,9 @@ def test_native_extra_fields_validate_shapes(tmp_path):
         {"register_convention_assumed": ["sysv_amd64"]},
         {"input_domain": 7},
         {"functions": ["main"]},
+        {"object_translation": "checked_correspondence"},
+        {"object_translation": []},
+        {"source_machine_tv": 3},
         {"foreign_field": {}},
     ]
     for extra in bad_cases:

@@ -1,0 +1,112 @@
+{
+ "acceptance": "evaluated",
+ "accepted": true,
+ "build_id": "3f1c9a7e5b2d4f80a1c6e9b3d5f7a9c1e2b4d6f8a0c3e5b7d9f1a3c5e7b9d1f3",
+ "checks_not_performed": [
+  "producer_authenticity",
+  "historical_execution",
+  "raw_link_argument_vector_reproduction",
+  "register_convention_validation",
+  "optimizer_semantics",
+  "abi_runtime_semantics",
+  "os_exit_status_observation",
+  "os_stdout_observation",
+  "os_stderr_observation",
+  "runtime_observation_semantics",
+  "grade_promotion",
+  "lean_kernel_checks"
+ ],
+ "checks_performed": [
+  "bundle_identity_binding",
+  "fresh_same_profile_source_recheck",
+  "llvm_snapshot_translation_recheck",
+  "toolchain_object_executable_reproduction",
+  "canonical_link_argument_vector_reproduction",
+  "object_symbol_correspondence",
+  "object_call_edge_correspondence",
+  "object_link_correspondence",
+  "function_coverage",
+  "function_count",
+  "llvm_ir_object_equivalence",
+  "relocation_targets",
+  "relocation_bounds",
+  "relocation_resolved_values",
+  "relocation_applied_values",
+  "hir_llvm_model_correspondence",
+  "object_data_correspondence",
+  "object_symbol_attribute_correspondence",
+  "object_source_machine_code_correspondence"
+ ],
+ "functions": {
+  "main": {
+   "outcome": "equivalent"
+  }
+ },
+ "input_domain": "loops_unrolled_refined_signatures",
+ "llvm_sha256": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2",
+ "object_sha256": "b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3",
+ "object_translation": {
+  "correspondence": {
+   "checks": [
+    {
+     "name": "function_coverage",
+     "result": "checked"
+    },
+    {
+     "name": "function_count",
+     "result": "checked"
+    },
+    {
+     "name": "llvm_ir_object_equivalence",
+     "result": "checked"
+    },
+    {
+     "name": "relocation_targets",
+     "result": "checked"
+    },
+    {
+     "name": "relocation_bounds",
+     "result": "checked"
+    },
+    {
+     "name": "relocation_resolved_values",
+     "result": "checked"
+    },
+    {
+     "name": "relocation_applied_values",
+     "result": "checked"
+    },
+    {
+     "name": "hir_llvm_model_correspondence",
+     "result": "checked"
+    },
+    {
+     "name": "object_data_correspondence",
+     "result": "checked"
+    },
+    {
+     "name": "object_symbol_attribute_correspondence",
+     "result": "checked"
+    }
+   ]
+  },
+  "transformations": [
+   {
+    "edge": "llvm_ir -> object_code",
+    "output_identity": {
+     "executable_sha256": "c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4",
+     "object_sha256": "b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3"
+    },
+    "result": "checked_correspondence"
+   }
+  ]
+ },
+ "register_convention_assumed": "sysv_amd64",
+ "schema_version": "mumei.native-evidence-acceptance/v1",
+ "scope": "native_bundle_object_translation_correspondence",
+ "source_machine_tv": {
+  "entry_wrapper_applicable": true,
+  "functions_evaluated": 1,
+  "result": "checked_source_machine_tv_within_profile"
+ }
+}
