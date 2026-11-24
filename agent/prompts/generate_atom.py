@@ -14,6 +14,40 @@ DECIDABLE_FRAGMENT_GUIDELINES = "# " + SPEC_GUIDE_DECIDABLE_FRAGMENT
 
 # Common mistakes checklist injected into all generation prompts.
 # Shared with generate_stdlib via import.
+
+
+# Hard syntax contract — violations are parse errors, not style issues.
+# Shared with the multi-atom and fix prompts via import.
+MUMEI_SYNTAX_CONTRACT = (
+    "# Mumei syntax contract (a violation is a parse error):\n"
+    "- Clause keywords take a colon and end with `;`: "
+    "`requires: <cond>;`, `ensures: <cond>;`, `effects: [Effect];`, "
+    "and the body closes with `};`\n"
+    "- INVALID: `requires x > 0;` (missing colon), `effects [Log]` "
+    "(missing colon), a bare `{` without the `body:` keyword\n"
+    "- The body opens as `body: {` — never a bare `{` after the clauses\n"
+    "- Effect operations are `perform Effect.operation;` — effects are not "
+    "objects, so `State(x).update(y)` or `Log.write(msg)` method-call "
+    "syntax does not exist\n"
+    "- Do not invent effects the spec does not declare: a pure arithmetic "
+    "atom has NO `effects:` clause at all\n"
+)
+
+# A complete valid atom, verified against the current parser — the model
+# should copy this clause shape exactly.
+MUMEI_VALID_ATOM_EXAMPLE = (
+    "# Complete valid example — copy this clause shape exactly:\n"
+    "```mumei\n"
+    "atom safe_add(a: i64, b: i64) -> i64\n"
+    "    requires: a >= 0 && b >= 0 && a <= 9223372036854775807 - b;\n"
+    "    ensures: result == a + b && result >= a;\n"
+    "    body: {\n"
+    "        a + b\n"
+    "    };\n"
+    "```\n"
+)
+
+
 COMMON_MISTAKES = (
     "# Common mistakes to avoid:\n"
     "1. **Division by zero**: If dividing, add `requires: divisor != 0`\n"
@@ -69,10 +103,10 @@ def build_prompt(
         "Mumei atoms have the following structure:\n"
         "```\n"
         "atom <name>(<params>) -> <return_type>\n"
-        "    effects: [<effect_list>]\n"
+        "    effects: [<effect_list>];\n"
         "    requires: <precondition>;\n"
         "    ensures: <postcondition>;\n"
-        "    body: { <implementation> }\n"
+        "    body: { <implementation> };\n"
         "```\n\n"
         "Rules:\n"
         "- Every atom MUST have requires, ensures, and body clauses\n"
@@ -82,6 +116,8 @@ def build_prompt(
     )
 
     sections.append(COMMON_MISTAKES)
+    sections.append(MUMEI_SYNTAX_CONTRACT)
+    sections.append(MUMEI_VALID_ATOM_EXAMPLE)
 
     # Pre-generation checklist if spec is parseable as JSON
     try:

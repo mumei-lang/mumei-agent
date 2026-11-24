@@ -43,6 +43,7 @@ from agent.strategies.generate_strategy_prompt import (
     _identify_failing_atoms,
     _is_std_module,
     _load_core_axiom_context,
+    _normalize_clause_syntax,
     _select_prompt_module,
     _summarise_core_axioms,
 )
@@ -416,7 +417,7 @@ def _generate_multi_atom_inner(
         model,
     )
 
-    generated_code = _extract_code(content)
+    generated_code = _normalize_clause_syntax(_extract_code(content))
     if not generated_code:
         _logger.warning("LLM returned empty multi-atom generation result")
         return "", False
@@ -467,8 +468,10 @@ def _generate_multi_atom_inner(
     # Stage 2+3: Check, verify, and targeted fix loop
     current_code = generated_code
     last_violation_type = "generation"
-    health_retry_attempted = False
     for attempt in range(config_max_retries):
+        # Repair the colon-less clause syntax LLMs sometimes regress to
+        # before paying for a parse round-trip.
+        current_code = _normalize_clause_syntax(current_code)
         tmp_path = None
         try:
             with tempfile.NamedTemporaryFile(
@@ -501,10 +504,12 @@ def _generate_multi_atom_inner(
                 )
                 continue
 
-            if not health_retry_attempted and not _health_check_generated_code(
+            if attempt == 0 and not _health_check_generated_code(
                 spec_json, current_code, model, generation_config, past_code_examples,
             ):
-                health_retry_attempted = True
+                # Only the initial generation is health-checked: diversity is
+                # meaningful between independent generations, while fix
+                # iterations are supposed to resemble their input.
                 retry_code = _retry_for_health(
                     client,
                     model,
@@ -689,7 +694,11 @@ def _attempt_multi_atom_fix(
 ) -> str:
     """Attempt to fix specific failing atoms in a multi-atom module."""
     failing_str = ", ".join(failing_atoms)
+    from agent.prompts.generate_atom import MUMEI_SYNTAX_CONTRACT
     fix_prompt = (
+        f"{MUMEI_SYNTAX_CONTRACT}\n"
+        "Do not copy broken clause syntax from the current code — rewrite "
+        "invalid clauses from scratch following the contract above.\n\n"
         f"# Original multi-atom specification:\n{spec_json}\n\n"
         f"# Current generated code (needs fixing):\n```mumei\n{current_code}\n```\n\n"
         f"# Verification error:\n{error_log}\n\n"
@@ -723,7 +732,7 @@ def _attempt_multi_atom_fix(
         model,
     )
 
-    fixed_code = _extract_code(fix_content)
+    fixed_code = _normalize_clause_syntax(_extract_code(fix_content))
     if not fixed_code:
         return current_code
     if enable_spec_code_mapping and spec:
@@ -901,7 +910,7 @@ def _generate_code_inner(
         model,
     )
 
-    generated_code = _extract_code(content)
+    generated_code = _normalize_clause_syntax(_extract_code(content))
     if not generated_code:
         _logger.warning("LLM returned empty generation result")
         return "", False
@@ -953,8 +962,10 @@ def _generate_code_inner(
     current_code = generated_code
     last_violation_type = "generation"
     prev_report: dict | None = None
-    health_retry_attempted = False
     for attempt in range(config_max_retries):
+        # Repair the colon-less clause syntax LLMs sometimes regress to
+        # before paying for a parse round-trip.
+        current_code = _normalize_clause_syntax(current_code)
         tmp_path = None
         try:
             with tempfile.NamedTemporaryFile(
@@ -988,10 +999,12 @@ def _generate_code_inner(
                 )
                 continue
 
-            if not health_retry_attempted and not _health_check_generated_code(
+            if attempt == 0 and not _health_check_generated_code(
                 spec_json, current_code, model, generation_config, past_code_examples,
             ):
-                health_retry_attempted = True
+                # Only the initial generation is health-checked: diversity is
+                # meaningful between independent generations, while fix
+                # iterations are supposed to resemble their input.
                 retry_code = _retry_for_health(
                     client,
                     model,
@@ -1383,7 +1396,7 @@ def _attempt_fix(
         model,
     )
 
-    fixed_code = _extract_code(fix_content)
+    fixed_code = _normalize_clause_syntax(_extract_code(fix_content))
     if not fixed_code:
         return current_code
     if enable_spec_code_mapping and spec:
