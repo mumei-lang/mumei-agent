@@ -243,14 +243,55 @@ def _literal_close(s: str, start: int, q: str, is_f: bool) -> int:
 
 def _line_comment_seen(out: list[str]) -> bool:
     """Whether the already-masked text contains a `//` comment opener —
-    one not preceded by `:` (URL scheme) or `\\` (regex escape)."""
+    one outside a `/* */` block comment and not preceded by `:` (URL
+    scheme) or `\\` (regex escape). Scanned left to right so a `/*`
+    after `//` never counts as a block opener either."""
     text = "".join(out)
-    j = text.find("//")
-    while j != -1:
-        if j == 0 or text[j - 1] not in ":\\":
-            return True
-        j = text.find("//", j + 1)
+    i, n = 0, len(text)
+    while i < n - 1:
+        pair = text[i : i + 2]
+        if pair == "//":
+            if i == 0 or text[i - 1] not in ":\\":
+                return True
+            i += 1
+            continue
+        if pair == "/*":
+            end = text.find("*/", i + 2)
+            if end < 0:
+                return False  # the rest is inside a block comment
+            i = end + 2
+            continue
+        i += 1
     return False
+
+
+def _strip_ts_comments(line: str) -> tuple[str, bool]:
+    """Strip `//` and `/* */` comments from a string-masked line in one
+    left-to-right pass; whichever opener comes first wins, so `/*`
+    inside a `//` comment and `//` inside a block comment are ignored.
+    Returns the stripped line and whether it ends inside a block
+    comment."""
+    out: list[str] = []
+    i, n = 0, len(line)
+    while i < n - 1:
+        pair = line[i : i + 2]
+        if pair == "//":
+            break
+        if pair == "/*":
+            end = line.find("*/", i + 2)
+            if end < 0:
+                return "".join(out), True
+            # A space keeps the comment from joining two tokens.
+            out.append(" ")
+            i = end + 2
+            continue
+        out.append(line[i])
+        i += 1
+    else:
+        # The loop only ends early via `break`; the trailing char pair is
+        # still unexamined when n - i <= 1.
+        out.append(line[i:])
+    return "".join(out), False
 
 
 def _mask_line_strings(
@@ -589,21 +630,12 @@ def _guard_source_lines(body: str, language: str = "") -> list[str]:
             cq, cisf, cinner = open_lit
             cont_literal = (cq, cisf, keep_interp, [cinner])
         if lang != "python":
-            while "/*" in line:
-                head, _, tail = line.partition("/*")
-                if "*/" in tail:
-                    # A space keeps the comment from joining two tokens.
-                    line = head + " " + tail.split("*/", 1)[1]
-                else:
-                    line = head
-                    in_block_comment = True
-                    break
-            line = _C_COMMENT_RE.sub(" ", line)
+            # One pass for both comment kinds: `//` inside `/* */` and
+            # `/*` inside `//` are comment text, not openers. `//` is a
+            # comment in C-family languages but Python's floor division,
+            # so this is skipped for Python bodies.
+            line, in_block_comment = _strip_ts_comments(line)
         line = line.split("#", 1)[0]
-        if lang != "python":
-            # `//` is a comment in C-family languages but the floor-division
-            # operator in Python — only strip it for non-Python bodies.
-            line = line.split("//", 1)[0]
         if line.strip():
             cleaned.append(line)
     logical: list[str] = []

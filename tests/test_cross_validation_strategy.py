@@ -1243,6 +1243,43 @@ class TestValidateSpecVsImpl:
         )
         assert "withdraw" in report.spec_stronger_than_impl
 
+    def test_ts_block_comment_marker_inside_line_comment(self):
+        r"""`// log `/api/*`` — a `/*` inside a // comment is text, not
+        a block-comment opener that swallows the next lines."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "bc.ts"
+        impl_path.write_text(
+            "function withdraw(balance: number, amount: number): number {\n"
+            "  // route /api/* matched\n"
+            "  if (amount <= balance) {\n"
+            "    return 0;\n"
+            "  }\n"
+            "  throw new Error();\n"
+            "}\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="typescript"
+        )
+        assert "withdraw" not in report.spec_stronger_than_impl
+
+    def test_ts_line_comment_marker_inside_block_comment(self):
+        """`/* a // b */ tag`x`` — a `//` inside /* */ does not make the
+        following backtick comment text."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "cb.ts"
+        impl_path.write_text(
+            "function withdraw(balance: number, amount: number): number {\n"
+            "  if (/* a // b */ `amount <= balance`.length > 0) {\n"
+            "    return 0;\n"
+            "  }\n"
+            "  throw new Error();\n"
+            "}\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="typescript"
+        )
+        assert "withdraw" in report.spec_stronger_than_impl
+
     def test_ts_backtick_inside_line_comment(self):
         """`// see tag`docs` — an unclosed backtick inside a //
         comment is text, not a template start."""
