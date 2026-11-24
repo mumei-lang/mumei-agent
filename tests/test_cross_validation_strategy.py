@@ -249,6 +249,118 @@ class TestValidateSpecVsImpl:
         assert result["uncovered"] == []
         assert result["ratio"] == 1.0
 
+    def _write_spec(self, name: str, requires: str) -> Path:
+        spec = (
+            f"atom {name}(balance: i64, amount: i64) -> i64\n"
+            f"  requires: {requires}\n"
+            "  ensures: result == balance - amount\n"
+            "{\n  0\n}\n"
+        )
+        spec_path = Path(self.tmpdir) / f"{name}.mm"
+        spec_path.write_text(spec)
+        return spec_path
+
+    def test_unenforced_precondition_is_flagged(self):
+        """A requires conjured by spec extraction (no matching guard in the
+        source) must surface as a spec-vs-impl gap — otherwise the audit
+        verifies the buggy code vacuously (mumei-agent#1325)."""
+        spec_path = self._write_spec(
+            "withdraw", "balance >= 0 && amount >= 0 && amount <= balance"
+        )
+        impl_path = Path(self.tmpdir) / "buggy.py"
+        impl_path.write_text(
+            "def withdraw(balance: int, amount: int) -> int:\n"
+            '    """Withdraw amount from balance."""\n'
+            "    if amount <= 0:\n"
+            "        raise ValueError('amount must be positive')\n"
+            "    return balance - amount\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert "withdraw" in report.spec_stronger_than_impl
+        assert any("not enforced" in detail for detail in report.details)
+
+    def test_enforced_precondition_is_not_flagged(self):
+        spec_path = self._write_spec(
+            "withdraw", "amount > 0 && amount <= balance"
+        )
+        impl_path = Path(self.tmpdir) / "good.py"
+        impl_path.write_text(
+            "def withdraw(balance: int, amount: int) -> int:\n"
+            "    if amount <= 0:\n"
+            "        raise ValueError('amount must be positive')\n"
+            "    if balance < amount:\n"
+            "        raise ValueError('insufficient funds')\n"
+            "    return balance - amount\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert "withdraw" not in report.spec_stronger_than_impl
+
+    def test_trivial_requires_is_not_flagged(self):
+        spec_path = self._write_spec("withdraw", "true")
+        impl_path = Path(self.tmpdir) / "any.py"
+        impl_path.write_text(
+            "def withdraw(balance: int, amount: int) -> int:\n"
+            "    return balance - amount\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert "withdraw" not in report.spec_stronger_than_impl
+
+    def test_docstring_and_comment_do_not_count_as_guards(self):
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "commented.py"
+        impl_path.write_text(
+            "def withdraw(balance, amount):\n"
+            '    """Should fail if amount > balance."""\n'
+            "    return balance - amount  # check: amount <= balance\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert "withdraw" in report.spec_stronger_than_impl
+
+    def test_call_forwarding_body_is_not_flagged(self):
+        """A body that forwards to a callee may delegate enforcement — the
+        file-local check cannot see the callee, so it stays silent."""
+        spec_path = self._write_spec("compare", "x >= 0 && y >= 0")
+        spec_path.write_text(
+            "atom compare(x: i64, y: i64) -> i64\n"
+            "  requires: x >= 0 && y >= 0\n"
+            "  ensures: result == 1 || result == 0\n"
+            "{\n  0\n}\n"
+        )
+        impl_path = Path(self.tmpdir) / "wrap.go"
+        impl_path.write_text(
+            "package subtle\n"
+            "func compare(x, y []byte) int {\n"
+            "    return constanttime.Compare(x, y)\n"
+            "}\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="go"
+        )
+        assert "compare" not in report.spec_stronger_than_impl
+
+    def test_python_annotated_signature_body_is_extracted(self):
+        """`def f(x: int) -> int:` must produce a body — previously the regex
+        required `)` immediately before `:` so annotated functions were
+        silently treated as bodiless."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "annotated.py"
+        impl_path.write_text(
+            "def withdraw(balance: int, amount: int) -> int:\n"
+            "    return balance - amount\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert "withdraw" in report.spec_stronger_than_impl
+
 
 # ---------------------------------------------------------------------------
 # Tests: CrossValidator.detect_spec_drift

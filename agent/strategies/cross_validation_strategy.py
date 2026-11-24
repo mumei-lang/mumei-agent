@@ -62,6 +62,103 @@ def _is_short_native_or_wrapper_body(body: str) -> bool:
     return True
 
 
+# ``return`` is deliberately absent: a trailing ``return balance - amount``
+# mentions the precondition's identifiers without guarding anything.
+_GUARD_STATEMENT_RE = re.compile(
+    r"\b(if|elif|assert|raise|match|guard|require|ensure|throw|panic!|except)\b"
+)
+_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_CLAUSE_KEYWORDS = {
+    "and", "or", "not", "in", "is", "forall", "exists", "implies",
+    "true", "false", "True", "False", "None", "Some", "Ok", "Err",
+}
+_TRIVIAL_REQUIRES = {"", "true", "True", "1"}
+
+
+def _requires_conditions(requires: str) -> list[str]:
+    """Split a requires clause into top-level conjuncts."""
+    normalized = requires.replace("&&", " and ")
+    parts = re.split(r"\band\b", normalized)
+    return [
+        part.strip(" ();")
+        for part in parts
+        if part.strip(" ();") and part.strip() not in _TRIVIAL_REQUIRES
+    ]
+
+
+def _condition_identifiers(condition: str) -> set[str]:
+    return {
+        token
+        for token in _IDENTIFIER_RE.findall(condition)
+        if token not in _CLAUSE_KEYWORDS
+    }
+
+
+def _guard_source_lines(body: str) -> list[str]:
+    """Return body lines with comments and docstrings stripped."""
+    cleaned: list[str] = []
+    in_docstring: str | None = None
+    for raw in body.splitlines():
+        line = raw
+        if in_docstring is not None:
+            if in_docstring in line:
+                line = line.split(in_docstring, 1)[1]
+                in_docstring = None
+            else:
+                continue
+        for quote in ('"""', "'''"):
+            if quote in line:
+                head, _, tail = line.partition(quote)
+                if quote in tail:
+                    line = head + tail.split(quote, 1)[1]
+                else:
+                    line = head
+                    in_docstring = quote
+                break
+        line = line.split("#", 1)[0].split("//", 1)[0]
+        if line.strip():
+            cleaned.append(line)
+    return cleaned
+
+
+def _has_unenforced_precondition(requires: str, body: str) -> bool:
+    """True when a spec precondition names identifiers no guard covers.
+
+    The audit's extracted ``requires`` should mirror defensive checks present
+    in the source. When the spec assumes a condition (``amount <= balance``)
+    that no ``if``/``assert``/``raise``/``throw``/``guard``
+    statement in the body mentions together, the precondition was conjured —
+    it is assumed, not enforced — so verification is vacuous on that clause.
+    """
+    if not requires or requires.strip() in _TRIVIAL_REQUIRES:
+        return False
+    lines = _guard_source_lines(body)
+    # A pure call-forwarding body may hand enforcement to the callee
+    # (``return constanttime.Compare(x, y)``) — that is outside what this
+    # file-local check can see, so it is not reported as unenforced.
+    if re.search(r"\breturn\s+[A-Za-z_][\w.]*\s*\(", " ".join(lines)):
+        return False
+    # Guard statements (if/assert/raise/throw/...) plus call sites that may
+    # delegate the check (``self._ensure_balance(amount)``); a bare
+    # ``return expr`` does not enforce anything.
+    enforcement_lines = [
+        line
+        for line in lines
+        if _GUARD_STATEMENT_RE.search(line)
+        or (re.search(r"[A-Za-z_][\w.]*\s*\(", line) and not line.lstrip().startswith("return"))
+    ]
+    for condition in _requires_conditions(requires):
+        identifiers = _condition_identifiers(condition)
+        if not identifiers:
+            continue
+        if not any(
+            identifiers <= set(_IDENTIFIER_RE.findall(line))
+            for line in enforcement_lines
+        ):
+            return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
@@ -184,12 +281,20 @@ class CrossValidator:
             if impl_name is None:
                 continue
             has_complex_contract = bool(atom["requires"]) and len(atom["requires"]) > 20
-            if has_complex_contract:
+            has_nontrivial_requires = bool(atom["requires"]) and atom["requires"].strip() not in _TRIVIAL_REQUIRES
+            if has_complex_contract or has_nontrivial_requires:
                 body = _extract_function_body(impl_source, language, impl_name)
-                if body and len(body.strip()) < len(atom["requires"]):
+                if body and has_complex_contract and len(body.strip()) < len(atom["requires"]):
                     if _is_short_native_or_wrapper_body(body):
                         continue
                     report.spec_stronger_than_impl.append(atom["name"])
+                    continue
+                if body and _has_unenforced_precondition(atom["requires"], body):
+                    report.spec_stronger_than_impl.append(atom["name"])
+                    report.details.append(
+                        f"spec precondition assumed, not enforced, by `{impl_name}`: "
+                        f"requires {atom['requires']}"
+                    )
 
         # Semantic gap detection: impl stronger than spec
         # Functions with complex validation that have no spec or trivial spec
