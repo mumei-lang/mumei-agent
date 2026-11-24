@@ -67,6 +67,7 @@ from pathlib import Path
 from agent.core_evidence import (
     MACHINE_TV_ASSUMPTION_MARKERS,
     OBJECT_CHECK_VOCABULARY,
+    OBJECT_TRANSLATION_CORRESPONDENCE_ITEMS,
 )
 from agent.native_accept import CHECK_VOCABULARY, DischargedChecks
 from agent.native_bundle import (
@@ -122,6 +123,12 @@ OBJECT_ACCEPT_WITHOUT_LINK_SCOPES = frozenset(
 )
 OBJECT_ACCEPT_SCOPES = (
     OBJECT_ACCEPT_WITH_LINK_SCOPES | OBJECT_ACCEPT_WITHOUT_LINK_SCOPES
+)
+OBJECT_ACCEPT_TRANSLATION_SCOPES = frozenset(
+    {
+        OBJECT_ACCEPT_TRANSLATION_WITH_LINK_SCOPE,
+        OBJECT_ACCEPT_TRANSLATION_WITHOUT_LINK_SCOPE,
+    }
 )
 OBJECT_SOURCE_MACHINE_CODE_CHECK = "object_source_machine_code_correspondence"
 
@@ -274,6 +281,14 @@ def _valid_acceptance_descriptor(descriptor: object, expected_build_id: str) -> 
     ):
         return False
     if OBJECT_SOURCE_MACHINE_CODE_CHECK not in performed:
+        return False
+    # Object-translation scopes: an `accepted` descriptor is only emitted
+    # once every correspondence item is checked
+    # (DESIGN_OBJECT_ACCEPTANCE.md §4), so a descriptor under these
+    # scopes that omits an item is not a descriptor Core would emit.
+    if scope in OBJECT_ACCEPT_TRANSLATION_SCOPES and not (
+        OBJECT_TRANSLATION_CORRESPONDENCE_ITEMS <= set(performed)
+    ):
         return False
     has_object_link = "object_link_correspondence" in performed
     if has_object_link != (scope in OBJECT_ACCEPT_WITH_LINK_SCOPES):

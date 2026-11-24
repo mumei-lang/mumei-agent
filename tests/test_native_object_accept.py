@@ -749,7 +749,46 @@ def test_translation_acceptance_scope_admitted_ahead_of_emit_switch(
 )
 def test_translation_scope_link_consistency_enforced(tmp_path, capsys, mutate):
     descriptor = json.loads(json.dumps(DESCRIPTOR))
+    descriptor["checks_performed"] += sorted(
+        OBJECT_TRANSLATION_CORRESPONDENCE_ITEMS
+    )
     mutate(descriptor)
+    core = _write_core(tmp_path, descriptor)
+    bundle = _write_bundle(tmp_path)
+    source = _write_source(tmp_path)
+    code, out, err = _run(capsys, _args(core, bundle, source))
+    assert code == 0 and err == ""
+    report = json.loads(out)
+    assert report["descriptor_invalid"] is True
+    assert "acceptance" not in report
+    assert "discharged_checks" not in report
+    assert report["checks_not_performed"] == sorted(ALL_CHECKS)
+
+
+@pytest.mark.parametrize(
+    "missing_item",
+    [
+        "llvm_ir_object_equivalence",
+        "object_symbol_attribute_correspondence",
+        "relocation_applied_values",
+    ],
+)
+def test_translation_scope_requires_all_correspondence_items(
+    tmp_path, capsys, missing_item
+):
+    """An `accepted` translation-scope descriptor is only emitted once
+    every correspondence item is checked; a descriptor missing an item
+    is not one Core would emit, so it is rejected rather than partially
+    credited."""
+    performed = [
+        *DESCRIPTOR["checks_performed"],
+        *sorted(OBJECT_TRANSLATION_CORRESPONDENCE_ITEMS - {missing_item}),
+    ]
+    descriptor = {
+        **DESCRIPTOR,
+        "scope": OBJECT_ACCEPT_TRANSLATION_WITH_LINK_SCOPE,
+        "checks_performed": performed,
+    }
     core = _write_core(tmp_path, descriptor)
     bundle = _write_bundle(tmp_path)
     source = _write_source(tmp_path)
