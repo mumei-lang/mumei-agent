@@ -25,6 +25,10 @@ def test_workflow_jobs_have_timeout_minutes(workflow_file: Path) -> None:
     jobs = data.get("jobs", {})
     assert jobs, f"{workflow_file.name} has no jobs"
     for job_name, job_config in jobs.items():
+        # `uses:` jobs call reusable workflows; timeout-minutes is not a valid
+        # key there (the callee declares its own timeouts).
+        if "uses" in job_config:
+            continue
         assert "timeout-minutes" in job_config, (
             f"job {job_name!r} in {workflow_file.name} is missing timeout-minutes"
         )
