@@ -2397,14 +2397,30 @@ OBJECT_CHECK_VOCABULARY = frozenset(
         "machine_code_tv_mxcsr_control_state",
         "machine_code_tv_nan_payload_bits",
         "machine_code_tv_sysv_memory_class_aggregate_abi",
+        # Item names of Core's `object_translation.correspondence.checks`
+        # record (DESIGN_OBJECT_ACCEPTANCE.md §5): the object-translation
+        # acceptance descriptor enumerates them in `checks_performed`
+        # instead of a single source-to-object name, so they live in the
+        # shared object-check vocabulary for the accept/recheck routes
+        # to credit item by item.
+        "function_coverage",
+        "function_count",
+        "llvm_ir_object_equivalence",
+        "hir_llvm_model_correspondence",
+        "relocation_targets",
+        "relocation_bounds",
+        "relocation_resolved_values",
+        "relocation_applied_values",
+        "object_data_correspondence",
+        "object_symbol_attribute_correspondence",
     }
 )
 
-# Item names of Core's `object_translation.correspondence.checks` record
-# (DESIGN_OBJECT_ACCEPTANCE.md §5): the object-translation acceptance
-# descriptor enumerates them in `checks_performed` instead of a single
-# source-to-object name, so they join the shared object-check vocabulary
-# for the accept/recheck routes to credit item by item.
+# The correspondence item names above, as their own set: the accept
+# route requires them for the object-translation scopes and the
+# recheck route excludes them. Keep in sync with the vocabulary
+# literal — `test_native_check_vocabularies_are_pairwise_disjoint`
+# pins both.
 OBJECT_TRANSLATION_CORRESPONDENCE_ITEMS = frozenset(
     {
         "function_coverage",
@@ -2419,8 +2435,6 @@ OBJECT_TRANSLATION_CORRESPONDENCE_ITEMS = frozenset(
         "object_symbol_attribute_correspondence",
     }
 )
-
-OBJECT_CHECK_VOCABULARY = OBJECT_CHECK_VOCABULARY | OBJECT_TRANSLATION_CORRESPONDENCE_ITEMS
 
 MACHINE_TV_ASSUMPTION_MARKERS = frozenset(
     {
