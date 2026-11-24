@@ -1280,14 +1280,32 @@ class TestValidateSpecVsImpl:
         )
         assert "withdraw" in report.spec_stronger_than_impl
 
+    def test_python_backtick_inside_comment(self):
+        """`x = 1 # see `tag` — a lone backtick inside a # comment is
+        text, not a multiline literal start."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "pbc.py"
+        impl_path.write_text(
+            "def withdraw(balance, amount):\n"
+            "    x = 1  # see `tag\n"
+            "    if amount <= balance:\n"
+            "        return 0\n"
+            "    raise ValueError()\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert "withdraw" not in report.spec_stronger_than_impl
+
     def test_ts_backtick_inside_block_comment(self):
-        """`/* see // `x` */` — a backtick inside a /* comment whose
-        close sits after it is comment text, not a template start."""
+        """`/* see // `x */` — a lone backtick inside a /* comment is
+        comment text, not a template start (a paired one could pass
+        either way)."""
         spec_path = self._write_spec("withdraw", "amount <= balance")
         impl_path = Path(self.tmpdir) / "ub.ts"
         impl_path.write_text(
             "function withdraw(balance: number, amount: number): number {\n"
-            "  /* note // `x` */ if (amount <= balance) {\n"
+            "  /* note // `x */ if (amount <= balance) {\n"
             "    return 0;\n"
             "  }\n"
             "  throw new Error();\n"

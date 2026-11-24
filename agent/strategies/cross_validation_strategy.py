@@ -241,15 +241,18 @@ def _literal_close(s: str, start: int, q: str, is_f: bool) -> int:
     return -1
 
 
-def _comment_state(out: list[str]) -> str | None:
+def _comment_state(out: list[str], lang: str) -> str | None:
     """Comment state at the end of the already-masked text: ``"line"``
-    after a `//` opener, ``"block"`` inside an unterminated `/*`, else
-    ``None``. Scanned left to right so the first opener wins — `/*`
-    inside `//` and `//` inside `/* */` are comment text. A `//`
-    preceded by `:` (URL scheme) or `\\` (regex escape) is not an
-    opener."""
+    after a line-comment opener, ``"block"`` inside an unterminated
+    `/*`, else ``None``. The openers are `#` for Python and `//` / `/*`
+    for C-family languages. Scanned left to right so the first opener
+    wins — `/*` inside `//` and `//` inside `/* */` are comment text.
+    A `//` preceded by `:` (URL scheme) or `\\` (regex escape) is not
+    an opener."""
     text = "".join(out)
     i, n = 0, len(text)
+    if lang == "python":
+        return "line" if "#" in text else None
     while i < n - 1:
         pair = text[i : i + 2]
         if pair == "//":
@@ -323,10 +326,9 @@ def _mask_line_strings(
         del out[len(out) - (i - p) :]
         prefix = line[p:i].lower()
         q = line[i]
-        if lang != "python" and _comment_state(out) is not None:
-            # Inside a `//` or `/*` comment — any quote is comment text,
-            # not a literal start. (Python has neither comment opener:
-            # `//` is floor division there.)
+        if _comment_state(out, lang) is not None:
+            # Inside a line or block comment — any quote is comment
+            # text, not a literal start.
             out.append(q)
             i += 1
             continue
