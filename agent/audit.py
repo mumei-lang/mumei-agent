@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import cast
 
@@ -77,6 +77,7 @@ from agent.audit_reporting import (
 from agent.attempt_schedule import MAX_SCHEDULE_ATTEMPTS, run_attempt_schedule
 from agent.code_to_spec import CodeToSpecExtractor, CodeToSpecResult, Language
 from agent.config import AgentConfig
+from agent.cross_validation_payload import _atom_from_mapping
 from agent.extract_spec import _collect_code_files
 from agent.extract_spec_helpers import _is_test_file
 from agent.gap_rules import _TRUSTED_ATOM_RE
@@ -86,6 +87,7 @@ from agent.native_replay import NativeReplayer, native_replay_violations, reconc
 from agent.llm_provider import LLMProvider, openai_client_adapter
 from agent.mumei_client import create_mumei_client
 from agent.prompts.report_formatter import format_counterexample
+from agent.python_implementation_check import check_python_implementations
 from agent.spec_ambiguity import classify_spec_ambiguity
 from agent.strategies.cross_validation_strategy import CrossValidationReport, CrossValidator
 from agent.strategies.foreign_code_strategy import (
@@ -571,6 +573,26 @@ class AuditPipeline:
                     audit_language,
                 )
                 cross_validation_gaps = _cross_validation_gap_strings(cross_report)
+                if audit_language == "python" and verification_status != "refuted":
+                    spec = extraction.forge_task_spec
+                    extracted_atoms = _dict_list(spec.get("atoms")) or ([spec] if "name" in spec else [])
+                    intents = [
+                        replace(
+                            _atom_from_mapping(atom, index),
+                            requires=_contract_text(atom.get("requires"), "true"),
+                            ensures=_contract_text(atom.get("ensures"), "true"),
+                        )
+                        for index, atom in enumerate(extracted_atoms)
+                    ]
+                    for check in check_python_implementations(source_code, intents, self.mumei_client):
+                        if check.status == "refuted":
+                            verification_status = "refuted"
+                            verification_violations.append(check.violation)
+                            counterexample_values.append(
+                                {"function_name": check.function, "counterexample": check.counterexample}
+                            )
+                        elif check.status == "unverifiable" and verification_status == "verified":
+                            verification_status = "unverifiable"
 
         # Ambiguity is reported, never resolved. A requirement the prose never
         # states is a gap in what was verified, so it lands in

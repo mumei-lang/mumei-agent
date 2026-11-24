@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -24,6 +25,7 @@ from agent.cross_validation import (
     validate_spec_to_code,
 )
 from agent.conformance_verifier import verify_conformance
+from agent.cross_validation_models import ContractParam, MumeiContractAtom
 from agent.cross_validation_report import _suggest_fix
 from agent.report_formatter import format_cross_validation_report
 from agent.verify_conformance import (
@@ -1328,6 +1330,50 @@ def test_validate_code_cli_writes_json_report(tmp_path: Path) -> None:
     assert payload["success"] is True
     assert payload["verdict"] == "verified"
     assert payload["inferred_atoms"][0]["name"] == "add"
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("body", "verdict"),
+    [
+        ("    return balance - amount\n", "refuted"),
+        ("    if amount > balance:\n        raise ValueError()\n    return balance - amount\n", "verified"),
+        ("    return debit(balance, amount)\n", "unverifiable"),
+    ],
+    ids=["missing-guard", "enforced-guard", "unsupported-body"],
+)
+def test_validate_code_checks_llm_postcondition_without_replacing_deterministic_atom(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str, verdict: str,
+) -> None:
+    core = os.environ.get("MUMEI_BIN")
+    if not core or not Path(core).is_absolute() or not Path(core).is_file():
+        pytest.skip("set MUMEI_BIN to an absolute trusted Core executable")
+    monkeypatch.setenv("LLM_API_KEY", "sentinel-test-only")
+    source = tmp_path / "payment.py"
+    output = tmp_path / "report.json"
+    source.write_text("def withdraw(balance: int, amount: int) -> int:\n" + body, encoding="utf-8")
+    llm_atom = MumeiContractAtom(
+        "withdraw", [ContractParam("balance"), ContractParam("amount")],
+        "i64", "amount <= balance && amount >= 0",
+        "result == balance - amount && result >= 0",
+    )
+    args = build_validate_code_parser().parse_args(["--input", str(source), "--output", str(output)])
+    with patch("agent.cross_validation._infer_code_contracts_with_llm", return_value=([llm_atom], [], [])):
+        if verdict == "verified":
+            main_validate_code(args)
+        else:
+            with pytest.raises(SystemExit) as exc:
+                main_validate_code(args)
+            assert exc.value.code == (1 if verdict == "refuted" else 2)
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["verdict"] == verdict
+    assert payload["inferred_atoms"][0]["requires"] == "true"
+    check, = payload["verification"]["implementation_checks"]
+    assert check["status"] == verdict
+    assert check["counterexample"] == (
+        {"amount": "1", "balance": "0"} if verdict == "refuted" else {}
+    )
+    assert bool(payload["issues"]) == (verdict == "refuted")
 
 
 @pytest.mark.parametrize(

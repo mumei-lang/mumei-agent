@@ -6,9 +6,12 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
+from agent.cross_validation_models import ContractParam, MumeiContractAtom
+from agent.python_implementation_check import check_python_implementations
 from agent.strategies.cross_validation_strategy import (
     CrossValidationReport,
     CrossValidator,
@@ -17,6 +20,40 @@ from agent.strategies.cross_validation_strategy import (
     _extract_functions,
     _extract_spec_atoms,
 )
+
+
+def test_failed_implementation_probe_without_model_is_inconclusive() -> None:
+    atom = MumeiContractAtom(
+        "withdraw", [ContractParam("balance"), ContractParam("amount")],
+        "i64", "amount <= balance && amount >= 0", "result >= 0",
+    )
+    verifier = MagicMock()
+
+    def verify(source_path, **_kwargs):
+        module = Path(source_path).read_text(encoding="utf-8")
+        assert "trusted atom" not in module
+        assert "requires: true;" in module
+        assert "ensures: ((amount > balance) || (result >= 0));" in module
+        assert "amount >= 0" not in module
+        return {
+            "success": False,
+            "report": {
+                "status": "failed",
+                "failure_type": "postcondition_violated",
+            },
+        }
+
+    verifier.verify.side_effect = verify
+    check, = check_python_implementations(
+        "def withdraw(balance: int, amount: int) -> int:\n"
+        "    if amount > balance:\n"
+        "        raise ValueError()\n"
+        "    return balance - amount\n",
+        [atom],
+        verifier,
+    )
+    assert check.status == "unverifiable"
+    assert check.counterexample == {}
 
 
 # ---------------------------------------------------------------------------

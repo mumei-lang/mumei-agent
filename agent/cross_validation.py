@@ -31,6 +31,7 @@ from agent.prompts.cross_validation_nl import (
     CROSS_VALIDATION_NL_SYSTEM_PROMPT,
     build_nl_cross_validation_prompt,
 )
+from agent.python_implementation_check import check_python_implementations
 from agent.intent_tracker import IntentChange, IntentDriftResult, IntentTracker
 from agent.spec_code_mapper import MappingResult, SpecCodeMapper
 from agent.cross_validation_models import (
@@ -799,6 +800,7 @@ def validate_foreign_code(
 
     source_line_map = _infer_foreign_source_line_map(code, normalized_language)
     atoms = _infer_foreign_contracts_with_code_to_spec(code, normalized_language, config)
+    llm_atoms: list[MumeiContractAtom] = []
     llm_issues: list[CrossValidationIssue] = []
     if use_llm and (config.api_key or llm_provider):
         llm_atoms, llm_issues, llm_warnings = _infer_code_contracts_with_llm(
@@ -898,6 +900,25 @@ def validate_foreign_code(
         verification=verification,
         warnings=warnings,
     )
+    if run_mumei and normalized_language == "python":
+        selected_names = {atom.name for atom in atoms}
+        intents = [atom for atom in llm_atoms if atom.name in selected_names]
+        if intents:
+            checks = check_python_implementations(code, intents, create_mumei_client(config.mumei_bin))
+            if checks:
+                verification = {**(verification or {}), "implementation_checks": [asdict(check) for check in checks]}
+                for check in checks:
+                    if check.status == "refuted":
+                        verdict = "refuted"
+                        issues.extend(_with_source_lines([
+                            CrossValidationIssue(
+                                kind="postcondition_violated",
+                                message=check.violation,
+                                location=check.function,
+                            )
+                        ], source_line_map))
+                    elif check.status == "unverifiable" and verdict == "verified":
+                        verdict = "unverifiable"
     success = verdict == "verified"
     if success:
         mumei_genuinely_failed = verification is not None and _mumei_report_has_failures(

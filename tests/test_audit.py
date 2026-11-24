@@ -1150,6 +1150,8 @@ def test_audit_pipeline_marks_verification_status_verified_for_clean_run(
     source = tmp_path / "payment.py"
     source.write_text(
         "def withdraw(balance: int, amount: int) -> int:\n"
+        "    if amount > balance:\n"
+        "        raise ValueError()\n"
         "    return balance - amount\n",
         encoding="utf-8",
     )
@@ -1174,7 +1176,13 @@ def test_audit_pipeline_marks_verification_status_verified_for_clean_run(
         coverage_ratio=1.0,
     )
     mumei = MagicMock()
-    mumei.verify.side_effect = _healthy_verify
+
+    def verify(source_path, **kwargs):
+        if Path(source_path).name == "python_implementation.mm":
+            return {"success": True, "report": {"status": "success"}}
+        return _healthy_verify(source_path, **kwargs)
+
+    mumei.verify.side_effect = verify
 
     result = AuditPipeline(
         AgentConfig(api_key="test"),
@@ -1238,6 +1246,49 @@ def test_audit_report_includes_counterexample_values(tmp_path: Path) -> None:
     ]
     assert "Z3 Counter-example: balance=100, amount=150" in result.verification_violations
     assert "counterexample_values:" in result.report
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("body", "status"),
+    [
+        ("    return balance - amount\n", "refuted"),
+        ("    if amount <= balance:\n        raise ValueError()\n    return balance - amount\n", "refuted"),
+        ("    if amount > balance:\n        raise ValueError()\n    return balance - amount\n", "verified"),
+        ("    return debit(balance, amount)\n", "unverifiable"),
+    ],
+    ids=["missing-guard", "reversed-guard", "enforced-guard", "unsupported-body"],
+)
+def test_audit_checks_extracted_postcondition_against_python_body(
+    tmp_path: Path, body: str, status: str,
+) -> None:
+    core = os.environ.get("MUMEI_BIN")
+    if not core or not Path(core).is_absolute() or not Path(core).is_file():
+        pytest.skip("set MUMEI_BIN to an absolute trusted Core executable")
+    source = tmp_path / "payment.py"
+    source.write_text("def withdraw(balance: int, amount: int) -> int:\n" + body, encoding="utf-8")
+    extractor = MagicMock()
+    extractor.extract_from_file.return_value = CodeToSpecResult(
+        success=True,
+        natural_language_spec="Withdraw amount from balance. Result must be non-negative.",
+        forge_task_spec=_forge_spec(),
+        detected_language="python",
+    )
+    result = AuditPipeline(
+        AgentConfig(api_key="test", mumei_bin=core),
+        code_to_spec_extractor=extractor,
+    ).audit_file(source, "python")
+
+    assert result.verification_status == status
+    if status == "refuted":
+        assert any("withdraw" in issue for issue in result.verification_violations)
+        assert result.counterexample_values == [
+            {"function_name": "withdraw", "counterexample": {"balance": "0", "amount": "1"}},
+        ]
+        assert any("migrate-suggest" in step["command"] for step in result.next_steps)
+    else:
+        assert result.verification_violations == []
+        assert result.counterexample_values == []
 
 
 def test_audit_report_includes_step_guidance() -> None:
