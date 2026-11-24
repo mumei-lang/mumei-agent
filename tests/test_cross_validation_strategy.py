@@ -1231,8 +1231,8 @@ class TestValidateSpecVsImpl:
         impl_path = Path(self.tmpdir) / "lc.ts"
         impl_path.write_text(
             "function withdraw(balance: number, amount: number): number {\n"
-            "  if (`${x // amount <= balance\n"
-            "       }`.length > 0) {\n"
+            "  if (`${// amount <= balance\n"
+            "       x}`.length > 0) {\n"
             "    return 0;\n"
             "  }\n"
             "  throw new Error();\n"
@@ -1242,6 +1242,25 @@ class TestValidateSpecVsImpl:
             spec_path=str(spec_path), impl_path=str(impl_path), language="typescript"
         )
         assert "withdraw" in report.spec_stronger_than_impl
+
+    def test_ts_backtick_inside_line_comment(self):
+        """`// see tag`docs` — an unclosed backtick inside a //
+        comment is text, not a template start."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "bt.ts"
+        impl_path.write_text(
+            "function withdraw(balance: number, amount: number): number {\n"
+            "  // see tag`docs\n"
+            "  if (amount <= balance) {\n"
+            "    return 0;\n"
+            "  }\n"
+            "  throw new Error();\n"
+            "}\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="typescript"
+        )
+        assert "withdraw" not in report.spec_stronger_than_impl
 
     def test_apostrophe_comment_ending_in_backslash(self):
         """`# don\\'t allow overdrafts \\` — the apostrophe plus trailing

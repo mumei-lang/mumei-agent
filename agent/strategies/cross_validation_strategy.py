@@ -241,6 +241,18 @@ def _literal_close(s: str, start: int, q: str, is_f: bool) -> int:
     return -1
 
 
+def _line_comment_seen(out: list[str]) -> bool:
+    """Whether the already-masked text contains a `//` comment opener —
+    one not preceded by `:` (URL scheme) or `\\` (regex escape)."""
+    text = "".join(out)
+    j = text.find("//")
+    while j != -1:
+        if j == 0 or text[j - 1] not in ":\\":
+            return True
+        j = text.find("//", j + 1)
+    return False
+
+
 def _mask_line_strings(
     line: str, keep_interp: bool
 ) -> tuple[str, tuple[str, bool, str] | None]:
@@ -268,6 +280,12 @@ def _mask_line_strings(
         del out[len(out) - (i - p) :]
         prefix = line[p:i].lower()
         q = line[i]
+        if q == "`" and _line_comment_seen(out):
+            # `//` already appeared on this line outside a string — the
+            # backtick is comment text, not a template start.
+            out.append(q)
+            i += 1
+            continue
         # A ' or " immediately after an identifier char is an apostrophe
         # inside text (``don't``, ``it's fine \``), never a literal
         # start — even with a trailing backslash that would otherwise
