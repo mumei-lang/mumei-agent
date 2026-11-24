@@ -700,14 +700,15 @@ class TestValidateSpecVsImpl:
 
     def test_format_specifier_hash_is_not_a_comment(self):
         """`f"{limit:#x}"` inside a condition must survive — the `#` is a
-        format flag, not a comment opener."""
+        format flag, not a comment opener. `balance` sits *after* the `#`,
+        so this fails if the spec chars eat the rest of the line."""
         spec_path = self._write_spec("withdraw", "amount <= balance")
         impl_path = Path(self.tmpdir) / "fh.py"
         impl_path.write_text(
             "def withdraw(balance, amount):\n"
-            '    if amount > int(f"{balance:#x}", 16):\n'
-            "        raise ValueError()\n"
-            "    return balance - amount\n"
+            '    if int(f"{amount:#x}", 16) <= balance:\n'
+            "        return balance - amount\n"
+            "    raise ValueError()\n"
         )
         report = self.validator.validate_spec_vs_impl(
             spec_path=str(spec_path), impl_path=str(impl_path), language="python"
@@ -724,6 +725,55 @@ class TestValidateSpecVsImpl:
             '    def check() -> int: assert balance >= amount; d = {"a": 1}\n'
             "    check()\n"
             "    return balance - amount\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert "withdraw" not in report.spec_stronger_than_impl
+
+    def test_multiline_assert_message_is_dropped(self):
+        """A parenthesised f-string message on continuation lines is still
+        a message — only the condition contributes identifiers."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "ma.py"
+        impl_path.write_text(
+            "def withdraw(balance, amount):\n"
+            "    assert amount > 0, (\n"
+            '        f"{balance} too low"\n'
+            "    )\n"
+            "    return balance - amount\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert "withdraw" in report.spec_stronger_than_impl
+
+    def test_multiline_assert_condition_is_joined(self):
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "mc.py"
+        impl_path.write_text(
+            "def withdraw(balance, amount):\n"
+            "    assert (\n"
+            "        amount > 0 and\n"
+            "        balance >= amount\n"
+            "    )\n"
+            "    return balance - amount\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert "withdraw" not in report.spec_stronger_than_impl
+
+    def test_braced_interpolation_is_seen(self):
+        """`f"{{{name}}}"` is a literal brace around a real interpolation —
+        `name` must still count as referenced."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "bi.py"
+        impl_path.write_text(
+            "def withdraw(balance, amount):\n"
+            '    if f"{{{balance}}}" == "1" and amount > 0:\n'
+            "        return balance - amount\n"
+            "    raise ValueError()\n"
         )
         report = self.validator.validate_spec_vs_impl(
             spec_path=str(spec_path), impl_path=str(impl_path), language="python"

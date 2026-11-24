@@ -103,7 +103,7 @@ _C_COMMENT_RE = re.compile(r"/\*[\s\S]*?\*/")
 _STRING_LITERAL_RE = re.compile(
     r'''(?P<pre>[A-Za-z]{0,3})(?P<q>["'`])(?P<inner>(?:\\.|[^\\])*?)(?P=q)'''
 )
-_INTERPOLATION_RE = re.compile(r"(?<!\{)\{([^{}]*)\}(?!\})")
+_INTERPOLATION_RE = re.compile(r"\{([^{}]*)\}")
 # Lines that gate execution (as opposed to `raise`/`throw`/`except`, whose
 # strings are error messages) keep interpolation expressions visible:
 # `if amount > int(f"{limit}")` really does check `limit`.
@@ -131,13 +131,36 @@ def _mask_string_literal_keep_interp(match: re.Match[str]) -> str:
     quote = match.group("q")
     exprs: list[str] = []
     if "f" in prefix or quote == "`":
-        for raw in _INTERPOLATION_RE.findall(inner):
+        # Drop escaped braces first (``{{``/``}}`` are literal text, not
+        # interpolation); ``f"{{{name}}}"`` then correctly still yields
+        # the real ``{name}`` reference.
+        unescaped = inner.replace("{{", "").replace("}}", "")
+        for raw in _INTERPOLATION_RE.findall(unescaped):
             expr = raw[1:] if raw.startswith("$") else raw
+            expr = _strip_format_spec(expr)
             # Format specifiers and expressions may carry `#` or `/`
             # (``{x:#x}``, ``{a//b}``) which the comment stripping after
             # masking would read as a comment opener — blank them out.
             exprs.append(expr.replace("#", " ").replace("/", " "))
     return quote + quote + (" " + " ".join(exprs) if exprs else "")
+
+
+def _strip_format_spec(expr: str) -> str:
+    """Drop an f-string format specifier — the ``:...`` suffix — so its
+    characters (``{y:#x}``'s ``x``) are not counted as variable references.
+    Colons inside brackets/braces (slices, dicts) stay.``!r``-style
+    conversions are dropped too."""
+    depth = 0
+    for i, ch in enumerate(expr):
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == ":" and depth == 0:
+            return expr[:i]
+        elif ch == "!" and depth == 0 and i + 1 < len(expr) and expr[i + 1] in "rsa":
+            return expr[:i]
+    return expr
 
 
 def _drop_assert_message(line: str) -> str:
@@ -204,7 +227,6 @@ def _guard_source_lines(body: str, language: str = "") -> list[str]:
             else _mask_string_literal
         )
         line = _STRING_LITERAL_RE.sub(mask, line)
-        line = _drop_assert_message(line)
         if lang != "python":
             while "/*" in line:
                 head, _, tail = line.partition("/*")
@@ -238,7 +260,10 @@ def _guard_source_lines(body: str, language: str = "") -> list[str]:
         closers = ")]}" if lang == "python" else ")]"
         depth += sum(line.count(c) for c in openers)
         depth -= sum(line.count(c) for c in closers)
-    return logical
+    # Drop assert failure messages on the *joined* logical line — doing it
+    # per physical line would orphan the continuation of a multi-line
+    # assert whose opening `(` sat after the comma.
+    return [_drop_assert_message(line) for line in logical]
 
 
 _FORWARD_RETURN_RE = re.compile(
