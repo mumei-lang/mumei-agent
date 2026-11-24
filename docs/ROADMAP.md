@@ -10340,7 +10340,12 @@ descriptor family does not emit acceptance items).
 scope↔`object_link_correspondence` consistency check covering both
 scope generations — the machine-TV scopes stay accepted unchanged, so
 the agent admits both vocabulary generations before Core switches the
-emitted scope (DESIGN_OBJECT_ACCEPTANCE.md §6 Step 3). Unknown scopes
-and names stay rejected (fail-closed bounds unchanged).
+emitted scope (DESIGN_OBJECT_ACCEPTANCE.md §6 Step 3). Under the
+translation scopes the descriptor must list every correspondence item
+in `checks_performed` — an `accepted` descriptor is only emitted once
+all items are checked, so a descriptor missing one is rejected rather
+than partially credited. Unknown scopes stay rejected; unknown check
+names in `checks_performed` remain admissible in the descriptor but
+are never credited (fail-closed crediting, unchanged).
 
 **回帰ゲート**: `uv run pytest tests/test_native_object_accept.py tests/test_native_check_partitions.py tests/test_native_accept.py tests/test_native_artifact_recheck.py tests/test_native_object_recheck.py tests/test_recovery_eval.py -q`
