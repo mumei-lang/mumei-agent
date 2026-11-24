@@ -771,9 +771,59 @@ class TestValidateSpecVsImpl:
         impl_path = Path(self.tmpdir) / "bi.py"
         impl_path.write_text(
             "def withdraw(balance, amount):\n"
-            '    if f"{{{balance}}}" == "1" and amount > 0:\n'
+            '    if len(f"{{{balance}}}") > 0 and amount > 0:\n'
             "        return balance - amount\n"
             "    raise ValueError()\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert "withdraw" not in report.spec_stronger_than_impl
+
+    def test_ts_template_literal_braces_are_not_interpolation(self):
+        """`` `{{{balance}}}` `` in TypeScript is literal text — only
+        ``${...}`` interpolates."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "t.ts"
+        impl_path.write_text(
+            "function withdraw(balance: number, amount: number): number {\n"
+            "  if (`{{{balance}}}`.length > 0 && amount > 0) {\n"
+            "    return balance - amount;\n"
+            "  }\n"
+            "  throw new Error();\n"
+            "}\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="typescript"
+        )
+        assert "withdraw" in report.spec_stronger_than_impl
+
+    def test_ts_template_interpolation_is_seen(self):
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "ti.ts"
+        impl_path.write_text(
+            "function withdraw(balance: number, amount: number): number {\n"
+            "  if (`${balance}`.length > 0 && amount <= balance) {\n"
+            "    return balance - amount;\n"
+            "  }\n"
+            "  throw new Error();\n"
+            "}\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="typescript"
+        )
+        assert "withdraw" not in report.spec_stronger_than_impl
+
+    def test_assert_message_parens_do_not_swallow_next_line(self):
+        """`f"{fmt(balance)}"` inside an assert message must not make the
+        following statement join the assert line."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "ap.py"
+        impl_path.write_text(
+            "def withdraw(balance, amount):\n"
+            '    assert amount > 0, f"bad {fmt(balance)}"\n'
+            "    assert balance >= amount\n"
+            "    return balance - amount\n"
         )
         report = self.validator.validate_spec_vs_impl(
             spec_path=str(spec_path), impl_path=str(impl_path), language="python"

@@ -104,6 +104,7 @@ _STRING_LITERAL_RE = re.compile(
     r'''(?P<pre>[A-Za-z]{0,3})(?P<q>["'`])(?P<inner>(?:\\.|[^\\])*?)(?P=q)'''
 )
 _INTERPOLATION_RE = re.compile(r"\{([^{}]*)\}")
+_TS_INTERPOLATION_RE = re.compile(r"\$\{([^{}]*)\}")
 # Lines that gate execution (as opposed to `raise`/`throw`/`except`, whose
 # strings are error messages) keep interpolation expressions visible:
 # `if amount > int(f"{limit}")` really does check `limit`.
@@ -130,18 +131,29 @@ def _mask_string_literal_keep_interp(match: re.Match[str]) -> str:
     prefix = match.group("pre").lower()
     quote = match.group("q")
     exprs: list[str] = []
-    if "f" in prefix or quote == "`":
-        # Drop escaped braces first (``{{``/``}}`` are literal text, not
-        # interpolation); ``f"{{{name}}}"`` then correctly still yields
-        # the real ``{name}`` reference.
-        unescaped = inner.replace("{{", "").replace("}}", "")
-        for raw in _INTERPOLATION_RE.findall(unescaped):
-            expr = raw[1:] if raw.startswith("$") else raw
+    # Drop escaped braces first (``{{``/``}}`` are literal text in Python
+    # f-strings); ``f"{{{name}}}"`` then correctly still yields the real
+    # ``{name}`` reference. Backtick templates interpolate ``${...}``
+    # only — a bare ``{x}`` there is literal text.
+    unescaped = inner.replace("{{", "").replace("}}", "")
+    if quote == "`":
+        found = _TS_INTERPOLATION_RE.findall(unescaped)
+    elif "f" in prefix:
+        found = _INTERPOLATION_RE.findall(unescaped)
+    else:
+        found = []
+    for expr in found:
+        # Nested literals inside the expression (``f"{d['balance']}"``)
+        # hold literal text, not references — mask them out too.
+        expr = _STRING_LITERAL_RE.sub(_mask_string_literal, expr)
+        if quote != "`":
             expr = _strip_format_spec(expr)
-            # Format specifiers and expressions may carry `#` or `/`
-            # (``{x:#x}``, ``{a//b}``) which the comment stripping after
-            # masking would read as a comment opener — blank them out.
-            exprs.append(expr.replace("#", " ").replace("/", " "))
+        # Blank comment- and depth-significant characters (``#``, ``/``,
+        # brackets) so the comment stripping and logical-line joining
+        # after masking are not affected by the expression's syntax.
+        expr = re.sub(r"[#/()\[\]{}]", " ", expr)
+        if expr.strip():
+            exprs.append(expr)
     return quote + quote + (" " + " ".join(exprs) if exprs else "")
 
 
