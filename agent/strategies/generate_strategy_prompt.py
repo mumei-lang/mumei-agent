@@ -178,7 +178,7 @@ def _build_skeleton(spec: dict) -> str:
         for p in raw_params
     )
     effects = spec.get("effects", [])
-    effects_str = f"    effects: [{', '.join(effects)}]\n" if effects else ""
+    effects_str = f"    effects: [{', '.join(effects)}];\n" if effects else ""
     return_type = spec.get("return_type")
     signature_return = f" -> {return_type}" if return_type else ""
     return (
@@ -186,7 +186,7 @@ def _build_skeleton(spec: dict) -> str:
         f"{effects_str}"
         f"    requires: ___;\n"
         f"    ensures: ___;\n"
-        f"    body: {{ ___ }}\n"
+        f"    body: {{ ___ }};\n"
     )
 
 def _detect_dependencies(atoms: list[dict]) -> dict[str, list[str]]:
@@ -280,7 +280,7 @@ def _identify_failing_atoms(
 
     return unique if unique else list(atom_names)
 
-_CLAUSE_KEYWORD_RE = re.compile(r"^(\s*)(requires|ensures|invariant|effects)(\s+)")
+_CLAUSE_KEYWORD_RE = re.compile(r"^(\s*)(requires|ensures|invariant|effects)(\s*:)?(\s+)")
 _BARE_BRACE_RE = re.compile(r"^(\s*)\{\s*$")
 _CLAUSE_HEAD_RE = re.compile(
     r"^\s*(requires|ensures|invariant|effects|effect_pre|effect_post)\s*[: ]"
@@ -299,31 +299,54 @@ def _normalize_clause_syntax(code: str) -> str:
     valid files come out byte-identical, and a bare ``{`` is only
     rewritten to ``body: {`` in the clause-header region of an atom
     (right after a clause line, before any ``body:``), never inside a
-    body block."""
+    body block. Clause conditions may span multiple lines; while a
+    clause is continued (its line does not end with ``;``) the header
+    is not considered over."""
     out: list[str] = []
     in_header = False  # between an atom signature and its body opener
+    continuation = False  # inside a multi-line clause condition
     for line in code.splitlines():
         stripped = line.strip()
         if re.match(r"^\s*atom\s+[A-Za-z_]", line):
             in_header = True
+            continuation = False
         m = _CLAUSE_KEYWORD_RE.match(line)
         if m and in_header:
+            # A clause head ends any continuation of the previous clause.
+            continuation = False
             rest = line[m.end():]
-            if not rest.startswith(":"):
+            if not m.group(3):
                 line = f"{m.group(1)}{m.group(2)}: {rest}"
-            rstripped = line.rstrip()
-            if m.group(2) == "effects" and rstripped.endswith("]"):
-                line = rstripped + ";"
-        brace = _BARE_BRACE_RE.match(line)
-        if brace and in_header:
-            line = f"{brace.group(1)}body: {{"
-            in_header = False
-        elif in_header and "body:" in line:
-            in_header = False
-        elif in_header and stripped and not _CLAUSE_HEAD_RE.match(line) and not stripped.startswith("//"):
-            # A non-clause line before the body means the header is
-            # over (or was malformed); stop looking for a bare brace.
-            if not re.match(r"^\s*atom\s", line) and not stripped.startswith("->") and not stripped.startswith(")"):
+            if m.group(2) == "effects":
+                rstripped = line.rstrip()
+                if rstripped.endswith("]"):
+                    line = rstripped + ";"
+            if not line.rstrip().endswith(";"):
+                continuation = True
+            out.append(line)
+            continue
+        if in_header and continuation:
+            if stripped.endswith(";"):
+                continuation = False
+                out.append(line)
+                continue
+            if "body:" not in line and not _BARE_BRACE_RE.match(line):
+                out.append(line)
+                continue
+            # The clause was missing its terminating ';' entirely —
+            # fall through so the body opener still gets repaired.
+            continuation = False
+        if in_header:
+            brace = _BARE_BRACE_RE.match(line)
+            if brace:
+                line = f"{brace.group(1)}body: {{"
                 in_header = False
+            elif "body:" in line:
+                in_header = False
+            elif stripped and not stripped.startswith("//"):
+                # A non-clause line before the body means the header is
+                # over (or was malformed); stop looking for a bare brace.
+                if not re.match(r"^\s*atom\s", line) and not stripped.startswith("->") and not stripped.startswith(")"):
+                    in_header = False
         out.append(line)
     return "\n".join(out) + ("\n" if code.endswith("\n") else "")

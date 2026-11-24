@@ -430,3 +430,68 @@ def test_generate_prompt_contains_syntax_contract_and_example():
     assert "missing colon" in prompt
     assert "safe_add" in prompt
     assert "Do not invent effects" in prompt
+
+
+def test_normalize_clause_syntax_appends_semicolon_to_coloned_effects():
+    """`effects: [Log]` with a colon but no semicolon still gets repaired."""
+    from agent.strategies.generate_strategy_prompt import _normalize_clause_syntax
+
+    broken = (
+        "atom log_op(msg: string) -> unit\n"
+        "    effects: [Log]\n"
+        "    requires: true;\n"
+        "    ensures: true;\n"
+        "    body: {\n"
+        "        unit\n"
+        "    };\n"
+    )
+    out = _normalize_clause_syntax(broken)
+    assert "effects: [Log];" in out
+
+
+def test_normalize_clause_syntax_repairs_clauses_after_multiline_condition():
+    """A multi-line requires condition must not end header tracking."""
+    from agent.strategies.generate_strategy_prompt import _normalize_clause_syntax
+
+    broken = (
+        "atom f(a: i64, b: i64) -> i64\n"
+        "    requires: a > 0 &&\n"
+        "        b > 0;\n"
+        "    ensures result > 0;\n"
+        "    {\n"
+        "        a + b\n"
+        "    };\n"
+    )
+    out = _normalize_clause_syntax(broken)
+    assert "ensures: result > 0;" in out
+    assert "body: {" in out
+
+
+def test_normalize_clause_syntax_keeps_multiline_condition_intact():
+    """Continuation lines of a valid multi-line clause pass through unchanged."""
+    from agent.strategies.generate_strategy_prompt import _normalize_clause_syntax
+
+    valid = (
+        "atom f(a: i64, b: i64) -> i64\n"
+        "    requires: a > 0 &&\n"
+        "        b > 0;\n"
+        "    ensures: result > 0;\n"
+        "    body: {\n"
+        "        a + b\n"
+        "    };\n"
+    )
+    assert _normalize_clause_syntax(valid) == valid
+
+
+def test_skeleton_and_structure_example_carry_semicolons():
+    """The prompt skeleton and structure example match the syntax contract."""
+    from agent.prompts.generate_atom import build_prompt
+    from agent.strategies.generate_strategy_prompt import _build_skeleton
+
+    skeleton = _build_skeleton(
+        {"name": "op", "inputs": [{"name": "x", "type": "i64"}], "effects": ["Log"]}
+    )
+    assert "effects: [Log];" in skeleton
+    assert "};" in skeleton
+    prompt = build_prompt('{"name": "op"}', "", {})
+    assert "effects: [<effect_list>];" in prompt

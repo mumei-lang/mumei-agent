@@ -732,7 +732,7 @@ def _attempt_multi_atom_fix(
         model,
     )
 
-    fixed_code = _extract_code(fix_content)
+    fixed_code = _normalize_clause_syntax(_extract_code(fix_content))
     if not fixed_code:
         return current_code
     if enable_spec_code_mapping and spec:
@@ -1396,7 +1396,7 @@ def _attempt_fix(
         model,
     )
 
-    fixed_code = _extract_code(fix_content)
+    fixed_code = _normalize_clause_syntax(_extract_code(fix_content))
     if not fixed_code:
         return current_code
     if enable_spec_code_mapping and spec:
