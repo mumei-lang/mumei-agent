@@ -327,7 +327,7 @@ even if listed; scope ↔ `object_link_correspondence` membership must be
 consistent; no CRT/loader/ABI/runtime/OS-exit-status claim; no evidence
 candidate, certificate, grade promotion, or recovery performer.
 
-Descriptor shape the route requires (closed): schema
+Descriptor shape the route requires: schema
 `mumei.native-evidence-acceptance/v1`, `acceptance: "evaluated"`,
 `accepted: true`, `build_id` equal to the declared expected pin, `scope`
 in {`native_bundle_object_machine_code_translation_correspondence`,
@@ -335,7 +335,11 @@ in {`native_bundle_object_machine_code_translation_correspondence`,
 `object_source_machine_code_correspondence ∈ checks_performed`,
 `object_link_correspondence` membership ⇔ with-link scope, disjoint
 performed/not-performed, valid `llvm_sha256`/`object_sha256`
-fingerprints.
+fingerprints. This is a minimum-requirement check, not a closed shape —
+`_valid_acceptance_descriptor` ignores fields it does not name, whereas
+`evaluate_core_acceptance`'s stored-carrier fold rejects any field
+outside its admitted set; the producer should not assume the two routes
+share one acceptance condition.
 
 ### 2. Agent-fold requirements for a Core object-stage acceptance
    descriptor emitted as a stored carrier
