@@ -302,6 +302,40 @@ def test_native_object_route_descriptor_records_admitted(tmp_path):
     assert evaluation["accepted"] is True
 
 
+def test_real_core_object_acceptance_descriptor_folds_unbound(tmp_path):
+    # Golden descriptor matching the shape real Core
+    # `native-bundle accept-object --json` emits under the
+    # `native_bundle_object_translation_correspondence` scope —
+    # regenerate with a built mumei when the descriptor shape changes.
+    fixture = (
+        Path(__file__).parent
+        / "fixtures"
+        / "evidence_native_object_acceptance.json"
+    )
+    descriptor = json.loads(fixture.read_text())
+    evaluation = evaluate_core_acceptance(descriptor)
+    assert evaluation["descriptor_match"] is True
+    assert evaluation["accepted"] is True
+
+    # The object schema pins no `evidence_fingerprint` — a stored
+    # descriptor can be accepted yet never bound to an attempt.
+    bound = evaluate_core_acceptance(
+        descriptor, expected_fingerprint="b" * 64
+    )
+    assert bound["descriptor_match"] is True
+    assert bound["attempt_bound"] is False
+
+    # The route accepts the real-shaped descriptor end to end.
+    evaluation = run_eval(
+        __import__("argparse").Namespace(
+            descriptor=str(fixture),
+            expected_fingerprint=None,
+            output=None,
+        )
+    )
+    assert evaluation["descriptor_match"] is True
+
+
 def test_native_observation_extras_malformed_checks_never_raise(tmp_path):
     # Observation pins beside a malformed checks_performed must fold to
     # descriptor_match=False, never raise — the evaluation JSON is
