@@ -243,17 +243,18 @@ def _literal_close(s: str, start: int, q: str, is_f: bool) -> int:
 
 def _mask_line_strings(
     line: str, keep_interp: bool
-) -> tuple[str, tuple[str, bool] | None]:
+) -> tuple[str, tuple[str, bool, str] | None]:
     """Mask every string literal in ``line`` to empty quotes.
 
-    Returns the masked text plus ``(quote, is_f)`` when a literal ran to
-    the end of the line unterminated (a multiline template/triple
-    literal) — the caller resumes the close-scan on the next line.
-    Unlike a regex approach, the literal's own quote inside ``{...}``
-    fields (PEP 701) does not end it early."""
+    Returns the masked text plus ``(quote, is_f, inner_tail)`` when a
+    multiline literal (template or triple-quoted) ran unterminated to
+    the end of the line — the caller resumes the close-scan on the next
+    line and evaluates the accumulated inner text. Unlike a regex
+    approach, the literal's own quote inside ``{...}`` fields (PEP 701)
+    does not end it early."""
     out: list[str] = []
     i, n = 0, len(line)
-    open_lit: tuple[str, bool] | None = None
+    open_lit: tuple[str, bool, str] | None = None
     while i < n:
         if line[i] not in "'\"`":
             out.append(line[i])
@@ -272,19 +273,32 @@ def _mask_line_strings(
             end = line.find(q * 3, i + 3)
             inner = line[i + 3 : n if end < 0 else end]
             i = n if end < 0 else end + 3
-            out.append(q * 6 + _kept_exprs(inner, q, is_f, keep_interp))
             if end < 0:
-                open_lit = (q * 3, is_f)
+                # Kept expressions wait for the closing line — the caller
+                # evaluates the whole multi-line inner at once.
+                out.append(q * 6)
+                open_lit = (q * 3, is_f, inner)
+            else:
+                out.append(q * 6 + _kept_exprs(inner, q, is_f, keep_interp))
             continue
         end = _literal_close(line, i + 1, q, is_f)
-        if end < 0:
+        if end < 0 and q == "`":
+            # A template literal can span lines — its continuation state
+            # keeps the inner text for the caller to finish masking.
             inner = line[i + 1 :]
             i = n
-            open_lit = (q, is_f)
+            out.append(q * 2)
+            open_lit = (q, is_f, inner)
+        elif end < 0:
+            # An unterminated ' or " is no literal — single-line quotes
+            # cannot span lines, so this is an apostrophe inside a
+            # comment or other text ("Don't", "can't"). Keep it as text.
+            out.append(line[i:])
+            i = n
         else:
             inner = line[i + 1 : end - 1]
             i = end
-        out.append(q * 2 + _kept_exprs(inner, q, is_f, keep_interp))
+            out.append(q * 2 + _kept_exprs(inner, q, is_f, keep_interp))
     return "".join(out), open_lit
 
 
@@ -304,6 +318,10 @@ def _kept_exprs(inner: str, quote: str, is_f: bool, keep_interp: bool) -> str:
         # hold literal text, not references — mask them out too.
         expr = _STRING_LITERAL_RE.sub(_mask_string_literal, expr)
         if quote == "`":
+            # A nested template literal inside the expression
+            # (``${`if cond`}``) holds text, not code — mask it whole so
+            # its contents are not read as guards or variable reads.
+            expr = _TS_NESTED_TEMPLATE_RE.sub("``", expr)
             expr = _mask_ts_regexes(_strip_ts_object_keys(expr))
         else:
             expr = _strip_format_spec(expr)
@@ -328,6 +346,7 @@ def _mask_string_literal(match: re.Match[str]) -> str:
 
 
 _TS_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/")
+_TS_NESTED_TEMPLATE_RE = re.compile(r"`(?:\\.|[^`\\])*`")
 _TS_REGEX_START_CHARS = "(,=:!?&|[{~^+*%-<>;"
 
 
@@ -335,13 +354,18 @@ def _mask_ts_regexes(expr: str) -> str:
     """Blank ``/.../`` regex-literal contents so pattern text
     (``/balance|amount/``) is not read as variable references. A ``/``
     opens a regex only after an operator-ish char — ``a / b`` division
-    is left alone."""
+    is left alone, and so is division after a postfix ``++``/``--``
+    (``counter++ / amount``)."""
     out: list[str] = []
     prev = ""  # last non-space char seen
+    prev2 = ""  # the char before it
     i, n = 0, len(expr)
     while i < n:
         c = expr[i]
-        if c == "/" and (not prev or prev in _TS_REGEX_START_CHARS):
+        if c == "/" and (
+            not prev
+            or (prev in _TS_REGEX_START_CHARS and prev2 + prev not in ("++", "--"))
+        ):
             j = i + 1
             in_class = False
             while j < n:
@@ -357,12 +381,12 @@ def _mask_ts_regexes(expr: str) -> str:
                 j += 1
             if j < n:
                 out.append("//")
-                prev = "/"
+                prev2, prev = "/", "/"
                 i = j + 1
                 continue
         out.append(c)
         if not c.isspace():
-            prev = c
+            prev2, prev = prev, c
         i += 1
     return "".join(out)
 
@@ -450,18 +474,31 @@ def _guard_source_lines(body: str, language: str = "") -> list[str]:
     cleaned: list[str] = []
     in_docstring: str | None = None
     in_block_comment = False
-    cont_literal: tuple[str, bool] | None = None
+    cont_literal: tuple[str, bool, bool, list[str]] | None = None
     for raw in body.splitlines():
         line = raw
         if cont_literal is not None:
-            # A literal from a previous line is still open — its contents
-            # are not code. Resume the close-scan; the closing quote's
-            # line may carry real comparisons after it.
-            cq, cisf = cont_literal
-            end = _literal_close(line, 0, cq[0], cisf or cq[0] == "`")
-            if end < 0:
-                continue
-            line = line[end:]
+            # A multiline literal (template or triple-quoted) is still
+            # open — accumulate its inner text, then emit the kept
+            # interpolation expressions on the closing line. Comparisons
+            # inside ``${...}`` on continuation lines are real code.
+            cq, cisf, ckeep, cbuf = cont_literal
+            if len(cq) == 1:
+                end = _literal_close(line, 0, cq, cisf or cq == "`")
+                if end < 0:
+                    cbuf.append(line)
+                    continue
+                cbuf.append(line[: end - 1])
+                line = line[end:]
+            else:
+                end = line.find(cq)
+                if end < 0:
+                    cbuf.append(line)
+                    continue
+                cbuf.append(line[:end])
+                line = line[end + len(cq) :]
+            kept = _kept_exprs("\n".join(cbuf), cq[0], cisf, ckeep)
+            line = cq[0] * 2 + kept + line
             cont_literal = None
         if in_block_comment:
             if "*/" in line:
@@ -487,9 +524,11 @@ def _guard_source_lines(body: str, language: str = "") -> list[str]:
                     break
         # Mask string-literal contents so a `#`, `//` or `/*` inside a
         # string ("/api/*", "a # b") is never read as a comment opener.
-        line, cont_literal = _mask_line_strings(
-            line, _CONDITIONAL_LINE_RE.match(line) is not None
-        )
+        keep_interp = _CONDITIONAL_LINE_RE.match(line) is not None
+        line, open_lit = _mask_line_strings(line, keep_interp)
+        if open_lit is not None:
+            cq, cisf, cinner = open_lit
+            cont_literal = (cq, cisf, keep_interp, [cinner])
         if lang != "python":
             while "/*" in line:
                 head, _, tail = line.partition("/*")
