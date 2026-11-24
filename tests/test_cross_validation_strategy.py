@@ -1297,6 +1297,41 @@ class TestValidateSpecVsImpl:
         )
         assert "withdraw" not in report.spec_stronger_than_impl
 
+    def test_ts_slashed_comment_delimiter_keeps_block(self):
+        """`/*/ \\`x\\` */` — the / after /* is not the start of */ —
+        content before the real close is comment text."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "sd.ts"
+        impl_path.write_text(
+            "function withdraw(balance: number, amount: number): number {\n"
+            "  /*/ `x` */ if (amount <= balance) {\n"
+            "    return 0;\n"
+            "  }\n"
+            "  throw new Error();\n"
+            "}\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="typescript"
+        )
+        assert "withdraw" not in report.spec_stronger_than_impl
+
+    def test_ts_division_after_comment_close(self):
+        """`x /* c *// y` — the / after */ is division, not a comment."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "dc.ts"
+        impl_path.write_text(
+            "function withdraw(balance: number, amount: number): number {\n"
+            "  if ((amount /* c *// balance) <= balance) {\n"
+            "    return 0;\n"
+            "  }\n"
+            "  throw new Error();\n"
+            "}\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="typescript"
+        )
+        assert "withdraw" not in report.spec_stronger_than_impl
+
     def test_ts_backtick_inside_block_comment(self):
         """`/* see // `x */` — a lone backtick inside a /* comment is
         comment text, not a template start (a paired one could pass

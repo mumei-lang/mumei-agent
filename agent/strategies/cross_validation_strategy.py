@@ -241,32 +241,51 @@ def _literal_close(s: str, start: int, q: str, is_f: bool) -> int:
     return -1
 
 
-def _comment_state(text: str, lang: str) -> str | None:
-    """Comment state at the end of already-emitted text: ``"line"``
-    after a line-comment opener, ``"block"`` inside an unterminated
-    `/*`, else ``None``. The openers are `#` for Python and `//` / `/*`
-    for C-family languages. Scanned left to right so the first opener
-    wins — `/*` inside `//` and `//` inside `/* */` are comment text.
-    A `//` preceded by `:` (URL scheme) or `\\` (regex escape) is not
-    an opener."""
-    i, n = 0, len(text)
-    if lang == "python":
-        return "line" if "#" in text else None
-    while i < n - 1:
-        pair = text[i : i + 2]
-        if pair == "//":
-            if i == 0 or text[i - 1] not in ":\\":
-                return "line"
-            i += 1
+def _scan_comment_pairs(
+    text: str, lang: str, state: str | None, last: str, prev2: str
+) -> tuple[str | None, str, str]:
+    """Advance ``(state, last, prev2)`` over ``text`` char by char.
+
+    ``state`` is ``"line"`` after a line-comment opener, ``"block"``
+    inside an unterminated `/*`, else ``None`` — openers are `#` for
+    Python and `//` / `/*` for C-family languages. ``last`` is the
+    previous char still available to start a pair; it is cleared when a
+    delimiter pair consumes it so `/*/` cannot close its own opener.
+    ``prev2`` is the char before ``last`` (for `//`'s `:`/`\\`
+    exclusion)."""
+    for c in text:
+        if state == "line":
+            break
+        if lang == "python" and c == "#":
+            state = "line"
+            break
+        if not last:
+            last = c
             continue
+        pair = last + c
+        if state == "block":
+            if pair == "*/":
+                state, last, prev2 = None, "", ""
+            else:
+                prev2, last = last, c
+            continue
+        if lang == "python":
+            prev2, last = last, c
+            continue
+        if pair == "//" and prev2 not in ":\\":
+            state = "line"
+            break
         if pair == "/*":
-            end = text.find("*/", i + 2)
-            if end < 0:
-                return "block"
-            i = end + 2
+            state, last, prev2 = "block", "", ""
             continue
-        i += 1
-    return None
+        prev2, last = last, c
+    return state, last, prev2
+
+
+def _comment_state(text: str, lang: str) -> str | None:
+    """Comment state at the end of already-emitted text (see
+    ``_scan_comment_pairs``)."""
+    return _scan_comment_pairs(text, lang, None, "", "")[0]
 
 
 def _strip_ts_comments(line: str) -> tuple[str, bool]:
@@ -313,44 +332,16 @@ def _mask_line_strings(
     i, n = 0, len(line)
     open_lit: tuple[str, bool, str] | None = None
     # Comment state over the emitted text, advanced incrementally so
-    # each quote costs O(1) instead of rescanning the line — ``"line"``
-    # after a line-comment opener, ``"block"`` inside an unterminated
-    # `/*`, ``tail`` keeps the last two emitted chars so an opener pair
-    # split across emitted chunks is still seen.
+    # each quote costs O(1) instead of rescanning the line.
     cstate: str | None = None
-    tail = ""
+    last = prev2 = ""
 
     def emit(chunk: str) -> None:
-        nonlocal cstate, tail
+        nonlocal cstate, last, prev2
         out.append(chunk)
-        if cstate == "line" or not chunk:
-            tail = (tail + chunk)[-2:]
-            return
-        scan = tail + chunk
-        m = len(scan)
-        if lang == "python":
-            if "#" in chunk:
-                cstate = "line"
-        else:
-            j = max(len(tail) - 1, 0)
-            while j < m - 1:
-                pair = scan[j : j + 2]
-                if cstate == "block":
-                    if pair == "*/":
-                        cstate = None
-                        j += 2
-                        continue
-                    j += 1
-                    continue
-                if pair == "//" and (j == 0 or scan[j - 1] not in ":\\"):
-                    cstate = "line"
-                    break
-                if pair == "/*":
-                    cstate = "block"
-                    j += 2
-                    continue
-                j += 1
-        tail = scan[-2:]
+        cstate, last, prev2 = _scan_comment_pairs(
+            chunk, lang, cstate, last, prev2
+        )
 
     while i < n:
         if line[i] not in "'\"`":
@@ -370,8 +361,9 @@ def _mask_line_strings(
             # The deleted letters cannot hold a comment opener, but a
             # deleted char between two `/` could have split `//` —
             # rescan for state, keep it cheap (quotes are rare).
-            tail = joined[-2:]
-            cstate = _comment_state(joined, lang)
+            cstate, last, prev2 = _scan_comment_pairs(
+                joined, lang, None, "", ""
+            )
         prefix = line[p:i].lower()
         q = line[i]
         if cstate is not None:
