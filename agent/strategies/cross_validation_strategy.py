@@ -241,15 +241,14 @@ def _literal_close(s: str, start: int, q: str, is_f: bool) -> int:
     return -1
 
 
-def _comment_state(out: list[str], lang: str) -> str | None:
-    """Comment state at the end of the already-masked text: ``"line"``
+def _comment_state(text: str, lang: str) -> str | None:
+    """Comment state at the end of already-emitted text: ``"line"``
     after a line-comment opener, ``"block"`` inside an unterminated
     `/*`, else ``None``. The openers are `#` for Python and `//` / `/*`
     for C-family languages. Scanned left to right so the first opener
     wins — `/*` inside `//` and `//` inside `/* */` are comment text.
     A `//` preceded by `:` (URL scheme) or `\\` (regex escape) is not
     an opener."""
-    text = "".join(out)
     i, n = 0, len(text)
     if lang == "python":
         return "line" if "#" in text else None
@@ -313,9 +312,49 @@ def _mask_line_strings(
     out: list[str] = []
     i, n = 0, len(line)
     open_lit: tuple[str, bool, str] | None = None
+    # Comment state over the emitted text, advanced incrementally so
+    # each quote costs O(1) instead of rescanning the line — ``"line"``
+    # after a line-comment opener, ``"block"`` inside an unterminated
+    # `/*`, ``tail`` keeps the last two emitted chars so an opener pair
+    # split across emitted chunks is still seen.
+    cstate: str | None = None
+    tail = ""
+
+    def emit(chunk: str) -> None:
+        nonlocal cstate, tail
+        out.append(chunk)
+        if cstate == "line" or not chunk:
+            tail = (tail + chunk)[-2:]
+            return
+        scan = tail + chunk
+        m = len(scan)
+        if lang == "python":
+            if "#" in chunk:
+                cstate = "line"
+        else:
+            j = max(len(tail) - 1, 0)
+            while j < m - 1:
+                pair = scan[j : j + 2]
+                if cstate == "block":
+                    if pair == "*/":
+                        cstate = None
+                        j += 2
+                        continue
+                    j += 1
+                    continue
+                if pair == "//" and (j == 0 or scan[j - 1] not in ":\\"):
+                    cstate = "line"
+                    break
+                if pair == "/*":
+                    cstate = "block"
+                    j += 2
+                    continue
+                j += 1
+        tail = scan[-2:]
+
     while i < n:
         if line[i] not in "'\"`":
-            out.append(line[i])
+            emit(line[i])
             i += 1
             continue
         # A quote's prefix letters (r/b/f/u) are part of the literal —
@@ -323,13 +362,22 @@ def _mask_line_strings(
         p = i
         while p > 0 and line[p - 1] in "rbufRBUF":
             p -= 1
-        del out[len(out) - (i - p) :]
+        if i != p:
+            # Drop the prefix letters — by char count, not list items,
+            # since emitted chunks can be multi-char.
+            joined = "".join(out)[: -(i - p)]
+            out = [joined]
+            # The deleted letters cannot hold a comment opener, but a
+            # deleted char between two `/` could have split `//` —
+            # rescan for state, keep it cheap (quotes are rare).
+            tail = joined[-2:]
+            cstate = _comment_state(joined, lang)
         prefix = line[p:i].lower()
         q = line[i]
-        if _comment_state(out, lang) is not None:
+        if cstate is not None:
             # Inside a line or block comment — any quote is comment
             # text, not a literal start.
-            out.append(q)
+            emit(q)
             i += 1
             continue
         # A ' or " immediately after an identifier char is an apostrophe
@@ -338,7 +386,7 @@ def _mask_line_strings(
         # open a line continuation. A backtick after an identifier is a
         # TS tagged template, which still is a literal.
         if q != "`" and p > 0 and (line[p - 1].isalnum() or line[p - 1] == "_"):
-            out.append(q)
+            emit(q)
             i += 1
             continue
         is_f = "f" in prefix and q != "`"
@@ -349,10 +397,10 @@ def _mask_line_strings(
             if end < 0:
                 # Kept expressions wait for the closing line — the caller
                 # evaluates the whole multi-line inner at once.
-                out.append(q * 6)
+                emit(q * 6)
                 open_lit = (q * 3, is_f, inner)
             else:
-                out.append(q * 6 + _kept_exprs(inner, q, is_f, keep_interp))
+                emit(q * 6 + _kept_exprs(inner, q, is_f, keep_interp))
             continue
         end = _literal_close(line, i + 1, q, is_f)
         if end < 0 and (q == "`" or line[i + 1 :].rstrip().endswith("\\")):
@@ -361,18 +409,18 @@ def _mask_line_strings(
             # continuation state keeps the inner text for the caller.
             inner = line[i + 1 :]
             i = n
-            out.append(q * 2)
+            emit(q * 2)
             open_lit = (q, is_f, inner)
         elif end < 0:
             # An unterminated ' or " is no literal — single-line quotes
             # cannot span lines, so this is an apostrophe inside a
             # comment or other text ("Don't", "can't"). Keep it as text.
-            out.append(line[i:])
+            emit(line[i:])
             i = n
         else:
             inner = line[i + 1 : end - 1]
             i = end
-            out.append(q * 2 + _kept_exprs(inner, q, is_f, keep_interp))
+            emit(q * 2 + _kept_exprs(inner, q, is_f, keep_interp))
     return "".join(out), open_lit
 
 
