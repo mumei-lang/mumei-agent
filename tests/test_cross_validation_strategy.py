@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
+import unittest
 from pathlib import Path
 
 import pytest
@@ -997,10 +999,14 @@ class TestValidateSpecVsImpl:
         )
         assert "withdraw" not in report.spec_stronger_than_impl
 
+    @unittest.skipUnless(
+        sys.version_info >= (3, 12),
+        "same-quote nesting inside f-string fields needs PEP 701",
+    )
     def test_fstring_same_quote_fill_char_keeps_field(self):
-        """`f"{x:{"|"}>5}"` — PEP 701 allows the literal's own quote char
-        inside a nested literal in a replacement field; the outer literal
-        must not end early."""
+        """`f"{x:{"|"}>5}"` — PEP 701 (Python 3.12+) allows the literal's
+        own quote char inside a nested literal in a replacement field;
+        the outer literal must not end early."""
         spec_path = self._write_spec("withdraw", "amount <= balance")
         impl_path = Path(self.tmpdir) / "qf.py"
         impl_path.write_text(
