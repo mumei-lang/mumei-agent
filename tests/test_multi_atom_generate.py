@@ -536,3 +536,24 @@ def test_normalize_clause_syntax_continuation_ending_with_comment():
     out = _normalize_clause_syntax(broken)
     assert "ensures: result > 0;" in out
     assert "body: {" in out
+
+
+def test_normalize_clause_syntax_comment_inside_continuation_does_not_end_it():
+    """A full-line comment ending with `;` inside a multi-line clause must not
+    end the continuation — otherwise the real continuation lines kill header
+    tracking and later clauses/braces go unrepaired."""
+    from agent.strategies.generate_strategy_prompt import _normalize_clause_syntax
+
+    broken = (
+        "atom f(a: i64, b: i64) -> i64\n"
+        "    requires: a > 0 &&\n"
+        "        // both must hold;\n"
+        "        b > 0;\n"
+        "    ensures result > 0;\n"
+        "    {\n"
+        "        a + b\n"
+        "    };\n"
+    )
+    out = _normalize_clause_syntax(broken)
+    assert "ensures: result > 0;" in out
+    assert "body: {" in out
