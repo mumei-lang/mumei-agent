@@ -10367,3 +10367,18 @@ alongside `executable_sha256` for stored with-link descriptors;
 signature extras and the agent-owned name stay unchanged. Docs only.
 
 **回帰ゲート**: `uv run pytest tests/test_native_object_accept.py tests/test_core_evidence.py -q`
+
+### Object-stage acceptance — stored-carrier descriptor records
+
+`agent/core_evidence.py` admits `object_translation` and
+`source_machine_tv` in `_NATIVE_ACCEPTANCE_EXTRA_FIELDS` — Core emits
+both records on every `accept-object` descriptor (mumei#1357/#1439), so
+a stored new-generation `mumei.native-evidence-acceptance/v1` descriptor
+failed the closed shape before this admission. Both are admitted as
+opaque dict records: the stored fold stays representation-level and does
+not interpret their contents. `attempt_bound` still reports false for
+these descriptors — Core emits no `evidence_fingerprint` record pin on
+the object schema — and `producer_signature` stays admitted only on the
+source schema, matching DESIGN_OBJECT_TV_CONSUMPTION.md §4.
+
+**回帰ゲート**: `uv run pytest tests/test_evidence_acceptance_eval.py tests/test_core_evidence.py -q`

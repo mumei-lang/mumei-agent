@@ -36,6 +36,17 @@ at develop on 2026-11-21, plus PRs merged on 2026-11-20/21 in mumei, mumei-agent
 
 ## Landed since the audit (2026-11-23)
 
+- Item 4 — landed: Core now has the object-stage acceptance producer
+  (design memo [mumei#1433](https://github.com/mumei-lang/mumei/pull/1433),
+  `object_translation_acceptance_decision`
+  [mumei#1435](https://github.com/mumei-lang/mumei/pull/1435), Step 3 emit
+  switch to `native_bundle_object_translation_correspondence`
+  [mumei#1439](https://github.com/mumei-lang/mumei/pull/1439)) and the
+  agent admits the descriptor both on the direct route and as a stored
+  carrier ([mumei-agent#1321](https://github.com/mumei-lang/mumei-agent/pull/1321)
+  survey, [#1322](https://github.com/mumei-lang/mumei-agent/pull/1322)
+  decision mapping, [#1323](https://github.com/mumei-lang/mumei-agent/pull/1323)
+  scope+item vocabulary, stored-carrier record admission in this PR).
 - Item 1 — landed: `native_machine_tv_branch_call_recheck` asserts all four
   branch/call checks in `checks_performed`
   ([mumei-demo#171](https://github.com/mumei-lang/mumei-demo/pull/171)).
