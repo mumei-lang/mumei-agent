@@ -8,6 +8,9 @@ on:
         required: false
         default: "examples/challenges/results/"
 
+permissions:
+  contents: read
+
 jobs:
   challenge:
     runs-on: ubuntu-latest
