@@ -1280,6 +1280,24 @@ class TestValidateSpecVsImpl:
         )
         assert "withdraw" in report.spec_stronger_than_impl
 
+    def test_ts_backtick_inside_block_comment(self):
+        """`/* see // `x` */` — a backtick inside a /* comment whose
+        close sits after it is comment text, not a template start."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "ub.ts"
+        impl_path.write_text(
+            "function withdraw(balance: number, amount: number): number {\n"
+            "  /* note // `x` */ if (amount <= balance) {\n"
+            "    return 0;\n"
+            "  }\n"
+            "  throw new Error();\n"
+            "}\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="typescript"
+        )
+        assert "withdraw" not in report.spec_stronger_than_impl
+
     def test_ts_backtick_inside_line_comment(self):
         """`// see tag`docs` — an unclosed backtick inside a //
         comment is text, not a template start."""
