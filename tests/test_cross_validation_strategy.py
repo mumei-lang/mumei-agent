@@ -1298,13 +1298,13 @@ class TestValidateSpecVsImpl:
         assert "withdraw" not in report.spec_stronger_than_impl
 
     def test_ts_slashed_comment_delimiter_keeps_block(self):
-        """`/*/ \\`x\\` */` — the / after /* is not the start of */ —
-        content before the real close is comment text."""
+        """`/*/ \`x */` — the / after /* is not the start of */ — a
+        lone backtick inside is comment text, not a template opener."""
         spec_path = self._write_spec("withdraw", "amount <= balance")
         impl_path = Path(self.tmpdir) / "sd.ts"
         impl_path.write_text(
             "function withdraw(balance: number, amount: number): number {\n"
-            "  /*/ `x` */ if (amount <= balance) {\n"
+            "  /*/ `x */ if (amount <= balance) {\n"
             "    return 0;\n"
             "  }\n"
             "  throw new Error();\n"
@@ -1321,7 +1321,7 @@ class TestValidateSpecVsImpl:
         impl_path = Path(self.tmpdir) / "dc.ts"
         impl_path.write_text(
             "function withdraw(balance: number, amount: number): number {\n"
-            "  if ((amount /* c *// balance) <= balance) {\n"
+            "  if ((amount /* c *// parseInt(\"1//\", 10)) <= balance) {\n"
             "    return 0;\n"
             "  }\n"
             "  throw new Error();\n"
