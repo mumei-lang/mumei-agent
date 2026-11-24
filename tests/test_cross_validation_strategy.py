@@ -982,17 +982,69 @@ class TestValidateSpecVsImpl:
         assert "withdraw" not in report.spec_stronger_than_impl
 
     def test_brace_inside_nested_literal_does_not_end_field(self):
-        """`f"{a if '}}' else b}"` — the `}}` sits inside a string literal
-        inside the field and must not close it early."""
+        """`f"{a if '}}' else (amount <= balance)}"` — the `}}` sits inside
+        a string literal inside the field; truncating there loses both
+        identifiers."""
         spec_path = self._write_spec("withdraw", "amount <= balance")
         impl_path = Path(self.tmpdir) / "nb.py"
         impl_path.write_text(
             "def withdraw(balance, amount):\n"
-            "    assert f\"{'y' if '}}' else balance}\" and amount <= balance\n"
+            "    assert f\"{'y' if '}}' else (amount <= balance)}\"\n"
             "    return balance - amount\n"
         )
         report = self.validator.validate_spec_vs_impl(
             spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert "withdraw" not in report.spec_stronger_than_impl
+
+    def test_fstring_same_quote_fill_char_keeps_field(self):
+        """`f"{x:\">5}"`` — PEP 701 allows the literal's own quote inside
+        a replacement field; the literal must not end early."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "qf.py"
+        impl_path.write_text(
+            "def withdraw(balance, amount):\n"
+            '    assert len(f"{balance:\">5}{amount:\">5}") > 0\n'
+            "    return balance - amount\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert "withdraw" not in report.spec_stronger_than_impl
+
+    def test_ts_block_comment_before_object_key(self):
+        """`${{ /* c */ balance: 1, amount }}` — the comment does not make
+        `balance` a real reference; it is still just a key."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "tc.ts"
+        impl_path.write_text(
+            "function withdraw(balance: number, amount: number): number {\n"
+            "  if (`${{ /* c */ balance: 1, amount }}`.length > 0) {\n"
+            "    return balance - amount;\n"
+            "  }\n"
+            "  throw new Error();\n"
+            "}\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="typescript"
+        )
+        assert "withdraw" in report.spec_stronger_than_impl
+
+    def test_ts_regex_quote_does_not_swallow_field(self):
+        """`${x.test(/'/) ? amount : balance}` — the `'` inside the regex
+        is not a string start and must not swallow the field."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "rq.ts"
+        impl_path.write_text(
+            "function withdraw(balance: number, amount: number): number {\n"
+            "  if (`${x.test(/'/) ? amount : balance}`.length > 0) {\n"
+            "    return balance - amount;\n"
+            "  }\n"
+            "  throw new Error();\n"
+            "}\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="typescript"
         )
         assert "withdraw" not in report.spec_stronger_than_impl
 

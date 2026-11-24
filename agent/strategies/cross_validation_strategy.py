@@ -129,7 +129,10 @@ def _field_end(s: str, j: int) -> int:
     depth = 1
     while j < len(s) and depth:
         if s[j] in "'\"`":
-            j = _skip_literal(s, j)
+            nxt = _skip_literal(s, j)
+            # An unterminated "literal" is e.g. a quote inside a regex —
+            # treat it as a plain char instead of losing the field.
+            j = nxt if nxt < len(s) else j + 1
             continue
         if s[j] == "{":
             depth += 1
@@ -199,6 +202,94 @@ _TS_BRACED_GROUP_RE = re.compile(r"\{[^{}]*\}")
 _TS_OBJECT_KEY_RE = re.compile(r"(?<=[{,])\s*[A-Za-z_]\w*\s*:")
 
 
+def _mask_line_strings(line: str, keep_interp: bool) -> str:
+    """Mask every string literal in ``line`` to empty quotes.
+
+    Unlike the regex approach, the scan tolerates the literal's own quote
+    char inside ``{...}`` replacement fields (PEP 701), skips string
+    literals nested inside fields, and treats an unterminated quote
+    inside a field (e.g. a ``'`` inside a regex literal) as plain text.
+    """
+    out: list[str] = []
+    i, n = 0, len(line)
+    while i < n:
+        if line[i] not in "'\"`":
+            out.append(line[i])
+            i += 1
+            continue
+        p = i
+        while p > 0 and line[p - 1].isalpha():
+            p -= 1
+        prefix = line[p:i].lower()
+        q = line[i]
+        is_f = "f" in prefix and q != "`"
+        if line[i : i + 3] == q * 3:
+            end = line.find(q * 3, i + 3)
+            inner = line[i + 3 : n if end < 0 else end]
+            i = n if end < 0 else end + 3
+            out.append(q * 6 + _kept_exprs(inner, q, is_f, keep_interp))
+            continue
+        k = i + 1
+        inner_start = k
+        field_depth = 0
+        while k < n:
+            c = line[k]
+            if c == "\\":
+                k += 2
+                continue
+            if is_f and c == "{":
+                if line[k : k + 2] == "{{":
+                    k += 2
+                    continue
+                field_depth += 1
+                k += 1
+                continue
+            if is_f and c == "}" and field_depth > 0:
+                field_depth -= 1
+                k += 1
+                continue
+            if field_depth > 0 and c in "'\"`":
+                nxt = _skip_literal(line, k)
+                k = nxt if nxt < n else k + 1
+                continue
+            if c == q and field_depth == 0:
+                break
+            k += 1
+        inner = line[inner_start:k]
+        i = k + 1 if k < n else n
+        out.append(q * 2 + _kept_exprs(inner, q, is_f, keep_interp))
+    return "".join(out)
+
+
+def _kept_exprs(inner: str, quote: str, is_f: bool, keep_interp: bool) -> str:
+    """Kept interpolation expressions for one literal, or ``""``."""
+    if not keep_interp:
+        return ""
+    if quote == "`":
+        found = _ts_interp_exprs(inner)
+    elif is_f:
+        found = _py_interp_exprs(inner)
+    else:
+        found = []
+    kept: list[str] = []
+    for expr in found:
+        # Nested literals inside the expression (``f"{d['balance']}"``)
+        # hold literal text, not references — mask them out too.
+        expr = _STRING_LITERAL_RE.sub(_mask_string_literal, expr)
+        if quote == "`":
+            expr = _strip_ts_object_keys(expr)
+        else:
+            expr = _strip_format_spec(expr)
+        # Blank comment-, comma- and depth-significant characters
+        # (``#``, ``/``, ``,``, brackets) so the comment stripping,
+        # assert-message splitting and logical-line joining after
+        # masking are not affected by the expression's syntax.
+        expr = re.sub(r"[#/,()\[\]{}]", " ", expr)
+        if expr.strip():
+            kept.append(expr)
+    return " " + " ".join(kept) if kept else ""
+
+
 def _mask_string_literal(match: re.Match[str]) -> str:
     """Replace a literal with empty quotes.
 
@@ -209,46 +300,24 @@ def _mask_string_literal(match: re.Match[str]) -> str:
     return match.group("q") * 2
 
 
-def _mask_string_literal_keep_interp(match: re.Match[str]) -> str:
-    """Like :func:`_mask_string_literal` but keeps f-string/template
-    interpolation expressions visible; used on conditional lines whose
-    comparisons may legitimately interpolate the checked identifiers."""
-    inner = match.group("inner")
-    prefix = match.group("pre").lower()
-    quote = match.group("q")
-    exprs: list[str] = []
-    if quote == "`":
-        found = _ts_interp_exprs(inner)
-    elif "f" in prefix:
-        found = _py_interp_exprs(inner)
-    else:
-        found = []
-    for expr in found:
-        # Nested literals inside the expression (``f"{d['balance']}"``)
-        # hold literal text, not references — mask them out too.
-        expr = _STRING_LITERAL_RE.sub(_mask_string_literal, expr)
-        if quote == "`":
-            # Object-literal keys are labels, not reads — ``${{balance: 1}}``
-            # mentions ``balance`` without reading it. Strip ``key:`` inside
-            # each braced group (repeated for nesting) before the braces
-            # themselves are blanked below. A ternary ``? a : b`` has no
-            # braces and is unaffected.
-            prev = None
-            while prev != expr:
-                prev = expr
-                expr = _TS_BRACED_GROUP_RE.sub(
-                    lambda m: _TS_OBJECT_KEY_RE.sub(":", m.group(0)), expr
-                )
-        else:
-            expr = _strip_format_spec(expr)
-        # Blank comment-, comma- and depth-significant characters
-        # (``#``, ``/``, ``,``, brackets) so the comment stripping,
-        # assert-message splitting and logical-line joining after
-        # masking are not affected by the expression's syntax.
-        expr = re.sub(r"[#/,()\[\]{}]", " ", expr)
-        if expr.strip():
-            exprs.append(expr)
-    return quote + quote + (" " + " ".join(exprs) if exprs else "")
+_TS_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/")
+
+
+def _strip_ts_object_keys(expr: str) -> str:
+    """Object-literal keys are labels, not reads — ``${{balance: 1}}``
+    mentions ``balance`` without reading it. Strip ``key:`` inside each
+    braced group (repeated for nesting), after dropping ``/* */``
+    comments that could sit between the ``{`` and the key."""
+    prev = None
+    while prev != expr:
+        prev = expr
+        expr = _TS_BRACED_GROUP_RE.sub(
+            lambda m: _TS_OBJECT_KEY_RE.sub(
+                ":", _TS_BLOCK_COMMENT_RE.sub("", m.group(0))
+            ),
+            expr,
+        )
+    return expr
 
 
 def _strip_format_spec(expr: str) -> str:
@@ -342,12 +411,7 @@ def _guard_source_lines(body: str, language: str = "") -> list[str]:
                     break
         # Mask string-literal contents so a `#`, `//` or `/*` inside a
         # string ("/api/*", "a # b") is never read as a comment opener.
-        mask = (
-            _mask_string_literal_keep_interp
-            if _CONDITIONAL_LINE_RE.match(line)
-            else _mask_string_literal
-        )
-        line = _STRING_LITERAL_RE.sub(mask, line)
+        line = _mask_line_strings(line, _CONDITIONAL_LINE_RE.match(line) is not None)
         if lang != "python":
             while "/*" in line:
                 head, _, tail = line.partition("/*")
