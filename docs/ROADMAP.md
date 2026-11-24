@@ -10329,10 +10329,13 @@ positions, builtin members and the `for *` target are unchanged.
 agent-fold conditions surveyed in section 2: schema reuse needs nothing;
 the new `native_bundle_object_translation_correspondence` scope and the
 correspondence item names in `checks_performed` are vocabulary updates
-to `_valid_acceptance_descriptor` and `OBJECT_ACCEPT_CHECKS` that must
+to `_valid_acceptance_descriptor` (scope set plus two-generation
+link-consistency) and the shared `OBJECT_CHECK_VOCABULARY` that must
 land before Core switches the emitted scope; the recommended
 whole-correspondence fingerprint pin is a new `_NATIVE_ACCEPTANCE_EXTRA_FIELDS`
-admission that also supplies the record pin `attempt_bound` lacks;
+admission — and, unless Core spells it `evidence_fingerprint` or
+`sidecar_fingerprint`, an `attempt_bound` comparison-set extension too —
+alongside `executable_sha256` for stored with-link descriptors;
 signature extras and the agent-owned name stay unchanged. Docs only.
 
 **回帰ゲート**: `uv run pytest tests/test_native_object_accept.py tests/test_core_evidence.py -q`
