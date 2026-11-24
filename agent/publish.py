@@ -231,6 +231,8 @@ def publish(
     generated_file = target_file_rel
     generated_path = cwd / generated_file
     generated_path.parent.mkdir(parents=True, exist_ok=True)
+    if not code.endswith("\n"):
+        code += "\n"
     with open(generated_path, "w", encoding="utf-8") as f:
         f.write(code)
     extra_file_paths: list[tuple[str, Path]] = []
@@ -245,6 +247,8 @@ def publish(
                 return result
             extra_path = cwd / relative
             extra_path.parent.mkdir(parents=True, exist_ok=True)
+            if not contents.endswith("\n"):
+                contents += "\n"
             extra_path.write_text(contents, encoding="utf-8")
             extra_file_paths.append((relative.as_posix(), extra_path))
     result["generated_file"] = generated_file

@@ -4,7 +4,12 @@ repos:
     hooks:
       - id: check-yaml
       - id: end-of-file-fixer
+        # Generated artifacts (reports/, forge_log.json) are not hand-edited;
+        # rewriting 1k+ report files on --all-files churns the tree.
+        exclude: '^(reports/|forge_log\.json$)'
       - id: trailing-whitespace
+        exclude: '^reports/'
+
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.17.6
     hooks:

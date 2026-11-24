@@ -20,7 +20,7 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@v5
       - name: Ruff check (baseline rules; see [tool.ruff.lint] in pyproject.toml)
-        run: uvx ruff check
+        run: uvx ruff==0.17.6 check
 
   test:
     runs-on: ubuntu-latest

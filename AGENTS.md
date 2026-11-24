@@ -5,8 +5,8 @@ These rules are for coding agents and harnesses that work in this repository (De
 ## Fast path
 
 ```bash
-uv sync --all-extras            # tree-sitter Rust/Solidity/TS parsers need all extras
-uvx ruff check                  # lint baseline ([tool.ruff.lint] in pyproject.toml)
+uv sync --extra test            # test extra only, matching CI; all extras pull in dashboard deps
+uvx ruff==0.17.6 check         # lint baseline, pinned to match pre-commit/CI
 PYTHONPATH=$PWD .venv/bin/python -m pytest -q tests/          # unit suite
 ```
 
