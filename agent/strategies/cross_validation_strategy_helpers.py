@@ -150,7 +150,7 @@ def _extract_function_body(source: str, language: str, function_name: str) -> st
             re.compile(
                 # Allow an optional `-> <annotation>` before the colon so
                 # annotated signatures like `def f(x: int) -> int:` match.
-                rf"def\s+{escaped}\s*\([^)]*\)\s*(?:->\s*[^:\n]+)?\s*:(?P<body>[\s\S]*?)(?=^\s*def\s+\w|\Z)",
+                rf"def\s+{escaped}\s*\([^)]*\)\s*(?:->\s*[^:\n]+)?\s*:(?P<body>[\s\S]*?)(?=^\s*(?:async\s+)?def\s+\w|^\s*class\s+\w|\Z)",
                 re.MULTILINE,
             )
         )

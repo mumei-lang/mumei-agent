@@ -94,34 +94,105 @@ def _condition_identifiers(condition: str) -> set[str]:
     }
 
 
-def _guard_source_lines(body: str) -> list[str]:
-    """Return body lines with comments and docstrings stripped."""
+_C_COMMENT_RE = re.compile(r"/\*[\s\S]*?\*/")
+
+
+def _guard_source_lines(body: str, language: str = "") -> list[str]:
+    """Return logical body lines with comments and docstrings stripped.
+
+    Lines inside an unclosed parenthesis are joined so a guard written across
+    several lines (``if (\n    amount > balance\n):``) is still seen as one
+    candidate.
+    """
+    lang = language.lower()
     cleaned: list[str] = []
     in_docstring: str | None = None
+    in_block_comment = False
     for raw in body.splitlines():
         line = raw
+        if in_block_comment:
+            if "*/" in line:
+                line = line.split("*/", 1)[1]
+                in_block_comment = False
+            else:
+                continue
         if in_docstring is not None:
             if in_docstring in line:
                 line = line.split(in_docstring, 1)[1]
                 in_docstring = None
             else:
                 continue
-        for quote in ('"""', "'''"):
-            if quote in line:
-                head, _, tail = line.partition(quote)
-                if quote in tail:
-                    line = head + tail.split(quote, 1)[1]
+        if lang == "python":
+            for quote in ('"""', "'''"):
+                if quote in line:
+                    head, _, tail = line.partition(quote)
+                    if quote in tail:
+                        line = head + tail.split(quote, 1)[1]
+                    else:
+                        line = head
+                        in_docstring = quote
+                    break
+        if lang != "python":
+            while "/*" in line:
+                head, _, tail = line.partition("/*")
+                if "*/" in tail:
+                    line = head + tail.split("*/", 1)[1]
                 else:
                     line = head
-                    in_docstring = quote
-                break
-        line = line.split("#", 1)[0].split("//", 1)[0]
+                    in_block_comment = True
+                    break
+            line = _C_COMMENT_RE.sub(" ", line)
+        line = line.split("#", 1)[0]
+        if lang != "python":
+            # `//` is a comment in C-family languages but the floor-division
+            # operator in Python — only strip it for non-Python bodies.
+            line = line.split("//", 1)[0]
         if line.strip():
             cleaned.append(line)
-    return cleaned
+    logical: list[str] = []
+    depth = 0
+    for line in cleaned:
+        if logical and depth > 0:
+            logical[-1] += " " + line.strip()
+        else:
+            logical.append(line)
+        depth += line.count("(") + line.count("[") + line.count("{")
+        depth -= line.count(")") + line.count("]") + line.count("}")
+    return logical
 
 
-def _has_unenforced_precondition(requires: str, body: str) -> bool:
+_FORWARD_RETURN_RE = re.compile(
+    r"\breturn\s+[A-Za-z_][\w.]*\s*\((?P<args>[^()]*)\)"
+)
+_FORWARD_ARG_RE = re.compile(r"^[A-Za-z_][\w.]*$")
+_CALL_SITE_RE = re.compile(r"(?P<callee>[A-Za-z_][\w.]*)\s*\(")
+_VALIDATION_TOKENS = (
+    "check", "valid", "ensure", "verify", "require", "guard",
+    "assert", "reject", "enforce", "insufficient", "forbid",
+)
+
+
+def _is_validation_call(callee: str) -> bool:
+    lowered = callee.lower()
+    return any(token in lowered for token in _VALIDATION_TOKENS)
+
+
+def _is_pure_call_forward(lines: list[str]) -> bool:
+    """True when the body is only ``return callee(ident, ident, ...)``.
+
+    A forward that passes raw identifiers may delegate the check to the
+    callee; ``return round(balance - amount, 2)`` computes instead and does
+    not get the exemption.
+    """
+    text = " ".join(lines)
+    match = _FORWARD_RETURN_RE.search(text)
+    if not match:
+        return False
+    args = [a.strip() for a in match.group("args").split(",") if a.strip()]
+    return bool(args) and all(_FORWARD_ARG_RE.match(a) for a in args)
+
+
+def _has_unenforced_precondition(requires: str, body: str, language: str = "") -> bool:
     """True when a spec precondition names identifiers no guard covers.
 
     The audit's extracted ``requires`` should mirror defensive checks present
@@ -132,20 +203,24 @@ def _has_unenforced_precondition(requires: str, body: str) -> bool:
     """
     if not requires or requires.strip() in _TRIVIAL_REQUIRES:
         return False
-    lines = _guard_source_lines(body)
-    # A pure call-forwarding body may hand enforcement to the callee
-    # (``return constanttime.Compare(x, y)``) — that is outside what this
-    # file-local check can see, so it is not reported as unenforced.
-    if re.search(r"\breturn\s+[A-Za-z_][\w.]*\s*\(", " ".join(lines)):
+    lines = _guard_source_lines(body, language)
+    if _is_pure_call_forward(lines):
         return False
-    # Guard statements (if/assert/raise/throw/...) plus call sites that may
-    # delegate the check (``self._ensure_balance(amount)``); a bare
-    # ``return expr`` does not enforce anything.
+    # Guard statements (if/assert/raise/throw/...) plus validation-named call
+    # sites that may delegate the check (``self._ensure_balance(amount)``).
+    # Calls like ``print(balance, amount)`` touch the identifiers without
+    # enforcing anything, so only validation-flavoured callee names count.
     enforcement_lines = [
         line
         for line in lines
         if _GUARD_STATEMENT_RE.search(line)
-        or (re.search(r"[A-Za-z_][\w.]*\s*\(", line) and not line.lstrip().startswith("return"))
+        or (
+            not line.lstrip().startswith("return")
+            and any(
+                _is_validation_call(m.group("callee"))
+                for m in _CALL_SITE_RE.finditer(line)
+            )
+        )
     ]
     for condition in _requires_conditions(requires):
         identifiers = _condition_identifiers(condition)
@@ -284,17 +359,19 @@ class CrossValidator:
             has_nontrivial_requires = bool(atom["requires"]) and atom["requires"].strip() not in _TRIVIAL_REQUIRES
             if has_complex_contract or has_nontrivial_requires:
                 body = _extract_function_body(impl_source, language, impl_name)
+                if body and _has_unenforced_precondition(atom["requires"], body, language):
+                    report.spec_stronger_than_impl.append(atom["name"])
+                    # The requires literal itself is not echoed: spec text may
+                    # contain sensitive values and diagnostics are forwarded to
+                    # MCP clients.
+                    report.details.append(
+                        f"spec precondition assumed, not enforced, by `{impl_name}`"
+                    )
+                    continue
                 if body and has_complex_contract and len(body.strip()) < len(atom["requires"]):
                     if _is_short_native_or_wrapper_body(body):
                         continue
                     report.spec_stronger_than_impl.append(atom["name"])
-                    continue
-                if body and _has_unenforced_precondition(atom["requires"], body):
-                    report.spec_stronger_than_impl.append(atom["name"])
-                    report.details.append(
-                        f"spec precondition assumed, not enforced, by `{impl_name}`: "
-                        f"requires {atom['requires']}"
-                    )
 
         # Semantic gap detection: impl stronger than spec
         # Functions with complex validation that have no spec or trivial spec

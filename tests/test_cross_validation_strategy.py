@@ -346,6 +346,68 @@ class TestValidateSpecVsImpl:
         )
         assert "compare" not in report.spec_stronger_than_impl
 
+    def test_computed_return_is_not_a_call_forward(self):
+        """`return round(balance - amount, 2)` computes — it does not delegate
+        the balance check to `round`."""
+        spec_path = self._write_spec("withdraw", "amount > 0 && amount <= balance")
+        impl_path = Path(self.tmpdir) / "rounded.py"
+        impl_path.write_text(
+            "def withdraw(balance, amount):\n"
+            "    if amount <= 0:\n"
+            "        raise ValueError('amount must be positive')\n"
+            "    return round(balance - amount, 2)\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert "withdraw" in report.spec_stronger_than_impl
+
+    def test_non_validation_call_does_not_count_as_guard(self):
+        """`print(balance, amount)` touches the identifiers without
+        enforcing anything."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "noisy.py"
+        impl_path.write_text(
+            "def withdraw(balance, amount):\n"
+            "    print(balance, amount)\n"
+            "    return balance - amount\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert "withdraw" in report.spec_stronger_than_impl
+
+    def test_multiline_guard_is_detected(self):
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "multiline.py"
+        impl_path.write_text(
+            "def withdraw(balance, amount):\n"
+            "    if (\n"
+            "        balance < amount\n"
+            "    ):\n"
+            "        raise ValueError('insufficient funds')\n"
+            "    return balance - amount\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert "withdraw" not in report.spec_stronger_than_impl
+
+    def test_python_floor_division_is_not_a_comment(self):
+        """`//` must not be stripped as a comment in Python bodies."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "floordiv.py"
+        impl_path.write_text(
+            "def withdraw(balance, amount):\n"
+            "    if amount > balance // 2 + balance:\n"
+            "        raise ValueError('over limit')\n"
+            "    return balance - amount\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert "withdraw" not in report.spec_stronger_than_impl
+
     def test_python_annotated_signature_body_is_extracted(self):
         """`def f(x: int) -> int:` must produce a body — previously the regex
         required `)` immediately before `:` so annotated functions were
