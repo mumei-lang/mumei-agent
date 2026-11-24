@@ -34,6 +34,7 @@ from agent.strategies.cross_validation_strategy_helpers import (
     _RUST_FUNC_RE,
     _TS_ARROW_RE,
     _TS_FUNC_RE,
+    _canonical_language,
     _canonical_symbol,
     _extract_function_body,
     _extract_functions,
@@ -95,6 +96,12 @@ def _condition_identifiers(condition: str) -> set[str]:
 
 
 _C_COMMENT_RE = re.compile(r"/\*[\s\S]*?\*/")
+# Masks string-literal contents before comment stripping so `"/api/*"` or
+# `"a # b"` is never misread as a comment opener. Escaped quotes inside
+# keep the literal balanced.
+_STRING_LITERAL_RE = re.compile(
+    r'"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'|`(?:[^`\\]|\\.)*`'
+)
 
 
 def _guard_source_lines(body: str, language: str = "") -> list[str]:
@@ -104,7 +111,7 @@ def _guard_source_lines(body: str, language: str = "") -> list[str]:
     several lines (``if (\n    amount > balance\n):``) is still seen as one
     candidate.
     """
-    lang = language.lower()
+    lang = _canonical_language(language) or language.lower()
     cleaned: list[str] = []
     in_docstring: str | None = None
     in_block_comment = False
@@ -132,6 +139,9 @@ def _guard_source_lines(body: str, language: str = "") -> list[str]:
                         line = head
                         in_docstring = quote
                     break
+        # Mask string-literal contents so a `#`, `//` or `/*` inside a
+        # string ("/api/*", "a # b") is never read as a comment opener.
+        line = _STRING_LITERAL_RE.sub('""', line)
         if lang != "python":
             while "/*" in line:
                 head, _, tail = line.partition("/*")
@@ -156,15 +166,21 @@ def _guard_source_lines(body: str, language: str = "") -> list[str]:
             logical[-1] += " " + line.strip()
         else:
             logical.append(line)
-        depth += line.count("(") + line.count("[") + line.count("{")
-        depth -= line.count(")") + line.count("]") + line.count("}")
+        # Only parens and brackets continue a logical line — a `{` opens a
+        # block, and joining `if cond {` with the next line would merge the
+        # condition with the block's body.
+        depth += line.count("(") + line.count("[")
+        depth -= line.count(")") + line.count("]")
     return logical
 
 
 _FORWARD_RETURN_RE = re.compile(
     r"\breturn\s+[A-Za-z_][\w.]*\s*\((?P<args>[^()]*)\)"
 )
-_FORWARD_ARG_RE = re.compile(r"^[A-Za-z_][\w.]*$")
+# An argument is a plain identifier (``balance``, ``s.balance``) or a
+# keyword-argument form of one (``balance=balance``) — both forward the raw
+# value. Anything else (arithmetic, literals, nested calls) computes.
+_FORWARD_ARG_RE = re.compile(r"^(?:[A-Za-z_][\w.]*\s*=\s*)?[A-Za-z_][\w.]*$")
 _CALL_SITE_RE = re.compile(r"(?P<callee>[A-Za-z_][\w.]*)\s*\(")
 _VALIDATION_TOKENS = (
     "check", "valid", "ensure", "verify", "require", "guard",

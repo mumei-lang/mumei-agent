@@ -394,13 +394,76 @@ class TestValidateSpecVsImpl:
         assert "withdraw" not in report.spec_stronger_than_impl
 
     def test_python_floor_division_is_not_a_comment(self):
-        """`//` must not be stripped as a comment in Python bodies."""
+        """`//` must not be stripped as a comment in Python bodies. The guard
+        uses the spec's own bound (amount <= balance) written through `//` so
+        the test fails if `//` truncates the line."""
         spec_path = self._write_spec("withdraw", "amount <= balance")
         impl_path = Path(self.tmpdir) / "floordiv.py"
         impl_path.write_text(
             "def withdraw(balance, amount):\n"
-            "    if amount > balance // 2 + balance:\n"
+            "    if amount // 1 > balance:\n"
             "        raise ValueError('over limit')\n"
+            "    return balance - amount\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert "withdraw" not in report.spec_stronger_than_impl
+
+    def test_go_brace_does_not_merge_condition_with_block_body(self):
+        """Go `if amount <= 0 { return -1 }` guards only `amount`; the block's
+        `return balance` must not be merged into the condition line."""
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "w.go"
+        impl_path.write_text(
+            "func withdraw(balance int, amount int) int {\n"
+            "\tif amount <= 0 {\n"
+            "\t\treturn -1\n"
+            "\t}\n"
+            "\treturn balance - amount\n"
+            "}\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="go"
+        )
+        assert "withdraw" in report.spec_stronger_than_impl
+
+    def test_comment_markers_inside_strings_are_not_comments(self):
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "w.ts"
+        impl_path.write_text(
+            "function withdraw(balance: number, amount: number): number {\n"
+            "  const tag = \"/api/*\";\n"
+            "  if (amount > balance) { throw new Error('over'); }\n"
+            "  return balance - amount;\n"
+            "}\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="typescript"
+        )
+        assert "withdraw" not in report.spec_stronger_than_impl
+
+    def test_keyword_arg_forward_is_pure_delegation(self):
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "kw.py"
+        impl_path.write_text(
+            "def withdraw(balance, amount):\n"
+            "    return ledger.apply(balance=balance, amount=amount)\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert "withdraw" not in report.spec_stronger_than_impl
+
+    def test_local_class_does_not_truncate_body(self):
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "localclass.py"
+        impl_path.write_text(
+            "def withdraw(balance, amount):\n"
+            "    class InsufficientFunds(Exception):\n"
+            "        pass\n"
+            "    if balance < amount:\n"
+            "        raise InsufficientFunds()\n"
             "    return balance - amount\n"
         )
         report = self.validator.validate_spec_vs_impl(
