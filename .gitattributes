@@ -1,7 +1,9 @@
 # Mark generated artifacts so GitHub diffs and `linguist` stats stay focused
 # on hand-written sources (B4, mumei-lang/mumei#1449).
 uv.lock linguist-generated
-reports/** linguist-generated
+# Only JSON results are generated; reports/*.py runners and *.md memos are
+# hand-authored and stay reviewable.
+reports/**/*.json linguist-generated
 forge_log.json linguist-generated
 docs/_site/** linguist-generated
 
