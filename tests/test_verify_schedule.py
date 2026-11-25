@@ -486,10 +486,15 @@ def test_host_source_stdin_wins_over_manifest_stdin(inputs, capsys, tmp_path):
             "stdin": "source",
         }
     }), encoding="utf-8")
+    policy = tmp_path / "policy_allow_manifest_stdin.json"
+    policy_doc = json.loads(Path(inputs["policy"]).read_text(encoding="utf-8"))
+    policy_doc["allow_manifest_attempt_stdin"] = True
+    policy.write_text(json.dumps(policy_doc), encoding="utf-8")
     args = args_for({
         **inputs,
         "adapters": str(adapters),
         "argv_map": str(path),
+        "policy": str(policy),
     })
 
     assert main_schedule(args) == 0
