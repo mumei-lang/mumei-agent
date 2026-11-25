@@ -2783,7 +2783,10 @@ def test_deep_constant_expression_stays_unknown_without_losing_analysis() -> Non
     depth = 1200
     expression = "1" + "+(1" * depth + ")" * depth
     flow = _go(f"d := int({expression})\nreturn 1 / d")
-    assert flow.facts_for_expression("1 / d") is not None
+    facts = flow.facts_for_expression("1 / d")
+    assert facts is not None
+    assert "d" not in facts.consts
+    assert "d" not in facts.nonzero
 
 
 def test_go_bitwise_precedence_is_not_python_precedence() -> None:
