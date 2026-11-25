@@ -1427,6 +1427,44 @@ def test_audit_does_not_treat_python_method_as_module_contract(
     assert [hint["function_name"] for hint in result.migration_hints] == ([] if has_guard else ["Service.call"])
 
 
+@pytest.mark.integration
+def test_auto_migrate_includes_refuted_module_function_and_method_gap(tmp_path: Path) -> None:
+    core = os.environ.get("MUMEI_BIN")
+    if not core or not Path(core).is_absolute() or not Path(core).is_file():
+        pytest.skip("set MUMEI_BIN to an absolute trusted Core executable")
+    source = tmp_path / "ledger.py"
+    source.write_text(
+        "def withdraw(balance: int, amount: int) -> int:\n"
+        "    return balance - amount\n\n"
+        "class Ledger:\n"
+        "    def debit(self, balance: int, amount: int) -> int:\n"
+        "        return balance - amount\n\n"
+        "def identity(amount: int) -> int:\n"
+        "    return amount\n",
+        encoding="utf-8",
+    )
+    spec = _forge_spec()
+    withdraw = spec["atoms"][0]
+    withdraw["requires"] = "true"
+    spec["atoms"].append({**withdraw, "name": "debit", "requires": "balance >= amount"})
+    extractor = MagicMock()
+    extractor.extract_from_file.return_value = CodeToSpecResult(
+        success=True,
+        detected_language="python",
+        natural_language_spec="Both operations return the remaining balance, which must be non-negative.",
+        forge_task_spec=spec,
+    )
+    config = AgentConfig(api_key="sentinel-test-only", mumei_bin=core, spec_cache_dir="")
+    result = AuditPipeline(config, code_to_spec_extractor=extractor).audit_file(
+        source, "python", auto_migrate=True,
+    )
+
+    assert result.verification_status == "refuted"
+    assert [entry["function_name"] for entry in result.counterexample_values] == ["withdraw"]
+    assert "spec precondition assumed, not enforced, by `Ledger.debit`" in result.cross_validation_gaps
+    assert {hint["function_name"] for hint in result.migration_hints} == {"withdraw", "Ledger.debit"}
+
+
 def test_audit_report_includes_step_guidance() -> None:
     result = AuditResult(
         success=False,

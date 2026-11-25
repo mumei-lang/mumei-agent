@@ -415,16 +415,19 @@ def _cross_validation_gap_strings(report: CrossValidationReport) -> list[str]:
 def _migration_issue_dicts(
     verification_violations: list[str],
     cross_validation_gaps: list[str],
+    *,
+    verification_function_names: Mapping[str, str],
 ) -> list[dict[str, str]]:
     issues: list[dict[str, str]] = []
-    issues.extend(
-        {
+    for violation in verification_violations:
+        issue = {
             "kind": "verification",
             "severity": "error",
             "message": violation,
         }
-        for violation in verification_violations
-    )
+        if violation in verification_function_names:
+            issue["function_name"] = verification_function_names[violation]
+        issues.append(issue)
     issues.extend(
         {
             "kind": "alignment",

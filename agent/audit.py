@@ -429,6 +429,7 @@ class AuditPipeline:
 
         spec_health_issues: list[str] = malformed_extraction_issues
         verification_violations: list[str] = []
+        verification_function_names: dict[str, str] = {}
         counterexample_values: list[dict] = []
         cross_validation_gaps: list[str] = []
         verification_status: str | None = None
@@ -597,7 +598,9 @@ class AuditPipeline:
                     ):
                         if check.status == "refuted":
                             verification_status = "refuted"
-                            verification_violations.append(check.violation)
+                            violation = check.violation
+                            verification_violations.append(violation)
+                            verification_function_names[violation] = check.function
                             counterexample_values.append(
                                 {"function_name": check.function, "counterexample": check.counterexample}
                             )
@@ -661,6 +664,7 @@ class AuditPipeline:
             migration_issues = _migration_issue_dicts(
                 verification_violations,
                 cross_validation_gaps,
+                verification_function_names=verification_function_names,
             )
             hints = suggest_migration_for_file(
                 source_label,
