@@ -19,6 +19,7 @@ from agent.core_evidence import (
     MAX_DIAGNOSTIC_BYTES,
     check_evidence_representation,
     check_evidence_requirement,
+    check_evidence_requirement_list,
     record_evidence_acceptance,
 )
 from agent.verification_attempt import (
@@ -861,6 +862,63 @@ def test_matching_sequence_does_not_change_timeout_cancel_or_error_protocol(exec
 
 def selected(output):
     return matching_sequence(output).select_result(output)
+
+
+def incomplete(output):
+    return AttemptOutput(
+        output.attempt,
+        output.stdout,
+        output.expected_stdout_sha256,
+        complete=False,
+    )
+
+
+def test_incomplete_output_fails_closed_before_core_io(monkeypatch, tmp_path):
+    def forbidden(*args, **kwargs):
+        pytest.fail("an incomplete adapter output reached Core I/O")
+
+    monkeypatch.setattr(core_evidence, "_run_check", forbidden)
+    output = incomplete(snapshot())
+    with pytest.raises(
+        core_evidence.CoreCheckFailed,
+        match="^Core Evidence representation check failed$",
+    ):
+        check_evidence_representation(
+            output, core_executable="/trusted/core", timeout_ms=100
+        )
+
+    requirement = str(tmp_path / "requirement.json")
+    requirement_list = str(tmp_path / "requirement-list.json")
+    for check, key in (
+        (check_evidence_requirement, "requirement_path"),
+        (check_evidence_requirement_list, "requirement_list_path"),
+    ):
+        with pytest.raises(
+            core_evidence.CoreCheckFailed,
+            match="^Core Evidence requirement check failed$",
+        ):
+            check(
+                output,
+                core_executable="/trusted/core",
+                timeout_ms=100,
+                **{key: requirement if key == "requirement_path" else requirement_list},
+            )
+
+
+def test_record_evidence_check_marks_incomplete_output_failed(monkeypatch):
+    def forbidden(*args, **kwargs):
+        pytest.fail("an incomplete adapter output reached Core I/O")
+
+    monkeypatch.setattr(core_evidence, "_run_check", forbidden)
+    output = incomplete(snapshot())
+    sequence = selected(output)
+    check = core_evidence.record_evidence_check(
+        sequence,
+        output,
+        core_executable="/trusted/core",
+        timeout_ms=100,
+    )
+    assert check.outcome == "failed"
 
 
 @pytest.mark.parametrize("exit_code", [0, 7, -9])

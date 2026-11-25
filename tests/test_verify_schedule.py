@@ -11,6 +11,7 @@ import pytest
 from agent import verify_schedule as verify_schedule_module
 from agent.attempt_runner import MAX_FEED_BYTES
 from agent.plan_history_log import append_plan_history, read_plan_history
+from agent.verification_attempt import MAX_STDOUT_BYTES
 from agent.verify_schedule import (
     build_schedule_parser,
     main_schedule,
@@ -1045,6 +1046,43 @@ def test_core_flag_records_evidence_acceptance(inputs, capsys, tmp_path):
     doc = json.loads(capsys.readouterr().out)
     assert doc["evidence_check"]["outcome"] == "valid"
     assert doc["evidence_acceptance"]["accepted"] is True
+
+
+def test_incomplete_selected_stdout_is_not_accepted(inputs, capsys, tmp_path):
+    argv_doc = json.loads(Path(inputs["argv_map"]).read_text())
+    argv_doc["beta"] = [
+        ATTEMPT_PY,
+        "-c",
+        f"import sys; sys.stdout.write('x' * {MAX_STDOUT_BYTES + 1})",
+    ]
+    argv_path = tmp_path / "argv-large-output.json"
+    argv_path.write_text(json.dumps(argv_doc), encoding="utf-8")
+
+    core = _accept_list_core(tmp_path, "accepted")
+    req = _requirement_list(tmp_path)
+    export = tmp_path / "promotable"
+    export.mkdir()
+    (export / "requirement-list.json").write_text("stale", encoding="utf-8")
+    (export / "evidence.json").write_text("stale", encoding="utf-8")
+    (export / "acceptance.json").write_text(json.dumps({
+        "schema_version": "mumei.evidence-requirement-list-acceptance/v1",
+    }), encoding="utf-8")
+
+    assert main_schedule(
+        args_for(
+            inputs,
+            argv_map=str(argv_path),
+            core=str(core),
+            core_requirement_list=str(req),
+            export_evidence_acceptance=str(export),
+        )
+    ) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["outcome"] == "selected"
+    assert doc["evidence_check"]["outcome"] == "failed"
+    assert doc["evidence_acceptance"]["accepted"] is False
+    for name in ("requirement-list.json", "evidence.json", "acceptance.json"):
+        assert not (export / name).exists()
 
 
 def test_core_flag_requires_absolute_existing_path(inputs):
