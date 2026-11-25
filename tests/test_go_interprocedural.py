@@ -1077,6 +1077,8 @@ def test_var_declaration_shapes_stay_unsupported(
         "func F(x int64) int64 { var ( a, b = x, x ); return a+b }",
         "func F(x int64) int64 { var ( a, b int64 ); return x + a + b }",
         "func F(x int64) int64 { var ( a int64 = x /*c*/ ); return a }",
+        "func F(x int64) int64 { var ( ch chan int64 = make(chan int64) ); ch <- x; return <-ch }",
+        "func F(x int64) int64 { var ( f func() int64 = func() int64 { return x } ); return f() }",
         "func F(x int64) int64 { const (A = iota); var ( a = x ); return x+a+A }",
     ],
 )
@@ -1086,6 +1088,21 @@ def test_compact_grouped_var_without_final_separator_is_admitted(
     result = named(*unit(go_types_helper, declarations))
     assert result.available
     assert result.return_dependencies == frozenset({0})
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        "func F(x int64) int64 { const (A float64 = 1); return x }",
+        "func F(x int64) int64 { var ( s string = \"s\" ); _ = s; return x }",
+    ],
+)
+def test_compact_grouped_non_scalar_declarations_stay_unsupported(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available
+    assert result.gaps
 
 
 @pytest.mark.parametrize(
