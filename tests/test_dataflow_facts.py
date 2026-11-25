@@ -2757,6 +2757,35 @@ def test_line_comment_newline_preserves_slice_colon() -> None:
     assert _transition_messages(source, "uninitialized_use")
 
 
+def test_constant_numeric_edge_forms_stay_resolved() -> None:
+    facts = _facts(
+        "d := int(2.)\nreturn 10 / d",
+        "10 / d",
+    )
+    assert facts.consts["d"] == 2
+
+    trailing = _facts(
+        "d := int(2,)\nreturn 10 / d",
+        "10 / d",
+    )
+    assert trailing.consts["d"] == 2
+
+
+def test_unicode_constant_name_resolves_in_expression() -> None:
+    facts = _facts(
+        "const 幅 = 2\nd := 幅 + 1\nreturn 12 / d",
+        "12 / d",
+    )
+    assert facts.consts["d"] == 3
+
+
+def test_deep_constant_expression_stays_unknown_without_losing_analysis() -> None:
+    depth = 1200
+    expression = "1" + "+(1" * depth + ")" * depth
+    flow = _go(f"d := int({expression})\nreturn 1 / d")
+    assert flow.facts_for_expression("1 / d") is not None
+
+
 def test_go_bitwise_precedence_is_not_python_precedence() -> None:
     facts = _facts("d := 2 + 'a' & 4 - 2\nreturn 1 / d", "1 / d")
     assert facts.consts["d"] == 0

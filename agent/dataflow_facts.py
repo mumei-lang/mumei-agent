@@ -207,7 +207,7 @@ def evaluate_constant_expression(
                 break
         if matched:
             continue
-        if ch in "+-*/%&|^":
+        if ch in "+-*/%&|^,":
             tokens.append(ch)
             i += 1
             continue
@@ -232,7 +232,7 @@ def evaluate_constant_expression(
         if ch.isdigit() or (ch == "." and i + 1 < len(expr) and expr[i + 1].isdigit()):
             number = re.match(
                 r"(?:0[xX][0-9a-fA-F_]+|0[bB][01_]+|0[oO][0-7_]+|"
-                r"\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][+-]?\d[\d_]*)?|"
+                r"\d[\d_]*(?:\.[\d_]*)?(?:[eE][+-]?\d[\d_]*)?|"
                 r"\.\d[\d_]*(?:[eE][+-]?\d[\d_]*)?)",
                 expr[i:],
             )
@@ -334,10 +334,14 @@ def evaluate_constant_expression(
             value = parse_expression(1)
             take(")")
             return value
-        if re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*", token):
+        if re.fullmatch(r"\w+(?:\.\w+)*", token) and (
+            token[0].isalpha() or token[0] == "_"
+        ):
             if peek() == "(":
                 take("(")
                 argument = parse_expression(1)
+                if peek() == ",":
+                    take(",")
                 take(")")
                 if token not in _NUMERIC_CASTS:
                     raise _Unknown
@@ -381,7 +385,7 @@ def evaluate_constant_expression(
         if position != len(tokens):
             return None
         return result
-    except (_Unknown, IndexError, OverflowError):
+    except (_Unknown, IndexError, OverflowError, RecursionError):
         return None
 
 
