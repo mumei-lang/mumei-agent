@@ -6,7 +6,7 @@ import typing
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from agent.code_to_spec import CodeToSpecConverter, CodeToSpecExtractor, Language
+from agent.code_to_spec import CodeToSpecConverter, CodeToSpecExtractor, Language, _spec_cache_key
 from agent.config import AgentConfig
 
 
@@ -149,6 +149,47 @@ def test_extract_from_file_uses_spec_cache(tmp_path: Path) -> None:
     assert second.forge_task_spec == forge_spec
     assert client.chat.completions.create.call_count == 1
     assert any("served from cache" in w for w in second.warnings)
+
+
+def test_python_spec_cache_replaces_legacy_private_function_name(tmp_path: Path) -> None:
+    source = tmp_path / "normalizer.py"
+    code = "def _normalize(value: int) -> int:\n    return -value\n"
+    source.write_text(code, encoding="utf-8")
+    cache_dir = tmp_path / "spec-cache"
+    cache_dir.mkdir()
+    client = MagicMock()
+    client.chat.completions.create.return_value = _make_response(
+        "_normalize: requires true; ensures result >= 0."
+    )
+    config = AgentConfig(api_key="sentinel-test-only", model="test-model", spec_cache_dir=str(cache_dir))
+    extractor = CodeToSpecExtractor(config, client=client)
+    private_atom = {
+        "name": "_normalize",
+        "inputs": [{"name": "value", "type": "i64"}],
+        "return_type": "i64",
+        "requires": "true",
+        "ensures": "result >= 0",
+    }
+    with patch("agent.code_to_spec._SPEC_CACHE_SCHEMA_VERSION", 1):
+        legacy_key = _spec_cache_key(code, "python", config.model, "")
+    (cache_dir / f"{legacy_key}.json").write_text(
+        json.dumps({
+            "natural_language_spec": "_normalize: requires true; ensures result >= 0.",
+            "forge_task_spec": {"atoms": [{**private_atom, "name": "normalize"}]},
+        }),
+        encoding="utf-8",
+    )
+
+    with patch("agent.spec_extractor.extract_spec", return_value={"atoms": [private_atom]}) as extract:
+        fresh = extractor.extract_from_file(source)
+        warm = extractor.extract_from_file(source)
+
+    assert fresh.success and warm.success
+    assert fresh.forge_task_spec["atoms"] == [private_atom]
+    assert warm.forge_task_spec == fresh.forge_task_spec
+    extract.assert_called_once()
+    assert not any("served from cache" in w for w in fresh.warnings)
+    assert any("served from cache" in w for w in warm.warnings)
 
 
 def test_extract_from_file_uses_context_instead_of_warm_cache(tmp_path: Path) -> None:

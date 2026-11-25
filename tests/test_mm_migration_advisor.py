@@ -174,6 +174,22 @@ def test_suggest_migration_for_file_returns_hints(tmp_path: Path) -> None:
     assert hints[0].priority == "high"
 
 
+def test_migration_selects_qualified_python_method(tmp_path: Path) -> None:
+    source = (
+        "def call(flag: bool) -> bool:\n    return flag\n\n"
+        "class Other:\n    def call(self, flag: bool) -> bool:\n        return flag\n\n"
+        "class Service:\n    def call(self, amount: int) -> int:\n        return amount\n"
+    )
+    path = tmp_path / "service.py"
+    path.write_text(source, encoding="utf-8")
+    issues = [{"kind": "alignment", "location": "Service.call", "message": "Guard missing."}]
+
+    hints = suggest_migration_for_file(str(path), "python", {"issues": issues})
+    assert [hint.function_name for hint in hints] == ["Service.call"]
+    assert "atom call_(amount: i64) -> i64" in hints[0].skeleton
+    assert suggest_migration("Service.call", source, "python", issues) == hints[0]
+
+
 def test_suggest_migration_for_file_returns_no_hints_without_issues(tmp_path: Path) -> None:
     source = tmp_path / "code.py"
     source.write_text("def add(a: int, b: int) -> int:\n    return a + b\n", encoding="utf-8")

@@ -39,6 +39,8 @@ from agent.strategies.cross_validation_strategy_helpers import (
     _extract_function_body,
     _extract_functions,
     _extract_spec_atoms,
+    _python_body_source,
+    _python_scoped_functions,
 )
 
 
@@ -962,41 +964,57 @@ class CrossValidator:
             report.details.append("No spec atoms found in spec file.")
             return report
 
-        # Coverage analysis (normalization-tolerant: snake_case / camelCase /
-        # leading-underscore differences between the two extractors must not
-        # register as false "no matching implementation" gaps).
-        spec_by_canon: dict[str, str] = {}
-        for atom in spec_atoms:
-            spec_by_canon.setdefault(_canonical_symbol(atom["name"]), atom["name"])
-        impl_by_canon = {_canonical_symbol(func): func for func in impl_functions}
-
-        report.uncovered_atoms = sorted(
-            original
-            for canon, original in spec_by_canon.items()
-            if canon not in impl_by_canon
-        )
-
-        covered = set(spec_by_canon) & set(impl_by_canon)
-        report.coverage_ratio = len(covered) / len(spec_by_canon) if spec_by_canon else 0.0
+        is_python = _canonical_language(language) == "python"
+        symbol_key = (lambda name: name) if is_python else _canonical_symbol
+        impl_by_key = {symbol_key(func): func for func in impl_functions}
+        module_functions, method_functions = _python_scoped_functions(impl_source) if is_python else ({}, {})
+        covered: set[tuple[str, str]] = set()
+        uncovered: dict[tuple[str, str], str] = {}
+        matched_atoms: dict[str, dict[str, Any]] = {}
+        matched_methods: dict[str, dict[str, Any]] = {}
 
         # Semantic gap detection: spec stronger than impl
         # If the spec has complex requires/ensures but the implementation
         # function is trivial (heuristic: short or no validation code)
         for atom in spec_atoms:
-            impl_name = impl_by_canon.get(_canonical_symbol(atom["name"]))
-            if impl_name is None:
+            if is_python and atom.get("python_non_module"):
                 continue
+            source_name = atom.get("python_source_name") if is_python else None
+            method_name = atom.get("python_method_name") if is_python else None
+            key = symbol_key(source_name or atom["name"])
+            if method_name is not None:
+                coverage_key = ("method", method_name)
+                function = method_functions.get(method_name)
+                impl_name = function.name if function is not None else None
+            else:
+                coverage_key = ("module" if source_name is not None else "", key)
+                if source_name is not None:
+                    impl_name = source_name if source_name in module_functions else None
+                else:
+                    impl_name = impl_by_key.get(key)
+                function = module_functions.get(impl_name) if impl_name is not None else None
+            if impl_name is None:
+                uncovered.setdefault(coverage_key, atom["name"])
+                continue
+            covered.add(coverage_key)
+            if method_name is not None:
+                matched_methods.setdefault(method_name, atom)
+            else:
+                matched_atoms.setdefault(key, atom)
             has_complex_contract = bool(atom["requires"]) and len(atom["requires"]) > 20
             has_nontrivial_requires = bool(atom["requires"]) and atom["requires"].strip() not in _TRIVIAL_REQUIRES
             if has_complex_contract or has_nontrivial_requires:
-                body = _extract_function_body(impl_source, language, impl_name)
+                body = (
+                    _python_body_source(impl_source, function)
+                    if function is not None else _extract_function_body(impl_source, language, impl_name)
+                )
                 if body and _has_unenforced_precondition(atom["requires"], body, language):
                     report.spec_stronger_than_impl.append(atom["name"])
                     # The requires literal itself is not echoed: spec text may
                     # contain sensitive values and diagnostics are forwarded to
                     # MCP clients.
                     report.details.append(
-                        f"spec precondition assumed, not enforced, by `{impl_name}`"
+                        f"spec precondition assumed, not enforced, by `{method_name or impl_name}`"
                     )
                     continue
                 if body and has_complex_contract and len(body.strip()) < len(atom["requires"]):
@@ -1004,18 +1022,22 @@ class CrossValidator:
                         continue
                     report.spec_stronger_than_impl.append(atom["name"])
 
+        report.uncovered_atoms = sorted(uncovered.values())
+        eligible_count = len(covered) + len(uncovered)
+        report.coverage_ratio = len(covered) / eligible_count if eligible_count else 0.0
+
         # Semantic gap detection: impl stronger than spec
         # Functions with complex validation that have no spec or trivial spec
         for func_name in impl_functions:
-            matching_atom = next(
-                (a for a in spec_atoms if _canonical_symbol(a["name"]) == _canonical_symbol(func_name)),
-                None,
-            )
+            matching_atom = matched_atoms.get(symbol_key(func_name))
             if matching_atom is None:
                 continue
             if not matching_atom["requires"] and not matching_atom["ensures"]:
                 # Impl exists but spec is trivial
                 report.impl_stronger_than_spec.append(func_name)
+        report.impl_stronger_than_spec.extend(
+            name for name, atom in matched_methods.items() if not atom["requires"] and not atom["ensures"]
+        )
 
         return report
 

@@ -1150,6 +1150,8 @@ def test_audit_pipeline_marks_verification_status_verified_for_clean_run(
     source = tmp_path / "payment.py"
     source.write_text(
         "def withdraw(balance: int, amount: int) -> int:\n"
+        "    if amount > balance:\n"
+        "        raise ValueError()\n"
         "    return balance - amount\n",
         encoding="utf-8",
     )
@@ -1174,7 +1176,13 @@ def test_audit_pipeline_marks_verification_status_verified_for_clean_run(
         coverage_ratio=1.0,
     )
     mumei = MagicMock()
-    mumei.verify.side_effect = _healthy_verify
+
+    def verify(source_path, **kwargs):
+        if Path(source_path).name == "python_implementation.mm":
+            return {"success": True, "report": {"status": "success"}}
+        return _healthy_verify(source_path, **kwargs)
+
+    mumei.verify.side_effect = verify
 
     result = AuditPipeline(
         AgentConfig(api_key="test"),
@@ -1238,6 +1246,223 @@ def test_audit_report_includes_counterexample_values(tmp_path: Path) -> None:
     ]
     assert "Z3 Counter-example: balance=100, amount=150" in result.verification_violations
     assert "counterexample_values:" in result.report
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("body", "status"),
+    [
+        ("    return balance - amount\n", "refuted"),
+        ("    if amount <= balance:\n        raise ValueError()\n    return balance - amount\n", "refuted"),
+        ("    if amount > balance:\n        raise ValueError()\n    return balance - amount\n", "verified"),
+        ("    return debit(balance, amount)\n", "unverifiable"),
+    ],
+    ids=["missing-guard", "reversed-guard", "enforced-guard", "unsupported-body"],
+)
+def test_audit_checks_extracted_postcondition_against_python_body(
+    tmp_path: Path, body: str, status: str,
+) -> None:
+    core = os.environ.get("MUMEI_BIN")
+    if not core or not Path(core).is_absolute() or not Path(core).is_file():
+        pytest.skip("set MUMEI_BIN to an absolute trusted Core executable")
+    source = tmp_path / "payment.py"
+    source.write_text("def withdraw(balance: int, amount: int) -> int:\n" + body, encoding="utf-8")
+    extractor = MagicMock()
+    extractor.extract_from_file.return_value = CodeToSpecResult(
+        success=True,
+        natural_language_spec="Withdraw amount from balance. Result must be non-negative.",
+        forge_task_spec=_forge_spec(),
+        detected_language="python",
+    )
+    result = AuditPipeline(
+        AgentConfig(api_key="test", mumei_bin=core),
+        code_to_spec_extractor=extractor,
+    ).audit_file(source, "python")
+
+    assert result.verification_status == status
+    if status == "refuted":
+        assert any("withdraw" in issue for issue in result.verification_violations)
+        assert result.counterexample_values == [
+            {"function_name": "withdraw", "counterexample": {"balance": "0", "amount": "1"}},
+        ]
+        assert any("migrate-suggest" in step["command"] for step in result.next_steps)
+    else:
+        assert result.verification_violations == []
+        assert result.counterexample_values == []
+
+
+@pytest.mark.integration
+def test_audit_aligns_public_and_private_python_contracts(tmp_path: Path) -> None:
+    core = os.environ.get("MUMEI_BIN")
+    if not core or not Path(core).is_absolute() or not Path(core).is_file():
+        pytest.skip("set MUMEI_BIN to an absolute trusted Core executable")
+    source = tmp_path / "normalizer.py"
+    source.write_text(
+        "def normalize(value: int) -> int:\n"
+        "    return value\n\n"
+        "def _normalize(value: int) -> int:\n"
+        "    return -value\n",
+        encoding="utf-8",
+    )
+    spec = {
+        "atoms": [
+            {
+                "name": name,
+                "inputs": [{"name": "value", "type": "i64"}],
+                "return_type": "i64",
+                "requires": "true",
+                "ensures": ensures,
+            }
+            for name, ensures in [
+                ("normalize", "result == value"),
+                ("_normalize", "result == -value"),
+            ]
+        ],
+    }
+    client = MagicMock()
+    client.chat.completions.create.return_value.choices[0].message.content = (
+        "normalize: requires true; ensures result == value.\n"
+        "_normalize: requires true; ensures result == -value."
+    )
+    config = AgentConfig(api_key="sentinel-test-only", mumei_bin=core, spec_cache_dir="")
+    with patch("agent.spec_extractor.extract_spec", return_value=spec):
+        result = AuditPipeline(config, client=client).audit_file(source, "python")
+
+    assert result.verification_violations == []
+    assert result.verification_status == "verified"
+    assert result.cross_validation_gaps == []
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("prefix", "other_def", "expected_status"),
+    [
+        ("", "", "refuted"),
+        ("async ", "", "unverifiable"),
+        ("", "class Service:\n    def call(self, balance: int, amount: int) -> int:\n        return 0\n", "unverifiable"),
+        ("", "if True:\n    def call(balance: int, amount: int) -> int:\n        return 0\n", "unverifiable"),
+        ("", "try:\n    def call(balance: int, amount: int) -> int:\n        return 0\nexcept Exception:\n    pass\n", "unverifiable"),
+        ("", "def call(balance: int, amount: int) -> int:\n    return 0\n", "unverifiable"),
+    ],
+    ids=["unambiguous", "async", "method", "if", "try", "duplicate"],
+)
+def test_audit_matches_reserved_python_function_name(
+    tmp_path: Path, prefix: str, other_def: str, expected_status: str,
+) -> None:
+    core = os.environ.get("MUMEI_BIN")
+    if not core or not Path(core).is_absolute() or not Path(core).is_file():
+        pytest.skip("set MUMEI_BIN to an absolute trusted Core executable")
+    source = tmp_path / "payment.py"
+    source.write_text(
+        f"{prefix}def call(balance: int, amount: int) -> int:\n"
+        "    return balance - amount\n\n" + other_def,
+        encoding="utf-8",
+    )
+    spec = _forge_spec()
+    spec["atoms"][0]["name"] = "call"
+    extractor = MagicMock()
+    extractor.extract_from_file.return_value = CodeToSpecResult(
+        success=True,
+        detected_language="python",
+        natural_language_spec="call: requires amount <= balance and amount >= 0; ensures result >= 0.",
+        forge_task_spec=spec,
+    )
+    config = AgentConfig(api_key="sentinel-test-only", mumei_bin=core, spec_cache_dir="")
+    result = AuditPipeline(config, code_to_spec_extractor=extractor).audit_file(source, "python")
+
+    assert result.verification_status == expected_status
+    if not other_def:
+        assert "spec atom has no matching implementation: call_" not in result.cross_validation_gaps
+        assert "spec precondition assumed, not enforced, by `call`" in result.cross_validation_gaps
+    if expected_status == "refuted":
+        assert any(witness["function_name"] == "call" for witness in result.counterexample_values)
+    else:
+        assert result.verification_violations == []
+        assert result.counterexample_values == []
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("has_module_collision", [False, True])
+@pytest.mark.parametrize("has_guard", [True, False], ids=["guarded", "missing-guard"])
+def test_audit_does_not_treat_python_method_as_module_contract(
+    tmp_path: Path, has_module_collision: bool, has_guard: bool,
+) -> None:
+    core = os.environ.get("MUMEI_BIN")
+    if not core or not Path(core).is_absolute() or not Path(core).is_file():
+        pytest.skip("set MUMEI_BIN to an absolute trusted Core executable")
+    source = tmp_path / "payment.py"
+    code = (
+        "class Service:\n"
+        "    def call(self, balance: int, amount: int = int(1)) -> int:\n"
+    )
+    if has_guard:
+        code += "        if amount > balance:\n            raise ValueError('amount exceeds balance')\n"
+    code += "        return balance - amount\n"
+    if has_module_collision:
+        code += "\ndef call_(balance: int, amount: int) -> int:\n    return balance - amount\n"
+    source.write_text(code, encoding="utf-8")
+    spec = _forge_spec()
+    spec["atoms"][0]["name"] = "call"
+    spec["atoms"][0]["requires"] = "balance >= amount"
+    extractor = MagicMock()
+    extractor.extract_from_file.return_value = CodeToSpecResult(
+        success=True,
+        detected_language="python",
+        natural_language_spec="call: requires balance >= amount; ensures result >= 0.",
+        forge_task_spec=spec,
+    )
+    config = AgentConfig(api_key="sentinel-test-only", mumei_bin=core, spec_cache_dir="")
+    result = AuditPipeline(config, code_to_spec_extractor=extractor).audit_file(
+        source, "python", auto_migrate=True,
+    )
+
+    assert result.cross_validation_gaps == (
+        [] if has_guard else [
+            "spec stronger than implementation: call_",
+            "spec precondition assumed, not enforced, by `Service.call`",
+        ]
+    )
+    assert result.verification_status == "unverifiable"
+    assert result.counterexample_values == []
+    assert [hint["function_name"] for hint in result.migration_hints] == ([] if has_guard else ["Service.call"])
+
+
+@pytest.mark.integration
+def test_auto_migrate_includes_refuted_module_function_and_method_gap(tmp_path: Path) -> None:
+    core = os.environ.get("MUMEI_BIN")
+    if not core or not Path(core).is_absolute() or not Path(core).is_file():
+        pytest.skip("set MUMEI_BIN to an absolute trusted Core executable")
+    source = tmp_path / "ledger.py"
+    source.write_text(
+        "def withdraw(balance: int, amount: int) -> int:\n"
+        "    return balance - amount\n\n"
+        "class Ledger:\n"
+        "    def debit(self, balance: int, amount: int) -> int:\n"
+        "        return balance - amount\n\n"
+        "def identity(amount: int) -> int:\n"
+        "    return amount\n",
+        encoding="utf-8",
+    )
+    spec = _forge_spec()
+    withdraw = spec["atoms"][0]
+    withdraw["requires"] = "true"
+    spec["atoms"].append({**withdraw, "name": "debit", "requires": "balance >= amount"})
+    extractor = MagicMock()
+    extractor.extract_from_file.return_value = CodeToSpecResult(
+        success=True,
+        detected_language="python",
+        natural_language_spec="Both operations return the remaining balance, which must be non-negative.",
+        forge_task_spec=spec,
+    )
+    config = AgentConfig(api_key="sentinel-test-only", mumei_bin=core, spec_cache_dir="")
+    result = AuditPipeline(config, code_to_spec_extractor=extractor).audit_file(
+        source, "python", auto_migrate=True,
+    )
+
+    assert result.verification_status == "refuted"
+    assert [entry["function_name"] for entry in result.counterexample_values] == ["withdraw"]
+    assert "spec precondition assumed, not enforced, by `Ledger.debit`" in result.cross_validation_gaps
+    assert {hint["function_name"] for hint in result.migration_hints} == {"withdraw", "Ledger.debit"}
 
 
 def test_audit_report_includes_step_guidance() -> None:
@@ -1411,6 +1636,27 @@ def test_audit_pipeline_auto_heal_records_healed_files(tmp_path: Path, capsys) -
     )
     assert "[Step 3/3] Running self-healing loop on generated skeletons..." in stderr
     heal_main.assert_called_once_with()
+
+
+def test_auto_heal_keeps_module_and_qualified_method_skeletons(tmp_path: Path) -> None:
+    pipeline = AuditPipeline(AgentConfig(api_key="test"), heal_output_dir=str(tmp_path))
+    migrations = {
+        "Ledger_debit": "atom Ledger_debit() -> i64 { body: { 0 } }",
+        "Ledger.debit": "atom debit() -> i64 { body: { 1 } }",
+    }
+    hints = [
+        {"function_name": function_name, "skeleton": skeleton}
+        for function_name, skeleton in migrations.items()
+    ]
+
+    with patch.object(pipeline, "_run_heal_loop"):
+        healed, errors = pipeline._heal_migration_hints(hints, tmp_path / "ledger.py")
+
+    assert errors == []
+    assert [Path(path).name for path in healed] == ["Ledger_debit.mm", "Ledger.debit.mm"]
+    assert [(tmp_path / f"{name}.mm").read_text(encoding="utf-8") for name in migrations] == [
+        skeleton + "\n" for skeleton in migrations.values()
+    ]
 
 
 def test_audit_pipeline_auto_migrate_skips_without_violations(tmp_path: Path) -> None:

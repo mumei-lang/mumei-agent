@@ -6,9 +6,12 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
+from agent.cross_validation_models import ContractParam, MumeiContractAtom
+from agent.python_implementation_check import check_python_implementations
 from agent.strategies.cross_validation_strategy import (
     CrossValidationReport,
     CrossValidator,
@@ -17,6 +20,42 @@ from agent.strategies.cross_validation_strategy import (
     _extract_functions,
     _extract_spec_atoms,
 )
+
+
+def test_failed_implementation_probe_without_model_is_inconclusive() -> None:
+    atom = MumeiContractAtom(
+        "withdraw", [ContractParam("balance"), ContractParam("amount")],
+        "i64", "amount <= balance && amount >= 0", "result >= 0",
+    )
+    verifier = MagicMock()
+
+    def verify(source_path, **_kwargs):
+        module = Path(source_path).read_text(encoding="utf-8")
+        assert "trusted atom" not in module
+        assert "requires: true;" in module
+        assert "ensures: ((amount > balance) || (result >= 0));" in module
+        assert "amount >= 0" not in module
+        return {
+            "success": False,
+            "report": {
+                "status": "failed",
+                "failure_type": "postcondition_violated",
+            },
+        }
+
+    verifier.verify.side_effect = verify
+    check, = check_python_implementations(
+        "def withdraw(balance: int, amount: int) -> int:\n"
+        "    if amount > balance:\n"
+        "        raise ValueError()\n"
+        "    return balance - amount\n",
+        [atom],
+        verifier,
+        source_names={"withdraw"},
+    )
+    verifier.verify.assert_called_once()
+    assert check.status == "unverifiable"
+    assert check.counterexample == {}
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +321,106 @@ class TestValidateSpecVsImpl:
         )
         assert "withdraw" in report.spec_stronger_than_impl
         assert any("not enforced" in detail for detail in report.details)
+
+    def test_python_private_contract_uses_exact_function_name(self):
+        spec_path = self._write_spec("_normalize", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "normalize.py"
+        impl_path.write_text(
+            "def _normalize(balance: int, amount: int) -> int:\n"
+            "    if amount > balance:\n"
+            "        raise ValueError('amount exceeds balance')\n"
+            "    return balance - amount\n\n"
+            "def normalize(balance: int, amount: int) -> int:\n"
+            "    return balance - amount\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert report.spec_stronger_than_impl == []
+        assert report.uncovered_atoms == []
+        assert report.coverage_ratio == 1.0
+
+    def test_python_standalone_contract_matches_exact_name_even_with_collision(self):
+        spec_path = self._write_spec("call_", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "call.py"
+        impl_path.write_text(
+            "def call(balance: int, amount: int) -> int:\n"
+            "    return balance - amount\n\n"
+            "def call_(balance: int, amount: int) -> int:\n"
+            "    return balance - amount\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert report.uncovered_atoms == []
+        assert report.spec_stronger_than_impl == ["call_"]
+
+    def test_python_method_does_not_hide_module_level_contract_match(self):
+        spec_path = self._write_spec("call_", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "call.py"
+        impl_path.write_text(
+            "class Service:\n"
+            "    def call(self, balance, amount):\n"
+            "        return balance - amount\n"
+            "    def call_(self, balance, amount):\n"
+            "        if amount > balance:\n"
+            "            raise ValueError('amount exceeds balance')\n"
+            "        return balance - amount\n\n"
+            "def call_(balance, amount):\n"
+            "    return balance - amount\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert report.uncovered_atoms == []
+        assert report.spec_stronger_than_impl == ["call_"]
+
+    def test_python_standalone_contract_does_not_match_unescaped_name(self):
+        spec_path = self._write_spec("call_", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "call.py"
+        impl_path.write_text("def call(balance, amount):\n    return balance - amount\n")
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert report.uncovered_atoms == ["call_"]
+        assert report.spec_stronger_than_impl == []
+        assert report.coverage_ratio == 0.0
+
+    def test_python_method_metadata_selects_only_the_named_class(self):
+        spec_path = self._write_spec("call_", "amount <= balance")
+        spec_path.write_text(spec_path.read_text().replace(
+            "{\n", "{\n  // python-method-name: Service.call\n", 1
+        ))
+        impl_path = Path(self.tmpdir) / "services.py"
+        impl_path.write_text(
+            "class Other:\n"
+            "    def call(self, balance, amount):\n"
+            "        if amount > balance:\n"
+            "            raise ValueError()\n"
+            "        return balance - amount\n\n"
+            "class Service:\n"
+            "    def call(self, balance, amount):\n"
+            "        return balance - amount\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert report.uncovered_atoms == []
+        assert report.spec_stronger_than_impl == ["call_"]
+        assert report.details == ["spec precondition assumed, not enforced, by `Service.call`"]
+
+    def test_python_module_guard_analysis_with_callable_default(self):
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "withdraw.py"
+        impl_path.write_text(
+            "def withdraw(balance: int, amount: int = int(1)) -> int:\n"
+            "    return balance - amount\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert report.uncovered_atoms == []
+        assert report.spec_stronger_than_impl == ["withdraw"]
 
     def test_enforced_precondition_is_not_flagged(self):
         spec_path = self._write_spec(

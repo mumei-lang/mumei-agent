@@ -7,7 +7,7 @@ import re
 import time
 from pathlib import Path
 
-from agent.cross_validation_foreign import _safe_identifier
+from agent.cross_validation_foreign import _MUMEI_RESERVED_IDENTIFIERS, _safe_identifier
 from agent.cross_validation_models import (
     ContractParam,
     CrossValidationIssue,
@@ -809,14 +809,16 @@ def _json_from_text(text: str) -> dict[str, object]:
     return payload
 
 
-def _atoms_from_payload(payload: dict[str, object]) -> list[MumeiContractAtom]:
+def _atoms_from_payload(
+    payload: dict[str, object], *, preserve_python_names: bool = False,
+) -> list[MumeiContractAtom]:
     atoms_value = payload.get("atoms")
     if not isinstance(atoms_value, list):
         return []
     atoms: list[MumeiContractAtom] = []
     for index, atom_value in enumerate(atoms_value):
         if isinstance(atom_value, dict):
-            atoms.append(_atom_from_mapping(atom_value, index))
+            atoms.append(_atom_from_mapping(atom_value, index, preserve_python_name=preserve_python_names))
     return atoms
 
 
@@ -849,8 +851,11 @@ def _ensures_clause(value: object) -> str:
     return "true" if clause.strip().lower() == "false" else clause
 
 
-def _atom_from_mapping(value: dict[object, object], index: int) -> MumeiContractAtom:
-    name = _safe_identifier(_string_value(value, "name", f"cross_validation_{index}"))
+def _atom_from_mapping(
+    value: dict[object, object], index: int, *, preserve_python_name: bool = False,
+) -> MumeiContractAtom:
+    raw_name = _string_value(value, "name", f"cross_validation_{index}")
+    name = raw_name if preserve_python_name and raw_name.isidentifier() else _safe_identifier(raw_name)
     params = _params_from_value(value.get("params") or value.get("inputs"))
     return_type = _string_value(value, "return_type", "i64")
     requires = _requires_clause(value.get("requires"))
@@ -1000,6 +1005,7 @@ def _params_from_contract_text(text: str) -> list[ContractParam]:
 def _atoms_to_mumei_module(atoms: list[MumeiContractAtom]) -> str:
     blocks: list[str] = []
     for atom in atoms:
+        name = _safe_identifier(atom.name) if atom.name in _MUMEI_RESERVED_IDENTIFIERS else atom.name
         params = ", ".join(f"{param.name}: {param.type}" for param in atom.params)
         default_value = _default_literal(atom.return_type)
         requires = _normalize_mumei_boolean_literals(atom.requires)
@@ -1007,7 +1013,7 @@ def _atoms_to_mumei_module(atoms: list[MumeiContractAtom]) -> str:
         blocks.append(
             "\n".join(
                 [
-                    f"trusted atom {atom.name}({params}) -> {atom.return_type} {{",
+                    f"trusted atom {name}({params}) -> {atom.return_type} {{",
                     f"    requires: {requires};",
                     f"    ensures: {ensures};",
                     "    body: {",

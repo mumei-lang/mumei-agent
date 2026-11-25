@@ -5,7 +5,7 @@ from dataclasses import asdict, is_dataclass
 import json
 from pathlib import Path
 import re
-from typing import Literal, Sequence
+from typing import Collection, Literal, Mapping, Sequence
 
 from agent.audit_models import AuditDirectoryResult, AuditResult
 from agent.cross_validation_models import ForeignCodeVerdict
@@ -16,18 +16,45 @@ from agent.prompts.report_formatter import (
 from agent.report_formatter import format_result_report
 from agent.spec_ambiguity import SpecAmbiguity
 from agent.strategies.cross_validation_strategy import CrossValidationReport
+from agent.strategies.foreign_code_strategy_helpers import _safe_identifier as _foreign_identifier
 from agent.strategies.spec_health_strategy import SpecHealthReport
 
 
-def _forge_task_to_mumei_source(spec: dict[str, object]) -> str:
+def _forge_task_to_mumei_source(
+    spec: dict[str, object], *, python_source_names: Collection[str] | None = None,
+    python_non_module_names: Collection[str] = (),
+    python_method_names: Mapping[str, str] | None = None,
+) -> str:
     atoms = _dict_list(spec.get("atoms"))
     if not atoms and "name" in spec:
         atoms = [spec]
-    blocks = [_forge_atom_to_mumei(atom) for atom in atoms]
+    blocks = [
+        _forge_atom_to_mumei(
+            atom, python_source_names=python_source_names, python_non_module_names=python_non_module_names,
+            python_method_names=python_method_names,
+        )
+        for atom in atoms
+    ]
     return "\n\n".join(blocks) + ("\n" if blocks else "")
 
-def _forge_atom_to_mumei(atom: dict[str, object]) -> str:
-    name = _safe_identifier(_string_value(atom.get("name"), "audited_atom"))
+def _forge_atom_to_mumei(
+    atom: dict[str, object], *, python_source_names: Collection[str] | None = None,
+    python_non_module_names: Collection[str] = (),
+    python_method_names: Mapping[str, str] | None = None,
+) -> str:
+    raw_name = _string_value(atom.get("name"), "audited_atom")
+    name = _foreign_identifier(raw_name, preserve_identifier=True) if python_source_names is not None else _safe_identifier(raw_name)
+    provenance = (
+        [f"    // python-source-name: {raw_name}"]
+        if python_source_names is not None and raw_name.isidentifier() and raw_name in python_source_names
+        else []
+    )
+    if raw_name in python_non_module_names:
+        method_name = python_method_names.get(raw_name) if python_method_names is not None else None
+        provenance = (
+            [f"    // python-method-name: {method_name}"]
+            if method_name is not None else ["    // python-scope: non-module"]
+        )
     params = _format_params(atom.get("params") or atom.get("inputs"))
     return_type = _string_value(atom.get("return_type"), "i64")
     requires = _coerce_to_boolean_clause(
@@ -40,6 +67,7 @@ def _forge_atom_to_mumei(atom: dict[str, object]) -> str:
     return "\n".join(
         [
             f"trusted atom {name}({params}) -> {return_type} {{",
+            *provenance,
             f"    requires: {requires};",
             f"    ensures: {ensures};",
             "    body: {",
@@ -387,16 +415,19 @@ def _cross_validation_gap_strings(report: CrossValidationReport) -> list[str]:
 def _migration_issue_dicts(
     verification_violations: list[str],
     cross_validation_gaps: list[str],
+    *,
+    verification_function_names: Mapping[str, str],
 ) -> list[dict[str, str]]:
     issues: list[dict[str, str]] = []
-    issues.extend(
-        {
+    for violation in verification_violations:
+        issue = {
             "kind": "verification",
             "severity": "error",
             "message": violation,
         }
-        for violation in verification_violations
-    )
+        if violation in verification_function_names:
+            issue["function_name"] = verification_function_names[violation]
+        issues.append(issue)
     issues.extend(
         {
             "kind": "alignment",

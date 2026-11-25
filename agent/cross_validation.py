@@ -31,6 +31,7 @@ from agent.prompts.cross_validation_nl import (
     CROSS_VALIDATION_NL_SYSTEM_PROMPT,
     build_nl_cross_validation_prompt,
 )
+from agent.python_implementation_check import check_python_implementations, python_contract_sources
 from agent.intent_tracker import IntentChange, IntentDriftResult, IntentTracker
 from agent.spec_code_mapper import MappingResult, SpecCodeMapper
 from agent.cross_validation_models import (
@@ -799,6 +800,7 @@ def validate_foreign_code(
 
     source_line_map = _infer_foreign_source_line_map(code, normalized_language)
     atoms = _infer_foreign_contracts_with_code_to_spec(code, normalized_language, config)
+    llm_atoms: list[MumeiContractAtom] = []
     llm_issues: list[CrossValidationIssue] = []
     if use_llm and (config.api_key or llm_provider):
         llm_atoms, llm_issues, llm_warnings = _infer_code_contracts_with_llm(
@@ -898,6 +900,28 @@ def validate_foreign_code(
         verification=verification,
         warnings=warnings,
     )
+    if run_mumei and normalized_language == "python":
+        selected_names = {atom.name for atom in atoms}
+        intents = [atom for atom in llm_atoms if atom.name in selected_names]
+        if intents:
+            source_names, _, _ = python_contract_sources(code)
+            checks = check_python_implementations(
+                code, intents, create_mumei_client(config.mumei_bin), source_names=source_names,
+            )
+            if checks:
+                verification = {**(verification or {}), "implementation_checks": [asdict(check) for check in checks]}
+                for check in checks:
+                    if check.status == "refuted":
+                        verdict = "refuted"
+                        issues.extend(_with_source_lines([
+                            CrossValidationIssue(
+                                kind="postcondition_violated",
+                                message=check.violation,
+                                location=check.function,
+                            )
+                        ], source_line_map))
+                    elif check.status == "unverifiable" and verdict == "verified":
+                        verdict = "unverifiable"
     success = verdict == "verified"
     if success:
         mumei_genuinely_failed = verification is not None and _mumei_report_has_failures(
@@ -1336,6 +1360,7 @@ def _infer_code_contracts_with_llm(
     prompt = build_code_cross_validation_prompt(code, language)
     return _infer_contracts_with_llm(
         config, CROSS_VALIDATION_CODE_SYSTEM_PROMPT, prompt, llm_provider=llm_provider,
+        preserve_python_names=language == "python",
     )
 
 
@@ -1345,6 +1370,7 @@ def _infer_contracts_with_llm(
     user_prompt: str,
     *,
     llm_provider: LLMProvider | None = None,
+    preserve_python_names: bool = False,
 ) -> tuple[list[MumeiContractAtom], list[CrossValidationIssue], list[str]]:
     warnings: list[str] = []
     try:
@@ -1357,7 +1383,11 @@ def _infer_contracts_with_llm(
             config.model,
         )
         payload = _json_from_text(content)
-        return _atoms_from_payload(payload), _issues_from_payload(payload), warnings
+        return (
+            _atoms_from_payload(payload, preserve_python_names=preserve_python_names),
+            _issues_from_payload(payload),
+            warnings,
+        )
     except Exception as exc:
         warnings.append(f"LLM contract inference skipped or failed: {exc}")
         return [], [], warnings

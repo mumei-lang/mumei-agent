@@ -346,7 +346,7 @@ def _infer_python_source_line_map(code: str) -> dict[str, int]:
     line_map: dict[str, int] = {}
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            line_map[_safe_identifier(node.name)] = node.lineno
+            line_map[node.name] = node.lineno
     return line_map
 
 
@@ -435,7 +435,7 @@ def _infer_python_contracts(code: str) -> list[MumeiContractAtom]:
         return_type = _python_mumei_return_type(node)
         atoms.append(
             MumeiContractAtom(
-                name=_safe_identifier(node.name),
+                name=node.name,
                 params=params,
                 return_type=return_type,
                 requires=requires,

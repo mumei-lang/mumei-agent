@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import cast
 
@@ -77,6 +77,7 @@ from agent.audit_reporting import (
 from agent.attempt_schedule import MAX_SCHEDULE_ATTEMPTS, run_attempt_schedule
 from agent.code_to_spec import CodeToSpecExtractor, CodeToSpecResult, Language
 from agent.config import AgentConfig
+from agent.cross_validation_payload import _atom_from_mapping
 from agent.extract_spec import _collect_code_files
 from agent.extract_spec_helpers import _is_test_file
 from agent.gap_rules import _TRUSTED_ATOM_RE
@@ -86,6 +87,7 @@ from agent.native_replay import NativeReplayer, native_replay_violations, reconc
 from agent.llm_provider import LLMProvider, openai_client_adapter
 from agent.mumei_client import create_mumei_client
 from agent.prompts.report_formatter import format_counterexample
+from agent.python_implementation_check import check_python_implementations, python_contract_sources
 from agent.spec_ambiguity import classify_spec_ambiguity
 from agent.strategies.cross_validation_strategy import CrossValidationReport, CrossValidator
 from agent.strategies.foreign_code_strategy import (
@@ -410,7 +412,15 @@ class AuditPipeline:
         malformed_extraction_issues = _malformed_extraction_issue_strings(
             extraction.forge_task_spec
         )
-        spec_source = _forge_task_to_mumei_source(extraction.forge_task_spec)
+        python_source_names, python_non_module_names, python_method_names = (
+            python_contract_sources(source_code) if audit_language == "python" else (None, set(), None)
+        )
+        spec_source = _forge_task_to_mumei_source(
+            extraction.forge_task_spec,
+            python_source_names=python_source_names,
+            python_non_module_names=python_non_module_names,
+            python_method_names=python_method_names,
+        )
         if not spec_source:
             if _source_has_function_declarations(source_code, audit_language) is not False:
                 errors.append(
@@ -419,6 +429,7 @@ class AuditPipeline:
 
         spec_health_issues: list[str] = malformed_extraction_issues
         verification_violations: list[str] = []
+        verification_function_names: dict[str, str] = {}
         counterexample_values: list[dict] = []
         cross_validation_gaps: list[str] = []
         verification_status: str | None = None
@@ -571,6 +582,30 @@ class AuditPipeline:
                     audit_language,
                 )
                 cross_validation_gaps = _cross_validation_gap_strings(cross_report)
+                if audit_language == "python" and verification_status != "refuted":
+                    spec = extraction.forge_task_spec
+                    extracted_atoms = _dict_list(spec.get("atoms")) or ([spec] if "name" in spec else [])
+                    intents = [
+                        replace(
+                            _atom_from_mapping(atom, index, preserve_python_name=True),
+                            requires=_contract_text(atom.get("requires"), "true"),
+                            ensures=_contract_text(atom.get("ensures"), "true"),
+                        )
+                        for index, atom in enumerate(extracted_atoms)
+                    ]
+                    for check in check_python_implementations(
+                        source_code, intents, self.mumei_client, source_names=python_source_names or set(),
+                    ):
+                        if check.status == "refuted":
+                            verification_status = "refuted"
+                            violation = check.violation
+                            verification_violations.append(violation)
+                            verification_function_names[violation] = check.function
+                            counterexample_values.append(
+                                {"function_name": check.function, "counterexample": check.counterexample}
+                            )
+                        elif check.status == "unverifiable" and verification_status == "verified":
+                            verification_status = "unverifiable"
 
         # Ambiguity is reported, never resolved. A requirement the prose never
         # states is a gap in what was verified, so it lands in
@@ -629,6 +664,7 @@ class AuditPipeline:
             migration_issues = _migration_issue_dicts(
                 verification_violations,
                 cross_validation_gaps,
+                verification_function_names=verification_function_names,
             )
             hints = suggest_migration_for_file(
                 source_label,
@@ -919,7 +955,9 @@ class AuditPipeline:
         healed_files: list[str] = []
         heal_errors: list[str] = []
         for hint in migration_hints:
-            function_name = _safe_identifier(_string_value(hint.get("function_name"), "audited_atom"))
+            function_name = _string_value(hint.get("function_name"), "audited_atom")
+            if "." not in function_name or not all(part.isidentifier() for part in function_name.split(".")):
+                function_name = _safe_identifier(function_name)
             skeleton = _string_value(hint.get("skeleton"), "")
             if not skeleton.strip():
                 heal_errors.append(f"{function_name}: migration skeleton is empty")

@@ -350,7 +350,7 @@ class ForeignCodeExtractor:
             preconditions, postconditions = _contract_lines(doc)
             specs.append(
                 ForeignCodeSpec(
-                    function_name=_safe_identifier(node.name),
+                    function_name=node.name,
                     params=params,
                     return_type=_python_type(node.returns),
                     preconditions=preconditions,

@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 from typing import Iterable
 
+from agent.strategies.cross_validation_strategy_helpers import _python_scoped_functions
 from agent.strategies.foreign_code_strategy import (
     ForeignCodeExtractor,
     ForeignCodeSpec,
@@ -33,8 +34,20 @@ def suggest_migration(
 ) -> MigrationHint:
     """Generate a .mm migration skeleton for a function with issues."""
     specs = ForeignCodeExtractor().extract(source_code, language)
-    spec = _find_spec(function_name, specs)
-    relevant_issues = _issues_for_function(function_name, issues)
+    methods = _qualified_methods(source_code, language, specs)
+    return _build_hint(function_name, specs, methods, issues, clause_labels=clause_labels)
+
+
+def _build_hint(
+    function_name: str,
+    specs: list[ForeignCodeSpec],
+    methods: dict[str, ForeignCodeSpec],
+    issues: list[dict],
+    *,
+    clause_labels: bool,
+) -> MigrationHint:
+    spec = methods.get(function_name) or _find_spec(function_name, specs)
+    relevant_issues = _issues_for_function(function_name, issues, methods)
     priority = _priority_for_issues(relevant_issues)
     if clause_labels:
         requires_labels = _requires_labels_for_spec(spec, relevant_issues)
@@ -45,7 +58,7 @@ def suggest_migration(
         skeleton = _trusted_atom_to_atom(to_mumei_atom(spec))
     reason = _reason_for_issues(relevant_issues)
     return MigrationHint(
-        function_name=spec.function_name,
+        function_name=function_name if function_name in methods else spec.function_name,
         priority=priority,
         reason=reason,
         skeleton=skeleton,
@@ -67,13 +80,14 @@ def suggest_migration_for_file(
     source_path = Path(code_file).expanduser().resolve()
     source_code = source_path.read_text(encoding="utf-8")
     specs = ForeignCodeExtractor().extract(source_code, language)
+    methods = _qualified_methods(source_code, language, specs)
     issues = _issue_dicts(validation_result.get("issues", []))
-    function_names = _function_names_with_issues(specs, issues)
+    function_names = _function_names_with_issues(specs, issues, methods)
     return [
-        suggest_migration(
+        _build_hint(
             name,
-            source_code,
-            language,
+            specs,
+            methods,
             issues,
             clause_labels=clause_labels,
         )
@@ -83,6 +97,20 @@ def suggest_migration_for_file(
 
 def hints_to_dicts(hints: Iterable[MigrationHint]) -> list[dict[str, str]]:
     return [asdict(hint) for hint in hints]
+
+
+def _qualified_methods(
+    source: str, language: str, specs: list[ForeignCodeSpec],
+) -> dict[str, ForeignCodeSpec]:
+    if language.strip().lower() != "python":
+        return {}
+    _, methods = _python_scoped_functions(source)
+    specs_by_line = {spec.source_line: spec for spec in specs}
+    return {
+        name: specs_by_line[node.lineno]
+        for name, node in methods.items()
+        if node.lineno in specs_by_line
+    }
 
 
 def _find_spec(function_name: str, specs: list[ForeignCodeSpec]) -> ForeignCodeSpec:
@@ -151,35 +179,46 @@ def _issue_dicts(raw_issues: object) -> list[dict]:
 def _function_names_with_issues(
     specs: list[ForeignCodeSpec],
     issues: list[dict],
+    methods: dict[str, ForeignCodeSpec],
 ) -> list[str]:
     spec_names = [spec.function_name for spec in specs]
+    targets = set(spec_names) | methods.keys()
     names: list[str] = []
     for issue in issues:
-        candidate = _safe_name(str(issue.get("function_name") or issue.get("location") or ""))
-        if not candidate:
-            candidate = _name_from_text(str(issue.get("message") or ""))
-        if candidate in spec_names and candidate not in names:
+        candidate = _issue_target(issue, methods)
+        if candidate in targets and candidate not in names:
             names.append(candidate)
     if names:
         return names
     return spec_names if issues else []
 
 
-def _issues_for_function(function_name: str, issues: list[dict]) -> list[dict]:
+def _issues_for_function(
+    function_name: str, issues: list[dict], methods: dict[str, ForeignCodeSpec],
+) -> list[dict]:
     if not issues:
         return []
     relevant: list[dict] = []
     for issue in issues:
-        candidate = _safe_name(str(issue.get("function_name") or issue.get("location") or ""))
+        candidate = _issue_target(issue, methods)
         message = str(issue.get("message") or "")
-        if candidate == function_name or function_name in message:
+        if candidate == function_name or (
+            candidate not in methods and function_name not in methods and function_name in message
+        ):
             relevant.append(issue)
     return relevant or issues
 
 
-def _name_from_text(text: str) -> str:
+def _issue_target(issue: dict, methods: dict[str, ForeignCodeSpec]) -> str:
+    candidate = str(issue.get("function_name") or issue.get("location") or "").strip()
+    if candidate:
+        return candidate if candidate in methods else _safe_name(candidate)
+    text = str(issue.get("message") or "")
+    for match in re.finditer(r"`(\w+(?:\.\w+)+)`", text):
+        if match[1] in methods:
+            return match[1]
     match = re.search(r"`(?P<name>[A-Za-z_][A-Za-z0-9_]*)`", text)
-    return _safe_name(match.group("name")) if match else ""
+    return _safe_name(match["name"]) if match else ""
 
 
 def _safe_name(name: str) -> str:
