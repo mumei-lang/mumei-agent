@@ -329,7 +329,9 @@ def build_schedule_parser(
             "scheduled attempts to an absolute regular file's SHA-256; "
             "probes and direct AttemptRunner calls are not gated. Optional "
             "adapter_settings is a list of [adapter_id, [[name, value], ...]] "
-            "entries validated against the adapter manifest schemas."
+            "entries validated against the adapter manifest schemas. Settings "
+            "are planning metadata only and are not passed to child argv, "
+            "stdin or environment."
         ),
     )
     parser.add_argument(
@@ -630,7 +632,8 @@ def build_plan_parser(
             "declared (an empty list permits only permission-free adapters). "
             "Optional adapter_settings is a list of [adapter_id, "
             "[[name, value], ...]] entries validated against the adapter "
-            "manifest schemas."
+            "manifest schemas. Settings are planning metadata only, not "
+            "process input."
         ),
     )
     parser.add_argument(

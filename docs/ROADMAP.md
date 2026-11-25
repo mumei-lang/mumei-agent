@@ -136,9 +136,10 @@ unregistered adapters, malformed entries, duplicate names, sensitive or
 invocation channels, and values outside the adapter's declared boolean,
 integer or choice schema fail before routing or fallback. The policy output
 still does not echo raw overrides; plans expose only the effective non-secret
-settings and configuration fingerprint. This is host configuration plumbing
-only — not adapter adoption, execution authority, Evidence truth or grade
-promotion.
+settings and configuration fingerprint. Settings are planning metadata only;
+they are not passed to child argv, stdin or environment. This is host
+configuration plumbing only — not adapter adoption, execution authority,
+Evidence truth or grade promotion.
 
 ### C04/C11 first supported planning slice
 

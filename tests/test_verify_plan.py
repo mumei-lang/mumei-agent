@@ -300,6 +300,33 @@ def test_invalid_adapter_setting_never_becomes_a_route(inputs, tmp_path, overrid
     assert SECRET not in str(failure.value)
 
 
+def test_sensitive_setting_rejection_does_not_print_secret(inputs, tmp_path):
+    adapters = _setting_inputs(inputs, tmp_path)
+    policy = tmp_path / "sensitive-settings.json"
+    policy.write_text(json.dumps({
+        "allowed_permissions": ["process.spawn"],
+        "adapter_settings": [["alpha", [["api_key", SECRET]]]],
+    }), encoding="utf-8")
+    output = tmp_path / "plan.json"
+
+    out = subprocess.run(
+        [
+            PY, "-m", "agent", "verify-plan",
+            "--request", inputs["request"],
+            "--adapters", adapters,
+            "--policy", str(policy),
+            "--output", str(output),
+        ],
+        check=False, capture_output=True, text=True, cwd=REPO_ROOT,
+        env={"PYTHONPATH": str(REPO_ROOT), "PATH": "/usr/bin:/bin"},
+    )
+
+    assert out.returncode == 1
+    assert SECRET not in out.stdout
+    assert SECRET not in out.stderr
+    assert not output.exists()
+
+
 def test_closed_shape_rejects_unknown_policy_keys(inputs, tmp_path):
     policy = tmp_path / "bad.json"
     policy.write_text('{"allowed_permissions": [], "mystery_knob": 1}')
