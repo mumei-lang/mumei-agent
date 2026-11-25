@@ -213,6 +213,93 @@ def test_effective_nonsecret_settings_are_exposed(inputs):
     assert "tool_version" in selected or "observed_tool_version" in selected
 
 
+def _setting_inputs(inputs, tmp_path):
+    adapters = tmp_path / "configured-adapters.json"
+    adapters.write_text(json.dumps([
+        manifest(
+            "alpha",
+            setting_specs=[
+                {"name": "cache", "kind": "boolean", "default": False},
+                {"name": "rounds", "kind": "integer", "default": 3, "minimum": 1, "maximum": 10},
+                {"name": "strategy", "kind": "choice", "default": "balanced", "choices": ["balanced", "eager"]},
+            ],
+        ),
+        manifest("beta", priority=5),
+    ]), encoding="utf-8")
+    return str(adapters)
+
+
+def test_policy_adapter_settings_override_declared_defaults(inputs, tmp_path):
+    adapters = _setting_inputs(inputs, tmp_path)
+    policy = tmp_path / "configured-policy.json"
+    policy.write_text(json.dumps({
+        "allowed_permissions": ["process.spawn"],
+        "selected_adapter": "alpha",
+        "adapter_settings": [["alpha", [["rounds", 7], ["cache", True], ["strategy", "eager"]]]],
+        "timeout_ms": 10_000,
+    }), encoding="utf-8")
+
+    doc = run_plan(args_for(inputs, adapters=adapters, policy=str(policy)))
+
+    assert doc["selected"]["adapter_id"] == "alpha"
+    assert doc["selected"]["adapter_settings"] == {
+        "cache": True,
+        "rounds": 7,
+        "strategy": "eager",
+    }
+    assert "adapter_settings" not in doc["policy"]
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        None,
+        {},
+        [[]],
+        [["alpha"]],
+        [["alpha", {}]],
+        [["alpha", [["rounds"]]]],
+        [["alpha", [["rounds", 1, 2]]]],
+    ],
+)
+def test_malformed_adapter_settings_declaration_is_rejected(inputs, tmp_path, settings):
+    policy = tmp_path / "bad-settings.json"
+    policy.write_text(json.dumps({
+        "allowed_permissions": ["process.spawn"],
+        "adapter_settings": settings,
+    }), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="invalid adapter settings declaration"):
+        run_plan(args_for(inputs, policy=str(policy)))
+
+
+@pytest.mark.parametrize(
+    "override,error",
+    [
+        ([["alpha", [["rounds", 0]]]], "setting value outside declared schema"),
+        ([["alpha", [["unknown", 1]]]], "setting has no registered schema"),
+        ([["ghost", []]], "settings have no registered adapter"),
+        ([["alpha", [["cache", True], ["cache", False]]]], "duplicate adapter setting name"),
+        ([["alpha", []], ["alpha", []]], "duplicate adapter settings"),
+        ([["alpha", [["api_key", SECRET]]]], "setting channel is not permitted"),
+    ],
+)
+def test_invalid_adapter_setting_never_becomes_a_route(inputs, tmp_path, override, error):
+    adapters = _setting_inputs(inputs, tmp_path)
+    policy = tmp_path / "invalid-settings.json"
+    policy.write_text(json.dumps({
+        "allowed_permissions": ["process.spawn"],
+        "selected_adapter": "alpha",
+        "allow_fallback": True,
+        "adapter_settings": override,
+        "timeout_ms": 10_000,
+    }), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=error) as failure:
+        run_plan(args_for(inputs, adapters=adapters, policy=str(policy)))
+    assert SECRET not in str(failure.value)
+
+
 def test_closed_shape_rejects_unknown_policy_keys(inputs, tmp_path):
     policy = tmp_path / "bad.json"
     policy.write_text('{"allowed_permissions": [], "mystery_knob": 1}')

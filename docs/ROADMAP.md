@@ -126,6 +126,20 @@ and cost review. It also does not make backend self-reports proof, make
 Semantic IR universal, hide lossy transformations, or run Z3 and external
 verifiers unconditionally in parallel.
 
+### C11 consumable adapter-settings policy
+
+`verify-plan` and `verify-schedule` now accept host-declared
+`adapter_settings` in the planner policy instead of exposing overrides only
+through the in-memory Python API. The closed JSON shape mirrors the internal
+value: a list of `[adapter_id, [[name, value], ...]]` entries. Unknown or
+unregistered adapters, malformed entries, duplicate names, sensitive or
+invocation channels, and values outside the adapter's declared boolean,
+integer or choice schema fail before routing or fallback. The policy output
+still does not echo raw overrides; plans expose only the effective non-secret
+settings and configuration fingerprint. This is host configuration plumbing
+only — not adapter adoption, execution authority, Evidence truth or grade
+promotion.
+
 ### C04/C11 first supported planning slice
 
 `agent.verification_planner` is an opt-in, in-memory, single-route planning API.
