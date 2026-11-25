@@ -1009,6 +1009,20 @@ def test_expression_switch_fallthrough(go_types_helper, declarations, expected):
             "func F(x int64) int64 { var _, a = 0, x; return a }",
             frozenset({0}),
         ),
+        # Grouped var declarations flatten every spec through the same
+        # scalar binding contract as individual declarations.
+        (
+            "func F(x, y int64) int64 { var ( a int64 = x; b = y; ); return a + b }",
+            frozenset({0, 1}),
+        ),
+        (
+            "func F(x, y int64) int64 { var (\n a, b int64 = x, y\n c int64\n ); return a + b + c }",
+            frozenset({0, 1}),
+        ),
+        (
+            "func F(x int64) int64 { var (); return x }",
+            frozenset({0}),
+        ),
     ],
 )
 def test_var_declaration_dependencies(go_types_helper, declarations, expected):
@@ -1025,8 +1039,8 @@ def test_var_declaration_dependencies(go_types_helper, declarations, expected):
         "func F(x int64) int64 { var a, b string; _ = a; _ = b; return x }",
         # Non-scalar var bindings are unavailable.
         "func F(x int64) int64 { var s string; _ = s; return x }",
-        # Grouped `var (...)` is a parser gap (tree-sitter has_error).
-        "func F(x int64) int64 { var ( a int64 = x; b = x ); return a+b }",
+        # Non-scalar names inside grouped declarations are unavailable.
+        "func F(x int64) int64 { var ( s string = \"s\"; ); _ = s; return x }",
     ],
 )
 def test_var_declaration_shapes_stay_unsupported(
@@ -1035,6 +1049,19 @@ def test_var_declaration_shapes_stay_unsupported(
     result = named(*unit(go_types_helper, declarations))
     assert not result.available
     assert result.gaps
+
+
+def test_compact_grouped_var_without_final_separator_is_parser_gap(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64) int64 { var ( a int64 = x; b = x ); return a+b }",
+        )
+    )
+    assert not result.available
+    assert result.gaps[0].reason == "syntax_or_parser_unavailable"
 
 
 @pytest.mark.parametrize(

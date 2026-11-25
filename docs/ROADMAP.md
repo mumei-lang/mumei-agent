@@ -3965,6 +3965,24 @@ mismatch stays `unsupported_statement`. Redeclaration inside a nested
 block still produces a fresh, branch-scoped binding that cannot escape
 its scope, matching the compiler.
 
+
+### C07 grouped var declarations
+
+Grouped `var ( ... )` declarations flatten each `var_spec` through the
+same scalar binding contract as individual declarations: explicit values
+bind pairwise against the pre-state, zero-value forms are dep-free,
+multi-name specs follow the multi-name declaration rules, `_` discards,
+and an empty `var ()` group is a no-op. Both newline layout and explicit
+semicolon separators are admitted when tree-sitter preserves the group.
+
+Boundaries: the compact valid form `var ( a int64 = x; b = x )` without
+a final separator remains a tree-sitter parse gap and fails closed as
+`syntax_or_parser_unavailable`; use a final separator or newline layout.
+Non-scalar names stay `binding_unavailable`, arity mismatches stay
+`unsupported_statement`, and var declarations have no const-style
+implicit repetition. This remains dependency analysis, not proof,
+evidence or audit verdict integration.
+
 ### C07 expression statements
 
 Statement-position expressions are admitted — in Go these can only be
