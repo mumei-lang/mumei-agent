@@ -27,8 +27,8 @@ joins the same way: the tag and every case guard are evaluated
 (effect-free), each clause body runs in its own scope and its
 reassignments union back. ``var`` declarations bind like lets —
 ``var a, b T`` is the dep-free zero value and ``var a, b = x, y``
-binds name-wise like ``:=`` (grouped ``var (...)`` forms are a parser
-gap). ``x++``/``x--`` on a
+binds name-wise like ``:=``; grouped ``var (...)`` forms follow the
+same contract. ``x++``/``x--`` on a
 bound scalar are dependency-preserving, on an imported member they
 record the member write, and ``_ = expression``
 evaluates-and-discards like a condition. Expression statements — only
@@ -48,8 +48,8 @@ outside the fragment (``defer`` and ``go`` stay unmodelled). Scalar
 never read a variable (the compiler rejects it before this reader runs),
 so a scalar-typed ``constant`` binding always resolves to an empty
 dependency set and the declaration itself writes nothing; ``iota`` is
-dep-free too, while non-scalar constants stay gaps and grouped
-``const ( ... )`` forms are a parser gap like grouped ``var``. A named
+dep-free too, while non-scalar constants stay gaps. Grouped
+``const ( ... )`` forms follow the same contract. A named
 scalar result — ``func F(x) (r int64)`` — is an ordinary local
 pre-initialised to the dep-free zero value; a bare ``return`` (legal
 only with a named result) yields its current dependencies. Type
@@ -895,11 +895,15 @@ def _syntax(raw: bytes) -> Any:
         from tree_sitter import Language, Parser
         import tree_sitter_go
 
-        root = Parser(Language(tree_sitter_go.language())).parse(raw).root_node
-        return None if root.has_error else root
+        from agent.tree_sitter_extract import (
+            parse_go_with_compact_group_recovery,
+        )
+
+        return parse_go_with_compact_group_recovery(
+            Parser(Language(tree_sitter_go.language())), raw
+        )
     except (ImportError, ValueError, TypeError, RuntimeError):
         return None
-
 
 def _key3(span: ByteSpan | FileSpan) -> tuple[int, int, int]:
     """Normalize a report span to (file, start, end) — file 0 for v1 reports."""
@@ -23007,11 +23011,17 @@ class _Builder:
                 if child.type == "var_spec":
                     specs.append(child)
                 elif child.type == "var_spec_list":
-                    specs.extend(
-                        c
-                        for c in child.named_children
-                        if c.type == "var_spec"
-                    )
+                    for grand in child.named_children:
+                        if grand.type == "var_spec":
+                            specs.append(grand)
+                        elif grand.type == "ERROR" and len(grand.children) == 1:
+                            inner = grand.children[0]
+                            if inner.type == "var_spec":
+                                specs.append(inner)
+                elif child.type == "ERROR" and len(child.children) == 1:
+                    inner = child.children[0]
+                    if inner.type == "var_spec":
+                        specs.append(inner)
             if not specs:
                 return
             for spec in specs:
@@ -24342,9 +24352,14 @@ class _Builder:
             # implicit repetition of the previous spec's expression list;
             # because constants never read variables, repetition carries no
             # dependencies and needs no expression evaluation here.
-            specs = [
-                c for c in node.named_children if c.type == "const_spec"
-            ]
+            specs = []
+            for child in node.named_children:
+                if child.type == "const_spec":
+                    specs.append(child)
+                elif child.type == "ERROR" and len(child.children) == 1:
+                    inner = child.children[0]
+                    if inner.type == "const_spec":
+                        specs.append(inner)
             if not specs:
                 # `const ()` is a valid empty declaration group.
                 return
