@@ -36,6 +36,33 @@ and shared acceptance rules, not external-tool orchestration. Do not run Z3
 and all installed plugins in parallel by default: comparisons require a stated
 purpose, permitted user policy, budget and result-reconciliation rules.
 
+### C04 planner acceptance completion
+
+The C04 planner scope is complete as a verification-native planner contract.
+The implemented slices now cover the issue-level acceptance criteria end to
+end:
+
+- adapter registration and replacement are declarative (`AdapterRegistry`,
+  manifests and `--adapter-overlay`) and need no planner-core edit;
+- automatic and explicit routing expose per-candidate exclusion/selection
+  reasons, effective non-secret settings, budgets and fallback provenance;
+- an unavailable or unsupported explicit selection fails closed unless the
+  user permits fallback, and fallback still must satisfy the original
+  profile, method, contract, fragment, target and input-format requirements;
+- non-success exits, timeouts, missing commands, declared `failed` and
+  declared `inconclusive` self-reports are not scheduling successes;
+- runtime resource/permission enforcement, executable digest pins and
+  fail-closed isolation policy are explicit host authorization controls;
+- durable tamper-evident plan history is opt-in, while existing Z3/Lean,
+  certificate, audit and grade gates remain unchanged.
+
+`tests/test_c04_planner_acceptance.py` pins this acceptance matrix as a
+single regression surface. Completion of C04 does **not** adopt an external
+verifier, make a backend self-report proof, or complete C11 evidence
+acceptance/promotion work: schedule records remain dispatch observations,
+Core evidence outcomes remain separate consumer records, and grade promotion
+stays outside the planner.
+
 ### C04/C11 first supported planning slice
 
 `agent.verification_planner` is an opt-in, in-memory, single-route planning API.
