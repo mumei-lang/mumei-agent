@@ -153,8 +153,9 @@ def build_reuse_parser(
     parser = build_check_parser(parser)
     parser.description = (
         "Run a provisioned go-types helper on declared Go sources and "
-        "emit a manifest that reuses a declared manifest's summaries "
-        "for the functions the fresh report confirms unchanged."
+        "emit a manifest that reuses a declared manifest's available "
+        "summaries for the functions the fresh report confirms unchanged. "
+        "Unavailable records are freshly derived."
     )
     for action in parser._actions:
         if action.dest == "manifest":
@@ -652,8 +653,9 @@ def main_reuse(args: argparse.Namespace | None = None) -> int:
 
     Same partition as ``go-summaries-check``: a manifest function whose
     identity survives in the fresh report and that `stale_dependents`
-    does not flag is reused verbatim, every other live function is
-    freshly derived and a `missing` entry is dropped. The emitted set is
+    does not flag is reused verbatim only when the declared record is
+    available. An unavailable record and every other live function is
+    freshly derived, and a `missing` entry is dropped. The emitted set is
     keyed to the fresh context — per-function reuse stays the host's
     weaker freshness choice, never the strict `for_function` gate.
     """

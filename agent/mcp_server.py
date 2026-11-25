@@ -2364,8 +2364,9 @@ def go_summaries_reuse(
 
     The same wiring as `go-summaries-reuse`: a manifest function
     whose identity survives in the fresh report and that
-    `stale_dependents` does not flag is reused verbatim, every other
-    live function is freshly derived and a `missing` entry is
+    `stale_dependents` does not flag is reused verbatim only when the
+    declared record is available. An unavailable record and every other
+    live function is freshly derived, and a `missing` entry is
     dropped — keyed to the fresh context, the weaker per-function
     freshness merge, never the strict gate.
 
