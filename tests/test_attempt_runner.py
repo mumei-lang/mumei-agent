@@ -739,13 +739,19 @@ def test_feed_stdin_writes_through_a_high_numbered_fd():
             os.close(fd)
 
 
-def test_feed_stdin_blocking_writes_complete_pipe_feed():
+def test_feed_stdin_blocking_writes_complete_pipe_feed(monkeypatch):
     """The Windows pipe fallback must deliver every byte and close stdin."""
     import types
 
     read_fd, write_fd = os.pipe()
     proc = types.SimpleNamespace(stdin=os.fdopen(write_fd, "wb"))
     payload = b"x" * 1024
+    real_write = os.write
+
+    def short_write(fd, data):
+        return real_write(fd, data[:17])
+
+    monkeypatch.setattr(os, "write", short_write)
     attempt_runner._feed_stdin_blocking(proc, payload)
     assert proc.stdin.closed
     chunks = []
