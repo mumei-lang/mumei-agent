@@ -5,9 +5,10 @@ import ast
 import re
 import subprocess
 import tempfile
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, AbstractSet
 
 from agent.cross_validation_models import ForeignCodeVerdict, MumeiContractAtom
 from agent.secret_redaction import redact_secrets, redact_value
@@ -177,32 +178,40 @@ def _check_one(
     return inconclusive
 
 
+def _unambiguous_module_definitions(source: str) -> dict[str, ast.FunctionDef]:
+    if len(source) > _MAX_SOURCE_CHARS:
+        return {}
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, RecursionError, ValueError):
+        return {}
+    counts = Counter(
+        node.name for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    )
+    return {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and counts[node.name] == 1
+    }
+
+
+def python_contract_source_names(source: str) -> set[str]:
+    return set(_unambiguous_module_definitions(source))
+
+
 def check_python_implementations(
     source: str, atoms: list[MumeiContractAtom], verifier: MumeiVerifyClientLike,
+    *, source_names: AbstractSet[str],
 ) -> list[ImplementationCheck]:
     candidates = [atom for atom in atoms if atom.ensures.strip().lower() not in _TRIVIAL]
     if not candidates:
         return []
-    if len(source) > _MAX_SOURCE_CHARS:
-        return [ImplementationCheck(redact_secrets(atom.name), "unverifiable") for atom in candidates]
-    try:
-        tree = ast.parse(source)
-    except (SyntaxError, RecursionError, ValueError):
-        return [ImplementationCheck(redact_secrets(atom.name), "unverifiable") for atom in candidates]
-    module_functions: dict[str, list[ast.FunctionDef | ast.AsyncFunctionDef]] = {}
-    for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            module_functions.setdefault(node.name, []).append(node)
-    function_names = {
-        node.name for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
+    module_functions = _unambiguous_module_definitions(source) if source_names else {}
     checks = []
     for atom in candidates:
-        if atom.name not in function_names:
-            continue
-        matches = module_functions.get(atom.name, [])
-        if len(matches) != 1 or not isinstance(matches[0], ast.FunctionDef):
+        node = module_functions.get(atom.name) if atom.name in source_names else None
+        if node is None:
             checks.append(ImplementationCheck(redact_secrets(atom.name), "unverifiable"))
         else:
-            checks.append(_check_one(matches[0], atom, verifier))
+            checks.append(_check_one(node, atom, verifier))
     return checks

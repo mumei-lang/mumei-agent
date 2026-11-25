@@ -1334,33 +1334,49 @@ def test_audit_aligns_public_and_private_python_contracts(tmp_path: Path) -> Non
 
 
 @pytest.mark.integration
-def test_audit_matches_reserved_python_function_name(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("other_def", "expected_status"),
+    [
+        ("", "refuted"),
+        ("class Service:\n    def call(self, balance: int, amount: int) -> int:\n        return 0\n", "unverifiable"),
+        ("if True:\n    def call(balance: int, amount: int) -> int:\n        return 0\n", "unverifiable"),
+        ("try:\n    def call(balance: int, amount: int) -> int:\n        return 0\nexcept Exception:\n    pass\n", "unverifiable"),
+        ("def call(balance: int, amount: int) -> int:\n    return 0\n", "unverifiable"),
+    ],
+    ids=["unambiguous", "method", "if", "try", "duplicate"],
+)
+def test_audit_matches_reserved_python_function_name(
+    tmp_path: Path, other_def: str, expected_status: str,
+) -> None:
     core = os.environ.get("MUMEI_BIN")
     if not core or not Path(core).is_absolute() or not Path(core).is_file():
         pytest.skip("set MUMEI_BIN to an absolute trusted Core executable")
     source = tmp_path / "payment.py"
     source.write_text(
-        "class Service:\n"
-        "    def call(self, balance: int, amount: int) -> int:\n"
-        "        return 0\n\n"
         "def call(balance: int, amount: int) -> int:\n"
-        "    return balance - amount\n",
+        "    return balance - amount\n\n" + other_def,
         encoding="utf-8",
     )
     spec = _forge_spec()
     spec["atoms"][0]["name"] = "call"
-    client = MagicMock()
-    client.chat.completions.create.return_value.choices[0].message.content = (
-        "call: requires amount <= balance and amount >= 0; ensures result >= 0."
+    extractor = MagicMock()
+    extractor.extract_from_file.return_value = CodeToSpecResult(
+        success=True,
+        detected_language="python",
+        natural_language_spec="call: requires amount <= balance and amount >= 0; ensures result >= 0.",
+        forge_task_spec=spec,
     )
     config = AgentConfig(api_key="sentinel-test-only", mumei_bin=core, spec_cache_dir="")
-    with patch("agent.spec_extractor.extract_spec", return_value=spec):
-        result = AuditPipeline(config, client=client).audit_file(source, "python")
+    result = AuditPipeline(config, code_to_spec_extractor=extractor).audit_file(source, "python")
 
-    assert result.verification_status == "refuted"
-    assert any(witness["function_name"] == "call" for witness in result.counterexample_values)
-    assert "spec atom has no matching implementation: call_" not in result.cross_validation_gaps
-    assert "spec precondition assumed, not enforced, by `call`" in result.cross_validation_gaps
+    assert result.verification_status == expected_status
+    if expected_status == "refuted":
+        assert any(witness["function_name"] == "call" for witness in result.counterexample_values)
+        assert "spec atom has no matching implementation: call_" not in result.cross_validation_gaps
+        assert "spec precondition assumed, not enforced, by `call`" in result.cross_validation_gaps
+    else:
+        assert result.verification_violations == []
+        assert result.counterexample_values == []
 
 
 def test_audit_report_includes_step_guidance() -> None:

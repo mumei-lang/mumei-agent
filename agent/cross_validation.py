@@ -31,7 +31,7 @@ from agent.prompts.cross_validation_nl import (
     CROSS_VALIDATION_NL_SYSTEM_PROMPT,
     build_nl_cross_validation_prompt,
 )
-from agent.python_implementation_check import check_python_implementations
+from agent.python_implementation_check import check_python_implementations, python_contract_source_names
 from agent.intent_tracker import IntentChange, IntentDriftResult, IntentTracker
 from agent.spec_code_mapper import MappingResult, SpecCodeMapper
 from agent.cross_validation_models import (
@@ -904,7 +904,9 @@ def validate_foreign_code(
         selected_names = {atom.name for atom in atoms}
         intents = [atom for atom in llm_atoms if atom.name in selected_names]
         if intents:
-            checks = check_python_implementations(code, intents, create_mumei_client(config.mumei_bin))
+            checks = check_python_implementations(
+                code, intents, create_mumei_client(config.mumei_bin), source_names=python_contract_source_names(code),
+            )
             if checks:
                 verification = {**(verification or {}), "implementation_checks": [asdict(check) for check in checks]}
                 for check in checks:

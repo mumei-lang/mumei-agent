@@ -51,7 +51,9 @@ def test_failed_implementation_probe_without_model_is_inconclusive() -> None:
         "    return balance - amount\n",
         [atom],
         verifier,
+        source_names={"withdraw"},
     )
+    verifier.verify.assert_called_once()
     assert check.status == "unverifiable"
     assert check.counterexample == {}
 
