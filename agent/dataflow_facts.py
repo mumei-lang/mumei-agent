@@ -377,18 +377,30 @@ _MAKE_GROW = re.compile(rf"^make\(\[\][^,]+,\s*({_IDENT})\+(\w+)(?:,[^)]*)?\)$")
 _COMPOSITE = re.compile(r"^(?:&?\[\][^{]+|&?map\[[^\]]+\][^{]+|&?[A-Za-z_][\w.]*)\{")
 _SLICE_EXPR = re.compile(rf"^{_IDENT}\[[^\]]*:[^\]]*\]$")
 def _strip_go_literals(text: str) -> str:
-    """Remove Go string/rune/raw-string literals in one lexical pass.
+    """Remove Go literals and comments in one lexical pass.
 
-    Whichever quote opens first wins — a ``"`` inside a backtick raw
-    string is raw text, not the start of a quoted literal, so regex
-    passes would mis-pair it and swallow real structure (``][`` and all).
+    Whichever token opens first wins — a ``"`` inside a backtick raw
+    string is raw text, not the start of a quoted literal, and a quote in
+    a comment is prose rather than a rune literal. Comments are replaced
+    by whitespace so neighboring identifiers cannot accidentally join.
     """
     out: list[str] = []
     i = 0
     end = len(text)
     while i < end:
         ch = text[i]
-        if ch == "`":
+        if text.startswith("//", i):
+            close = text.find("\n", i + 2)
+            if close == -1:
+                i = end
+            else:
+                out.append("\n")
+                i = close + 1
+        elif text.startswith("/*", i):
+            close = text.find("*/", i + 2)
+            out.append(" ")
+            i = end if close == -1 else close + 2
+        elif ch == "`":
             close = text.find("`", i + 1)
             i = end if close == -1 else close + 1
         elif ch in "\"'":
@@ -1069,6 +1081,7 @@ def _forward_goto_plan(
         group: tuple[tree_sitter_extract.Statement, ...],
         ancestors: tuple[int, ...],
         parent_indices: dict[int, int],
+        transparent_label_site: tuple[int, int] | None = None,
     ) -> None:
         group_id = id(group)
         groups[group_id] = group
@@ -1081,8 +1094,9 @@ def _forward_goto_plan(
                 if statement.label in labels:
                     ok[0] = False
                     return
-                labels[statement.label] = ((index, 0), group_id, local_index)
-                label_frames[statement.label] = group_id
+                label_group, label_index = transparent_label_site or (group_id, local_index)
+                labels[statement.label] = ((index, 0), label_group, label_index)
+                label_frames[statement.label] = label_group
             if statement.kind == "goto":
                 label = control_flow._jump_label(statement.text)
                 gotos.append(
@@ -1100,7 +1114,17 @@ def _forward_goto_plan(
                 statement.orelse,
                 statement.post,
             ):
-                visit(sub, ancestors + (group_id,), indices)
+                transparent_child = None
+                if (
+                    statement.kind == "block"
+                    and statement.stacked_label
+                    and sub is statement.body
+                ):
+                    # Stacked labels introduce neither a scope nor a label
+                    # frame: ``L1: L2: stmt`` labels the same statement-list
+                    # position as ``L1``.
+                    transparent_child = transparent_label_site or (group_id, local_index)
+                visit(sub, ancestors + (group_id,), indices, transparent_child)
                 if not ok[0]:
                     return
 
@@ -1391,18 +1415,29 @@ class _Walker:
         self._descent_indices: list[int] = []
 
     def _collect_label_frames(
-        self, statements: tuple[tree_sitter_extract.Statement, ...]
+        self,
+        statements: tuple[tree_sitter_extract.Statement, ...],
+        transparent_frame: int | None = None,
     ) -> None:
         for statement in statements:
             if statement.labeled and statement.label:
-                self._label_frames.setdefault(statement.label, id(statements))
+                self._label_frames.setdefault(
+                    statement.label, transparent_frame or id(statements)
+                )
             for group in (
                 statement.init,
                 statement.body,
                 statement.orelse,
                 statement.post,
             ):
-                self._collect_label_frames(group)
+                child_transparent = None
+                if (
+                    statement.kind == "block"
+                    and statement.stacked_label
+                    and group is statement.body
+                ):
+                    child_transparent = transparent_frame or id(statements)
+                self._collect_label_frames(group, child_transparent)
 
     # -- helpers ---------------------------------------------------------
 
@@ -2419,14 +2454,17 @@ class _Walker:
             # only the resulting binding facts afterwards.
             pre_env = env.copy()
             evaluated = []
-            exact_alias_roots = {}
+            exact_copy_provenance = {}
             for name, type_text, value in declarations:
                 scratch = pre_env.copy()
                 self._var_one(name, type_text, value, scratch)
                 evaluated.append((name, scratch))
                 value_text = _norm(value)
                 if re.fullmatch(r"[A-Za-z_]\w*", value_text):
-                    exact_alias_roots[name] = pre_env.root(value_text)
+                    # A same-spec name on the right still denotes the outer
+                    # object. Keep that pre-declaration identity distinct
+                    # from the new binding that happens to reuse its name.
+                    exact_copy_provenance[name] = ("pre", pre_env.root(value_text))
             for _name, _type_text, value in declarations:
                 # Initializer side effects still happen even though the new
                 # bindings do not: a bare handle mention can transfer ownership
@@ -2442,12 +2480,11 @@ class _Walker:
                 # after the shadowing binding lands. Never link it to the new
                 # binding: equal-length facts would otherwise flow backwards
                 # from the outer object into the new empty slice.
-                if (
-                    alias in declared_names
-                    and root in declared_names
-                    and exact_alias_roots.get(alias) != root
-                ):
-                    del env.aliases[alias]
+                if alias in declared_names and root in declared_names:
+                    alias_provenance = exact_copy_provenance.get(alias)
+                    root_provenance = exact_copy_provenance.get(root)
+                    if alias_provenance is None or alias_provenance != root_provenance:
+                        del env.aliases[alias]
             return
         for name, type_text, value in declarations:
             self._var_one(name, type_text, value, env)

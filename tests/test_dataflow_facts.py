@@ -2697,8 +2697,11 @@ def test_multi_name_var_exact_slice_aliases_keep_equal_length() -> None:
 
 
 def test_double_labeled_grouped_var_specs_stay_source_ordered() -> None:
+    # Valid Go: both forward gotos land directly on their labels, then fall
+    # through the declarations; neither jumps over the bindings.
     facts = _facts(
-        "d := 0\n"
+        "if n == 0 { goto Outer }\n"
+        "if n == 1 { goto Inner }\n"
         "Outer: Inner: var (\n"
         "d = 1\n"
         "x = 1/d\n"
@@ -2707,6 +2710,38 @@ def test_double_labeled_grouped_var_specs_stay_source_ordered() -> None:
         "x",
     )
     assert facts.consts["x"] == 1
+
+
+def test_multi_name_var_distinct_initializer_does_not_alias_new_shadow() -> None:
+    # ``t`` copies the outer slice, while the new ``s`` is empty. Their names
+    # collide after shadowing, but the objects are different lengths.
+    facts = _facts(
+        "s := []int{1}\n"
+        "i := 0\n"
+        "if i < len(s) {\n"
+        "var s, t = []int{}, s\n"
+        "if i < len(t) {\n"
+        "return s[i]\n"
+        "}\n"
+        "return 0\n"
+        "}\n"
+        "return 0",
+        "s[i]",
+    )
+    assert ("i", "s") not in facts.lt_len
+
+
+def test_comment_quote_does_not_hide_file_ownership_transfer() -> None:
+    flow = _go(
+        'f, err := os.Open("p")\n'
+        "if err != nil { return 0 }\n"
+        "takeOwnership(/* caller's file */ f)\n"
+        "return 0"
+    )
+    assert not any(
+        issue.category == "resource_leak" and issue.subject == "f"
+        for issue in flow.issues
+    )
 
 
 def test_shadowed_slice_alias_does_not_share_outer_length_with_new_slice() -> None:
