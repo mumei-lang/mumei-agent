@@ -33,6 +33,7 @@ import argparse
 import hashlib
 import json
 import os
+import stat
 import sys
 from pathlib import Path
 
@@ -102,11 +103,26 @@ def _input_size(path: str, bound: int) -> None:
         )
 
 
-def load_saved_descriptor(path: str, expected_build_id: str) -> dict:
-    """Decode and validate a saved `accept-object --json` descriptor."""
+def read_descriptor_bytes(path: str) -> bytes:
+    """Read a regular, non-symlink descriptor file within Core's bound."""
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            raise ValueError("--descriptor must be a regular file")
+        data = handle.read(MAX_EVIDENCE_BYTES + 1)
+    if len(data) > MAX_EVIDENCE_BYTES:
+        raise ValueError(
+            f"{Path(path).name} exceeds the Core input bound "
+            f"({MAX_EVIDENCE_BYTES} bytes)"
+        )
+    return data
+
+
+def load_saved_descriptor(data: bytes, expected_build_id: str) -> dict:
+    """Decode and validate saved `accept-object --json` descriptor bytes."""
     try:
         descriptor = json.loads(
-            Path(path).read_bytes(),
+            data,
             object_pairs_hook=_unique_json_object,
             parse_constant=_reject_json_constant,
         )
@@ -124,7 +140,7 @@ def load_saved_descriptor(path: str, expected_build_id: str) -> dict:
     return descriptor
 
 
-def _check_request(args: argparse.Namespace) -> tuple[list[str], dict]:
+def _check_request(args: argparse.Namespace) -> tuple[list[str], bytes, dict]:
     """Validate declared paths, bounds and the saved descriptor before dispatch."""
     if os.name != "posix":
         raise ValueError("native-object-acceptance-recheck requires a POSIX host")
@@ -148,13 +164,18 @@ def _check_request(args: argparse.Namespace) -> tuple[list[str], dict]:
     for member in members:
         _input_size(str(bundle / member), member_bound_bytes(member))
     _input_size(args.source, MAX_SOURCE_BYTES)
-    _input_size(args.descriptor, MAX_EVIDENCE_BYTES)
-    descriptor = load_saved_descriptor(args.descriptor, args.expected_build_id)
+    try:
+        data = read_descriptor_bytes(args.descriptor)
+    except OSError as exc:
+        raise ValueError(f"cannot read declared input: {exc}") from exc
+    descriptor = load_saved_descriptor(data, args.expected_build_id)
     _check_output_path(args, _declared_files(args, members))
-    return members, descriptor
+    return members, data, descriptor
 
 
-def _attempt_fingerprint(args: argparse.Namespace, members: list[str]) -> str:
+def _attempt_fingerprint(
+    args: argparse.Namespace, members: list[str], descriptor_bytes: bytes
+) -> str:
     bundle = Path(args.bundle)
     member_hashes = {member: _file_sha256(bundle / member) for member in members}
     request = {
@@ -167,7 +188,7 @@ def _attempt_fingerprint(args: argparse.Namespace, members: list[str]) -> str:
         },
         "descriptor": {
             "path": args.descriptor,
-            "sha256": _file_sha256(Path(args.descriptor)),
+            "sha256": hashlib.sha256(descriptor_bytes).hexdigest(),
         },
         "expected_build_id": args.expected_build_id,
     }
@@ -270,8 +291,8 @@ def run_object_acceptance_recheck(args: argparse.Namespace) -> dict:
         AttemptSequenceStore,
     )
 
-    members, descriptor = _check_request(args)
-    fingerprint = _attempt_fingerprint(args, members)
+    members, descriptor_bytes, descriptor = _check_request(args)
+    fingerprint = _attempt_fingerprint(args, members, descriptor_bytes)
     argv = (
         args.core,
         "native-bundle",
@@ -293,7 +314,12 @@ def run_object_acceptance_recheck(args: argparse.Namespace) -> dict:
     )
     try:
         drift_members = declared_members(Path(args.bundle))
-        inputs_changed = _attempt_fingerprint(args, drift_members) != fingerprint
+        inputs_changed = (
+            _attempt_fingerprint(
+                args, drift_members, read_descriptor_bytes(args.descriptor)
+            )
+            != fingerprint
+        )
     except (OSError, ValueError):
         inputs_changed = True
     record = dispatch.run.record

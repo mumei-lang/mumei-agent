@@ -230,6 +230,43 @@ def test_oversized_descriptor_is_rejected_before_parsing(tmp_path, capsys):
     assert "exceeds the Core input bound" in err
 
 
+@pytest.mark.parametrize("kind", ["fifo", "symlink"])
+def test_non_regular_descriptor_is_rejected_without_blocking(tmp_path, capsys, kind):
+    core = _write_core(tmp_path)
+    bundle, source, saved = _write_inputs(tmp_path)
+    special = tmp_path / "special.json"
+    if kind == "fifo":
+        os.mkfifo(special)
+    else:
+        special.symlink_to(saved)
+    code, out, err = _run(capsys, _args(core, bundle, source, special))
+    assert code == 1 and out == ""
+    assert "--descriptor must be a regular file" in err or "cannot read" in err
+
+
+def test_descriptor_replaced_after_validation_claims_no_outcome(
+    tmp_path, capsys, monkeypatch
+):
+    from agent import native_object_acceptance_recheck as route
+
+    core = _write_core(tmp_path)
+    bundle, source, saved = _write_inputs(tmp_path)
+    original = route.load_saved_descriptor
+
+    def replace_after_parse(data, expected_build_id):
+        descriptor = original(data, expected_build_id)
+        saved.write_text(json.dumps(_variant(object_sha256="4" * 64)))
+        return descriptor
+
+    monkeypatch.setattr(route, "load_saved_descriptor", replace_after_parse)
+    code, out, _ = _run(capsys, _args(core, bundle, source, saved))
+    assert code == 0
+    report = json.loads(out)
+    assert report["inputs_changed"] is True
+    assert "object_acceptance_recheck" not in report
+    assert "discharged_checks" not in report
+
+
 def test_relative_descriptor_path_is_rejected(tmp_path, capsys):
     core = _write_core(tmp_path)
     bundle, source, _ = _write_inputs(tmp_path)
