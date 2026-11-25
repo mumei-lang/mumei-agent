@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from agent import verify_schedule as verify_schedule_module
+from agent.attempt_runner import MAX_FEED_BYTES
 from agent.plan_history_log import append_plan_history, read_plan_history
 from agent.verify_schedule import (
     build_schedule_parser,
@@ -445,6 +446,127 @@ def test_undeclared_argv_adapter_is_not_dispatched(inputs, capsys, tmp_path):
     assert doc["attempts"][0]["terminal_state"] == "not_dispatched"
     assert doc["attempts"][0]["adapter_id"] == "alpha"
     assert doc["attempts"][0]["enforcement"] is None
+
+
+def _source_stdin_probe():
+    return (
+        "import sys;"
+        f"sys.exit(0 if sys.stdin.buffer.read() == {SOURCE!r} else 3)"
+    )
+
+
+def test_host_argv_map_can_pipe_source_bytes_to_stdin(inputs, capsys, tmp_path):
+    path = tmp_path / "argv_source_stdin.json"
+    path.write_text(json.dumps({
+        "alpha": {
+            "argv": [ATTEMPT_PY, "-c", _source_stdin_probe()],
+            "stdin": "source",
+        }
+    }), encoding="utf-8")
+    args = args_for({**inputs, "argv_map": str(path)})
+
+    assert main_schedule(args) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["outcome"] == "selected"
+    assert doc["selected_adapter_id"] == "alpha"
+    assert doc["attempts"][0]["exit_code"] == 0
+    assert SOURCE.decode("utf-8") not in json.dumps(doc)
+
+
+def test_host_source_stdin_wins_over_manifest_stdin(inputs, capsys, tmp_path):
+    adapters = tmp_path / "adapters_wrong_stdin.json"
+    adapters.write_text(json.dumps([
+        manifest("alpha", attempt_stdin="WRONG"),
+        manifest("beta"),
+    ]), encoding="utf-8")
+    path = tmp_path / "argv_source_stdin.json"
+    path.write_text(json.dumps({
+        "alpha": {
+            "argv": [ATTEMPT_PY, "-c", _source_stdin_probe()],
+            "stdin": "source",
+        }
+    }), encoding="utf-8")
+    policy = tmp_path / "policy_allow_manifest_stdin.json"
+    policy_doc = json.loads(Path(inputs["policy"]).read_text(encoding="utf-8"))
+    policy_doc["allow_manifest_attempt_stdin"] = True
+    policy.write_text(json.dumps(policy_doc), encoding="utf-8")
+    args = args_for({
+        **inputs,
+        "adapters": str(adapters),
+        "argv_map": str(path),
+        "policy": str(policy),
+    })
+
+    assert main_schedule(args) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["outcome"] == "selected"
+    assert doc["attempts"][0]["exit_code"] == 0
+
+
+def test_host_argv_object_without_stdin_still_gets_closed_pipe(inputs, capsys, tmp_path):
+    path = tmp_path / "argv_closed_stdin.json"
+    path.write_text(json.dumps({
+        "alpha": {"argv": [ATTEMPT_PY, "-c", _source_stdin_probe()]}
+    }), encoding="utf-8")
+    args = args_for({**inputs, "argv_map": str(path)})
+
+    assert main_schedule(args) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["outcome"] != "selected"
+    assert doc["attempts"][0]["exit_code"] == 3
+
+
+def test_oversize_source_stdin_adapter_fails_closed_and_falls_back(
+    inputs, capsys, tmp_path
+):
+    big_source = tmp_path / "FAKE_PRIVATE_BIG_SOURCE.mm"
+    big_source.write_bytes(b"x" * (MAX_FEED_BYTES + 1))
+    path = tmp_path / "argv_oversize_source_stdin.json"
+    path.write_text(json.dumps({
+        "alpha": {
+            "argv": [ATTEMPT_PY, "-c", "import sys; sys.exit(0)"],
+            "stdin": "source",
+        },
+        "beta": [ATTEMPT_PY, "-c", "import sys; sys.exit(0)"],
+    }), encoding="utf-8")
+    args = args_for({
+        **inputs,
+        "argv_map": str(path),
+        "source": str(big_source),
+    })
+
+    assert main_schedule(args) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["outcome"] == "selected"
+    assert doc["selected_adapter_id"] == "beta"
+    assert doc["attempts"][0]["terminal_state"] == "not_dispatched"
+    assert doc["attempts"][1]["adapter_id"] == "beta"
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        {"argv": [ATTEMPT_PY, "-c", "pass"], "stdin": None},
+        {"argv": [ATTEMPT_PY, "-c", "pass"], "stdin": "literal"},
+        {"argv": [ATTEMPT_PY, "-c", "pass"], "stdin": True},
+        {"argv": [ATTEMPT_PY, "-c", "pass"], "stdin": {"kind": "source"}},
+        {"argv": [ATTEMPT_PY, "-c", "pass"], "unknown": "source"},
+        {"stdin": "source"},
+    ],
+)
+def test_host_argv_map_rejects_unknown_or_unsupported_stdin_declarations(
+    inputs, capsys, tmp_path, declaration
+):
+    path = tmp_path / "argv_bad_stdin.json"
+    path.write_text(json.dumps({"alpha": declaration}), encoding="utf-8")
+    args = args_for({**inputs, "argv_map": str(path)})
+
+    with pytest.raises(SystemExit):
+        main_schedule(args)
+    err = capsys.readouterr().err
+    assert err.startswith("verify-schedule:")
+    assert "FAKE_PRIVATE" not in err
+    assert SOURCE.decode("utf-8") not in err
 
 
 def test_cli_subcommand_dispatches(tmp_path):

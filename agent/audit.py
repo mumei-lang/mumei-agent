@@ -108,8 +108,10 @@ from agent.verification_planner import (
     RouteRequirements,
     RuntimeObservation,
 )
+from agent.attempt_runner import MAX_FEED_BYTES
 from agent.verify_schedule import (
     SOURCE_INPUT_FORMAT,
+    HostAttemptInvocation,
     _load_argv_map,
     _load_observations,
     _load_policy,
@@ -1413,7 +1415,7 @@ class _ScheduledVerification:
 
     request: RouteRequirements
     registry: AdapterRegistry
-    argv_map: dict[str, tuple[str, ...]]
+    argv_map: dict[str, HostAttemptInvocation]
     policy: PlannerPolicy
     observations: tuple[RuntimeObservation, ...] | None
     max_attempts: int
@@ -1554,8 +1556,14 @@ def _run_scheduled_verification(
     source = source_path.read_bytes()
 
     def argv_for(adapter_id: str) -> tuple[str, ...] | None:
-        argv = context.argv_map.get(adapter_id)
-        if argv is None:
+        declared = context.argv_map.get(adapter_id)
+        if declared is not None:
+            if declared.feed_source_stdin and len(source) > MAX_FEED_BYTES:
+                # Same fail-closed input-preparation boundary as
+                # verify-schedule: this adapter cannot receive the unit.
+                return None
+            argv = declared.argv
+        else:
             if not context.policy.allow_manifest_attempt_argv:
                 return None
             descriptor = context.registry.descriptor(adapter_id)
@@ -1565,6 +1573,9 @@ def _run_scheduled_verification(
         return (*argv, str(source_path))
 
     def stdin_for(adapter_id: str) -> bytes | None:
+        declared = context.argv_map.get(adapter_id)
+        if declared is not None and declared.feed_source_stdin:
+            return source
         if not context.policy.allow_manifest_attempt_stdin:
             return None
         descriptor = context.registry.descriptor(adapter_id)

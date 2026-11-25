@@ -4529,6 +4529,9 @@ def _scheduled_verification_files(
     tmp_path: Path,
     both_exit: int | None = None,
     beta_stdout: str | None = None,
+    argv_map_override: dict | None = None,
+    adapter_required_permissions: tuple[str, ...] = (),
+    policy_permissions: tuple[str, ...] = ("process.spawn",),
 ):
     """Declared inputs for the --enable-scheduled-verification lane."""
     def write(name: str, doc: object) -> str:
@@ -4554,7 +4557,7 @@ def _scheduled_verification_files(
             "methods": ["deductive_proof"],
             "result_contracts": [contract],
             "input_formats": ["mumei.source-text/v1"],
-            "required_permissions": [],
+            "required_permissions": list(adapter_required_permissions),
         }
 
     alpha_exit = both_exit if both_exit is not None else 3
@@ -4578,14 +4581,16 @@ def _scheduled_verification_files(
         "adapters": write("adapters", [manifest("alpha"), manifest("beta")]),
         "argv_map": write(
             "argv",
-            {
+            argv_map_override
+            if argv_map_override is not None
+            else {
                 "alpha": [ATTEMPT_PY, "-c", f"import sys; sys.exit({alpha_exit})"],
                 "beta": [ATTEMPT_PY, "-c", beta_code],
             },
         ),
         "policy": write(
             "policy",
-            {"allowed_permissions": ["process.spawn"], "timeout_ms": 10_000},
+            {"allowed_permissions": list(policy_permissions), "timeout_ms": 10_000},
         ),
         "observations": write(
             "observations",
@@ -4614,9 +4619,17 @@ def _scheduled_verification_ctx(
     beta_stdout: str | None = None,
     core_requirement: str | None = None,
     core_requirement_list: str | None = None,
+    argv_map_override: dict | None = None,
+    adapter_required_permissions: tuple[str, ...] = (),
+    policy_permissions: tuple[str, ...] = ("process.spawn",),
 ):
     files = _scheduled_verification_files(
-        tmp_path, both_exit=both_exit, beta_stdout=beta_stdout
+        tmp_path,
+        both_exit=both_exit,
+        beta_stdout=beta_stdout,
+        argv_map_override=argv_map_override,
+        adapter_required_permissions=adapter_required_permissions,
+        policy_permissions=policy_permissions,
     )
     argv = [
         "--code-file",
@@ -4769,6 +4782,42 @@ def test_audit_scheduled_verification_records_selected(
     assert "scheduled_verification: outcome=selected attempts=2" in result.report
     assert "FAKE_PRIVATE" not in json.dumps(schedule)
     assert "FAKE_PRIVATE" not in result.report
+
+
+def test_audit_host_argv_object_with_source_stdin_dispatches(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "calc.py"
+    source.write_text("def calc():\n    return 0\n", encoding="utf-8")
+    ctx = _scheduled_verification_ctx(
+        tmp_path,
+        argv_map_override={
+            "alpha": {
+                "argv": [
+                    ATTEMPT_PY,
+                    "-c",
+                    "import sys; from pathlib import Path; "
+                    "sys.exit(0 if sys.stdin.buffer.read() == "
+                    "Path(sys.argv[-1]).read_bytes() else 3)",
+                ],
+                "stdin": "source",
+            }
+        },
+        adapter_required_permissions=("filesystem.read", "process.spawn"),
+        policy_permissions=("filesystem.read", "process.spawn"),
+    )
+
+    result = _scheduled_audit_pipeline().audit_file(
+        source,
+        "python",
+        scheduled_verification=ctx,
+    )
+
+    schedule = result.scheduled_verification
+    assert schedule["outcome"] == "selected"
+    assert schedule["selected_adapter_id"] == "alpha"
+    assert schedule["attempts"][0]["terminal_state"] == "exited"
+    assert schedule["attempts"][0]["exit_code"] == 0
 
 
 def test_audit_records_valid_schedule_check_without_changing_verdict(

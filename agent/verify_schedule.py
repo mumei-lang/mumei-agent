@@ -20,8 +20,10 @@ import json
 import os
 import sys
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
+from agent.attempt_runner import MAX_FEED_BYTES
 from agent.attempt_schedule import (
     MAX_SCHEDULE_ATTEMPTS,
     AttemptScheduleResult,
@@ -194,12 +196,35 @@ def _load_observations(path: str | None) -> tuple[RuntimeObservation, ...]:
     )
 
 
-def _load_argv_map(path: str) -> dict[str, tuple[str, ...]]:
+@dataclass(frozen=True)
+class HostAttemptInvocation:
+    """Host-declared process invocation and input preparation.
+
+    `feed_source_stdin` is the only supported host stdin declaration in this
+    slice: the declared source bytes are piped to the child. The bytes
+    are never copied into diagnostics or schedule output.
+    """
+
+    argv: tuple[str, ...]
+    feed_source_stdin: bool = False
+
+
+def _load_argv_map(path: str) -> dict[str, HostAttemptInvocation]:
     document = _load_document(path, "adapter argv map")
     if type(document) is not dict:
         raise ValueError("adapter argv map must be a JSON object")
-    argvs: dict[str, tuple[str, ...]] = {}
-    for adapter_id, argv in document.items():
+    invocations: dict[str, HostAttemptInvocation] = {}
+    for adapter_id, declaration in document.items():
+        feed_source_stdin = False
+        argv = declaration
+        if type(declaration) is dict:
+            if set(declaration) - {"argv", "stdin"} or "argv" not in declaration:
+                raise ValueError("invalid adapter argv declaration")
+            argv = declaration["argv"]
+            if "stdin" in declaration:
+                if declaration["stdin"] != "source":
+                    raise ValueError("invalid adapter stdin declaration")
+                feed_source_stdin = True
         if (
             type(adapter_id) is not str
             or type(argv) is not list
@@ -207,8 +232,10 @@ def _load_argv_map(path: str) -> dict[str, tuple[str, ...]]:
             or any(type(arg) is not str or not arg for arg in argv)
         ):
             raise ValueError("invalid adapter argv declaration")
-        argvs[adapter_id] = tuple(argv)
-    return argvs
+        invocations[adapter_id] = HostAttemptInvocation(
+            tuple(argv), feed_source_stdin
+        )
+    return invocations
 
 
 def _load_registry(
@@ -267,7 +294,11 @@ def build_schedule_parser(
     )
     parser.add_argument(
         "--argv-map", required=True, metavar="PATH",
-        help="Declared JSON object mapping adapter_id to its argv array.",
+        help=(
+            "Declared JSON object mapping adapter_id to its argv array, or "
+            "to {\"argv\": [...], \"stdin\": \"source\"} to pipe the declared "
+            "source bytes explicitly."
+        ),
     )
     parser.add_argument(
         "--policy", required=True, metavar="PATH",
@@ -466,7 +497,11 @@ def _run_schedule_result(args: argparse.Namespace) -> AttemptScheduleResult:
         # plant an executable command by itself.
         declared = argv_map.get(adapter_id)
         if declared is not None:
-            return declared
+            if declared.feed_source_stdin and len(source) > MAX_FEED_BYTES:
+                # Input preparation is impossible within the runner's bounded
+                # feed: fail this adapter closed so fallback can continue.
+                return None
+            return declared.argv
         if policy.allow_manifest_attempt_argv:
             descriptor = registry.descriptor(adapter_id)
             if descriptor is not None:
@@ -474,6 +509,11 @@ def _run_schedule_result(args: argparse.Namespace) -> AttemptScheduleResult:
         return None
 
     def stdin_for(adapter_id: str) -> bytes | None:
+        # A host argv-map ``stdin: "source"`` declaration wins and needs no
+        # manifest opt-in: it is the host's own input-preparation choice.
+        declared = argv_map.get(adapter_id)
+        if declared is not None and declared.feed_source_stdin:
+            return source
         # Manifest-declared stdin feeds the attempt only when the host
         # policy opts in — like argv, a manifest must not plant input.
         if not policy.allow_manifest_attempt_stdin:
