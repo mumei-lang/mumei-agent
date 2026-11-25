@@ -261,24 +261,24 @@ def parse_go_with_compact_group_recovery(parser, source_bytes: bytes):
         root, source_bytes
     ):
         return None
+    patched_source = _apply_semicolon_insertions(source_bytes, insertions)
     try:
-        patched = parser.parse(
-            _apply_semicolon_insertions(source_bytes, insertions)
-        ).root_node
+        patched = parser.parse(patched_source).root_node
     except Exception:
         return None
     if patched.has_error:
         return None
-    for spec_type in ("const_spec", "var_spec"):
-        original_count = sum(
-            node.type == spec_type for node in _syntax_nodes(root)
-        )
-        patched_count = sum(
-            node.type == spec_type for node in _syntax_nodes(patched)
-        )
-        if original_count != patched_count:
-            return None
-    return root
+    original_specs = [
+        (node.type, source_bytes[node.start_byte : node.end_byte])
+        for node in _syntax_nodes(root)
+        if node.type in {"const_spec", "var_spec"}
+    ]
+    patched_specs = [
+        (node.type, patched_source[node.start_byte : node.end_byte])
+        for node in _syntax_nodes(patched)
+        if node.type in {"const_spec", "var_spec"}
+    ]
+    return root if original_specs == patched_specs else None
 
 
 # Node types that introduce a named function/method, per grammar.
