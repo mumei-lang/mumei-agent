@@ -1378,6 +1378,31 @@ def test_validate_code_checks_llm_postcondition_without_replacing_deterministic_
 
 
 @pytest.mark.integration
+def test_validate_python_parameterless_postcondition_refutation() -> None:
+    core = os.environ.get("MUMEI_BIN")
+    if not core or not Path(core).is_absolute() or not Path(core).is_file():
+        pytest.skip("set MUMEI_BIN to an absolute trusted Core executable")
+    provider = MagicMock()
+    provider.complete.return_value = json.dumps({"atoms": [{
+        "name": "constant",
+        "params": [],
+        "return_type": "i64",
+        "requires": "true",
+        "ensures": "result >= 0",
+    }]})
+    result = validate_foreign_code(
+        "def constant() -> int:\n    return -1\n",
+        language="python",
+        config=AgentConfig(api_key="sentinel-test-only", mumei_bin=core),
+        llm_provider=provider,
+    )
+    assert result.verdict == "refuted"
+    assert result.verification["implementation_checks"] == [
+        {"function": "constant", "status": "refuted", "counterexample": {}},
+    ]
+
+
+@pytest.mark.integration
 def test_validate_python_postcondition_checks_exact_llm_function_name() -> None:
     core = os.environ.get("MUMEI_BIN")
     if not core or not Path(core).is_absolute() or not Path(core).is_file():

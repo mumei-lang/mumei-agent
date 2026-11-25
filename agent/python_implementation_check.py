@@ -160,14 +160,16 @@ def _check_one(
     status = report.get("status")
     if verification.get("success") is True and status in ("success", "verified"):
         return ImplementationCheck(name, "verified")
+    params = {param.name for param in atom.params}
     model = report.get("counterexample")
+    if model is None and not params:
+        model = {}
     if (
         verification.get("success") is False and status == "failed"
         and report.get("failure_type") == "postcondition_violated"
         and report.get("counterexample_fidelity", "exact") == "exact"
-        and isinstance(model, dict) and model
+        and isinstance(model, dict) and (model or not params)
     ):
-        params = {param.name for param in atom.params}
         if model.keys() <= params and all(isinstance(value, (str, int)) for value in model.values()):
             # Redact integer values too, if their textual form matches a credential.
             safe_model = redact_value({key: str(value) for key, value in model.items()})
