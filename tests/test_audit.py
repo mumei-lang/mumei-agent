@@ -1335,25 +1335,26 @@ def test_audit_aligns_public_and_private_python_contracts(tmp_path: Path) -> Non
 
 @pytest.mark.integration
 @pytest.mark.parametrize(
-    ("other_def", "expected_status"),
+    ("prefix", "other_def", "expected_status"),
     [
-        ("", "refuted"),
-        ("class Service:\n    def call(self, balance: int, amount: int) -> int:\n        return 0\n", "unverifiable"),
-        ("if True:\n    def call(balance: int, amount: int) -> int:\n        return 0\n", "unverifiable"),
-        ("try:\n    def call(balance: int, amount: int) -> int:\n        return 0\nexcept Exception:\n    pass\n", "unverifiable"),
-        ("def call(balance: int, amount: int) -> int:\n    return 0\n", "unverifiable"),
+        ("", "", "refuted"),
+        ("async ", "", "unverifiable"),
+        ("", "class Service:\n    def call(self, balance: int, amount: int) -> int:\n        return 0\n", "unverifiable"),
+        ("", "if True:\n    def call(balance: int, amount: int) -> int:\n        return 0\n", "unverifiable"),
+        ("", "try:\n    def call(balance: int, amount: int) -> int:\n        return 0\nexcept Exception:\n    pass\n", "unverifiable"),
+        ("", "def call(balance: int, amount: int) -> int:\n    return 0\n", "unverifiable"),
     ],
-    ids=["unambiguous", "method", "if", "try", "duplicate"],
+    ids=["unambiguous", "async", "method", "if", "try", "duplicate"],
 )
 def test_audit_matches_reserved_python_function_name(
-    tmp_path: Path, other_def: str, expected_status: str,
+    tmp_path: Path, prefix: str, other_def: str, expected_status: str,
 ) -> None:
     core = os.environ.get("MUMEI_BIN")
     if not core or not Path(core).is_absolute() or not Path(core).is_file():
         pytest.skip("set MUMEI_BIN to an absolute trusted Core executable")
     source = tmp_path / "payment.py"
     source.write_text(
-        "def call(balance: int, amount: int) -> int:\n"
+        f"{prefix}def call(balance: int, amount: int) -> int:\n"
         "    return balance - amount\n\n" + other_def,
         encoding="utf-8",
     )
@@ -1370,10 +1371,11 @@ def test_audit_matches_reserved_python_function_name(
     result = AuditPipeline(config, code_to_spec_extractor=extractor).audit_file(source, "python")
 
     assert result.verification_status == expected_status
-    if expected_status == "refuted":
-        assert any(witness["function_name"] == "call" for witness in result.counterexample_values)
+    if not other_def:
         assert "spec atom has no matching implementation: call_" not in result.cross_validation_gaps
         assert "spec precondition assumed, not enforced, by `call`" in result.cross_validation_gaps
+    if expected_status == "refuted":
+        assert any(witness["function_name"] == "call" for witness in result.counterexample_values)
     else:
         assert result.verification_violations == []
         assert result.counterexample_values == []

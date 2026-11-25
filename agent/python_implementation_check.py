@@ -178,7 +178,9 @@ def _check_one(
     return inconclusive
 
 
-def _python_function_scopes(source: str) -> tuple[dict[str, ast.FunctionDef], set[str], set[str]] | None:
+def _python_function_scopes(
+    source: str,
+) -> tuple[dict[str, ast.FunctionDef | ast.AsyncFunctionDef], set[str], set[str]] | None:
     try:
         tree = ast.parse(source)
     except (SyntaxError, RecursionError, ValueError):
@@ -191,7 +193,7 @@ def _python_function_scopes(source: str) -> tuple[dict[str, ast.FunctionDef], se
     module_functions = {
         node.name: node
         for node in tree.body
-        if isinstance(node, ast.FunctionDef) and counts[node.name] == 1
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and counts[node.name] == 1
     }
     return module_functions, {node.name for node in definitions if node not in direct_nodes}, set(counts)
 
@@ -220,7 +222,7 @@ def check_python_implementations(
         if atom.name not in declared_names:
             continue
         node = module_functions.get(atom.name) if atom.name in source_names else None
-        if node is None:
+        if not isinstance(node, ast.FunctionDef):
             checks.append(ImplementationCheck(redact_secrets(atom.name), "unverifiable"))
         else:
             checks.append(_check_one(node, atom, verifier))
