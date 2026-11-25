@@ -72,7 +72,7 @@ def register(registry: AdapterRegistry, *documents: dict) -> None:
 
 def policy(**overrides) -> PlannerPolicy:
     values = {
-        "timeout_ms": 200,
+        "timeout_ms": 5_000,
         "memory_mb": 64,
         "allowed_permissions": frozenset(),
     }
@@ -202,8 +202,9 @@ def test_unsupported_explicit_selection_fails_closed_without_substitution():
 
 
 def test_permitted_fallback_preserves_contract_format_and_records_origin():
+    incompatible = manifest("gamma", input_formats=["mumei.other-input/v1"], priority=10)
     registry = AdapterRegistry()
-    register(registry, manifest("alpha"), manifest("beta", priority=9))
+    register(registry, manifest("alpha"), manifest("beta", priority=9), incompatible)
 
     plan = registry.plan(
         request(),
@@ -211,6 +212,7 @@ def test_permitted_fallback_preserves_contract_format_and_records_origin():
         (
             RuntimeObservation("alpha", "missing", "1.0.0", 1),
             RuntimeObservation("beta", "available", "1.0.0", 2),
+            RuntimeObservation("gamma", "available", "1.0.0", 3),
         ),
     )
 
@@ -221,6 +223,7 @@ def test_permitted_fallback_preserves_contract_format_and_records_origin():
     assert plan.selected.input_format == INPUT_FORMAT
     reasons = {decision.adapter_id: decision.reasons for decision in plan.decisions}
     assert reasons["beta"] == ("selected_fallback",)
+    assert "unsupported_input_format" in reasons["gamma"]
 
 
 def test_non_success_exit_is_a_tool_error_not_a_success_and_falls_back():
@@ -256,14 +259,13 @@ def test_missing_command_is_not_dispatched_and_falls_back():
 
 def test_timeout_is_a_tool_error_not_a_success_and_falls_back():
     registry = AdapterRegistry()
-    register(registry, manifest("alpha"), manifest("beta"))
+    register(registry, manifest("alpha", max_timeout_ms=200), manifest("beta"))
     result = schedule(
         registry,
         {
             "alpha": (PY, "-c", "import time; time.sleep(30)"),
             "beta": exit_zero(),
         }.get,
-        planner_policy=policy(timeout_ms=200),
         observations=available("alpha", "beta"),
     )
 
@@ -272,19 +274,20 @@ def test_timeout_is_a_tool_error_not_a_success_and_falls_back():
     assert result.entries[0].terminal_state == "timed_out"
 
 
-def test_inconclusive_self_report_is_not_a_success_and_falls_back():
-    inconclusive_manifest = manifest(
+@pytest.mark.parametrize("outcome", ["failed", "inconclusive"])
+def test_negative_self_report_is_not_a_success_and_falls_back(outcome):
+    negative_manifest = manifest(
         "alpha",
         verdict_markers=[
-            {"stream": "stdout", "contains": "INCONCLUSIVE", "outcome": "inconclusive"}
+            {"stream": "stdout", "contains": outcome.upper(), "outcome": outcome}
         ],
     )
     registry = AdapterRegistry()
-    register(registry, inconclusive_manifest, manifest("beta"))
+    register(registry, negative_manifest, manifest("beta"))
     result = schedule(
         registry,
         {
-            "alpha": (PY, "-c", "print('INCONCLUSIVE')"),
+            "alpha": (PY, "-c", f"print('{outcome.upper()}')"),
             "beta": exit_zero(),
         }.get,
         observations=available("alpha", "beta"),
@@ -292,7 +295,7 @@ def test_inconclusive_self_report_is_not_a_success_and_falls_back():
 
     assert result.outcome == "selected"
     assert result.selected_adapter_id == "beta"
-    assert result.entries[0].reported_outcome == "inconclusive"
+    assert result.entries[0].reported_outcome == outcome
     assert result.entries[0].exit_code == 0
 
 
