@@ -1091,18 +1091,24 @@ def test_compact_grouped_var_without_final_separator_is_admitted(
 
 
 @pytest.mark.parametrize(
-    "declarations",
+    "declarations,expected_reasons",
     [
-        "func F(x int64) int64 { const (A float64 = 1); return x }",
-        "func F(x int64) int64 { var ( s string = \"s\" ); _ = s; return x }",
+        (
+            "func F(x int64) int64 { const (A float64 = 1); return x }",
+            {"binding_unavailable"},
+        ),
+        (
+            "func F(x int64) int64 { var ( s string = \"s\" ); _ = s; return x }",
+            {"unsupported_expression"},
+        ),
     ],
 )
 def test_compact_grouped_non_scalar_declarations_stay_unsupported(
-    go_types_helper, declarations
+    go_types_helper, declarations, expected_reasons
 ):
     result = named(*unit(go_types_helper, declarations))
     assert not result.available
-    assert result.gaps
+    assert {gap.reason for gap in result.gaps} == expected_reasons
 
 
 @pytest.mark.parametrize(

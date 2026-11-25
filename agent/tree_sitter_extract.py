@@ -204,6 +204,26 @@ def _compact_group_close(node):
     )
 
 
+def _semicolon_outside_comments(
+    root, source_bytes: bytes, start_byte: int, end_byte: int
+) -> bool:
+    """Whether a semicolon byte occurs outside tree-sitter comment nodes."""
+    comments = [
+        (node.start_byte, node.end_byte)
+        for node in _syntax_nodes(root)
+        if node.type == "comment"
+        and node.start_byte < end_byte
+        and start_byte < node.end_byte
+    ]
+    for position in range(start_byte, end_byte):
+        if source_bytes[position] != ord(";"):
+            continue
+        if any(start <= position < end for start, end in comments):
+            continue
+        return True
+    return False
+
+
 def _compact_group_semicolon_insertions(root, source_bytes: bytes) -> list[int]:
     """Positions where tree-sitter misses Go's grouped-declaration terminator.
 
@@ -225,7 +245,11 @@ def _compact_group_semicolon_insertions(root, source_bytes: bytes) -> list[int]:
             continue
         last = specs[-1]
         between = source_bytes[last.end_byte : close.start_byte]
-        if b";" in between or b"\n" in between or b"\r" in between:
+        if (
+            _semicolon_outside_comments(root, source_bytes, last.end_byte, close.start_byte)
+            or b"\n" in between
+            or b"\r" in between
+        ):
             continue
         positions.append(close.start_byte)
     return positions
@@ -255,9 +279,30 @@ def _only_compact_group_error_wrappers(root, source_bytes: bytes) -> bool:
         if close is None or node.end_byte > close.start_byte:
             return False
         between = source_bytes[node.end_byte : close.start_byte]
-        if b";" in between or b"\n" in between or b"\r" in between:
+        if (
+            _semicolon_outside_comments(root, source_bytes, node.end_byte, close.start_byte)
+            or b"\n" in between
+            or b"\r" in between
+        ):
             return False
     return True
+
+
+def _text_with_semicolon_insertions(
+    text: bytes, start_byte: int, end_byte: int, positions: list[int]
+) -> bytes:
+    """Apply recovery semicolons that fall inside one original node span."""
+    out = bytearray()
+    cursor = 0
+    for position in sorted(set(positions)):
+        if not start_byte < position < end_byte:
+            continue
+        relative = position - start_byte
+        out += text[cursor:relative]
+        out += b";"
+        cursor = relative
+    out += text[cursor:]
+    return bytes(out)
 
 
 def _apply_semicolon_insertions(source_bytes: bytes, positions: list[int]) -> bytes:
@@ -302,12 +347,20 @@ def parse_go_with_compact_group_recovery(parser, source_bytes: bytes):
     if patched.has_error:
         return None
     original_specs = [
-        (node.type, source_bytes[node.start_byte : node.end_byte])
+        (
+            node.type,
+            _text_with_semicolon_insertions(
+                source_bytes[node.start_byte : node.end_byte],
+                node.start_byte,
+                node.end_byte,
+                insertions,
+            ),
+        )
         for node in _syntax_nodes(root)
         if node.type in {"const_spec", "var_spec"}
     ]
     patched_specs = [
-        (node.type, patched_source[node.start_byte : node.end_byte])
+        (node.type, node.text)
         for node in _syntax_nodes(patched)
         if node.type in {"const_spec", "var_spec"}
     ]
@@ -1311,10 +1364,65 @@ def _go_statements(source_bytes: bytes, node, base: int, offsets: list[int]) -> 
         node = lists[0]
     results: list[Statement] = []
     for child in node.named_children:
+        if child.type in {"const_declaration", "var_declaration"}:
+            spec_statements = _go_declaration_spec_statements(
+                source_bytes, child, base, offsets
+            )
+            if spec_statements is not None:
+                results.extend(spec_statements)
+                continue
         statement = _go_statement(source_bytes, child, base, offsets)
         if statement is not None:
             results.append(statement)
     return tuple(results)
+
+
+def _go_declaration_spec_statements(
+    source_bytes: bytes, node, base: int, offsets: list[int]
+) -> tuple[Statement, ...] | None:
+    """Split multi-spec grouped declarations into source-order specs.
+
+    Each grouped spec is a separate Go declaration: a later initializer may
+    read a name introduced by an earlier spec, while names in one multi-name
+    spec still bind simultaneously. Single-spec declarations keep the original
+    node span/text through the ordinary statement path. Empty groups return no
+    statements because they are no-ops.
+    """
+    if node.type not in {"const_declaration", "var_declaration"}:
+        return None
+    specs = go_declaration_spec_nodes(node)
+    if len(specs) <= 1:
+        return None
+    kind = "const" if node.type == "const_declaration" else "var"
+    statements: list[Statement] = []
+    for spec in specs:
+        names: list[str] = []
+        values: list[str] = []
+        spec_names = [
+            _decode(source_bytes, child)
+            for child in spec.children_by_field_name("name")
+        ]
+        spec_values = _go_expression_list(
+            source_bytes, spec.child_by_field_name("value")
+        )
+        type_node = spec.child_by_field_name("type")
+        type_text = (
+            _decode(source_bytes, type_node).strip() if type_node is not None else ""
+        )
+        for index, name in enumerate(spec_names):
+            names.append(name)
+            values.append(spec_values[index] if index < len(spec_values) else "")
+        statements.append(
+            Statement(
+                kind=kind,
+                text=_decode(source_bytes, spec).strip(),
+                start=offsets[spec.start_byte] - base,
+                operator=type_text,
+                targets=tuple(names),
+                values=tuple(values),
+            )
+        )
+    return tuple(statements)
 
 
 def _go_statement(source_bytes: bytes, node, base: int, offsets: list[int]) -> Statement | None:

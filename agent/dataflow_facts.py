@@ -2402,9 +2402,31 @@ class _Walker:
                 self._var_one(name, type_text, value, env)
             return
         types = statement.operator.split("|") if statement.operator else []
-        for index, name in enumerate(statement.targets):
-            value = statement.values[index] if index < len(statement.values) else ""
-            type_text = _norm(types[index]) if index < len(types) else ""
+        declarations = [
+            (
+                name,
+                _norm(types[index]) if index < len(types) else "",
+                statement.values[index] if index < len(statement.values) else "",
+            )
+            for index, name in enumerate(statement.targets)
+        ]
+        if len(declarations) > 1:
+            # One VarSpec's initializers are evaluated before any of its new
+            # bindings enter scope: ``var d, x = 1, 1/d`` reads the outer
+            # ``d``, never the ``d`` declared by the same spec. Evaluate each
+            # initializer against the pre-declaration environment and merge
+            # only the resulting binding facts afterwards.
+            pre_env = env.copy()
+            evaluated = []
+            for name, type_text, value in declarations:
+                scratch = pre_env.copy()
+                self._var_one(name, type_text, value, scratch)
+                evaluated.append((name, scratch))
+            for name, scratch in evaluated:
+                env.kill(name)
+                _copy_name_facts(env, scratch, name)
+            return
+        for name, type_text, value in declarations:
             self._var_one(name, type_text, value, env)
 
     @staticmethod

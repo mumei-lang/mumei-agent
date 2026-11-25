@@ -3972,13 +3972,18 @@ Grouped `var ( ... )` declarations flatten each `var_spec` through the
 same scalar binding contract as individual declarations: explicit values
 bind pairwise against the pre-state, zero-value forms are dep-free,
 multi-name specs follow the multi-name declaration rules, `_` discards,
-and an empty `var ()` group is a no-op. Both newline layout and explicit
-semicolon separators are admitted when tree-sitter preserves the group.
+and an empty `var ()` group is a no-op. Each grouped spec is a separate
+declaration in source order, while names within one multi-name spec enter
+scope only after that spec's initializer list. Both newline layout and
+explicit semicolon separators are admitted when tree-sitter preserves the
+group.
 
 Compact one-line forms without a final separator are admitted through a
 narrow tree-sitter recovery: the original byte offsets are kept, only a
 final grouped spec directly before `)` is treated as implicitly
-terminated, recognised zero-width final-spec `ERROR` wrappers are
+terminated, comment text never supplies that terminator, nested compact
+groups inside function literals are validated without shifting the
+original offsets, recognised zero-width final-spec `ERROR` wrappers are
 flattened, and a semicolon-patched parse must otherwise be clean. Any
 unrelated `ERROR` node or remaining parse error still fails closed as
 `syntax_or_parser_unavailable`. Names use exactly the admission contract
@@ -4136,9 +4141,11 @@ explicit constant.
 Compact one-line forms without a final separator use the same narrow
 tree-sitter recovery as grouped `var`: the original byte offsets are
 kept, only a final grouped spec directly before `)` is treated as
-implicitly terminated, recognised zero-width final-spec `ERROR` wrappers
-are flattened, and a semicolon-patched parse must otherwise be clean.
-Any unrelated `ERROR` node or remaining parse error still fails closed
+implicitly terminated, comment text never supplies that terminator,
+nested compact groups inside function literals are validated without
+shifting the original offsets, recognised zero-width final-spec `ERROR`
+wrappers are flattened, and a semicolon-patched parse must otherwise be
+clean. Any unrelated `ERROR` node or remaining parse error still fails closed
 as `syntax_or_parser_unavailable`. Non-scalar constants, including
 non-scalar implicit repetitions, stay `binding_unavailable`; missing
 names and arity mismatches stay `unsupported_statement`. This is still

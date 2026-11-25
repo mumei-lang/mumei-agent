@@ -294,6 +294,19 @@ def test_assignment_facts_grouped_var_targets_assign():
     assert "y" in result[cfg.exit].some_path
 
 
+def test_grouped_var_specs_initialize_in_source_order():
+    body = "var (\na = x\nb = a\n)\nreturn b"
+    cfg = graph(body)
+    assert control_flow.unassigned_uses(body, cfg, entry_assigned=frozenset({"x"})) == ()
+
+
+def test_grouped_var_zero_value_spec_does_not_count_as_assignment():
+    body = "var (\na int64\nb = x\n)\nreturn a + b"
+    cfg = graph(body)
+    uses = control_flow.unassigned_uses(body, cfg, entry_assigned=frozenset({"x"}))
+    assert [(use.name, use.definite) for use in uses] == [("a", True)]
+
+
 def test_compact_grouped_var_without_final_separator_builds_cfg():
     body = "var ( y = x ); return y"
     cfg, result = facts(body)

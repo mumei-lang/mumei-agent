@@ -2632,6 +2632,20 @@ def test_shadowed_err_site_survives_scope_exit() -> None:
     )
 
 
+def test_multi_name_var_spec_initializers_read_outer_bindings() -> None:
+    # One VarSpec's bindings enter scope only after its initializer list:
+    # ``1/d`` reads the outer zero-valued ``d``, so the result must not be
+    # folded through the new ``d = 1`` binding. Separate grouped specs are
+    # sequential and do see the earlier new binding.
+    same_spec = _facts("d := 0\nvar d, x = 1, 1/d\nreturn x", "x")
+    assert "x" not in same_spec.nonzero
+    assert "x" not in same_spec.consts
+
+    separate_specs = _facts("d := 0\nvar (\nd = 1\nx = 1/d\n)\nreturn x", "x")
+    assert "x" in separate_specs.nonzero
+    assert separate_specs.consts["x"] == 1
+
+
 def test_var_self_reference_drops_outer_facts() -> None:
     # ``var d = d - 1`` shadows the outer ``d`` — its nonzero/consts
     # facts must not leak into the inner binding.

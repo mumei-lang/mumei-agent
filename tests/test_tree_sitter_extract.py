@@ -46,6 +46,42 @@ def test_go_compact_group_recovery_accepts_missing_final_terminator() -> None:
     assert root is not None and root.has_error
 
 
+def test_go_compact_group_recovery_accepts_comment_semicolon_before_close() -> None:
+    parser = tree_sitter_extract._get_parser("go")
+    source = b"package p\nfunc F() { const (A = 1 /* ; */); _ = A }\n"
+    assert (
+        tree_sitter_extract.parse_go_with_compact_group_recovery(parser, source)
+        is not None
+    )
+
+
+def test_go_compact_group_recovery_accepts_nested_group_in_function_literal() -> None:
+    parser = tree_sitter_extract._get_parser("go")
+    source = (
+        b"package p\nfunc F(x int64) int64 { "
+        b"var ( f = func() int64 { var ( y = x ); return y } ); return f() }\n"
+    )
+    assert (
+        tree_sitter_extract.parse_go_with_compact_group_recovery(parser, source)
+        is not None
+    )
+
+
+def test_go_grouped_declaration_specs_keep_source_order() -> None:
+    tree = tree_sitter_extract.extract_statements(
+        "var ( a = x; b = a )\nreturn b", "go"
+    )
+    assert tree is not None
+    assert [statement.text for statement in tree.statements[:2]] == [
+        "a = x",
+        "b = a",
+    ]
+    assert [statement.targets for statement in tree.statements[:2]] == [
+        ("a",),
+        ("b",),
+    ]
+
+
 @pytest.mark.parametrize(
     "source",
     [
