@@ -1334,16 +1334,17 @@ def test_validate_code_cli_writes_json_report(tmp_path: Path) -> None:
 
 @pytest.mark.integration
 @pytest.mark.parametrize(
-    ("body", "verdict"),
+    ("body", "verdict", "requires"),
     [
-        ("    return balance - amount\n", "refuted"),
-        ("    if amount > balance:\n        raise ValueError()\n    return balance - amount\n", "verified"),
-        ("    return debit(balance, amount)\n", "unverifiable"),
+        ("    return balance - amount\n", "refuted", "amount <= balance && amount >= 0"),
+        ("    if amount > balance:\n        raise ValueError()\n    return balance - amount\n", "verified", "amount <= balance && amount >= 0"),
+        ("    return debit(balance, amount)\n", "unverifiable", "amount <= balance && amount >= 0"),
+        ("    return balance - amount\n", "refuted", "true"),
     ],
-    ids=["missing-guard", "enforced-guard", "unsupported-body"],
+    ids=["missing-guard", "enforced-guard", "unsupported-body", "unconditional-postcondition"],
 )
 def test_validate_code_checks_llm_postcondition_without_replacing_deterministic_atom(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str, verdict: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str, verdict: str, requires: str,
 ) -> None:
     core = os.environ.get("MUMEI_BIN")
     if not core or not Path(core).is_absolute() or not Path(core).is_file():
@@ -1354,7 +1355,7 @@ def test_validate_code_checks_llm_postcondition_without_replacing_deterministic_
     source.write_text("def withdraw(balance: int, amount: int) -> int:\n" + body, encoding="utf-8")
     llm_atom = MumeiContractAtom(
         "withdraw", [ContractParam("balance"), ContractParam("amount")],
-        "i64", "amount <= balance && amount >= 0",
+        "i64", requires,
         "result == balance - amount && result >= 0",
     )
     args = build_validate_code_parser().parse_args(["--input", str(source), "--output", str(output)])

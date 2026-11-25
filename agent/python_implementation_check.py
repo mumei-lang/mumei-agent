@@ -178,10 +178,7 @@ def _check_one(
 def check_python_implementations(
     source: str, atoms: list[MumeiContractAtom], verifier: MumeiVerifyClientLike,
 ) -> list[ImplementationCheck]:
-    candidates = [
-        atom for atom in atoms
-        if atom.requires.strip().lower() not in _TRIVIAL and atom.ensures.strip().lower() not in _TRIVIAL
-    ]
+    candidates = [atom for atom in atoms if atom.ensures.strip().lower() not in _TRIVIAL]
     if not candidates:
         return []
     if len(source) > _MAX_SOURCE_CHARS:
