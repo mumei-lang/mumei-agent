@@ -610,7 +610,7 @@ def test_const_declarations_and_reads(go_types_helper, declarations, expected):
         ),
         # Implicit repetition does not admit a non-scalar constant.
         (
-            "func F(x int64) int64 { const (\n A = \"s\"\n B\n ); return x }",
+            "func F(x int64) int64 { const (\n _ float64 = 1\n B\n ); _ = B; return x }",
             "binding_unavailable",
         ),
     ],
