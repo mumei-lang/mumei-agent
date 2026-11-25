@@ -1150,7 +1150,7 @@ Replay a saved native-bundle accept-object descriptor against a fresh object acc
 | `--core` | `<PATH>` | yes | — | Declared Core executable (absolute path) used to run `native-bundle recheck-object-acceptance`. |
 | `--bundle` | `<DIR>` | yes | — | Declared native-bundle directory (absolute path) holding native-bundle.json and its declared members. |
 | `--source` | `<PATH>` | yes | — | Declared caller-supplied .mm source (absolute path, at most 65536 bytes); the bundle's own labels/paths are never read. |
-| `--descriptor` | `<PATH>` | yes | — | Declared saved `accept-object --json` descriptor (absolute path, at most 1048576 bytes) to replay. |
+| `--descriptor` | `<PATH>` | yes | — | Declared saved `accept-object --json` descriptor (absolute path to a regular file, not a symlink, at most 1048576 bytes) to replay. |
 | `--expected-build-id` | `<SHA256>` | yes | — | SHA-256 of native-bundle.json obtained through a separately trusted channel, not the descriptor. |
 | `--attempt-timeout` | `<<MS>>` | no | 60000 | Declared attempt bound in milliseconds. |
 | `--memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling applied to the attempt child's whole address space. |

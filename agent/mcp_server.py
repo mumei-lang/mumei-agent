@@ -4268,7 +4268,7 @@ def native_object_acceptance_recheck(
         source_path: Absolute path to the declared .mm source file (at most
             64 KiB); the bundle's own labels/paths are never read.
         descriptor_path: Absolute path to the saved `accept-object --json`
-            descriptor (at most 1 MiB).
+            descriptor: a regular file, not a symlink, at most 1 MiB.
         expected_build_id: SHA-256 of native-bundle.json obtained through a
             separately trusted channel (64 lowercase hex).
         attempt_timeout_ms: Declared attempt bound in milliseconds.
