@@ -5799,8 +5799,11 @@ runs the same provisioned helper on the same declared inputs plus
 `--manifest <PATH>`, partitions the declared manifest's functions by the
 same rule `go-summaries-check` reports, and emits a merged
 `mumei.go-scalar-parameter-deps/v1` manifest — a `reusable` function's
-declared summary is carried over verbatim, every other live function is
-freshly derived and a `missing` entry is dropped. The merged set is
+declared summary is carried over verbatim only when that record is
+available, every other live function is freshly derived and a `missing`
+entry is dropped. An unavailable reusable record never suppresses the
+fresh derivation, so widened analyzer coverage reaches existing users
+without a manual regeneration step. The merged set is
 keyed to the fresh context, so it describes the current unit, not the
 declared one. The manifest now declares the `target_arch` it was
 derived for (`int`/`uintptr` widths are arch-dependent while binding

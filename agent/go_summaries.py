@@ -689,7 +689,10 @@ def summary_reuse_set(args: argparse.Namespace) -> "GoSummarySet":
     return GoSummarySet(
         live.context_key,
         tuple(
-            by_id[f.binding_id] if f.binding_id in reusable else f
+            by_id[f.binding_id]
+            if f.binding_id in reusable
+            and by_id[f.binding_id].available
+            else f
             for f in live.functions
         ),
         live.target_arch,

@@ -730,6 +730,34 @@ def test_reuse_merges_declared_and_fresh_summaries(tmp_path, capsys):
     )
 
 
+def test_reuse_does_not_carry_an_unavailable_summary_forward(tmp_path, capsys):
+    files = {
+        "a.go": "package p\nfunc F0() int64 { return 1 }\n",
+        "b.go": "package p\nfunc F1() int64 { return 2 }\n",
+    }
+    helper = _write_helper(
+        tmp_path, json.dumps(_package_fixture(files)).encode()
+    )
+    paths = [_write_source(tmp_path, n, s) for n, s in files.items()]
+    manifest_path = _produce_manifest(tmp_path, capsys, helper, *paths)
+    manifest = json.loads(manifest_path.read_text())
+    fresh_f0 = dict(manifest["functions"][0])
+    # Model a manifest produced before this analyzer admitted the
+    # function's shape: identity freshness still holds, but the old
+    # record is unavailable and must not suppress the live derivation.
+    manifest["functions"][0].pop("return_dependencies")
+    manifest["functions"][0]["gaps"] = [
+        {"reason": "unsupported_statement", "span": None}
+    ]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    code, out, err = _run_reuse(
+        capsys, _reuse_args(helper, manifest_path, *paths)
+    )
+    assert code == 0 and err == ""
+    merged = json.loads(out)
+    assert merged["functions"][0] == fresh_f0
+
+
 def test_reuse_carries_call_modeling(tmp_path, capsys):
     """A `--summary-aware-calls` reuse run keeps the modeling counts
     the fresh derivation recorded in the merged manifest."""
