@@ -485,3 +485,63 @@ def test_adapter_swap_needs_no_core_edit(tmp_path):
     paths_fail["argv"] = str(swap_path)
     doc_ok = _doc(_run(paths_fail))
     assert doc_ok["selected_adapter_id"] == "alpha"
+
+
+Z3_PROFILE = "smtlib2.unsat/v1"
+
+
+def test_z3_cli_pilot_fails_closed_without_source_input_contract(tmp_path):
+    """Z3 CLI is a useful candidate, but the pilot must not silently feed it
+    bytes outside the host-declared source input contract. This records the
+    current adoption blocker instead of treating a solver self-report as evidence."""
+
+    contract = {
+        "profile": Z3_PROFILE,
+        "method": "deductive_proof",
+        "scope": "unbounded",
+        "correspondence_relation": "exact_model",
+        "correspondence_status": "assumed",
+    }
+    adapters = [
+        _manifest(
+            "z3cli",
+            profiles=[Z3_PROFILE],
+            input_formats=["smtlib2/v1"],
+            result_contracts=[contract],
+            required_permissions=["process.spawn"],
+            max_timeout_ms=1_000,
+            max_memory_mb=64,
+            verdict_markers=[
+                {"stream": "stdout", "contains": "unsat", "outcome": "valid"},
+                {"stream": "stdout", "contains": "sat", "outcome": "failed"},
+                {"stream": "stdout", "contains": "unknown", "outcome": "inconclusive"},
+            ],
+        )
+    ]
+    request = {
+        "profile": Z3_PROFILE,
+        "method": "deductive_proof",
+        "result_contract": contract,
+        "input_format": "smtlib2/v1",
+    }
+    observations = [
+        {"adapter_id": "z3cli", "availability": "available",
+         "tool_version": "0", "stamp": 1}
+    ]
+    paths = _write_docs(
+        tmp_path,
+        adapters=adapters,
+        argv_map={"z3cli": ["/definitely/not/executed-z3"]},
+        policy={"allowed_permissions": ["process.spawn"], "timeout_ms": 2_000},
+        observations=observations,
+        request=request,
+    )
+    Path(paths["source"]).write_text(
+        "(assert false)\n(check-sat)\n", encoding="utf-8"
+    )
+
+    out = _run(paths)
+
+    assert out.returncode != 0
+    assert "requires the source input contract and format" in out.stderr
+    assert "valid" not in out.stdout
