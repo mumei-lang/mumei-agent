@@ -739,6 +739,31 @@ def test_feed_stdin_writes_through_a_high_numbered_fd():
             os.close(fd)
 
 
+def test_feed_stdin_blocking_writes_complete_pipe_feed():
+    """The Windows pipe fallback must deliver every byte and close stdin."""
+    import types
+
+    read_fd, write_fd = os.pipe()
+    proc = types.SimpleNamespace(stdin=os.fdopen(write_fd, "wb"))
+    payload = b"x" * 8192
+    feeder = threading.Thread(
+        target=attempt_runner._feed_stdin_blocking,
+        args=(proc, payload),
+        daemon=True,
+    )
+    feeder.start()
+    got = b""
+    while True:
+        chunk = os.read(read_fd, 4096)
+        if not chunk:
+            break
+        got += chunk
+    feeder.join(5)
+    os.close(read_fd)
+    assert not feeder.is_alive()
+    assert got == payload
+
+
 def test_run_results_feed_sequence_reconciliation():
     runner = AttemptRunner()
     req = request()

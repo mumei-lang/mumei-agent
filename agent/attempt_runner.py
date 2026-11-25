@@ -107,6 +107,28 @@ def _writable_poller(fd: int) -> "select.poll | None":
     return poller
 
 
+def _feed_stdin_blocking(process: subprocess.Popen, data: bytes) -> None:
+    """Write a bounded feed on Windows, where select() cannot poll pipes.
+
+    The write runs on the caller's daemon feeder thread. A child that never
+    reads can leave that thread blocked, but it cannot block process exit or
+    the attempt wait loop; feeding fewer bytes or closing early would make the
+    child observe truncated input, so correctness wins over reclamation.
+    """
+    fd = process.stdin.fileno()
+    view = memoryview(data)
+    offset = 0
+    while offset < len(view):
+        try:
+            offset += os.write(fd, view[offset:])
+        except (BrokenPipeError, OSError, ValueError):
+            break
+    try:
+        process.stdin.close()
+    except (OSError, ValueError):
+        pass
+
+
 def _feed_stdin(
     process: subprocess.Popen, data: bytes, stop: threading.Event
 ) -> None:
@@ -120,6 +142,9 @@ def _feed_stdin(
     case: a descendant that inherits the read end but never reads
     leaves the pipe full forever, and without the event the blocked
     write would linger past the join timeout."""
+    if os.name == "nt":
+        _feed_stdin_blocking(process, data)
+        return
     fd = process.stdin.fileno()
     try:
         os.set_blocking(fd, False)
