@@ -1393,7 +1393,7 @@ def test_audit_does_not_treat_python_method_as_module_contract(
     source = tmp_path / "payment.py"
     code = (
         "class Service:\n"
-        "    def call(self, balance: int, amount: int) -> int:\n"
+        "    def call(self, balance: int, amount: int = int(1)) -> int:\n"
     )
     if has_guard:
         code += "        if amount > balance:\n            raise ValueError('amount exceeds balance')\n"

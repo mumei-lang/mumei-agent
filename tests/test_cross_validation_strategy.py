@@ -409,6 +409,19 @@ class TestValidateSpecVsImpl:
         assert report.spec_stronger_than_impl == ["call_"]
         assert report.details == ["spec precondition assumed, not enforced, by `Service.call`"]
 
+    def test_python_module_guard_analysis_with_callable_default(self):
+        spec_path = self._write_spec("withdraw", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "withdraw.py"
+        impl_path.write_text(
+            "def withdraw(balance: int, amount: int = int(1)) -> int:\n"
+            "    return balance - amount\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert report.uncovered_atoms == []
+        assert report.spec_stronger_than_impl == ["withdraw"]
+
     def test_enforced_precondition_is_not_flagged(self):
         spec_path = self._write_spec(
             "withdraw", "amount > 0 && amount <= balance"

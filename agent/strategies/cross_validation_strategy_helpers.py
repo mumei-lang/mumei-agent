@@ -187,10 +187,29 @@ def _extract_spec_atoms(spec_source: str) -> list[dict[str, Any]]:
     return atoms
 
 
+def _python_body_source(source: str, function: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
+    body_span = ast.copy_location(ast.Pass(), function.body[0])
+    body_span.end_lineno = function.end_lineno
+    body_span.end_col_offset = function.end_col_offset
+    return ast.get_source_segment(source, body_span, padded=True) or ""
+
+
 def _extract_function_body(source: str, language: str, function_name: str) -> str:
     """Return the body of ``function_name`` or the empty string if not found."""
     escaped = re.escape(function_name)
     lang = _canonical_language(language)
+    if lang == "python":
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            return ""
+        function = min(
+            (node for node in ast.walk(tree)
+             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == function_name),
+            key=lambda node: node.lineno,
+            default=None,
+        )
+        return _python_body_source(source, function) if function is not None else ""
     if lang in tree_sitter_extract.SUPPORTED_LANGUAGES:
         blocks = tree_sitter_extract.function_blocks(source, lang, _safe_identifier)
         if blocks is not None:
@@ -198,20 +217,7 @@ def _extract_function_body(source: str, language: str, function_name: str) -> st
                 if name == function_name:
                     return body
     patterns: list[re.Pattern[str]] = []
-    if lang == "python":
-        patterns.append(
-            re.compile(
-                # Allow `async def` and an optional `-> <annotation>` before
-                # the colon so annotated signatures match. The body ends at
-                # a `def`/`class` (or `async def`) at the same or smaller
-                # indentation — a nested `def`/`class` (deeper indent) and
-                # a `#`-comment at column 0 belong to the body and must not
-                # truncate it.
-                rf"(?P<indent>^[ \t]*)(?:async\s+)?def\s+{escaped}\s*\([^)]*\)\s*(?:->\s*[^:\n]+)?\s*:(?P<body>[\s\S]*?)(?=^(?P=indent)?[^ \t\n#]|\Z)",
-                re.MULTILINE,
-            )
-        )
-    elif lang == "rust":
+    if lang == "rust":
         patterns.append(
             re.compile(
                 rf"(?:pub\s+)?(?:async\s+)?fn\s+{escaped}\s*(?:<[^>]*>)?\s*\([^)]*\)[^\{{]*\{{(?P<body>[\s\S]*?)\}}",

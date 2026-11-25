@@ -18,7 +18,6 @@ Typical usage::
 """
 from __future__ import annotations
 
-import ast
 import hashlib
 import json
 import re
@@ -40,6 +39,7 @@ from agent.strategies.cross_validation_strategy_helpers import (
     _extract_function_body,
     _extract_functions,
     _extract_spec_atoms,
+    _python_body_source,
     _python_scoped_functions,
 )
 
@@ -1004,11 +1004,10 @@ class CrossValidator:
             has_complex_contract = bool(atom["requires"]) and len(atom["requires"]) > 20
             has_nontrivial_requires = bool(atom["requires"]) and atom["requires"].strip() not in _TRIVIAL_REQUIRES
             if has_complex_contract or has_nontrivial_requires:
-                function_source = (
-                    ast.get_source_segment(impl_source, function) or ""
-                    if function is not None else impl_source
+                body = (
+                    _python_body_source(impl_source, function)
+                    if function is not None else _extract_function_body(impl_source, language, impl_name)
                 )
-                body = _extract_function_body(function_source, language, impl_name)
                 if body and _has_unenforced_precondition(atom["requires"], body, language):
                     report.spec_stronger_than_impl.append(atom["name"])
                     # The requires literal itself is not echoed: spec text may
