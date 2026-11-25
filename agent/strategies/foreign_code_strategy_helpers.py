@@ -170,6 +170,7 @@ def to_mumei_atom(
     requires_labels: Mapping[str, str] | None = None,
 ) -> str:
     """Convert a foreign-code contract into Mumei atom syntax."""
+    function_name = _safe_identifier(spec.function_name, preserve_identifier=True)
     params = ", ".join(
         f"{_safe_identifier(name)}: {_mumei_type(type_name)}"
         for name, type_name in spec.params.items()
@@ -202,7 +203,7 @@ def to_mumei_atom(
     else:
         requires_lines = [f"    requires: {requires};"]
     declared = {
-        _safe_identifier(spec.function_name),
+        function_name,
         *(_safe_identifier(name) for name in spec.params),
     }
     safe_postconditions = [
@@ -214,7 +215,7 @@ def to_mumei_atom(
     default_value = _default_literal(return_type)
     return "\n".join(
         [
-            f"trusted atom {_safe_identifier(spec.function_name)}({params}) -> {return_type} {{",
+            f"trusted atom {function_name}({params}) -> {return_type} {{",
             *requires_lines,
             f"    ensures: {ensures};",
             "    body: {",
@@ -480,9 +481,8 @@ _MUMEI_RESERVED_IDENTIFIERS = {
 }
 
 
-def _safe_identifier(value: str) -> str:
-    safe = re.sub(r"\W+", "_", value.strip())
-    safe = safe.strip("_")
+def _safe_identifier(value: str, *, preserve_identifier: bool = False) -> str:
+    safe = value if preserve_identifier and value.isidentifier() else re.sub(r"\W+", "_", value.strip()).strip("_")
     if not safe:
         return "foreign_code_atom"
     if safe[0].isdigit():
@@ -3914,14 +3914,14 @@ def _detect_python_safety_issues(source: str) -> list[ForeignSafetyIssue]:
             }
             issues.extend(
                 _issues_for_expression(
-                    _safe_identifier(node.name), text, "Python", guaranteed_nonzero=nonzero
+                    node.name, text, "Python", guaranteed_nonzero=nonzero
                 )
             )
         body_text = ast.get_source_segment(source, node)
         if body_text:
             issues.extend(
                 _sentinel_index_issues(
-                    _safe_identifier(node.name), body_text, "Python"
+                    node.name, body_text, "Python"
                 )
             )
     return issues

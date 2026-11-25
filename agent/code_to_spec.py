@@ -8,7 +8,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Protocol, cast
+from typing import Literal, Protocol
 
 import chardet
 from openai import OpenAI
@@ -424,6 +424,8 @@ def _align_llm_spec_with_source(
     source_atoms: list[ContractLike],
     code_path: Path,
     warnings: list[str],
+    *,
+    exact_names: bool = False,
 ) -> dict[str, object]:
     """Replace hallucinated LLM atom names with actual source function names.
 
@@ -437,8 +439,9 @@ def _align_llm_spec_with_source(
     if not isinstance(atoms, list):
         return forge_task_spec
 
-    source_by_canon = {_canonicalize_name(atom.name): atom for atom in source_atoms}
-    matched_by_canon: dict[str, dict[str, object]] = {}
+    key_for = (lambda name: name) if exact_names else _canonicalize_name
+    source_by_key = {key_for(atom.name): atom for atom in source_atoms}
+    matched_by_key: dict[str, dict[str, object]] = {}
 
     for atom in atoms:
         if not isinstance(atom, dict):
@@ -446,24 +449,26 @@ def _align_llm_spec_with_source(
         name = atom.get("name", "")
         if not name or not isinstance(name, str):
             continue
-        source_atom = _best_matching_source_atom(name, source_atoms, source_by_canon)
+        source_atom = (
+            source_by_key.get(name) if exact_names else _best_matching_source_atom(name, source_atoms, source_by_key)
+        )
         if source_atom is None:
             warnings.append(
                 f"Dropping spec atom '{name}' with no matching source function."
             )
             continue
         atom["name"] = source_atom.name
-        canon = _canonicalize_name(source_atom.name)
-        if canon in matched_by_canon:
+        key = key_for(source_atom.name)
+        if key in matched_by_key:
             warnings.append(f"Duplicate spec atom mapping for '{source_atom.name}'.")
             continue
-        matched_by_canon[canon] = atom
+        matched_by_key[key] = atom
 
     final_atoms: list[dict[str, object]] = []
     for source_atom in source_atoms:
-        canon = _canonicalize_name(source_atom.name)
-        if canon in matched_by_canon:
-            final_atoms.append(cast(dict[str, object], matched_by_canon[canon]))
+        key = key_for(source_atom.name)
+        if key in matched_by_key:
+            final_atoms.append(matched_by_key[key])
         else:
             base = _forge_task_spec_from_atoms(code_path, [source_atom])
             final_atoms.extend(base["atoms"])
@@ -795,6 +800,7 @@ class CodeToSpecExtractor:
                     deterministic.atoms,
                     code_path,
                     warnings,
+                    exact_names=detected_language == "python",
                 )
             if cache_dir and cache_enabled:
                 _write_spec_cache(

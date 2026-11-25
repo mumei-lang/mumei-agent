@@ -16,18 +16,20 @@ from agent.prompts.report_formatter import (
 from agent.report_formatter import format_result_report
 from agent.spec_ambiguity import SpecAmbiguity
 from agent.strategies.cross_validation_strategy import CrossValidationReport
+from agent.strategies.foreign_code_strategy_helpers import _safe_identifier as _foreign_identifier
 from agent.strategies.spec_health_strategy import SpecHealthReport
 
 
-def _forge_task_to_mumei_source(spec: dict[str, object]) -> str:
+def _forge_task_to_mumei_source(spec: dict[str, object], *, preserve_atom_names: bool = False) -> str:
     atoms = _dict_list(spec.get("atoms"))
     if not atoms and "name" in spec:
         atoms = [spec]
-    blocks = [_forge_atom_to_mumei(atom) for atom in atoms]
+    blocks = [_forge_atom_to_mumei(atom, preserve_atom_name=preserve_atom_names) for atom in atoms]
     return "\n\n".join(blocks) + ("\n" if blocks else "")
 
-def _forge_atom_to_mumei(atom: dict[str, object]) -> str:
-    name = _safe_identifier(_string_value(atom.get("name"), "audited_atom"))
+def _forge_atom_to_mumei(atom: dict[str, object], *, preserve_atom_name: bool = False) -> str:
+    raw_name = _string_value(atom.get("name"), "audited_atom")
+    name = _foreign_identifier(raw_name, preserve_identifier=True) if preserve_atom_name else _safe_identifier(raw_name)
     params = _format_params(atom.get("params") or atom.get("inputs"))
     return_type = _string_value(atom.get("return_type"), "i64")
     requires = _coerce_to_boolean_clause(

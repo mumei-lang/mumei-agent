@@ -412,7 +412,9 @@ class AuditPipeline:
         malformed_extraction_issues = _malformed_extraction_issue_strings(
             extraction.forge_task_spec
         )
-        spec_source = _forge_task_to_mumei_source(extraction.forge_task_spec)
+        spec_source = _forge_task_to_mumei_source(
+            extraction.forge_task_spec, preserve_atom_names=audit_language == "python",
+        )
         if not spec_source:
             if _source_has_function_declarations(source_code, audit_language) is not False:
                 errors.append(

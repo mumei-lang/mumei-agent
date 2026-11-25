@@ -1291,6 +1291,48 @@ def test_audit_checks_extracted_postcondition_against_python_body(
         assert result.counterexample_values == []
 
 
+@pytest.mark.integration
+def test_audit_aligns_public_and_private_python_contracts(tmp_path: Path) -> None:
+    core = os.environ.get("MUMEI_BIN")
+    if not core or not Path(core).is_absolute() or not Path(core).is_file():
+        pytest.skip("set MUMEI_BIN to an absolute trusted Core executable")
+    source = tmp_path / "normalizer.py"
+    source.write_text(
+        "def normalize(value: int) -> int:\n"
+        "    return value\n\n"
+        "def _normalize(value: int) -> int:\n"
+        "    return -value\n",
+        encoding="utf-8",
+    )
+    spec = {
+        "atoms": [
+            {
+                "name": name,
+                "inputs": [{"name": "value", "type": "i64"}],
+                "return_type": "i64",
+                "requires": "true",
+                "ensures": ensures,
+            }
+            for name, ensures in [
+                ("normalize", "result == value"),
+                ("_normalize", "result == -value"),
+            ]
+        ],
+    }
+    client = MagicMock()
+    client.chat.completions.create.return_value.choices[0].message.content = (
+        "normalize: requires true; ensures result == value.\n"
+        "_normalize: requires true; ensures result == -value."
+    )
+    config = AgentConfig(api_key="sentinel-test-only", mumei_bin=core, spec_cache_dir="")
+    with patch("agent.spec_extractor.extract_spec", return_value=spec):
+        result = AuditPipeline(config, client=client).audit_file(source, "python")
+
+    assert result.verification_violations == []
+    assert result.verification_status == "verified"
+    assert result.cross_validation_gaps == []
+
+
 def test_audit_report_includes_step_guidance() -> None:
     result = AuditResult(
         success=False,
