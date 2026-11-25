@@ -976,6 +976,8 @@ class CrossValidator:
         # If the spec has complex requires/ensures but the implementation
         # function is trivial (heuristic: short or no validation code)
         for atom in spec_atoms:
+            if is_python and atom.get("python_non_module"):
+                continue
             source_name = atom.get("python_source_name") if is_python else None
             key = symbol_key(source_name or atom["name"])
             coverage_key = (source_name is not None, key)
@@ -1012,7 +1014,8 @@ class CrossValidator:
                     report.spec_stronger_than_impl.append(atom["name"])
 
         report.uncovered_atoms = sorted(uncovered.values())
-        report.coverage_ratio = len(covered) / (len(covered) + len(uncovered))
+        eligible_count = len(covered) + len(uncovered)
+        report.coverage_ratio = len(covered) / eligible_count if eligible_count else 0.0
 
         # Semantic gap detection: impl stronger than spec
         # Functions with complex validation that have no spec or trivial spec

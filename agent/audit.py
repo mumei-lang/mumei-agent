@@ -87,7 +87,7 @@ from agent.native_replay import NativeReplayer, native_replay_violations, reconc
 from agent.llm_provider import LLMProvider, openai_client_adapter
 from agent.mumei_client import create_mumei_client
 from agent.prompts.report_formatter import format_counterexample
-from agent.python_implementation_check import check_python_implementations, python_contract_source_names
+from agent.python_implementation_check import check_python_implementations, python_contract_sources
 from agent.spec_ambiguity import classify_spec_ambiguity
 from agent.strategies.cross_validation_strategy import CrossValidationReport, CrossValidator
 from agent.strategies.foreign_code_strategy import (
@@ -412,10 +412,13 @@ class AuditPipeline:
         malformed_extraction_issues = _malformed_extraction_issue_strings(
             extraction.forge_task_spec
         )
-        python_source_names = python_contract_source_names(source_code) if audit_language == "python" else None
+        python_source_names, python_non_module_names = (
+            python_contract_sources(source_code) if audit_language == "python" else (None, set())
+        )
         spec_source = _forge_task_to_mumei_source(
             extraction.forge_task_spec,
             python_source_names=python_source_names,
+            python_non_module_names=python_non_module_names,
         )
         if not spec_source:
             if _source_has_function_declarations(source_code, audit_language) is not False:

@@ -121,7 +121,10 @@ _ATOM_DEF_RE = re.compile(
 )
 _REQUIRES_RE = re.compile(r"requires\s*:\s*(.+?)(?:\n|ensures|effects|\{)", re.DOTALL)
 _ENSURES_RE = re.compile(r"ensures\s*:\s*(.+?)(?:\n|effects|\{)", re.DOTALL)
-_PYTHON_SOURCE_NAME_RE = re.compile(r"[^\n{]*\{[ \t]*\n[ \t]*// python-source-name: (\S+)[ \t]*(?:\n|$)")
+_PYTHON_PROVENANCE_RE = re.compile(
+    r"[^\n{]*\{[ \t]*\n[ \t]*// (?:python-source-name: (?P<name>\S+)|(?P<non_module>python-scope: non-module))"
+    r"[ \t]*(?:\n|$)"
+)
 
 
 def _extract_spec_atoms(spec_source: str) -> list[dict[str, Any]]:
@@ -144,9 +147,13 @@ def _extract_spec_atoms(spec_source: str) -> list[dict[str, Any]]:
             "requires": req_m.group(1).strip() if req_m else "",
             "ensures": ens_m.group(1).strip() if ens_m else "",
         }
-        source_name = _PYTHON_SOURCE_NAME_RE.match(part, m.end())
-        if source_name and source_name.group(1).isidentifier():
-            atom["python_source_name"] = source_name.group(1)
+        provenance = _PYTHON_PROVENANCE_RE.match(part, m.end())
+        if provenance:
+            source_name = provenance.group("name")
+            if provenance.group("non_module"):
+                atom["python_non_module"] = True
+            elif source_name and source_name.isidentifier():
+                atom["python_source_name"] = source_name
         atoms.append(atom)
     return atoms
 

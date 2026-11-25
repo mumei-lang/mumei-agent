@@ -178,25 +178,30 @@ def _check_one(
     return inconclusive
 
 
-def _unambiguous_module_definitions(source: str) -> dict[str, ast.FunctionDef]:
-    if len(source) > _MAX_SOURCE_CHARS:
-        return {}
+def _python_function_scopes(source: str) -> tuple[dict[str, ast.FunctionDef], set[str], set[str]] | None:
     try:
         tree = ast.parse(source)
     except (SyntaxError, RecursionError, ValueError):
-        return {}
-    counts = Counter(
-        node.name for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    )
-    return {
+        return None
+    definitions = [
+        node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    counts = Counter(node.name for node in definitions)
+    direct_nodes = set(tree.body)
+    module_functions = {
         node.name: node
         for node in tree.body
         if isinstance(node, ast.FunctionDef) and counts[node.name] == 1
     }
+    return module_functions, {node.name for node in definitions if node not in direct_nodes}, set(counts)
 
 
-def python_contract_source_names(source: str) -> set[str]:
-    return set(_unambiguous_module_definitions(source))
+def python_contract_sources(source: str) -> tuple[set[str], set[str]]:
+    scopes = _python_function_scopes(source)
+    if scopes is None:
+        return set(), set()
+    module_functions, non_module_names, _ = scopes
+    return set(module_functions), non_module_names
 
 
 def check_python_implementations(
@@ -206,9 +211,14 @@ def check_python_implementations(
     candidates = [atom for atom in atoms if atom.ensures.strip().lower() not in _TRIVIAL]
     if not candidates:
         return []
-    module_functions = _unambiguous_module_definitions(source) if source_names else {}
+    scopes = _python_function_scopes(source) if len(source) <= _MAX_SOURCE_CHARS else None
+    if scopes is None:
+        return [ImplementationCheck(redact_secrets(atom.name), "unverifiable") for atom in candidates]
+    module_functions, _, declared_names = scopes
     checks = []
     for atom in candidates:
+        if atom.name not in declared_names:
+            continue
         node = module_functions.get(atom.name) if atom.name in source_names else None
         if node is None:
             checks.append(ImplementationCheck(redact_secrets(atom.name), "unverifiable"))

@@ -1379,6 +1379,43 @@ def test_audit_matches_reserved_python_function_name(
         assert result.counterexample_values == []
 
 
+@pytest.mark.integration
+@pytest.mark.parametrize("has_module_collision", [False, True])
+def test_audit_does_not_treat_python_method_as_module_contract(
+    tmp_path: Path, has_module_collision: bool,
+) -> None:
+    core = os.environ.get("MUMEI_BIN")
+    if not core or not Path(core).is_absolute() or not Path(core).is_file():
+        pytest.skip("set MUMEI_BIN to an absolute trusted Core executable")
+    source = tmp_path / "payment.py"
+    code = (
+        "class Service:\n"
+        "    def call(self, balance: int, amount: int) -> int:\n"
+        "        if amount > balance:\n"
+        "            raise ValueError('amount exceeds balance')\n"
+        "        return balance - amount\n"
+    )
+    if has_module_collision:
+        code += "\ndef call_(balance: int, amount: int) -> int:\n    return balance - amount\n"
+    source.write_text(code, encoding="utf-8")
+    spec = _forge_spec()
+    spec["atoms"][0]["name"] = "call"
+    spec["atoms"][0]["requires"] = "balance >= amount"
+    extractor = MagicMock()
+    extractor.extract_from_file.return_value = CodeToSpecResult(
+        success=True,
+        detected_language="python",
+        natural_language_spec="call: requires balance >= amount; ensures result >= 0.",
+        forge_task_spec=spec,
+    )
+    config = AgentConfig(api_key="sentinel-test-only", mumei_bin=core, spec_cache_dir="")
+    result = AuditPipeline(config, code_to_spec_extractor=extractor).audit_file(source, "python")
+
+    assert result.cross_validation_gaps == []
+    assert result.verification_status == "unverifiable"
+    assert result.counterexample_values == []
+
+
 def test_audit_report_includes_step_guidance() -> None:
     result = AuditResult(
         success=False,
