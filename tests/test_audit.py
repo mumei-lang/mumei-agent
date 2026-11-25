@@ -1333,6 +1333,33 @@ def test_audit_aligns_public_and_private_python_contracts(tmp_path: Path) -> Non
     assert result.cross_validation_gaps == []
 
 
+@pytest.mark.integration
+def test_audit_matches_reserved_python_function_name(tmp_path: Path) -> None:
+    core = os.environ.get("MUMEI_BIN")
+    if not core or not Path(core).is_absolute() or not Path(core).is_file():
+        pytest.skip("set MUMEI_BIN to an absolute trusted Core executable")
+    source = tmp_path / "payment.py"
+    source.write_text(
+        "def call(balance: int, amount: int) -> int:\n"
+        "    return balance - amount\n",
+        encoding="utf-8",
+    )
+    spec = _forge_spec()
+    spec["atoms"][0]["name"] = "call"
+    client = MagicMock()
+    client.chat.completions.create.return_value.choices[0].message.content = (
+        "call: requires amount <= balance and amount >= 0; ensures result >= 0."
+    )
+    config = AgentConfig(api_key="sentinel-test-only", mumei_bin=core, spec_cache_dir="")
+    with patch("agent.spec_extractor.extract_spec", return_value=spec):
+        result = AuditPipeline(config, client=client).audit_file(source, "python")
+
+    assert result.verification_status == "refuted"
+    assert any(witness["function_name"] == "call" for witness in result.counterexample_values)
+    assert "spec atom has no matching implementation: call_" not in result.cross_validation_gaps
+    assert "spec precondition assumed, not enforced, by `call`" in result.cross_validation_gaps
+
+
 def test_audit_report_includes_step_guidance() -> None:
     result = AuditResult(
         success=False,

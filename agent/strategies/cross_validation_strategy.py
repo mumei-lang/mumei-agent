@@ -40,6 +40,7 @@ from agent.strategies.cross_validation_strategy_helpers import (
     _extract_functions,
     _extract_spec_atoms,
 )
+from agent.strategies.foreign_code_strategy_helpers import _safe_identifier
 
 
 def _is_short_native_or_wrapper_body(body: str) -> bool:
@@ -962,12 +963,26 @@ class CrossValidator:
             report.details.append("No spec atoms found in spec file.")
             return report
 
-        # Python extraction preserves identifiers; other extractors may normalize them.
-        symbol_key = (lambda name: name) if _canonical_language(language) == "python" else _canonical_symbol
+        is_python = _canonical_language(language) == "python"
+        symbol_key = (lambda name: name) if is_python else _canonical_symbol
+
+        def impl_symbol_key(name: str) -> str:
+            return _safe_identifier(name, preserve_identifier=True) if is_python else symbol_key(name)
+
         spec_by_key: dict[str, str] = {}
         for atom in spec_atoms:
             spec_by_key.setdefault(symbol_key(atom["name"]), atom["name"])
-        impl_by_key = {symbol_key(func): func for func in impl_functions}
+        if is_python:
+            impl_by_key: dict[str, str] = {}
+            ambiguous_keys: set[str] = set()
+            for func in impl_functions:
+                key = impl_symbol_key(func)
+                if impl_by_key.setdefault(key, func) != func:
+                    ambiguous_keys.add(key)
+            for key in ambiguous_keys:
+                del impl_by_key[key]
+        else:
+            impl_by_key = {impl_symbol_key(func): func for func in impl_functions}
 
         report.uncovered_atoms = sorted(
             original
@@ -1006,8 +1021,11 @@ class CrossValidator:
         # Semantic gap detection: impl stronger than spec
         # Functions with complex validation that have no spec or trivial spec
         for func_name in impl_functions:
+            key = impl_symbol_key(func_name)
+            if key not in impl_by_key:
+                continue
             matching_atom = next(
-                (a for a in spec_atoms if symbol_key(a["name"]) == symbol_key(func_name)),
+                (a for a in spec_atoms if symbol_key(a["name"]) == key),
                 None,
             )
             if matching_atom is None:

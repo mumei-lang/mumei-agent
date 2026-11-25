@@ -338,6 +338,21 @@ class TestValidateSpecVsImpl:
         assert report.uncovered_atoms == []
         assert report.coverage_ratio == 1.0
 
+    def test_python_reserved_name_collision_does_not_choose_a_body(self):
+        spec_path = self._write_spec("call_", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "call.py"
+        impl_path.write_text(
+            "def call(balance: int, amount: int) -> int:\n"
+            "    return balance - amount\n\n"
+            "def call_(balance: int, amount: int) -> int:\n"
+            "    return balance - amount\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert report.uncovered_atoms == ["call_"]
+        assert report.spec_stronger_than_impl == []
+
     def test_enforced_precondition_is_not_flagged(self):
         spec_path = self._write_spec(
             "withdraw", "amount > 0 && amount <= balance"
