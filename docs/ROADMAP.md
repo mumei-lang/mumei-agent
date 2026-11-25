@@ -105,9 +105,12 @@ acceptance criteria end to end:
 - execution, cancellation, bounded collection, source-input preparation,
   stream/completeness declarations, normalized result records and conflict
   reconciliation are host-controlled and permission-gated;
-- missing tools, version mismatches, invalid settings, timeouts, malformed,
-  partial or conflicting outputs, unavailable explicit selections and denied
-  fallback fail closed with reasons rather than becoming successes;
+- missing tools, version mismatches, invalid settings, timeouts, malformed
+  outputs, unavailable explicit selections and denied fallback fail closed
+  with reasons rather than becoming successes. Partial output may still carry
+  a host-declared exit-code `selected` dispatch outcome, but it fails closed
+  before Core I/O and cannot become Evidence acceptance or promotion;
+  conflicting output reports are rejected;
 - scheduling and adapter self-reports remain dispatch observations only;
   native Evidence meaning, acceptance and grade promotion stay with Mumei
   Core under the shared trust policy;

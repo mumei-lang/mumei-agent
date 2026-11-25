@@ -92,6 +92,22 @@ def test_user_adapter_registration_configuration_location_version_and_disable():
     assert plan.selected.memory_mb <= 32
     assert plan.selected.configuration_fingerprint is not None
 
+    replacement = configured_manifest(
+        "alpha", adapter_version="1.1.0", location="remote", priority=1
+    )
+    with pytest.raises(ValueError, match="replacement must be explicit"):
+        registry.register_manifest(replacement)
+    registry.register_manifest(replacement, replace=True)
+    replaced = registry.plan(
+        request(),
+        policy(allowed_locations=frozenset({"remote"})),
+        (
+            RuntimeObservation("alpha", "available", "1.1.0", 2),
+        ),
+    )
+    assert replaced.selected is not None
+    assert replaced.selected.adapter_version == "1.1.0"
+
     mismatch = registry.plan(
         request(),
         policy(
@@ -99,7 +115,7 @@ def test_user_adapter_registration_configuration_location_version_and_disable():
             allowed_locations=frozenset({"remote"}),
             tool_version_pins=(("alpha", "1.0.1"),),
         ),
-        available("alpha"),
+        (RuntimeObservation("alpha", "available", "1.1.0", 3),),
     )
     assert mismatch.selected is None
     assert "tool_version_mismatch" in reasons(mismatch, "alpha")
@@ -110,7 +126,7 @@ def test_user_adapter_registration_configuration_location_version_and_disable():
             allowed_locations=frozenset({"remote"}),
             disabled_adapters=frozenset({"alpha"}),
         ),
-        available("alpha"),
+        (RuntimeObservation("alpha", "available", "1.1.0", 4),),
     )
     assert disabled.selected is None
     assert "disabled" in reasons(disabled, "alpha")
@@ -157,7 +173,12 @@ def test_missing_tool_and_denied_fallback_are_not_successes():
 
 def test_timeout_is_a_tool_error_and_permitted_fallback_continues():
     registry = AdapterRegistry()
-    register(registry, manifest("alpha", max_timeout_ms=200), manifest("beta"))
+    register(
+        registry,
+        manifest("alpha", max_timeout_ms=200),
+        manifest("beta"),
+        manifest("gamma", input_formats=["mumei.other-input/v1"], priority=9),
+    )
     result = schedule(
         registry,
         {
@@ -165,10 +186,11 @@ def test_timeout_is_a_tool_error_and_permitted_fallback_continues():
             "beta": exit_zero(),
         }.get,
         planner_policy=policy(selected_adapter="alpha", allow_fallback=True),
-        observations=available("alpha", "beta"),
+        observations=available("alpha", "beta", "gamma"),
     )
     assert result.entries[0].terminal_state == "timed_out"
     assert result.entries[1].adapter_id == "beta"
+    assert all(entry.adapter_id != "gamma" for entry in result.entries)
     assert result.outcome == "selected"
     assert result.selected_adapter_id == "beta"
 
