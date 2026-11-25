@@ -1672,8 +1672,9 @@ class _Walker:
         if kind == "block":
             if statement.stacked_label:
                 # ``L1: L2: stmt`` — a stacked label introduces no Go
-                # scope, so walk the inner statement in this scope.
-                return self.statement(statement.body[0], env)
+                # scope, so walk its contents in this scope. Split grouped
+                # declarations can put more than one spec statement here.
+                return self.walk(statement.body, env)
             inner, terminated = self._scoped_walk(statement.body, env.copy(), env)
             return inner, terminated
         if kind in {"define", "assign"}:
@@ -2418,10 +2419,14 @@ class _Walker:
             # only the resulting binding facts afterwards.
             pre_env = env.copy()
             evaluated = []
+            exact_alias_roots = {}
             for name, type_text, value in declarations:
                 scratch = pre_env.copy()
                 self._var_one(name, type_text, value, scratch)
                 evaluated.append((name, scratch))
+                value_text = _norm(value)
+                if re.fullmatch(r"[A-Za-z_]\w*", value_text):
+                    exact_alias_roots[name] = pre_env.root(value_text)
             for _name, _type_text, value in declarations:
                 # Initializer side effects still happen even though the new
                 # bindings do not: a bare handle mention can transfer ownership
@@ -2437,7 +2442,11 @@ class _Walker:
                 # after the shadowing binding lands. Never link it to the new
                 # binding: equal-length facts would otherwise flow backwards
                 # from the outer object into the new empty slice.
-                if alias in declared_names and root in declared_names:
+                if (
+                    alias in declared_names
+                    and root in declared_names
+                    and exact_alias_roots.get(alias) != root
+                ):
                     del env.aliases[alias]
             return
         for name, type_text, value in declarations:
@@ -2680,7 +2689,7 @@ class _Walker:
         (``process(f)``, ``s.file = f``, ``return f``) means the current
         function may no longer own the resource, so no leak is reported.
         """
-        stripped = _strip_borrowing_calls(value)
+        stripped = _strip_borrowing_calls(_strip_go_literals(value))
         for held in list(env.held):
             if held[0] == "file" and re.search(
                 rf"(?<![\w.]){re.escape(held[1])}(?![\w])(?!\s*\.)", stripped

@@ -77,6 +77,17 @@ def test_go_labeled_grouped_declaration_specs_keep_label_on_first_spec() -> None
     assert (second.text, second.labeled) == ("b = a", False)
 
 
+def test_go_double_labeled_grouped_declaration_preserves_both_labels() -> None:
+    tree = tree_sitter_extract.extract_statements(
+        "Outer: Inner: var (\na = x\nb = a\n)\nreturn b", "go"
+    )
+    assert tree is not None
+    outer = tree.statements[0]
+    inner = outer.body[0]
+    assert (outer.label, inner.label) == ("Outer", "Inner")
+    assert [statement.text for statement in inner.body] == ["a = x", "b = a"]
+
+
 def test_go_grouped_multi_name_spec_repeats_type_per_target() -> None:
     tree = tree_sitter_extract.extract_statements(
         "var (\np, q *int\nr = 1\n)\nreturn *q", "go"

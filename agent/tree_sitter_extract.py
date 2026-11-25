@@ -1387,14 +1387,17 @@ def _go_statements(source_bytes: bytes, node, base: int, offsets: list[int]) -> 
     results: list[Statement] = []
     for child in node.named_children:
         declaration_node = child
-        label = ""
-        if child.type == "labeled_statement":
-            declaration_node = None
-            for part in child.named_children:
+        label_nodes = []
+        while declaration_node is not None and declaration_node.type == "labeled_statement":
+            label = ""
+            inner = None
+            for part in declaration_node.named_children:
                 if part.type == "label_name":
                     label = _decode(source_bytes, part)
                 else:
-                    declaration_node = part
+                    inner = part
+            label_nodes.append((declaration_node, label))
+            declaration_node = inner
         if declaration_node is not None and declaration_node.type in {
             "const_declaration",
             "var_declaration",
@@ -1403,12 +1406,35 @@ def _go_statements(source_bytes: bytes, node, base: int, offsets: list[int]) -> 
                 source_bytes, declaration_node, base, offsets
             )
             if spec_statements:
-                if label:
-                    spec_statements = (
-                        replace(spec_statements[0], labeled=True, label=label),
-                        *spec_statements[1:],
+                if not label_nodes:
+                    results.extend(spec_statements)
+                    continue
+                if len(label_nodes) == 1:
+                    results.extend(
+                        (
+                            replace(
+                                spec_statements[0],
+                                labeled=True,
+                                label=label_nodes[0][1],
+                            ),
+                            *spec_statements[1:],
+                        )
                     )
-                results.extend(spec_statements)
+                    continue
+                wrapped = spec_statements
+                for label_node, label in reversed(label_nodes):
+                    wrapped = (
+                        Statement(
+                            kind="block",
+                            text=_decode(source_bytes, label_node).strip(),
+                            start=offsets[label_node.start_byte] - base,
+                            body=wrapped,
+                            labeled=True,
+                            label=label,
+                            stacked_label=True,
+                        ),
+                    )
+                results.extend(wrapped)
                 continue
         statement = _go_statement(source_bytes, child, base, offsets)
         if statement is not None:

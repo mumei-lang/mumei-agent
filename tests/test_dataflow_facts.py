@@ -2663,6 +2663,52 @@ def test_multi_name_var_initializer_escape_reaches_outer_environment() -> None:
     assert not any(issue.category == "resource_leak" for issue in flow.issues)
 
 
+def test_multi_name_var_string_literal_does_not_transfer_file_ownership() -> None:
+    # ``"f"`` is only string data: it must not count as a bare mention that
+    # hands the open handle owned by variable ``f`` to another owner.
+    flow = _go(
+        'f, err := os.Open("p")\n'
+        "if err != nil { return 0 }\n"
+        'var g, x = "f", 1\n'
+        "_ = g\n"
+        "_ = x\n"
+        "return 0"
+    )
+    assert any(
+        issue.category == "resource_leak" and issue.subject == "f"
+        for issue in flow.issues
+    )
+
+
+def test_multi_name_var_exact_slice_aliases_keep_equal_length() -> None:
+    # Both new bindings copy the same outer slice, so they remain equal-length
+    # aliases of one another even though the outer name is shadowed.
+    facts = _facts(
+        "s := []int{1}\n"
+        "i := 0\n"
+        "if i < len(s) {\n"
+        "var s, t = s, s\n"
+        "return t[i]\n"
+        "}\n"
+        "return 0",
+        "t[i]",
+    )
+    assert ("i", "t") in facts.lt_len
+
+
+def test_double_labeled_grouped_var_specs_stay_source_ordered() -> None:
+    facts = _facts(
+        "d := 0\n"
+        "Outer: Inner: var (\n"
+        "d = 1\n"
+        "x = 1/d\n"
+        ")\n"
+        "return x",
+        "x",
+    )
+    assert facts.consts["x"] == 1
+
+
 def test_shadowed_slice_alias_does_not_share_outer_length_with_new_slice() -> None:
     facts = _facts(
         "s := []int{1}\n"
