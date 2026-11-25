@@ -139,8 +139,10 @@ tuple for newer declarations.
 Replanning is a **declared re-selection, not a runtime verdict**: it
 records that the host observed a failure — it does not prove the
 excluded adapter actually failed or that the new route will work, and it
-carries no attempt outcome or Evidence. C04/C11 stay partial; source/
-evidence ingestion, acceptance and default routes remain open.
+carries no attempt outcome or Evidence. At the time this replanning slice
+landed, C04/C11 stayed partial; source/evidence ingestion, acceptance and
+default routes remained open. Later slices and the completion note above
+record the current status.
 
 ### C11 bounded plan history for runtime fallback records
 
