@@ -320,6 +320,24 @@ class TestValidateSpecVsImpl:
         assert "withdraw" in report.spec_stronger_than_impl
         assert any("not enforced" in detail for detail in report.details)
 
+    def test_python_private_contract_uses_exact_function_name(self):
+        spec_path = self._write_spec("_normalize", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "normalize.py"
+        impl_path.write_text(
+            "def _normalize(balance: int, amount: int) -> int:\n"
+            "    if amount > balance:\n"
+            "        raise ValueError('amount exceeds balance')\n"
+            "    return balance - amount\n\n"
+            "def normalize(balance: int, amount: int) -> int:\n"
+            "    return balance - amount\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert report.spec_stronger_than_impl == []
+        assert report.uncovered_atoms == []
+        assert report.coverage_ratio == 1.0
+
     def test_enforced_precondition_is_not_flagged(self):
         spec_path = self._write_spec(
             "withdraw", "amount > 0 && amount <= balance"

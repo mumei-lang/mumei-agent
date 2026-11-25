@@ -962,28 +962,27 @@ class CrossValidator:
             report.details.append("No spec atoms found in spec file.")
             return report
 
-        # Coverage analysis (normalization-tolerant: snake_case / camelCase /
-        # leading-underscore differences between the two extractors must not
-        # register as false "no matching implementation" gaps).
-        spec_by_canon: dict[str, str] = {}
+        # Python extraction preserves identifiers; other extractors may normalize them.
+        symbol_key = (lambda name: name) if _canonical_language(language) == "python" else _canonical_symbol
+        spec_by_key: dict[str, str] = {}
         for atom in spec_atoms:
-            spec_by_canon.setdefault(_canonical_symbol(atom["name"]), atom["name"])
-        impl_by_canon = {_canonical_symbol(func): func for func in impl_functions}
+            spec_by_key.setdefault(symbol_key(atom["name"]), atom["name"])
+        impl_by_key = {symbol_key(func): func for func in impl_functions}
 
         report.uncovered_atoms = sorted(
             original
-            for canon, original in spec_by_canon.items()
-            if canon not in impl_by_canon
+            for key, original in spec_by_key.items()
+            if key not in impl_by_key
         )
 
-        covered = set(spec_by_canon) & set(impl_by_canon)
-        report.coverage_ratio = len(covered) / len(spec_by_canon) if spec_by_canon else 0.0
+        covered = set(spec_by_key) & set(impl_by_key)
+        report.coverage_ratio = len(covered) / len(spec_by_key) if spec_by_key else 0.0
 
         # Semantic gap detection: spec stronger than impl
         # If the spec has complex requires/ensures but the implementation
         # function is trivial (heuristic: short or no validation code)
         for atom in spec_atoms:
-            impl_name = impl_by_canon.get(_canonical_symbol(atom["name"]))
+            impl_name = impl_by_key.get(symbol_key(atom["name"]))
             if impl_name is None:
                 continue
             has_complex_contract = bool(atom["requires"]) and len(atom["requires"]) > 20
@@ -1008,7 +1007,7 @@ class CrossValidator:
         # Functions with complex validation that have no spec or trivial spec
         for func_name in impl_functions:
             matching_atom = next(
-                (a for a in spec_atoms if _canonical_symbol(a["name"]) == _canonical_symbol(func_name)),
+                (a for a in spec_atoms if symbol_key(a["name"]) == symbol_key(func_name)),
                 None,
             )
             if matching_atom is None:
