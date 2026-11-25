@@ -24332,14 +24332,17 @@ class _Builder:
                             )
             return
         if kind == "const_declaration":
-            # Grouped `const (...)` declarations never reach here — like
-            # grouped vars the grammar marks them has_error. A spec
-            # without a value (implicit iota repetition) is unmodelled.
+            # Grouped `const (...)` declarations use the same const_spec
+            # nodes as individual declarations. A spec without a value is
+            # implicit repetition of the previous spec's expression list;
+            # because constants never read variables, repetition carries no
+            # dependencies and needs no expression evaluation here.
             specs = [
                 c for c in node.named_children if c.type == "const_spec"
             ]
             if not specs:
-                raise _Unsupported("unsupported_statement", _span(node))
+                # `const ()` is a valid empty declaration group.
+                return
             for spec in specs:
                 names: list[Any] = []
                 value_nodes: list[Any] = []
@@ -24356,7 +24359,9 @@ class _Builder:
                             )
                     elif field == "value":
                         value_nodes.extend(_children(child))
-                if not names or len(names) != len(value_nodes):
+                if not names or (
+                    len(value_nodes) not in {0, len(names)}
+                ):
                     raise _Unsupported("unsupported_statement", _span(spec))
                 for name in names:
                     if name.text == b"_":

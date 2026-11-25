@@ -552,6 +552,32 @@ def test_range_int_dependencies(go_types_helper, declarations, expected):
             "func F(x int64) int64 { const A = min(1, 2); return x + A }",
             frozenset({0}),
         ),
+        # Grouped const declarations bind every spec and keep the same
+        # scalar/type restrictions as individual declarations.
+        (
+            "func F(x int64) int64 { const ( A = 1; B int64 = 2; ); return x + A + B }",
+            frozenset({0}),
+        ),
+        (
+            "func F(x int64) int64 { const (\n A, B = 1, 2\n C int64 = 3\n ); return x + A + B + C }",
+            frozenset({0}),
+        ),
+        # A no-value spec repeats the previous constant expression. The
+        # dependency model needs no iota/value evaluation: every scalar
+        # constant is parameter-independent either way.
+        (
+            "func F(x int64) int64 { const (\n A = iota\n B\n C\n ); return x + A + B + C }",
+            frozenset({0}),
+        ),
+        (
+            "func F(x int64) int64 { const (\n A int64 = 1\n B\n ); return x + A + B }",
+            frozenset({0}),
+        ),
+        # An empty declaration group is a valid no-op.
+        (
+            "func F(x int64) int64 { const (); return x }",
+            frozenset({0}),
+        ),
     ],
 )
 def test_const_declarations_and_reads(go_types_helper, declarations, expected):
@@ -582,11 +608,29 @@ def test_const_declarations_and_reads(go_types_helper, declarations, expected):
             "func F(x int64) int64 { const A = len(\"s\"); return x }",
             "unresolved_or_opaque_call",
         ),
+        # Implicit repetition does not admit a non-scalar constant.
+        (
+            "func F(x int64) int64 { const (\n _ float64 = 1\n B\n ); _ = B; return x }",
+            "binding_unavailable",
+        ),
     ],
 )
 def test_const_declaration_gaps(go_types_helper, declarations, reason):
     result = named(*unit(go_types_helper, declarations))
     assert not result.available and result.gaps[0].reason == reason
+
+
+def test_compact_grouped_const_without_final_separator_is_parser_gap(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64) int64 { const (A = iota; B); return x + A + B }",
+        )
+    )
+    assert not result.available
+    assert result.gaps[0].reason == "syntax_or_parser_unavailable"
 
 
 @pytest.mark.parametrize(
