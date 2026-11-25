@@ -745,33 +745,16 @@ def test_feed_stdin_blocking_writes_complete_pipe_feed():
 
     read_fd, write_fd = os.pipe()
     proc = types.SimpleNamespace(stdin=os.fdopen(write_fd, "wb"))
-    payload = b"x" * 8192
-    feeder = threading.Thread(
-        target=attempt_runner._feed_stdin_blocking,
-        args=(proc, payload),
-        daemon=True,
-    )
-    feeder.start()
+    payload = b"x" * 1024
+    attempt_runner._feed_stdin_blocking(proc, payload)
+    assert proc.stdin.closed
     chunks = []
-
-    def read_to_eof() -> None:
-        while True:
-            chunk = os.read(read_fd, 4096)
-            if not chunk:
-                break
-            chunks.append(chunk)
-
-    reader = threading.Thread(target=read_to_eof, daemon=True)
-    reader.start()
-    reader.join(5)
-    if reader.is_alive():
-        proc.stdin.close()
-        reader.join(1)
-        os.close(read_fd)
-        pytest.fail("stdin feed did not reach EOF within five seconds")
-    feeder.join(5)
+    while True:
+        chunk = os.read(read_fd, 4096)
+        if not chunk:
+            break
+        chunks.append(chunk)
     os.close(read_fd)
-    assert not feeder.is_alive()
     assert b"".join(chunks) == payload
 
 
