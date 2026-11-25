@@ -35,6 +35,35 @@ def test_tree_sitter_available_for_supported_languages() -> None:
     assert tree_sitter_extract.is_available("python") is False
 
 
+def test_go_compact_group_recovery_accepts_missing_final_terminator() -> None:
+    parser = tree_sitter_extract._get_parser("go")
+    source = b"package p\nfunc F() { const (A = 1); _ = A }\n"
+    root = tree_sitter_extract.parse_go_with_compact_group_recovery(
+        parser, source
+    )
+    # The original tree is returned with its original byte offsets, so the
+    # grammar's missing-token marker remains visible to callers.
+    assert root is not None and root.has_error
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        b"package p\nfunc F() { const (A = 1); return + }\n",
+        b"package p\nfunc F() { const (A = ); _ = A }\n",
+        b"package p\nfunc F() { var (A = 1; B); _ = A }\n",
+    ],
+)
+def test_go_compact_group_recovery_rejects_unrelated_errors(source) -> None:
+    parser = tree_sitter_extract._get_parser("go")
+    assert (
+        tree_sitter_extract.parse_go_with_compact_group_recovery(
+            parser, source
+        )
+        is None
+    )
+
+
 def test_rust_blocks_capture_nested_braces_and_ignore_string_fn() -> None:
     source = (
         'fn outer(a: i64) -> i64 {\n'

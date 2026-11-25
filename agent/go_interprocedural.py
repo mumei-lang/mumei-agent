@@ -905,6 +905,7 @@ def _syntax(raw: bytes) -> Any:
     except (ImportError, ValueError, TypeError, RuntimeError):
         return None
 
+
 def _key3(span: ByteSpan | FileSpan) -> tuple[int, int, int]:
     """Normalize a report span to (file, start, end) — file 0 for v1 reports."""
     return (
