@@ -4530,6 +4530,8 @@ def _scheduled_verification_files(
     both_exit: int | None = None,
     beta_stdout: str | None = None,
     argv_map_override: dict | None = None,
+    adapter_required_permissions: tuple[str, ...] = (),
+    policy_permissions: tuple[str, ...] = ("process.spawn",),
 ):
     """Declared inputs for the --enable-scheduled-verification lane."""
     def write(name: str, doc: object) -> str:
@@ -4555,7 +4557,7 @@ def _scheduled_verification_files(
             "methods": ["deductive_proof"],
             "result_contracts": [contract],
             "input_formats": ["mumei.source-text/v1"],
-            "required_permissions": [],
+            "required_permissions": list(adapter_required_permissions),
         }
 
     alpha_exit = both_exit if both_exit is not None else 3
@@ -4588,7 +4590,7 @@ def _scheduled_verification_files(
         ),
         "policy": write(
             "policy",
-            {"allowed_permissions": ["process.spawn"], "timeout_ms": 10_000},
+            {"allowed_permissions": list(policy_permissions), "timeout_ms": 10_000},
         ),
         "observations": write(
             "observations",
@@ -4618,12 +4620,16 @@ def _scheduled_verification_ctx(
     core_requirement: str | None = None,
     core_requirement_list: str | None = None,
     argv_map_override: dict | None = None,
+    adapter_required_permissions: tuple[str, ...] = (),
+    policy_permissions: tuple[str, ...] = ("process.spawn",),
 ):
     files = _scheduled_verification_files(
         tmp_path,
         both_exit=both_exit,
         beta_stdout=beta_stdout,
         argv_map_override=argv_map_override,
+        adapter_required_permissions=adapter_required_permissions,
+        policy_permissions=policy_permissions,
     )
     argv = [
         "--code-file",
@@ -4787,10 +4793,18 @@ def test_audit_host_argv_object_with_source_stdin_dispatches(
         tmp_path,
         argv_map_override={
             "alpha": {
-                "argv": [ATTEMPT_PY, "-c", "import sys; sys.exit(0)"],
+                "argv": [
+                    ATTEMPT_PY,
+                    "-c",
+                    "import sys; from pathlib import Path; "
+                    "sys.exit(0 if sys.stdin.buffer.read() == "
+                    "Path(sys.argv[-1]).read_bytes() else 3)",
+                ],
                 "stdin": "source",
             }
         },
+        adapter_required_permissions=("filesystem.read", "process.spawn"),
+        policy_permissions=("filesystem.read", "process.spawn"),
     )
 
     result = _scheduled_audit_pipeline().audit_file(
