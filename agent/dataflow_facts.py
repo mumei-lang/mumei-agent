@@ -376,6 +376,35 @@ _MAKE_SIZE = re.compile(r"^make\(\[\][^,]+,\s*(\w+)(?:,[^)]*)?\)$")
 _MAKE_GROW = re.compile(rf"^make\(\[\][^,]+,\s*({_IDENT})\+(\w+)(?:,[^)]*)?\)$")
 _COMPOSITE = re.compile(r"^(?:&?\[\][^{]+|&?map\[[^\]]+\][^{]+|&?[A-Za-z_][\w.]*)\{")
 _SLICE_EXPR = re.compile(rf"^{_IDENT}\[[^\]]*:[^\]]*\]$")
+def _go_rune_value(literal: str) -> int | None:
+    """Decode a Go rune literal, or ``None`` when its value is unsupported."""
+    if len(literal) < 2 or not literal.startswith("'") or not literal.endswith("'"):
+        return None
+    body = literal[1:-1]
+    if not body:
+        return None
+    if not body.startswith("\\"):
+        return ord(body) if len(body) == 1 else None
+    escapes = {
+        "a": 7, "b": 8, "f": 12, "n": 10, "r": 13, "t": 9, "v": 11,
+        "\\": 92, "'": 39, '"': 34,
+    }
+    if len(body) == 2 and body[1] in escapes:
+        return escapes[body[1]]
+    try:
+        if re.fullmatch(r"\\x[0-9a-fA-F]{2}", body):
+            return int(body[2:], 16)
+        if re.fullmatch(r"\\u[0-9a-fA-F]{4}", body):
+            return int(body[2:], 16)
+        if re.fullmatch(r"\\U[0-9a-fA-F]{8}", body):
+            return int(body[2:], 16)
+        if re.fullmatch(r"\\[0-7]{3}", body):
+            return int(body[1:], 8)
+    except ValueError:
+        return None
+    return None
+
+
 def _strip_go_literals(text: str) -> str:
     """Remove Go literals and comments in one lexical pass.
 
@@ -412,7 +441,17 @@ def _strip_go_literals(text: str) -> str:
                 if text[j] == ch:
                     break
                 j += 1
-            i = j + 1 if j < end else end
+            close = j + 1 if j < end else end
+            if ch == "'":
+                rune_value = _go_rune_value(text[i:close])
+                # A rune is an integer constant. Keep unknown forms opaque
+                # rather than deleting them into a changed arithmetic value.
+                out.append(
+                    str(rune_value)
+                    if rune_value is not None
+                    else "_mumei_unknown_rune"
+                )
+            i = close
         else:
             out.append(ch)
             i += 1

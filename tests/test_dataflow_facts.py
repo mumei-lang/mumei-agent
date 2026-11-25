@@ -2757,14 +2757,19 @@ def test_line_comment_newline_preserves_slice_colon() -> None:
     assert _transition_messages(source, "uninitialized_use")
 
 
+def test_rune_literal_arithmetic_keeps_zero_constant() -> None:
+    facts = _facts("d := '0' - 48\nreturn 1 / d", "1 / d")
+    assert facts.consts["d"] == 0
+
+
 def test_parenthesized_channel_copy_keeps_closed_state() -> None:
     source = (
         "package demo\n"
         "func Push() int {\n"
         "    ch := make(chan int)\n"
+        "    close(ch)\n"
         "    {\n"
         "        var ch, out = (ch), ch\n"
-        "        close(ch)\n"
         "        out <- 1\n"
         "    }\n"
         "    return 0\n"
