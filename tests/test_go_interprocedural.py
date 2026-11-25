@@ -1023,6 +1023,17 @@ def test_expression_switch_fallthrough(go_types_helper, declarations, expected):
             "func F(x int64) int64 { var (); return x }",
             frozenset({0}),
         ),
+        # Grouped declarations use the same admitted non-scalar shapes
+        # as individual vars — channels and function values are not
+        # rejected merely for being non-scalar.
+        (
+            "func F(x int64) int64 { var ( ch chan int64 = make(chan int64); ); ch <- x; return <-ch }",
+            frozenset({0}),
+        ),
+        (
+            "func F(x int64) int64 { var ( f func() int64 = func() int64 { return x }; ); return f() }",
+            frozenset({0}),
+        ),
     ],
 )
 def test_var_declaration_dependencies(go_types_helper, declarations, expected):
