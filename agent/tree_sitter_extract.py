@@ -243,7 +243,13 @@ def _only_compact_group_error_wrappers(root, source_bytes: bytes) -> bool:
             "const_declaration": "const_spec",
             "var_spec_list": "var_spec",
         }.get(parent.type)
-        if spec_type is None or node.children[0].type != spec_type:
+        inner = node.children[0]
+        if (
+            spec_type is None
+            or inner.type != spec_type
+            or node.start_byte != inner.start_byte
+            or node.end_byte != inner.end_byte
+        ):
             return False
         close = _compact_group_close(parent)
         if close is None or node.end_byte > close.start_byte:
