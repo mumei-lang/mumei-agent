@@ -1412,7 +1412,9 @@ def test_audit_does_not_treat_python_method_as_module_contract(
         forge_task_spec=spec,
     )
     config = AgentConfig(api_key="sentinel-test-only", mumei_bin=core, spec_cache_dir="")
-    result = AuditPipeline(config, code_to_spec_extractor=extractor).audit_file(source, "python")
+    result = AuditPipeline(config, code_to_spec_extractor=extractor).audit_file(
+        source, "python", auto_migrate=True,
+    )
 
     assert result.cross_validation_gaps == (
         [] if has_guard else [
@@ -1422,6 +1424,7 @@ def test_audit_does_not_treat_python_method_as_module_contract(
     )
     assert result.verification_status == "unverifiable"
     assert result.counterexample_values == []
+    assert [hint["function_name"] for hint in result.migration_hints] == ([] if has_guard else ["Service.call"])
 
 
 def test_audit_report_includes_step_guidance() -> None:
