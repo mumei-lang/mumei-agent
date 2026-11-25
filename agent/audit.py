@@ -412,13 +412,14 @@ class AuditPipeline:
         malformed_extraction_issues = _malformed_extraction_issue_strings(
             extraction.forge_task_spec
         )
-        python_source_names, python_non_module_names = (
-            python_contract_sources(source_code) if audit_language == "python" else (None, set())
+        python_source_names, python_non_module_names, python_method_names = (
+            python_contract_sources(source_code) if audit_language == "python" else (None, set(), None)
         )
         spec_source = _forge_task_to_mumei_source(
             extraction.forge_task_spec,
             python_source_names=python_source_names,
             python_non_module_names=python_non_module_names,
+            python_method_names=python_method_names,
         )
         if not spec_source:
             if _source_has_function_declarations(source_code, audit_language) is not False:

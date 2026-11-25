@@ -386,6 +386,29 @@ class TestValidateSpecVsImpl:
         assert report.spec_stronger_than_impl == []
         assert report.coverage_ratio == 0.0
 
+    def test_python_method_metadata_selects_only_the_named_class(self):
+        spec_path = self._write_spec("call_", "amount <= balance")
+        spec_path.write_text(spec_path.read_text().replace(
+            "{\n", "{\n  // python-method-name: Service.call\n", 1
+        ))
+        impl_path = Path(self.tmpdir) / "services.py"
+        impl_path.write_text(
+            "class Other:\n"
+            "    def call(self, balance, amount):\n"
+            "        if amount > balance:\n"
+            "            raise ValueError()\n"
+            "        return balance - amount\n\n"
+            "class Service:\n"
+            "    def call(self, balance, amount):\n"
+            "        return balance - amount\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert report.uncovered_atoms == []
+        assert report.spec_stronger_than_impl == ["call_"]
+        assert report.details == ["spec precondition assumed, not enforced, by `Service.call`"]
+
     def test_enforced_precondition_is_not_flagged(self):
         spec_path = self._write_spec(
             "withdraw", "amount > 0 && amount <= balance"

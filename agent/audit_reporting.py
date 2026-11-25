@@ -5,7 +5,7 @@ from dataclasses import asdict, is_dataclass
 import json
 from pathlib import Path
 import re
-from typing import Collection, Literal, Sequence
+from typing import Collection, Literal, Mapping, Sequence
 
 from agent.audit_models import AuditDirectoryResult, AuditResult
 from agent.cross_validation_models import ForeignCodeVerdict
@@ -23,6 +23,7 @@ from agent.strategies.spec_health_strategy import SpecHealthReport
 def _forge_task_to_mumei_source(
     spec: dict[str, object], *, python_source_names: Collection[str] | None = None,
     python_non_module_names: Collection[str] = (),
+    python_method_names: Mapping[str, str] | None = None,
 ) -> str:
     atoms = _dict_list(spec.get("atoms"))
     if not atoms and "name" in spec:
@@ -30,6 +31,7 @@ def _forge_task_to_mumei_source(
     blocks = [
         _forge_atom_to_mumei(
             atom, python_source_names=python_source_names, python_non_module_names=python_non_module_names,
+            python_method_names=python_method_names,
         )
         for atom in atoms
     ]
@@ -38,6 +40,7 @@ def _forge_task_to_mumei_source(
 def _forge_atom_to_mumei(
     atom: dict[str, object], *, python_source_names: Collection[str] | None = None,
     python_non_module_names: Collection[str] = (),
+    python_method_names: Mapping[str, str] | None = None,
 ) -> str:
     raw_name = _string_value(atom.get("name"), "audited_atom")
     name = _foreign_identifier(raw_name, preserve_identifier=True) if python_source_names is not None else _safe_identifier(raw_name)
@@ -47,7 +50,11 @@ def _forge_atom_to_mumei(
         else []
     )
     if raw_name in python_non_module_names:
-        provenance = ["    // python-scope: non-module"]
+        method_name = python_method_names.get(raw_name) if python_method_names is not None else None
+        provenance = (
+            [f"    // python-method-name: {method_name}"]
+            if method_name is not None else ["    // python-scope: non-module"]
+        )
     params = _format_params(atom.get("params") or atom.get("inputs"))
     return_type = _string_value(atom.get("return_type"), "i64")
     requires = _coerce_to_boolean_clause(

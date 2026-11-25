@@ -904,7 +904,7 @@ def validate_foreign_code(
         selected_names = {atom.name for atom in atoms}
         intents = [atom for atom in llm_atoms if atom.name in selected_names]
         if intents:
-            source_names, _ = python_contract_sources(code)
+            source_names, _, _ = python_contract_sources(code)
             checks = check_python_implementations(
                 code, intents, create_mumei_client(config.mumei_bin), source_names=source_names,
             )

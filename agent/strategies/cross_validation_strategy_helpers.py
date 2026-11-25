@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ast
 import re
+from collections import Counter
 from typing import Any
 
 from agent import tree_sitter_extract
@@ -71,16 +72,40 @@ def _canonical_language(language: str) -> str:
     return aliases.get(language.strip().lower(), language.strip().lower())
 
 
-def _python_module_functions(source: str) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
+def _python_class_methods(tree: ast.Module) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
+    methods: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
+
+    def collect(scope: ast.Module | ast.ClassDef, prefix: str) -> None:
+        definitions = [
+            node for node in scope.body if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+        ]
+        counts = Counter(node.name for node in definitions)
+        for node in definitions:
+            if counts[node.name] != 1:
+                continue
+            qualified = prefix + node.name
+            if isinstance(node, ast.ClassDef):
+                collect(node, qualified + ".")
+            elif prefix:
+                methods[qualified] = node
+
+    collect(tree, "")
+    return methods
+
+
+def _python_scoped_functions(
+    source: str,
+) -> tuple[dict[str, ast.FunctionDef | ast.AsyncFunctionDef], dict[str, ast.FunctionDef | ast.AsyncFunctionDef]]:
     try:
         tree = ast.parse(source)
     except SyntaxError:
-        return {}
-    return {
+        return {}, {}
+    module_functions = {
         node.name: node
         for node in tree.body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
+    return module_functions, _python_class_methods(tree)
 
 
 def _extract_functions(source: str, language: str) -> list[str]:
@@ -122,7 +147,8 @@ _ATOM_DEF_RE = re.compile(
 _REQUIRES_RE = re.compile(r"requires\s*:\s*(.+?)(?:\n|ensures|effects|\{)", re.DOTALL)
 _ENSURES_RE = re.compile(r"ensures\s*:\s*(.+?)(?:\n|effects|\{)", re.DOTALL)
 _PYTHON_PROVENANCE_RE = re.compile(
-    r"[^\n{]*\{[ \t]*\n[ \t]*// (?:python-source-name: (?P<name>\S+)|(?P<non_module>python-scope: non-module))"
+    r"[^{]*\{[ \t]*\n[ \t]*// (?:python-source-name: (?P<name>\S+)|"
+    r"python-method-name: (?P<method>\S+)|(?P<non_module>python-scope: non-module))"
     r"[ \t]*(?:\n|$)"
 )
 
@@ -150,10 +176,13 @@ def _extract_spec_atoms(spec_source: str) -> list[dict[str, Any]]:
         provenance = _PYTHON_PROVENANCE_RE.match(part, m.end())
         if provenance:
             source_name = provenance.group("name")
+            method_name = provenance.group("method")
             if provenance.group("non_module"):
                 atom["python_non_module"] = True
             elif source_name and source_name.isidentifier():
                 atom["python_source_name"] = source_name
+            elif method_name and "." in method_name and all(part.isidentifier() for part in method_name.split(".")):
+                atom["python_method_name"] = method_name
         atoms.append(atom)
     return atoms
 

@@ -1383,8 +1383,9 @@ def test_audit_matches_reserved_python_function_name(
 
 @pytest.mark.integration
 @pytest.mark.parametrize("has_module_collision", [False, True])
+@pytest.mark.parametrize("has_guard", [True, False], ids=["guarded", "missing-guard"])
 def test_audit_does_not_treat_python_method_as_module_contract(
-    tmp_path: Path, has_module_collision: bool,
+    tmp_path: Path, has_module_collision: bool, has_guard: bool,
 ) -> None:
     core = os.environ.get("MUMEI_BIN")
     if not core or not Path(core).is_absolute() or not Path(core).is_file():
@@ -1393,10 +1394,10 @@ def test_audit_does_not_treat_python_method_as_module_contract(
     code = (
         "class Service:\n"
         "    def call(self, balance: int, amount: int) -> int:\n"
-        "        if amount > balance:\n"
-        "            raise ValueError('amount exceeds balance')\n"
-        "        return balance - amount\n"
     )
+    if has_guard:
+        code += "        if amount > balance:\n            raise ValueError('amount exceeds balance')\n"
+    code += "        return balance - amount\n"
     if has_module_collision:
         code += "\ndef call_(balance: int, amount: int) -> int:\n    return balance - amount\n"
     source.write_text(code, encoding="utf-8")
@@ -1413,7 +1414,12 @@ def test_audit_does_not_treat_python_method_as_module_contract(
     config = AgentConfig(api_key="sentinel-test-only", mumei_bin=core, spec_cache_dir="")
     result = AuditPipeline(config, code_to_spec_extractor=extractor).audit_file(source, "python")
 
-    assert result.cross_validation_gaps == []
+    assert result.cross_validation_gaps == (
+        [] if has_guard else [
+            "spec stronger than implementation: call_",
+            "spec precondition assumed, not enforced, by `Service.call`",
+        ]
+    )
     assert result.verification_status == "unverifiable"
     assert result.counterexample_values == []
 

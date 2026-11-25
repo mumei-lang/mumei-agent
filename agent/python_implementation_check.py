@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, AbstractSet
 
 from agent.cross_validation_models import ForeignCodeVerdict, MumeiContractAtom
 from agent.secret_redaction import redact_secrets, redact_value
+from agent.strategies.cross_validation_strategy_helpers import _python_class_methods
 
 if TYPE_CHECKING:
     from agent.audit_models import MumeiVerifyClientLike
@@ -179,12 +180,8 @@ def _check_one(
 
 
 def _python_function_scopes(
-    source: str,
-) -> tuple[dict[str, ast.FunctionDef | ast.AsyncFunctionDef], set[str], set[str]] | None:
-    try:
-        tree = ast.parse(source)
-    except (SyntaxError, RecursionError, ValueError):
-        return None
+    tree: ast.Module,
+) -> tuple[dict[str, ast.FunctionDef | ast.AsyncFunctionDef], set[str], Counter[str]]:
     definitions = [
         node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     ]
@@ -195,15 +192,27 @@ def _python_function_scopes(
         for node in tree.body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and counts[node.name] == 1
     }
-    return module_functions, {node.name for node in definitions if node not in direct_nodes}, set(counts)
+    return module_functions, {node.name for node in definitions if node not in direct_nodes}, counts
 
 
-def python_contract_sources(source: str) -> tuple[set[str], set[str]]:
-    scopes = _python_function_scopes(source)
-    if scopes is None:
-        return set(), set()
-    module_functions, non_module_names, _ = scopes
-    return set(module_functions), non_module_names
+def _parse_python(source: str) -> ast.Module | None:
+    try:
+        return ast.parse(source)
+    except (SyntaxError, RecursionError, ValueError):
+        return None
+
+
+def python_contract_sources(source: str) -> tuple[set[str], set[str], dict[str, str]]:
+    tree = _parse_python(source)
+    if tree is None:
+        return set(), set(), {}
+    module_functions, non_module_names, counts = _python_function_scopes(tree)
+    method_names = {
+        node.name: qualified
+        for qualified, node in _python_class_methods(tree).items()
+        if counts[node.name] == 1
+    }
+    return set(module_functions), non_module_names, method_names
 
 
 def check_python_implementations(
@@ -213,10 +222,10 @@ def check_python_implementations(
     candidates = [atom for atom in atoms if atom.ensures.strip().lower() not in _TRIVIAL]
     if not candidates:
         return []
-    scopes = _python_function_scopes(source) if len(source) <= _MAX_SOURCE_CHARS else None
-    if scopes is None:
+    tree = _parse_python(source) if len(source) <= _MAX_SOURCE_CHARS else None
+    if tree is None:
         return [ImplementationCheck(redact_secrets(atom.name), "unverifiable") for atom in candidates]
-    module_functions, _, declared_names = scopes
+    module_functions, _, declared_names = _python_function_scopes(tree)
     checks = []
     for atom in candidates:
         if atom.name not in declared_names:

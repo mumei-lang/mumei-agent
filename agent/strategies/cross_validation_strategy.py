@@ -40,7 +40,7 @@ from agent.strategies.cross_validation_strategy_helpers import (
     _extract_function_body,
     _extract_functions,
     _extract_spec_atoms,
-    _python_module_functions,
+    _python_scoped_functions,
 )
 
 
@@ -967,10 +967,11 @@ class CrossValidator:
         is_python = _canonical_language(language) == "python"
         symbol_key = (lambda name: name) if is_python else _canonical_symbol
         impl_by_key = {symbol_key(func): func for func in impl_functions}
-        module_functions = _python_module_functions(impl_source) if is_python else {}
-        covered: set[tuple[bool, str]] = set()
-        uncovered: dict[tuple[bool, str], str] = {}
+        module_functions, method_functions = _python_scoped_functions(impl_source) if is_python else ({}, {})
+        covered: set[tuple[str, str]] = set()
+        uncovered: dict[tuple[str, str], str] = {}
         matched_atoms: dict[str, dict[str, Any]] = {}
+        matched_methods: dict[str, dict[str, Any]] = {}
 
         # Semantic gap detection: spec stronger than impl
         # If the spec has complex requires/ensures but the implementation
@@ -979,24 +980,33 @@ class CrossValidator:
             if is_python and atom.get("python_non_module"):
                 continue
             source_name = atom.get("python_source_name") if is_python else None
+            method_name = atom.get("python_method_name") if is_python else None
             key = symbol_key(source_name or atom["name"])
-            coverage_key = (source_name is not None, key)
-            if source_name is not None:
-                impl_name = source_name if source_name in module_functions else None
+            if method_name is not None:
+                coverage_key = ("method", method_name)
+                function = method_functions.get(method_name)
+                impl_name = function.name if function is not None else None
             else:
-                impl_name = impl_by_key.get(key)
+                coverage_key = ("module" if source_name is not None else "", key)
+                if source_name is not None:
+                    impl_name = source_name if source_name in module_functions else None
+                else:
+                    impl_name = impl_by_key.get(key)
+                function = module_functions.get(impl_name) if impl_name is not None else None
             if impl_name is None:
                 uncovered.setdefault(coverage_key, atom["name"])
                 continue
             covered.add(coverage_key)
-            matched_atoms.setdefault(key, atom)
+            if method_name is not None:
+                matched_methods.setdefault(method_name, atom)
+            else:
+                matched_atoms.setdefault(key, atom)
             has_complex_contract = bool(atom["requires"]) and len(atom["requires"]) > 20
             has_nontrivial_requires = bool(atom["requires"]) and atom["requires"].strip() not in _TRIVIAL_REQUIRES
             if has_complex_contract or has_nontrivial_requires:
-                module_function = module_functions.get(impl_name)
                 function_source = (
-                    ast.get_source_segment(impl_source, module_function) or ""
-                    if module_function is not None else impl_source
+                    ast.get_source_segment(impl_source, function) or ""
+                    if function is not None else impl_source
                 )
                 body = _extract_function_body(function_source, language, impl_name)
                 if body and _has_unenforced_precondition(atom["requires"], body, language):
@@ -1005,7 +1015,7 @@ class CrossValidator:
                     # contain sensitive values and diagnostics are forwarded to
                     # MCP clients.
                     report.details.append(
-                        f"spec precondition assumed, not enforced, by `{impl_name}`"
+                        f"spec precondition assumed, not enforced, by `{method_name or impl_name}`"
                     )
                     continue
                 if body and has_complex_contract and len(body.strip()) < len(atom["requires"]):
@@ -1026,6 +1036,9 @@ class CrossValidator:
             if not matching_atom["requires"] and not matching_atom["ensures"]:
                 # Impl exists but spec is trivial
                 report.impl_stronger_than_spec.append(func_name)
+        report.impl_stronger_than_spec.extend(
+            name for name, atom in matched_methods.items() if not atom["requires"] and not atom["ensures"]
+        )
 
         return report
 
