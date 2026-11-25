@@ -1058,26 +1058,7 @@ def test_incomplete_selected_stdout_is_not_accepted(inputs, capsys, tmp_path):
     argv_path = tmp_path / "argv-large-output.json"
     argv_path.write_text(json.dumps(argv_doc), encoding="utf-8")
 
-    diagnostic = {
-        "schema_version": "mumei.evidence-representation-check/v1",
-        "evidence_schema_version": "mumei.verification-evidence/v1",
-        "representation": "valid",
-        "acceptance": "not_evaluated",
-        "checks_not_performed": [
-            "claim_truth", "file_identity", "freshness",
-            "producer_authenticity", "semantic_correspondence",
-            "artifact_semantics",
-        ],
-    }
-    core = tmp_path / "mumei-stub"
-    core.write_text(
-        f"#!{ATTEMPT_PY}\n"
-        "import json, sys\n"
-        "sys.stdin.buffer.read()\n"
-        f"sys.stdout.write({json.dumps(diagnostic)!r})\n",
-        encoding="utf-8",
-    )
-    core.chmod(0o755)
+    core = _accept_list_core(tmp_path, "accepted")
     req = _requirement_list(tmp_path)
     export = tmp_path / "promotable"
     export.mkdir()
