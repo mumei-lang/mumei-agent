@@ -11,6 +11,7 @@ import pytest
 from agent import verify_schedule as verify_schedule_module
 from agent.attempt_runner import MAX_FEED_BYTES
 from agent.plan_history_log import append_plan_history, read_plan_history
+from agent.verification_attempt import MAX_STDOUT_BYTES
 from agent.verify_schedule import (
     build_schedule_parser,
     main_schedule,
@@ -1045,6 +1046,46 @@ def test_core_flag_records_evidence_acceptance(inputs, capsys, tmp_path):
     doc = json.loads(capsys.readouterr().out)
     assert doc["evidence_check"]["outcome"] == "valid"
     assert doc["evidence_acceptance"]["accepted"] is True
+
+
+def test_incomplete_selected_stdout_is_not_accepted(inputs, capsys, tmp_path):
+    argv_doc = json.loads(Path(inputs["argv_map"]).read_text())
+    argv_doc["beta"] = [
+        ATTEMPT_PY,
+        "-c",
+        f"import sys; sys.stdout.write('x' * {MAX_STDOUT_BYTES + 1})",
+    ]
+    argv_path = tmp_path / "argv-large-output.json"
+    argv_path.write_text(json.dumps(argv_doc), encoding="utf-8")
+
+    diagnostic = {
+        "schema_version": "mumei.evidence-representation-check/v1",
+        "evidence_schema_version": "mumei.verification-evidence/v1",
+        "representation": "valid",
+        "acceptance": "not_evaluated",
+        "checks_not_performed": [
+            "claim_truth", "file_identity", "freshness",
+            "producer_authenticity", "semantic_correspondence",
+            "artifact_semantics",
+        ],
+    }
+    core = tmp_path / "mumei-stub"
+    core.write_text(
+        f"#!{ATTEMPT_PY}\n"
+        "import json, sys\n"
+        "sys.stdin.buffer.read()\n"
+        f"sys.stdout.write({json.dumps(diagnostic)!r})\n",
+        encoding="utf-8",
+    )
+    core.chmod(0o755)
+
+    assert main_schedule(
+        args_for(inputs, argv_map=str(argv_path), core=str(core))
+    ) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["outcome"] == "selected"
+    assert doc["evidence_check"]["outcome"] == "failed"
+    assert doc["evidence_acceptance"]["accepted"] is False
 
 
 def test_core_flag_requires_absolute_existing_path(inputs):

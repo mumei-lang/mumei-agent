@@ -78,6 +78,19 @@ closed pipe rather than inheriting the parent stdin. This is an
 input-preparation contract only — not Evidence acceptance, output meaning or
 grade promotion — so C11 remains partial.
 
+### C11 incomplete adapter output fail-closed handoff
+
+Core representation and requirement checks now refuse an `AttemptOutput`
+whose capture is declared incomplete before any Core process or pipe I/O.
+A truncated adapter stdout can therefore never be mistaken for the whole
+evidence document merely because its captured prefix is well formed.
+`record_evidence_check` and the requirement-declared variants record the
+check as `failed`; scheduling still records the host-declared exit-code
+selection separately, but `evidence_acceptance` is not accepted and no
+promotable verdict is produced from partial bytes. Complete captures are
+unchanged. This is transport integrity only — not output meaning, Evidence
+truth or grade promotion — so C11 remains partial.
+
 ### C04/C11 first supported planning slice
 
 `agent.verification_planner` is an opt-in, in-memory, single-route planning API.

@@ -96,6 +96,8 @@ def check_evidence_representation(
         raise ValueError("unsupported Core representation check request")
     if attempt_sequence is not None:
         attempt_sequence.check_output_binding(output)
+    if not output.complete:
+        raise CoreCheckFailed("Core Evidence representation check failed")
     try:
         stdout, code = _run_check(
             output.stdout, core_executable, timeout_ms, cancel_event
@@ -225,6 +227,8 @@ def check_evidence_requirement(
         raise ValueError("unsupported Core requirement check request")
     if attempt_sequence is not None:
         attempt_sequence.check_output_binding(output)
+    if not output.complete:
+        raise CoreCheckFailed("Core Evidence requirement check failed")
     try:
         # `evidence accept` writes a one-line verdict note to stderr on
         # every non-accepted outcome, and a requirement's check outcomes
@@ -318,6 +322,8 @@ def check_evidence_requirement_list(
         raise ValueError("unsupported Core requirement check request")
     if attempt_sequence is not None:
         attempt_sequence.check_output_binding(output)
+    if not output.complete:
+        raise CoreCheckFailed("Core Evidence requirement check failed")
     try:
         # `evidence accept` writes a one-line verdict note to stderr on
         # every non-accepted outcome, so stderr is a diagnostic stream
