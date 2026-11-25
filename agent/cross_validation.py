@@ -1357,6 +1357,7 @@ def _infer_code_contracts_with_llm(
     prompt = build_code_cross_validation_prompt(code, language)
     return _infer_contracts_with_llm(
         config, CROSS_VALIDATION_CODE_SYSTEM_PROMPT, prompt, llm_provider=llm_provider,
+        preserve_python_names=language == "python",
     )
 
 
@@ -1366,6 +1367,7 @@ def _infer_contracts_with_llm(
     user_prompt: str,
     *,
     llm_provider: LLMProvider | None = None,
+    preserve_python_names: bool = False,
 ) -> tuple[list[MumeiContractAtom], list[CrossValidationIssue], list[str]]:
     warnings: list[str] = []
     try:
@@ -1378,7 +1380,11 @@ def _infer_contracts_with_llm(
             config.model,
         )
         payload = _json_from_text(content)
-        return _atoms_from_payload(payload), _issues_from_payload(payload), warnings
+        return (
+            _atoms_from_payload(payload, preserve_python_names=preserve_python_names),
+            _issues_from_payload(payload),
+            warnings,
+        )
     except Exception as exc:
         warnings.append(f"LLM contract inference skipped or failed: {exc}")
         return [], [], warnings

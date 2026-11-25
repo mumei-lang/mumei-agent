@@ -578,7 +578,7 @@ class AuditPipeline:
                     extracted_atoms = _dict_list(spec.get("atoms")) or ([spec] if "name" in spec else [])
                     intents = [
                         replace(
-                            _atom_from_mapping(atom, index),
+                            _atom_from_mapping(atom, index, preserve_python_name=True),
                             requires=_contract_text(atom.get("requires"), "true"),
                             ensures=_contract_text(atom.get("ensures"), "true"),
                         )
