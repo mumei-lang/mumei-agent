@@ -174,117 +174,215 @@ def evaluate_constant_expression(
 ) -> Fraction | None:
     """Safely evaluate a constant arithmetic expression.
 
-    Supports ``+``, ``-``, ``*``, ``/``, ``%``, ``<<``, ``>>``, ``|``, ``&``,
-    ``^``, parentheses, numeric literals (decimal, hex, binary, octal, float
-    with exponent/underscores), numeric casts such as ``int64(x)`` and
-    references to already-known constants (``values``).  The result is a
-    ``Fraction`` so floating-point intermediates (e.g. ``365.2425``) stay exact
+    Supports Go operator precedence for ``+``, ``-``, ``*``, ``/``, ``%``,
+    ``<<``, ``>>``, ``|``, ``&``, ``^`` and ``&^``, parentheses, numeric
+    and rune literals, numeric casts and references to already-known
+    constants.  Unlike Python, Go orders bitwise ``&`` with the
+    multiplicative operators and bitwise ``|``/``^`` with the additive
+    operators, so this deliberately does not delegate parsing to ``ast``.
+    The result is a ``Fraction`` so floating-point intermediates stay exact
     until a final integer conversion is requested.
     """
     expr = expr.strip()
     if not expr:
         return None
-    try:
-        tree = ast.parse(expr, mode="eval")
-    except (SyntaxError, ValueError, MemoryError, RecursionError):
+
+    tokens: list[str] = []
+    i = 0
+    while i < len(expr):
+        ch = expr[i]
+        if ch.isspace():
+            i += 1
+            continue
+        if ch in "()":
+            tokens.append(ch)
+            i += 1
+            continue
+        matched = False
+        for operator in ("<<", ">>", "&^"):
+            if expr.startswith(operator, i):
+                tokens.append(operator)
+                i += len(operator)
+                matched = True
+                break
+        if matched:
+            continue
+        if ch in "+-*/%&|^":
+            tokens.append(ch)
+            i += 1
+            continue
+        if ch in "\"'`":
+            quote = ch
+            j = i + 1
+            if quote == "`":
+                close = expr.find("`", j)
+                j = len(expr) if close == -1 else close + 1
+            else:
+                while j < len(expr):
+                    if expr[j] == "\\":
+                        j += 2
+                        continue
+                    if expr[j] == quote:
+                        j += 1
+                        break
+                    j += 1
+            tokens.append(expr[i:j])
+            i = j
+            continue
+        if ch.isdigit() or (ch == "." and i + 1 < len(expr) and expr[i + 1].isdigit()):
+            number = re.match(
+                r"(?:0[xX][0-9a-fA-F_]+|0[bB][01_]+|0[oO][0-7_]+|"
+                r"\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][+-]?\d[\d_]*)?|"
+                r"\.\d[\d_]*(?:[eE][+-]?\d[\d_]*)?)",
+                expr[i:],
+            )
+            if not number:
+                return None
+            tokens.append(number.group(0))
+            i += len(number.group(0))
+            continue
+        if ch.isalpha() or ch == "_":
+            name = re.match(r"\w+(?:\.\w+)*", expr[i:])
+            if not name:
+                return None
+            tokens.append(name.group(0))
+            i += len(name.group(0))
+            continue
         return None
 
-    def _constant_value(node: ast.Constant) -> Fraction | None:
-        if isinstance(node.value, bool):
-            return None
-        if isinstance(node.value, int):
-            return Fraction(node.value)
-        if isinstance(node.value, float):
-            text = ast.get_source_segment(expr, node)
-            if text is None:
-                text = str(node.value)
-            try:
-                return Fraction(text.replace("_", ""))
-            except ValueError:
-                return None
-        return None
+    class _Unknown(Exception):
+        pass
 
-    def _eval(node: ast.AST) -> Fraction | None:
-        if isinstance(node, ast.Expression):
-            return _eval(node.body)
-        if isinstance(node, ast.Constant):
-            return _constant_value(node)
-        if isinstance(node, ast.Name):
-            return values.get(node.id)
-        if isinstance(node, ast.Attribute):
-            base = node.value
-            if isinstance(base, ast.Name):
-                return values.get(f"{base.id}.{node.attr}")
-            return None
-        if isinstance(node, ast.Call):
-            if (
-                isinstance(node.func, ast.Name)
-                and node.func.id in _NUMERIC_CASTS
-                and len(node.args) == 1
-            ):
-                return _eval(node.args[0])
-            return None
-        if isinstance(node, ast.BinOp):
-            left = _eval(node.left)
-            right = _eval(node.right)
-            if left is None or right is None:
-                return None
-            if isinstance(node.op, ast.Add):
-                return left + right
-            if isinstance(node.op, ast.Sub):
-                return left - right
-            if isinstance(node.op, ast.Mult):
-                return left * right
-            if isinstance(node.op, (ast.Div, ast.FloorDiv)):
-                if right == 0:
-                    return None
-                if left.denominator == 1 and right.denominator == 1:
-                    # Go integer division truncates toward zero.
-                    return Fraction(int(left / right))
-                return left / right
-            if isinstance(node.op, ast.Mod):
-                if right == 0 or left.denominator != 1 or right.denominator != 1:
-                    return None
-                quotient = int(left / right)
-                return left - right * quotient
-            if isinstance(node.op, ast.Pow):
-                if right.denominator != 1:
-                    return None
-                exp = int(right)
-                if exp < 0 or exp > 64:
-                    return None
-                return left ** exp
-            if left.denominator != 1 or right.denominator != 1:
-                return None
-            if isinstance(node.op, ast.LShift):
-                if right < 0 or right > 128:
-                    return None
-                return Fraction(int(left) << int(right))
-            if isinstance(node.op, ast.RShift):
-                if right < 0 or right > 128:
-                    return None
-                return Fraction(int(left) >> int(right))
-            if isinstance(node.op, ast.BitOr):
-                return Fraction(int(left) | int(right))
-            if isinstance(node.op, ast.BitAnd):
-                return Fraction(int(left) & int(right))
-            if isinstance(node.op, ast.BitXor):
-                return Fraction(int(left) ^ int(right))
-            return None
-        if isinstance(node, ast.UnaryOp):
-            operand = _eval(node.operand)
-            if operand is None:
-                return None
-            if isinstance(node.op, ast.UAdd):
-                return +operand
-            if isinstance(node.op, ast.USub):
+    position = 0
+
+    def peek() -> str | None:
+        return tokens[position] if position < len(tokens) else None
+
+    def take(expected: str | None = None) -> str:
+        nonlocal position
+        if position >= len(tokens):
+            raise _Unknown
+        token = tokens[position]
+        if expected is not None and token != expected:
+            raise _Unknown
+        position += 1
+        return token
+
+    def literal_value(token: str) -> Fraction:
+        if token.startswith(("\"", "`")):
+            raise _Unknown
+        if token.startswith("'"):
+            rune_value = _go_rune_value(token)
+            if rune_value is None:
+                raise _Unknown
+            return Fraction(rune_value)
+        integer = _parse_int(token)
+        if integer is not None:
+            return Fraction(integer)
+        try:
+            return Fraction(token.replace("_", ""))
+        except (ValueError, ZeroDivisionError):
+            raise _Unknown from None
+
+    def integer_pair(left: Fraction, right: Fraction) -> tuple[int, int]:
+        if left.denominator != 1 or right.denominator != 1:
+            raise _Unknown
+        return int(left), int(right)
+
+    def apply(operator: str, left: Fraction, right: Fraction) -> Fraction:
+        if operator == "+":
+            return left + right
+        if operator == "-":
+            return left - right
+        if operator == "*":
+            return left * right
+        if operator == "/":
+            if right == 0:
+                raise _Unknown
+            if left.denominator == 1 and right.denominator == 1:
+                # Go integer division truncates toward zero.
+                return Fraction(int(left / right))
+            return left / right
+        if operator == "%":
+            left_int, right_int = integer_pair(left, right)
+            if right_int == 0:
+                raise _Unknown
+            quotient = int(left / right)
+            return Fraction(left_int - right_int * quotient)
+        left_int, right_int = integer_pair(left, right)
+        if operator == "<<":
+            if right_int < 0 or right_int > 128:
+                raise _Unknown
+            return Fraction(left_int << right_int)
+        if operator == ">>":
+            if right_int < 0 or right_int > 128:
+                raise _Unknown
+            return Fraction(left_int >> right_int)
+        if operator == "&":
+            return Fraction(left_int & right_int)
+        if operator == "&^":
+            return Fraction(left_int & ~right_int)
+        if operator == "|":
+            return Fraction(left_int | right_int)
+        if operator == "^":
+            return Fraction(left_int ^ right_int)
+        raise _Unknown
+
+    def parse_primary() -> Fraction:
+        token = take()
+        if token == "(":
+            value = parse_expression(1)
+            take(")")
+            return value
+        if re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*", token):
+            if peek() == "(":
+                take("(")
+                argument = parse_expression(1)
+                take(")")
+                if token not in _NUMERIC_CASTS:
+                    raise _Unknown
+                return argument
+            if token not in values:
+                raise _Unknown
+            return values[token]
+        return literal_value(token)
+
+    def parse_unary() -> Fraction:
+        token = peek()
+        if token in {"+", "-", "^"}:
+            take()
+            operand = parse_unary()
+            if token == "+":
+                return operand
+            if token == "-":
                 return -operand
-            if isinstance(node.op, ast.Invert) and operand.denominator == 1:
-                return Fraction(~int(operand))
-            return None
-        return None
+            if operand.denominator != 1:
+                raise _Unknown
+            return Fraction(~int(operand))
+        return parse_primary()
 
-    return _eval(tree)
+    precedence = {
+        "*": 5, "/": 5, "%": 5, "<<": 5, ">>": 5, "&": 5, "&^": 5,
+        "+": 4, "-": 4, "|": 4, "^": 4,
+    }
+
+    def parse_expression(min_precedence: int) -> Fraction:
+        left = parse_unary()
+        while True:
+            operator = peek()
+            if operator not in precedence or precedence[operator] < min_precedence:
+                return left
+            take()
+            right = parse_expression(precedence[operator] + 1)
+            left = apply(operator, left, right)
+
+    try:
+        result = parse_expression(1)
+        if position != len(tokens):
+            return None
+        return result
+    except (_Unknown, IndexError, OverflowError):
+        return None
 
 
 def fold_constants(
@@ -2576,14 +2674,15 @@ class _Walker:
 
     def _var_one(self, name: str, type_text: str, value: str, env: _Env) -> None:
         type_text = _norm(type_text)
-        if value and _norm(value) != "nil":
+        value_key = _strip_parens(_norm(_strip_go_literals(value))) if value else ""
+        if value and value_key != "nil":
             if _root_name(name) in {
                 _root_name(token) for token in re.findall(_IDENT, value)
             }:
                 # ``var f = f`` reads the pre-declaration binding —
                 # evaluate it before the declaration's own kill.
                 scratch = env.copy()
-                if _norm(value) != _norm(name):
+                if value_key != _norm(name):
                     scratch.kill(name)
                     # ``var f = bufio.NewReader(f)`` wraps the resource
                     # but does not close it — keep its held tracking on

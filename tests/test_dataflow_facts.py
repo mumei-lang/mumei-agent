@@ -2757,6 +2757,11 @@ def test_line_comment_newline_preserves_slice_colon() -> None:
     assert _transition_messages(source, "uninitialized_use")
 
 
+def test_go_bitwise_precedence_is_not_python_precedence() -> None:
+    facts = _facts("d := 2 + 'a' & 4 - 2\nreturn 1 / d", "1 / d")
+    assert facts.consts["d"] == 0
+
+
 def test_rune_literal_arithmetic_keeps_zero_constant() -> None:
     facts = _facts("d := '0' - 48\nreturn 1 / d", "1 / d")
     assert facts.consts["d"] == 0
@@ -2770,7 +2775,7 @@ def test_parenthesized_channel_copy_keeps_closed_state() -> None:
         "    close(ch)\n"
         "    {\n"
         "        var ch, out = (ch), ch\n"
-        "        out <- 1\n"
+        "        ch <- 1\n"
         "    }\n"
         "    return 0\n"
         "}\n"
