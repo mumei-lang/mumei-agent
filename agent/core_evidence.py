@@ -96,6 +96,7 @@ def check_evidence_representation(
         raise ValueError("unsupported Core representation check request")
     if attempt_sequence is not None:
         attempt_sequence.check_output_binding(output)
+    _check_cancelled(cancel_event)
     if not output.complete:
         raise CoreCheckFailed("Core Evidence representation check failed")
     try:
@@ -227,6 +228,7 @@ def check_evidence_requirement(
         raise ValueError("unsupported Core requirement check request")
     if attempt_sequence is not None:
         attempt_sequence.check_output_binding(output)
+    _check_cancelled(cancel_event)
     if not output.complete:
         raise CoreCheckFailed("Core Evidence requirement check failed")
     try:
@@ -322,6 +324,7 @@ def check_evidence_requirement_list(
         raise ValueError("unsupported Core requirement check request")
     if attempt_sequence is not None:
         attempt_sequence.check_output_binding(output)
+    _check_cancelled(cancel_event)
     if not output.complete:
         raise CoreCheckFailed("Core Evidence requirement check failed")
     try:
