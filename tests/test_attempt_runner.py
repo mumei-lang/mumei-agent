@@ -745,7 +745,7 @@ def test_feed_stdin_blocking_writes_complete_pipe_feed(monkeypatch):
 
     read_fd, write_fd = os.pipe()
     proc = types.SimpleNamespace(stdin=os.fdopen(write_fd, "wb"))
-    payload = b"x" * 1024
+    payload = bytes(range(256)) * 4
     real_write = os.write
 
     def short_write(fd, data):
