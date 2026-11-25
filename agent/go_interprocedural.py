@@ -90,6 +90,7 @@ from dataclasses import asdict, dataclass, replace
 from typing import Any
 
 from agent import control_flow
+from agent.tree_sitter_extract import go_declaration_spec_nodes
 from agent.go_type_snapshot import (
     MAX_SOURCE_BYTES,
     PACKAGE_PROFILE as TYPE_PACKAGE_PROFILE,
@@ -23007,22 +23008,7 @@ class _Builder:
             # Grouped `var (...)` declarations nest their specs in a
             # var_spec_list, unlike const groups. Flatten both shapes so
             # each spec follows the same scalar/type restrictions.
-            specs = []
-            for child in node.named_children:
-                if child.type == "var_spec":
-                    specs.append(child)
-                elif child.type == "var_spec_list":
-                    for grand in child.named_children:
-                        if grand.type == "var_spec":
-                            specs.append(grand)
-                        elif grand.type == "ERROR" and len(grand.children) == 1:
-                            inner = grand.children[0]
-                            if inner.type == "var_spec":
-                                specs.append(inner)
-                elif child.type == "ERROR" and len(child.children) == 1:
-                    inner = child.children[0]
-                    if inner.type == "var_spec":
-                        specs.append(inner)
+            specs = go_declaration_spec_nodes(node)
             if not specs:
                 return
             for spec in specs:
@@ -24353,14 +24339,7 @@ class _Builder:
             # implicit repetition of the previous spec's expression list;
             # because constants never read variables, repetition carries no
             # dependencies and needs no expression evaluation here.
-            specs = []
-            for child in node.named_children:
-                if child.type == "const_spec":
-                    specs.append(child)
-                elif child.type == "ERROR" and len(child.children) == 1:
-                    inner = child.children[0]
-                    if inner.type == "const_spec":
-                        specs.append(inner)
+            specs = go_declaration_spec_nodes(node)
             if not specs:
                 # `const ()` is a valid empty declaration group.
                 return

@@ -147,16 +147,43 @@ def _syntax_nodes(root):
         stack.extend(reversed(node.children))
 
 
+def _spec_or_compact_error_wrapper(node, spec_type: str) -> list:
+    if node.type == spec_type:
+        return [node]
+    if node.type == "ERROR" and len(node.children) == 1:
+        inner = node.children[0]
+        if inner.type == spec_type:
+            return [inner]
+    return []
+
+
 def _compact_group_specs(node, spec_type: str) -> list:
     """Specs in a compact group, including tree-sitter's final-spec error wrapper."""
     specs = []
     for child in node.children:
-        if child.type == spec_type:
-            specs.append(child)
-        elif child.type == "ERROR" and len(child.children) == 1:
-            inner = child.children[0]
-            if inner.type == spec_type:
-                specs.append(inner)
+        specs.extend(_spec_or_compact_error_wrapper(child, spec_type))
+    return specs
+
+
+def go_declaration_spec_nodes(node) -> list:
+    """Flatten a Go const/var declaration's specs, including compact groups.
+
+    Grouped vars nest under ``var_spec_list``; a compact final spec may
+    additionally sit inside tree-sitter's zero-width ``ERROR`` wrapper.
+    The wrapper is only syntactically valid after
+    :func:`parse_go_with_compact_group_recovery` has accepted the tree.
+    """
+    if node.type == "const_declaration":
+        return _compact_group_specs(node, "const_spec")
+    if node.type != "var_declaration":
+        return []
+    specs = []
+    for child in node.named_children:
+        if child.type == "var_spec_list":
+            for grand in child.named_children:
+                specs.extend(_spec_or_compact_error_wrapper(grand, "var_spec"))
+        else:
+            specs.extend(_spec_or_compact_error_wrapper(child, "var_spec"))
     return specs
 
 
@@ -1535,22 +1562,7 @@ def _go_statement(source_bytes: bytes, node, base: int, offsets: list[int]) -> S
         names: list[str] = []
         values: list[str] = []
         types: list[str] = []
-        specs = []
-        for child in node.named_children:
-            if child.type in {"const_spec", "var_spec"}:
-                specs.append(child)
-            elif child.type == "var_spec_list":
-                for grand in child.named_children:
-                    if grand.type == "var_spec":
-                        specs.append(grand)
-                    elif grand.type == "ERROR" and len(grand.children) == 1:
-                        inner = grand.children[0]
-                        if inner.type == "var_spec":
-                            specs.append(inner)
-            elif child.type == "ERROR" and len(child.children) == 1:
-                inner = child.children[0]
-                if inner.type in {"const_spec", "var_spec"}:
-                    specs.append(inner)
+        specs = go_declaration_spec_nodes(node)
         for spec in specs:
             spec_names = [
                 _decode(source_bytes, child)
