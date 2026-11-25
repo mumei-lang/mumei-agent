@@ -63,6 +63,19 @@ acceptance/promotion work: schedule records remain dispatch observations,
 Core evidence outcomes remain separate consumer records, and grade promotion
 stays outside the planner.
 
+### C11 host-declared source stdin preparation
+
+`verify-schedule` now lets the host's argv map declare input preparation
+explicitly. An entry may stay the legacy argv array, or use
+`{"argv": [...], "stdin": "source"}`; only the exact `source` declaration is
+accepted. It pipes the declared source bytes already bound into the schedule
+to that attempt's stdin, wins over manifest `attempt_stdin`, and never copies
+source bytes into diagnostics or schedule output. When neither this host
+declaration nor an opted-in manifest stdin applies, the child still gets a
+closed pipe rather than inheriting the parent stdin. This is an
+input-preparation contract only — not Evidence acceptance, output meaning or
+grade promotion — so C11 remains partial.
+
 ### C04/C11 first supported planning slice
 
 `agent.verification_planner` is an opt-in, in-memory, single-route planning API.
