@@ -76,7 +76,7 @@ permitted fallback can continue; bytes are never truncated. When neither this ho
 declaration nor an opted-in manifest stdin applies, the child still gets a
 closed pipe rather than inheriting the parent stdin. This is an
 input-preparation contract only — not Evidence acceptance, output meaning or
-grade promotion — so C11 remains partial.
+grade promotion — so the C11 contract remained partial at that slice.
 
 ### C11 incomplete adapter output fail-closed handoff
 
@@ -89,7 +89,8 @@ check as `failed`; scheduling still records the host-declared exit-code
 selection separately, but `evidence_acceptance` is not accepted and no
 promotable verdict is produced from partial bytes. Complete captures are
 unchanged. This is transport integrity only — not output meaning, Evidence
-truth or grade promotion — so C11 remains partial.
+truth or grade promotion — so the C11 contract remained partial before the
+acceptance-completion matrix below.
 
 ### C11 plugin contract acceptance completion
 

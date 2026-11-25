@@ -56,6 +56,12 @@ def configured_manifest(adapter_id: str, **overrides) -> dict:
     return manifest(adapter_id, **values)
 
 
+def reasons(plan, adapter_id):
+    return {
+        decision.adapter_id: decision.reasons for decision in plan.decisions
+    }[adapter_id]
+
+
 def test_user_adapter_registration_configuration_location_version_and_disable():
     registry = AdapterRegistry()
     register(
@@ -96,7 +102,7 @@ def test_user_adapter_registration_configuration_location_version_and_disable():
         available("alpha"),
     )
     assert mismatch.selected is None
-    assert "tool_version_mismatch" in mismatch.decisions[0].reasons
+    assert "tool_version_mismatch" in reasons(mismatch, "alpha")
 
     disabled = registry.plan(
         request(),
@@ -107,7 +113,7 @@ def test_user_adapter_registration_configuration_location_version_and_disable():
         available("alpha"),
     )
     assert disabled.selected is None
-    assert "disabled" in disabled.decisions[0].reasons
+    assert "disabled" in reasons(disabled, "alpha")
 
 
 def test_invalid_settings_are_static_configuration_errors():
@@ -149,7 +155,7 @@ def test_missing_tool_and_denied_fallback_are_not_successes():
     assert denied.selected_adapter_id is None
 
 
-def test_timeout_is_a_tool_error_and_permitted_fallback_preserves_requirements():
+def test_timeout_is_a_tool_error_and_permitted_fallback_continues():
     registry = AdapterRegistry()
     register(registry, manifest("alpha", max_timeout_ms=200), manifest("beta"))
     result = schedule(
@@ -162,8 +168,34 @@ def test_timeout_is_a_tool_error_and_permitted_fallback_preserves_requirements()
         observations=available("alpha", "beta"),
     )
     assert result.entries[0].terminal_state == "timed_out"
+    assert result.entries[1].adapter_id == "beta"
+    assert result.outcome == "selected"
     assert result.selected_adapter_id == "beta"
-    assert result.entries[1].request_fingerprint
+
+
+def test_permitted_fallback_preserves_original_requirements():
+    registry = AdapterRegistry()
+    register(
+        registry,
+        manifest("alpha"),
+        manifest("beta"),
+        manifest("gamma", input_formats=["mumei.other-input/v1"], priority=9),
+    )
+    plan = registry.plan(
+        request(),
+        policy(selected_adapter="alpha", allow_fallback=True),
+        (
+            RuntimeObservation("alpha", "missing", "1.0.0", 1),
+            RuntimeObservation("beta", "available", "1.0.0", 2),
+            RuntimeObservation("gamma", "available", "1.0.0", 3),
+        ),
+    )
+    assert plan.selected is not None
+    assert plan.selected.adapter_id == "beta"
+    assert plan.fallback_from == "alpha"
+    assert plan.selected.input_format == INPUT_FORMAT
+    assert plan.selected.result_contract == contract()
+    assert "unsupported_input_format" in reasons(plan, "gamma")
 
 
 def snapshot(body=b"payload", complete=True):
