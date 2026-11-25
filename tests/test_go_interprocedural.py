@@ -573,6 +573,11 @@ def test_range_int_dependencies(go_types_helper, declarations, expected):
             "func F(x int64) int64 { const (\n A int64 = 1\n B\n ); return x + A + B }",
             frozenset({0}),
         ),
+        # An empty declaration group is a valid no-op.
+        (
+            "func F(x int64) int64 { const (); return x }",
+            frozenset({0}),
+        ),
     ],
 )
 def test_const_declarations_and_reads(go_types_helper, declarations, expected):
@@ -613,6 +618,19 @@ def test_const_declarations_and_reads(go_types_helper, declarations, expected):
 def test_const_declaration_gaps(go_types_helper, declarations, reason):
     result = named(*unit(go_types_helper, declarations))
     assert not result.available and result.gaps[0].reason == reason
+
+
+def test_compact_grouped_const_without_final_separator_is_parser_gap(
+    go_types_helper,
+):
+    result = named(
+        *unit(
+            go_types_helper,
+            "func F(x int64) int64 { const (A = iota; B); return x + A + B }",
+        )
+    )
+    assert not result.available
+    assert result.gaps[0].reason == "syntax_or_parser_unavailable"
 
 
 @pytest.mark.parametrize(

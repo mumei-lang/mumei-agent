@@ -24341,7 +24341,8 @@ class _Builder:
                 c for c in node.named_children if c.type == "const_spec"
             ]
             if not specs:
-                raise _Unsupported("unsupported_statement", _span(node))
+                # `const ()` is a valid empty declaration group.
+                return
             for spec in specs:
                 names: list[Any] = []
                 value_nodes: list[Any] = []

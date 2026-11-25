@@ -4098,19 +4098,25 @@ parameter-independent, not a known value.
 ### C07 grouped const declarations and implicit repetition
 
 Grouped `const ( ... )` declarations admit the same scalar fragment as
-individual constants: each `const_spec` binds pairwise when values are
-present, `_` discards, typed and untyped integer/rune/bool constants are
-dep-free, and values are still checked for fragment legality. A spec
-with no value uses Go's implicit repetition of the previous expression
-list. The model does not evaluate the repeated value or `iota`; because
-constants cannot read variables, the repetition is parameter-independent
-for exactly the same scalar-type reasons as an explicit constant.
+individual constants when tree-sitter preserves the group: each
+`const_spec` binds pairwise when values are present, `_` discards, typed
+and untyped integer/rune/bool constants are dep-free, and values are
+still checked for fragment legality. An empty `const ()` group is a
+no-op. A spec with no value uses Go's implicit repetition of the
+previous expression list. The model does not evaluate the repeated value
+or `iota`; because constants cannot read variables, the repetition is
+parameter-independent for exactly the same scalar-type reasons as an
+explicit constant.
 
-Boundaries: grouped `var` remains a parser gap. Non-scalar constants,
-including non-scalar implicit repetitions, stay `binding_unavailable`;
-missing names and arity mismatches stay `unsupported_statement`. This is
-still dependency analysis, not constant evaluation, proof, evidence or
-audit verdict integration.
+Boundaries: the tree-sitter grammar still marks the compact valid form
+`const (A = iota; B)` without a final separator as erroneous, so the
+whole source fails closed as `syntax_or_parser_unavailable`; use an
+explicit final separator or newline layout. Grouped `var` remains a
+parser/summary gap. Non-scalar constants, including non-scalar implicit
+repetitions, stay `binding_unavailable`; missing names and arity
+mismatches stay `unsupported_statement`. This is still dependency
+analysis, not constant evaluation, proof, evidence or audit verdict
+integration.
 
 ### C07 remaining scalar binary operators
 
