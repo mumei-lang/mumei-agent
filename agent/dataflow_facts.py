@@ -174,117 +174,219 @@ def evaluate_constant_expression(
 ) -> Fraction | None:
     """Safely evaluate a constant arithmetic expression.
 
-    Supports ``+``, ``-``, ``*``, ``/``, ``%``, ``<<``, ``>>``, ``|``, ``&``,
-    ``^``, parentheses, numeric literals (decimal, hex, binary, octal, float
-    with exponent/underscores), numeric casts such as ``int64(x)`` and
-    references to already-known constants (``values``).  The result is a
-    ``Fraction`` so floating-point intermediates (e.g. ``365.2425``) stay exact
+    Supports Go operator precedence for ``+``, ``-``, ``*``, ``/``, ``%``,
+    ``<<``, ``>>``, ``|``, ``&``, ``^`` and ``&^``, parentheses, numeric
+    and rune literals, numeric casts and references to already-known
+    constants.  Unlike Python, Go orders bitwise ``&`` with the
+    multiplicative operators and bitwise ``|``/``^`` with the additive
+    operators, so this deliberately does not delegate parsing to ``ast``.
+    The result is a ``Fraction`` so floating-point intermediates stay exact
     until a final integer conversion is requested.
     """
     expr = expr.strip()
     if not expr:
         return None
-    try:
-        tree = ast.parse(expr, mode="eval")
-    except (SyntaxError, ValueError, MemoryError, RecursionError):
+
+    tokens: list[str] = []
+    i = 0
+    while i < len(expr):
+        ch = expr[i]
+        if ch.isspace():
+            i += 1
+            continue
+        if ch in "()":
+            tokens.append(ch)
+            i += 1
+            continue
+        matched = False
+        for operator in ("<<", ">>", "&^"):
+            if expr.startswith(operator, i):
+                tokens.append(operator)
+                i += len(operator)
+                matched = True
+                break
+        if matched:
+            continue
+        if ch in "+-*/%&|^,":
+            tokens.append(ch)
+            i += 1
+            continue
+        if ch in "\"'`":
+            quote = ch
+            j = i + 1
+            if quote == "`":
+                close = expr.find("`", j)
+                j = len(expr) if close == -1 else close + 1
+            else:
+                while j < len(expr):
+                    if expr[j] == "\\":
+                        j += 2
+                        continue
+                    if expr[j] == quote:
+                        j += 1
+                        break
+                    j += 1
+            tokens.append(expr[i:j])
+            i = j
+            continue
+        if ch.isdigit() or (ch == "." and i + 1 < len(expr) and expr[i + 1].isdigit()):
+            number = re.match(
+                r"(?:0[xX][0-9a-fA-F_]+|0[bB][01_]+|0[oO][0-7_]+|"
+                r"\d[\d_]*(?:\.[\d_]*)?(?:[eE][+-]?\d[\d_]*)?|"
+                r"\.\d[\d_]*(?:[eE][+-]?\d[\d_]*)?)",
+                expr[i:],
+            )
+            if not number:
+                return None
+            tokens.append(number.group(0))
+            i += len(number.group(0))
+            continue
+        if ch.isalpha() or ch == "_":
+            name = re.match(r"\w+(?:\.\w+)*", expr[i:])
+            if not name:
+                return None
+            tokens.append(name.group(0))
+            i += len(name.group(0))
+            continue
         return None
 
-    def _constant_value(node: ast.Constant) -> Fraction | None:
-        if isinstance(node.value, bool):
-            return None
-        if isinstance(node.value, int):
-            return Fraction(node.value)
-        if isinstance(node.value, float):
-            text = ast.get_source_segment(expr, node)
-            if text is None:
-                text = str(node.value)
-            try:
-                return Fraction(text.replace("_", ""))
-            except ValueError:
-                return None
-        return None
+    class _Unknown(Exception):
+        pass
 
-    def _eval(node: ast.AST) -> Fraction | None:
-        if isinstance(node, ast.Expression):
-            return _eval(node.body)
-        if isinstance(node, ast.Constant):
-            return _constant_value(node)
-        if isinstance(node, ast.Name):
-            return values.get(node.id)
-        if isinstance(node, ast.Attribute):
-            base = node.value
-            if isinstance(base, ast.Name):
-                return values.get(f"{base.id}.{node.attr}")
-            return None
-        if isinstance(node, ast.Call):
-            if (
-                isinstance(node.func, ast.Name)
-                and node.func.id in _NUMERIC_CASTS
-                and len(node.args) == 1
-            ):
-                return _eval(node.args[0])
-            return None
-        if isinstance(node, ast.BinOp):
-            left = _eval(node.left)
-            right = _eval(node.right)
-            if left is None or right is None:
-                return None
-            if isinstance(node.op, ast.Add):
-                return left + right
-            if isinstance(node.op, ast.Sub):
-                return left - right
-            if isinstance(node.op, ast.Mult):
-                return left * right
-            if isinstance(node.op, (ast.Div, ast.FloorDiv)):
-                if right == 0:
-                    return None
-                if left.denominator == 1 and right.denominator == 1:
-                    # Go integer division truncates toward zero.
-                    return Fraction(int(left / right))
-                return left / right
-            if isinstance(node.op, ast.Mod):
-                if right == 0 or left.denominator != 1 or right.denominator != 1:
-                    return None
-                quotient = int(left / right)
-                return left - right * quotient
-            if isinstance(node.op, ast.Pow):
-                if right.denominator != 1:
-                    return None
-                exp = int(right)
-                if exp < 0 or exp > 64:
-                    return None
-                return left ** exp
-            if left.denominator != 1 or right.denominator != 1:
-                return None
-            if isinstance(node.op, ast.LShift):
-                if right < 0 or right > 128:
-                    return None
-                return Fraction(int(left) << int(right))
-            if isinstance(node.op, ast.RShift):
-                if right < 0 or right > 128:
-                    return None
-                return Fraction(int(left) >> int(right))
-            if isinstance(node.op, ast.BitOr):
-                return Fraction(int(left) | int(right))
-            if isinstance(node.op, ast.BitAnd):
-                return Fraction(int(left) & int(right))
-            if isinstance(node.op, ast.BitXor):
-                return Fraction(int(left) ^ int(right))
-            return None
-        if isinstance(node, ast.UnaryOp):
-            operand = _eval(node.operand)
-            if operand is None:
-                return None
-            if isinstance(node.op, ast.UAdd):
-                return +operand
-            if isinstance(node.op, ast.USub):
+    position = 0
+
+    def peek() -> str | None:
+        return tokens[position] if position < len(tokens) else None
+
+    def take(expected: str | None = None) -> str:
+        nonlocal position
+        if position >= len(tokens):
+            raise _Unknown
+        token = tokens[position]
+        if expected is not None and token != expected:
+            raise _Unknown
+        position += 1
+        return token
+
+    def literal_value(token: str) -> Fraction:
+        if token.startswith(("\"", "`")):
+            raise _Unknown
+        if token.startswith("'"):
+            rune_value = _go_rune_value(token)
+            if rune_value is None:
+                raise _Unknown
+            return Fraction(rune_value)
+        integer = _parse_int(token)
+        if integer is not None:
+            return Fraction(integer)
+        try:
+            return Fraction(token.replace("_", ""))
+        except (ValueError, ZeroDivisionError):
+            raise _Unknown from None
+
+    def integer_pair(left: Fraction, right: Fraction) -> tuple[int, int]:
+        if left.denominator != 1 or right.denominator != 1:
+            raise _Unknown
+        return int(left), int(right)
+
+    def apply(operator: str, left: Fraction, right: Fraction) -> Fraction:
+        if operator == "+":
+            return left + right
+        if operator == "-":
+            return left - right
+        if operator == "*":
+            return left * right
+        if operator == "/":
+            if right == 0:
+                raise _Unknown
+            if left.denominator == 1 and right.denominator == 1:
+                # Go integer division truncates toward zero.
+                return Fraction(int(left / right))
+            return left / right
+        if operator == "%":
+            left_int, right_int = integer_pair(left, right)
+            if right_int == 0:
+                raise _Unknown
+            quotient = int(left / right)
+            return Fraction(left_int - right_int * quotient)
+        left_int, right_int = integer_pair(left, right)
+        if operator == "<<":
+            if right_int < 0 or right_int > 128:
+                raise _Unknown
+            return Fraction(left_int << right_int)
+        if operator == ">>":
+            if right_int < 0 or right_int > 128:
+                raise _Unknown
+            return Fraction(left_int >> right_int)
+        if operator == "&":
+            return Fraction(left_int & right_int)
+        if operator == "&^":
+            return Fraction(left_int & ~right_int)
+        if operator == "|":
+            return Fraction(left_int | right_int)
+        if operator == "^":
+            return Fraction(left_int ^ right_int)
+        raise _Unknown
+
+    def parse_primary() -> Fraction:
+        token = take()
+        if token == "(":
+            value = parse_expression(1)
+            take(")")
+            return value
+        if re.fullmatch(r"\w+(?:\.\w+)*", token) and (
+            token[0].isalpha() or token[0] == "_"
+        ):
+            if peek() == "(":
+                take("(")
+                argument = parse_expression(1)
+                if peek() == ",":
+                    take(",")
+                take(")")
+                if token not in _NUMERIC_CASTS:
+                    raise _Unknown
+                return argument
+            if token not in values:
+                raise _Unknown
+            return values[token]
+        return literal_value(token)
+
+    def parse_unary() -> Fraction:
+        token = peek()
+        if token in {"+", "-", "^"}:
+            take()
+            operand = parse_unary()
+            if token == "+":
+                return operand
+            if token == "-":
                 return -operand
-            if isinstance(node.op, ast.Invert) and operand.denominator == 1:
-                return Fraction(~int(operand))
-            return None
-        return None
+            if operand.denominator != 1:
+                raise _Unknown
+            return Fraction(~int(operand))
+        return parse_primary()
 
-    return _eval(tree)
+    precedence = {
+        "*": 5, "/": 5, "%": 5, "<<": 5, ">>": 5, "&": 5, "&^": 5,
+        "+": 4, "-": 4, "|": 4, "^": 4,
+    }
+
+    def parse_expression(min_precedence: int) -> Fraction:
+        left = parse_unary()
+        while True:
+            operator = peek()
+            if operator not in precedence or precedence[operator] < min_precedence:
+                return left
+            take()
+            right = parse_expression(precedence[operator] + 1)
+            left = apply(operator, left, right)
+
+    try:
+        result = parse_expression(1)
+        if position != len(tokens):
+            return None
+        return result
+    except (_Unknown, IndexError, OverflowError, RecursionError):
+        return None
 
 
 def fold_constants(
@@ -376,19 +478,60 @@ _MAKE_SIZE = re.compile(r"^make\(\[\][^,]+,\s*(\w+)(?:,[^)]*)?\)$")
 _MAKE_GROW = re.compile(rf"^make\(\[\][^,]+,\s*({_IDENT})\+(\w+)(?:,[^)]*)?\)$")
 _COMPOSITE = re.compile(r"^(?:&?\[\][^{]+|&?map\[[^\]]+\][^{]+|&?[A-Za-z_][\w.]*)\{")
 _SLICE_EXPR = re.compile(rf"^{_IDENT}\[[^\]]*:[^\]]*\]$")
-def _strip_go_literals(text: str) -> str:
-    """Remove Go string/rune/raw-string literals in one lexical pass.
+def _go_rune_value(literal: str) -> int | None:
+    """Decode a Go rune literal, or ``None`` when its value is unsupported."""
+    if len(literal) < 2 or not literal.startswith("'") or not literal.endswith("'"):
+        return None
+    body = literal[1:-1]
+    if not body:
+        return None
+    if not body.startswith("\\"):
+        return ord(body) if len(body) == 1 else None
+    escapes = {
+        "a": 7, "b": 8, "f": 12, "n": 10, "r": 13, "t": 9, "v": 11,
+        "\\": 92, "'": 39, '"': 34,
+    }
+    if len(body) == 2 and body[1] in escapes:
+        return escapes[body[1]]
+    try:
+        if re.fullmatch(r"\\x[0-9a-fA-F]{2}", body):
+            return int(body[2:], 16)
+        if re.fullmatch(r"\\u[0-9a-fA-F]{4}", body):
+            return int(body[2:], 16)
+        if re.fullmatch(r"\\U[0-9a-fA-F]{8}", body):
+            return int(body[2:], 16)
+        if re.fullmatch(r"\\[0-7]{3}", body):
+            return int(body[1:], 8)
+    except ValueError:
+        return None
+    return None
 
-    Whichever quote opens first wins — a ``"`` inside a backtick raw
-    string is raw text, not the start of a quoted literal, so regex
-    passes would mis-pair it and swallow real structure (``][`` and all).
+
+def _strip_go_literals(text: str) -> str:
+    """Remove Go literals and comments in one lexical pass.
+
+    Whichever token opens first wins — a ``"`` inside a backtick raw
+    string is raw text, not the start of a quoted literal, and a quote in
+    a comment is prose rather than a rune literal. Comments are replaced
+    by whitespace so neighboring identifiers cannot accidentally join.
     """
     out: list[str] = []
     i = 0
     end = len(text)
     while i < end:
         ch = text[i]
-        if ch == "`":
+        if text.startswith("//", i):
+            close = text.find("\n", i + 2)
+            if close == -1:
+                i = end
+            else:
+                out.append("\n")
+                i = close + 1
+        elif text.startswith("/*", i):
+            close = text.find("*/", i + 2)
+            out.append(" ")
+            i = end if close == -1 else close + 2
+        elif ch == "`":
             close = text.find("`", i + 1)
             i = end if close == -1 else close + 1
         elif ch in "\"'":
@@ -400,7 +543,17 @@ def _strip_go_literals(text: str) -> str:
                 if text[j] == ch:
                     break
                 j += 1
-            i = j + 1 if j < end else end
+            close = j + 1 if j < end else end
+            if ch == "'":
+                rune_value = _go_rune_value(text[i:close])
+                # A rune is an integer constant. Keep unknown forms opaque
+                # rather than deleting them into a changed arithmetic value.
+                out.append(
+                    str(rune_value)
+                    if rune_value is not None
+                    else "_mumei_unknown_rune"
+                )
+            i = close
         else:
             out.append(ch)
             i += 1
@@ -1069,6 +1222,7 @@ def _forward_goto_plan(
         group: tuple[tree_sitter_extract.Statement, ...],
         ancestors: tuple[int, ...],
         parent_indices: dict[int, int],
+        transparent_label_site: tuple[int, int] | None = None,
     ) -> None:
         group_id = id(group)
         groups[group_id] = group
@@ -1081,8 +1235,9 @@ def _forward_goto_plan(
                 if statement.label in labels:
                     ok[0] = False
                     return
-                labels[statement.label] = ((index, 0), group_id, local_index)
-                label_frames[statement.label] = group_id
+                label_group, label_index = transparent_label_site or (group_id, local_index)
+                labels[statement.label] = ((index, 0), label_group, label_index)
+                label_frames[statement.label] = label_group
             if statement.kind == "goto":
                 label = control_flow._jump_label(statement.text)
                 gotos.append(
@@ -1100,7 +1255,17 @@ def _forward_goto_plan(
                 statement.orelse,
                 statement.post,
             ):
-                visit(sub, ancestors + (group_id,), indices)
+                transparent_child = None
+                if (
+                    statement.kind == "block"
+                    and statement.stacked_label
+                    and sub is statement.body
+                ):
+                    # Stacked labels introduce neither a scope nor a label
+                    # frame: ``L1: L2: stmt`` labels the same statement-list
+                    # position as ``L1``.
+                    transparent_child = transparent_label_site or (group_id, local_index)
+                visit(sub, ancestors + (group_id,), indices, transparent_child)
                 if not ok[0]:
                     return
 
@@ -1391,18 +1556,29 @@ class _Walker:
         self._descent_indices: list[int] = []
 
     def _collect_label_frames(
-        self, statements: tuple[tree_sitter_extract.Statement, ...]
+        self,
+        statements: tuple[tree_sitter_extract.Statement, ...],
+        transparent_frame: int | None = None,
     ) -> None:
         for statement in statements:
             if statement.labeled and statement.label:
-                self._label_frames.setdefault(statement.label, id(statements))
+                self._label_frames.setdefault(
+                    statement.label, transparent_frame or id(statements)
+                )
             for group in (
                 statement.init,
                 statement.body,
                 statement.orelse,
                 statement.post,
             ):
-                self._collect_label_frames(group)
+                child_transparent = None
+                if (
+                    statement.kind == "block"
+                    and statement.stacked_label
+                    and group is statement.body
+                ):
+                    child_transparent = transparent_frame or id(statements)
+                self._collect_label_frames(group, child_transparent)
 
     # -- helpers ---------------------------------------------------------
 
@@ -1533,11 +1709,7 @@ class _Walker:
                 # when an outer jump ends the block.
                 for ahead in range(index, len(statements)):
                     later = statements[ahead]
-                    if (
-                        later.labeled
-                        and later.label
-                        and self.goto_carried.get(later.label)
-                    ):
+                    if self._has_carried_label(later):
                         if self._contains_backward_target_label(
                             statements[index:ahead]
                         ):
@@ -1554,27 +1726,45 @@ class _Walker:
             self._scope_stack.pop()
             self._descent_indices.pop()
 
+    @staticmethod
+    def _stacked_position_labels(statement: tree_sitter_extract.Statement) -> tuple[str, ...]:
+        labels = []
+        current = statement
+        while current.labeled and current.label:
+            labels.append(current.label)
+            if not (current.kind == "block" and current.stacked_label and current.body):
+                break
+            current = current.body[0]
+        return tuple(labels)
+
     def statement(self, statement: tree_sitter_extract.Statement, env: _Env) -> tuple[_Env, str]:
-        if statement.labeled and statement.label:
-            # Paths recorded by earlier ``goto``s join the fall-through at
-            # the labelled statement. When the fall-through is dead (the
-            # ``env is None`` resume marker) the recorded environments are
-            # the only ones that reach here.
-            pending = self.goto_carried.pop(statement.label, ())
+        position_labels = self._stacked_position_labels(statement)
+        if position_labels:
+            # Every label in ``L1: L2: stmt`` names the same position. Consume
+            # their carried paths together; otherwise a jump to the inner
+            # label would either be dropped or be merged with an empty state
+            # before the inner label is reached.
+            pending = []
+            for label in position_labels:
+                pending.extend(self.goto_carried.pop(label, ()))
             if env is None and pending:
                 env = pending[0]
                 pending = pending[1:]
             for carried in pending:
                 env = env.merge(carried)
-        if env is None:
+        if env is None and not (
+            statement.kind == "block" and statement.stacked_label
+        ):
             env = _Env()
-        if statement.labeled and statement.label in self._backward_havoc:
+        for label in position_labels:
+            if label not in self._backward_havoc:
+                continue
             before = env.copy()
             env = env.copy()
-            for name in self._backward_havoc[statement.label]:
+            for name in self._backward_havoc[label]:
                 env.kill(name)
             self._keep_nil_maps(
-                env, before, self._backward_regions[statement.label]
+                env, before, self._backward_regions[label]
             )
         kind = statement.kind
         if kind in {
@@ -1672,8 +1862,9 @@ class _Walker:
         if kind == "block":
             if statement.stacked_label:
                 # ``L1: L2: stmt`` — a stacked label introduces no Go
-                # scope, so walk the inner statement in this scope.
-                return self.statement(statement.body[0], env)
+                # scope, so walk its contents in this scope. Split grouped
+                # declarations can put more than one spec statement here.
+                return self.walk(statement.body, env)
             inner, terminated = self._scoped_walk(statement.body, env.copy(), env)
             return inner, terminated
         if kind in {"define", "assign"}:
@@ -2242,6 +2433,17 @@ class _Walker:
                 return True
         return False
 
+    def _has_carried_label(self, statement: tree_sitter_extract.Statement) -> bool:
+        if (
+            statement.labeled
+            and statement.label
+            and self.goto_carried.get(statement.label)
+        ):
+            return True
+        if statement.kind == "block" and statement.stacked_label:
+            return any(self._has_carried_label(part) for part in statement.body)
+        return False
+
     def _contains_backward_target_label(
         self, statements: tuple[tree_sitter_extract.Statement, ...]
     ) -> bool:
@@ -2402,9 +2604,55 @@ class _Walker:
                 self._var_one(name, type_text, value, env)
             return
         types = statement.operator.split("|") if statement.operator else []
-        for index, name in enumerate(statement.targets):
-            value = statement.values[index] if index < len(statement.values) else ""
-            type_text = _norm(types[index]) if index < len(types) else ""
+        declarations = [
+            (
+                name,
+                _norm(types[index]) if index < len(types) else "",
+                statement.values[index] if index < len(statement.values) else "",
+            )
+            for index, name in enumerate(statement.targets)
+        ]
+        if len(declarations) > 1:
+            # One VarSpec's initializers are evaluated before any of its new
+            # bindings enter scope: ``var d, x = 1, 1/d`` reads the outer
+            # ``d``, never the ``d`` declared by the same spec. Evaluate each
+            # initializer against the pre-declaration environment and merge
+            # only the resulting binding facts afterwards.
+            pre_env = env.copy()
+            evaluated = []
+            exact_copy_provenance = {}
+            for name, type_text, value in declarations:
+                scratch = pre_env.copy()
+                self._var_one(name, type_text, value, scratch)
+                evaluated.append((name, scratch))
+                value_text = _strip_parens(_norm(_strip_go_literals(value)))
+                if re.fullmatch(r"[A-Za-z_]\w*", value_text):
+                    # A same-spec name on the right still denotes the outer
+                    # object. Keep that pre-declaration identity distinct
+                    # from the new binding that happens to reuse its name.
+                    exact_copy_provenance[name] = ("pre", pre_env.root(value_text))
+            for _name, _type_text, value in declarations:
+                # Initializer side effects still happen even though the new
+                # bindings do not: a bare handle mention can transfer ownership
+                # out of this function. Scratches evaluate against the pure
+                # pre-state, so apply that conservative escape once here.
+                self._escape(value, env)
+            declared_names = frozenset(name for name, _type, _value in declarations)
+            for name, scratch in evaluated:
+                env.kill(name)
+                _copy_name_facts(env, scratch, name)
+            for alias, root in list(env.aliases.items()):
+                # An alias to a same-named outer slice cannot be represented
+                # after the shadowing binding lands. Never link it to the new
+                # binding: equal-length facts would otherwise flow backwards
+                # from the outer object into the new empty slice.
+                if alias in declared_names and root in declared_names:
+                    alias_provenance = exact_copy_provenance.get(alias)
+                    root_provenance = exact_copy_provenance.get(root)
+                    if alias_provenance is None or alias_provenance != root_provenance:
+                        del env.aliases[alias]
+            return
+        for name, type_text, value in declarations:
             self._var_one(name, type_text, value, env)
 
     @staticmethod
@@ -2430,14 +2678,15 @@ class _Walker:
 
     def _var_one(self, name: str, type_text: str, value: str, env: _Env) -> None:
         type_text = _norm(type_text)
-        if value and _norm(value) != "nil":
+        value_key = _strip_parens(_norm(_strip_go_literals(value))) if value else ""
+        if value and value_key != "nil":
             if _root_name(name) in {
                 _root_name(token) for token in re.findall(_IDENT, value)
             }:
                 # ``var f = f`` reads the pre-declaration binding —
                 # evaluate it before the declaration's own kill.
                 scratch = env.copy()
-                if _norm(value) != _norm(name):
+                if value_key != _norm(name):
                     scratch.kill(name)
                     # ``var f = bufio.NewReader(f)`` wraps the resource
                     # but does not close it — keep its held tracking on
@@ -2644,7 +2893,7 @@ class _Walker:
         (``process(f)``, ``s.file = f``, ``return f``) means the current
         function may no longer own the resource, so no leak is reported.
         """
-        stripped = _strip_borrowing_calls(value)
+        stripped = _strip_borrowing_calls(_strip_go_literals(value))
         for held in list(env.held):
             if held[0] == "file" and re.search(
                 rf"(?<![\w.]){re.escape(held[1])}(?![\w])(?!\s*\.)", stripped
@@ -2659,7 +2908,10 @@ class _Walker:
             return literal >= 0
         return text in env.nonneg or text in env.consts and env.consts[text] >= 0
     def _define(self, target: str, value: str, env: _Env) -> None:
-        text = _norm(value)
+        # Strip comments before whitespace normalization: otherwise a newline
+        # that ends a ``//`` comment disappears first and the comment swallows
+        # the rest of the expression (including a slice colon on the next line).
+        text = _strip_parens(_norm(_strip_go_literals(value)))
         self._escape(value, env)
         if not self._reliable(target):
             return

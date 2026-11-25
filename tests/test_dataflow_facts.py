@@ -2632,6 +2632,241 @@ def test_shadowed_err_site_survives_scope_exit() -> None:
     )
 
 
+def test_grouped_multi_name_var_zero_values_keep_each_type() -> None:
+    flow = _go(
+        "var (\n"
+        "p, q *int\n"
+        "r = 1\n"
+        ")\n"
+        "_ = p\n"
+        "_ = r\n"
+        "return *q"
+    )
+    assert any(
+        issue.category == "uninitialized_use" and issue.subject == "q"
+        for issue in flow.issues
+    )
+
+
+def test_multi_name_var_initializer_escape_reaches_outer_environment() -> None:
+    # The assignment-like mention hands the open handle off during initializer
+    # evaluation. Forgetting that transfer only in the per-binding scratch
+    # would leave a false leak on the outer name.
+    flow = _go(
+        'f, err := os.Open("p")\n'
+        "if err != nil { return 0 }\n"
+        "var g, x = f, 1\n"
+        "_ = g\n"
+        "_ = x\n"
+        "return 0"
+    )
+    assert not any(issue.category == "resource_leak" for issue in flow.issues)
+
+
+def test_multi_name_var_string_literal_does_not_transfer_file_ownership() -> None:
+    # ``"f"`` is only string data: it must not count as a bare mention that
+    # hands the open handle owned by variable ``f`` to another owner.
+    flow = _go(
+        'f, err := os.Open("p")\n'
+        "if err != nil { return 0 }\n"
+        'var g, x = "f", 1\n'
+        "_ = g\n"
+        "_ = x\n"
+        "return 0"
+    )
+    assert any(
+        issue.category == "resource_leak" and issue.subject == "f"
+        for issue in flow.issues
+    )
+
+
+def test_multi_name_var_exact_slice_aliases_keep_equal_length() -> None:
+    # Both new bindings copy the same outer slice, so they remain equal-length
+    # aliases of one another even though the outer name is shadowed.
+    facts = _facts(
+        "s := []int{1}\n"
+        "i := 0\n"
+        "if i < len(s) {\n"
+        "var s, t = s, s\n"
+        "return t[i]\n"
+        "}\n"
+        "return 0",
+        "t[i]",
+    )
+    assert ("i", "t") in facts.lt_len
+
+
+def test_double_labeled_grouped_var_specs_stay_source_ordered() -> None:
+    # Valid Go: both forward gotos land directly on their labels, then fall
+    # through the declarations; neither jumps over the bindings.
+    facts = _facts(
+        "if n == 0 { goto Outer }\n"
+        "if n == 1 { goto Inner }\n"
+        "Outer: Inner: var (\n"
+        "d = 1\n"
+        "x = 1/d\n"
+        ")\n"
+        "return x",
+        "x",
+    )
+    assert facts.consts["x"] == 1
+
+
+def test_multi_name_var_distinct_initializer_does_not_alias_new_shadow() -> None:
+    # ``t`` copies the outer slice, while the new ``s`` is empty. Their names
+    # collide after shadowing, but the objects are different lengths.
+    facts = _facts(
+        "s := []int{1}\n"
+        "i := 0\n"
+        "if i < len(s) {\n"
+        "var s, t = []int{}, s\n"
+        "if i < len(t) {\n"
+        "return s[i]\n"
+        "}\n"
+        "return 0\n"
+        "}\n"
+        "return 0",
+        "s[i]",
+    )
+    assert ("i", "s") not in facts.lt_len
+
+
+def test_comment_quote_does_not_hide_file_ownership_transfer() -> None:
+    flow = _go(
+        'f, err := os.Open("p")\n'
+        "if err != nil { return 0 }\n"
+        "takeOwnership(/* caller's file */ f)\n"
+        "return 0"
+    )
+    assert not any(
+        issue.category == "resource_leak" and issue.subject == "f"
+        for issue in flow.issues
+    )
+
+
+def test_line_comment_newline_preserves_slice_colon() -> None:
+    source = (
+        "package demo\n"
+        "func First() int {\n"
+        "    var buf []int\n"
+        "    x := buf[// bound\n"
+        "        :1]\n"
+        "    return x[0]\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "uninitialized_use")
+
+
+def test_constant_numeric_edge_forms_stay_resolved() -> None:
+    facts = _facts(
+        "d := int(2.)\nreturn 10 / d",
+        "10 / d",
+    )
+    assert facts.consts["d"] == 2
+
+    trailing = _facts(
+        "d := int(2,)\nreturn 10 / d",
+        "10 / d",
+    )
+    assert trailing.consts["d"] == 2
+
+
+def test_unicode_constant_name_resolves_in_expression() -> None:
+    facts = _facts(
+        "const 幅 = 2\nd := 幅 + 1\nreturn 12 / d",
+        "12 / d",
+    )
+    assert facts.consts["d"] == 3
+
+
+def test_deep_constant_expression_stays_unknown_without_losing_analysis() -> None:
+    depth = 5000
+    expression = "1" + "+(1" * depth + ")" * depth
+    flow = _go(f"d := int({expression})\nreturn 1 / d")
+    facts = flow.facts_for_expression("1 / d")
+    assert facts is not None
+    assert "d" not in facts.consts
+    assert "d" not in facts.nonzero
+
+
+def test_go_bitwise_precedence_is_not_python_precedence() -> None:
+    facts = _facts("d := 2 + 'a' & 4 - 2\nreturn 1 / d", "1 / d")
+    assert facts.consts["d"] == 0
+
+
+def test_rune_literal_arithmetic_keeps_zero_constant() -> None:
+    facts = _facts("d := '0' - 48\nreturn 1 / d", "1 / d")
+    assert facts.consts["d"] == 0
+
+
+def test_parenthesized_channel_copy_keeps_closed_state() -> None:
+    source = (
+        "package demo\n"
+        "func Push() int {\n"
+        "    ch := make(chan int)\n"
+        "    close(ch)\n"
+        "    {\n"
+        "        var ch, out = (ch), ch\n"
+        "        ch <- 1\n"
+        "    }\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "send_on_closed_channel")
+
+
+def test_inner_stacked_label_goto_path_is_not_dropped() -> None:
+    # Valid Go: ``Outer`` is used by the backward goto, while the only path
+    # that first reaches the declarations is the forward ``goto Inner``.
+    facts = _facts(
+        "d := 0\n"
+        "if n == 0 { goto Inner }\n"
+        "d = 1\n"
+        "return 0\n"
+        "Outer: Inner: var (\n"
+        "x = 1/d\n"
+        ")\n"
+        "if n == 2 { goto Outer }\n"
+        "return x",
+        "x",
+        param_names={"n"},
+    )
+    assert facts.consts["d"] == 0
+
+
+def test_shadowed_slice_alias_does_not_share_outer_length_with_new_slice() -> None:
+    facts = _facts(
+        "s := []int{1}\n"
+        "{\n"
+        "var s, t = s[:0], s\n"
+        "return len(t) / len(s)\n"
+        "}\n"
+        "return 0",
+        "len(t) / len(s)",
+    )
+    assert "len(t)" in facts.nonzero
+    assert "len(s)" not in facts.nonzero
+    assert "s" not in facts.len_ge
+
+
+def test_multi_name_var_spec_initializers_read_outer_bindings() -> None:
+    # One VarSpec's bindings enter scope only after its initializer list:
+    # ``1/d`` reads the outer zero-valued ``d``, so the result must not be
+    # folded through the new ``d = 1`` binding. Separate grouped specs are
+    # sequential and do see the earlier new binding.
+    same_spec = _facts(
+        "d := 0\n{\nvar d, x = 1, 1/d\nreturn x\n}\nreturn 0", "x"
+    )
+    assert "x" not in same_spec.nonzero
+    assert "x" not in same_spec.consts
+
+    separate_specs = _facts(
+        "d := 0\n{\nvar (\nd = 1\nx = 1/d\n)\nreturn x\n}\nreturn 0", "x"
+    )
+    assert "x" in separate_specs.nonzero
+    assert separate_specs.consts["x"] == 1
+
+
 def test_var_self_reference_drops_outer_facts() -> None:
     # ``var d = d - 1`` shadows the outer ``d`` — its nonzero/consts
     # facts must not leak into the inner binding.

@@ -288,6 +288,39 @@ def test_assignment_facts_recognize_assignment_forms(statement):
     assert "x" in result[cfg.exit].some_path
 
 
+def test_assignment_facts_grouped_var_targets_assign():
+    body = "var (\ny = x\n)\nreturn y"
+    cfg, result = facts(body)
+    assert "y" in result[cfg.exit].some_path
+
+
+def test_grouped_var_specs_initialize_in_source_order():
+    body = "var (\na = x\nb = a\n)\nreturn b"
+    cfg = graph(body)
+    assert control_flow.unassigned_uses(body, cfg, entry_assigned=frozenset({"x"})) == ()
+
+
+def test_grouped_var_zero_value_spec_does_not_count_as_assignment():
+    body = "var (\na int64\nb = x\n)\nreturn a + b"
+    cfg = graph(body)
+    uses = control_flow.unassigned_uses(body, cfg, entry_assigned=frozenset({"x"}))
+    assert [(use.name, use.definite) for use in uses] == [("a", True)]
+
+
+def test_compact_grouped_var_without_final_separator_builds_cfg():
+    body = "var ( y = x ); return y"
+    cfg, result = facts(body)
+    assert nodes(cfg, "var")
+    assert "y" in result[cfg.exit].some_path
+
+
+def test_compact_grouped_const_without_final_separator_builds_cfg():
+    body = "const ( A = 1 ); return A"
+    cfg, result = facts(body)
+    assert nodes(cfg, "const")
+    assert "A" in result[cfg.exit].some_path
+
+
 def test_bare_var_is_a_declaration_not_an_assignment():
     body = "var x int\nreturn x"
     cfg, result = facts(body)

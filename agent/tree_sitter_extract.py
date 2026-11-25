@@ -139,6 +139,256 @@ def is_available(language: str) -> bool:
     return _get_parser(_normalize_language(language)) is not None
 
 
+def _syntax_nodes(root):
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        yield node
+        stack.extend(reversed(node.children))
+
+
+def _spec_or_compact_error_wrapper(node, spec_type: str) -> list:
+    if node.type == spec_type:
+        return [node]
+    if node.type == "ERROR" and len(node.children) == 1:
+        inner = node.children[0]
+        if inner.type == spec_type:
+            return [inner]
+    return []
+
+
+def _compact_group_specs(node, spec_type: str) -> list:
+    """Specs in a compact group, including tree-sitter's final-spec error wrapper."""
+    specs = []
+    for child in node.children:
+        specs.extend(_spec_or_compact_error_wrapper(child, spec_type))
+    return specs
+
+
+def go_declaration_spec_nodes(node) -> list:
+    """Flatten a Go const/var declaration's specs, including compact groups.
+
+    Grouped vars nest under ``var_spec_list``; a compact final spec may
+    additionally sit inside tree-sitter's zero-width ``ERROR`` wrapper.
+    The wrapper is only syntactically valid after
+    :func:`parse_go_with_compact_group_recovery` has accepted the tree.
+    """
+    if node.type == "const_declaration":
+        return _compact_group_specs(node, "const_spec")
+    if node.type != "var_declaration":
+        return []
+    specs = []
+    for child in node.named_children:
+        if child.type == "var_spec_list":
+            for grand in child.named_children:
+                specs.extend(_spec_or_compact_error_wrapper(grand, "var_spec"))
+        else:
+            specs.extend(_spec_or_compact_error_wrapper(child, "var_spec"))
+    return specs
+
+
+def _compact_group_parts(node):
+    if node.type == "const_declaration":
+        if not any(child.type == "(" for child in node.children):
+            return None
+        return _compact_group_specs(node, "const_spec")
+    if node.type == "var_spec_list":
+        return _compact_group_specs(node, "var_spec")
+    return None
+
+
+def _compact_group_close(node):
+    return next(
+        (child for child in reversed(node.children) if child.type == ")"),
+        None,
+    )
+
+
+def _comment_spans(root) -> tuple[tuple[int, int], ...]:
+    return tuple(
+        (node.start_byte, node.end_byte)
+        for node in _syntax_nodes(root)
+        if node.type == "comment"
+    )
+
+
+def _semicolon_outside_comments(
+    source_bytes: bytes,
+    start_byte: int,
+    end_byte: int,
+    comments: tuple[tuple[int, int], ...],
+) -> bool:
+    """Whether a semicolon byte occurs outside tree-sitter comment nodes."""
+    relevant = [
+        (start, end)
+        for start, end in comments
+        if start < end_byte and start_byte < end
+    ]
+    for position in range(start_byte, end_byte):
+        if source_bytes[position] != ord(";"):
+            continue
+        if any(start <= position < end for start, end in relevant):
+            continue
+        return True
+    return False
+
+
+def _compact_group_semicolon_insertions(
+    root, source_bytes: bytes, comments: tuple[tuple[int, int], ...] | None = None
+) -> list[int]:
+    """Positions where tree-sitter misses Go's grouped-declaration terminator.
+
+    The Go scanner terminates a final grouped spec before ``)`` even in
+    the compact one-line form. tree-sitter-go usually parses that spec
+    list into the right shape but marks a missing terminator; with one
+    spec it wraps the final spec in a zero-width ``ERROR`` node instead.
+    Detect only those shapes — a final spec directly before the group
+    close with no newline or explicit semicolon between them — so
+    ordinary parse errors still fail closed.
+    """
+    if comments is None:
+        comments = _comment_spans(root)
+    positions = []
+    for node in _syntax_nodes(root):
+        specs = _compact_group_parts(node)
+        if specs is None:
+            continue
+        close = _compact_group_close(node)
+        if not specs or close is None:
+            continue
+        last = specs[-1]
+        between = source_bytes[last.end_byte : close.start_byte]
+        if (
+            _semicolon_outside_comments(
+                source_bytes, last.end_byte, close.start_byte, comments
+            )
+            or b"\n" in between
+            or b"\r" in between
+        ):
+            continue
+        positions.append(close.start_byte)
+    return positions
+
+
+def _only_compact_group_error_wrappers(
+    root, source_bytes: bytes, comments: tuple[tuple[int, int], ...] | None = None
+) -> bool:
+    """Whether every ``ERROR`` node is a recognised compact-group wrapper."""
+    if comments is None:
+        comments = _comment_spans(root)
+    for node in _syntax_nodes(root):
+        if not (node.is_error or node.type == "ERROR"):
+            continue
+        parent = node.parent
+        if parent is None or len(node.children) != 1:
+            return False
+        spec_type = {
+            "const_declaration": "const_spec",
+            "var_spec_list": "var_spec",
+        }.get(parent.type)
+        inner = node.children[0]
+        if (
+            spec_type is None
+            or inner.type != spec_type
+            or node.start_byte != inner.start_byte
+            or node.end_byte != inner.end_byte
+        ):
+            return False
+        close = _compact_group_close(parent)
+        if close is None or node.end_byte > close.start_byte:
+            return False
+        between = source_bytes[node.end_byte : close.start_byte]
+        if (
+            _semicolon_outside_comments(
+                source_bytes, node.end_byte, close.start_byte, comments
+            )
+            or b"\n" in between
+            or b"\r" in between
+        ):
+            return False
+    return True
+
+
+def _text_with_semicolon_insertions(
+    text: bytes, start_byte: int, end_byte: int, positions: list[int]
+) -> bytes:
+    """Apply recovery semicolons that fall inside one original node span."""
+    out = bytearray()
+    cursor = 0
+    for position in sorted(set(positions)):
+        if not start_byte < position < end_byte:
+            continue
+        relative = position - start_byte
+        out += text[cursor:relative]
+        out += b";"
+        cursor = relative
+    out += text[cursor:]
+    return bytes(out)
+
+
+def _apply_semicolon_insertions(source_bytes: bytes, positions: list[int]) -> bytes:
+    patched = bytearray()
+    cursor = 0
+    for position in sorted(set(positions)):
+        patched += source_bytes[cursor:position]
+        patched += b";"
+        cursor = position
+    patched += source_bytes[cursor:]
+    return bytes(patched)
+
+
+def parse_go_with_compact_group_recovery(parser, source_bytes: bytes):
+    """Parse Go source, admitting only the compact-group terminator false positive.
+
+    Returns the original tree when every parse error is explained by
+    tree-sitter-go missing the implicit terminator before a grouped
+    declaration's closing parenthesis. The returned tree keeps the
+    original byte offsets; the semicolon-patched parse is used only as a
+    fail-closed witness that no other syntax error is present. Recognised
+    zero-width final-spec ``ERROR`` wrappers are admitted; any unrelated
+    ``ERROR`` node, dropped spec or remaining parse error returns
+    ``None``.
+    """
+    try:
+        root = parser.parse(source_bytes).root_node
+    except Exception:
+        return None
+    if not root.has_error:
+        return root
+    comments = _comment_spans(root)
+    insertions = _compact_group_semicolon_insertions(root, source_bytes, comments)
+    if not insertions or not _only_compact_group_error_wrappers(
+        root, source_bytes, comments
+    ):
+        return None
+    patched_source = _apply_semicolon_insertions(source_bytes, insertions)
+    try:
+        patched = parser.parse(patched_source).root_node
+    except Exception:
+        return None
+    if patched.has_error:
+        return None
+    original_specs = [
+        (
+            node.type,
+            _text_with_semicolon_insertions(
+                source_bytes[node.start_byte : node.end_byte],
+                node.start_byte,
+                node.end_byte,
+                insertions,
+            ),
+        )
+        for node in _syntax_nodes(root)
+        if node.type in {"const_spec", "var_spec"}
+    ]
+    patched_specs = [
+        (node.type, node.text)
+        for node in _syntax_nodes(patched)
+        if node.type in {"const_spec", "var_spec"}
+    ]
+    return root if original_specs == patched_specs else None
+
+
 # Node types that introduce a named function/method, per grammar.
 _FUNCTION_NODE_TYPES = {
     # Rust traits use ``function_signature_item`` for methods without a body.
@@ -1136,10 +1386,108 @@ def _go_statements(source_bytes: bytes, node, base: int, offsets: list[int]) -> 
         node = lists[0]
     results: list[Statement] = []
     for child in node.named_children:
+        declaration_node = child
+        label_nodes = []
+        while declaration_node is not None and declaration_node.type == "labeled_statement":
+            label = ""
+            inner = None
+            for part in declaration_node.named_children:
+                if part.type == "label_name":
+                    label = _decode(source_bytes, part)
+                else:
+                    inner = part
+            label_nodes.append((declaration_node, label))
+            declaration_node = inner
+        if declaration_node is not None and declaration_node.type in {
+            "const_declaration",
+            "var_declaration",
+        }:
+            spec_statements = _go_declaration_spec_statements(
+                source_bytes, declaration_node, base, offsets
+            )
+            if spec_statements:
+                if not label_nodes:
+                    results.extend(spec_statements)
+                    continue
+                if len(label_nodes) == 1:
+                    results.extend(
+                        (
+                            replace(
+                                spec_statements[0],
+                                labeled=True,
+                                label=label_nodes[0][1],
+                            ),
+                            *spec_statements[1:],
+                        )
+                    )
+                    continue
+                wrapped = spec_statements
+                for label_node, label in reversed(label_nodes):
+                    wrapped = (
+                        Statement(
+                            kind="block",
+                            text=_decode(source_bytes, label_node).strip(),
+                            start=offsets[label_node.start_byte] - base,
+                            body=wrapped,
+                            labeled=True,
+                            label=label,
+                            stacked_label=True,
+                        ),
+                    )
+                results.extend(wrapped)
+                continue
         statement = _go_statement(source_bytes, child, base, offsets)
         if statement is not None:
             results.append(statement)
     return tuple(results)
+
+
+def _go_declaration_spec_statements(
+    source_bytes: bytes, node, base: int, offsets: list[int]
+) -> tuple[Statement, ...] | None:
+    """Split multi-spec grouped declarations into source-order specs.
+
+    Each grouped spec is a separate Go declaration: a later initializer may
+    read a name introduced by an earlier spec, while names in one multi-name
+    spec still bind simultaneously. Single-spec declarations keep the original
+    node span/text through the ordinary statement path. Empty groups return no
+    statements because they are no-ops.
+    """
+    if node.type not in {"const_declaration", "var_declaration"}:
+        return None
+    specs = go_declaration_spec_nodes(node)
+    if len(specs) <= 1:
+        return None
+    kind = "const" if node.type == "const_declaration" else "var"
+    statements: list[Statement] = []
+    for spec in specs:
+        names: list[str] = []
+        values: list[str] = []
+        spec_names = [
+            _decode(source_bytes, child)
+            for child in spec.children_by_field_name("name")
+        ]
+        spec_values = _go_expression_list(
+            source_bytes, spec.child_by_field_name("value")
+        )
+        type_node = spec.child_by_field_name("type")
+        type_text = (
+            _decode(source_bytes, type_node).strip() if type_node is not None else ""
+        )
+        for index, name in enumerate(spec_names):
+            names.append(name)
+            values.append(spec_values[index] if index < len(spec_values) else "")
+        statements.append(
+            Statement(
+                kind=kind,
+                text=_decode(source_bytes, spec).strip(),
+                start=offsets[spec.start_byte] - base,
+                operator="|".join(type_text for _ in names),
+                targets=tuple(names),
+                values=tuple(values),
+            )
+        )
+    return tuple(statements)
 
 
 def _go_statement(source_bytes: bytes, node, base: int, offsets: list[int]) -> Statement | None:
@@ -1393,9 +1741,8 @@ def _go_statement(source_bytes: bytes, node, base: int, offsets: list[int]) -> S
         names: list[str] = []
         values: list[str] = []
         types: list[str] = []
-        for spec in node.named_children:
-            if spec.type not in {"const_spec", "var_spec"}:
-                continue
+        specs = go_declaration_spec_nodes(node)
+        for spec in specs:
             spec_names = [
                 _decode(source_bytes, child)
                 for child in spec.children_by_field_name("name")
@@ -1539,14 +1886,11 @@ def extract_statements(body: str, language: str) -> StatementTree | None:
         return None
     wrapped = _GO_BODY_PREFIX + body + "\n}\n"
     source_bytes = wrapped.encode("utf-8")
-    try:
-        tree = parser.parse(source_bytes)
-    except Exception:
-        return None
-    if tree.root_node.has_error:
+    root_node = parse_go_with_compact_group_recovery(parser, source_bytes)
+    if root_node is None:
         return None
     fn_node = None
-    for child in tree.root_node.named_children:
+    for child in root_node.named_children:
         if child.type == "function_declaration":
             fn_node = child
     if fn_node is None:

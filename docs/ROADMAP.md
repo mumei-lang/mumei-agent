@@ -3972,13 +3972,22 @@ Grouped `var ( ... )` declarations flatten each `var_spec` through the
 same scalar binding contract as individual declarations: explicit values
 bind pairwise against the pre-state, zero-value forms are dep-free,
 multi-name specs follow the multi-name declaration rules, `_` discards,
-and an empty `var ()` group is a no-op. Both newline layout and explicit
-semicolon separators are admitted when tree-sitter preserves the group.
+and an empty `var ()` group is a no-op. Each grouped spec is a separate
+declaration in source order, while names within one multi-name spec enter
+scope only after that spec's initializer list. Both newline layout and
+explicit semicolon separators are admitted when tree-sitter preserves the
+group.
 
-Boundaries: the compact valid form `var ( a int64 = x; b = x )` without
-a final separator remains a tree-sitter parse gap and fails closed as
-`syntax_or_parser_unavailable`; use a final separator or newline layout.
-Names use exactly the admission contract of individual `var`
+Compact one-line forms without a final separator are admitted through a
+narrow tree-sitter recovery: the original byte offsets are kept, only a
+final grouped spec directly before `)` is treated as implicitly
+terminated, comment text never supplies that terminator, nested compact
+groups inside function literals are validated without shifting the
+original offsets, recognised zero-width final-spec `ERROR` wrappers are
+flattened, and a semicolon-patched parse must otherwise be clean. Any
+unrelated `ERROR` node or remaining parse error still fails closed as
+`syntax_or_parser_unavailable`. Names use exactly the admission contract
+of individual `var`
 declarations: supported channel, function-value, pointer and composite
 shapes keep their existing semantics, while unsupported names stay
 `binding_unavailable`. Arity mismatches stay `unsupported_statement`,
@@ -4129,15 +4138,19 @@ or `iota`; because constants cannot read variables, the repetition is
 parameter-independent for exactly the same scalar-type reasons as an
 explicit constant.
 
-Boundaries: the tree-sitter grammar still marks the compact valid form
-`const (A = iota; B)` without a final separator as erroneous, so the
-whole source fails closed as `syntax_or_parser_unavailable`; use an
-explicit final separator or newline layout. Grouped `var` remains a
-parser/summary gap. Non-scalar constants, including non-scalar implicit
-repetitions, stay `binding_unavailable`; missing names and arity
-mismatches stay `unsupported_statement`. This is still dependency
-analysis, not constant evaluation, proof, evidence or audit verdict
-integration.
+Compact one-line forms without a final separator use the same narrow
+tree-sitter recovery as grouped `var`: the original byte offsets are
+kept, only a final grouped spec directly before `)` is treated as
+implicitly terminated, comment text never supplies that terminator,
+nested compact groups inside function literals are validated without
+shifting the original offsets, recognised zero-width final-spec `ERROR`
+wrappers are flattened, and a semicolon-patched parse must otherwise be
+clean. Any unrelated `ERROR` node or remaining parse error still fails closed
+as `syntax_or_parser_unavailable`. Non-scalar constants, including
+non-scalar implicit repetitions, stay `binding_unavailable`; missing
+names and arity mismatches stay `unsupported_statement`. This is still
+dependency analysis, not constant evaluation, proof, evidence or audit
+verdict integration.
 
 ### C07 remaining scalar binary operators
 

@@ -35,6 +35,102 @@ def test_tree_sitter_available_for_supported_languages() -> None:
     assert tree_sitter_extract.is_available("python") is False
 
 
+def test_go_compact_group_recovery_accepts_missing_final_terminator() -> None:
+    parser = tree_sitter_extract._get_parser("go")
+    source = b"package p\nfunc F() { const (A = 1); _ = A }\n"
+    root = tree_sitter_extract.parse_go_with_compact_group_recovery(
+        parser, source
+    )
+    # The original tree is returned with its original byte offsets, so the
+    # grammar's missing-token marker remains visible to callers.
+    assert root is not None and root.has_error
+
+
+def test_go_compact_group_recovery_accepts_comment_semicolon_before_close() -> None:
+    parser = tree_sitter_extract._get_parser("go")
+    source = b"package p\nfunc F() { const (A = 1 /* ; */); _ = A }\n"
+    assert (
+        tree_sitter_extract.parse_go_with_compact_group_recovery(parser, source)
+        is not None
+    )
+
+
+def test_go_compact_group_recovery_accepts_nested_group_in_function_literal() -> None:
+    parser = tree_sitter_extract._get_parser("go")
+    source = (
+        b"package p\nfunc F(x int64) int64 { "
+        b"var ( f = func() int64 { var ( y = x ); return y } ); return f() }\n"
+    )
+    assert (
+        tree_sitter_extract.parse_go_with_compact_group_recovery(parser, source)
+        is not None
+    )
+
+
+def test_go_labeled_grouped_declaration_specs_keep_label_on_first_spec() -> None:
+    tree = tree_sitter_extract.extract_statements(
+        "L: var (\na = x\nb = a\n)\nreturn b", "go"
+    )
+    assert tree is not None
+    first, second = tree.statements[:2]
+    assert (first.text, first.labeled, first.label) == ("a = x", True, "L")
+    assert (second.text, second.labeled) == ("b = a", False)
+
+
+def test_go_double_labeled_grouped_declaration_preserves_both_labels() -> None:
+    tree = tree_sitter_extract.extract_statements(
+        "Outer: Inner: var (\na = x\nb = a\n)\nreturn b", "go"
+    )
+    assert tree is not None
+    outer = tree.statements[0]
+    inner = outer.body[0]
+    assert (outer.label, inner.label) == ("Outer", "Inner")
+    assert [statement.text for statement in inner.body] == ["a = x", "b = a"]
+
+
+def test_go_grouped_multi_name_spec_repeats_type_per_target() -> None:
+    tree = tree_sitter_extract.extract_statements(
+        "var (\np, q *int\nr = 1\n)\nreturn *q", "go"
+    )
+    assert tree is not None
+    first = tree.statements[0]
+    assert first.targets == ("p", "q")
+    assert first.operator == "*int|*int"
+
+
+def test_go_grouped_declaration_specs_keep_source_order() -> None:
+    tree = tree_sitter_extract.extract_statements(
+        "var ( a = x; b = a )\nreturn b", "go"
+    )
+    assert tree is not None
+    assert [statement.text for statement in tree.statements[:2]] == [
+        "a = x",
+        "b = a",
+    ]
+    assert [statement.targets for statement in tree.statements[:2]] == [
+        ("a",),
+        ("b",),
+    ]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        b"package p\nfunc F() { const (A = 1); return + }\n",
+        b"package p\nfunc F() { const (A = ); _ = A }\n",
+        b"package p\nfunc F() { var (A = 1; B); _ = A }\n",
+    ],
+)
+def test_go_compact_group_recovery_rejects_unrelated_errors(source) -> None:
+    parser = tree_sitter_extract._get_parser("go")
+    assert (
+        tree_sitter_extract.parse_go_with_compact_group_recovery(
+            parser, source
+        )
+        is None
+    )
+
+
 def test_rust_blocks_capture_nested_braces_and_ignore_string_fn() -> None:
     source = (
         'fn outer(a: i64) -> i64 {\n'

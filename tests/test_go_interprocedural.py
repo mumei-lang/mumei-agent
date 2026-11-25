@@ -620,17 +620,22 @@ def test_const_declaration_gaps(go_types_helper, declarations, reason):
     assert not result.available and result.gaps[0].reason == reason
 
 
-def test_compact_grouped_const_without_final_separator_is_parser_gap(
-    go_types_helper,
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        "func F(x int64) int64 { const (A = iota); return x + A }",
+        "func F(x int64) int64 { const (A int64 = 1); return x + A }",
+        "func F(x int64) int64 { const (A = iota; B); return x + A + B }",
+        "func F(x int64) int64 { const (A, B = 1, 2); return x + A + B }",
+        "func F(x int64) int64 { const (A = 1 /*c*/); return x + A }",
+    ],
+)
+def test_compact_grouped_const_without_final_separator_is_admitted(
+    go_types_helper, declarations
 ):
-    result = named(
-        *unit(
-            go_types_helper,
-            "func F(x int64) int64 { const (A = iota; B); return x + A + B }",
-        )
-    )
-    assert not result.available
-    assert result.gaps[0].reason == "syntax_or_parser_unavailable"
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
 
 
 @pytest.mark.parametrize(
@@ -1062,17 +1067,48 @@ def test_var_declaration_shapes_stay_unsupported(
     assert result.gaps
 
 
-def test_compact_grouped_var_without_final_separator_is_parser_gap(
-    go_types_helper,
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        "func F(x int64) int64 { var ( a = x ); return a }",
+        "func F(x int64) int64 { var ( a int64 = x ); return a }",
+        "func F(x int64) int64 { var ( a int64 ); return x + a }",
+        "func F(x int64) int64 { var ( a int64 = x; b = x ); return a+b }",
+        "func F(x int64) int64 { var ( a, b = x, x ); return a+b }",
+        "func F(x int64) int64 { var ( a, b int64 ); return x + a + b }",
+        "func F(x int64) int64 { var ( a int64 = x /*c*/ ); return a }",
+        "func F(x int64) int64 { var ( ch chan int64 = make(chan int64) ); ch <- x; return <-ch }",
+        "func F(x int64) int64 { var ( f func() int64 = func() int64 { return x } ); return f() }",
+        "func F(x int64) int64 { const (A = iota); var ( a = x ); return x+a+A }",
+    ],
+)
+def test_compact_grouped_var_without_final_separator_is_admitted(
+    go_types_helper, declarations
 ):
-    result = named(
-        *unit(
-            go_types_helper,
-            "func F(x int64) int64 { var ( a int64 = x; b = x ); return a+b }",
-        )
-    )
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
+@pytest.mark.parametrize(
+    "declarations,expected_reasons",
+    [
+        (
+            "func F(x int64) int64 { const (A float64 = 1); return x }",
+            {"binding_unavailable"},
+        ),
+        (
+            "func F(x int64) int64 { var ( s string = \"s\" ); _ = s; return x }",
+            {"unsupported_expression"},
+        ),
+    ],
+)
+def test_compact_grouped_non_scalar_declarations_stay_unsupported(
+    go_types_helper, declarations, expected_reasons
+):
+    result = named(*unit(go_types_helper, declarations))
     assert not result.available
-    assert result.gaps[0].reason == "syntax_or_parser_unavailable"
+    assert {gap.reason for gap in result.gaps} == expected_reasons
 
 
 @pytest.mark.parametrize(
