@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 #: Bump when the extraction prompt or spec-alignment logic changes so stale
 #: cache entries are not mistaken for current output.
-_SPEC_CACHE_SCHEMA_VERSION = 1
+_SPEC_CACHE_SCHEMA_VERSION = 2
 
 
 def _spec_cache_key(code: str, language: str, model: str, domain_hint: str) -> str:
