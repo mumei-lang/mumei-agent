@@ -41,7 +41,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `config` | 2 | Show effective settings and where each value comes from |
 | `go-summaries` | 7 | Run a provisioned go-types helper on declared Go sources and print the summary manifest JSON. |
 | `go-summaries-check` | 8 | Run a provisioned go-types helper on declared Go sources and check a declared summary manifest against the fresh report. |
-| `go-summaries-reuse` | 8 | Run a provisioned go-types helper on declared Go sources and emit a manifest that reuses a declared manifest's summaries for the functions the fresh report confirms unchanged. |
+| `go-summaries-reuse` | 8 | Run a provisioned go-types helper on declared Go sources and emit a manifest that reuses a declared manifest's available summaries for the functions the fresh report confirms unchanged. Unavailable records are freshly derived. |
 | `go-summaries-accept` | 9 | Run a provisioned go-types helper on declared Go sources and accept one function's declared summary under the strict whole-context gate. |
 | `summaries-plan` | 6 | Plan the summary-derivation route for a declared profile through the C11 probe boundary and print the plan JSON. |
 | `go-summaries-attempt` | 9 | Run the go-summaries produce route as one declared attempt and emit the reconciled lineage descriptors. |
@@ -621,7 +621,7 @@ Run a provisioned go-types helper on declared Go sources and check a declared su
 
 ## `mumei-agent go-summaries-reuse`
 
-Run a provisioned go-types helper on declared Go sources and emit a manifest that reuses a declared manifest's summaries for the functions the fresh report confirms unchanged.
+Run a provisioned go-types helper on declared Go sources and emit a manifest that reuses a declared manifest's available summaries for the functions the fresh report confirms unchanged. Unavailable records are freshly derived.
 
 ### Options
 
