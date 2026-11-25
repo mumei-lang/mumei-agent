@@ -13,6 +13,6 @@ Assessment summary:
 | independence | weak for Mumei assurance because Core already uses Z3; useful as an execution-boundary pilot, not as independent semantic evidence |
 | verdict trust | stdout markers are adapter self-reports only; they are not Evidence acceptance |
 
-The regression pilot in `tests/test_fixture_adapter_schedule.py` uses the narrow `smtlib2.unsat/v1` profile with `(assert false)` input. It verifies host-controlled argv dispatch, stdin feeding, timeout/memory metadata, exit-code selection and marker normalization. It intentionally does not promote the result to proof, Evidence acceptance or grade.
+The regression pilot in `tests/test_fixture_adapter_schedule.py` uses the narrow `smtlib2.unsat/v1` profile with `(assert false)` input. It verifies the current fail-closed boundary: the scheduler rejects the undeclared source input contract before dispatch, so no argv execution, stdin feeding, timeout enforcement, exit-code selection or marker normalization is claimed yet. It intentionally does not promote any result to proof, Evidence acceptance or grade.
 
 Adoption recommendation: keep Z3 CLI as a non-promotable pilot only. Do not count it as an independent verifier because it shares the same solver family as Mumei Core. A future candidate with independent semantics or proof certificates should supersede it.
