@@ -300,6 +300,31 @@ def _valid_acceptance_descriptor(descriptor: object, expected_build_id: str) -> 
     )
 
 
+def accepted_descriptor_fields(descriptor: dict) -> dict[str, object]:
+    """Report fields a validated acceptance descriptor establishes."""
+    fields: dict[str, object] = {
+        "acceptance_schema": NATIVE_EVIDENCE_ACCEPTANCE_SCHEMA,
+        "scope": descriptor["scope"],
+        "llvm_sha256": descriptor["llvm_sha256"],
+        "object_sha256": descriptor["object_sha256"],
+    }
+    for field in ("register_convention_assumed", "input_domain"):
+        value = _bounded_descriptor_string(descriptor, field)
+        if value is not None:
+            fields[field] = value
+    outcomes = _function_outcomes(descriptor)
+    if outcomes is not None:
+        fields["function_outcomes"] = outcomes
+    discharged = set(DischargedChecks.ACCEPTED)
+    discharged.update(set(descriptor["checks_performed"]) & OBJECT_ACCEPT_CHECKS)
+    discharged.add("object_translation_correspondence")
+    fields["discharged_checks"] = sorted(discharged)
+    fields["checks_not_performed"] = sorted(
+        (CHECK_VOCABULARY | OBJECT_CHECK_VOCABULARY) - discharged
+    )
+    return fields
+
+
 def build_object_accept_parser(
     parser: argparse.ArgumentParser | None = None,
 ) -> argparse.ArgumentParser:
@@ -479,25 +504,7 @@ def run_object_accept(args: argparse.Namespace) -> dict:
             report["descriptor_invalid"] = True
         else:
             report["acceptance"] = "accepted"
-            report["acceptance_schema"] = NATIVE_EVIDENCE_ACCEPTANCE_SCHEMA
-            report["scope"] = descriptor["scope"]
-            report["llvm_sha256"] = descriptor["llvm_sha256"]
-            report["object_sha256"] = descriptor["object_sha256"]
-            for field in ("register_convention_assumed", "input_domain"):
-                value = _bounded_descriptor_string(descriptor, field)
-                if value is not None:
-                    report[field] = value
-            outcomes = _function_outcomes(descriptor)
-            if outcomes is not None:
-                report["function_outcomes"] = outcomes
-            checks_performed = set(descriptor["checks_performed"])
-            discharged = set(DischargedChecks.ACCEPTED)
-            discharged.update(checks_performed & OBJECT_ACCEPT_CHECKS)
-            discharged.add("object_translation_correspondence")
-            report["discharged_checks"] = sorted(discharged)
-            report["checks_not_performed"] = sorted(
-                (CHECK_VOCABULARY | OBJECT_CHECK_VOCABULARY) - discharged
-            )
+            report.update(accepted_descriptor_fields(descriptor))
     elif exit_code == 3:
         report["acceptance"] = OBJECT_ACCEPT_OUTCOMES[exit_code]
     return report

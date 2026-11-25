@@ -72,6 +72,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `native-recheck` | 7 | Run a declared Core native consumer recheck as one attempt and emit the reconciled lineage plus the declared recheck outcome. |
 | `native-attempt` | 6 | Run a declared Core native bundle production as one attempt and emit the reconciled lineage plus the declared Build ID. |
 | `native-accept` | 7 | Run a declared Core native artifact acceptance as one attempt and emit the reconciled lineage plus the declared acceptance outcome. |
+| `native-object-acceptance-recheck` | 8 | Replay a saved native-bundle accept-object descriptor against a fresh object acceptance of the pinned inputs as one declared attempt. A consistent run discharges the saved descriptor's checks as native-object-accept does for a fresh one; it does not authenticate the descriptor or its producer, and makes no historical-execution, register-convention, ABI, runtime or final-artifact claim. It emits no evidence candidate, is not reusable Evidence or a certificate, is not a recovery performer and does not promote a grade. |
 | `native-object-accept` | 7 | Run Core's bounded object-stage machine-code acceptance under an assumed, not validated, register convention and stated input domain. Core's machine_code_entry_wrapper_tv is consumed only when the valid descriptor lists it in checks_performed; when applicable, it checks one unconditional main call to __mumei_user_main returning the low 32 bits of its result. Applicability requires both object symbols and a supported __mumei_user_main source signature. This makes no CRT, loader, OS exit-status, ABI or runtime claim; os_exit_status_observation remains a separate runtime-observation check and is not discharged. This emits no evidence candidate, is not reusable Evidence or a certificate, is not a recovery performer, and does not promote a grade; broader C entry-wrapper behavior, CRT, loader/libc, ABI/runtime, optimizer semantics, producer authenticity and historical execution remain outside the profile. object_translation_correspondence here is only profile-bounded source-to-object machine-code correspondence, not universal object TV. Core's machine_code_f64_scalar_function_tv is consumed only when listed in checks_performed and is limited to Core's f64 profile with XMM argument/result registers assumed, not validated. MXCSR RNE, masked exceptions, FTZ/DAZ-off assumptions and NaN payload bits remain unestablished and not performed; the agent never discharges the external-callee, MXCSR or NaN-payload assumption markers even if a descriptor lists them as performed. Direct-call f64 arguments are admitted only under Core's exact-bits obligation (NaN-aware match, then an exact-bit proof against the XMM argument); computed f64 arguments without provably identical bits and f64 tail calls fail closed. This makes no IEEE-754 conformance, ABI, runtime or full object-TV claim. Core's `machine_code_composite_register_aggregate_tv` is consumed only when listed in `checks_performed`. It covers one- through sixteen-leaf struct parameters and direct-call struct arguments, and struct results of at most four leaves (at most three integer leaves in rax/rdx/rcx and at most two f64 leaves in xmm0/xmm1), with integer and/or f64 leaves; an i128/u128 leaf occupies two consecutive integer slots, low half first. Integer leaves take the next register in rdi–r9 and f64 leaves the next in xmm0–xmm7; leaves without a free register in their class are passed on the argument stack in declaration order, as LLVM lowers scalar stack arguments. Four-integer-leaf results (hidden sret) and three-f64-leaf results (x87) fail closed. One- and two-leaf values use Core's existing assumed SysV eightbyte convention; aggregates wider than two leaves assume LLVM first-class aggregate lowering, not SysV C-ABI classification, and `machine_code_tv_sysv_memory_class_aggregate_abi` stays not performed. This makes no ABI, runtime or full object-TV claim. |
 | `native-artifact-recheck` | 7 | Run a declared Core native artifact recheck as one attempt and emit the reconciled lineage plus the declared recheck outcome. |
 | `native-exit-status-recheck` | 7 | Run a declared Core native artifact recheck as one attempt and emit the reconciled lineage plus the declared recheck outcome. |
@@ -1136,6 +1137,24 @@ Run a declared Core native artifact acceptance as one attempt and emit the recon
 | `--attempt-timeout` | `<<MS>>` | no | 60000 | Declared attempt bound in milliseconds. |
 | `--memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling applied to the attempt child's whole address space. |
 | `--output` | `<PATH>` | no | — | Write the accept report JSON here instead of stdout. |
+
+
+## `mumei-agent native-object-acceptance-recheck`
+
+Replay a saved native-bundle accept-object descriptor against a fresh object acceptance of the pinned inputs as one declared attempt. A consistent run discharges the saved descriptor's checks as native-object-accept does for a fresh one; it does not authenticate the descriptor or its producer, and makes no historical-execution, register-convention, ABI, runtime or final-artifact claim. It emits no evidence candidate, is not reusable Evidence or a certificate, is not a recovery performer and does not promote a grade.
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--core` | `<PATH>` | yes | — | Declared Core executable (absolute path) used to run `native-bundle recheck-object-acceptance`. |
+| `--bundle` | `<DIR>` | yes | — | Declared native-bundle directory (absolute path) holding native-bundle.json and its declared members. |
+| `--source` | `<PATH>` | yes | — | Declared caller-supplied .mm source (absolute path, at most 65536 bytes); the bundle's own labels/paths are never read. |
+| `--descriptor` | `<PATH>` | yes | — | Declared saved `accept-object --json` descriptor (absolute path, at most 1048576 bytes) to replay. |
+| `--expected-build-id` | `<SHA256>` | yes | — | SHA-256 of native-bundle.json obtained through a separately trusted channel, not the descriptor. |
+| `--attempt-timeout` | `<<MS>>` | no | 60000 | Declared attempt bound in milliseconds. |
+| `--memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling applied to the attempt child's whole address space. |
+| `--output` | `<PATH>` | no | — | Write the object-acceptance-recheck report JSON here instead of stdout. |
 
 
 ## `mumei-agent native-object-accept`

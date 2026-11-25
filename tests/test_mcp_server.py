@@ -168,6 +168,7 @@ class TestGetAgentStatus:
         assert "native_observations_accept" in registered
         assert "native_observations_recheck" in registered
         assert "native_object_accept" in registered
+        assert "native_object_acceptance_recheck" in registered
         assert "native_object_recheck" in registered
         assert "native_machine_tv_recheck" in registered
         assert "send_latent_message" in registered

@@ -93,6 +93,7 @@ _SUBCOMMANDS = {
     "native-observations-recheck",
     "native-object-recheck",
     "native-object-accept",
+    "native-object-acceptance-recheck",
     "native-machine-tv-recheck",
     "native-check",
     "native-evidence-accept",
@@ -1148,6 +1149,19 @@ def main() -> None:
         native_accept_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(native_accept_main(args))
+    elif command == "native-object-acceptance-recheck":
+        import argparse
+        from agent.native_object_acceptance_recheck import (
+            build_object_acceptance_recheck_parser as native_oar_build_parser,
+            main_object_acceptance_recheck as native_oar_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent native-object-acceptance-recheck",
+        )
+        native_oar_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(native_oar_main(args))
     elif command == "native-object-accept":
         import argparse
         from agent.native_object_accept import (
