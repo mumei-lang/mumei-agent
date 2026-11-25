@@ -1055,7 +1055,7 @@ Run the declared plan/dispatch/observe/fallback schedule over declared adapter m
 | `--request` | `<PATH>` | yes | — | Declared route requirements JSON (profile, method, result_contract, input_format). |
 | `--adapters` | `<PATH>` | yes | — | Declared JSON array of adapter manifests to register. |
 | `--adapter-overlay` | `<PATH>` | no | — | Declared JSON array of user adapter manifests registered after --adapters; an overlay entry adds a new adapter or replaces the same adapter_id. Repeatable; later overlays win. Manifests are parsed statically; nothing is loaded or executed. |
-| `--argv-map` | `<PATH>` | yes | — | Declared JSON object mapping adapter_id to its argv array. |
+| `--argv-map` | `<PATH>` | yes | — | Declared JSON object mapping adapter_id to its argv array, or to {"argv": [...], "stdin": "source"} to pipe the declared source bytes explicitly. |
 | `--policy` | `<PATH>` | yes | — | Declared planner policy JSON. allowed_permissions must be declared (an empty list permits only permission-free adapters); optional Boolean require_enforced_isolation defaults to false and fails closed when required isolation or memory cannot be enforced. Optional executable_sha256_pins pins argv[0] of scheduled attempts to an absolute regular file's SHA-256; probes and direct AttemptRunner calls are not gated. |
 | `--observations` | `<PATH>` | no | — | Optional declared JSON array of runtime observations. |
 | `--source` | `<PATH>` | yes | — | Declared .mm source file (absolute path). |
