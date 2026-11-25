@@ -76,7 +76,7 @@ permitted fallback can continue; bytes are never truncated. When neither this ho
 declaration nor an opted-in manifest stdin applies, the child still gets a
 closed pipe rather than inheriting the parent stdin. This is an
 input-preparation contract only — not Evidence acceptance, output meaning or
-grade promotion — so C11 remains partial.
+grade promotion — so the C11 contract remained partial at that slice.
 
 ### C11 incomplete adapter output fail-closed handoff
 
@@ -89,7 +89,42 @@ check as `failed`; scheduling still records the host-declared exit-code
 selection separately, but `evidence_acceptance` is not accepted and no
 promotable verdict is produced from partial bytes. Complete captures are
 unchanged. This is transport integrity only — not output meaning, Evidence
-truth or grade promotion — so C11 remains partial.
+truth or grade promotion — so the C11 contract remained partial before the
+acceptance-completion matrix below.
+
+### C11 plugin contract acceptance completion
+
+The C11 plugin-contract scope is complete as a verification-native
+orchestration contract. The implemented slices now cover the issue-level
+acceptance criteria end to end:
+
+- adapters are registered, replaced, selected, disabled and configured
+  declaratively without planner-core edits, with protocol/version and
+  execution-location constraints, budgets, explicit fallback policy and
+  effective non-secret settings visible in plans;
+- execution, cancellation, bounded collection, source-input preparation,
+  stream/completeness declarations, normalized result records and conflict
+  reconciliation are host-controlled and permission-gated;
+- missing tools, version mismatches, invalid settings, timeouts, malformed
+  outputs, unavailable explicit selections and denied fallback fail closed
+  with reasons rather than becoming successes. Partial output may still carry
+  a host-declared exit-code `selected` dispatch outcome, but it fails closed
+  before Core I/O and cannot become Evidence acceptance or promotion;
+  conflicting output reports are rejected;
+- scheduling and adapter self-reports remain dispatch observations only;
+  native Evidence meaning, acceptance and grade promotion stay with Mumei
+  Core under the shared trust policy;
+- secret, command, endpoint or environment channels are rejected in adapter
+  settings/manifests, manifest argv/stdin need explicit host opt-in, and no
+  implicit install or unapproved execution/data-egress path is introduced.
+
+`tests/test_c11_plugin_contract_acceptance.py` pins this acceptance matrix
+as a single regression surface. Completion of C11 does **not** adopt or
+endorse any external verifier: external adoption still requires separate
+maintenance, license/distribution/commercial, CI, toolchain-compatibility
+and cost review. It also does not make backend self-reports proof, make
+Semantic IR universal, hide lossy transformations, or run Z3 and external
+verifiers unconditionally in parallel.
 
 ### C04/C11 first supported planning slice
 
