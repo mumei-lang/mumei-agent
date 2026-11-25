@@ -765,6 +765,8 @@ def test_feed_stdin_blocking_writes_complete_pipe_feed():
     reader.start()
     reader.join(5)
     if reader.is_alive():
+        proc.stdin.close()
+        reader.join(1)
         os.close(read_fd)
         pytest.fail("stdin feed did not reach EOF within five seconds")
     feeder.join(5)
