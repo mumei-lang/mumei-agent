@@ -230,18 +230,22 @@ def test_oversized_descriptor_is_rejected_before_parsing(tmp_path, capsys):
     assert "exceeds the Core input bound" in err
 
 
-@pytest.mark.parametrize("kind", ["fifo", "symlink"])
+@pytest.mark.parametrize("kind", ["fifo", "symlink", "directory"])
 def test_non_regular_descriptor_is_rejected_without_blocking(tmp_path, capsys, kind):
     core = _write_core(tmp_path)
     bundle, source, saved = _write_inputs(tmp_path)
     special = tmp_path / "special.json"
     if kind == "fifo":
         os.mkfifo(special)
+    elif kind == "directory":
+        special.mkdir()
     else:
         special.symlink_to(saved)
+    open_before = len(os.listdir("/proc/self/fd"))
     code, out, err = _run(capsys, _args(core, bundle, source, special))
     assert code == 1 and out == ""
     assert "--descriptor must be a regular file" in err or "cannot read" in err
+    assert len(os.listdir("/proc/self/fd")) == open_before
 
 
 def test_descriptor_replaced_after_validation_claims_no_outcome(

@@ -106,9 +106,13 @@ def _input_size(path: str, bound: int) -> None:
 def read_descriptor_bytes(path: str) -> bytes:
     """Read a regular, non-symlink descriptor file within Core's bound."""
     fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
-    with os.fdopen(fd, "rb") as handle:
-        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise ValueError("--descriptor must be a regular file")
+    except BaseException:
+        os.close(fd)
+        raise
+    with os.fdopen(fd, "rb") as handle:
         data = handle.read(MAX_EVIDENCE_BYTES + 1)
     if len(data) > MAX_EVIDENCE_BYTES:
         raise ValueError(
@@ -245,8 +249,9 @@ def build_object_acceptance_recheck_parser(
         required=True,
         metavar="PATH",
         help=(
-            "Declared saved `accept-object --json` descriptor (absolute path, "
-            "at most 1048576 bytes) to replay."
+            "Declared saved `accept-object --json` descriptor (absolute path "
+            "to a regular file, not a symlink, at most 1048576 bytes) to "
+            "replay."
         ),
     )
     parser.add_argument(
