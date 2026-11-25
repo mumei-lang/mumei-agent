@@ -54,9 +54,10 @@ _CONTRACT_KEYS = frozenset(
 )
 _POLICY_KEYS = frozenset(
     {"selected_adapter", "allow_fallback", "disabled_adapters", "allowed_locations",
-     "tool_version_pins", "timeout_ms", "memory_mb", "allowed_permissions",
-     "allow_manifest_attempt_argv", "allow_manifest_attempt_stdin",
-     "require_enforced_isolation", "executable_sha256_pins"}
+     "tool_version_pins", "adapter_settings", "timeout_ms", "memory_mb",
+     "allowed_permissions", "allow_manifest_attempt_argv",
+     "allow_manifest_attempt_stdin", "require_enforced_isolation",
+     "executable_sha256_pins"}
 )
 _OBSERVATION_KEYS = frozenset({"adapter_id", "availability", "tool_version", "stamp"})
 _ADAPTER_OVERLAY_HELP = (
@@ -147,6 +148,22 @@ def _load_policy(path: str) -> PlannerPolicy:
         PlannerPolicy(executable_sha256_pins=executable_pin_pairs)
     except (TypeError, ValueError):
         raise ValueError("invalid executable digest pin declaration") from None
+    settings = document.get("adapter_settings", [])
+    if type(settings) is not list or any(
+        type(entry) is not list
+        or len(entry) != 2
+        or type(entry[1]) is not list
+        or any(
+            type(pair) is not list or len(pair) != 2
+            for pair in entry[1]
+        )
+        for entry in settings
+    ):
+        raise ValueError("invalid adapter settings declaration")
+    adapter_settings = tuple(
+        (entry[0], tuple(tuple(pair) for pair in entry[1]))
+        for entry in settings
+    )
     if "allowed_permissions" not in document:
         raise ValueError(
             "planner policy requires an explicit allowed_permissions list"
@@ -170,6 +187,7 @@ def _load_policy(path: str) -> PlannerPolicy:
             {"local"} if locations is None else locations
         ),
         tool_version_pins=tuple(tuple(pin) for pin in pins),
+        adapter_settings=adapter_settings,
         executable_sha256_pins=executable_pin_pairs,
         timeout_ms=document.get("timeout_ms", 30_000),
         memory_mb=document.get("memory_mb", 1024),
@@ -309,7 +327,11 @@ def build_schedule_parser(
             "and fails closed when required isolation or memory cannot be "
             "enforced. Optional executable_sha256_pins pins argv[0] of "
             "scheduled attempts to an absolute regular file's SHA-256; "
-            "probes and direct AttemptRunner calls are not gated."
+            "probes and direct AttemptRunner calls are not gated. Optional "
+            "adapter_settings is a list of [adapter_id, [[name, value], ...]] "
+            "entries validated against the adapter manifest schemas. Settings "
+            "are planning metadata only and are not passed to child argv, "
+            "stdin or environment."
         ),
     )
     parser.add_argument(
@@ -607,7 +629,11 @@ def build_plan_parser(
         "--policy", required=True, metavar="PATH",
         help=(
             "Declared planner policy JSON. allowed_permissions must be "
-            "declared (an empty list permits only permission-free adapters)."
+            "declared (an empty list permits only permission-free adapters). "
+            "Optional adapter_settings is a list of [adapter_id, "
+            "[[name, value], ...]] entries validated against the adapter "
+            "manifest schemas. Settings are planning metadata only, not "
+            "process input."
         ),
     )
     parser.add_argument(
