@@ -322,6 +322,7 @@ def test_sensitive_setting_rejection_does_not_print_secret(inputs, tmp_path):
     )
 
     assert out.returncode == 1
+    assert "setting channel is not permitted" in out.stderr
     assert SECRET not in out.stdout
     assert SECRET not in out.stderr
     assert not output.exists()
