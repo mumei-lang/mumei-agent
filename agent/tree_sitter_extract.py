@@ -204,27 +204,38 @@ def _compact_group_close(node):
     )
 
 
-def _semicolon_outside_comments(
-    root, source_bytes: bytes, start_byte: int, end_byte: int
-) -> bool:
-    """Whether a semicolon byte occurs outside tree-sitter comment nodes."""
-    comments = [
+def _comment_spans(root) -> tuple[tuple[int, int], ...]:
+    return tuple(
         (node.start_byte, node.end_byte)
         for node in _syntax_nodes(root)
         if node.type == "comment"
-        and node.start_byte < end_byte
-        and start_byte < node.end_byte
+    )
+
+
+def _semicolon_outside_comments(
+    source_bytes: bytes,
+    start_byte: int,
+    end_byte: int,
+    comments: tuple[tuple[int, int], ...],
+) -> bool:
+    """Whether a semicolon byte occurs outside tree-sitter comment nodes."""
+    relevant = [
+        (start, end)
+        for start, end in comments
+        if start < end_byte and start_byte < end
     ]
     for position in range(start_byte, end_byte):
         if source_bytes[position] != ord(";"):
             continue
-        if any(start <= position < end for start, end in comments):
+        if any(start <= position < end for start, end in relevant):
             continue
         return True
     return False
 
 
-def _compact_group_semicolon_insertions(root, source_bytes: bytes) -> list[int]:
+def _compact_group_semicolon_insertions(
+    root, source_bytes: bytes, comments: tuple[tuple[int, int], ...] | None = None
+) -> list[int]:
     """Positions where tree-sitter misses Go's grouped-declaration terminator.
 
     The Go scanner terminates a final grouped spec before ``)`` even in
@@ -235,6 +246,8 @@ def _compact_group_semicolon_insertions(root, source_bytes: bytes) -> list[int]:
     close with no newline or explicit semicolon between them — so
     ordinary parse errors still fail closed.
     """
+    if comments is None:
+        comments = _comment_spans(root)
     positions = []
     for node in _syntax_nodes(root):
         specs = _compact_group_parts(node)
@@ -246,7 +259,9 @@ def _compact_group_semicolon_insertions(root, source_bytes: bytes) -> list[int]:
         last = specs[-1]
         between = source_bytes[last.end_byte : close.start_byte]
         if (
-            _semicolon_outside_comments(root, source_bytes, last.end_byte, close.start_byte)
+            _semicolon_outside_comments(
+                source_bytes, last.end_byte, close.start_byte, comments
+            )
             or b"\n" in between
             or b"\r" in between
         ):
@@ -255,8 +270,12 @@ def _compact_group_semicolon_insertions(root, source_bytes: bytes) -> list[int]:
     return positions
 
 
-def _only_compact_group_error_wrappers(root, source_bytes: bytes) -> bool:
+def _only_compact_group_error_wrappers(
+    root, source_bytes: bytes, comments: tuple[tuple[int, int], ...] | None = None
+) -> bool:
     """Whether every ``ERROR`` node is a recognised compact-group wrapper."""
+    if comments is None:
+        comments = _comment_spans(root)
     for node in _syntax_nodes(root):
         if not (node.is_error or node.type == "ERROR"):
             continue
@@ -280,7 +299,9 @@ def _only_compact_group_error_wrappers(root, source_bytes: bytes) -> bool:
             return False
         between = source_bytes[node.end_byte : close.start_byte]
         if (
-            _semicolon_outside_comments(root, source_bytes, node.end_byte, close.start_byte)
+            _semicolon_outside_comments(
+                source_bytes, node.end_byte, close.start_byte, comments
+            )
             or b"\n" in between
             or b"\r" in between
         ):
@@ -334,9 +355,10 @@ def parse_go_with_compact_group_recovery(parser, source_bytes: bytes):
         return None
     if not root.has_error:
         return root
-    insertions = _compact_group_semicolon_insertions(root, source_bytes)
+    comments = _comment_spans(root)
+    insertions = _compact_group_semicolon_insertions(root, source_bytes, comments)
     if not insertions or not _only_compact_group_error_wrappers(
-        root, source_bytes
+        root, source_bytes, comments
     ):
         return None
     patched_source = _apply_semicolon_insertions(source_bytes, insertions)
@@ -1364,11 +1386,28 @@ def _go_statements(source_bytes: bytes, node, base: int, offsets: list[int]) -> 
         node = lists[0]
     results: list[Statement] = []
     for child in node.named_children:
-        if child.type in {"const_declaration", "var_declaration"}:
+        declaration_node = child
+        label = ""
+        if child.type == "labeled_statement":
+            declaration_node = None
+            for part in child.named_children:
+                if part.type == "label_name":
+                    label = _decode(source_bytes, part)
+                else:
+                    declaration_node = part
+        if declaration_node is not None and declaration_node.type in {
+            "const_declaration",
+            "var_declaration",
+        }:
             spec_statements = _go_declaration_spec_statements(
-                source_bytes, child, base, offsets
+                source_bytes, declaration_node, base, offsets
             )
-            if spec_statements is not None:
+            if spec_statements:
+                if label:
+                    spec_statements = (
+                        replace(spec_statements[0], labeled=True, label=label),
+                        *spec_statements[1:],
+                    )
                 results.extend(spec_statements)
                 continue
         statement = _go_statement(source_bytes, child, base, offsets)
@@ -1417,7 +1456,7 @@ def _go_declaration_spec_statements(
                 kind=kind,
                 text=_decode(source_bytes, spec).strip(),
                 start=offsets[spec.start_byte] - base,
-                operator=type_text,
+                operator="|".join(type_text for _ in names),
                 targets=tuple(names),
                 values=tuple(values),
             )

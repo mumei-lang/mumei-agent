@@ -2632,16 +2632,66 @@ def test_shadowed_err_site_survives_scope_exit() -> None:
     )
 
 
+def test_grouped_multi_name_var_zero_values_keep_each_type() -> None:
+    flow = _go(
+        "var (\n"
+        "p, q *int\n"
+        "r = 1\n"
+        ")\n"
+        "_ = p\n"
+        "_ = r\n"
+        "return *q"
+    )
+    assert any(
+        issue.category == "uninitialized_use" and issue.subject == "q"
+        for issue in flow.issues
+    )
+
+
+def test_multi_name_var_initializer_escape_reaches_outer_environment() -> None:
+    # The assignment-like mention hands the open handle off during initializer
+    # evaluation. Forgetting that transfer only in the per-binding scratch
+    # would leave a false leak on the outer name.
+    flow = _go(
+        'f, err := os.Open("p")\n'
+        "if err != nil { return 0 }\n"
+        "var g, x = f, 1\n"
+        "_ = g\n"
+        "_ = x\n"
+        "return 0"
+    )
+    assert not any(issue.category == "resource_leak" for issue in flow.issues)
+
+
+def test_shadowed_slice_alias_does_not_share_outer_length_with_new_slice() -> None:
+    facts = _facts(
+        "s := []int{1}\n"
+        "{\n"
+        "var s, t = s[:0], s\n"
+        "return len(t) / len(s)\n"
+        "}\n"
+        "return 0",
+        "len(t) / len(s)",
+    )
+    assert "len(t)" in facts.nonzero
+    assert "len(s)" not in facts.nonzero
+    assert "s" not in facts.len_ge
+
+
 def test_multi_name_var_spec_initializers_read_outer_bindings() -> None:
     # One VarSpec's bindings enter scope only after its initializer list:
     # ``1/d`` reads the outer zero-valued ``d``, so the result must not be
     # folded through the new ``d = 1`` binding. Separate grouped specs are
     # sequential and do see the earlier new binding.
-    same_spec = _facts("d := 0\nvar d, x = 1, 1/d\nreturn x", "x")
+    same_spec = _facts(
+        "d := 0\n{\nvar d, x = 1, 1/d\nreturn x\n}\nreturn 0", "x"
+    )
     assert "x" not in same_spec.nonzero
     assert "x" not in same_spec.consts
 
-    separate_specs = _facts("d := 0\nvar (\nd = 1\nx = 1/d\n)\nreturn x", "x")
+    separate_specs = _facts(
+        "d := 0\n{\nvar (\nd = 1\nx = 1/d\n)\nreturn x\n}\nreturn 0", "x"
+    )
     assert "x" in separate_specs.nonzero
     assert separate_specs.consts["x"] == 1
 

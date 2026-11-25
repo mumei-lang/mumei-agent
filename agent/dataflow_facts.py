@@ -2422,9 +2422,23 @@ class _Walker:
                 scratch = pre_env.copy()
                 self._var_one(name, type_text, value, scratch)
                 evaluated.append((name, scratch))
+            for _name, _type_text, value in declarations:
+                # Initializer side effects still happen even though the new
+                # bindings do not: a bare handle mention can transfer ownership
+                # out of this function. Scratches evaluate against the pure
+                # pre-state, so apply that conservative escape once here.
+                self._escape(value, env)
+            declared_names = frozenset(name for name, _type, _value in declarations)
             for name, scratch in evaluated:
                 env.kill(name)
                 _copy_name_facts(env, scratch, name)
+            for alias, root in list(env.aliases.items()):
+                # An alias to a same-named outer slice cannot be represented
+                # after the shadowing binding lands. Never link it to the new
+                # binding: equal-length facts would otherwise flow backwards
+                # from the outer object into the new empty slice.
+                if alias in declared_names and root in declared_names:
+                    del env.aliases[alias]
             return
         for name, type_text, value in declarations:
             self._var_one(name, type_text, value, env)

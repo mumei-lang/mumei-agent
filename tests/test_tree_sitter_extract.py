@@ -67,6 +67,26 @@ def test_go_compact_group_recovery_accepts_nested_group_in_function_literal() ->
     )
 
 
+def test_go_labeled_grouped_declaration_specs_keep_label_on_first_spec() -> None:
+    tree = tree_sitter_extract.extract_statements(
+        "L: var (\na = x\nb = a\n)\nreturn b", "go"
+    )
+    assert tree is not None
+    first, second = tree.statements[:2]
+    assert (first.text, first.labeled, first.label) == ("a = x", True, "L")
+    assert (second.text, second.labeled) == ("b = a", False)
+
+
+def test_go_grouped_multi_name_spec_repeats_type_per_target() -> None:
+    tree = tree_sitter_extract.extract_statements(
+        "var (\np, q *int\nr = 1\n)\nreturn *q", "go"
+    )
+    assert tree is not None
+    first = tree.statements[0]
+    assert first.targets == ("p", "q")
+    assert first.operator == "*int|*int"
+
+
 def test_go_grouped_declaration_specs_keep_source_order() -> None:
     tree = tree_sitter_extract.extract_statements(
         "var ( a = x; b = a )\nreturn b", "go"
