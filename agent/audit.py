@@ -108,6 +108,7 @@ from agent.verification_planner import (
     RouteRequirements,
     RuntimeObservation,
 )
+from agent.attempt_runner import MAX_FEED_BYTES
 from agent.verify_schedule import (
     SOURCE_INPUT_FORMAT,
     HostAttemptInvocation,
@@ -1557,6 +1558,10 @@ def _run_scheduled_verification(
     def argv_for(adapter_id: str) -> tuple[str, ...] | None:
         declared = context.argv_map.get(adapter_id)
         if declared is not None:
+            if declared.feed_source_stdin and len(source) > MAX_FEED_BYTES:
+                # Same fail-closed input-preparation boundary as
+                # verify-schedule: this adapter cannot receive the unit.
+                return None
             argv = declared.argv
         else:
             if not context.policy.allow_manifest_attempt_argv:

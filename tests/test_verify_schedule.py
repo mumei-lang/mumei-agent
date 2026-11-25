@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from agent import verify_schedule as verify_schedule_module
+from agent.attempt_runner import MAX_FEED_BYTES
 from agent.plan_history_log import append_plan_history, read_plan_history
 from agent.verify_schedule import (
     build_schedule_parser,
@@ -508,6 +509,33 @@ def test_host_argv_object_without_stdin_still_gets_closed_pipe(inputs, capsys, t
     doc = json.loads(capsys.readouterr().out)
     assert doc["outcome"] != "selected"
     assert doc["attempts"][0]["exit_code"] == 3
+
+
+def test_oversize_source_stdin_adapter_fails_closed_and_falls_back(
+    inputs, capsys, tmp_path
+):
+    big_source = tmp_path / "FAKE_PRIVATE_BIG_SOURCE.mm"
+    big_source.write_bytes(b"x" * (MAX_FEED_BYTES + 1))
+    path = tmp_path / "argv_oversize_source_stdin.json"
+    path.write_text(json.dumps({
+        "alpha": {
+            "argv": [ATTEMPT_PY, "-c", "import sys; sys.exit(0)"],
+            "stdin": "source",
+        },
+        "beta": [ATTEMPT_PY, "-c", "import sys; sys.exit(0)"],
+    }), encoding="utf-8")
+    args = args_for({
+        **inputs,
+        "argv_map": str(path),
+        "source": str(big_source),
+    })
+
+    assert main_schedule(args) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["outcome"] == "selected"
+    assert doc["selected_adapter_id"] == "beta"
+    assert doc["attempts"][0]["terminal_state"] == "not_dispatched"
+    assert doc["attempts"][1]["adapter_id"] == "beta"
 
 
 @pytest.mark.parametrize(

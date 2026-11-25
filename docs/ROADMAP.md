@@ -70,7 +70,9 @@ explicitly. An entry may stay the legacy argv array, or use
 `{"argv": [...], "stdin": "source"}`; only the exact `source` declaration is
 accepted. It pipes the declared source bytes already bound into the schedule
 to that attempt's stdin, wins over manifest `attempt_stdin`, and never copies
-source bytes into diagnostics or schedule output. When neither this host
+source bytes into diagnostics or schedule output. A source larger than the
+runner's bounded feed makes that adapter fail closed as `not_dispatched` so
+permitted fallback can continue; bytes are never truncated. When neither this host
 declaration nor an opted-in manifest stdin applies, the child still gets a
 closed pipe rather than inheriting the parent stdin. This is an
 input-preparation contract only — not Evidence acceptance, output meaning or

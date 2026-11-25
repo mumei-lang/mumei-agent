@@ -23,6 +23,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from agent.attempt_runner import MAX_FEED_BYTES
 from agent.attempt_schedule import (
     MAX_SCHEDULE_ATTEMPTS,
     AttemptScheduleResult,
@@ -496,6 +497,10 @@ def _run_schedule_result(args: argparse.Namespace) -> AttemptScheduleResult:
         # plant an executable command by itself.
         declared = argv_map.get(adapter_id)
         if declared is not None:
+            if declared.feed_source_stdin and len(source) > MAX_FEED_BYTES:
+                # Input preparation is impossible within the runner's bounded
+                # feed: fail this adapter closed so fallback can continue.
+                return None
             return declared.argv
         if policy.allow_manifest_attempt_argv:
             descriptor = registry.descriptor(adapter_id)
