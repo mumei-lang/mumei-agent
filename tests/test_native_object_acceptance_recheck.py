@@ -241,11 +241,12 @@ def test_non_regular_descriptor_is_rejected_without_blocking(tmp_path, capsys, k
         special.mkdir()
     else:
         special.symlink_to(saved)
-    open_before = len(os.listdir("/proc/self/fd"))
+    fd_dir = next(d for d in ("/proc/self/fd", "/dev/fd") if os.path.isdir(d))
+    open_before = len(os.listdir(fd_dir))
     code, out, err = _run(capsys, _args(core, bundle, source, special))
     assert code == 1 and out == ""
     assert "--descriptor must be a regular file" in err or "cannot read" in err
-    assert len(os.listdir("/proc/self/fd")) == open_before
+    assert len(os.listdir(fd_dir)) == open_before
 
 
 def test_descriptor_replaced_after_validation_claims_no_outcome(
