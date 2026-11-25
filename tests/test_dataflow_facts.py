@@ -2744,6 +2744,54 @@ def test_comment_quote_does_not_hide_file_ownership_transfer() -> None:
     )
 
 
+def test_line_comment_newline_preserves_slice_colon() -> None:
+    source = (
+        "package demo\n"
+        "func First() int {\n"
+        "    var buf []int\n"
+        "    x := buf[// bound\n"
+        "        :1]\n"
+        "    return x[0]\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "uninitialized_use")
+
+
+def test_parenthesized_channel_copy_keeps_closed_state() -> None:
+    source = (
+        "package demo\n"
+        "func Push() int {\n"
+        "    ch := make(chan int)\n"
+        "    {\n"
+        "        var ch, out = (ch), ch\n"
+        "        close(ch)\n"
+        "        out <- 1\n"
+        "    }\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "send_on_closed_channel")
+
+
+def test_inner_stacked_label_goto_path_is_not_dropped() -> None:
+    # Valid Go: ``Outer`` is used by the backward goto, while the only path
+    # that first reaches the declarations is the forward ``goto Inner``.
+    facts = _facts(
+        "d := 0\n"
+        "if n == 0 { goto Inner }\n"
+        "d = 1\n"
+        "return 0\n"
+        "Outer: Inner: var (\n"
+        "x = 1/d\n"
+        ")\n"
+        "if n == 2 { goto Outer }\n"
+        "return x",
+        "x",
+        param_names={"n"},
+    )
+    assert facts.consts["d"] == 0
+
+
 def test_shadowed_slice_alias_does_not_share_outer_length_with_new_slice() -> None:
     facts = _facts(
         "s := []int{1}\n"

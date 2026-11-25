@@ -1568,11 +1568,7 @@ class _Walker:
                 # when an outer jump ends the block.
                 for ahead in range(index, len(statements)):
                     later = statements[ahead]
-                    if (
-                        later.labeled
-                        and later.label
-                        and self.goto_carried.get(later.label)
-                    ):
+                    if self._has_carried_label(later):
                         if self._contains_backward_target_label(
                             statements[index:ahead]
                         ):
@@ -1589,27 +1585,45 @@ class _Walker:
             self._scope_stack.pop()
             self._descent_indices.pop()
 
+    @staticmethod
+    def _stacked_position_labels(statement: tree_sitter_extract.Statement) -> tuple[str, ...]:
+        labels = []
+        current = statement
+        while current.labeled and current.label:
+            labels.append(current.label)
+            if not (current.kind == "block" and current.stacked_label and current.body):
+                break
+            current = current.body[0]
+        return tuple(labels)
+
     def statement(self, statement: tree_sitter_extract.Statement, env: _Env) -> tuple[_Env, str]:
-        if statement.labeled and statement.label:
-            # Paths recorded by earlier ``goto``s join the fall-through at
-            # the labelled statement. When the fall-through is dead (the
-            # ``env is None`` resume marker) the recorded environments are
-            # the only ones that reach here.
-            pending = self.goto_carried.pop(statement.label, ())
+        position_labels = self._stacked_position_labels(statement)
+        if position_labels:
+            # Every label in ``L1: L2: stmt`` names the same position. Consume
+            # their carried paths together; otherwise a jump to the inner
+            # label would either be dropped or be merged with an empty state
+            # before the inner label is reached.
+            pending = []
+            for label in position_labels:
+                pending.extend(self.goto_carried.pop(label, ()))
             if env is None and pending:
                 env = pending[0]
                 pending = pending[1:]
             for carried in pending:
                 env = env.merge(carried)
-        if env is None:
+        if env is None and not (
+            statement.kind == "block" and statement.stacked_label
+        ):
             env = _Env()
-        if statement.labeled and statement.label in self._backward_havoc:
+        for label in position_labels:
+            if label not in self._backward_havoc:
+                continue
             before = env.copy()
             env = env.copy()
-            for name in self._backward_havoc[statement.label]:
+            for name in self._backward_havoc[label]:
                 env.kill(name)
             self._keep_nil_maps(
-                env, before, self._backward_regions[statement.label]
+                env, before, self._backward_regions[label]
             )
         kind = statement.kind
         if kind in {
@@ -2278,6 +2292,17 @@ class _Walker:
                 return True
         return False
 
+    def _has_carried_label(self, statement: tree_sitter_extract.Statement) -> bool:
+        if (
+            statement.labeled
+            and statement.label
+            and self.goto_carried.get(statement.label)
+        ):
+            return True
+        if statement.kind == "block" and statement.stacked_label:
+            return any(self._has_carried_label(part) for part in statement.body)
+        return False
+
     def _contains_backward_target_label(
         self, statements: tuple[tree_sitter_extract.Statement, ...]
     ) -> bool:
@@ -2459,7 +2484,7 @@ class _Walker:
                 scratch = pre_env.copy()
                 self._var_one(name, type_text, value, scratch)
                 evaluated.append((name, scratch))
-                value_text = _norm(value)
+                value_text = _strip_parens(_norm(_strip_go_literals(value)))
                 if re.fullmatch(r"[A-Za-z_]\w*", value_text):
                     # A same-spec name on the right still denotes the outer
                     # object. Keep that pre-declaration identity distinct
@@ -2741,7 +2766,10 @@ class _Walker:
             return literal >= 0
         return text in env.nonneg or text in env.consts and env.consts[text] >= 0
     def _define(self, target: str, value: str, env: _Env) -> None:
-        text = _norm(value)
+        # Strip comments before whitespace normalization: otherwise a newline
+        # that ends a ``//`` comment disappears first and the comment swallows
+        # the rest of the expression (including a slice colon on the next line).
+        text = _strip_parens(_norm(_strip_go_literals(value)))
         self._escape(value, env)
         if not self._reliable(target):
             return
