@@ -338,7 +338,7 @@ class TestValidateSpecVsImpl:
         assert report.uncovered_atoms == []
         assert report.coverage_ratio == 1.0
 
-    def test_python_reserved_name_collision_does_not_choose_a_body(self):
+    def test_python_standalone_contract_matches_exact_name_even_with_collision(self):
         spec_path = self._write_spec("call_", "amount <= balance")
         impl_path = Path(self.tmpdir) / "call.py"
         impl_path.write_text(
@@ -350,8 +350,39 @@ class TestValidateSpecVsImpl:
         report = self.validator.validate_spec_vs_impl(
             spec_path=str(spec_path), impl_path=str(impl_path), language="python"
         )
+        assert report.uncovered_atoms == []
+        assert report.spec_stronger_than_impl == ["call_"]
+
+    def test_python_method_does_not_hide_module_level_contract_match(self):
+        spec_path = self._write_spec("call_", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "call.py"
+        impl_path.write_text(
+            "class Service:\n"
+            "    def call(self, balance, amount):\n"
+            "        return balance - amount\n"
+            "    def call_(self, balance, amount):\n"
+            "        if amount > balance:\n"
+            "            raise ValueError('amount exceeds balance')\n"
+            "        return balance - amount\n\n"
+            "def call_(balance, amount):\n"
+            "    return balance - amount\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
+        assert report.uncovered_atoms == []
+        assert report.spec_stronger_than_impl == ["call_"]
+
+    def test_python_standalone_contract_does_not_match_unescaped_name(self):
+        spec_path = self._write_spec("call_", "amount <= balance")
+        impl_path = Path(self.tmpdir) / "call.py"
+        impl_path.write_text("def call(balance, amount):\n    return balance - amount\n")
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="python"
+        )
         assert report.uncovered_atoms == ["call_"]
         assert report.spec_stronger_than_impl == []
+        assert report.coverage_ratio == 0.0
 
     def test_enforced_precondition_is_not_flagged(self):
         spec_path = self._write_spec(

@@ -189,19 +189,20 @@ def check_python_implementations(
         tree = ast.parse(source)
     except (SyntaxError, RecursionError, ValueError):
         return [ImplementationCheck(redact_secrets(atom.name), "unverifiable") for atom in candidates]
-    top_level = {id(node) for node in tree.body}
-    functions: dict[str, list[ast.FunctionDef | ast.AsyncFunctionDef]] = {}
-    for node in ast.walk(tree):
+    module_functions: dict[str, list[ast.FunctionDef | ast.AsyncFunctionDef]] = {}
+    for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            functions.setdefault(node.name, []).append(node)
+            module_functions.setdefault(node.name, []).append(node)
+    function_names = {
+        node.name for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
     checks = []
     for atom in candidates:
-        matches = functions.get(atom.name, [])
-        if not matches:
+        if atom.name not in function_names:
             continue
-        node = matches[0]
-        if len(matches) != 1 or not isinstance(node, ast.FunctionDef) or id(node) not in top_level:
+        matches = module_functions.get(atom.name, [])
+        if len(matches) != 1 or not isinstance(matches[0], ast.FunctionDef):
             checks.append(ImplementationCheck(redact_secrets(atom.name), "unverifiable"))
         else:
-            checks.append(_check_one(node, atom, verifier))
+            checks.append(_check_one(matches[0], atom, verifier))
     return checks

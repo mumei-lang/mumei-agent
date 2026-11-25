@@ -71,8 +71,20 @@ def _canonical_language(language: str) -> str:
     return aliases.get(language.strip().lower(), language.strip().lower())
 
 
+def _python_module_functions(source: str) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return {}
+    return {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+
 def _extract_functions(source: str, language: str) -> list[str]:
-    """Extract top-level function names from implementation source."""
+    """Extract function names from implementation source."""
     lang = _canonical_language(language)
     if lang == "python":
         try:
@@ -109,13 +121,14 @@ _ATOM_DEF_RE = re.compile(
 )
 _REQUIRES_RE = re.compile(r"requires\s*:\s*(.+?)(?:\n|ensures|effects|\{)", re.DOTALL)
 _ENSURES_RE = re.compile(r"ensures\s*:\s*(.+?)(?:\n|effects|\{)", re.DOTALL)
+_PYTHON_SOURCE_NAME_RE = re.compile(r"[^\n{]*\{[ \t]*\n[ \t]*// python-source-name: (\S+)[ \t]*(?:\n|$)")
 
 
 def _extract_spec_atoms(spec_source: str) -> list[dict[str, Any]]:
     """Extract atom name, params, requires, ensures from .mm source."""
     atoms: list[dict[str, Any]] = []
     # Split on atom definitions to handle multi-atom files
-    parts = re.split(r"(?=atom\s+\w+)", spec_source)
+    parts = re.split(r"(?=atom\s+\w+\s*\()", spec_source)
     for part in parts:
         m = _ATOM_DEF_RE.search(part)
         if not m:
@@ -125,12 +138,16 @@ def _extract_spec_atoms(spec_source: str) -> list[dict[str, Any]]:
         params = [p.strip().split(":")[0].strip() for p in params_raw.split(",") if p.strip()]
         req_m = _REQUIRES_RE.search(part)
         ens_m = _ENSURES_RE.search(part)
-        atoms.append({
+        atom = {
             "name": name,
             "params": params,
             "requires": req_m.group(1).strip() if req_m else "",
             "ensures": ens_m.group(1).strip() if ens_m else "",
-        })
+        }
+        source_name = _PYTHON_SOURCE_NAME_RE.match(part, m.end())
+        if source_name and source_name.group(1).isidentifier():
+            atom["python_source_name"] = source_name.group(1)
+        atoms.append(atom)
     return atoms
 
 

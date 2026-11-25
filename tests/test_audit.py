@@ -1340,6 +1340,9 @@ def test_audit_matches_reserved_python_function_name(tmp_path: Path) -> None:
         pytest.skip("set MUMEI_BIN to an absolute trusted Core executable")
     source = tmp_path / "payment.py"
     source.write_text(
+        "class Service:\n"
+        "    def call(self, balance: int, amount: int) -> int:\n"
+        "        return 0\n\n"
         "def call(balance: int, amount: int) -> int:\n"
         "    return balance - amount\n",
         encoding="utf-8",

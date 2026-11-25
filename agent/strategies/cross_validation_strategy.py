@@ -18,6 +18,7 @@ Typical usage::
 """
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import re
@@ -39,8 +40,8 @@ from agent.strategies.cross_validation_strategy_helpers import (
     _extract_function_body,
     _extract_functions,
     _extract_spec_atoms,
+    _python_module_functions,
 )
-from agent.strategies.foreign_code_strategy_helpers import _safe_identifier
 
 
 def _is_short_native_or_wrapper_body(body: str) -> bool:
@@ -965,45 +966,37 @@ class CrossValidator:
 
         is_python = _canonical_language(language) == "python"
         symbol_key = (lambda name: name) if is_python else _canonical_symbol
-
-        def impl_symbol_key(name: str) -> str:
-            return _safe_identifier(name, preserve_identifier=True) if is_python else symbol_key(name)
-
-        spec_by_key: dict[str, str] = {}
-        for atom in spec_atoms:
-            spec_by_key.setdefault(symbol_key(atom["name"]), atom["name"])
-        if is_python:
-            impl_by_key: dict[str, str] = {}
-            ambiguous_keys: set[str] = set()
-            for func in impl_functions:
-                key = impl_symbol_key(func)
-                if impl_by_key.setdefault(key, func) != func:
-                    ambiguous_keys.add(key)
-            for key in ambiguous_keys:
-                del impl_by_key[key]
-        else:
-            impl_by_key = {impl_symbol_key(func): func for func in impl_functions}
-
-        report.uncovered_atoms = sorted(
-            original
-            for key, original in spec_by_key.items()
-            if key not in impl_by_key
-        )
-
-        covered = set(spec_by_key) & set(impl_by_key)
-        report.coverage_ratio = len(covered) / len(spec_by_key) if spec_by_key else 0.0
+        impl_by_key = {symbol_key(func): func for func in impl_functions}
+        module_functions = _python_module_functions(impl_source) if is_python else {}
+        covered: set[tuple[bool, str]] = set()
+        uncovered: dict[tuple[bool, str], str] = {}
+        matched_atoms: dict[str, dict[str, Any]] = {}
 
         # Semantic gap detection: spec stronger than impl
         # If the spec has complex requires/ensures but the implementation
         # function is trivial (heuristic: short or no validation code)
         for atom in spec_atoms:
-            impl_name = impl_by_key.get(symbol_key(atom["name"]))
+            source_name = atom.get("python_source_name") if is_python else None
+            key = symbol_key(source_name or atom["name"])
+            coverage_key = (source_name is not None, key)
+            if source_name is not None:
+                impl_name = source_name if source_name in module_functions else None
+            else:
+                impl_name = impl_by_key.get(key)
             if impl_name is None:
+                uncovered.setdefault(coverage_key, atom["name"])
                 continue
+            covered.add(coverage_key)
+            matched_atoms.setdefault(key, atom)
             has_complex_contract = bool(atom["requires"]) and len(atom["requires"]) > 20
             has_nontrivial_requires = bool(atom["requires"]) and atom["requires"].strip() not in _TRIVIAL_REQUIRES
             if has_complex_contract or has_nontrivial_requires:
-                body = _extract_function_body(impl_source, language, impl_name)
+                module_function = module_functions.get(impl_name)
+                function_source = (
+                    ast.get_source_segment(impl_source, module_function) or ""
+                    if module_function is not None else impl_source
+                )
+                body = _extract_function_body(function_source, language, impl_name)
                 if body and _has_unenforced_precondition(atom["requires"], body, language):
                     report.spec_stronger_than_impl.append(atom["name"])
                     # The requires literal itself is not echoed: spec text may
@@ -1018,16 +1011,13 @@ class CrossValidator:
                         continue
                     report.spec_stronger_than_impl.append(atom["name"])
 
+        report.uncovered_atoms = sorted(uncovered.values())
+        report.coverage_ratio = len(covered) / (len(covered) + len(uncovered))
+
         # Semantic gap detection: impl stronger than spec
         # Functions with complex validation that have no spec or trivial spec
         for func_name in impl_functions:
-            key = impl_symbol_key(func_name)
-            if key not in impl_by_key:
-                continue
-            matching_atom = next(
-                (a for a in spec_atoms if symbol_key(a["name"]) == key),
-                None,
-            )
+            matching_atom = matched_atoms.get(symbol_key(func_name))
             if matching_atom is None:
                 continue
             if not matching_atom["requires"] and not matching_atom["ensures"]:
