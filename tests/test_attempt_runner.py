@@ -752,12 +752,24 @@ def test_feed_stdin_blocking_writes_complete_pipe_feed():
         daemon=True,
     )
     feeder.start()
+    os.set_blocking(read_fd, False)
+    deadline = time.monotonic() + 5
     got = b""
     while True:
-        chunk = os.read(read_fd, 4096)
+        try:
+            chunk = os.read(read_fd, 4096)
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                os.close(read_fd)
+                pytest.fail("stdin feed did not reach EOF within five seconds")
+            time.sleep(0.01)
+            continue
         if not chunk:
             break
         got += chunk
+        if time.monotonic() >= deadline:
+            os.close(read_fd)
+            pytest.fail("stdin feed did not reach EOF within five seconds")
     feeder.join(5)
     os.close(read_fd)
     assert not feeder.is_alive()
