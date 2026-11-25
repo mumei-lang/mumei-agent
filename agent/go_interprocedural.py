@@ -22999,16 +22999,21 @@ class _Builder:
                         )
             return
         if kind == "var_declaration":
-            # Grouped `var (...)` declarations never reach here — the
-            # grammar marks them has_error and the source is rejected as
-            # `syntax_or_parser_unavailable` before statement dispatch.
-            specs = [
-                c
-                for c in node.named_children
-                if c.type == "var_spec"
-            ]
+            # Grouped `var (...)` declarations nest their specs in a
+            # var_spec_list, unlike const groups. Flatten both shapes so
+            # each spec follows the same scalar/type restrictions.
+            specs = []
+            for child in node.named_children:
+                if child.type == "var_spec":
+                    specs.append(child)
+                elif child.type == "var_spec_list":
+                    specs.extend(
+                        c
+                        for c in child.named_children
+                        if c.type == "var_spec"
+                    )
             if not specs:
-                raise _Unsupported("unsupported_statement", _span(node))
+                return
             for spec in specs:
                 names: list[Any] = []
                 value_nodes: list[Any] = []

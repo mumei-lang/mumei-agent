@@ -3965,6 +3965,27 @@ mismatch stays `unsupported_statement`. Redeclaration inside a nested
 block still produces a fresh, branch-scoped binding that cannot escape
 its scope, matching the compiler.
 
+
+### C07 grouped var declarations
+
+Grouped `var ( ... )` declarations flatten each `var_spec` through the
+same scalar binding contract as individual declarations: explicit values
+bind pairwise against the pre-state, zero-value forms are dep-free,
+multi-name specs follow the multi-name declaration rules, `_` discards,
+and an empty `var ()` group is a no-op. Both newline layout and explicit
+semicolon separators are admitted when tree-sitter preserves the group.
+
+Boundaries: the compact valid form `var ( a int64 = x; b = x )` without
+a final separator remains a tree-sitter parse gap and fails closed as
+`syntax_or_parser_unavailable`; use a final separator or newline layout.
+Names use exactly the admission contract of individual `var`
+declarations: supported channel, function-value, pointer and composite
+shapes keep their existing semantics, while unsupported names stay
+`binding_unavailable`. Arity mismatches stay `unsupported_statement`,
+and var declarations have no const-style implicit repetition. This
+remains dependency analysis, not proof, evidence or audit verdict
+integration.
+
 ### C07 expression statements
 
 Statement-position expressions are admitted — in Go these can only be
@@ -5778,8 +5799,11 @@ runs the same provisioned helper on the same declared inputs plus
 `--manifest <PATH>`, partitions the declared manifest's functions by the
 same rule `go-summaries-check` reports, and emits a merged
 `mumei.go-scalar-parameter-deps/v1` manifest — a `reusable` function's
-declared summary is carried over verbatim, every other live function is
-freshly derived and a `missing` entry is dropped. The merged set is
+declared summary is carried over verbatim only when that record is
+available, every other live function is freshly derived and a `missing`
+entry is dropped. An unavailable reusable record never suppresses the
+fresh derivation, so widened analyzer coverage reaches existing users
+without a manual regeneration step. The merged set is
 keyed to the fresh context, so it describes the current unit, not the
 declared one. The manifest now declares the `target_arch` it was
 derived for (`int`/`uintptr` widths are arch-dependent while binding
