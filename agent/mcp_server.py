@@ -4240,6 +4240,78 @@ def native_object_accept(
 
 
 @mcp.tool()
+def native_object_acceptance_recheck(
+    core_path: str,
+    bundle_dir: str,
+    source_path: str,
+    descriptor_path: str,
+    expected_build_id: str,
+    attempt_timeout_ms: int = 60000,
+) -> str:
+    """Replay a saved native accept-object descriptor (C10).
+
+    Runs `native-bundle recheck-object-acceptance` as one declared attempt —
+    the same wiring as the `native-object-acceptance-recheck` CLI route. The
+    saved descriptor must pass the `native_object_accept` descriptor
+    validation under an object-translation scope before dispatch. Core reruns
+    `accept-object`, recomputes `evidence_fingerprint` and exits 0 only when
+    the saved descriptor equals the fresh one: `object_acceptance_recheck` is
+    then `consistent` and the descriptor's checks are discharged as
+    `native_object_accept` does. Exit 3 is `inconclusive`; exit 1 (stale,
+    tampered or foreign descriptor, or any static failure) and mid-run drift
+    claim nothing. Consistency does not authenticate the descriptor or its
+    producer.
+
+    Args:
+        core_path: Absolute path to the mumei Core executable.
+        bundle_dir: Absolute path to the declared bundle directory.
+        source_path: Absolute path to the declared .mm source file (at most
+            64 KiB); the bundle's own labels/paths are never read.
+        descriptor_path: Absolute path to the saved `accept-object --json`
+            descriptor: a regular file, not a symlink, at most 1 MiB.
+        expected_build_id: SHA-256 of native-bundle.json obtained through a
+            separately trusted channel (64 lowercase hex).
+        attempt_timeout_ms: Declared attempt bound in milliseconds.
+
+    Returns:
+        JSON with `report` — the
+        `mumei.native-object-acceptance-recheck-report/v1` document — on
+        success, or `error` on a declared failure.
+    """
+    try:
+        from agent.native_object_acceptance_recheck import (
+            run_object_acceptance_recheck,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+
+    declared = [core_path, bundle_dir, source_path, descriptor_path]
+    for name, path in zip(
+        ("core_path", "bundle_dir", "source_path", "descriptor_path"), declared
+    ):
+        if not _valid_declared_path(path):
+            return _err(f"{name} must be a nonempty single-line path")
+    if type(attempt_timeout_ms) is not int or attempt_timeout_ms < 1:
+        return _err("attempt_timeout_ms must be a positive integer")
+
+    args = argparse.Namespace(
+        core=core_path,
+        bundle=bundle_dir,
+        source=source_path,
+        descriptor=descriptor_path,
+        expected_build_id=expected_build_id,
+        attempt_timeout=attempt_timeout_ms,
+        memory_bound_mb=None,
+        output=None,
+    )
+    try:
+        report = run_object_acceptance_recheck(args)
+    except (OSError, ValueError, UnicodeDecodeError) as exc:
+        return _err(_redact_declared_paths(str(exc), declared))
+    return _ok({"report": report})
+
+
+@mcp.tool()
 def native_artifact_recheck(
     core_path: str,
     bundle_dir: str,

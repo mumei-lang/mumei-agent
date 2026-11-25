@@ -131,6 +131,7 @@ jobs:
               tests/test_native_exit_status_accept.py \
               tests/test_native_machine_tv_recheck.py \
               tests/test_native_object_accept.py \
+              tests/test_native_object_acceptance_recheck.py \
               tests/test_native_object_recheck.py \
               tests/test_native_observations_accept.py \
               tests/test_native_observations_recheck.py \

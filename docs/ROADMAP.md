@@ -7797,6 +7797,36 @@ and historical execution remain outside the claim. The report is not reusable
 Evidence or a certificate, does not promote a grade, emits no evidence
 candidate and is not a recovery performer.
 
+### C10 Option B native-object-acceptance-recheck route
+
+`python -m agent native-object-acceptance-recheck --core <path> --bundle <dir>
+--source <path> --descriptor <path> --expected-build-id <sha256>` runs Core's
+`native-bundle recheck-object-acceptance --expected-build-id <id> <bundle>
+<source> <descriptor>` (mumei#1471) in the C11 declared-attempt lifecycle. The
+request fingerprint also binds the saved descriptor's bytes, bounded at the
+Core's 1 MiB `MAX_EVIDENCE_BYTES`. Before dispatch the descriptor must decode
+without duplicate keys or non-finite constants and pass the
+`native-object-accept` descriptor validation under an object-translation scope
+with a lowercase SHA-256 `evidence_fingerprint`; anything else is a static
+error with no attempt.
+
+Core reruns `accept-object` on the pinned inputs, recomputes
+`evidence_fingerprint` and exits 0 only when the saved descriptor equals the
+fresh one. Only that exit with no input drift reports
+`object_acceptance_recheck: consistent`, and the saved descriptor's checks are
+then discharged exactly as `native-object-accept` discharges a fresh one.
+Exit 3 is `inconclusive`. Exit 1 shares a stale, tampered or foreign
+descriptor with every static failure, so it claims nothing, and mid-run drift
+reports `inputs_changed` without an outcome.
+
+Consistency does not authenticate the descriptor or its producer and says
+nothing about historical execution; register-convention, ABI/runtime/OS and
+final-artifact assurance stay outside the claim. Producer-signature
+verification waits on C08 (mumei#1469). The report is not reusable Evidence or
+a certificate, emits no evidence candidate, is not a recovery performer and
+does not promote a grade. The route is also the
+`native_object_acceptance_recheck` MCP tool. C10 stays partial.
+
 ### C10 Option B native-machine-tv-recheck route
 
 `python -m agent native-machine-tv-recheck --core <path> --bundle <dir>
