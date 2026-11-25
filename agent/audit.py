@@ -951,7 +951,9 @@ class AuditPipeline:
         healed_files: list[str] = []
         heal_errors: list[str] = []
         for hint in migration_hints:
-            function_name = _safe_identifier(_string_value(hint.get("function_name"), "audited_atom"))
+            function_name = _string_value(hint.get("function_name"), "audited_atom")
+            if "." not in function_name or not all(part.isidentifier() for part in function_name.split(".")):
+                function_name = _safe_identifier(function_name)
             skeleton = _string_value(hint.get("skeleton"), "")
             if not skeleton.strip():
                 heal_errors.append(f"{function_name}: migration skeleton is empty")

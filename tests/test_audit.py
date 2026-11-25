@@ -1600,6 +1600,27 @@ def test_audit_pipeline_auto_heal_records_healed_files(tmp_path: Path, capsys) -
     heal_main.assert_called_once_with()
 
 
+def test_auto_heal_keeps_module_and_qualified_method_skeletons(tmp_path: Path) -> None:
+    pipeline = AuditPipeline(AgentConfig(api_key="test"), heal_output_dir=str(tmp_path))
+    migrations = {
+        "Ledger_debit": "atom Ledger_debit() -> i64 { body: { 0 } }",
+        "Ledger.debit": "atom debit() -> i64 { body: { 1 } }",
+    }
+    hints = [
+        {"function_name": function_name, "skeleton": skeleton}
+        for function_name, skeleton in migrations.items()
+    ]
+
+    with patch.object(pipeline, "_run_heal_loop"):
+        healed, errors = pipeline._heal_migration_hints(hints, tmp_path / "ledger.py")
+
+    assert errors == []
+    assert [Path(path).name for path in healed] == ["Ledger_debit.mm", "Ledger.debit.mm"]
+    assert [(tmp_path / f"{name}.mm").read_text(encoding="utf-8") for name in migrations] == [
+        skeleton + "\n" for skeleton in migrations.values()
+    ]
+
+
 def test_audit_pipeline_auto_migrate_skips_without_violations(tmp_path: Path) -> None:
     source = tmp_path / "payment.py"
     source.write_text(
