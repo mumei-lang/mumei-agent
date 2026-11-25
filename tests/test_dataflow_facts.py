@@ -2780,7 +2780,7 @@ def test_unicode_constant_name_resolves_in_expression() -> None:
 
 
 def test_deep_constant_expression_stays_unknown_without_losing_analysis() -> None:
-    depth = 1200
+    depth = 5000
     expression = "1" + "+(1" * depth + ")" * depth
     flow = _go(f"d := int({expression})\nreturn 1 / d")
     facts = flow.facts_for_expression("1 / d")
