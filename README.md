@@ -59,7 +59,7 @@ The stable audit keys are `spec_health_issues`, `verification_violations`,
 uv run mumei-agent audit --code-file src/example.py --auto-migrate --auto-heal
 ```
 
-Plain `audit` performs the audit/validation stage only; it does not run migration or healing. Those stages are opt-in through `--auto-migrate` / `--auto-heal`, explicit `migrate-suggest` / `heal`, or MCP `scan_and_fix`. By default, extracted contracts are checked against trusted atoms with empty bodies; `--enable-body-port` verifies an LLM-translated port, not the original foreign body, and `--enable-native-replay` is a finite behavioral observation rather than semantic-equivalence proof.
+Plain `audit` performs the audit/validation stage only; it does not run migration or healing. Those stages are opt-in through `--auto-migrate` / `--auto-heal` or explicit `migrate-suggest` / `heal`. MCP `scan_and_fix` enables migration but runs healing only when its `auto_heal` argument is true. By default, extracted contracts are checked against trusted atoms with empty bodies; `--enable-body-port` verifies an LLM-translated port, not the original foreign body, and `--enable-native-replay` is a finite behavioral observation rather than semantic-equivalence proof.
 
 ## External verifier orchestration
 
