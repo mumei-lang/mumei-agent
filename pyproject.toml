@@ -49,9 +49,11 @@ viz = [
     "streamlit>=1.30",
 ]
 otel = [
-    "opentelemetry-api>=1.20",
-    "opentelemetry-sdk>=1.20",
-    "opentelemetry-exporter-otlp>=1.20",
+    # 1.45.x does not follow OTLP/HTTP redirects but treats 3xx responses as
+    # successful exports, silently dropping telemetry behind a redirect.
+    "opentelemetry-api>=1.20,<1.45",
+    "opentelemetry-sdk>=1.20,<1.45",
+    "opentelemetry-exporter-otlp>=1.20,<1.45",
     "opentelemetry-instrumentation-openai>=0.1",  # if available
 ]
 test = [
