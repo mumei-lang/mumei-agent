@@ -34,6 +34,7 @@ developed in-tree and moved here as a standalone project
 ## Prerequisites
 
 - Python 3.10+ and [uv](https://docs.astral.sh/uv/)
+- On Intel macOS, a Rust toolchain for the `cryptography` source build (upstream no longer publishes Intel macOS wheels)
 - A running Mumei checkout/binary for verification
 - Ollama (default) or another OpenAI-compatible LLM provider
 
