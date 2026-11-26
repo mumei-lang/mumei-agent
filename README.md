@@ -1,6 +1,6 @@
 # Mumei Agent
 
-AI-driven autonomous fix loop for the [Mumei](https://github.com/mumei-lang/mumei) proof-driven programming language. It combines LLMs (Qwen/Ollama/OpenAI) with Z3 to detect, explain, and repair code issues.
+AI orchestration layer for the verification-native [Mumei](https://github.com/mumei-lang/mumei) platform. It connects LLMs (Qwen/Ollama/OpenAI) and MCP clients to specification extraction, existing-code audit, `.mm` generation and repair, migration suggestions, evidence collection, and replaceable verifier adapters. LLMs propose candidates and transformations; Mumei Core, Z3, Lean 4, and explicit evidence-acceptance policy decide what counts as proof.
 
 > **Note:** 本ドキュメントのコマンドは uv 管理のプロジェクト環境で実行することを前提とし、`uv run` を付けて表記している。仮想環境をアクティベート済み（`source .venv/bin/activate`）の場合は `uv run` を省略できる。
 
@@ -58,6 +58,12 @@ The stable audit keys are `spec_health_issues`, `verification_violations`,
 ```bash
 uv run mumei-agent audit --code-file src/example.py --auto-migrate --auto-heal
 ```
+
+Plain `audit` performs the audit/validation stage only; it does not run migration or healing. Those stages are opt-in through `--auto-migrate` / `--auto-heal` or explicit `migrate-suggest` / `heal`. MCP `scan_and_fix` enables migration but runs healing only when its `auto_heal` argument is true. By default, extracted contracts are checked against trusted atoms with empty bodies; `--enable-body-port` verifies an LLM-translated port, not the original foreign body, and `--enable-native-replay` is a finite behavioral observation rather than semantic-equivalence proof.
+
+## External verifier orchestration
+
+The verification-native C04/C11 planner/plugin contract supports declarative adapter registration, selection, configuration, budgets, permission checks, bounded execution records, and normalized outputs. Adapter self-reports remain dispatch observations; evidence meaning, acceptance, and grade promotion stay with Mumei Core and the relevant trusted checker. The current Z3 CLI pilot is non-promotable and only checks the pre-dispatch input-contract boundary. See [`docs/ROADMAP.md`](docs/ROADMAP.md) and [`docs/EXTERNAL_VERIFIER_PILOT.md`](docs/EXTERNAL_VERIFIER_PILOT.md).
 
 ## Lean fallback and AI-generated Lean proofs (Task 2-C / 2-D)
 
