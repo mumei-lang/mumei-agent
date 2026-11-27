@@ -158,3 +158,17 @@ def test_directory_report_surfaces_triage_counts() -> None:
     )
     _aggregate_directory_fixed_keys(directory)
     assert "triage: refuted=1, verified=0, unverifiable=0" in _build_directory_report(directory)
+
+def test_fingerprint_uses_checkout_relative_source_key(tmp_path, monkeypatch) -> None:
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    monkeypatch.chdir(checkout)
+    absolute = _finalize(
+        source_file=str(checkout / "src" / "example.py"),
+        verification_violations=["counterexample"],
+    )
+    relative = _finalize(
+        source_file="src/example.py",
+        verification_violations=["counterexample"],
+    )
+    assert absolute.findings[0]["fingerprint"] == relative.findings[0]["fingerprint"]

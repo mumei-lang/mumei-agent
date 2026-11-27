@@ -7,6 +7,8 @@ so CI consumers do not have to re-implement string-based dogfood triage.
 from __future__ import annotations
 
 import hashlib
+import os
+from pathlib import Path
 
 from agent.audit_models import AuditDirectoryResult, AuditResult
 
@@ -111,7 +113,11 @@ def build_directory_findings(result: AuditDirectoryResult) -> list[dict]:
             "line": None,
             "triage_bucket": "operational",
             "fingerprint": _fingerprint(
-                "error", "operational", message, result.source_dir, None
+                "error",
+                "operational",
+                message,
+                _stable_source_key(result.source_dir),
+                None,
             ),
         }
         for message in result.errors
@@ -169,7 +175,11 @@ def _finding(
         "line": line,
         "triage_bucket": triage_bucket,
         "fingerprint": _fingerprint(
-            category, verification_basis, str(message), source_file, line
+            category,
+            verification_basis,
+            str(message),
+            _stable_source_key(source_file),
+            line,
         ),
     }
 
@@ -313,6 +323,17 @@ def _triage_dict(
             },
         },
     }
+
+
+def _stable_source_key(source_file: str) -> str:
+    """Use a checkout-relative source key when possible for stable CI fingerprints."""
+    try:
+        path = Path(os.path.expanduser(source_file)).resolve()
+        if path.is_absolute():
+            return path.relative_to(Path.cwd().resolve()).as_posix()
+    except (OSError, ValueError):
+        pass
+    return Path(source_file).as_posix()
 
 
 def _fingerprint(
