@@ -827,6 +827,7 @@ def test_failed_heal_does_not_accumulate_duplicate_skeletons(tmp_path: Path) -> 
     pipeline.heal_output_dir = tmp_path
 
     def fail(target: Path) -> None:
+        Path(str(target) + ".bak").write_text("backup", encoding="utf-8")
         raise RuntimeError("LLM unavailable")
 
     pipeline._run_heal_loop = fail
@@ -835,3 +836,23 @@ def test_failed_heal_does_not_accumulate_duplicate_skeletons(tmp_path: Path) -> 
         assert healed == []
         assert len(errors) == 1
     assert not list(tmp_path.glob("withdraw-*.mm"))
+    assert not list(tmp_path.glob("*.bak"))
+
+
+
+def test_string_content_ending_in_credential_assignment_text_is_not_blocked(tmp_path: Path) -> None:
+    source = tmp_path / "payment.py"
+    source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+    skeleton = 'atom withdraw() -> i64 {\n    requires: mode == "token=";\n    ensures: message == "hello";\n    body: { 0 }\n}'
+
+    report = build_migration_execution(
+        _result(source, [_hint("withdraw", skeleton)]),
+        output_path=tmp_path / "execution.json",
+        mumei_client=FakeVerifyClient(),
+    )
+
+    candidate = report["candidates"][0]
+    assert candidate["execution_state"] == "ready_for_human_review"
+    assert candidate["extracted_contract"]["requires"] == ['mode == "token="']
+    assert candidate["extracted_contract"]["ensures"] == ['message == "hello"']
+    assert candidate["extracted_contract"]["string_literals_redacted"] is False

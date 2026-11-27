@@ -1020,10 +1020,11 @@ class AuditPipeline:
             try:
                 self._run_heal_loop(target)
             except Exception as exc:
-                try:
-                    target.unlink()
-                except OSError:
-                    pass
+                for artifact in (target, Path(str(target) + ".bak")):
+                    try:
+                        artifact.unlink()
+                    except (FileNotFoundError, OSError):
+                        pass
                 message = redact_secrets(str(exc).replace(str(target), target.name).replace(str(output_dir), "<heal-output>"))
                 heal_errors.append(f"{target.name}: {message}")
                 continue
