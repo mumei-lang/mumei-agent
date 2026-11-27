@@ -8069,6 +8069,99 @@ _SENTINEL_NESTED_INDEX_RES: dict[str, re.Pattern[str]] = {
 }
 
 
+_PROBABLE_REGEX_OPENERS = set("([{=,:;!&|?+-*%^~<>")
+
+
+def _mask_probable_regex_literals(text: str) -> str:
+    """Blank likely JavaScript/TypeScript regex literals, preserving length.
+
+    This is deliberately conservative: only a ``/`` in a position where an
+    expression can start is treated as a regex opener. It prevents quotes or
+    braces inside ``/"/``-style literals from confusing the lightweight string
+    and brace scanners used by sentinel analysis.
+    """
+    chars = list(text)
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] != "/" or (i + 1 < n and text[i + 1] in "/*"):
+            i += 1
+            continue
+        j = i - 1
+        while j >= 0 and text[j].isspace():
+            j -= 1
+        if j >= 0 and text[j] not in _PROBABLE_REGEX_OPENERS:
+            i += 1
+            continue
+        k = i + 1
+        in_class = False
+        end = -1
+        while k < n:
+            ch = text[k]
+            if ch == "\\":
+                k += 2
+                continue
+            if ch == "[":
+                in_class = True
+            elif ch == "]":
+                in_class = False
+            elif ch == "/" and not in_class:
+                end = k
+                break
+            elif ch in "\r\n":
+                break
+            k += 1
+        if end < 0:
+            i += 1
+            continue
+        for pos in range(i, end + 1):
+            if chars[pos] not in "\r\n":
+                chars[pos] = " "
+        i = end + 1
+    return "".join(chars)
+
+
+_GUARD_TAIL_TOKEN_RE = re.compile(r"[{}]|\bswitch\b|\bcase\b|\bdefault\s*:")
+
+
+def _braceless_exit_dominates_use(tail: str) -> bool:
+    """Whether the text after a braceless return/throw reaches the use.
+
+    Balanced object literals do not invalidate the guard, but a closing brace
+    that belongs to an outer block does. A following ``case`` in the same
+    switch also invalidates it; cases in a switch that starts after the guard
+    do not.
+    """
+    masked_tail = _strip_go_rust_literals_and_comments(_mask_probable_regex_literals(tail))
+    semicolon = masked_tail.find(";")
+    if semicolon < 0:
+        return False
+    depth = 0
+    post_guard_switch_depth: int | None = None
+    pending_switch = False
+    for token in _GUARD_TAIL_TOKEN_RE.finditer(masked_tail[semicolon + 1 :]):
+        text = token.group(0)
+        if text == "switch":
+            pending_switch = True
+            continue
+        if text == "{":
+            depth += 1
+            if pending_switch:
+                post_guard_switch_depth = depth
+                pending_switch = False
+            continue
+        if text == "}":
+            if depth == 0:
+                return False
+            if post_guard_switch_depth == depth:
+                post_guard_switch_depth = None
+            depth -= 1
+            continue
+        if post_guard_switch_depth is None:
+            return False
+    return True
+
+
 def _sentinel_guarded(
     body: str, var: str, use_pos: int, kind: str, since: int = 0
 ) -> bool:
@@ -8089,22 +8182,11 @@ def _sentinel_guarded(
         tail = body[match.end() : use_pos]
         if re.match(r"\s*\)*\s*(?:return|throw)\b", tail) is None:
             return False
-        # A braceless early exit nested inside another ``if`` does not dominate
-        # code after that outer block. Object literals may contain braces, so
-        # inspect only the text after the exit statement's first semicolon.
-        masked_tail = _strip_go_rust_literals_and_comments(tail)
-        semicolon = masked_tail.find(";")
-        if semicolon < 0:
-            return False
-        depth = 0
-        for ch in masked_tail[semicolon + 1 :]:
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                if depth == 0:
-                    return False
-                depth -= 1
-        return True
+        # A braceless early exit nested inside another block or switch case
+        # does not dominate code after that block/case. Object literals may
+        # contain braces, so inspect balanced structure after the exit
+        # statement's first semicolon.
+        return _braceless_exit_dominates_use(tail)
 
     if kind == "minus1":
         safe_re = re.compile(

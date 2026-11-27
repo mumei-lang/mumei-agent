@@ -678,3 +678,26 @@ def test_ts_indexof_pop_still_invalidates_membership() -> None:
         "tasks.pop(); tasks[tasks.indexOf(task)] = task;"
     )
     assert any("indexOf" in issue.message for issue in _sentinel_issues(body, "TypeScript"))
+
+def test_ts_find_regex_literal_does_not_hide_nested_guard_boundary() -> None:
+    body = (
+        "const el = xs.find(x => x > 0); if (outer) { if (!el) return; "
+        "const re = /\"/g; } return el.value;"
+    )
+    assert any("undefined" in issue.message for issue in _sentinel_issues(body, "TypeScript"))
+
+
+def test_ts_find_guard_in_other_switch_case_does_not_guard_use() -> None:
+    body = (
+        "const el = xs.find(x => x > 0); switch (kind) { case 'a': if (!el) return; "
+        "const out = { x: 1 }; break; case 'b': return el.value; }"
+    )
+    assert any("undefined" in issue.message for issue in _sentinel_issues(body, "TypeScript"))
+
+
+def test_ts_find_guard_before_switch_still_dominates_later_use() -> None:
+    body = (
+        "const el = xs.find(x => x > 0); if (!el) return; "
+        "switch (kind) { case 'a': console.log(1); } return el.value;"
+    )
+    assert not _sentinel_issues(body, "TypeScript")
