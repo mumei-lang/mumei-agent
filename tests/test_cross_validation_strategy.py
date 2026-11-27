@@ -1734,11 +1734,15 @@ def test_go_framework_request_nil_precondition_is_caller_guaranteed(tmp_path):
 
 func adminAuthorized(r *http.Request) bool { return r.Header.Get("X") != "" }
 func resetHandler(w http.ResponseWriter, r *http.Request) {
+    log.Print(r, "reset")
     if !adminAuthorized(r) { return }
 }
 func main() {
     mux := http.NewServeMux()
-    mux.HandleFunc("/admin/reset", resetHandler)
+    mux.HandleFunc(
+        "/admin/reset",
+        resetHandler,
+    )
 }
 ''')
     spec = tmp_path / "spec.mm"
@@ -1820,7 +1824,10 @@ func resetHandler(w http.ResponseWriter, r *http.Request) {
     r = nil
     if !adminAuthorized(r) { return }
 }
-func main() { mux.HandleFunc("/admin/reset", resetHandler) }
+func main() {
+    mux := http.NewServeMux()
+    mux.HandleFunc("/admin/reset", resetHandler)
+}
 """)
     spec = tmp_path / "spec.mm"
     spec.write_text('atom adminAuthorized(r: i64) -> bool {\n  requires: r != nil;\n  ensures: true;\n}\n')
@@ -1839,7 +1846,10 @@ func resetHandler(w http.ResponseWriter, r *http.Request) {
     callback := adminAuthorized
     if !callback(r) { return }
 }
-func main() { mux.HandleFunc("/admin/reset", resetHandler) }
+func main() {
+    mux := http.NewServeMux()
+    mux.HandleFunc("/admin/reset", resetHandler)
+}
 """)
     spec = tmp_path / "spec.mm"
     spec.write_text('atom adminAuthorized(r: i64) -> bool {\n  requires: r != nil;\n  ensures: true;\n}\n')
@@ -1856,7 +1866,10 @@ func adminAuthorized(r *http.Request) bool { return r.Header.Get("X") != "" }
 func resetHandler(w http.ResponseWriter, r *http.Request) {
     go adminAuthorized(r)
 }
-func main() { mux.HandleFunc("/admin/reset", resetHandler) }
+func main() {
+    mux := http.NewServeMux()
+    mux.HandleFunc("/admin/reset", resetHandler)
+}
 """)
     spec = tmp_path / "spec.mm"
     spec.write_text('atom adminAuthorized(r: i64) -> bool {\n  requires: r != nil;\n  ensures: true;\n}\n')
@@ -1874,6 +1887,27 @@ func adminAuthorized(r *http.Request) bool { return r.Header.Get("X") != "" }
 func resetHandler(w http.ResponseWriter, r *http.Request) {
     r, ok := nil, true
     if ok && !adminAuthorized(r) { return }
+}
+func main() {
+    mux := http.NewServeMux()
+    mux.HandleFunc("/admin/reset", resetHandler)
+}
+""")
+    spec = tmp_path / "spec.mm"
+    spec.write_text('atom adminAuthorized(r: i64) -> bool {\n  requires: r != nil;\n  ensures: true;\n}\n')
+
+    report = CrossValidator().validate_spec_vs_impl(str(spec), str(tmp_path / "main.go"), "go")
+
+    assert report.spec_stronger_than_impl == ["adminAuthorized"]
+
+
+
+def test_go_blank_parameter_positions_prevent_suppression(tmp_path):
+    (tmp_path / "main.go").write_text("""package main
+
+func adminAuthorized(_ string, r *http.Request) bool { return r.Header.Get("X") != "" }
+func resetHandler(w http.ResponseWriter, r *http.Request) {
+    if !adminAuthorized("x", r) { return }
 }
 func main() {
     mux := http.NewServeMux()

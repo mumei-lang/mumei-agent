@@ -902,7 +902,7 @@ def _split_go_call_args(text: str) -> list[str]:
     return args
 
 
-def _go_call_args_at(text: str, open_paren: int) -> list[str] | None:
+def _go_call_args_at(text: str, open_paren: int) -> tuple[list[str], int] | None:
     depth = 1
     index = open_paren + 1
     while index < len(text) and depth:
@@ -913,24 +913,32 @@ def _go_call_args_at(text: str, open_paren: int) -> list[str] | None:
         index += 1
     if depth:
         return None
-    return _split_go_call_args(text[open_paren + 1:index - 1])
+    return _split_go_call_args(text[open_paren + 1:index - 1]), index
 
 
 
 def _go_handler_registration_spans(text: str, handler_name: str) -> list[tuple[int, int]]:
     spans: list[tuple[int, int]] = []
-    handle_func = re.compile(
-        rf"\b([A-Za-z_]\w*)\.HandleFunc\s*\([^()\n]*\b{re.escape(handler_name)}\b\s*\)"
-    )
+    handle_func = re.compile(r"\b([A-Za-z_]\w*)\.HandleFunc\s*\(")
     for match in re.finditer(handle_func, text):
+        parsed = _go_call_args_at(text, match.end() - 1)
+        if parsed is None:
+            continue
+        args, end = parsed
         receiver = match.group(1)
         servemux_init = re.compile(
             rf"\b(?:var\s+{re.escape(receiver)}\s*=|{re.escape(receiver)}\s*:=)\s*http\.NewServeMux\s*\("
         )
-        if receiver == "http" or servemux_init.search(text):
-            spans.append((match.start(), match.end()))
-    handler_conversion = re.compile(rf"\bhttp\.HandlerFunc\s*\(\s*{re.escape(handler_name)}\s*\)")
-    spans.extend((match.start(), match.end()) for match in handler_conversion.finditer(text))
+        if len(args) >= 2 and args[1] == handler_name and (receiver == "http" or servemux_init.search(text)):
+            spans.append((match.start(), end))
+    handler_conversion = re.compile(r"\bhttp\.HandlerFunc\s*\(")
+    for match in re.finditer(handler_conversion, text):
+        parsed = _go_call_args_at(text, match.end() - 1)
+        if parsed is None:
+            continue
+        args, end = parsed
+        if len(args) == 1 and args[0] == handler_name:
+            spans.append((match.start(), end))
     return spans
 
 
@@ -984,6 +992,8 @@ def _go_nil_precondition_caller_guaranteed(impl_path: str, function_name: str, p
     if target is None:
         return False
     target_text, target_fn = target
+    if re.search(r"(?<![\w])_(?![\w])", target_fn.params_text):
+        return False
     target_param_types = _go_param_types(target_fn.params_text)
     param_names = list(target_param_types)
     if param_name not in target_param_types:
@@ -1013,8 +1023,11 @@ def _go_nil_precondition_caller_guaranteed(impl_path: str, function_name: str, p
             )
             if enclosing is None or getattr(enclosing, "raw_name", "") == function_name:
                 return False
-            args = _go_call_args_at(text, open_paren)
-            if args is None or len(args) <= param_index:
+            parsed_call = _go_call_args_at(text, open_paren)
+            if parsed_call is None:
+                return False
+            args, _end = parsed_call
+            if len(args) <= param_index:
                 return False
             arg = args[param_index]
             if not re.fullmatch(r"[A-Za-z_]\w*", arg):
@@ -1023,7 +1036,11 @@ def _go_nil_precondition_caller_guaranteed(impl_path: str, function_name: str, p
             if param_types.get(arg) != "*http.Request" or "http.ResponseWriter" not in param_types.values():
                 return False
             body_prefix = text[enclosing.body_start_char:start]
-            if re.search(rf"\b{re.escape(arg)}\b(?:\s*,|\s*:=|\s*=(?!=))", body_prefix):
+            assignment_re = re.compile(
+                rf"(?:^|[;{{\n])\s*(?:[\w.]+,\s*)*{re.escape(arg)}(?:\s*,[^=;\n]*)?\s*(?::=|=(?!=))",
+                re.MULTILINE,
+            )
+            if assignment_re.search(body_prefix):
                 return False
             callers.add(enclosing.raw_name)
             saw_call = True
