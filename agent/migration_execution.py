@@ -231,7 +231,12 @@ def _is_credential_name(value: str) -> bool:
     compound_suffixes = {"value", "hash", "digest", "key", "accesskey", "token", "secret", "password", "passwd", "credential", "credentials", "code", "store"}
     numeric_compound_roots = {"password", "passwd", "secret", "token", "credential", "apikey", "privatekey", "accesskey", "sessionkey"}
     key_pairs = {("api", "key"), ("private", "key"), ("access", "key"), ("session", "key"), ("signing", "key"), ("encryption", "key")}
-    for component in value.split("."):
+    dot_components = value.split(".")
+    key_contexts = {"access", "session", "signing", "encryption", "private", "api", "client"}
+    if len(dot_components) > 1 and dot_components[-1].lower() == "key" and dot_components[-2].lower() in key_contexts:
+        return True
+    weak_root_prefixes = {"access", "refresh", "bearer", "session", "api", "client", "user", "service", "app", "auth", "authentication", "oauth", "csrf", "xsrf", "id", "signing", "encryption", "private"}
+    for component in dot_components:
         component_words: list[str] = []
         for part in re.split(r"[_$\-]+", component):
             lowered_part = part.lower()
@@ -241,7 +246,9 @@ def _is_credential_name(value: str) -> bool:
                 position = lowered_part.find(root)
                 while position >= 0:
                     remainder = lowered_part[position + len(root):]
-                    if not remainder or remainder in compound_suffixes or (root in numeric_compound_roots and remainder.isdigit()):
+                    prefix = lowered_part[:position]
+                    weak_blocked = root in {"token", "auth", "authentication"} and prefix and prefix not in weak_root_prefixes
+                    if not weak_blocked and (not remainder or remainder in compound_suffixes or (root in numeric_compound_roots and remainder.isdigit())):
                         return True
                     position = lowered_part.find(root, position + 1)
             component_words.extend(match.group(0).lower() for match in re.finditer(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|\d+", part))
