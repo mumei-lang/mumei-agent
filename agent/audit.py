@@ -18,6 +18,7 @@ from typing import cast
 
 from agent import evidence_check_schedule, telemetry
 from agent.audit_sarif import write_sarif
+from agent.secret_redaction import redact_secrets
 from agent.audit_models import (
     AuditDirectoryResult,
     AuditResult,
@@ -88,6 +89,7 @@ from agent.lean_bridge_helpers import run_lean_bridge_and_merge_proof_cert
 from agent.body_port import BodyPorter, body_port_violations
 from agent.native_replay import NativeReplayer, native_replay_violations, reconcile_body_ports
 from agent.llm_provider import LLMProvider, openai_client_adapter
+from agent.migration_execution import append_execution_next_step, build_migration_execution, migration_output_function_stem, migration_output_key, migration_output_target, migration_text_has_sensitive_literals
 from agent.migration_readiness import append_next_step_summary, build_migration_readiness
 from agent.mumei_client import create_mumei_client
 from agent.prompts.report_formatter import format_counterexample
@@ -283,6 +285,7 @@ class AuditPipeline:
         domain_hint: str = "",
         auto_migrate: bool = False,
         auto_heal: bool = False,
+        migration_heal_functions: list[str] | None = None,
         enable_lean_bridge: bool = False,
         enable_body_port: bool = False,
         enable_native_replay: bool = False,
@@ -306,6 +309,7 @@ class AuditPipeline:
                 domain_hint=domain_hint,
                 auto_migrate=auto_migrate,
                 auto_heal=auto_heal,
+                migration_heal_functions=migration_heal_functions,
                 enable_lean_bridge=enable_lean_bridge,
                 enable_body_port=enable_body_port,
                 enable_native_replay=enable_native_replay,
@@ -331,6 +335,7 @@ class AuditPipeline:
                 domain_hint=domain_hint,
                 auto_migrate=auto_migrate,
                 auto_heal=auto_heal,
+                migration_heal_functions=migration_heal_functions,
                 enable_lean_bridge=enable_lean_bridge,
                 enable_body_port=enable_body_port,
                 enable_native_replay=enable_native_replay,
@@ -354,6 +359,7 @@ class AuditPipeline:
         domain_hint: str = "",
         auto_migrate: bool = False,
         auto_heal: bool = False,
+        migration_heal_functions: list[str] | None = None,
         enable_lean_bridge: bool = False,
         enable_body_port: bool = False,
         enable_native_replay: bool = False,
@@ -709,6 +715,7 @@ class AuditPipeline:
             healed_files, heal_errors = self._heal_migration_hints(
                 result.migration_hints,
                 source_path,
+                selected_functions=migration_heal_functions,
             )
             result.healed_files = healed_files
             result.heal_errors = heal_errors
@@ -722,6 +729,7 @@ class AuditPipeline:
         domain_hint: str = "",
         auto_migrate: bool = False,
         auto_heal: bool = False,
+        migration_heal_functions: list[str] | None = None,
         enable_lean_bridge: bool = False,
         enable_body_port: bool = False,
         enable_native_replay: bool = False,
@@ -755,6 +763,7 @@ class AuditPipeline:
                 domain_hint=domain_hint,
                 auto_migrate=auto_migrate,
                 auto_heal=auto_heal,
+                migration_heal_functions=migration_heal_functions,
                 enable_lean_bridge=enable_lean_bridge,
                 enable_body_port=enable_body_port,
                 enable_native_replay=enable_native_replay,
@@ -788,6 +797,7 @@ class AuditPipeline:
         domain_hint: str = "",
         auto_migrate: bool = False,
         auto_heal: bool = False,
+        migration_heal_functions: list[str] | None = None,
         enable_lean_bridge: bool = False,
         enable_body_port: bool = False,
         enable_native_replay: bool = False,
@@ -908,6 +918,7 @@ class AuditPipeline:
                     domain_hint=domain_hint,
                     auto_migrate=auto_migrate,
                     auto_heal=auto_heal,
+                    migration_heal_functions=migration_heal_functions,
                     enable_lean_bridge=enable_lean_bridge,
                     enable_body_port=enable_body_port,
                     enable_native_replay=enable_native_replay,
@@ -974,27 +985,73 @@ class AuditPipeline:
         self,
         migration_hints: list[dict],
         source_path: Path,
+        *,
+        selected_functions: list[str] | None = None,
     ) -> tuple[list[str], list[str]]:
         output_dir = (self.heal_output_dir or source_path.parent).resolve()
         output_dir.mkdir(parents=True, exist_ok=True)
         healed_files: list[str] = []
         heal_errors: list[str] = []
+        selected = set(selected_functions or [])
         for hint in migration_hints:
             function_name = _string_value(hint.get("function_name"), "audited_atom")
+            if selected and function_name not in selected and function_name.split(".")[-1] not in selected:
+                continue
             if "." not in function_name or not all(part.isidentifier() for part in function_name.split(".")):
                 function_name = _safe_identifier(function_name)
             skeleton = _string_value(hint.get("skeleton"), "")
             if not skeleton.strip():
                 heal_errors.append(f"{function_name}: migration skeleton is empty")
                 continue
-            target = output_dir / f"{function_name}.mm"
-            target.write_text(skeleton.rstrip() + "\n", encoding="utf-8")
+            if migration_text_has_sensitive_literals(skeleton):
+                heal_errors.append(f"{function_name}: migration skeleton contains sensitive credential-like data")
+                continue
+            target = migration_output_target(output_dir, source_path, function_name, skeleton)
+            canonical_skeleton = skeleton.rstrip() + "\n"
+            try:
+                with target.open("x", encoding="utf-8") as output_file:
+                    output_file.write(canonical_skeleton)
+            except FileExistsError:
+                heal_errors.append(f"{function_name}: migration output already exists: {target.name}")
+                continue
+            except OSError as exc:
+                heal_errors.append(f"{function_name}: could not write migration output: {type(exc).__name__}")
+                continue
             try:
                 self._run_heal_loop(target)
             except Exception as exc:
-                heal_errors.append(f"{target}: {exc}")
+                for artifact in (target, Path(str(target) + ".bak")):
+                    try:
+                        artifact.unlink()
+                    except (FileNotFoundError, OSError):
+                        pass
+                message = redact_secrets(str(exc).replace(str(target), target.name).replace(str(output_dir), "<heal-output>"))
+                heal_errors.append(f"{target.name}: {message}")
                 continue
-            healed_files.append(str(target))
+            try:
+                final_bytes = target.read_bytes()
+            except OSError as exc:
+                heal_errors.append(f"{target.name}: healed output unreadable: {type(exc).__name__}")
+                continue
+            duplicate: Path | None = None
+            output_key = migration_output_key(source_path, skeleton)
+            for existing in output_dir.glob(f"{migration_output_function_stem(function_name)}-{output_key}*.mm"):
+                if existing == target or not existing.is_file():
+                    continue
+                try:
+                    if existing.read_bytes() == final_bytes:
+                        duplicate = existing
+                        break
+                except OSError:
+                    continue
+            if duplicate is not None:
+                try:
+                    target.unlink()
+                except OSError:
+                    pass
+                healed_files.append(str(duplicate))
+            else:
+                healed_files.append(str(target))
         return healed_files, heal_errors
 
     def _run_heal_loop(self, source_path: Path) -> None:
@@ -1168,6 +1225,26 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
             "Write a mumei.migration-readiness/v1 JSON report. Requires "
             "--auto-migrate; the report prioritizes migration_hints and verifies "
             "the highest-ranked skeleton as a scaffold, not as host-code equivalence proof."
+        ),
+    )
+    parser.add_argument(
+        "--migration-execution-output",
+        metavar="PATH",
+        help=(
+            "Write a mumei.migration-execution/v1 acceptance artifact. Requires "
+            "--auto-migrate; requesting it also runs the existing self-healing loop "
+            "and records generated .mm, proof-certificate, SARIF, heal, and "
+            "behavioral diagnostic evidence without changing the fixed audit keys."
+        ),
+    )
+    parser.add_argument(
+        "--migration-function",
+        action="append",
+        default=[],
+        metavar="FUNCTION",
+        help=(
+            "Restrict migration execution healing and evidence to a function name. Repeatable; "
+            "the fixed migration_hints audit key still contains all candidates."
         ),
     )
     parser.add_argument("--domain-hint", default="", help="Optional domain hint for spec extraction.")
@@ -1950,9 +2027,22 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
             raise SystemExit(2) from exc
 
     migration_readiness_output = getattr(args, "migration_readiness_output", None)
+    migration_execution_output = getattr(args, "migration_execution_output", None)
     if migration_readiness_output and not args.auto_migrate:
         print(
             "audit: --migration-readiness-output requires --auto-migrate",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    if migration_execution_output and not args.auto_migrate:
+        print(
+            "audit: --migration-execution-output requires --auto-migrate",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    if getattr(args, "migration_function", None) and not migration_execution_output:
+        print(
+            "audit: --migration-function requires --migration-execution-output",
             file=sys.stderr,
         )
         raise SystemExit(2)
@@ -2000,6 +2090,28 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
             )
             raise SystemExit(2)
 
+    if migration_execution_output:
+        execution_conflicting = (
+            _output_conflicts_with_audit_inputs(migration_execution_output, args, declared_input_paths)
+            or _same_output_path(migration_execution_output, sarif_output)
+            or _same_output_path(migration_execution_output, migration_readiness_output)
+            or _same_output_path(migration_execution_output, getattr(args, "baseline", None))
+            or _same_output_path(migration_execution_output, getattr(args, "write_baseline", None))
+        )
+        audit_input_path = Path(os.path.expanduser(args.code_file))
+        if not execution_conflicting and audit_input_path.is_dir():
+            execution_conflicting = any(
+                _same_output_path(migration_execution_output, str(candidate))
+                for candidate in audit_input_path.rglob("*")
+                if candidate.is_file() and candidate.suffix.lower() in {ext.lower() for ext in AUDIT_EXTENSION_MAP} | {".mm"}
+            )
+        if execution_conflicting:
+            print(
+                "audit: --migration-execution-output must not overwrite --output, --sarif-output, --migration-readiness-output, --baseline, --write-baseline, --code-file, or a declared schedule input",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+
     config = AgentConfig(mumei_lean_repo=getattr(args, "mumei_lean_repo", None))
     pipeline = AuditPipeline(config=config, heal_output_dir=args.heal_output_dir)
     result = pipeline.audit_file(
@@ -2007,7 +2119,12 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
         args.language,
         domain_hint=args.domain_hint,
         auto_migrate=args.auto_migrate,
-        auto_heal=args.auto_heal,
+        auto_heal=args.auto_heal or bool(migration_execution_output),
+        **(
+            {"migration_heal_functions": list(getattr(args, "migration_function", []) or [])}
+            if migration_execution_output and getattr(args, "migration_function", None)
+            else {}
+        ),
         enable_lean_bridge=bool(getattr(args, "enable_lean_bridge", False)),
         include_tests=bool(getattr(args, "include_tests", False)),
         enable_body_port=bool(getattr(args, "enable_body_port", False)),
@@ -2060,6 +2177,27 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
             result,
             readiness_report,
             Path(migration_readiness_output).expanduser(),
+        )
+        if isinstance(result, AuditResult):
+            result.report = _build_report(result)
+        else:
+            result.summary = _build_directory_report(result)
+    if migration_execution_output:
+        try:
+            execution_report = build_migration_execution(
+                result,
+                output_path=Path(migration_execution_output).expanduser(),
+                mumei_client=pipeline.mumei_client,
+                selected_functions=list(getattr(args, "migration_function", []) or []),
+                heal_attempted=True,
+            )
+        except OSError as exc:
+            print(f"audit: failed to write migration execution output: {exc}", file=sys.stderr)
+            raise SystemExit(2) from exc
+        append_execution_next_step(
+            result,
+            execution_report,
+            Path(migration_execution_output).expanduser(),
         )
         if isinstance(result, AuditResult):
             result.report = _build_report(result)

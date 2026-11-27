@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mumei.dev/schemas/migration-execution.schema.json",
+  "title": "mumei.migration-execution/v1",
+  "description": "Migration execution acceptance evidence. Verification of a generated .mm skeleton proves only that generated contract as written; it is not semantic-equivalence proof for the original host-language function. Behavioral replay/body-port entries are diagnostic evidence only, not formal verdicts.",
+  "type": "object",
+  "required": [
+    "schema",
+    "generated_at",
+    "source",
+    "audit",
+    "selection",
+    "candidates",
+    "operational_errors",
+    "artifact_paths",
+    "evidence_boundary",
+    "summary"
+  ],
+  "properties": {
+    "schema": {"const": "mumei.migration-execution/v1"},
+    "generated_at": {"type": "string"},
+    "source": {
+      "type": "object",
+      "required": ["path", "language", "kind", "sha256"],
+      "properties": {
+        "path": {"type": "string"},
+        "language": {"type": "string"},
+        "kind": {"enum": ["file", "directory"]},
+        "sha256": {"type": ["string", "null"]}
+      }
+    },
+    "audit": {"type": "object"},
+    "selection": {
+      "type": "object",
+      "required": ["basis", "requested_functions", "missing_requested_functions"],
+      "properties": {
+        "basis": {"type": "string"},
+        "requested_functions": {"type": "array", "items": {"type": "string"}},
+        "missing_requested_functions": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "candidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "function_name",
+          "source_provenance",
+          "selection",
+          "extracted_contract",
+          "generated_mm",
+          "heal",
+          "verification",
+          "unbound_audit_diagnostics",
+          "contract_provenance",
+          "evidence_blockers",
+          "operational_errors",
+          "review_required",
+          "execution_state"
+        ],
+        "properties": {
+          "function_name": {"type": "string"},
+          "source_provenance": {"type": "object"},
+          "selection": {"type": "object"},
+          "extracted_contract": {"type": "object", "description": "Contract clauses with credential-sensitive string-literal contents redacted; string_literals_present records presence and string_literals_redacted records sensitive redaction."},
+          "generated_mm": {"type": "object"},
+          "heal": {"type": "object"},
+          "verification": {"type": "object"},
+          "unbound_audit_diagnostics": {"type": "object", "description": "Host-audit diagnostic evidence explicitly not bound to execution of the generated/healed .mm artifact; never semantic-equivalence proof or a formal verdict."},
+          "contract_provenance": {"type": "object", "description": "Original skeleton and final generated/healed contract hashes and clauses for contract-erosion review."},
+          "evidence_blockers": {"type": "array"},
+          "operational_errors": {"type": "array", "items": {"type": "string"}},
+          "review_required": {"type": "boolean"},
+          "execution_state": {"enum": ["not_attempted", "blocked", "operational_error", "ready_for_human_review"]}
+        }
+      }
+    },
+    "operational_errors": {"type": "array", "items": {"type": "string"}},
+    "artifact_paths": {"type": "object"},
+    "evidence_boundary": {"type": "array", "items": {"type": "string"}},
+    "summary": {"type": "object"}
+  },
+  "additionalProperties": true
+}
