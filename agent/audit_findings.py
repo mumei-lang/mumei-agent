@@ -9,7 +9,9 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import subprocess
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from agent.audit_models import AuditDirectoryResult, AuditResult
 
@@ -86,27 +88,15 @@ def build_file_findings(result: AuditResult) -> list[dict]:
 
 
 def _root_relative_source_key(source_file: str, source_dir: str) -> str:
-    root = Path(os.path.expanduser(source_dir)).resolve()
-    checkout_root = None
-    for candidate in (root, *root.parents):
-        if (candidate / ".git").exists():
-            checkout_root = candidate
-    if checkout_root is not None:
-        root_key = root.relative_to(checkout_root).as_posix()
-        if root_key == ".":
-            root_key = root.name
-    else:
-        try:
-            root_key = root.relative_to(Path.cwd().resolve()).as_posix()
-        except (OSError, ValueError):
-            root_key = root.as_posix()
+    key = _stable_source_key(source_file)
+    if key.startswith(("git:", "git-remote:")):
+        return key
     try:
-        relative = Path(os.path.expanduser(source_file)).resolve().relative_to(root).as_posix()
+        return Path(os.path.expanduser(source_file)).resolve().relative_to(
+            Path(os.path.expanduser(source_dir)).resolve()
+        ).as_posix()
     except (OSError, ValueError):
-        return _stable_source_key(source_file)
-    if root_key in {"", "."}:
-        return relative
-    return f"{root_key.rstrip('/')}/{relative}"
+        return key
 
 
 def _refingerprint_for_audit_root(row: dict, source_dir: str) -> None:
@@ -390,20 +380,86 @@ def _redact_message(text: str, known_paths: list[str]) -> str:
     return _ABSOLUTE_PATH_RE.sub("<path>", redacted)
 
 
+def _canonical_remote_key(remote_url: str) -> str:
+    scp_like = re.match(r"^[^@\s]+@([^:\s]+):(.+)$", remote_url)
+    if scp_like:
+        host, path = scp_like.groups()
+    else:
+        parsed = urlsplit(remote_url)
+        host = (parsed.hostname or parsed.netloc).lower()
+        path = parsed.path
+    path = path.removeprefix("/").removesuffix(".git").strip("/")
+    return f"{host}/{path}"
+
+
+_GIT_IDENTITY_CACHE: dict[str, str | None] = {}
+
+
+def _git_identity(checkout_root: Path) -> str | None:
+    """Return a clone-stable identity for a valid git checkout, if available."""
+    cache_key = str(checkout_root)
+    if cache_key in _GIT_IDENTITY_CACHE:
+        return _GIT_IDENTITY_CACHE[cache_key]
+    identity = None
+    try:
+        remote = subprocess.run(
+            ["git", "-C", str(checkout_root), "config", "--get", "remote.origin.url"],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=2,
+        )
+        remote_url = remote.stdout.strip()
+        if remote.returncode == 0 and remote_url:
+            # Hash rather than expose the URL: credential-bearing remotes must
+            # never leak into findings, while the digest remains clone-stable.
+            digest = hashlib.sha256(
+                _canonical_remote_key(remote_url).encode("utf-8", errors="replace")
+            ).hexdigest()[:20]
+            identity = f"git-remote:{digest}"
+        else:
+            completed = subprocess.run(
+                ["git", "-C", str(checkout_root), "rev-list", "--max-parents=0", "HEAD"],
+                capture_output=True,
+                check=False,
+                text=True,
+                timeout=2,
+            )
+            root_commits = sorted(line for line in completed.stdout.splitlines() if line)
+            if completed.returncode == 0 and root_commits:
+                digest = hashlib.sha256(
+                    "\n".join(root_commits).encode("utf-8", errors="replace")
+                ).hexdigest()[:20]
+                identity = f"git:{digest}"
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    _GIT_IDENTITY_CACHE[cache_key] = identity
+    return identity
+
+
 def _stable_source_key(source_file: str) -> str:
-    """Use a checkout-relative source key when possible for stable CI fingerprints."""
+    """Use a repository-scoped source key when possible for stable CI fingerprints."""
     try:
         path = Path(os.path.expanduser(source_file)).resolve()
         start = path if path.is_dir() else path.parent
-        checkout_root = None
+        nearest_checkout = None
+        outermost_checkout = None
         for candidate in (start, *start.parents):
             if (candidate / ".git").exists():
-                # Use the outermost checkout: nested submodules need path keys
-                # relative to the audited superproject, not colliding keys
-                # relative to each submodule root.
-                checkout_root = candidate
-        if checkout_root is not None:
-            return path.relative_to(checkout_root).as_posix()
+                if nearest_checkout is None:
+                    nearest_checkout = candidate
+                outermost_checkout = candidate
+        if nearest_checkout is not None:
+            identity = _git_identity(nearest_checkout)
+            if identity is not None:
+                return (
+                    f"{identity}:"
+                    f"{path.relative_to(nearest_checkout).as_posix()}"
+                )
+            # A bare .git marker in tests or an unborn checkout has no stable
+            # repository identity. Keep the outermost path shape there so
+            # nested markers do not collapse distinct files into one key.
+            return path.relative_to(outermost_checkout).as_posix()
         return path.relative_to(Path.cwd().resolve()).as_posix()
     except (OSError, ValueError):
         pass

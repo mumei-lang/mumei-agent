@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -13,6 +15,18 @@ from agent.audit_baseline import apply_baseline, load_baseline, write_baseline
 from agent.audit_models import AuditResult
 from agent.audit_reporting import _finalize_audit_result
 from agent.audit_sarif import audit_exit_code
+
+
+def _init_git_repo(path: Path, message: str) -> None:
+    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=path, check=True)
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-m", message],
+        cwd=path,
+        check=True,
+        capture_output=True,
+    )
 
 
 def _result(**overrides):
@@ -365,7 +379,8 @@ def test_directory_fingerprints_change_when_audit_root_changes(tmp_path: Path, m
     results = []
     for root_name in ("src", "other"):
         root = tmp_path / root_name
-        (root / ".git").mkdir(parents=True)
+        root.mkdir(parents=True)
+        _init_git_repo(root, root_name)
         target = root / "payment.py"
         target.write_text("def withdraw():\n    pass\n", encoding="utf-8")
         directory = AuditDirectoryResult(
@@ -396,6 +411,32 @@ def test_directory_fingerprint_stable_when_invoked_from_checkout_subdirectory(tm
         directory = AuditDirectoryResult(
             success=False,
             source_dir=audit_root,
+            language="python",
+            file_results=[_result(source_file=str(target))],
+        )
+        _aggregate_directory_fixed_keys(directory)
+        fingerprints.append(directory.findings[0]["fingerprint"])
+
+    assert fingerprints[0] == fingerprints[1]
+
+def test_directory_fingerprint_stable_when_checkout_directory_is_renamed(tmp_path: Path) -> None:
+    from agent.audit_models import AuditDirectoryResult
+    from agent.audit_reporting import _aggregate_directory_fixed_keys
+
+    first = tmp_path / "checkout-one"
+    first.mkdir()
+    _init_git_repo(first, "same-repository")
+    second = tmp_path / "renamed-checkout"
+    shutil.copytree(first, second)
+
+    fingerprints = []
+    for checkout in (first, second):
+        target = checkout / "src" / "payment.py"
+        target.parent.mkdir(exist_ok=True)
+        target.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+        directory = AuditDirectoryResult(
+            success=False,
+            source_dir=str(checkout),
             language="python",
             file_results=[_result(source_file=str(target))],
         )
