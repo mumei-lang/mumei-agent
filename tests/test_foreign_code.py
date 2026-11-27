@@ -8388,3 +8388,26 @@ contract Auction {
         issue.function_name == "settle" and "no access-control guard" in issue.message
         for issue in _detect_solidity_contract_issues(source)
     )
+
+
+def test_solidity_reassigned_caller_alias_does_not_scope_later_balance_access() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_solidity_contract_issues
+
+    source = """
+contract Vault {
+    mapping(address => uint256) balances;
+    address beneficiary;
+    function withdraw() external {
+        address payable recipient = payable(msg.sender);
+        recipient = payable(beneficiary);
+        uint256 amount = balances[recipient];
+        balances[recipient] = 0;
+        (bool ok, ) = recipient.call{value: amount}("");
+        require(ok, "payout failed");
+    }
+}
+"""
+    assert any(
+        issue.function_name == "withdraw" and "no access-control guard" in issue.message
+        for issue in _detect_solidity_contract_issues(source)
+    )

@@ -8974,19 +8974,19 @@ _SOLIDITY_CALLER_ALIAS_DECLARATION = re.compile(
 def _solidity_caller_scoped_access(body: str) -> bool:
     if _SOLIDITY_CALLER_SCOPED_PATTERN.search(body):
         return True
-    aliases = {
-        match.group("name")
-        for match in _SOLIDITY_CALLER_ALIAS_DECLARATION.finditer(body)
-    }
-    for alias in aliases:
-        caller = re.escape(alias)
-        if re.search(
+    for declaration in _SOLIDITY_CALLER_ALIAS_DECLARATION.finditer(body):
+        caller = re.escape(declaration.group("name"))
+        use_pattern = re.compile(
             rf"\[\s*{caller}\s*\]"
             rf"|,\s*{caller}\s*[,)]"
-            rf"|\(\s*{caller}\s*[,)]",
-            body,
-        ):
-            return True
+            rf"|\(\s*{caller}\s*[,)]"
+        )
+        reassignment = re.compile(
+            rf"\b{caller}\s*(?<![=!<>])=(?![=])"
+        )
+        for use in use_pattern.finditer(body, declaration.end()):
+            if reassignment.search(body, declaration.end(), use.start()) is None:
+                return True
     return False
 
 
