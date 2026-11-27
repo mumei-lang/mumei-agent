@@ -87,10 +87,19 @@ def build_file_findings(result: AuditResult) -> list[dict]:
 
 def _root_relative_source_key(source_file: str, source_dir: str) -> str:
     root = Path(os.path.expanduser(source_dir)).resolve()
-    try:
-        root_key = root.relative_to(Path.cwd().resolve()).as_posix()
-    except (OSError, ValueError):
-        root_key = root.as_posix()
+    checkout_root = None
+    for candidate in (root, *root.parents):
+        if (candidate / ".git").exists():
+            checkout_root = candidate
+    if checkout_root is not None:
+        root_key = root.relative_to(checkout_root).as_posix()
+        if root_key == ".":
+            root_key = root.name
+    else:
+        try:
+            root_key = root.relative_to(Path.cwd().resolve()).as_posix()
+        except (OSError, ValueError):
+            root_key = root.as_posix()
     try:
         relative = Path(os.path.expanduser(source_file)).resolve().relative_to(root).as_posix()
     except (OSError, ValueError):

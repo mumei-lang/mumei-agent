@@ -378,3 +378,28 @@ def test_directory_fingerprints_change_when_audit_root_changes(tmp_path: Path, m
         results.append(directory.findings[0]["fingerprint"])
 
     assert results[0] != results[1]
+
+
+def test_directory_fingerprint_stable_when_invoked_from_checkout_subdirectory(tmp_path: Path, monkeypatch) -> None:
+    from agent.audit_models import AuditDirectoryResult
+    from agent.audit_reporting import _aggregate_directory_fixed_keys
+
+    checkout = tmp_path / "checkout"
+    target = checkout / "src" / "payment.py"
+    target.parent.mkdir(parents=True)
+    (checkout / ".git").mkdir()
+    target.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+
+    fingerprints = []
+    for cwd, audit_root in ((checkout, "src"), (checkout / "src", ".")):
+        monkeypatch.chdir(cwd)
+        directory = AuditDirectoryResult(
+            success=False,
+            source_dir=audit_root,
+            language="python",
+            file_results=[_result(source_file=str(target))],
+        )
+        _aggregate_directory_fixed_keys(directory)
+        fingerprints.append(directory.findings[0]["fingerprint"])
+
+    assert fingerprints[0] == fingerprints[1]
