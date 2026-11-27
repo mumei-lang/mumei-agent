@@ -186,7 +186,7 @@ runs:
               exit 2
             fi
             if [ -e "$WRITE_BASELINE_PATH" ] || [ -L "$WRITE_BASELINE_PATH" ]; then
-              WRITE_BASELINE_BEFORE="$(stat -c %y "$WRITE_BASELINE_PATH" 2>/dev/null || echo unreadable)"
+              WRITE_BASELINE_BEFORE="$(python -c 'import os,sys; print(os.stat(sys.argv[1]).st_mtime_ns)' "$WRITE_BASELINE_PATH" 2>/dev/null || echo unreadable)"
             else
               WRITE_BASELINE_BEFORE=absent
             fi
@@ -207,7 +207,7 @@ runs:
           cp "$SARIF_FILE" "$ACTION_STATE/audit.sarif"
         fi
         if [ -n "$WRITE_BASELINE_PATH" ] && [ -f "$WRITE_BASELINE_PATH" ] && [ ! -L "$WRITE_BASELINE_PATH" ]; then
-          WRITE_BASELINE_AFTER="$(stat -c %y "$WRITE_BASELINE_PATH" 2>/dev/null || echo unreadable)"
+          WRITE_BASELINE_AFTER="$(python -c 'import os,sys; print(os.stat(sys.argv[1]).st_mtime_ns)' "$WRITE_BASELINE_PATH" 2>/dev/null || echo unreadable)"
           if [ "$WRITE_BASELINE_BEFORE" = absent ] || [ "$WRITE_BASELINE_AFTER" != "$WRITE_BASELINE_BEFORE" ]; then
             cp "$WRITE_BASELINE_PATH" "$ACTION_STATE/generated-baseline.json"
           fi
