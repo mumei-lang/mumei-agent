@@ -9,6 +9,7 @@ import re
 from typing import Callable, cast
 
 from agent import dataflow_facts, semantic_safety, tree_sitter_extract
+from agent.ts_interprocedural import _pattern_binders
 from agent.config import AgentConfig
 from agent.cross_validation_models import (
     ContractParam,
@@ -597,8 +598,8 @@ def _single_return_expr(function_node: ast.FunctionDef | ast.AsyncFunctionDef) -
         return ""
 
 
-_TYPESCRIPT_RECORD_DECLARATION = re.compile(
-    r"^\ufeff?(?:export\s+)?(?:const|let|var)\s+([A-Za-z_]\w*)\s*:\s*Record\s*<[^<>=]+>(?!\s*\[)",
+_TYPESCRIPT_RECORD_DECLARATION_START = re.compile(
+    r"^\ufeff?(?:export\s+)?(?:const|let|var)\s+([A-Za-z_]\w*)\s*:\s*Record\s*<",
     re.MULTILINE,
 )
 _SOLIDITY_MAPPING_DECLARATION = re.compile(
@@ -611,17 +612,131 @@ _SOLIDITY_ARRAY_DECLARATION = re.compile(
 
 
 def _typescript_associative_containers(code: str) -> set[str]:
-    """Names declared as TypeScript ``Record`` objects rather than arrays."""
+    """Names declared as top-level TypeScript ``Record`` objects, not arrays."""
     masked = _strip_go_rust_literals_and_comments(code, single_quoted_strings=True)
-    return set(_TYPESCRIPT_RECORD_DECLARATION.findall(masked))
+    containers: set[str] = set()
+    for match in _TYPESCRIPT_RECORD_DECLARATION_START.finditer(masked):
+        depth = 1
+        close = -1
+        for index in range(match.end(), len(masked)):
+            char = masked[index]
+            if char == "<":
+                depth += 1
+            elif char == ">" and masked[index - 1] not in "=-":
+                depth -= 1
+                if depth == 0:
+                    close = index
+                    break
+        if close < 0:
+            continue
+        if masked[close + 1 :].lstrip().startswith("["):
+            continue
+        containers.add(match.group(1))
+    return containers
+
+
+def _solidity_mapping_spans(masked: str) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    for match in re.finditer(r"\bmapping\s*\(", masked):
+        opening = masked.find("(", match.start())
+        depth = 0
+        for index in range(opening, len(masked)):
+            if masked[index] == "(":
+                depth += 1
+            elif masked[index] == ")":
+                depth -= 1
+                if depth == 0:
+                    spans.append((match.start(), index + 1))
+                    break
+    return spans
 
 
 def _solidity_mapping_names(code: str) -> set[str]:
     """Names declared as Solidity mappings and never as arrays in this file."""
     masked = _strip_go_rust_literals_and_comments(code, single_quoted_strings=True)
     mappings = set(_SOLIDITY_MAPPING_DECLARATION.findall(masked))
-    arrays = set(_SOLIDITY_ARRAY_DECLARATION.findall(masked))
+    mapping_spans = _solidity_mapping_spans(masked)
+    arrays = {
+        match.group(1)
+        for match in _SOLIDITY_ARRAY_DECLARATION.finditer(masked)
+        if not any(start <= match.start() < end for start, end in mapping_spans)
+    }
     return mappings - arrays
+
+
+def _typescript_pattern_names(node) -> set[str]:
+    if node is None:
+        return set()
+    if node.type == "identifier":
+        return {node.text.decode("utf-8", "replace")}
+    if node.type in {"object_pattern", "array_pattern"}:
+        return set(_pattern_binders(node))
+    return set()
+
+
+def _typescript_binding_names_from_tree(root) -> set[str]:
+    names: set[str] = set()
+
+    def walk(node) -> None:
+        if node.type == "variable_declarator":
+            pattern = node.child_by_field_name("name")
+            if pattern is None and node.named_children:
+                pattern = node.named_children[0]
+            names.update(_typescript_pattern_names(pattern))
+        elif node.type in {"required_parameter", "optional_parameter", "rest_parameter"}:
+            pattern = next(iter(node.named_children), None)
+            names.update(_typescript_pattern_names(pattern))
+        elif node.type in {
+            "function_declaration",
+            "generator_function_declaration",
+            "class_declaration",
+            "abstract_class_declaration",
+        }:
+            name_node = node.child_by_field_name("name")
+            if name_node is not None:
+                names.add(name_node.text.decode("utf-8", "replace"))
+        for child in node.children:
+            walk(child)
+
+    walk(root)
+    return names
+
+
+def _typescript_body_binding_names(body: str) -> set[str] | None:
+    """Local/callback binding names in a function body, or ``None`` to fail closed."""
+    prefix = "async function __mumei_binding_scan__() {\n"
+    tree, _source_bytes = tree_sitter_extract.parse(prefix + body + "\n}", "typescript")
+    if tree is None or tree.root_node.has_error:
+        return None
+    return _typescript_binding_names_from_tree(tree.root_node)
+
+
+def _typescript_param_binding_names(params_text: str) -> set[str] | None:
+    """Binding identifiers in a parameter list, ignoring type-only references."""
+    tree, _source_bytes = tree_sitter_extract.parse(
+        f"function __mumei_param_scan__({params_text}) {{}}", "typescript"
+    )
+    if tree is None or tree.root_node.has_error:
+        return None
+
+    def first_formal_parameters(node):
+        if node.type == "formal_parameters":
+            return node
+        for child in node.children:
+            found = first_formal_parameters(child)
+            if found is not None:
+                return found
+        return None
+
+    formal = first_formal_parameters(tree.root_node)
+    if formal is None:
+        return set()
+    names: set[str] = set()
+    for parameter in formal.children:
+        if parameter.type not in {"required_parameter", "optional_parameter", "rest_parameter"}:
+            continue
+        names.update(_typescript_pattern_names(next(iter(parameter.named_children), None)))
+    return names
 
 
 def _typescript_visible_associative_containers(
@@ -629,20 +744,27 @@ def _typescript_visible_associative_containers(
 ) -> set[str]:
     """Drop global ``Record`` names shadowed by the function being analyzed."""
     visible = set(containers) - param_names
+    parameter_bindings = _typescript_param_binding_names(params_text)
+    if parameter_bindings is None:
+        # Parser fallback: any mention in the raw parameter list may be a binding.
+        visible = {
+            name
+            for name in visible
+            if not re.search(rf"\b{re.escape(name)}\b", params_text)
+        }
+    else:
+        visible -= parameter_bindings
     if not visible:
         return visible
+    body_bindings = _typescript_body_binding_names(body)
+    if body_bindings is not None:
+        return visible - body_bindings
+    # Without tree-sitter, fail closed when a declaration or callback may shadow
+    # the global Record. This loses precision but never drops array bounds.
     masked = _strip_go_rust_literals_and_comments(body, single_quoted_strings=True)
     for name in list(visible):
-        if re.search(rf"\b{re.escape(name)}\b", params_text):
-            visible.discard(name)
-            continue
         name_used = re.search(rf"\b{re.escape(name)}\b", masked)
-        possible_local_binding = re.search(r"\b(?:const|let|var)\b", masked)
-        possible_arrow = "=>" in masked
-        if name_used and (possible_local_binding or possible_arrow):
-            # Lexical shadowing is hard to prove with this lightweight extractor;
-            # keep array bounds whenever a local binding or callback may shadow
-            # the global Record. This is conservative and only loses precision.
+        if name_used and (re.search(r"\b(?:const|let|var)\b", masked) or "=>" in masked):
             visible.discard(name)
     return visible
 

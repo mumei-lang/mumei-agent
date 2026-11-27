@@ -1933,22 +1933,63 @@ contract Rewards {
 
 
 
-def test_typescript_record_array_and_destructured_shadow_keep_array_bounds() -> None:
+def test_typescript_record_array_declaration_keeps_array_bounds() -> None:
     from agent.cross_validation_foreign import _infer_typescript_contracts
 
     source = """
-export const values: Record<string, number>[] = [];
-export function valueAt(values: number[], index: number): number {
-  return values[index];
+export const table: Record<string, number>[] = [];
+export function direct(index: number): number {
+  return table[index];
 }
+"""
+    atom = _infer_typescript_contracts(source)[0]
+    assert "index < len_table" in atom.requires
+
+
+def test_typescript_destructured_shadow_keeps_array_bounds() -> None:
+    from agent.cross_validation_foreign import _infer_typescript_contracts
+
+    source = """
+export const values: Record<string, number> = {};
 export function destructured(index: number): number {
   const { values } = { values: [1] };
   return values[index];
 }
 """
+    atom = _infer_typescript_contracts(source)[0]
+    assert "index < len_values" in atom.requires
+
+
+def test_typescript_nested_record_and_typeof_reference_do_not_generate_array_bounds() -> None:
+    from agent.cross_validation_foreign import _infer_typescript_contracts
+
+    source = """
+export const nested: Record<number, Record<string, number>> = {};
+export const costs: Record<string, number> = {};
+export function nestedAt(index: number): Record<string, number> {
+  return nested[index];
+}
+export function costOf(key: keyof typeof costs): number {
+  return costs[key];
+}
+"""
     atoms = {atom.name: atom for atom in _infer_typescript_contracts(source)}
-    assert "index < len_values" in atoms["valueAt"].requires
-    assert "index < len_values" in atoms["destructured"].requires
+    assert atoms["nestedAt"].requires == "true"
+    assert atoms["costOf"].requires == "true"
+
+
+def test_typescript_unrelated_local_does_not_shadow_record() -> None:
+    from agent.cross_validation_foreign import _infer_typescript_contracts
+
+    source = """
+export const prices: Record<string, number> = {};
+export function priceOf(key: string): number {
+  const fee = 2;
+  return prices[key] + fee;
+}
+"""
+    atom = _infer_typescript_contracts(source)[0]
+    assert atom.requires == "true"
 
 
 def test_solidity_fixed_array_bytes_collision_and_override_mapping() -> None:
@@ -1957,6 +1998,7 @@ def test_solidity_fixed_array_bytes_collision_and_override_mapping() -> None:
     source = """
 contract A {
     mapping(address => uint256) private values;
+    mapping(address => bytes) private data;
     mapping(address => uint256) public override balances;
     function balanceOf(address user) external view returns (uint256) { return balances[user]; }
 }
@@ -1971,6 +2013,17 @@ contract B {
     assert atoms["balanceOf"].requires == "true"
     assert "index < len_values" in atoms["valueAt"].requires
     assert "index < len_data" in atoms["byteAt"].requires
+
+
+def test_solidity_mapping_value_label_does_not_disable_mapping_suppression() -> None:
+    from agent.cross_validation_foreign import _solidity_mapping_names
+
+    source = """
+contract A {
+    mapping(uint256 => bytes payload) public payload;
+}
+"""
+    assert _solidity_mapping_names(source) == {"payload"}
 
 
 def test_solidity_interface_functions_are_extracted_as_trusted_atoms() -> None:
