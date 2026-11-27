@@ -40,14 +40,20 @@ def _finish(args: argparse.Namespace, payload: dict[str, object], *, error: str 
     if payload["status"] != "not_requested":
         target_dir.mkdir(parents=True, exist_ok=True)
         (target_dir / "status.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    counts = payload.get("counts") if isinstance(payload.get("counts"), dict) else {}
+    operational_error_count = counts.get("operational_error", 0)
     _write_outputs(
         args.github_output,
         {
             "migration_execution_status": payload["status"],
             "migration_execution_ready_count": payload["ready_count"],
+            "migration_execution_operational_error_count": operational_error_count,
         },
     )
-    return 0 if payload["status"] != "operational_error" else 2
+    candidate_operational_failure = payload["status"] == "emitted_by_audit_cli" and operational_error_count != 0
+    if candidate_operational_failure:
+        return 3
+    return 2 if payload["status"] == "operational_error" else 0
 
 
 def _load(path: Path) -> dict[str, Any]:

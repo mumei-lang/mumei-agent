@@ -45,6 +45,7 @@ jobs:
             echo "- total_seconds: \`${{ steps.audit.outputs.total_seconds }}\`";
             echo "- migration_execution_status: \`${{ steps.audit.outputs.migration_execution_status }}\`";
             echo "- migration_execution_ready_count: \`${{ steps.audit.outputs.migration_execution_ready_count }}\`";
+            echo "- migration_execution_operational_error_count: \`${{ steps.audit.outputs.migration_execution_operational_error_count }}\`";
           } >> "$GITHUB_STEP_SUMMARY"
 
   verify-artifact:
