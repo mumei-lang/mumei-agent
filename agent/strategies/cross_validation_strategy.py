@@ -876,6 +876,188 @@ def _has_unenforced_precondition(requires: str, body: str, language: str = "") -
     return False
 
 
+
+def _split_go_call_args(text: str) -> list[str]:
+    args: list[str] = []
+    start = 0
+    depth = 0
+    quote = ""
+    for index, char in enumerate(text):
+        if quote:
+            if char == quote and (index == 0 or text[index - 1] != "\\"):
+                quote = ""
+            continue
+        if char in {'"', "'", "`"}:
+            quote = char
+        elif char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+        elif char == "," and depth == 0:
+            args.append(text[start:index].strip())
+            start = index + 1
+    tail = text[start:].strip()
+    if tail:
+        args.append(tail)
+    return args
+
+
+def _go_call_args_at(text: str, open_paren: int) -> tuple[list[str], int] | None:
+    depth = 1
+    index = open_paren + 1
+    while index < len(text) and depth:
+        if text[index] == "(":
+            depth += 1
+        elif text[index] == ")":
+            depth -= 1
+        index += 1
+    if depth:
+        return None
+    return _split_go_call_args(text[open_paren + 1:index - 1]), index
+
+
+
+def _go_handler_registration_spans(text: str, handler_name: str) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    handle_func = re.compile(r"\b([A-Za-z_]\w*)\.HandleFunc\s*\(")
+    for match in re.finditer(handle_func, text):
+        parsed = _go_call_args_at(text, match.end() - 1)
+        if parsed is None:
+            continue
+        args, end = parsed
+        receiver = match.group(1)
+        servemux_init = re.compile(
+            rf"\b(?:var\s+{re.escape(receiver)}\s*=|{re.escape(receiver)}\s*:=)\s*http\.NewServeMux\s*\("
+        )
+        handler_elsewhere = any(
+            re.search(rf"\b{re.escape(handler_name)}\b", arg)
+            for index, arg in enumerate(args)
+            if index != 1
+        )
+        if (
+            len(args) >= 2
+            and args[1] == handler_name
+            and not handler_elsewhere
+            and (receiver == "http" or servemux_init.search(text))
+        ):
+            spans.append((match.start(), end))
+    handler_conversion = re.compile(r"\bhttp\.HandlerFunc\s*\(")
+    for match in re.finditer(handler_conversion, text):
+        parsed = _go_call_args_at(text, match.end() - 1)
+        if parsed is None:
+            continue
+        args, end = parsed
+        if len(args) == 1 and args[0] == handler_name:
+            spans.append((match.start(), end))
+    return spans
+
+
+def _go_handler_only_framework_invoked(
+    files: list[tuple[str, list[object]]], handler_name: str
+) -> bool:
+    registered = False
+    for text, functions in files:
+        declaration = next((fn for fn in functions if getattr(fn, "raw_name", "") == handler_name), None)
+        registration_spans = _go_handler_registration_spans(text, handler_name)
+        registered = registered or bool(registration_spans)
+        for match in re.finditer(rf"\b{re.escape(handler_name)}\b", text):
+            start = match.start()
+            if start > 0 and text[start - 1] == ".":
+                continue
+            if declaration is not None and declaration.start_char <= start < declaration.body_start_char:
+                continue
+            if any(span_start <= start < span_end for span_start, span_end in registration_spans):
+                continue
+            return False
+    return registered
+
+
+def _go_nil_precondition_caller_guaranteed(impl_path: str, function_name: str, param_name: str) -> bool:
+    if not function_name or function_name[0].isupper():
+        return False
+    try:
+        paths = sorted(
+            path for path in Path(impl_path).parent.glob("*.go") if not path.name.endswith("_test.go")
+        )
+        raw_files = [(path.read_text(encoding="utf-8"), path) for path in paths]
+    except OSError:
+        return False
+
+    from agent.cross_validation_foreign import _go_param_types, _strip_go_rust_literals_and_comments
+    from agent import tree_sitter_extract
+
+    files: list[tuple[str, list[object]]] = []
+    target = None
+    for source, _path in raw_files:
+        text = _strip_go_rust_literals_and_comments(source)
+        functions = tree_sitter_extract.extract_contract_functions(text, "go", lambda name: name)
+        if functions is None:
+            return False
+        files.append((text, list(functions)))
+        for fn in functions:
+            if getattr(fn, "raw_name", "") == function_name:
+                if target is not None:
+                    return False
+                target = (text, fn)
+    if target is None:
+        return False
+    target_text, target_fn = target
+    if re.search(r"(?<![\w])_(?![\w])", target_fn.params_text):
+        return False
+    target_param_types = _go_param_types(target_fn.params_text)
+    param_names = list(target_param_types)
+    if param_name not in target_param_types:
+        return False
+    param_index = param_names.index(param_name)
+
+    callers: set[str] = set()
+    saw_call = False
+    occurrence_re = re.compile(rf"\b{re.escape(function_name)}\b")
+    for text, functions in files:
+        for match in occurrence_re.finditer(text):
+            start = match.start()
+            if start > 0 and text[start - 1] == ".":
+                continue
+            if text is target_text and target_fn.start_char <= start < target_fn.body_start_char:
+                continue
+            open_paren = match.end()
+            while open_paren < len(text) and text[open_paren].isspace():
+                open_paren += 1
+            if open_paren >= len(text) or text[open_paren] != "(":
+                return False
+            line_prefix = text[text.rfind("\n", 0, start) + 1:start]
+            if re.search(r"\b(?:go|defer)\s*$", line_prefix):
+                return False
+            enclosing = next(
+                (fn for fn in functions if fn.body_start_char <= start < fn.body_end_char), None
+            )
+            if enclosing is None or getattr(enclosing, "raw_name", "") == function_name:
+                return False
+            parsed_call = _go_call_args_at(text, open_paren)
+            if parsed_call is None:
+                return False
+            args, _end = parsed_call
+            if len(args) <= param_index:
+                return False
+            arg = args[param_index]
+            if not re.fullmatch(r"[A-Za-z_]\w*", arg):
+                return False
+            param_types = _go_param_types(enclosing.params_text)
+            if param_types.get(arg) != "*http.Request" or "http.ResponseWriter" not in param_types.values():
+                return False
+            body_prefix = text[enclosing.body_start_char:start]
+            assignment_re = re.compile(
+                rf"(?:^|[;{{\n]|\bif\s+|\bfor\s+|\bswitch\s+)\s*(?:[\w.]+,\s*)*{re.escape(arg)}(?:\s*,[^=;\n]*)?\s*(?::=|=(?!=))",
+                re.MULTILINE,
+            )
+            if assignment_re.search(body_prefix):
+                return False
+            callers.add(enclosing.raw_name)
+            saw_call = True
+    if not saw_call:
+        return False
+    return all(_go_handler_only_framework_invoked(files, caller) for caller in callers)
+
 # ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
@@ -1027,6 +1209,13 @@ class CrossValidator:
                     if function is not None else _extract_function_body(impl_source, language, impl_name)
                 )
                 if body and _has_unenforced_precondition(atom["requires"], body, language):
+                    nil_match = re.fullmatch(r"\s*(\w+)\s*!=\s*nil\s*;?\s*", atom["requires"])
+                    if (
+                        _canonical_language(language) == "go"
+                        and nil_match
+                        and _go_nil_precondition_caller_guaranteed(impl_path, impl_name, nil_match.group(1))
+                    ):
+                        continue
                     report.spec_stronger_than_impl.append(atom["name"])
                     report._precondition_gap_atoms.append(atom["name"])
                     # The requires literal itself is not echoed: spec text may
