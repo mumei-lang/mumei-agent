@@ -8092,8 +8092,19 @@ def _sentinel_guarded(
         # A braceless early exit nested inside another ``if`` does not dominate
         # code after that outer block. Object literals may contain braces, so
         # inspect only the text after the exit statement's first semicolon.
-        semicolon = tail.find(";")
-        return semicolon >= 0 and "}" not in tail[semicolon + 1 :]
+        masked_tail = _strip_go_rust_literals_and_comments(tail)
+        semicolon = masked_tail.find(";")
+        if semicolon < 0:
+            return False
+        depth = 0
+        for ch in masked_tail[semicolon + 1 :]:
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                if depth == 0:
+                    return False
+                depth -= 1
+        return True
 
     if kind == "minus1":
         safe_re = re.compile(
@@ -8226,7 +8237,7 @@ def _sentinel_index_issues(
                 ):
                     intervening = body[assignment.end() : match.start()]
                     array_mutated = re.search(
-                        rf"\b{re.escape(array_name)}\s*(?:\.\s*(?:push|pop|shift|unshift|splice)\s*\(|\s*=[^=]|\.length\s*=|\[[^\]]+\]\s*=)",
+                        rf"\b{re.escape(array_name)}\s*(?:\.\s*(?:pop|shift|splice)\s*\(|(?<![=!<>])=(?![=>])|\.length\s*(?<![=!<>])=(?![=>])|\[[^\]]+\]\s*(?<![=!<>])=(?![=>]))",
                         intervening,
                     )
                     if array_mutated is None:

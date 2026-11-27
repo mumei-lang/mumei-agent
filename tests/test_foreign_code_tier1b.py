@@ -655,3 +655,26 @@ def test_ts_indexof_find_provenance_still_flagged_after_mutation() -> None:
         "tasks.splice(0, 1); tasks[tasks.indexOf(task)] = task;"
     )
     assert any("indexOf" in issue.message for issue in _sentinel_issues(body, "TypeScript"))
+
+def test_ts_find_object_literal_after_early_exit_still_guarded() -> None:
+    body = (
+        "const el = xs.find(x => x > 0); if (!el) return; "
+        "const out = { value: el.value }; return out.value;"
+    )
+    assert not _sentinel_issues(body, "TypeScript")
+
+
+def test_ts_indexof_length_comparison_and_push_do_not_invalidate_membership() -> None:
+    body = (
+        "const task = tasks.find((t) => t.id === id); if (!task) return 0; "
+        "if (tasks.length === 1) tasks.push(task); tasks[tasks.indexOf(task)] = task;"
+    )
+    assert not _sentinel_issues(body, "TypeScript")
+
+
+def test_ts_indexof_pop_still_invalidates_membership() -> None:
+    body = (
+        "const task = tasks.find((t) => t.id === id); if (!task) return 0; "
+        "tasks.pop(); tasks[tasks.indexOf(task)] = task;"
+    )
+    assert any("indexOf" in issue.message for issue in _sentinel_issues(body, "TypeScript"))
