@@ -266,7 +266,7 @@ def main() -> None:
             # part of the audited output contract.
             print(f"audit: operational error ({type(exc).__name__})", file=sys.stderr)
             raise SystemExit(2) from exc
-        raise SystemExit(audit_exit_code(result))
+        raise SystemExit(audit_exit_code(result, fail_on=args.fail_on))
     elif command == "extract-spec":
         import argparse
         from agent.extract_spec import build_parser as extract_build_parser, main as extract_main

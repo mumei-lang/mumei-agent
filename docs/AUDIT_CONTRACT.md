@@ -98,7 +98,27 @@ The `python -m agent audit` process classifies completion independently of the s
 | `1` | evidence against the audited code exists (`verification_violations` or a `refuted` file) |
 | `2` | argument validation failed, extraction/operational errors occurred, or malformed extraction meant the code was never checked |
 
-`--sarif-output <PATH>` writes a SARIF 2.1.0 artifact alongside `--format`/`--output`; it does not replace the stable JSON audit keys. SARIF results are derived only from those keys: `verification_violations` map to `mumei.audit/verification-violation` errors, spec health and cross-validation diagnostics map to warnings, trusted atoms map to review warnings, and operational errors map to `mumei.audit/audit-error`. Locations use repo-relative artifact URIs when the audited file is under the current working directory; files outside it use opaque `external/<hash>` artifact URIs, and machine-local absolute paths in messages are redacted or relativized. Findings are file-level unless the audit key carries a source line (currently trusted atoms), malformed-extraction entries map to audit errors, and each result has a deterministic `mumeiAuditFinding/v1` partial fingerprint for baseline tracking.
+`--sarif-output <PATH>` writes a SARIF 2.1.0 artifact alongside `--format`/`--output`; it does not replace the stable JSON audit keys. SARIF results are derived only from those keys: `verification_violations` map to `mumei.audit/verification-violation` errors, spec health and cross-validation diagnostics map to warnings, trusted atoms map to review warnings, and operational errors map to `mumei.audit/audit-error`. Locations use repo-relative artifact URIs when the audited file is under the current working directory; files outside it use opaque `external/<hash>` artifact URIs, and machine-local absolute paths in messages are redacted or relativized. Findings are file-level unless the audit key carries a source line (currently trusted atoms), malformed-extraction entries map to audit errors, and each result has a deterministic `mumeiAuditFinding/v1` partial fingerprint. When `--baseline` is used, SARIF rows also carry `baselineState` (`new` or `unchanged`) derived from the finding-level baseline annotation.
+
+### Baseline and fail-on policy
+
+`--write-baseline <PATH>` writes a deterministic `mumei.audit-baseline/v1` JSON file containing the sorted fingerprints of the current `findings`. `--baseline <PATH>` reads that schema, annotates each matching finding as `baseline: "suppressed"` (others are `baseline: "new"`), and excludes suppressed code findings from exit-code failure evaluation. The fixed audit keys are not rewritten: baseline suppression is a CI policy overlay, not evidence removal. Operational errors and malformed extraction still exit `2`, even when their rows match a baseline, because the code was not checked normally.
+
+`--fail-on` selects the finding-driven exit-1 policy after baseline suppression:
+
+| Policy | Exit `1` when |
+| --- | --- |
+| `refuted` (default) | any non-suppressed code finding exists, or a refuted file has no finding row that a baseline could suppress |
+| `error` | any non-suppressed error-severity finding exists (today primarily code findings; operational errors still exit `2`) |
+| `high-confidence` | a non-suppressed code finding has `confidence: "high"`; an unbaselinable refuted verdict also fails because its confidence cannot be established |
+| `never` | findings never cause exit `1`; operational/extraction errors still exit `2` |
+
+A typical rollout writes the baseline once, reviews it into the repository, then fails only on newly introduced findings:
+
+```bash
+uv run mumei-agent audit --code-file src/ --write-baseline audit-baseline.json --sarif-output reports/audit.sarif
+uv run mumei-agent audit --code-file src/ --baseline audit-baseline.json --fail-on high-confidence --sarif-output reports/audit.sarif
+```
 
 ## Finding metadata and triage projection
 

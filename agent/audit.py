@@ -26,6 +26,7 @@ from agent.audit_models import (
     ForeignCodeVerifierLike,
     MumeiVerifyClientLike,
 )
+from agent.audit_baseline import apply_baseline, load_baseline, write_baseline
 from agent.audit_reporting import (
     _aggregate_directory_fixed_keys,
     _append_text_next_step,
@@ -1124,6 +1125,25 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
             "independent of --format/--output and uses the stable audit keys."
         ),
     )
+    parser.add_argument(
+        "--baseline",
+        metavar="PATH",
+        help="Read an audit baseline (mumei.audit-baseline/v1) and suppress matching finding fingerprints.",
+    )
+    parser.add_argument(
+        "--write-baseline",
+        metavar="PATH",
+        help="Write the current audit finding fingerprints as a baseline file.",
+    )
+    parser.add_argument(
+        "--fail-on",
+        choices=["refuted", "error", "high-confidence", "never"],
+        default="refuted",
+        help=(
+            "CI failure policy for non-suppressed findings (default: refuted). "
+            "Operational/extraction errors still exit 2."
+        ),
+    )
     parser.add_argument("--domain-hint", default="", help="Optional domain hint for spec extraction.")
     parser.add_argument(
         "--auto-migrate",
@@ -1688,6 +1708,47 @@ def _check_scheduled_verification(
     }
 
 
+def _normalized_output_path(path: str) -> str:
+    return os.path.realpath(os.path.expanduser(path))
+
+
+def _same_output_path(left: str | None, right: str | None) -> bool:
+    if not left or not right:
+        return False
+    try:
+        return os.path.samefile(left, right)
+    except OSError:
+        return _normalized_output_path(left) == _normalized_output_path(right)
+
+
+def _output_conflicts_with_audit_inputs(
+    output_path: str,
+    args: argparse.Namespace,
+    declared_input_paths: tuple[str, ...],
+) -> bool:
+    conflicting = _same_output_path(output_path, args.output) or _same_output_path(
+        output_path, os.path.expanduser(args.code_file)
+    ) or any(
+        _same_output_path(output_path, path)
+        for path in declared_input_paths
+    )
+    audit_input_path = Path(os.path.expanduser(args.code_file))
+    if not conflicting and audit_input_path.is_dir():
+        audited_candidates = [
+            *(
+                candidate
+                for candidate in audit_input_path.rglob("*")
+                if candidate.is_file()
+                and candidate.suffix in {*AUDIT_EXTENSION_MAP, ".mm"}
+            )
+        ]
+        conflicting = any(
+            _same_output_path(output_path, str(candidate))
+            for candidate in audited_candidates
+        )
+    return conflicting
+
+
 def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectoryResult:
     args = args or build_parser().parse_args()
     if getattr(args, "enable_summary_attempts", False) and not getattr(
@@ -1795,60 +1856,58 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
                 file=sys.stderr,
             )
             raise SystemExit(2)
+    declared_input_paths = tuple(
+        path
+        for name in (
+            "schedule_request",
+            "schedule_adapters",
+            "schedule_argv_map",
+            "schedule_policy",
+            "schedule_observations",
+            "schedule_core",
+            "schedule_core_requirement",
+            "schedule_core_requirement_list",
+        )
+        if (path := getattr(args, name, None)) is not None
+    )
     sarif_output = getattr(args, "sarif_output", None)
-    if sarif_output:
-        def _normalized_output_path(path: str) -> str:
-            return os.path.realpath(os.path.expanduser(path))
-
-        def _same_output_path(left: str | None, right: str | None) -> bool:
-            if not left or not right:
-                return False
-            try:
-                return os.path.samefile(left, right)
-            except OSError:
-                return _normalized_output_path(left) == _normalized_output_path(right)
-
-        declared_input_paths = tuple(
-            path
-            for name in (
-                "schedule_request",
-                "schedule_adapters",
-                "schedule_argv_map",
-                "schedule_policy",
-                "schedule_observations",
-                "schedule_core",
-                "schedule_core_requirement",
-                "schedule_core_requirement_list",
-            )
-            if (path := getattr(args, name, None)) is not None
+    if sarif_output and _output_conflicts_with_audit_inputs(
+        sarif_output, args, declared_input_paths
+    ):
+        print(
+            "audit: --sarif-output must not overwrite --output, --code-file, "
+            "or a declared schedule input",
+            file=sys.stderr,
         )
-        conflicting = _same_output_path(sarif_output, args.output) or _same_output_path(
-            sarif_output, os.path.expanduser(args.code_file)
-        ) or any(
-            _same_output_path(sarif_output, path)
-            for path in declared_input_paths
+        raise SystemExit(2)
+    write_baseline_path = getattr(args, "write_baseline", None)
+    if write_baseline_path and _output_conflicts_with_audit_inputs(
+        write_baseline_path, args, declared_input_paths
+    ):
+        print(
+            "audit: --write-baseline must not overwrite --output, --code-file, "
+            "or a declared schedule input",
+            file=sys.stderr,
         )
-        audit_input_path = Path(os.path.expanduser(args.code_file))
-        if not conflicting and audit_input_path.is_dir():
-            audited_candidates = [
-                *(
-                    candidate
-                    for candidate in audit_input_path.rglob("*")
-                    if candidate.is_file()
-                    and candidate.suffix in {*AUDIT_EXTENSION_MAP, ".mm"}
-                )
-            ]
-            conflicting = any(
-                _same_output_path(sarif_output, str(candidate))
-                for candidate in audited_candidates
-            )
-        if conflicting:
-            print(
-                "audit: --sarif-output must not overwrite --output, --code-file, "
-                "or a declared schedule input",
-                file=sys.stderr,
-            )
-            raise SystemExit(2)
+        raise SystemExit(2)
+    if (
+        write_baseline_path
+        and sarif_output
+        and _same_output_path(write_baseline_path, sarif_output)
+    ):
+        print(
+            "audit: --write-baseline must not overwrite --sarif-output",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+    baseline_fingerprints: set[str] = set()
+    if getattr(args, "baseline", None):
+        try:
+            baseline_fingerprints = load_baseline(args.baseline)
+        except ValueError as exc:
+            print(f"audit: {exc}", file=sys.stderr)
+            raise SystemExit(2) from exc
 
     config = AgentConfig(mumei_lean_repo=getattr(args, "mumei_lean_repo", None))
     result = AuditPipeline(config=config, heal_output_dir=args.heal_output_dir).audit_file(
@@ -1878,6 +1937,14 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
         summary_plan_histories=getattr(args, "summary_plan_histories", None),
         scheduled_verification=scheduled_verification,
     )
+    if getattr(args, "baseline", None):
+        apply_baseline(result, baseline_fingerprints)
+    if write_baseline_path:
+        try:
+            write_baseline(result, write_baseline_path)
+        except OSError as exc:
+            print(f"audit: failed to write baseline output: {exc}", file=sys.stderr)
+            raise SystemExit(2) from exc
     output_format = "json" if args.json else args.format
     payload = _format_result(result, output_format)
     if args.output:
