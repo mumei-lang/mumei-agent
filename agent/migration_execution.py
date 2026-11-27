@@ -220,7 +220,7 @@ def _simple_token(tokens: list[tuple[str, str]], kind: str) -> tuple[str, str] |
 
 def _is_credential_operand(tokens: list[tuple[str, str]]) -> bool:
     token = _simple_token(tokens, "name")
-    return token is not None and _CREDENTIAL_NAME_RE.search(token[1]) is not None
+    return token is not None and _CREDENTIAL_NAME_RE.search(token[1].split(".")[-1]) is not None
 
 
 def _string_operand(tokens: list[tuple[str, str]]) -> str | None:
@@ -331,14 +331,18 @@ def migration_output_key(source_path: str | Path, skeleton: str) -> str:
 
 
 def migration_output_target(output_dir: Path, source_path: str | Path, function_name: str, skeleton: str) -> Path:
+    def occupied(candidate: Path) -> bool:
+        backup = Path(str(candidate) + ".bak")
+        return candidate.exists() or candidate.is_symlink() or backup.exists() or backup.is_symlink()
+
     key = migration_output_key(source_path, skeleton)
     candidate = output_dir / f"{function_name}-{key}.mm"
-    if not candidate.exists() and not candidate.is_symlink():
+    if not occupied(candidate):
         return candidate
     suffix = 1
     while True:
         candidate = output_dir / f"{function_name}-{key}-{suffix}.mm"
-        if not candidate.exists() and not candidate.is_symlink():
+        if not occupied(candidate):
             return candidate
         suffix += 1
 

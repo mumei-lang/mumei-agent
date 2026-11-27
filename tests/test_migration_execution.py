@@ -875,3 +875,39 @@ def test_credential_like_function_argument_is_not_a_direct_comparison(tmp_path: 
     assert candidate["execution_state"] == "ready_for_human_review"
     assert candidate["extracted_contract"]["requires"] == ['classify(token_kind) == "public"']
     assert candidate["extracted_contract"]["string_literals_redacted"] is False
+
+
+
+def test_auth_mode_public_label_is_not_treated_as_credential_value(tmp_path: Path) -> None:
+    source = tmp_path / "payment.py"
+    source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+    skeleton = 'atom withdraw() -> i64 {\n    requires: auth.mode == "public";\n    ensures: result >= 0;\n    body: { 0 }\n}'
+
+    report = build_migration_execution(
+        _result(source, [_hint("withdraw", skeleton)]),
+        output_path=tmp_path / "execution.json",
+        mumei_client=FakeVerifyClient(),
+    )
+
+    candidate = report["candidates"][0]
+    assert candidate["execution_state"] == "ready_for_human_review"
+    assert candidate["extracted_contract"]["requires"] == ['auth.mode == "public"']
+    assert candidate["extracted_contract"]["string_literals_redacted"] is False
+
+
+def test_existing_backup_marks_migration_target_as_occupied(tmp_path: Path) -> None:
+    source = tmp_path / "source.py"
+    source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+    hint = _hint("withdraw")
+    key = migration_output_key(source, hint["skeleton"])
+    backup = tmp_path / f"withdraw-{key}.mm.bak"
+    backup.write_text("pre-existing backup", encoding="utf-8")
+    pipeline = object.__new__(AuditPipeline)
+    pipeline.heal_output_dir = tmp_path
+    pipeline._run_heal_loop = lambda target: None
+
+    healed, errors = pipeline._heal_migration_hints([hint], source)
+
+    assert errors == []
+    assert Path(healed[0]).name.endswith("-1.mm")
+    assert backup.read_text(encoding="utf-8") == "pre-existing backup"
