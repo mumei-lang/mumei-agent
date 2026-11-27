@@ -1987,51 +1987,57 @@ def _rust_guarded_indices(body: str) -> set[str]:
     return guarded
 
 
-def _rust_guarded_nonempty_len_divisors(
-    body: str, raw_param_types: dict[str, str] | None = None
-) -> set[str]:
-    """Return ``x.len()`` divisors made non-zero by a dominating empty check.
+def _rust_collection_len_division_issues(
+    function_name: str, body: str, raw_param_types: dict[str, str] | None = None
+) -> list[ForeignSafetyIssue]:
+    """Find integer division/modulo by simple collection ``len()`` in Rust.
 
-    The suppression is deliberately narrow: the receiver must be an immutable
-    reference parameter, the empty check must be a top-level ``if`` whose
-    consequence exits directly, and a later use of the same receiver's length
-    must exist. Mutable references and local mutable values are not suppressed
-    here because their length can change after the guard.
+    Unlike the expression-level heuristic, this scan is positional: an empty
+    check suppresses a finding only when it is a top-level early-exit guard
+    that textually dominates the division. Suppression is further limited to
+    immutable reference parameters whose raw type is still visible after
+    shadowing analysis. The finding itself is type-independent because zero
+    integer division panics regardless of whether the receiver is mutable.
     """
-    immutable_receivers = {
-        name
-        for name, type_text in (raw_param_types or {}).items()
-        if re.fullmatch(
-            r"&\s*(?:'\w+\s+)?(?:\[[^\]]+\]|Vec\s*<.+>)",
-            re.sub(r"\s+", " ", type_text.strip()),
-        )
-    }
-    if not immutable_receivers:
-        return set()
     parser = tree_sitter_extract._get_parser("rust")
     if parser is None:
-        return set()
-    source = f"fn __mumei_len_guard() {{\n{body}\n}}"
+        return []
+    source = f"fn __mumei_len_division_scan() {{\n{body}\n}}"
     source_bytes = source.encode("utf-8")
     try:
         tree = parser.parse(source_bytes)
     except Exception:
-        return set()
+        return []
     if tree.root_node.has_error:
-        return set()
+        return []
     function = next(
         (child for child in tree.root_node.named_children if child.type == "function_item"),
         None,
     )
     block = function.child_by_field_name("body") if function is not None else None
     if block is None:
-        return set()
+        return []
 
     def text(node) -> str:
         return source_bytes[node.start_byte : node.end_byte].decode("utf-8")
 
+    normalized_types = {
+        name: re.sub(r"\s+", "", type_text.strip())
+        for name, type_text in (raw_param_types or {}).items()
+    }
+    immutable_receivers = {
+        name
+        for name, type_text in normalized_types.items()
+        if re.fullmatch(r"&(?:'\w+)?(?:\[[^\]]+\]|Vec<.+>)", type_text)
+    }
+
+    def fixed_len_is_nonzero(receiver: str) -> bool:
+        type_text = normalized_types.get(receiver, "")
+        array = re.fullmatch(r"&(?:'\w+)?\[[^;]+;(\d+)\]", type_text)
+        return array is not None and int(array.group(1)) > 0
+
     def simple_len_call(node) -> str | None:
-        if node.type != "call_expression":
+        if node is None or node.type != "call_expression":
             return None
         function_node = node.child_by_field_name("function")
         if function_node is None or function_node.type != "field_expression":
@@ -2041,6 +2047,21 @@ def _rust_guarded_nonempty_len_divisors(
         if value is None or field is None or text(field) != "len":
             return None
         return text(value) if value.type == "identifier" else None
+
+    def len_divisor_receiver(node) -> str | None:
+        if node is None:
+            return None
+        direct = simple_len_call(node)
+        if direct is not None:
+            return direct
+        if node.type != "type_cast_expression":
+            return None
+        cast_type = node.child_by_field_name("type")
+        if cast_type is None or not re.fullmatch(
+            r"(?:i|u)(?:64|128|size)", text(cast_type)
+        ):
+            return None
+        return simple_len_call(node.child_by_field_name("value"))
 
     def guard_receiver(condition) -> str | None:
         if condition is None:
@@ -2077,38 +2098,76 @@ def _rust_guarded_nonempty_len_divisors(
                     return True
         return False
 
-    def contains_len_use(node, receiver: str) -> bool:
-        if simple_len_call(node) == receiver:
-            return True
-        return any(contains_len_use(child, receiver) for child in node.named_children)
-
-    def contains_receiver_write(node, receiver: str) -> bool:
-        if node.type == "assignment_expression":
-            left = node.child_by_field_name("left")
-            if left is not None and left.type == "identifier" and text(left) == receiver:
-                return True
-        return any(contains_receiver_write(child, receiver) for child in node.named_children)
-
-    guarded: set[str] = set()
-    siblings = list(block.named_children)
-    for index, statement in enumerate(siblings):
+    guards: list[tuple[str, int, int]] = []
+    for statement in block.named_children:
         if statement.type != "expression_statement" or not statement.named_children:
             continue
         if_expression = statement.named_children[0]
         if if_expression.type != "if_expression":
             continue
         receiver = guard_receiver(if_expression.child_by_field_name("condition"))
+        if receiver is None or not exits_directly(if_expression.child_by_field_name("consequence")):
+            continue
+        guards.append((receiver, statement.start_byte, statement.end_byte))
+
+    def contains_receiver_write(node, receiver: str, start: int, end: int) -> bool:
+        if node.end_byte <= start or node.start_byte >= end:
+            return False
+        if node.type == "assignment_expression":
+            left = node.child_by_field_name("left")
+            if left is not None and left.type == "identifier" and text(left) == receiver:
+                return True
+        if node.type == "let_declaration":
+            pattern = node.child_by_field_name("pattern")
+            if pattern is not None and pattern.type == "identifier" and text(pattern) == receiver:
+                return True
+        return any(
+            contains_receiver_write(child, receiver, start, end)
+            for child in node.named_children
+        )
+
+    def suppressed(node, receiver: str) -> bool:
         if receiver not in immutable_receivers:
-            continue
-        if not exits_directly(if_expression.child_by_field_name("consequence")):
-            continue
-        later = siblings[index + 1 :]
-        if not any(contains_len_use(node, receiver) for node in later):
-            continue
-        if any(contains_receiver_write(node, receiver) for node in later):
-            continue
-        guarded.add(f"{receiver}.len()")
-    return guarded
+            return False
+        for guard_receiver_name, _guard_start, guard_end in guards:
+            if guard_receiver_name != receiver or guard_end > node.start_byte:
+                continue
+            if not contains_receiver_write(block, receiver, guard_end, node.start_byte):
+                return True
+        return False
+
+    issues: list[ForeignSafetyIssue] = []
+    seen: set[tuple[str, int]] = set()
+
+    def visit(node) -> None:
+        if node.type == "binary_expression":
+            operator = node.child_by_field_name("operator")
+            if operator is not None and text(operator) in {"/", "%"}:
+                receiver = len_divisor_receiver(node.child_by_field_name("right"))
+                if (
+                    receiver is not None
+                    and not fixed_len_is_nonzero(receiver)
+                    and not suppressed(node, receiver)
+                    and (receiver, node.start_byte) not in seen
+                ):
+                    seen.add((receiver, node.start_byte))
+                    divisor = f"{receiver}.len()"
+                    issues.append(
+                        ForeignSafetyIssue(
+                            function_name=function_name,
+                            message=(
+                                f"Rust function `{function_name}` can divide by `{divisor}` "
+                                f"without a non-zero contract (Z3 counterexample: {divisor}=0)"
+                            ),
+                            required_contracts=(f"{divisor} != 0",),
+                            counterexample={divisor: 0},
+                        )
+                    )
+        for child in node.named_children:
+            visit(child)
+
+    visit(block)
+    return issues
 
 
 def _rust_doc_comment_nonzero_params(source: str, name: str) -> set[str]:
@@ -4094,9 +4153,6 @@ def _detect_block_safety_issues(
             per_function_float_vars = _rust_float_variables(body)
             per_function_guarded_indices = _rust_guarded_indices(body)
             per_function_nonzero |= _rust_doc_comment_nonzero_params(source, name)
-            per_function_nonzero |= _rust_guarded_nonempty_len_divisors(
-                body, (per_function_raw_param_types or {}).get(block_idx)
-            )
             per_function_unsigned_vars = _rust_unsigned_variables(source, body, name)
         function_has_unchecked = (
             solidity_checked_arithmetic and re.search(r"\bunchecked\b", body) is not None
@@ -4155,6 +4211,10 @@ def _detect_block_safety_issues(
             for p in redeclared:
                 block_param_types.pop(p, None)
                 block_raw_types.pop(p, None)
+            if label == "Rust":
+                issues.extend(
+                    _rust_collection_len_division_issues(name, body, block_raw_types)
+                )
             block_cast_sub_issues = _cast_and_subtraction_issues(
                 name,
                 (
@@ -6650,7 +6710,11 @@ def _division_safety_issue(
         # Go float division by zero produces +/-Inf or NaN, not a panic.
         return None
     is_simple_rust_len = label == "Rust" and re.fullmatch(r"[A-Za-z_]\w*\.len\(\)", stripped) is not None
-    if "." in divisor and not is_simple_rust_len and (guaranteed_nonzero is None or (divisor not in guaranteed_nonzero and stripped not in guaranteed_nonzero)):
+    if is_simple_rust_len:
+        # Positional ownership: ``_rust_collection_len_division_issues`` scans
+        # these divisors with guard dominance and shadowing information.
+        return None
+    if "." in divisor and (guaranteed_nonzero is None or (divisor not in guaranteed_nonzero and stripped not in guaranteed_nonzero)):
         # Member/selector divisors such as ``obj.b`` or ``time.Second`` that are
         # not provably non-zero are too noisy to model as a free variable.
         return None
