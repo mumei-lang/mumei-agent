@@ -931,3 +931,35 @@ def test_long_function_names_keep_backup_probe_within_filename_limits(tmp_path: 
     healed_again, errors_again = pipeline._heal_migration_hints([_hint(long_name)], source)
     assert errors_again == []
     assert healed_again == healed
+
+
+def test_long_private_function_binds_truncated_healed_output(tmp_path: Path) -> None:
+    source = tmp_path / "source.py"
+    source.write_text("def private():\n    pass\n", encoding="utf-8")
+    long_name = "_" + "private" + "x" * 240
+    pipeline = object.__new__(AuditPipeline)
+    pipeline.heal_output_dir = tmp_path
+    pipeline._run_heal_loop = lambda target: None
+    healed, errors = pipeline._heal_migration_hints([_hint(long_name)], source)
+    assert errors == []
+
+    report = build_migration_execution(
+        _result(source, [_hint(long_name)], healed_files=healed),
+        output_path=tmp_path / "execution.json",
+        mumei_client=FakeVerifyClient(),
+    )
+    assert report["candidates"][0]["heal"]["healed_file"] == healed[0]
+
+
+def test_author_name_public_label_is_not_credential_like(tmp_path: Path) -> None:
+    source = tmp_path / "payment.py"
+    source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+    skeleton = 'atom withdraw() -> i64 {\n    requires: author.name == "editor";\n    ensures: result >= 0;\n    body: { 0 }\n}'
+    report = build_migration_execution(
+        _result(source, [_hint("withdraw", skeleton)]),
+        output_path=tmp_path / "execution.json",
+        mumei_client=FakeVerifyClient(),
+    )
+    candidate = report["candidates"][0]
+    assert candidate["execution_state"] == "ready_for_human_review"
+    assert candidate["extracted_contract"]["string_literals_redacted"] is False

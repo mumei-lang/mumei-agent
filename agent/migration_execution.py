@@ -230,9 +230,21 @@ def _simple_token(tokens: list[tuple[str, str]], kind: str) -> tuple[str, str] |
     return None
 
 
+
+
+def _is_credential_name(value: str) -> bool:
+    words: list[str] = []
+    for part in re.split(r"[._$\-]+", value):
+        if re.fullmatch(r"(?:api[_-]?key|private[_-]?key)", part, re.IGNORECASE):
+            return True
+        words.extend(match.group(0).lower() for match in re.finditer(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|\d+", part))
+    if any(word in {"password", "passwd", "secret", "token", "auth", "authentication", "credential", "credentials", "apikey"} for word in words):
+        return True
+    return any(pair in {("api", "key"), ("private", "key")} for pair in zip(words, words[1:]))
+
 def _is_credential_operand(tokens: list[tuple[str, str]]) -> bool:
     token = _simple_token(tokens, "name")
-    return token is not None and _CREDENTIAL_NAME_RE.search(token[1]) is not None
+    return token is not None and _is_credential_name(token[1])
 
 
 def _string_operand(tokens: list[tuple[str, str]]) -> str | None:
@@ -375,7 +387,8 @@ def _redact_error_text(text: str) -> str:
 
 
 def _healed_content(function_name: str, healed_files: list[str], skeleton: str, source_path: str, excluded_paths: set[str]) -> tuple[str, str | None, bool]:
-    base_names = {function_name, _safe_stem(function_name), _safe_identifier(function_name), migration_output_function_stem(function_name)}
+    raw_base_names = {function_name, _safe_stem(function_name), _safe_identifier(function_name)}
+    base_names = raw_base_names | {migration_output_function_stem(base) for base in raw_base_names}
     expected_names = {f"{base}.mm" for base in base_names}
     key = migration_output_key(source_path, skeleton)
 
@@ -649,7 +662,8 @@ def build_migration_execution(
                 candidate["heal"]["healed_file"] = healed_path
                 candidate["generated_mm"]["origin"] = "healed_file" if used_healed else "generated_skeleton"
             heal_errors = file_result.heal_errors if isinstance(file_result, AuditResult) else result.heal_errors
-            expected_error_stems = {function_name, _safe_stem(function_name), _safe_identifier(function_name), migration_output_function_stem(function_name)}
+            raw_error_stems = {function_name, _safe_stem(function_name), _safe_identifier(function_name)}
+            expected_error_stems = raw_error_stems | {migration_output_function_stem(base) for base in raw_error_stems}
             error_key = migration_output_key(hint_source, skeleton)
 
             def heal_error_matches(item: object) -> bool:
