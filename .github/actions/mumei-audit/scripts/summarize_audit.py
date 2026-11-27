@@ -85,6 +85,11 @@ def main() -> int:
                 lines.append("- `--auto-migrate` was added automatically because migration execution was requested.")
             elif note == "requested":
                 lines.append("- `--auto-migrate` was supplied explicitly by the caller.")
+        if migration_status == "emitted_by_audit_cli":
+            if counts.get("operational_error", 0):
+                lines.append("- Consumer policy: failing the action because at least one candidate is `operational_error`; `blocked` and `ready_for_human_review` do not fail the action.")
+            else:
+                lines.append("- Consumer policy: candidate `operational_error` fails the action; `blocked` and `ready_for_human_review` do not.")
         if migration.get("error"):
             lines.append(f"- Operational error: {migration['error']}")
     violations = audit.get("verification_violations") if isinstance(audit.get("verification_violations"), list) else []

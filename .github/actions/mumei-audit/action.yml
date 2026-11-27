@@ -66,6 +66,9 @@ outputs:
   migration_execution_ready_count:
     description: Number of migration execution candidates ready for human review.
     value: ${{ steps.audit.outputs.migration_execution_ready_count }}
+  migration_execution_operational_error_count:
+    description: Number of migration execution candidates in operational_error state.
+    value: ${{ steps.audit.outputs.migration_execution_operational_error_count }}
 runs:
   using: composite
   steps:
@@ -283,7 +286,10 @@ runs:
           --github-output "$GITHUB_OUTPUT"
         MIGRATION_COLLECTOR_EXIT=$?
         set -e
-        if [ "$MIGRATION_COLLECTOR_EXIT" -ne 0 ]; then
+        if [ "$MIGRATION_COLLECTOR_EXIT" -eq 3 ]; then
+          echo "::error::migration execution evidence contains candidate operational_error; inspect migration-execution/status.json and migration_execution.json in the evidence artifact."
+          exit 2
+        elif [ "$MIGRATION_COLLECTOR_EXIT" -ne 0 ]; then
           echo "::error::migration execution evidence collection failed; inspect migration-execution/status.json in the evidence artifact."
           exit 2
         fi
