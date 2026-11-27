@@ -6,18 +6,22 @@ AI orchestration layer for the verification-native [Mumei](https://github.com/mu
 
 ## Architecture
 
+```mermaid
+flowchart TD
+    Input["existing code / natural-language requirements / .mm"] --> Entry["CLI / MCP scan_and_fix"]
+    Entry --> Extract["specification extraction + existing-code audit"]
+    Extract --> LLM["optional LLM provider"]
+    LLM -->|candidate specs, ports, repairs| Work["generate / migrate / heal"]
+    Work -->|subprocess: check + verify --json| Core["mumei CLI + Z3"]
+    Core -->|counterexamples + diagnostics| Work
+    Core -->|Z3 unknown obligations| Lean["optional mumei-lean escalation"]
+    Core --> Evidence["audit JSON / proof evidence"]
+    Lean --> Evidence
+    Entry --> Adapters["external verifier adapters"]
+    Adapters -->|normalized observations, not proof| Evidence
 ```
-mumei CLI (Z3 verification)
-  ^ subprocess: mumei check / mumei verify --json
-  |
-agent/self_healing.py (heal mode)     agent/generate.py (generate mode)
-  ^ OpenAI-compatible API               ^ OpenAI-compatible API
-  |                                      |
-Ollama + Qwen (LLM inference)          Ollama + Qwen (LLM inference)
-  ^ Docker Compose                       ^ Docker Compose
-  |                                      |
-docker-compose.yml                     docker-compose.yml
-```
+
+The LLM and verifier adapters propose candidates or produce observations; they do not accept proofs. Mumei Core, Z3, Lean 4, and the explicit evidence-acceptance policy decide what becomes verified evidence. The cross-repository ownership boundary is defined in [mumei's verification-native architecture](https://github.com/mumei-lang/mumei/blob/develop/docs/VERIFICATION_NATIVE.md).
 
 The detailed generate flow, MCP relationships, and harness vocabulary are in [`docs/CLI_GUIDE.md`](docs/CLI_GUIDE.md) and [`docs/MCP_SERVER.md`](docs/MCP_SERVER.md).
 
