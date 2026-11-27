@@ -51,10 +51,14 @@ def test_composite_action_contract_and_cache_steps() -> None:
     assert "audit_exit_code" in audit_step["run"]
     artifact_step = next(step for step in steps if step["name"] == "Upload audit evidence artifact")
     assert artifact_step["with"]["include-hidden-files"] is True
-    assert artifact_step["if"] == "always() && steps.audit.outputs.audit_exit_code != ''"
-    assert "${{ runner.temp }}/mumei-audit" in artifact_step["with"]["path"]
+    assert artifact_step["if"] == "always()"
+    assert artifact_step["with"]["path"] == "${{ env.ACTION_STATE }}"
     assert "UV_PROJECT=" in audit_step["run"]
+    assert "python -I -m agent" in audit_step["run"]
     assert "prepare_output_path" in audit_step["run"]
+    assert "WRITE_BASELINE_PATH" in audit_step["run"]
+    assert "generated-baseline.json" in audit_step["run"]
+    assert "audit.sarif" in audit_step["run"]
     assert "mumei-agent-uv.lock" not in ACTION_PATH.read_text(encoding="utf-8")
 
 

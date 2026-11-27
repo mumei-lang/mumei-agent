@@ -62,7 +62,7 @@ runs:
     - name: Start timing
       shell: bash
       run: |
-        ACTION_STATE="$RUNNER_TEMP/mumei-audit"
+        ACTION_STATE="$(mktemp -d "$RUNNER_TEMP/mumei-audit.XXXXXX")"
         mkdir -p "$ACTION_STATE/timing"
         date +%s > "$ACTION_STATE/timing/start"
         echo "ACTION_STATE=$ACTION_STATE" >> "$GITHUB_ENV"
@@ -141,17 +141,43 @@ runs:
         if [ -n "$LANGUAGE" ]; then
           ARGS+=(--language "$LANGUAGE")
         fi
+        WRITE_BASELINE_PATH=""
         if [ -n "$AUDIT_ARGS" ]; then
           read -r -a EXTRA_ARGS <<< "$AUDIT_ARGS"
           ARGS+=("${EXTRA_ARGS[@]}")
+          for ((i = 0; i < ${#EXTRA_ARGS[@]}; i++)); do
+            token="${EXTRA_ARGS[i]}"
+            value=""
+            if [ "$token" = "--write-baseline" ] && [ $((i + 1)) -lt ${#EXTRA_ARGS[@]} ]; then
+              value="${EXTRA_ARGS[i + 1]}"
+            elif [[ "$token" == --write-baseline=* ]]; then
+              value="${token#--write-baseline=}"
+            fi
+            if [ -n "$value" ]; then
+              case "$value" in
+                /*) WRITE_BASELINE_PATH="$value" ;;
+                *) WRITE_BASELINE_PATH="$GITHUB_WORKSPACE/$value" ;;
+              esac
+              prepare_output_path "$WRITE_BASELINE_PATH"
+            fi
+          done
         fi
         date +%s > "$ACTION_STATE/timing/audit_start"
         set +e
-        UV_PROJECT="$AGENT_ROOT" uv run python -m agent "${ARGS[@]}" \
+        UV_PROJECT="$AGENT_ROOT" uv run python -I -m agent "${ARGS[@]}" \
           > "$ACTION_STATE/audit.stdout.log" 2> "$ACTION_STATE/audit.stderr.log"
         EXIT_CODE=$?
         set -e
         date +%s > "$ACTION_STATE/timing/audit_end"
+        if [ -f "$AUDIT_JSON" ] && [ ! -L "$AUDIT_JSON" ]; then
+          cp "$AUDIT_JSON" "$ACTION_STATE/audit.json"
+        fi
+        if [ -f "$SARIF_FILE" ] && [ ! -L "$SARIF_FILE" ]; then
+          cp "$SARIF_FILE" "$ACTION_STATE/audit.sarif"
+        fi
+        if [ -n "$WRITE_BASELINE_PATH" ] && [ -f "$WRITE_BASELINE_PATH" ] && [ ! -L "$WRITE_BASELINE_PATH" ]; then
+          cp "$WRITE_BASELINE_PATH" "$ACTION_STATE/generated-baseline.json"
+        fi
         echo "audit_exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
 
     - name: Check SARIF artifact
@@ -198,14 +224,11 @@ runs:
           --github-output "$GITHUB_OUTPUT"
 
     - name: Upload audit evidence artifact
-      if: always() && steps.audit.outputs.audit_exit_code != ''
+      if: always()
       uses: actions/upload-artifact@v4
       with:
         name: ${{ inputs['artifact-name'] }}
-        path: |
-          ${{ runner.temp }}/mumei-audit
-          ${{ inputs['audit-output'] }}
-          ${{ inputs['sarif-output'] }}
+        path: ${{ env.ACTION_STATE }}
         if-no-files-found: warn
         include-hidden-files: true
 

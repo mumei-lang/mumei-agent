@@ -54,7 +54,7 @@ python scripts/ci_verify.py src/*.mm --proof-cert
 
 ## Existing-code audit composite action
 
-`.github/actions/mumei-audit` is the adoption-oriented composite action for repositories that do not yet use `.mm`. It installs the mumei binary, sets up Python/uv with a dependency cache keyed by this repository's `uv.lock`, runs `python -m agent audit`, writes SARIF and JSON evidence, uploads SARIF to code scanning when present, and appends a concise audit summary plus timing to `GITHUB_STEP_SUMMARY`.
+`.github/actions/mumei-audit` is the adoption-oriented composite action for repositories that do not yet use `.mm`. It installs the mumei binary, sets up Python/uv with a dependency cache keyed by this repository's `uv.lock`, runs `python -m agent audit`, writes SARIF and JSON evidence, uploads SARIF to code scanning when present, and appends a concise audit summary plus timing to `GITHUB_STEP_SUMMARY`. The uploaded evidence artifact has a flat layout (`audit.json`, `audit.sarif`, audit logs, timing files, and `generated-baseline.json` when `--write-baseline` is used), independent of the caller workspace layout.
 
 Minimal caller workflow:
 
