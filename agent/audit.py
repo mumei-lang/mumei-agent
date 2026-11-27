@@ -1020,6 +1020,10 @@ class AuditPipeline:
             try:
                 self._run_heal_loop(target)
             except Exception as exc:
+                try:
+                    target.unlink()
+                except OSError:
+                    pass
                 message = redact_secrets(str(exc).replace(str(target), target.name).replace(str(output_dir), "<heal-output>"))
                 heal_errors.append(f"{target.name}: {message}")
                 continue

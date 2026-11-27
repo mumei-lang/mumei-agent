@@ -413,10 +413,19 @@ def test_migration_output_never_overwrites_existing_mm(tmp_path: Path) -> None:
     assert Path(healed[0]).name != "withdraw.mm"
     assert existing.read_text(encoding="utf-8") == "atom existing() -> i64 { body: { 1 } }\n"
 
+    keyed_before = sorted(path.name for path in tmp_path.glob("withdraw-*.mm"))
     healed_again, errors_again = pipeline._heal_migration_hints([_hint("withdraw")], tmp_path / "source.py")
     assert errors_again == []
     assert len(healed_again) == 1
     assert healed_again[0] == healed[0]
+    assert sorted(path.name for path in tmp_path.glob("withdraw-*.mm")) == keyed_before
+
+    report = build_migration_execution(
+        _result(tmp_path / "source.py", [_hint("withdraw")], healed_files=healed_again),
+        output_path=tmp_path / "execution.json",
+        mumei_client=FakeVerifyClient(),
+    )
+    assert report["candidates"][0]["heal"]["healed_file"] == healed[0]
 
 
 def test_credential_shaped_skeleton_is_not_written_or_copied(tmp_path: Path) -> None:
@@ -785,3 +794,42 @@ def test_non_utf8_existing_output_does_not_break_retry_naming(tmp_path: Path) ->
     assert errors == []
     assert len(healed) == 1
     assert Path(healed[0]).name.endswith("-1.mm")
+
+
+
+def test_parenthesized_credential_literals_are_redacted_and_blocked(tmp_path: Path) -> None:
+    source = tmp_path / "payment.py"
+    source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+    secret = "plain-password-value"
+    expressions = [
+        f'password == ("{secret}")',
+        f'("{secret}") == password',
+    ]
+    for expression in expressions:
+        skeleton = f'atom withdraw() -> i64 {{\n    requires: {expression};\n    ensures: result >= 0;\n    body: {{ 0 }}\n}}'
+        report = build_migration_execution(
+            _result(source, [_hint("withdraw", skeleton)]),
+            output_path=tmp_path / "execution.json",
+            mumei_client=FakeVerifyClient(),
+        )
+        candidate = report["candidates"][0]
+        assert candidate["execution_state"] == "blocked"
+        assert "<redacted>" in candidate["extracted_contract"]["requires"][0]
+        assert secret not in json.dumps(report)
+
+
+def test_failed_heal_does_not_accumulate_duplicate_skeletons(tmp_path: Path) -> None:
+    source = tmp_path / "source.py"
+    source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+    pipeline = object.__new__(AuditPipeline)
+    pipeline.heal_output_dir = tmp_path
+
+    def fail(target: Path) -> None:
+        raise RuntimeError("LLM unavailable")
+
+    pipeline._run_heal_loop = fail
+    for _ in range(2):
+        healed, errors = pipeline._heal_migration_hints([_hint("withdraw")], source)
+        assert healed == []
+        assert len(errors) == 1
+    assert not list(tmp_path.glob("withdraw-*.mm"))
