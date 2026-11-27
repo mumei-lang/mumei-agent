@@ -9032,9 +9032,10 @@ def _solidity_function_is_protocol_settlement(params: str, body: str) -> bool:
 
 
 def _solidity_function_is_caller_scoped(body: str) -> bool:
-    body = _SOLIDITY_EMIT_STATEMENT.sub("", body)
-    # Braces inside strings and comments are masked so they don't count as blocks.
+    # Braces and apparent statements inside strings and comments are masked first
+    # so they neither count as blocks nor look like ``emit`` statements.
     masked = _strip_go_rust_literals_and_comments(body, single_quoted_strings=True)
+    masked = _SOLIDITY_EMIT_STATEMENT.sub("", masked)
     # Solidity also quotes strings with ``'``; the Go/Rust masker only knows char literals.
     masked = re.sub(r"'(?:\\.|[^'\\\n])*'", lambda q: " " * len(q.group(0)), masked)
     depth = [0]
