@@ -748,5 +748,10 @@ def test_ts_find_guard_in_same_switch_default_clause_dominates_use() -> None:
 
 
 def test_ts_find_use_in_else_after_guard_is_guarded() -> None:
-    body = "const item = xs.find(x => x.ok); if (!item) return; else return item.value;"
+    body = "const item = xs.find(x => x.ok); if (!item) return; else { return item.value; }"
     assert not _sentinel_issues(body, "TypeScript")
+
+
+def test_ts_find_reassignment_in_else_invalidates_guard() -> None:
+    body = "let item = xs.find(x => x.ok); if (!item) return; else { item = lookup(); return item.value; }"
+    assert any("undefined" in issue.message for issue in _sentinel_issues(body, "TypeScript"))

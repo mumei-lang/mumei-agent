@@ -8181,14 +8181,25 @@ def _sentinel_guarded(
             rf"\b{re.escape(var)}\s*={{2,3}}\s*(?:undefined|null)\b"
             rf"|\b(?:undefined|null)\s*={{2,3}}\s*{re.escape(var)}\b"
         )
+    reassignment = re.compile(
+        rf"\b{re.escape(var)}\s*(?<![=!<>])=(?![=>])"
+    )
+
+    def not_reassigned_after(match: re.Match[str]) -> bool:
+        return reassignment.search(body, match.end(), use_pos) is None
+
     if any(
-        _guard_mechanism(body, m, use_pos) in _GUARD_HOLDS_MECHANISMS
+        not_reassigned_after(m)
+        and _guard_mechanism(body, m, use_pos) in _GUARD_HOLDS_MECHANISMS
         for m in safe_re.finditer(body, since, use_pos)
     ):
         return True
     if any(
-        _guard_mechanism(body, m, use_pos) in _GUARD_NEGATED_MECHANISMS
-        or single_statement_early_exit(m)
+        not_reassigned_after(m)
+        and (
+            _guard_mechanism(body, m, use_pos) in _GUARD_NEGATED_MECHANISMS
+            or single_statement_early_exit(m)
+        )
         for m in bad_re.finditer(body, since, use_pos)
     ):
         return True
@@ -8200,13 +8211,17 @@ def _sentinel_guarded(
         )
         falsy = re.compile(rf"\bif\s*\(\s*!\s*{re.escape(var)}\b")
         if any(
-            _guard_mechanism(body, m, use_pos) in _GUARD_HOLDS_MECHANISMS
+            not_reassigned_after(m)
+            and _guard_mechanism(body, m, use_pos) in _GUARD_HOLDS_MECHANISMS
             for m in truthy.finditer(body, since, use_pos)
         ):
             return True
         if any(
-            _guard_mechanism(body, m, use_pos) in _GUARD_NEGATED_MECHANISMS
-            or single_statement_early_exit(m)
+            not_reassigned_after(m)
+            and (
+                _guard_mechanism(body, m, use_pos) in _GUARD_NEGATED_MECHANISMS
+                or single_statement_early_exit(m)
+            )
             for m in falsy.finditer(body, since, use_pos)
         ):
             return True
