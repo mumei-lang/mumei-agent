@@ -28,6 +28,8 @@ class FakeVerifyClient:
         )
         if "--output" in (extra_args or []):
             Path(extra_args[extra_args.index("--output") + 1]).write_text("{}", encoding="utf-8")
+        if report_dir:
+            (Path(report_dir) / "report.sarif").write_text('{"version":"2.1.0","runs":[]}\n', encoding="utf-8")
         return {
             "success": self.success,
             "report": {"status": "verified" if self.success else "refuted", "message": "fake verifier"},
@@ -166,6 +168,7 @@ def test_critical_verification_diagnostics_are_redacted_and_sarif_is_declared(tm
     assert verification["status"] == "refuted"
     assert verification["sarif_path"].endswith(".sarif")
     assert verification["sarif_path"].endswith("report.sarif")
+    assert Path(verification["sarif_path"]).is_file()
     assert "sk-1234567890abcdefghij" not in json.dumps(report)
     assert "<redacted>" in json.dumps(report)
 
