@@ -8182,11 +8182,18 @@ def _sentinel_guarded(
             rf"|\b(?:undefined|null)\s*={{2,3}}\s*{re.escape(var)}\b"
         )
     reassignment = re.compile(
-        rf"\b{re.escape(var)}\s*(?<![=!<>])=(?![=>])"
+        rf"(?<![\w$.]){re.escape(var)}\s*(?<![=!<>])=(?![=>])"
     )
 
     def not_reassigned_after(match: re.Match[str]) -> bool:
-        return reassignment.search(body, match.end(), use_pos) is None
+        for overwrite in reassignment.finditer(body, match.end(), use_pos):
+            rhs = body[overwrite.end() : use_pos].lstrip()
+            if kind == "undefined" and re.match(
+                r"(?:[-+]?\d|[\[{'\"`]|new\b|true\b|false\b)", rhs
+            ):
+                continue
+            return False
+        return True
 
     if any(
         not_reassigned_after(m)
@@ -8982,7 +8989,7 @@ def _solidity_caller_scoped_access(body: str) -> bool:
             rf"|\(\s*{caller}\s*[,)]"
         )
         reassignment = re.compile(
-            rf"\b{caller}\s*(?<![=!<>])=(?![=])"
+            rf"(?<![\w$.]){caller}\s*(?<![=!<>])=(?![=])"
         )
         for use in use_pattern.finditer(body, declaration.end()):
             if reassignment.search(body, declaration.end(), use.start()) is None:
@@ -9042,7 +9049,7 @@ def _solidity_function_is_caller_scoped(body: str) -> bool:
         member = masked[: m.start()].rstrip().endswith(".")
         if name is None or member or not declared_local(name.group(0), m.start()):
             return False
-    return _solidity_caller_scoped_access(body)
+    return _solidity_caller_scoped_access(masked)
 
 
 def _solidity_named_return_params(attrs: str) -> set[str]:

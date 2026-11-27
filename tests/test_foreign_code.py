@@ -8411,3 +8411,25 @@ contract Vault {
         issue.function_name == "withdraw" and "no access-control guard" in issue.message
         for issue in _detect_solidity_contract_issues(source)
     )
+
+
+def test_solidity_comment_alias_assignment_does_not_invalidate_caller_scope() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_solidity_contract_issues
+
+    source = """
+contract Vault {
+    mapping(address => uint256) balances;
+    function withdraw() external {
+        address payable recipient = payable(msg.sender);
+        // recipient = payable(beneficiary);
+        uint256 amount = balances[recipient];
+        balances[recipient] = 0;
+        (bool ok, ) = recipient.call{value: amount}("");
+        require(ok, "payout failed");
+    }
+}
+"""
+    assert not any(
+        issue.function_name == "withdraw" and "no access-control guard" in issue.message
+        for issue in _detect_solidity_contract_issues(source)
+    )

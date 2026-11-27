@@ -755,3 +755,13 @@ def test_ts_find_use_in_else_after_guard_is_guarded() -> None:
 def test_ts_find_reassignment_in_else_invalidates_guard() -> None:
     body = "let item = xs.find(x => x.ok); if (!item) return; else { item = lookup(); return item.value; }"
     assert any("undefined" in issue.message for issue in _sentinel_issues(body, "TypeScript"))
+
+
+def test_ts_property_assignment_does_not_invalidate_local_sentinel_guard() -> None:
+    body = "const item = xs.find(x => x.ok); if (!item) return; state.item = item; return item.value;"
+    assert not _sentinel_issues(body, "TypeScript")
+
+
+def test_ts_object_literal_overwrite_does_not_invalidate_undefined_guard() -> None:
+    body = "let item = xs.find(x => x.ok); if (!item) return; else { item = { value: 1 }; return item.value; }"
+    assert not _sentinel_issues(body, "TypeScript")
