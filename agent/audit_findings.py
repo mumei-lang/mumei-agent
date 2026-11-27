@@ -355,9 +355,15 @@ def _stable_source_key(source_file: str) -> str:
     try:
         path = Path(os.path.expanduser(source_file)).resolve()
         start = path if path.is_dir() else path.parent
+        checkout_root = None
         for candidate in (start, *start.parents):
             if (candidate / ".git").exists():
-                return path.relative_to(candidate).as_posix()
+                # Use the outermost checkout: nested submodules need path keys
+                # relative to the audited superproject, not colliding keys
+                # relative to each submodule root.
+                checkout_root = candidate
+        if checkout_root is not None:
+            return path.relative_to(checkout_root).as_posix()
         return path.relative_to(Path.cwd().resolve()).as_posix()
     except (OSError, ValueError):
         pass

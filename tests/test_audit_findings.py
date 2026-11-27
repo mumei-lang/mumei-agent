@@ -246,3 +246,15 @@ def test_directory_input_validation_error_has_findings_and_triage(tmp_path: Path
     assert result.errors
     assert result.findings[0]["category"] == "error"
     assert result.triage["schema"] == "mumei.audit-triage/v1"
+
+def test_stable_source_key_distinguishes_nested_submodule_paths(tmp_path: Path, monkeypatch) -> None:
+    checkout = tmp_path / "checkout"
+    submodule = checkout / "vendor" / "lib"
+    submodule.mkdir(parents=True)
+    (checkout / ".git").mkdir()
+    (submodule / ".git").mkdir()
+    monkeypatch.chdir(checkout)
+    from agent.audit_findings import _stable_source_key
+
+    assert _stable_source_key("specs/payment.mm") == "specs/payment.mm"
+    assert _stable_source_key("vendor/lib/specs/payment.mm") == "vendor/lib/specs/payment.mm"
