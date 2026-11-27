@@ -969,7 +969,7 @@ def test_uppercase_credential_constants_are_redacted_and_blocked(tmp_path: Path,
     source = tmp_path / "payment.py"
     source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
     secret = "uppercase-secret"
-    for expression in [f'PASSWORD == "{secret}"', f'AUTH_TOKEN == "{secret}"', f'accesstoken == "{secret}"', f'tokenvalue == "{secret}"', f'ACCESSTOKENVALUE == "{secret}"']:
+    for expression in [f'PASSWORD == "{secret}"', f'AUTH_TOKEN == "{secret}"', f'accesstoken == "{secret}"', f'tokenvalue == "{secret}"', f'ACCESSTOKENVALUE == "{secret}"', f'secretaccesskey == "{secret}"']:
         skeleton = f'atom withdraw() -> i64 {{\n    requires: {expression};\n    ensures: result >= 0;\n    body: {{ 0 }}\n}}'
         report = build_migration_execution(_result(source, [_hint("withdraw", skeleton)]), output_path=tmp_path / "execution.json", mumei_client=FakeVerifyClient())
         assert report["candidates"][0]["execution_state"] == "blocked"

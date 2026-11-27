@@ -234,6 +234,9 @@ def _is_credential_name(value: str) -> bool:
         lowered_part = part.lower()
         if re.fullmatch(r"(?:api[_-]?key|private[_-]?key)", part, re.IGNORECASE):
             return True
+        for root in {"password", "passwd", "secret", "credential", "apikey", "privatekey"}:
+            if root in lowered_part:
+                return True
         for root in credential_words:
             position = lowered_part.find(root)
             while position >= 0:
