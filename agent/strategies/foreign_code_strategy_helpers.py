@@ -6623,13 +6623,13 @@ def _is_float_expression(
 
 
 def _go_assignment_division_expressions(body: str) -> tuple[str, ...]:
-    """Return RHS expressions of Go assignments that contain division/modulo.
+    """Return RHS expressions of Go assignments whose divisor contains ``len``.
 
-    Safety scanning historically followed return expressions only. Division in
-    an intermediate assignment is the same runtime operation, so collect those
-    RHS expressions syntax-aware-ly and let the caller reuse the normal
-    expression checker. Non-division expressions are ignored to keep this a
-    narrow recall fix rather than a broad new dataflow analysis.
+    Safety scanning historically followed return expressions only. Division by
+    a collection length in an intermediate assignment is the same runtime
+    operation, so collect just those RHS expressions syntax-aware-ly and let
+    the caller reuse the normal expression checker. Other divisors are ignored
+    to keep this a narrow recall fix rather than a broad new dataflow analysis.
     """
     tree = tree_sitter_extract.extract_statements(body, "go")
     if tree is None:
