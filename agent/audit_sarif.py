@@ -87,10 +87,19 @@ def audit_exit_code(
 
     active_code = active_code_findings(result)
     unbaselined_refuted = has_unbaselined_refuted_without_findings(result)
+    unprojected_code_evidence = any(
+        not (file_result.findings or [])
+        and (
+            file_result.verification_status == "refuted"
+            or bool(file_result.verification_violations)
+        )
+        for file_result in files
+    )
     if fail_on == "high-confidence":
         return (
             1
             if unbaselined_refuted
+            or unprojected_code_evidence
             or any(row.get("confidence") == "high" for row in active_code)
             else 0
         )
@@ -98,19 +107,13 @@ def audit_exit_code(
         return (
             1
             if unbaselined_refuted
+            or unprojected_code_evidence
             or any(
                 row.get("severity") == "error" for row in active_findings(result)
             )
             else 0
         )
-    if active_code or unbaselined_refuted:
-        return 1
-    if not any((file_result.findings or []) for file_result in files) and any(
-        file_result.verification_status == "refuted" or bool(file_result.verification_violations)
-        for file_result in files
-    ):
-        # Direct callers may pass a result before audit reporting derives the
-        # finding projection. Preserve the A-1 raw-signal classification there.
+    if active_code or unbaselined_refuted or unprojected_code_evidence:
         return 1
     return 0
 

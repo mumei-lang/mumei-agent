@@ -384,6 +384,7 @@ def _canonical_remote_key(remote_url: str) -> str:
     scp_like = re.match(r"^[^@\s]+@([^:\s]+):(.+)$", remote_url)
     if scp_like:
         host, path = scp_like.groups()
+        host = host.lower()
     else:
         parsed = urlsplit(remote_url)
         host = (parsed.hostname or parsed.netloc).lower()

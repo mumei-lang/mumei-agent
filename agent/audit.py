@@ -1879,7 +1879,7 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
     ):
         print(
             "audit: --sarif-output must not overwrite --output, --code-file, "
-            "or a declared schedule input",
+            "or a declared audit input",
             file=sys.stderr,
         )
         raise SystemExit(2)
@@ -1889,7 +1889,7 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
     ):
         print(
             "audit: --write-baseline must not overwrite --output, --code-file, "
-            "or a declared schedule input",
+            "or a declared audit input",
             file=sys.stderr,
         )
         raise SystemExit(2)
