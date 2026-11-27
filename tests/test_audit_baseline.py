@@ -444,3 +444,31 @@ def test_directory_fingerprint_stable_when_checkout_directory_is_renamed(tmp_pat
         fingerprints.append(directory.findings[0]["fingerprint"])
 
     assert fingerprints[0] == fingerprints[1]
+
+
+def test_directory_fingerprint_uses_symlink_input_path_not_external_target(tmp_path: Path) -> None:
+    from agent.audit_models import AuditDirectoryResult
+    from agent.audit_reporting import _aggregate_directory_fixed_keys
+
+    checkout = tmp_path / "checkout"
+    external = tmp_path / "external-checkout"
+    for root in (checkout, external):
+        (root / ".git").mkdir(parents=True)
+        target = root / "src" / "payment.py"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+    link = checkout / "linked-payment.py"
+    link.symlink_to(external / "src" / "payment.py")
+
+    directory = AuditDirectoryResult(
+        success=False,
+        source_dir=str(checkout),
+        language="python",
+        file_results=[
+            _result(source_file=str(checkout / "src" / "payment.py")),
+            _result(source_file=str(link)),
+        ],
+    )
+    _aggregate_directory_fixed_keys(directory)
+
+    assert directory.findings[0]["fingerprint"] != directory.findings[1]["fingerprint"]

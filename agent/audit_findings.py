@@ -85,8 +85,13 @@ def build_file_findings(result: AuditResult) -> list[dict]:
     return rows
 
 
+def _lexical_absolute_path(path: str) -> Path:
+    """Return a cwd-independent path without collapsing symlinked audit inputs."""
+    return Path(os.path.abspath(os.path.expanduser(path)))
+
+
 def _root_relative_source_key(source_file: str, source_dir: str) -> str:
-    root = Path(os.path.expanduser(source_dir)).resolve()
+    root = _lexical_absolute_path(source_dir)
     if any((candidate / ".git").exists() for candidate in (root, *root.parents)):
         # In a git checkout the durable identity is the repository-relative
         # file path. This is independent of the checkout directory name and
@@ -96,7 +101,7 @@ def _root_relative_source_key(source_file: str, source_dir: str) -> str:
         # Outside a git checkout (for example a temporary multi-repository
         # scan root), keep the audit-root-relative prefix so independent
         # nested trees do not collapse onto the same key.
-        return Path(os.path.expanduser(source_file)).resolve().relative_to(root).as_posix()
+        return _lexical_absolute_path(source_file).relative_to(root).as_posix()
     except (OSError, ValueError):
         return _stable_source_key(source_file)
 
@@ -385,7 +390,7 @@ def _redact_message(text: str, known_paths: list[str]) -> str:
 def _stable_source_key(source_file: str) -> str:
     """Use a checkout-relative source key when possible for stable CI fingerprints."""
     try:
-        path = Path(os.path.expanduser(source_file)).resolve()
+        path = _lexical_absolute_path(source_file)
         start = path if path.is_dir() else path.parent
         checkout_root = None
         for candidate in (start, *start.parents):
