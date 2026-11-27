@@ -164,7 +164,8 @@ def test_critical_verification_diagnostics_are_redacted_and_sarif_is_declared(tm
 
     verification = report["critical_function"]["verification"]
     assert verification["status"] == "refuted"
-    assert verification["sarif_path"].endswith("readiness.migration-readiness/report.sarif")
+    assert verification["sarif_path"].endswith(".sarif")
+    assert not verification["sarif_path"].endswith("report.sarif")
     assert "sk-1234567890abcdefghij" not in json.dumps(report)
     assert "<redacted>" in json.dumps(report)
 
@@ -224,6 +225,33 @@ def test_directory_hints_keep_per_file_health_and_duplicate_attribution(tmp_path
     assert entries[str(second)]["external_effects"] == []
 
 
+def test_duplicate_hints_within_one_file_keep_file_attribution(tmp_path: Path) -> None:
+    source = tmp_path / "src" / "same.py"
+    source.parent.mkdir()
+    source.write_text("def same():\n    open('x', 'w').write('x')\n", encoding="utf-8")
+    hint = _hint("same", "high")
+    file_result = _result(source, [hint, dict(hint)], spec_health_issues=[])
+    directory = AuditDirectoryResult(
+        success=False,
+        source_dir=str(source.parent),
+        language="python",
+        file_results=[file_result],
+        verification_status="unverifiable",
+        migration_hints=[hint, dict(hint)],
+    )
+
+    report = build_migration_readiness(
+        directory,
+        output_path=tmp_path / "readiness.json",
+        mumei_client=FakeVerifyClient(),
+    )
+
+    entries = [entry for entry in report["migration_plan"] if entry["function_name"] == "same"]
+    assert len(entries) == 2
+    assert all(entry["source_file"] == str(source) for entry in entries)
+    assert all(entry["external_effects"] == ["filesystem"] for entry in entries)
+
+
 def test_artifact_directory_does_not_take_over_foreign_directory(tmp_path: Path) -> None:
     source = tmp_path / "payment.py"
     source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
@@ -240,6 +268,36 @@ def test_artifact_directory_does_not_take_over_foreign_directory(tmp_path: Path)
 
     assert sentinel.read_text(encoding="utf-8").startswith("atom user_owned")
     assert "readiness.migration-readiness-1" in report["artifact_paths"]["critical_artifacts"]
+
+
+def test_artifact_directory_does_not_follow_or_reuse_checkout_controlled_paths(tmp_path: Path) -> None:
+    source = tmp_path / "payment.py"
+    source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+    victim = tmp_path / "victim.mm"
+    victim.write_text("atom victim() -> i64 {\n    requires: true;\n    ensures: true;\n    body: { 0 }\n}\n", encoding="utf-8")
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / ".mumei-generated-artifacts").write_text("planted\n", encoding="utf-8")
+    controlled = tmp_path / "readiness.migration-readiness"
+    controlled.symlink_to(target, target_is_directory=True)
+
+    report = build_migration_readiness(
+        _result(source, [_hint("withdraw", "high")]),
+        output_path=tmp_path / "readiness.json",
+        mumei_client=FakeVerifyClient(),
+    )
+
+    artifacts = report["artifact_paths"]["critical_artifacts"]
+    assert "readiness.migration-readiness-1" in artifacts
+    assert victim.read_text(encoding="utf-8").startswith("atom victim")
+    assert not list(target.glob("withdraw-*.mm"))
+
+    second = build_migration_readiness(
+        _result(source, [_hint("withdraw", "high")]),
+        output_path=tmp_path / "readiness.json",
+        mumei_client=FakeVerifyClient(),
+    )
+    assert "readiness.migration-readiness-2" in second["artifact_paths"]["critical_artifacts"]
 
 
 def test_diagnostics_redact_credentials_before_truncation_and_remove_absolute_paths(tmp_path: Path) -> None:
@@ -273,6 +331,52 @@ def test_diagnostics_redact_credentials_before_truncation_and_remove_absolute_pa
     assert str(tmp_path) not in diagnostics
     assert "<redacted>" in serialized
     assert "<path>" in diagnostics
+
+
+def test_diagnostics_redact_artifact_paths_containing_spaces(tmp_path: Path) -> None:
+    spaced = tmp_path / "checkout with spaces"
+    spaced.mkdir()
+    source = spaced / "payment.py"
+    source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+
+    class PathLeakClient(FakeVerifyClient):
+        def verify(self, source_path, **kwargs):
+            super().verify(source_path, **kwargs)
+            return {
+                "success": False,
+                "report": {"status": "refuted", "message": f"failed at {source_path}"},
+                "stdout": "{}",
+                "stderr": "",
+            }
+
+    report = build_migration_readiness(
+        _result(source, [_hint("withdraw", "high")]),
+        output_path=spaced / "readiness.json",
+        mumei_client=PathLeakClient(success=False),
+    )
+
+    diagnostics = json.dumps(report["critical_function"]["verification"]["diagnostics"])
+    assert "checkout with spaces" not in diagnostics
+    assert "<path>" in diagnostics
+
+
+def test_migration_readiness_output_replaces_symlink_without_overwriting_target(tmp_path: Path) -> None:
+    source = tmp_path / "payment.py"
+    source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+    victim = tmp_path / "victim.json"
+    victim.write_text("user data\n", encoding="utf-8")
+    output = tmp_path / "readiness.json"
+    output.symlink_to(victim)
+
+    build_migration_readiness(
+        _result(source, [_hint("withdraw", "high")]),
+        output_path=output,
+        mumei_client=FakeVerifyClient(),
+    )
+
+    assert victim.read_text(encoding="utf-8") == "user data\n"
+    assert not output.is_symlink()
+    assert json.loads(output.read_text(encoding="utf-8"))["schema"] == SCHEMA
 
 
 def test_cli_requires_auto_migrate_for_migration_readiness(tmp_path: Path) -> None:
