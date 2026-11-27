@@ -1023,7 +1023,7 @@ def _go_nil_precondition_caller_guaranteed(impl_path: str, function_name: str, p
             if param_types.get(arg) != "*http.Request" or "http.ResponseWriter" not in param_types.values():
                 return False
             body_prefix = text[enclosing.body_start_char:start]
-            if re.search(rf"\b{re.escape(arg)}\s*(?:=|:=)", body_prefix):
+            if re.search(rf"\b{re.escape(arg)}\b(?:\s*,|\s*:=|\s*=(?!=))", body_prefix):
                 return False
             callers.add(enclosing.raw_name)
             saw_call = True

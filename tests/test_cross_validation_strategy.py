@@ -1864,3 +1864,25 @@ func main() { mux.HandleFunc("/admin/reset", resetHandler) }
     report = CrossValidator().validate_spec_vs_impl(str(spec), str(tmp_path / "main.go"), "go")
 
     assert report.spec_stronger_than_impl == ["adminAuthorized"]
+
+
+
+def test_go_request_multiassignment_prevents_framework_suppression(tmp_path):
+    (tmp_path / "main.go").write_text("""package main
+
+func adminAuthorized(r *http.Request) bool { return r.Header.Get("X") != "" }
+func resetHandler(w http.ResponseWriter, r *http.Request) {
+    r, ok := nil, true
+    if ok && !adminAuthorized(r) { return }
+}
+func main() {
+    mux := http.NewServeMux()
+    mux.HandleFunc("/admin/reset", resetHandler)
+}
+""")
+    spec = tmp_path / "spec.mm"
+    spec.write_text('atom adminAuthorized(r: i64) -> bool {\n  requires: r != nil;\n  ensures: true;\n}\n')
+
+    report = CrossValidator().validate_spec_vs_impl(str(spec), str(tmp_path / "main.go"), "go")
+
+    assert report.spec_stronger_than_impl == ["adminAuthorized"]
