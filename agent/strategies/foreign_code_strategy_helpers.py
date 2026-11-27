@@ -1987,40 +1987,127 @@ def _rust_guarded_indices(body: str) -> set[str]:
     return guarded
 
 
-def _rust_guarded_nonempty_len_divisors(body: str) -> set[str]:
-    """Return simple ``x.len()`` divisors dominated by an empty-check exit.
+def _rust_guarded_nonempty_len_divisors(
+    body: str, raw_param_types: dict[str, str] | None = None
+) -> set[str]:
+    """Return ``x.len()`` divisors made non-zero by a dominating empty check.
 
-    This intentionally recognises only the conservative early-exit shape used
-    for empty collections. A missing fact merely keeps the warning; it never
-    creates one.
+    The suppression is deliberately narrow: the receiver must be an immutable
+    reference parameter, the empty check must be a top-level ``if`` whose
+    consequence exits directly, and a later use of the same receiver's length
+    must exist. Mutable references and local mutable values are not suppressed
+    here because their length can change after the guard.
     """
-    stripped = _strip_go_rust_literals_and_comments(body)
-    guarded: set[str] = set()
-    patterns = (
-        r"if\s+(?P<name>[A-Za-z_]\w*)\.is_empty\(\)\s*\{(?P<body>[^{}]{0,400})\}",
-        r"if\s+(?P<name>[A-Za-z_]\w*)\.len\(\)\s*==\s*0\s*\{(?P<body>[^{}]{0,400})\}",
+    immutable_receivers = {
+        name
+        for name, type_text in (raw_param_types or {}).items()
+        if re.fullmatch(
+            r"&\s*(?:'\w+\s+)?(?:\[[^\]]+\]|Vec\s*<.+>)",
+            re.sub(r"\s+", " ", type_text.strip()),
+        )
+    }
+    if not immutable_receivers:
+        return set()
+    parser = tree_sitter_extract._get_parser("rust")
+    if parser is None:
+        return set()
+    source = f"fn __mumei_len_guard() {{\n{body}\n}}"
+    source_bytes = source.encode("utf-8")
+    try:
+        tree = parser.parse(source_bytes)
+    except Exception:
+        return set()
+    if tree.root_node.has_error:
+        return set()
+    function = next(
+        (child for child in tree.root_node.named_children if child.type == "function_item"),
+        None,
     )
-    for pattern in patterns:
-        for match in re.finditer(pattern, stripped, re.DOTALL):
-            if not re.search(r"\breturn\b|panic!|unreachable!", match.group("body")):
+    block = function.child_by_field_name("body") if function is not None else None
+    if block is None:
+        return set()
+
+    def text(node) -> str:
+        return source_bytes[node.start_byte : node.end_byte].decode("utf-8")
+
+    def simple_len_call(node) -> str | None:
+        if node.type != "call_expression":
+            return None
+        function_node = node.child_by_field_name("function")
+        if function_node is None or function_node.type != "field_expression":
+            return None
+        value = function_node.child_by_field_name("value")
+        field = function_node.child_by_field_name("field")
+        if value is None or field is None or text(field) != "len":
+            return None
+        return text(value) if value.type == "identifier" else None
+
+    def guard_receiver(condition) -> str | None:
+        if condition is None:
+            return None
+        if condition.type == "call_expression":
+            function_node = condition.child_by_field_name("function")
+            if function_node is None or function_node.type != "field_expression":
+                return None
+            value = function_node.child_by_field_name("value")
+            field = function_node.child_by_field_name("field")
+            if value is not None and field is not None and text(field) == "is_empty" and value.type == "identifier":
+                return text(value)
+            return None
+        if condition.type == "binary_expression":
+            left = condition.child_by_field_name("left")
+            right = condition.child_by_field_name("right")
+            operator = condition.child_by_field_name("operator")
+            if operator is not None and text(operator) == "==" and right is not None and text(right).strip() == "0":
+                return simple_len_call(left)
+        return None
+
+    def exits_directly(consequence) -> bool:
+        if consequence is None or consequence.type != "block":
+            return False
+        for statement in consequence.named_children:
+            if statement.type != "expression_statement" or not statement.named_children:
                 continue
-            # Only a top-level early-exit guard is known to dominate the rest of
-            # the function body. Nested guards may be conditional and are ignored.
-            if stripped[: match.start()].count("{") != stripped[: match.start()].count("}"):
-                continue
-            name = match.group("name")
-            use_pattern = re.compile(rf"\b{re.escape(name)}\.len\(\)")
-            for use in use_pattern.finditer(stripped, match.end()):
-                between = stripped[match.end() : use.start()]
-                mutating_write = re.search(
-                    rf"\b{re.escape(name)}\s*(?:\[[^\]]*\])?=|"
-                    rf"\b{re.escape(name)}\s*\.\s*(?!len\b)[A-Za-z_]\w*\s*\(|"
-                    rf"&\s*mut\s+{re.escape(name)}\b",
-                    between,
-                )
-                if not mutating_write:
-                    guarded.add(f"{name}.len()")
-                    break
+            expression = statement.named_children[0]
+            if expression.type == "return_expression":
+                return True
+            if expression.type == "macro_invocation":
+                macro = expression.child_by_field_name("macro")
+                if macro is not None and text(macro) in {"panic", "unreachable"}:
+                    return True
+        return False
+
+    def contains_len_use(node, receiver: str) -> bool:
+        if simple_len_call(node) == receiver:
+            return True
+        return any(contains_len_use(child, receiver) for child in node.named_children)
+
+    def contains_receiver_write(node, receiver: str) -> bool:
+        if node.type == "assignment_expression":
+            left = node.child_by_field_name("left")
+            if left is not None and left.type == "identifier" and text(left) == receiver:
+                return True
+        return any(contains_receiver_write(child, receiver) for child in node.named_children)
+
+    guarded: set[str] = set()
+    siblings = list(block.named_children)
+    for index, statement in enumerate(siblings):
+        if statement.type != "expression_statement" or not statement.named_children:
+            continue
+        if_expression = statement.named_children[0]
+        if if_expression.type != "if_expression":
+            continue
+        receiver = guard_receiver(if_expression.child_by_field_name("condition"))
+        if receiver not in immutable_receivers:
+            continue
+        if not exits_directly(if_expression.child_by_field_name("consequence")):
+            continue
+        later = siblings[index + 1 :]
+        if not any(contains_len_use(node, receiver) for node in later):
+            continue
+        if any(contains_receiver_write(node, receiver) for node in later):
+            continue
+        guarded.add(f"{receiver}.len()")
     return guarded
 
 
@@ -4007,7 +4094,9 @@ def _detect_block_safety_issues(
             per_function_float_vars = _rust_float_variables(body)
             per_function_guarded_indices = _rust_guarded_indices(body)
             per_function_nonzero |= _rust_doc_comment_nonzero_params(source, name)
-            per_function_nonzero |= _rust_guarded_nonempty_len_divisors(body)
+            per_function_nonzero |= _rust_guarded_nonempty_len_divisors(
+                body, (per_function_raw_param_types or {}).get(block_idx)
+            )
             per_function_unsigned_vars = _rust_unsigned_variables(source, body, name)
         function_has_unchecked = (
             solidity_checked_arithmetic and re.search(r"\bunchecked\b", body) is not None

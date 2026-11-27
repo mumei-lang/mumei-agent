@@ -8415,6 +8415,26 @@ def test_rust_collection_len_divisor_detected_only_without_empty_guard() -> None
 
 
 
+def test_rust_collection_len_guard_must_dominate_and_receiver_stays_immutable() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    nested_guard = """pub fn split(amount: i64, recipients: &[String], cond: bool) -> i64 {
+    if cond {
+        if recipients.is_empty() { return 0; }
+    }
+    amount / recipients.len() as i64
+}
+"""
+    mutable_receiver = """pub fn split(amount: i64, recipients: &mut Vec<String>) -> i64 {
+    if recipients.is_empty() { return 0; }
+    recipients.clear();
+    amount / recipients.len() as i64
+}
+"""
+    for source in (nested_guard, mutable_receiver):
+        assert [i for i in _detect_safety_issues(source, "rust") if "divide" in i.message]
+
+
 def test_rust_arbitrary_member_divisor_remains_conservative() -> None:
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
 
