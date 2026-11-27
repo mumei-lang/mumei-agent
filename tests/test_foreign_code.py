@@ -1931,6 +1931,48 @@ contract Rewards {
     assert "divisor != 0" in atoms["scaledByInput"].requires
 
 
+
+
+def test_typescript_record_array_and_destructured_shadow_keep_array_bounds() -> None:
+    from agent.cross_validation_foreign import _infer_typescript_contracts
+
+    source = """
+export const values: Record<string, number>[] = [];
+export function valueAt(values: number[], index: number): number {
+  return values[index];
+}
+export function destructured(index: number): number {
+  const { values } = { values: [1] };
+  return values[index];
+}
+"""
+    atoms = {atom.name: atom for atom in _infer_typescript_contracts(source)}
+    assert "index < len_values" in atoms["valueAt"].requires
+    assert "index < len_values" in atoms["destructured"].requires
+
+
+def test_solidity_fixed_array_bytes_collision_and_override_mapping() -> None:
+    from agent.cross_validation_foreign import _infer_solidity_contracts
+
+    source = """
+contract A {
+    mapping(address => uint256) private values;
+    mapping(address => uint256) public override balances;
+    function balanceOf(address user) external view returns (uint256) { return balances[user]; }
+}
+contract B {
+    uint256[4] private values;
+    bytes data;
+    function valueAt(uint256 index) external view returns (uint256) { return values[index]; }
+    function byteAt(uint256 index) external view returns (bytes1) { return data[index]; }
+}
+"""
+    atoms = {atom.name: atom for atom in _infer_solidity_contracts(source)}
+    assert atoms["balanceOf"].requires == "true"
+    assert "index < len_values" in atoms["valueAt"].requires
+    assert "index < len_data" in atoms["byteAt"].requires
+
+
 def test_solidity_interface_functions_are_extracted_as_trusted_atoms() -> None:
     """Solidity interface declarations without a body must still produce atoms."""
     from agent.cross_validation_foreign import _infer_solidity_contracts

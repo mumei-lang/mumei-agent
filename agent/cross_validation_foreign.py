@@ -598,15 +598,15 @@ def _single_return_expr(function_node: ast.FunctionDef | ast.AsyncFunctionDef) -
 
 
 _TYPESCRIPT_RECORD_DECLARATION = re.compile(
-    r"^(?:export\s+)?(?:const|let|var)\s+([A-Za-z_]\w*)\s*:\s*Record\s*<",
+    r"^\ufeff?(?:export\s+)?(?:const|let|var)\s+([A-Za-z_]\w*)\s*:\s*Record\s*<[^<>=]+>(?!\s*\[)",
     re.MULTILINE,
 )
 _SOLIDITY_MAPPING_DECLARATION = re.compile(
-    r"\bmapping\s*\((?:[^()]|\([^()]*\))*\)\s*(?:(?:public|private|internal)\s+)*([A-Za-z_]\w*)",
+    r"\bmapping\s*\((?:[^()]|\([^()]*\))*\)\s*(?:(?:public|private|internal|override)\s+)*([A-Za-z_]\w*)",
     re.DOTALL,
 )
 _SOLIDITY_ARRAY_DECLARATION = re.compile(
-    r"\b[A-Za-z_]\w*(?:\s*\[\s*\])+\s+(?:(?:public|private|internal|memory|storage|calldata)\s+)*([A-Za-z_]\w*)"
+    r"\b(?:[A-Za-z_]\w*(?:\s*\[\s*\d*\s*\])+|bytes)\s+(?:(?:public|private|internal|memory|storage|calldata)\s+)*([A-Za-z_]\w*)"
 )
 
 
@@ -625,7 +625,7 @@ def _solidity_mapping_names(code: str) -> set[str]:
 
 
 def _typescript_visible_associative_containers(
-    containers: set[str], body: str, param_names: set[str]
+    containers: set[str], body: str, param_names: set[str], params_text: str
 ) -> set[str]:
     """Drop global ``Record`` names shadowed by the function being analyzed."""
     visible = set(containers) - param_names
@@ -633,8 +633,13 @@ def _typescript_visible_associative_containers(
         return visible
     masked = _strip_go_rust_literals_and_comments(body, single_quoted_strings=True)
     for name in list(visible):
-        local_declaration = re.search(
-            rf"\b(?:const|let|var)\s+{re.escape(name)}\b", masked
+        if re.search(rf"\b{re.escape(name)}\b", params_text):
+            visible.discard(name)
+            continue
+        local_declaration = any(
+            re.search(r"\b(?:const|let|var)\b", line)
+            and re.search(rf"\b{re.escape(name)}\b", line)
+            for line in masked.splitlines()
         )
         arrow_parameter = re.search(rf"\b{re.escape(name)}\s*=>", masked)
         if local_declaration or arrow_parameter:
@@ -1653,7 +1658,7 @@ def _infer_typescript_contracts(code: str) -> list[MumeiContractAtom]:
                     known_constants,
                     _typescript_nullable_params(fn.params_text),
                     _typescript_visible_associative_containers(
-                        associative_containers, fn.body, param_names
+                        associative_containers, fn.body, param_names, fn.params_text
                     ),
                 )
                 local_names = _local_variable_names(fn.body, "typescript")
@@ -1740,7 +1745,7 @@ def _infer_typescript_contracts(code: str) -> list[MumeiContractAtom]:
                         known_constants,
                         _typescript_nullable_params(match.group("params")),
                         _typescript_visible_associative_containers(
-                            associative_containers, body, param_names
+                            associative_containers, body, param_names, match.group("params")
                         ),
                     ),
                     ensures=_ensures_for_return_expression(return_expr, return_type, param_names, known_constants, local_names, param_types=param_types),
