@@ -1,0 +1,68 @@
+name: Mumei audit action selftest
+
+on:
+  push:
+    branches: [develop]
+    paths:
+      - .github/actions/mumei-audit/**
+      - .github/workflows/mumei-audit-selftest.yml
+      - examples/ci-small-repo/**
+  pull_request:
+    branches: [develop]
+    paths:
+      - .github/actions/mumei-audit/**
+      - .github/workflows/mumei-audit-selftest.yml
+      - examples/ci-small-repo/**
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  small-repo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run composite audit action on a small repository fixture
+        id: audit
+        uses: ./.github/actions/mumei-audit
+        with:
+          code-file: examples/ci-small-repo/src
+          language: python
+          audit-args: --baseline examples/ci-small-repo/baseline.json --write-baseline .mumei-audit/generated-baseline.json --fail-on high-confidence
+          upload-sarif: true
+
+      - name: Publish measured action runtime
+        run: |
+          {
+            echo '## Small-repo composite action timing';
+            echo;
+            echo "- setup_seconds: \`${{ steps.audit.outputs.setup_seconds }}\`";
+            echo "- audit_seconds: \`${{ steps.audit.outputs.audit_seconds }}\`";
+            echo "- total_seconds: \`${{ steps.audit.outputs.total_seconds }}\`";
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  verify-artifact:
+    runs-on: ubuntu-latest
+    needs: small-repo
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Download audit evidence artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: mumei-audit-evidence
+          path: evidence
+
+      - name: Verify canonical evidence files
+        run: |
+          test -s evidence/audit.json
+          test -s evidence/audit.sarif
+          test -s evidence/generated-baseline.json
+          test -e evidence/audit.stdout.log
+          test -e evidence/audit.stderr.log
+          python3 -c "import json; baseline=json.load(open('evidence/generated-baseline.json', encoding='utf-8')); sarif=json.load(open('evidence/audit.sarif', encoding='utf-8')); assert baseline['version'] == 'mumei.audit-baseline/v1'; assert sarif['version'] == '2.1.0'"
