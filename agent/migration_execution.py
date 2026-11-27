@@ -124,16 +124,18 @@ _CREDENTIAL_EXPR = rf"(?:[\w$]+\.)*{_CREDENTIAL_WORD}"
 _STRING_LITERAL = r'"(?:\\.|[^"\\])*"'
 _OPEN_PARENS = r"(?:\(\s*)*"
 _CLOSE_PARENS = r"(?:\s*\))*"
+_PAREN_CREDENTIAL_EXPR = rf"{_OPEN_PARENS}{_CREDENTIAL_EXPR}{_CLOSE_PARENS}"
+_CREDENTIAL_NAME_PATTERN = rf"(?<![\w$])(?P<name>{_PAREN_CREDENTIAL_EXPR})(?![\w$])"
 _CREDENTIAL_COMPARISON_FORWARD = re.compile(
-    rf"(?P<name>\b{_CREDENTIAL_EXPR}\b)\s*(?P<op>==|!=)\s*{_OPEN_PARENS}(?P<literal>{_STRING_LITERAL})",
+    rf"{_CREDENTIAL_NAME_PATTERN}\s*(?P<op>==|!=)\s*{_OPEN_PARENS}(?P<literal>{_STRING_LITERAL})",
     re.IGNORECASE,
 )
 _CREDENTIAL_COMPARISON_REVERSE = re.compile(
-    rf"{_OPEN_PARENS}(?P<literal>{_STRING_LITERAL}){_CLOSE_PARENS}\s*(?P<op>==|!=)\s*(?P<name>\b{_CREDENTIAL_EXPR}\b)",
+    rf"{_OPEN_PARENS}(?P<literal>{_STRING_LITERAL}){_CLOSE_PARENS}\s*(?P<op>==|!=)\s*{_CREDENTIAL_NAME_PATTERN}",
     re.IGNORECASE,
 )
 _CREDENTIAL_ASSIGNMENT = re.compile(
-    rf"(?P<name>\b{_CREDENTIAL_EXPR}\b)\s*(?::=|=(?!=))\s*{_OPEN_PARENS}(?P<literal>{_STRING_LITERAL})",
+    rf"{_CREDENTIAL_NAME_PATTERN}\s*(?::=|=(?!=))\s*{_OPEN_PARENS}(?P<literal>{_STRING_LITERAL})",
     re.IGNORECASE,
 )
 
