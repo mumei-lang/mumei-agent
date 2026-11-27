@@ -44,13 +44,18 @@ def test_composite_action_contract_and_cache_steps() -> None:
     setup_uv = next(step for step in steps if step["name"] == "Set up uv with dependency cache")
     assert setup_uv["uses"] == "astral-sh/setup-uv@v5"
     assert setup_uv["with"]["enable-cache"] is True
-    assert setup_uv["with"]["cache-dependency-glob"] == "mumei-agent-uv.lock"
+    assert setup_uv["with"]["cache-dependency-glob"] == "${{ github.action_path }}/../../../uv.lock"
     assert 'MUMEI_STD_PATH=$HOME/.mumei/std' in ACTION_PATH.read_text(encoding="utf-8")
     audit_step = next(step for step in steps if step["name"] == "Run mumei-agent audit")
     assert "--sarif-output" in audit_step["run"]
     assert "audit_exit_code" in audit_step["run"]
     artifact_step = next(step for step in steps if step["name"] == "Upload audit evidence artifact")
     assert artifact_step["with"]["include-hidden-files"] is True
+    assert artifact_step["if"] == "always() && steps.audit.outputs.audit_exit_code != ''"
+    assert "${{ runner.temp }}/mumei-audit" in artifact_step["with"]["path"]
+    assert "UV_PROJECT=" in audit_step["run"]
+    assert "prepare_output_path" in audit_step["run"]
+    assert "mumei-agent-uv.lock" not in ACTION_PATH.read_text(encoding="utf-8")
 
 
 def test_action_does_not_embed_secret_values_or_secret_env_names() -> None:
@@ -70,6 +75,12 @@ def test_selftest_workflow_exercises_small_repo_and_publishes_timing() -> None:
     action_step = next(step for step in steps if step.get("uses") == "./.github/actions/mumei-audit")
     assert action_step["with"]["code-file"] == "examples/ci-small-repo/src"
     assert action_step["with"]["language"] == "python"
+    audit_args = action_step["with"]["audit-args"]
+    assert "--baseline examples/ci-small-repo/baseline.json" in audit_args
+    assert "--write-baseline .mumei-audit/generated-baseline.json" in audit_args
+    assert "--fail-on high-confidence" in audit_args
+    baseline = json.loads((ROOT / "examples" / "ci-small-repo" / "baseline.json").read_text(encoding="utf-8"))
+    assert baseline == {"version": "mumei.audit-baseline/v1", "fingerprints": []}
     publish = next(step for step in steps if step.get("name") == "Publish measured action runtime")
     assert "setup_seconds" in publish["run"]
     assert "audit_seconds" in publish["run"]
@@ -87,6 +98,28 @@ def test_composite_run_scripts_have_valid_bash_syntax(tmp_path: Path) -> None:
         probe.write_text(re.sub(r"\$\{\{[^}]*\}\}", "x", script), encoding="utf-8")
         result = subprocess.run(["bash", "-n", str(probe)], capture_output=True, text=True)
         assert result.returncode == 0, f"{step.get('name')}: {result.stderr}"
+
+
+def test_prepare_output_path_rejects_symlink_parent_and_replaces_leaf_symlink(tmp_path: Path) -> None:
+    helper = SUMMARY_SCRIPT.parent / "prepare_output_path.py"
+    target = tmp_path / "target"
+    target.mkdir()
+    link_parent = tmp_path / "link-parent"
+    link_parent.symlink_to(target, target_is_directory=True)
+    rejected = subprocess.run(
+        [sys.executable, str(helper), str(link_parent / "audit.json")],
+        capture_output=True,
+        text=True,
+    )
+    assert rejected.returncode != 0
+
+    output = tmp_path / "audit.json"
+    victim = tmp_path / "victim.json"
+    victim.write_text("keep\n", encoding="utf-8")
+    output.symlink_to(victim)
+    subprocess.run([sys.executable, str(helper), str(output)], check=True)
+    assert not output.is_symlink()
+    assert victim.read_text(encoding="utf-8") == "keep\n"
 
 
 def test_summarize_audit_writes_step_summary_and_timing_outputs(tmp_path: Path) -> None:

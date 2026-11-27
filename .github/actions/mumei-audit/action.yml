@@ -62,8 +62,10 @@ runs:
     - name: Start timing
       shell: bash
       run: |
-        mkdir -p .mumei-audit/timing
-        date +%s > .mumei-audit/timing/start
+        ACTION_STATE="$RUNNER_TEMP/mumei-audit"
+        mkdir -p "$ACTION_STATE/timing"
+        date +%s > "$ACTION_STATE/timing/start"
+        echo "ACTION_STATE=$ACTION_STATE" >> "$GITHUB_ENV"
 
     - name: Locate bundled mumei-agent source
       shell: bash
@@ -72,7 +74,6 @@ runs:
         test -f "$AGENT_ROOT/pyproject.toml"
         test -f "$AGENT_ROOT/uv.lock"
         echo "AGENT_ROOT=$AGENT_ROOT" >> "$GITHUB_ENV"
-        cp "$AGENT_ROOT/uv.lock" "$GITHUB_WORKSPACE/mumei-agent-uv.lock"
 
     - name: Set up Python
       uses: actions/setup-python@v7
@@ -83,7 +84,7 @@ runs:
       uses: astral-sh/setup-uv@v5
       with:
         enable-cache: true
-        cache-dependency-glob: mumei-agent-uv.lock
+        cache-dependency-glob: ${{ github.action_path }}/../../../uv.lock
 
     - name: Install mumei
       shell: bash
@@ -107,7 +108,7 @@ runs:
 
     - name: Finish setup timing
       shell: bash
-      run: date +%s > .mumei-audit/timing/setup_end
+      run: date +%s > "$ACTION_STATE/timing/setup_end"
 
     - name: Run mumei-agent audit
       id: audit
@@ -131,7 +132,11 @@ runs:
           /*) SARIF_FILE="$SARIF_OUTPUT" ;;
           *) SARIF_FILE="$GITHUB_WORKSPACE/$SARIF_OUTPUT" ;;
         esac
-        mkdir -p "$(dirname "$AUDIT_JSON")" "$(dirname "$SARIF_FILE")"
+        prepare_output_path() {
+          python "${{ github.action_path }}/scripts/prepare_output_path.py" "$1"
+        }
+        prepare_output_path "$AUDIT_JSON"
+        prepare_output_path "$SARIF_FILE"
         ARGS=(audit --code-file "$TARGET" --format json --output "$AUDIT_JSON" --sarif-output "$SARIF_FILE")
         if [ -n "$LANGUAGE" ]; then
           ARGS+=(--language "$LANGUAGE")
@@ -140,15 +145,13 @@ runs:
           read -r -a EXTRA_ARGS <<< "$AUDIT_ARGS"
           ARGS+=("${EXTRA_ARGS[@]}")
         fi
-        date +%s > .mumei-audit/timing/audit_start
+        date +%s > "$ACTION_STATE/timing/audit_start"
         set +e
-        (
-          cd "$AGENT_ROOT"
-          uv run python -m agent "${ARGS[@]}"
-        ) > .mumei-audit/audit.stdout.log 2> .mumei-audit/audit.stderr.log
+        UV_PROJECT="$AGENT_ROOT" uv run python -m agent "${ARGS[@]}" \
+          > "$ACTION_STATE/audit.stdout.log" 2> "$ACTION_STATE/audit.stderr.log"
         EXIT_CODE=$?
         set -e
-        date +%s > .mumei-audit/timing/audit_end
+        date +%s > "$ACTION_STATE/timing/audit_end"
         echo "audit_exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
 
     - name: Check SARIF artifact
@@ -179,24 +182,28 @@ runs:
       shell: bash
       env:
         AUDIT_OUTPUT: ${{ inputs['audit-output'] }}
+        AUDIT_EXIT_CODE: ${{ steps.audit.outputs.audit_exit_code }}
       run: |
         case "$AUDIT_OUTPUT" in
           /*) AUDIT_JSON="$AUDIT_OUTPUT" ;;
           *) AUDIT_JSON="$GITHUB_WORKSPACE/$AUDIT_OUTPUT" ;;
         esac
+        if [ -z "$AUDIT_EXIT_CODE" ]; then
+          AUDIT_EXIT_CODE=2
+        fi
         python "${{ github.action_path }}/scripts/summarize_audit.py" \
           --audit-json "$AUDIT_JSON" \
-          --exit-code "${{ steps.audit.outputs.audit_exit_code }}" \
-          --timing-dir .mumei-audit/timing \
+          --exit-code "$AUDIT_EXIT_CODE" \
+          --timing-dir "$ACTION_STATE/timing" \
           --github-output "$GITHUB_OUTPUT"
 
     - name: Upload audit evidence artifact
-      if: always()
+      if: always() && steps.audit.outputs.audit_exit_code != ''
       uses: actions/upload-artifact@v4
       with:
         name: ${{ inputs['artifact-name'] }}
         path: |
-          .mumei-audit/
+          ${{ runner.temp }}/mumei-audit
           ${{ inputs['audit-output'] }}
           ${{ inputs['sarif-output'] }}
         if-no-files-found: warn
@@ -207,11 +214,6 @@ runs:
       uses: github/codeql-action/upload-sarif@v3
       with:
         sarif_file: ${{ inputs['sarif-output'] }}
-
-    - name: Remove temporary cache key copy
-      if: always()
-      shell: bash
-      run: rm -f "$GITHUB_WORKSPACE/mumei-agent-uv.lock"
 
     - name: Enforce audit result
       if: always() && steps.audit.outputs.audit_exit_code != '0'

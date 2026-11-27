@@ -75,7 +75,10 @@ jobs:
         with:
           code-file: src/
           language: python
+          audit-args: --baseline audit-baseline.json --write-baseline .mumei-audit/generated-baseline.json --fail-on high-confidence
 ```
+
+The `audit-args` example uses the merged baseline contract directly: `audit-baseline.json` is a copyable `mumei.audit-baseline/v1` file such as `{"version":"mumei.audit-baseline/v1","fingerprints":[]}`, `--write-baseline` refreshes the fingerprint set for review, and `--fail-on high-confidence` keeps informational/model-limitation evidence visible without failing the job on lower-confidence findings. Keep `audit-args` on one line because the composite action treats it as a space-separated argument list.
 
 Relevant inputs:
 
