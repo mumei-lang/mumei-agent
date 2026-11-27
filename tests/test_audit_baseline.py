@@ -258,6 +258,8 @@ def test_cli_rejects_write_baseline_over_summary_inputs(tmp_path: Path) -> None:
         args = build_parser().parse_args([
             "--code-file", str(source),
             "--language", "python",
+            "--enable-summaries",
+            "--enable-summary-plan",
             flag, str(input_path),
             "--write-baseline", str(input_path),
         ])
@@ -353,3 +355,26 @@ def test_directory_trusted_atom_fingerprints_distinguish_independent_checkouts(t
 
     assert len(directory.findings) == 2
     assert directory.findings[0]["fingerprint"] != directory.findings[1]["fingerprint"]
+
+
+def test_directory_fingerprints_change_when_audit_root_changes(tmp_path: Path, monkeypatch) -> None:
+    from agent.audit_models import AuditDirectoryResult
+    from agent.audit_reporting import _aggregate_directory_fixed_keys
+
+    monkeypatch.chdir(tmp_path)
+    results = []
+    for root_name in ("src", "other"):
+        root = tmp_path / root_name
+        (root / ".git").mkdir(parents=True)
+        target = root / "payment.py"
+        target.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+        directory = AuditDirectoryResult(
+            success=False,
+            source_dir=str(root),
+            language="python",
+            file_results=[_result(source_file=str(target))],
+        )
+        _aggregate_directory_fixed_keys(directory)
+        results.append(directory.findings[0]["fingerprint"])
+
+    assert results[0] != results[1]

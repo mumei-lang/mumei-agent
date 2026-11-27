@@ -86,12 +86,18 @@ def build_file_findings(result: AuditResult) -> list[dict]:
 
 
 def _root_relative_source_key(source_file: str, source_dir: str) -> str:
+    root = Path(os.path.expanduser(source_dir)).resolve()
     try:
-        return Path(os.path.expanduser(source_file)).resolve().relative_to(
-            Path(os.path.expanduser(source_dir)).resolve()
-        ).as_posix()
+        root_key = root.relative_to(Path.cwd().resolve()).as_posix()
+    except (OSError, ValueError):
+        root_key = root.as_posix()
+    try:
+        relative = Path(os.path.expanduser(source_file)).resolve().relative_to(root).as_posix()
     except (OSError, ValueError):
         return _stable_source_key(source_file)
+    if root_key in {"", "."}:
+        return relative
+    return f"{root_key.rstrip('/')}/{relative}"
 
 
 def _refingerprint_for_audit_root(row: dict, source_dir: str) -> None:
