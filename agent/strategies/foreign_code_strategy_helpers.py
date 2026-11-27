@@ -2059,24 +2059,25 @@ def _rust_collection_len_division_issues(
 
     local_bindings: list[tuple[int, str, bool]] = []
 
-    def collect_local_bindings(node) -> None:
-        if node.type == "let_declaration":
-            pattern = node.child_by_field_name("pattern")
-            if pattern is not None and pattern.type == "identifier":
-                value = node.child_by_field_name("value")
-                is_integer = primitive_integer_type(node.child_by_field_name("type")) or primitive_integer_syntax(value)
-                if (
-                    not is_integer
-                    and value is not None
-                    and value.type == "identifier"
-                    and normalized_types.get(text(value), "") in integer_types
-                ):
-                    is_integer = True
-                local_bindings.append((node.end_byte, text(pattern), is_integer))
-        for child in node.named_children:
-            collect_local_bindings(child)
-
-    collect_local_bindings(block)
+    # Only top-level bindings have the same lexical scope as a later top-level
+    # numerator. Nested block bindings may shadow an outer custom value without
+    # changing it, so treating them as evidence would be unsound.
+    for statement in block.named_children:
+        if statement.type != "let_declaration":
+            continue
+        pattern = statement.child_by_field_name("pattern")
+        if pattern is None or pattern.type != "identifier":
+            continue
+        value = statement.child_by_field_name("value")
+        is_integer = primitive_integer_type(statement.child_by_field_name("type")) or primitive_integer_syntax(value)
+        if (
+            not is_integer
+            and value is not None
+            and value.type == "identifier"
+            and normalized_types.get(text(value), "") in integer_types
+        ):
+            is_integer = True
+        local_bindings.append((statement.end_byte, text(pattern), is_integer))
     local_bindings.sort()
 
     def primitive_integer_numerator(node) -> bool:

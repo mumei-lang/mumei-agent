@@ -8472,7 +8472,21 @@ fn f(amount: Amount, recipients: &[String]) -> Amount {
     amount / recipients.len() as i64
 }
 """
+    nested_shadowing = """struct Amount;
+impl std::ops::Div<usize> for Amount {
+    type Output = Amount;
+    fn div(self, _rhs: usize) -> Amount { Amount }
+}
+fn f(recipients: &[String], cond: bool) -> Amount {
+    let x = Amount;
+    if cond {
+        let x = 1i64;
+    }
+    x / recipients.len()
+}
+"""
     assert not [i for i in _detect_safety_issues(operator_overloaded, "rust") if "divide" in i.message]
+    assert not [i for i in _detect_safety_issues(nested_shadowing, "rust") if "divide" in i.message]
     assert [i for i in _detect_safety_issues(primitive_local, "rust") if "divide" in i.message]
 
 
