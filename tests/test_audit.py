@@ -5514,3 +5514,38 @@ def test_audit_scheduled_verification_core_requires_absolute_path(
     )
     with pytest.raises(ValueError, match="--schedule-core"):
         _load_scheduled_verification(args)
+
+
+def test_audit_pipeline_classifies_verifier_crash_as_operational_error(tmp_path: Path) -> None:
+    source = tmp_path / "payment.py"
+    source.write_text("def withdraw(balance: int, amount: int) -> int:\n    return balance - amount\n", encoding="utf-8")
+    extractor = MagicMock()
+    extractor.extract_from_file.return_value = CodeToSpecResult(
+        success=True,
+        natural_language_spec="withdraw requires balance >= amount",
+        forge_task_spec=_forge_spec(),
+        detected_language="python",
+    )
+    foreign_verifier = MagicMock()
+    foreign_verifier.verify.return_value = {
+        "success": False,
+        "errors": ["mumei verify failed"],
+        "verification": {"success": False, "report": {}, "stderr": "panic"},
+    }
+    cross_validator = MagicMock()
+    cross_validator.validate_spec_vs_impl.return_value = CrossValidationReport(coverage_ratio=1.0)
+    mumei = MagicMock()
+    mumei.verify.side_effect = _healthy_verify
+
+    result = AuditPipeline(
+        AgentConfig(api_key="test"),
+        code_to_spec_extractor=extractor,
+        foreign_code_verifier=foreign_verifier,
+        cross_validator=cross_validator,
+        mumei_client=mumei,
+    ).audit_file(source, "python")
+
+    assert result.verification_status == "unverifiable"
+    assert result.verification_violations == []
+    assert result.errors == ["mumei verify did not produce a verification report"]
+    assert result.success is False

@@ -88,6 +88,18 @@ Language-pattern advisories (V1-B-2, `agent/language_patterns.py`) add heuristic
 
 `audit` separates findings about the code from findings about the extracted spec. `finding_counts` counts each level: `code` (`verification_violations`), `spec` (`spec_health_issues` other than `encoding-gap:` entries, plus `cross_validation_gaps`), `model_limitations` (`encoding-gap:` entries, spec clauses mumei could not encode) and `errors`. Only code findings, errors and `malformed-extraction:` entries (the code was never checked) set `success` to false and count toward `files_with_issues`. Spec diagnostics are still listed in full, but they show up as "passed with N spec diagnostics to review" and in `files_with_spec_diagnostics`, because an LLM-extracted spec that disagrees with the code is not evidence that the code is wrong.
 
+## CI artifact and exit-code contract
+
+The `python -m agent audit` process classifies completion independently of the selected human output format:
+
+| Exit code | Meaning |
+|---|---|
+| `0` | no failing code findings; spec-only diagnostics and `unverifiable` remain review items |
+| `1` | evidence against the audited code exists (`verification_violations` or a `refuted` file) |
+| `2` | argument validation failed, extraction/operational errors occurred, or malformed extraction meant the code was never checked |
+
+`--sarif-output <PATH>` writes a SARIF 2.1.0 artifact alongside `--format`/`--output`; it does not replace the stable JSON audit keys. SARIF results are derived only from those keys: `verification_violations` map to `mumei.audit/verification-violation` errors, spec health and cross-validation diagnostics map to warnings, trusted atoms map to review warnings, and operational errors map to `mumei.audit/audit-error`. Locations use repo-relative artifact URIs when the audited file is under the current working directory; files outside it use opaque `external/<hash>` artifact URIs, and machine-local absolute paths in messages are redacted or relativized. Findings are file-level unless the audit key carries a source line (currently trusted atoms), malformed-extraction entries map to audit errors, and each result has a deterministic `mumeiAuditFinding/v1` partial fingerprint for baseline tracking.
+
 For manual review, run the same stages separately:
 
 ```bash

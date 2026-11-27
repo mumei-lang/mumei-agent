@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import cast
 
 from agent import evidence_check_schedule, telemetry
+from agent.audit_sarif import write_sarif
 from agent.audit_models import (
     AuditDirectoryResult,
     AuditResult,
@@ -73,6 +74,7 @@ from agent.audit_reporting import (
     _string_value,
     _verification_issue_strings,
     _verification_status_from_foreign_result,
+    _verification_tool_failure_without_evidence,
 )
 from agent.attempt_schedule import MAX_SCHEDULE_ATTEMPTS, run_attempt_schedule
 from agent.code_to_spec import CodeToSpecExtractor, CodeToSpecResult, Language
@@ -526,6 +528,8 @@ class AuditPipeline:
                     verification_violations=verification_violations,
                     spec_health_issues=spec_health_issues,
                 )
+                if _verification_tool_failure_without_evidence(foreign_result):
+                    errors.append("mumei verify did not produce a verification report")
             except ValueError as exc:
                 verification_violations.append(str(exc))
                 verification_status = "unverifiable"
@@ -1111,6 +1115,14 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
         help="Output format (default: human).",
     )
     parser.add_argument("--output", help="Optional output path.")
+    parser.add_argument(
+        "--sarif-output",
+        metavar="PATH",
+        help=(
+            "Write a SARIF 2.1.0 report for CI annotation. This artifact is "
+            "independent of --format/--output and uses the stable audit keys."
+        ),
+    )
     parser.add_argument("--domain-hint", default="", help="Optional domain hint for spec extraction.")
     parser.add_argument(
         "--auto-migrate",
@@ -1782,6 +1794,61 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
                 file=sys.stderr,
             )
             raise SystemExit(2)
+    sarif_output = getattr(args, "sarif_output", None)
+    if sarif_output:
+        def _normalized_output_path(path: str) -> str:
+            return os.path.realpath(os.path.expanduser(path))
+
+        def _same_output_path(left: str | None, right: str | None) -> bool:
+            if not left or not right:
+                return False
+            try:
+                return os.path.samefile(left, right)
+            except OSError:
+                return _normalized_output_path(left) == _normalized_output_path(right)
+
+        declared_input_paths = tuple(
+            path
+            for name in (
+                "schedule_request",
+                "schedule_adapters",
+                "schedule_argv_map",
+                "schedule_policy",
+                "schedule_observations",
+                "schedule_core",
+                "schedule_core_requirement",
+                "schedule_core_requirement_list",
+            )
+            if (path := getattr(args, name, None)) is not None
+        )
+        conflicting = _same_output_path(sarif_output, args.output) or _same_output_path(
+            sarif_output, os.path.expanduser(args.code_file)
+        ) or any(
+            _same_output_path(sarif_output, path)
+            for path in declared_input_paths
+        )
+        audit_input_path = Path(os.path.expanduser(args.code_file))
+        if not conflicting and audit_input_path.is_dir():
+            audited_candidates = [
+                *(
+                    candidate
+                    for candidate in audit_input_path.rglob("*")
+                    if candidate.is_file()
+                    and candidate.suffix in {*AUDIT_EXTENSION_MAP, ".mm"}
+                )
+            ]
+            conflicting = any(
+                _same_output_path(sarif_output, str(candidate))
+                for candidate in audited_candidates
+            )
+        if conflicting:
+            print(
+                "audit: --sarif-output must not overwrite --output, --code-file, "
+                "or a declared schedule input",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+
     config = AgentConfig(mumei_lean_repo=getattr(args, "mumei_lean_repo", None))
     result = AuditPipeline(config=config, heal_output_dir=args.heal_output_dir).audit_file(
         args.code_file,
@@ -1816,6 +1883,12 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
         Path(args.output).write_text(payload + "\n", encoding="utf-8")
     else:
         print(payload)
+    if sarif_output:
+        try:
+            write_sarif(result, sarif_output)
+        except OSError as exc:
+            print(f"audit: failed to write SARIF output: {exc}", file=sys.stderr)
+            raise SystemExit(2) from exc
     return result
 
 _RATE_LIMIT_MARKERS = (

@@ -246,6 +246,7 @@ def main() -> None:
     elif command == "audit":
         import argparse
         from agent.audit import build_parser as audit_build_parser, main as audit_main
+        from agent.audit_sarif import audit_exit_code
 
         parser = argparse.ArgumentParser(
             prog="python -m agent audit",
@@ -256,7 +257,16 @@ def main() -> None:
         )
         audit_build_parser(parser)
         args = parser.parse_args(argv[1:])
-        audit_main(args)
+        try:
+            result = audit_main(args)
+        except Exception as exc:
+            # CI needs a stable operational-error class even when construction
+            # or extraction fails before an AuditResult exists. Keep the
+            # process error generic because third-party exception text is not
+            # part of the audited output contract.
+            print(f"audit: operational error ({type(exc).__name__})", file=sys.stderr)
+            raise SystemExit(2) from exc
+        raise SystemExit(audit_exit_code(result))
     elif command == "extract-spec":
         import argparse
         from agent.extract_spec import build_parser as extract_build_parser, main as extract_main

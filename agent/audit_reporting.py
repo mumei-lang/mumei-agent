@@ -248,6 +248,27 @@ def _is_inconclusive_non_failure(report: dict[str, object], *, counterexample_pr
     )
 
 
+def _verification_tool_failure_without_evidence(result: dict[str, object]) -> bool:
+    """True when mumei exited unsuccessfully without its own failure report.
+
+    Independent foreign-code counterexamples can still refute the code, but
+    they do not prove that the verifier itself completed; an empty/unknown
+    verification report therefore remains an operational error.
+    """
+    verification = _dict_value(result.get("verification"))
+    if not verification or verification.get("success") is not False:
+        return False
+    report = _dict_value(verification.get("report"))
+    status = _string_value(report.get("status"), "")
+    if status in _INCONCLUSIVE_VERIFY_STATUSES:
+        return False
+    report_counterexample = format_counterexample(report)
+    has_report_counterexample = bool(report.get("counterexample") or report_counterexample)
+    has_failed_atoms = bool(report.get("failed") or report.get("failed_clause"))
+    has_failure_status = status in {"failed", "refuted"}
+    return not (has_report_counterexample or has_failed_atoms or has_failure_status)
+
+
 def _verification_issue_strings(result: dict[str, object]) -> list[str]:
     issues: list[str] = []
     verification = _dict_value(result.get("verification"))
@@ -264,7 +285,7 @@ def _verification_issue_strings(result: dict[str, object]) -> list[str]:
     )
     inconclusive = _is_inconclusive_non_failure(
         report, counterexample_present=counterexample_present
-    )
+    ) or _verification_tool_failure_without_evidence(result)
     for item in _string_list(result.get("errors")):
         # A bare "mumei verify failed" for a trusted/inconclusive result is a
         # false positive; drop it (real failures carry status/failed detail).
@@ -340,6 +361,8 @@ def _verification_status_from_foreign_result(
         return "unverifiable"
     if has_counterexample:
         return "refuted"
+    if _verification_tool_failure_without_evidence(result):
+        return "unverifiable"
     if verification.get("success") is False:
         return "refuted"
     return "verified"
