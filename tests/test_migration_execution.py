@@ -89,7 +89,7 @@ def test_migration_execution_records_acceptance_evidence_and_boundary(tmp_path: 
     assert verification["sarif"]["sha256"]
     assert client.calls[0]["source_path"].endswith(".mm")
     assert candidate["behavioral_evidence"]["status"] == "available"
-    assert candidate["behavioral_evidence"]["entries"][0]["verdict"] == "violates"
+    assert candidate["behavioral_evidence"]["entries"][0]["outcome"] == "violates"
     boundary = "\n".join(report["evidence_boundary"])
     assert "not proof that host-language code implements the same behavior" in boundary
     assert "diagnostic evidence only" in candidate["behavioral_evidence"]["semantics"]
@@ -299,3 +299,22 @@ def test_directory_candidates_keep_per_file_provenance(tmp_path: Path) -> None:
     provenance = [item["source_provenance"] for item in report["candidates"]]
     assert [item["path"] for item in provenance] == [str(first), str(second)]
     assert len({item["sha256"] for item in provenance}) == 2
+
+
+def test_healed_contract_replaces_weak_skeleton_blocker(tmp_path: Path) -> None:
+    source = tmp_path / "payment.py"
+    source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+    weak = "atom withdraw() -> i64 {\n    requires: true;\n    ensures: true;\n    body: { 0 }\n}"
+    strong = "atom withdraw(x: i64) -> i64 {\n    requires: x >= 0;\n    ensures: result >= 0;\n    body: { x }\n}"
+    healed = tmp_path / "withdraw.mm"
+    healed.write_text(strong, encoding="utf-8")
+
+    report = build_migration_execution(
+        _result(source, [_hint("withdraw", weak)], healed_files=[str(healed)]),
+        output_path=tmp_path / "execution.json",
+        mumei_client=FakeVerifyClient(),
+    )
+
+    candidate = report["candidates"][0]
+    assert candidate["extracted_contract"]["weak_true_contract"] is False
+    assert not any("weak true/true" in str(item) for item in candidate["evidence_blockers"])

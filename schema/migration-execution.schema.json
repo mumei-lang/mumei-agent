@@ -2,6 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://mumei.dev/schemas/migration-execution.schema.json",
   "title": "mumei.migration-execution/v1",
+  "description": "Migration execution acceptance evidence. Verification of a generated .mm skeleton proves only that generated contract as written; it is not semantic-equivalence proof for the original host-language function. Behavioral replay/body-port entries are diagnostic evidence only, not formal verdicts.",
   "type": "object",
   "required": [
     "schema",
@@ -64,7 +65,7 @@
           "generated_mm": {"type": "object"},
           "heal": {"type": "object"},
           "verification": {"type": "object"},
-          "behavioral_evidence": {"type": "object"},
+          "behavioral_evidence": {"type": "object", "description": "Diagnostic behavioral evidence only; never semantic-equivalence proof or a formal verdict."},
           "evidence_blockers": {"type": "array"},
           "operational_errors": {"type": "array", "items": {"type": "string"}},
           "review_required": {"type": "boolean"},

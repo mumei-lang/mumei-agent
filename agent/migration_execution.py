@@ -145,7 +145,7 @@ def _behavior_entries(file_result: AuditResult | AuditDirectoryResult, function_
                     "kind": "native_replay",
                     "function_name": function_name,
                     "input": item.get("input"),
-                    "verdict": item.get("verdict"),
+                    "outcome": item.get("verdict"),
                     "reason": item.get("reason"),
                     "source": item.get("source"),
                 }
@@ -335,7 +335,11 @@ def build_migration_execution(
                 "semantics": "diagnostic evidence only; not semantic-equivalence proof",
                 "entries": [],
             },
-            "evidence_blockers": list(feasibility_blockers),
+            "evidence_blockers": [
+                item
+                for item in feasibility_blockers
+                if item != "generated skeleton has weak true/true contracts"
+            ],
             "operational_errors": [],
             "review_required": True,
             "execution_state": "not_attempted",
