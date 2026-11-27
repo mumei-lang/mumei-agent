@@ -963,3 +963,15 @@ def test_author_name_public_label_is_not_credential_like(tmp_path: Path) -> None
     candidate = report["candidates"][0]
     assert candidate["execution_state"] == "ready_for_human_review"
     assert candidate["extracted_contract"]["string_literals_redacted"] is False
+
+
+
+def test_uppercase_credential_constants_are_redacted_and_blocked(tmp_path: Path) -> None:
+    source = tmp_path / "payment.py"
+    source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+    secret = "uppercase-secret"
+    for expression in [f'PASSWORD == "{secret}"', f'AUTH_TOKEN == "{secret}"']:
+        skeleton = f'atom withdraw() -> i64 {{\n    requires: {expression};\n    ensures: result >= 0;\n    body: {{ 0 }}\n}}'
+        report = build_migration_execution(_result(source, [_hint("withdraw", skeleton)]), output_path=tmp_path / "execution.json", mumei_client=FakeVerifyClient())
+        assert report["candidates"][0]["execution_state"] == "blocked"
+        assert secret not in json.dumps(report)
