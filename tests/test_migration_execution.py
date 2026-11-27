@@ -224,3 +224,20 @@ def test_cli_rejects_migration_execution_output_conflicts(tmp_path: Path, capsys
             main(args)
         assert exc.value.code == 2
         assert "--migration-execution-output must not overwrite" in capsys.readouterr().err
+
+
+def test_cli_rejects_migration_function_without_execution_output(tmp_path: Path) -> None:
+    source = tmp_path / "payment.py"
+    source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+    args = build_parser().parse_args(
+        [
+            "--code-file", str(source),
+            "--language", "python",
+            "--auto-migrate",
+            "--migration-function", "withdraw",
+        ]
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        main(args)
+    assert exc.value.code == 2

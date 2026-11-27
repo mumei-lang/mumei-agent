@@ -269,7 +269,7 @@ def build_migration_execution(
         health = _contract_health(file_result)
         effects = _effect_profile(source_text, hint_language, function_name)
         feasibility, feasibility_blockers = _verification_feasibility(hint, health, effects)
-        source_hash = _sha256_text(source_text) if source_text else None
+        source_hash = _sha256_file(Path(hint_source))
         candidate: dict[str, object] = {
             "function_name": function_name,
             "source_provenance": {

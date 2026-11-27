@@ -1984,6 +1984,12 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
             file=sys.stderr,
         )
         raise SystemExit(2)
+    if getattr(args, "migration_function", None) and not migration_execution_output:
+        print(
+            "audit: --migration-function requires --migration-execution-output",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
     if migration_readiness_output:
         def _same_migration_path(left: str | None, right: str | None) -> bool:
             if not left or not right:
