@@ -84,7 +84,7 @@ runs:
       uses: astral-sh/setup-uv@v5
       with:
         enable-cache: true
-        cache-dependency-glob: ${{ github.action_path }}/../../../uv.lock
+        cache-dependency-glob: ${{ env.AGENT_ROOT }}/uv.lock
 
     - name: Install mumei
       shell: bash

@@ -44,7 +44,7 @@ def test_composite_action_contract_and_cache_steps() -> None:
     setup_uv = next(step for step in steps if step["name"] == "Set up uv with dependency cache")
     assert setup_uv["uses"] == "astral-sh/setup-uv@v5"
     assert setup_uv["with"]["enable-cache"] is True
-    assert setup_uv["with"]["cache-dependency-glob"] == "${{ github.action_path }}/../../../uv.lock"
+    assert setup_uv["with"]["cache-dependency-glob"] == "${{ env.AGENT_ROOT }}/uv.lock"
     assert 'MUMEI_STD_PATH=$HOME/.mumei/std' in ACTION_PATH.read_text(encoding="utf-8")
     audit_step = next(step for step in steps if step["name"] == "Run mumei-agent audit")
     assert "--sarif-output" in audit_step["run"]
