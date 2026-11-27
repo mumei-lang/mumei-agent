@@ -597,10 +597,41 @@ def _single_return_expr(function_node: ast.FunctionDef | ast.AsyncFunctionDef) -
         return ""
 
 
+def _typescript_nullable_params(params_text: str) -> set[str]:
+    """Return TypeScript parameters that may actually be null/undefined.
+
+    Preconditions are caller contracts, so nested callback locals and
+    non-nullable annotated parameters must not produce ``!= null`` requires.
+    Untyped, optional, ``any``/``unknown`` or explicit null/undefined unions
+    remain nullable.
+    """
+    nullable: set[str] = set()
+    for raw in _split_signature_params(params_text):
+        if not raw.strip():
+            continue
+        parts = raw.split(":", 1)
+        pname = parts[0].strip().split("=")[0].strip().rstrip("?")
+        if not pname:
+            continue
+        if len(parts) < 2:
+            nullable.add(_safe_identifier(pname))
+            continue
+        type_text = parts[1].strip().lower()
+        if (
+            raw.strip().startswith(pname + "?")
+            or "null" in type_text
+            or "undefined" in type_text
+            or type_text in {"any", "unknown"}
+        ):
+            nullable.add(_safe_identifier(pname))
+    return nullable
+
+
 def _safety_requires_for_expression(
     expression: str,
     language: str = "python",
     known_constants: dict[str, int] | None = None,
+    nullable_params: set[str] | None = None,
 ) -> str:
     known_constants = known_constants or {}
     if not expression:
@@ -613,11 +644,11 @@ def _safety_requires_for_expression(
         findings = tree_sitter_extract.analyze_expression(expression, canonical)
         if findings is not None:
             requirements = _generic_requirements_from_findings(
-                findings, canonical, known_constants
+                findings, canonical, known_constants, nullable_params
             )
             return " && ".join(_dedupe_strings(requirements)) if requirements else "true"
         requirements = _generic_safety_requires_for_expression(
-            expression, known_constants, canonical
+            expression, known_constants, canonical, nullable_params
         )
         return " && ".join(_dedupe_strings(requirements)) if requirements else "true"
     requirements: list[str] = []
@@ -645,6 +676,7 @@ def _generic_requirements_from_findings(
     findings: tree_sitter_extract.ExpressionSafety,
     language: str = "typescript",
     known_constants: dict[str, int] | None = None,
+    nullable_params: set[str] | None = None,
 ) -> list[str]:
     """Divide-by-zero / bounds / null requirements from syntax-tree findings.
 
@@ -671,6 +703,8 @@ def _generic_requirements_from_findings(
             requirements.append(f"{index} >= 0")
         requirements.append(f"{index} < len_{container}")
     for value in findings.length_access_values:
+        if nullable_params is not None and value not in nullable_params:
+            continue
         if semantic_safety.should_flag_null_deref(value, None, language):
             requirements.append(f"{value} != null")
             requirements.append(f"{value} != undefined")
@@ -716,6 +750,7 @@ def _generic_safety_requires_for_expression(
     expression: str,
     known_constants: dict[str, int] | None = None,
     language: str = "typescript",
+    nullable_params: set[str] | None = None,
 ) -> list[str]:
     known_constants = known_constants or {}
     requirements: list[str] = []
@@ -742,6 +777,8 @@ def _generic_safety_requires_for_expression(
         expression,
     ):
         value = match.group("value")
+        if nullable_params is not None and value not in nullable_params:
+            continue
         if semantic_safety.should_flag_null_deref(value, None, language):
             requirements.append(f"{value} != null")
             requirements.append(f"{value} != undefined")
@@ -1467,7 +1504,10 @@ def _infer_typescript_arrow_functions_with_tree_sitter(
                 params=params_list,
                 return_type=return_type,
                 requires=_safety_requires_for_expression(
-                    raw_return_expr, "typescript", known_constants
+                    raw_return_expr,
+                    "typescript",
+                    known_constants,
+                    _typescript_nullable_params(params_text),
                 ),
                 ensures=_ensures_for_return_expression(return_expr, return_type, param_names, known_constants, local_names, param_types=param_types),
             )
@@ -1499,7 +1539,10 @@ def _infer_typescript_contracts(code: str) -> list[MumeiContractAtom]:
                     (fn.return_type or "number").strip(), raw_return_expr, param_types
                 )
                 requires = _safety_requires_for_expression(
-                    raw_return_expr, "typescript", known_constants
+                    raw_return_expr,
+                    "typescript",
+                    known_constants,
+                    _typescript_nullable_params(fn.params_text),
                 )
                 local_names = _local_variable_names(fn.body, "typescript")
                 ensures = _ensures_for_return_expression(return_expr, return_type, param_names, known_constants, local_names, param_types=param_types)
@@ -1580,7 +1623,10 @@ def _infer_typescript_contracts(code: str) -> list[MumeiContractAtom]:
                     params=params_list,
                     return_type=return_type,
                     requires=_safety_requires_for_expression(
-                        raw_return_expr, "typescript", known_constants
+                        raw_return_expr,
+                        "typescript",
+                        known_constants,
+                        _typescript_nullable_params(match.group("params")),
                     ),
                     ensures=_ensures_for_return_expression(return_expr, return_type, param_names, known_constants, local_names, param_types=param_types),
                 )

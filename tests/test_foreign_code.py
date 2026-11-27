@@ -8282,3 +8282,30 @@ contract Vault {
         issue.function_name == "settle" and "no access-control guard" in issue.message
         for issue in _detect_solidity_contract_issues(source)
     )
+
+
+def test_typescript_contract_requires_skip_nonnullable_and_local_length_values() -> None:
+    from agent.cross_validation_foreign import _infer_typescript_contracts
+
+    source = """
+export function summarize(items: number[]): number {
+  return items.length;
+}
+export function readBody(req: Request): Promise<string> {
+  return new Promise((resolve) => {
+    req.on('data', (chunk: Buffer) => resolve(chunk.length));
+  });
+}
+"""
+    atoms = {atom.name: atom for atom in _infer_typescript_contracts(source)}
+    assert atoms["summarize"].requires == "true"
+    assert atoms["readBody"].requires == "true"
+
+
+def test_typescript_contract_requires_keep_nullable_length_param() -> None:
+    from agent.cross_validation_foreign import _infer_typescript_contracts
+
+    source = "export function size(items?: number[]): number { return items.length; }\n"
+    atom = _infer_typescript_contracts(source)[0]
+    assert "items != null" in atom.requires
+    assert "items != undefined" in atom.requires
