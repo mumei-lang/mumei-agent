@@ -71,7 +71,10 @@ jobs:
           test -s evidence/migration-execution/migration_execution.json
           test -s evidence/migration-execution/status.json
           test -e evidence/migration-execution/generated-artifacts/.mumei-generated-artifacts
-          ! grep -R -q 'fake-password-value' evidence/migration-execution
+          if grep -R -q 'fake-password-value' evidence/migration-execution; then
+            echo "::error::credential-like sentinel appeared in migration execution evidence"
+            exit 1
+          fi
           python3 - <<'PY'
           import json
           baseline=json.load(open('evidence/generated-baseline.json', encoding='utf-8'))
