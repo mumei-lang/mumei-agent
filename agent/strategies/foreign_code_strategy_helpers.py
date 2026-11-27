@@ -2036,6 +2036,60 @@ def _rust_collection_len_division_issues(
         array = re.fullmatch(r"&(?:'\w+)?\[[^;]+;(\d+)\]", type_text)
         return array is not None and int(array.group(1)) > 0
 
+    integer_types = {
+        "i8", "i16", "i32", "i64", "i128", "isize",
+        "u8", "u16", "u32", "u64", "u128", "usize",
+    }
+
+    def primitive_integer_type(type_node) -> bool:
+        return type_node is not None and text(type_node) in integer_types
+
+    def primitive_integer_syntax(node) -> bool:
+        if node is None:
+            return False
+        if node.type == "integer_literal":
+            return True
+        if node.type == "type_cast_expression":
+            return primitive_integer_type(node.child_by_field_name("type"))
+        if node.type == "unary_expression":
+            operator = node.child_by_field_name("operator")
+            argument = node.child_by_field_name("argument")
+            return operator is not None and text(operator) == "-" and primitive_integer_syntax(argument)
+        return False
+
+    local_bindings: list[tuple[int, str, bool]] = []
+
+    def collect_local_bindings(node) -> None:
+        if node.type == "let_declaration":
+            pattern = node.child_by_field_name("pattern")
+            if pattern is not None and pattern.type == "identifier":
+                value = node.child_by_field_name("value")
+                is_integer = primitive_integer_type(node.child_by_field_name("type")) or primitive_integer_syntax(value)
+                if (
+                    not is_integer
+                    and value is not None
+                    and value.type == "identifier"
+                    and normalized_types.get(text(value), "") in integer_types
+                ):
+                    is_integer = True
+                local_bindings.append((node.end_byte, text(pattern), is_integer))
+        for child in node.named_children:
+            collect_local_bindings(child)
+
+    collect_local_bindings(block)
+    local_bindings.sort()
+
+    def primitive_integer_numerator(node) -> bool:
+        if primitive_integer_syntax(node):
+            return True
+        if node is None or node.type != "identifier":
+            return False
+        name = text(node)
+        if normalized_types.get(name, "") in integer_types:
+            return True
+        prior = [entry for entry in local_bindings if entry[0] <= node.start_byte and entry[1] == name]
+        return bool(prior and prior[-1][2])
+
     def simple_len_call(node) -> str | None:
         if node is None or node.type != "call_expression":
             return None
@@ -2146,6 +2200,7 @@ def _rust_collection_len_division_issues(
                 receiver = len_divisor_receiver(node.child_by_field_name("right"))
                 if (
                     receiver is not None
+                    and primitive_integer_numerator(node.child_by_field_name("left"))
                     and not fixed_len_is_nonzero(receiver)
                     and not suppressed(node, receiver)
                     and (receiver, node.start_byte) not in seen

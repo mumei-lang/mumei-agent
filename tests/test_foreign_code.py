@@ -8455,6 +8455,27 @@ def test_rust_collection_len_guard_must_dominate_and_receiver_stays_immutable() 
         assert [i for i in _detect_safety_issues(source, "rust") if "divide" in i.message]
 
 
+def test_rust_collection_len_division_requires_primitive_integer_numerator() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    operator_overloaded = """struct Amount;
+impl std::ops::Div<usize> for Amount {
+    type Output = Amount;
+    fn div(self, _rhs: usize) -> Amount { Amount }
+}
+fn f(amount: Amount, recipients: &[String]) -> Amount {
+    amount / recipients.len()
+}
+"""
+    primitive_local = """fn f(recipients: &[String]) -> i64 {
+    let amount: i64 = 10;
+    amount / recipients.len() as i64
+}
+"""
+    assert not [i for i in _detect_safety_issues(operator_overloaded, "rust") if "divide" in i.message]
+    assert [i for i in _detect_safety_issues(primitive_local, "rust") if "divide" in i.message]
+
+
 def test_rust_arbitrary_member_divisor_remains_conservative() -> None:
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
 
