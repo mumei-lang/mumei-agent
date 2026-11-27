@@ -451,9 +451,13 @@ def test_cli_writes_migration_readiness_after_audit(tmp_path: Path) -> None:
     assert build.call_args.kwargs["mumei_client"] is pipeline_cls.return_value.mumei_client
 
 
-def test_cli_rejects_migration_readiness_output_conflicts(tmp_path: Path) -> None:
+def test_cli_rejects_migration_readiness_output_conflicts(tmp_path: Path, capsys) -> None:
     source = tmp_path / "payment.py"
     source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+    (tmp_path / "baseline.json").write_text(
+        '{"version":"mumei.audit-baseline/v1","fingerprints":[]}\n',
+        encoding="utf-8",
+    )
 
     for conflict in (
         str(source),
@@ -477,6 +481,7 @@ def test_cli_rejects_migration_readiness_output_conflicts(tmp_path: Path) -> Non
         with pytest.raises(SystemExit) as exc:
             main(args)
         assert exc.value.code == 2
+        assert "--migration-readiness-output must not overwrite" in capsys.readouterr().err
 
 
 def test_cli_rejects_case_insensitive_source_collision_in_directory(tmp_path: Path) -> None:
