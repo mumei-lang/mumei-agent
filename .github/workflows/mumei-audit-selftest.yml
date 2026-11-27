@@ -63,5 +63,5 @@ jobs:
           test -s evidence/audit.json
           test -s evidence/audit.sarif
           test -s evidence/generated-baseline.json
-          test -s evidence/audit.stdout.log || test -s evidence/audit.stderr.log
+          test -e evidence/audit.stdout.log && test -e evidence/audit.stderr.log
           python3 -c "import json; baseline=json.load(open('evidence/generated-baseline.json', encoding='utf-8')); sarif=json.load(open('evidence/audit.sarif', encoding='utf-8')); assert baseline['version'] == 'mumei.audit-baseline/v1'; assert sarif['version'] == '2.1.0'"
