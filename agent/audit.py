@@ -284,6 +284,7 @@ class AuditPipeline:
         domain_hint: str = "",
         auto_migrate: bool = False,
         auto_heal: bool = False,
+        migration_heal_functions: list[str] | None = None,
         enable_lean_bridge: bool = False,
         enable_body_port: bool = False,
         enable_native_replay: bool = False,
@@ -307,6 +308,7 @@ class AuditPipeline:
                 domain_hint=domain_hint,
                 auto_migrate=auto_migrate,
                 auto_heal=auto_heal,
+                migration_heal_functions=migration_heal_functions,
                 enable_lean_bridge=enable_lean_bridge,
                 enable_body_port=enable_body_port,
                 enable_native_replay=enable_native_replay,
@@ -332,6 +334,7 @@ class AuditPipeline:
                 domain_hint=domain_hint,
                 auto_migrate=auto_migrate,
                 auto_heal=auto_heal,
+                migration_heal_functions=migration_heal_functions,
                 enable_lean_bridge=enable_lean_bridge,
                 enable_body_port=enable_body_port,
                 enable_native_replay=enable_native_replay,
@@ -355,6 +358,7 @@ class AuditPipeline:
         domain_hint: str = "",
         auto_migrate: bool = False,
         auto_heal: bool = False,
+        migration_heal_functions: list[str] | None = None,
         enable_lean_bridge: bool = False,
         enable_body_port: bool = False,
         enable_native_replay: bool = False,
@@ -710,6 +714,7 @@ class AuditPipeline:
             healed_files, heal_errors = self._heal_migration_hints(
                 result.migration_hints,
                 source_path,
+                selected_functions=migration_heal_functions,
             )
             result.healed_files = healed_files
             result.heal_errors = heal_errors
@@ -723,6 +728,7 @@ class AuditPipeline:
         domain_hint: str = "",
         auto_migrate: bool = False,
         auto_heal: bool = False,
+        migration_heal_functions: list[str] | None = None,
         enable_lean_bridge: bool = False,
         enable_body_port: bool = False,
         enable_native_replay: bool = False,
@@ -756,6 +762,7 @@ class AuditPipeline:
                 domain_hint=domain_hint,
                 auto_migrate=auto_migrate,
                 auto_heal=auto_heal,
+                migration_heal_functions=migration_heal_functions,
                 enable_lean_bridge=enable_lean_bridge,
                 enable_body_port=enable_body_port,
                 enable_native_replay=enable_native_replay,
@@ -789,6 +796,7 @@ class AuditPipeline:
         domain_hint: str = "",
         auto_migrate: bool = False,
         auto_heal: bool = False,
+        migration_heal_functions: list[str] | None = None,
         enable_lean_bridge: bool = False,
         enable_body_port: bool = False,
         enable_native_replay: bool = False,
@@ -909,6 +917,7 @@ class AuditPipeline:
                     domain_hint=domain_hint,
                     auto_migrate=auto_migrate,
                     auto_heal=auto_heal,
+                    migration_heal_functions=migration_heal_functions,
                     enable_lean_bridge=enable_lean_bridge,
                     enable_body_port=enable_body_port,
                     enable_native_replay=enable_native_replay,
@@ -975,13 +984,18 @@ class AuditPipeline:
         self,
         migration_hints: list[dict],
         source_path: Path,
+        *,
+        selected_functions: list[str] | None = None,
     ) -> tuple[list[str], list[str]]:
         output_dir = (self.heal_output_dir or source_path.parent).resolve()
         output_dir.mkdir(parents=True, exist_ok=True)
         healed_files: list[str] = []
         heal_errors: list[str] = []
+        selected = set(selected_functions or [])
         for hint in migration_hints:
             function_name = _string_value(hint.get("function_name"), "audited_atom")
+            if selected and function_name not in selected and function_name.split(".")[-1] not in selected:
+                continue
             if "." not in function_name or not all(part.isidentifier() for part in function_name.split(".")):
                 function_name = _safe_identifier(function_name)
             skeleton = _string_value(hint.get("skeleton"), "")
@@ -1187,7 +1201,7 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
         default=[],
         metavar="FUNCTION",
         help=(
-            "Restrict migration execution evidence to a function name. Repeatable; "
+            "Restrict migration execution healing and evidence to a function name. Repeatable; "
             "the fixed migration_hints audit key still contains all candidates."
         ),
     )
@@ -2064,6 +2078,11 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
         domain_hint=args.domain_hint,
         auto_migrate=args.auto_migrate,
         auto_heal=args.auto_heal or bool(migration_execution_output),
+        **(
+            {"migration_heal_functions": list(getattr(args, "migration_function", []) or [])}
+            if migration_execution_output and getattr(args, "migration_function", None)
+            else {}
+        ),
         enable_lean_bridge=bool(getattr(args, "enable_lean_bridge", False)),
         include_tests=bool(getattr(args, "include_tests", False)),
         enable_body_port=bool(getattr(args, "enable_body_port", False)),

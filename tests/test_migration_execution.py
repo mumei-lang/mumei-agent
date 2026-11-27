@@ -7,7 +7,7 @@ from unittest.mock import patch
 import pytest
 import jsonschema
 
-from agent.audit import build_parser, main
+from agent.audit import AuditPipeline, build_parser, main
 from agent.audit_models import AuditResult
 from agent.migration_execution import SCHEMA, build_migration_execution
 
@@ -91,11 +91,17 @@ def test_migration_execution_records_acceptance_evidence_and_boundary(tmp_path: 
     assert verification["sarif"]["written"] is True
     assert verification["sarif"]["sha256"]
     assert client.calls[0]["source_path"].endswith(".mm")
-    assert candidate["behavioral_evidence"]["status"] == "available"
-    assert candidate["behavioral_evidence"]["entries"][0]["outcome"] == "violates"
+    assert candidate["unbound_audit_diagnostics"]["status"] == "available"
+    assert candidate["unbound_audit_diagnostics"]["entries"][0]["outcome"] == "violates"
+    assert candidate["unbound_audit_diagnostics"]["binding"]["status"] == "not_bound_to_generated_mm"
+    assert candidate["unbound_audit_diagnostics"]["binding"]["generated_mm_sha256"] is None
+    provenance = candidate["contract_provenance"]
+    assert provenance["original_skeleton_sha256"] == provenance["final_sha256"]
+    assert provenance["content_changed"] is False
+    assert provenance["contract_clauses_changed"] is False
     boundary = "\n".join(report["evidence_boundary"])
     assert "not proof that host-language code implements the same behavior" in boundary
-    assert "diagnostic evidence only" in candidate["behavioral_evidence"]["semantics"]
+    assert "diagnostic evidence only" in candidate["unbound_audit_diagnostics"]["semantics"]
     assert report["summary"]["ready_for_human_review"] == 1
 
 
@@ -204,6 +210,7 @@ def test_cli_execution_output_enables_existing_heal_flow_and_adds_next_step(tmp_
 
     assert returned is result
     assert pipeline_cls.return_value.audit_file.call_args.kwargs["auto_heal"] is True
+    assert pipeline_cls.return_value.audit_file.call_args.kwargs["migration_heal_functions"] == ["withdraw"]
     build.assert_called_once()
     assert build.call_args.kwargs["output_path"] == output
     assert build.call_args.kwargs["selected_functions"] == ["withdraw"]
@@ -321,6 +328,11 @@ def test_healed_contract_replaces_weak_skeleton_blocker(tmp_path: Path) -> None:
     candidate = report["candidates"][0]
     assert candidate["extracted_contract"]["weak_true_contract"] is False
     assert not any("weak true/true" in str(item) for item in candidate["evidence_blockers"])
+    provenance = candidate["contract_provenance"]
+    assert provenance["original_requires"] == ["true"]
+    assert provenance["final_requires"] == ["x >= 0"]
+    assert provenance["content_changed"] is True
+    assert provenance["contract_clauses_changed"] is True
 
 
 def test_empty_verifier_report_is_operational_even_with_zero_exit(tmp_path: Path) -> None:
@@ -342,3 +354,17 @@ def test_empty_verifier_report_is_operational_even_with_zero_exit(tmp_path: Path
     assert candidate["execution_state"] == "operational_error"
     assert candidate["verification"]["operational_error"] == "VerifierOutputUnavailable"
     assert candidate["verification"]["contract_proved"] is not True
+
+
+def test_heal_migration_hints_respects_selected_functions(tmp_path: Path) -> None:
+    pipeline = object.__new__(AuditPipeline)
+    pipeline.heal_output_dir = tmp_path
+    pipeline._run_heal_loop = lambda target: None
+    hints = [_hint("withdraw"), _hint("deposit")]
+
+    healed, errors = pipeline._heal_migration_hints(hints, tmp_path / "source.py", selected_functions=["withdraw"])
+
+    assert errors == []
+    assert healed == [str(tmp_path / "withdraw.mm")]
+    assert (tmp_path / "withdraw.mm").exists()
+    assert not (tmp_path / "deposit.mm").exists()

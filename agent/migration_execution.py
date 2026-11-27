@@ -330,12 +330,18 @@ def build_migration_execution(
             "generated_mm": {"path": None, "sha256": None, "origin": "generated_skeleton", "healed_source_path": None},
             "heal": {"attempted": heal_attempted, "errors": [], "healed_file": None},
             "verification": {},
-            "behavioral_evidence": {
+            "unbound_audit_diagnostics": {
                 "status": "not_available",
                 "reason": "audit did not produce native-replay or body-port diagnostics for this function",
                 "semantics": "diagnostic evidence only; not semantic-equivalence proof",
+                "binding": {
+                    "status": "not_bound_to_generated_mm",
+                    "generated_mm_sha256": None,
+                    "reason": "entries come from host-code audit lanes, not execution of the generated/healed .mm artifact",
+                },
                 "entries": [],
             },
+            "contract_provenance": {},
             "evidence_blockers": [
                 item
                 for item in feasibility_blockers
@@ -362,7 +368,21 @@ def build_migration_execution(
             if candidate["heal"]["errors"]:
                 candidate["evidence_blockers"].append("heal completed with errors")
             contract = _extracted_contract(healed_text)
+            original_contract = _extracted_contract(skeleton)
             candidate["extracted_contract"] = contract
+            candidate["contract_provenance"] = {
+                "original_skeleton_sha256": _sha256_text(skeleton),
+                "original_requires": original_contract["requires"],
+                "original_ensures": original_contract["ensures"],
+                "final_sha256": _sha256_text(healed_text),
+                "final_requires": contract["requires"],
+                "final_ensures": contract["ensures"],
+                "content_changed": healed_text != skeleton,
+                "contract_clauses_changed": (
+                    original_contract["requires"] != contract["requires"]
+                    or original_contract["ensures"] != contract["ensures"]
+                ),
+            }
             if not healed_text.strip():
                 candidate["evidence_blockers"].append("generated .mm content is empty")
                 candidate["execution_state"] = "blocked"
@@ -396,10 +416,15 @@ def build_migration_execution(
             if contract["trusted_atom_declarations"]:
                 candidate["evidence_blockers"].append("generated .mm declares trusted atoms")
             behavior_entries = _behavior_entries(file_result, function_name)
-            candidate["behavioral_evidence"] = {
+            candidate["unbound_audit_diagnostics"] = {
                 "status": "available" if behavior_entries else "not_available",
                 "reason": None if behavior_entries else "audit did not produce native-replay or body-port diagnostics for this function",
                 "semantics": "diagnostic evidence only; not semantic-equivalence proof",
+                "binding": {
+                    "status": "not_bound_to_generated_mm",
+                    "generated_mm_sha256": None,
+                    "reason": "entries come from host-code audit lanes, not execution of the generated/healed .mm artifact",
+                },
                 "entries": behavior_entries,
             }
             candidate["evidence_blockers"] = list(dict.fromkeys(str(item) for item in candidate["evidence_blockers"]))

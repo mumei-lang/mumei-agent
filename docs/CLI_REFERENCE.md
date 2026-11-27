@@ -288,7 +288,7 @@ Audit existing code by extracting specs, verifying contracts, emitting cross_val
 | `--fail-on` | `{refuted, error, high-confidence, never}` | no | refuted | CI failure policy for non-suppressed findings (default: refuted). Operational/extraction errors still exit 2. |
 | `--migration-readiness-output` | `<PATH>` | no | — | Write a mumei.migration-readiness/v1 JSON report. Requires --auto-migrate; the report prioritizes migration_hints and verifies the highest-ranked skeleton as a scaffold, not as host-code equivalence proof. |
 | `--migration-execution-output` | `<PATH>` | no | — | Write a mumei.migration-execution/v1 acceptance artifact. Requires --auto-migrate; requesting it also runs the existing self-healing loop and records generated .mm, proof-certificate, SARIF, heal, and behavioral diagnostic evidence without changing the fixed audit keys. |
-| `--migration-function` | `<FUNCTION>` | no | [] | Restrict migration execution evidence to a function name. Repeatable; the fixed migration_hints audit key still contains all candidates. |
+| `--migration-function` | `<FUNCTION>` | no | [] | Restrict migration execution healing and evidence to a function name. Repeatable; the fixed migration_hints audit key still contains all candidates. |
 | `--domain-hint` | `<DOMAIN_HINT>` | no | — | Optional domain hint for spec extraction. |
 | `--auto-migrate` | — | no | — | Emit migration_hints by generating .mm migration skeletons for functions with issues. |
 | `--auto-heal` | — | no | — | Run the self-healing loop on each skeleton produced by --auto-migrate. |
