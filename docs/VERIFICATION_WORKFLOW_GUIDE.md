@@ -260,6 +260,12 @@ uv run mumei-agent audit --code-file src/foo.py --format markdown --output repor
 uv run mumei-agent audit --code-file src/ --format markdown --output reports/src-audit.md
 ```
 
+CI annotation が必要な場合は `--sarif-output` を併用する。SARIF は `--format`/`--output` とは独立した artifact で、exit code は `0`=code finding なし、`1`=code への反証あり、`2`=引数・抽出・実行環境のエラーです。spec-only diagnostic と `unverifiable` は baseline policy 未導入の既定では fail にしません。
+
+```bash
+uv run mumei-agent audit --code-file src/ --format json --output reports/audit.json --sarif-output reports/audit.sarif
+```
+
 `extract-spec --code-file` は単一ファイルとディレクトリの両方を受け付ける。ディレクトリを渡すと対応拡張子のファイルをまとめて処理する。
 `validate-code --input`、`validate-spec-to-code --code`、`validate-code-to-spec --code` は単一コードファイルを指定する。
 
