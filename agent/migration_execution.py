@@ -119,30 +119,36 @@ def _outside_string_mask(code: str) -> str:
     return "".join(out)
 
 
-def _redact_string_literals(text: str) -> str:
-    out: list[str] = []
-    in_string = False
-    escaped = False
-    for char in text:
-        if in_string:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                in_string = False
-            continue
-        if char == '"':
-            in_string = True
-            out.append('"<redacted>"')
-        else:
-            out.append(char)
-    return "".join(out)
+_CREDENTIAL_WORD = r"[\w$]*(?:password|passwd|secret|token|api_?key|apikey|private_?key|auth|credential)[\w$]*"
+_CREDENTIAL_EXPR = rf"(?:[\w$]+\.)*{_CREDENTIAL_WORD}"
+_STRING_LITERAL = r'"(?:\\.|[^"\\])*"'
+_CREDENTIAL_COMPARISON_FORWARD = re.compile(
+    rf"(?P<name>\b{_CREDENTIAL_EXPR}\b)\s*(?P<op>==|!=)\s*(?P<literal>{_STRING_LITERAL})",
+    re.IGNORECASE,
+)
+_CREDENTIAL_COMPARISON_REVERSE = re.compile(
+    rf"(?P<literal>{_STRING_LITERAL})\s*(?P<op>==|!=)\s*(?P<name>\b{_CREDENTIAL_EXPR}\b)",
+    re.IGNORECASE,
+)
 
 
-def migration_text_has_string_literals(text: str) -> bool:
-    code = "\n".join(_strip_mm_comments(text, mask_strings=True))
-    return '"' in code
+def _redact_credential_comparison_literals(text: str) -> str:
+    text = _CREDENTIAL_COMPARISON_FORWARD.sub(
+        lambda match: f'{match.group("name")} {match.group("op")} "<redacted>"',
+        text,
+    )
+    return _CREDENTIAL_COMPARISON_REVERSE.sub(
+        lambda match: f'"<redacted>" {match.group("op")} {match.group("name")}',
+        text,
+    )
+
+
+def redact_sensitive_migration_text(text: str) -> str:
+    return _redact_credential_comparison_literals(redact_secrets(text))
+
+
+def migration_text_has_sensitive_literals(text: str) -> bool:
+    return redact_sensitive_migration_text(text) != text
 
 
 def _extract_mm_clauses(code: str, keyword: str) -> list[str]:
@@ -167,7 +173,7 @@ def _extract_mm_clauses(code: str, keyword: str) -> list[str]:
                 index += 1
                 continue
             if char == ";":
-                clauses.append(_redact_string_literals(code[start:index].strip()))
+                clauses.append(code[start:index].strip())
                 break
             index += 1
     return clauses
@@ -176,15 +182,19 @@ def _extract_mm_clauses(code: str, keyword: str) -> list[str]:
 def _extracted_contract(skeleton: str) -> dict[str, object]:
     code = "\n".join(_strip_mm_comments(skeleton, mask_strings=False))
     masked = "\n".join(_strip_mm_comments(skeleton, mask_strings=True))
-    requires = [redact_secrets(item) for item in _extract_mm_clauses(code, "requires")]
-    ensures = [redact_secrets(item) for item in _extract_mm_clauses(code, "ensures")]
+    raw_requires = _extract_mm_clauses(code, "requires")
+    raw_ensures = _extract_mm_clauses(code, "ensures")
+    requires = [redact_sensitive_migration_text(item) for item in raw_requires]
+    ensures = [redact_sensitive_migration_text(item) for item in raw_ensures]
     trusted_atoms = re.findall(r"\btrusted\s+atom\s+([A-Za-z_]\w*)", masked)
     weak = bool(requires and ensures and all(item == "true" for item in requires + ensures))
+    string_literals_present = any(re.search(_STRING_LITERAL, item) for item in raw_requires + raw_ensures)
     return {
         "requires": requires,
         "ensures": ensures,
         "weak_true_contract": weak,
         "trusted_atom_declarations": trusted_atoms,
+        "string_literals_present": string_literals_present,
         "string_literals_redacted": any('"<redacted>"' in item for item in requires + ensures),
         "generated_contract_sha256": _sha256_text(skeleton),
     }
@@ -204,31 +214,19 @@ def migration_output_key(source_path: str | Path, skeleton: str) -> str:
 
 def migration_output_target(output_dir: Path, source_path: str | Path, function_name: str, skeleton: str) -> Path:
     key = migration_output_key(source_path, skeleton)
-    candidates = [output_dir / f"{function_name}-{key}.mm"]
+    candidate = output_dir / f"{function_name}-{key}.mm"
+    if not candidate.exists() and not candidate.is_symlink():
+        return candidate
     suffix = 1
-    while candidates[-1].exists() or candidates[-1].is_symlink():
-        candidates.append(output_dir / f"{function_name}-{key}-{suffix}.mm")
-        suffix += 1
-    first_absent: Path | None = None
-    canonical = _canonical_mm_text(skeleton)
-    for candidate in candidates:
+    while True:
+        candidate = output_dir / f"{function_name}-{key}-{suffix}.mm"
         if not candidate.exists() and not candidate.is_symlink():
-            first_absent = candidate
-            break
-        try:
-            if candidate.is_file() and candidate.read_text(encoding="utf-8") == canonical:
-                return candidate
-        except OSError:
-            pass
-    return first_absent or candidates[-1]
+            return candidate
+        suffix += 1
 
 
 def _canonical_mm_text(text: str) -> str:
     return text.rstrip() + "\n" if text.strip() else text
-
-
-def _contains_credential_shaped_data(text: str) -> bool:
-    return redact_secrets(text) != text
 
 
 _ABSOLUTE_PATH_FRAGMENT = re.compile(r"(?<![\w])(?:/[^\s:;,()\[\]{}'\"]+)+")
@@ -443,7 +441,7 @@ def build_migration_execution(
             "A verified generated .mm skeleton proves only the skeleton contract as written; it is not proof that host-language code implements the same behavior.",
             "Behavioral replay, native execution, and body-port entries are diagnostic evidence only and are not semantic-equivalence proof or formal verdicts.",
             "Weak true/true contracts and trusted atom declarations remain blockers for human review even when verification succeeds.",
-            "String literals in migration skeletons are redacted in recorded contract clauses and block generated .mm artifact copying because they may be sensitive.",
+            "Credential-like comparison/assignment literals, known token formats, and environment secret values are redacted in recorded contract clauses and block generated .mm artifact copying; non-secret string literals remain diagnostic contract content.",
         ],
     }
     _write_partial(output_path, report)
@@ -514,11 +512,24 @@ def build_migration_execution(
                 candidate["generated_mm"]["origin"] = "healed_file" if used_healed else "generated_skeleton"
             heal_errors = file_result.heal_errors if isinstance(file_result, AuditResult) else result.heal_errors
             expected_error_stems = {function_name, _safe_stem(function_name), _safe_identifier(function_name)}
+            error_key = migration_output_key(hint_source, skeleton)
+
+            def heal_error_matches(item: object) -> bool:
+                text = str(item)
+                if text.startswith(f"{function_name}:"):
+                    return True
+                stem = Path(text.split(":", 1)[0]).stem
+                if stem in expected_error_stems:
+                    return True
+                return any(
+                    re.fullmatch(rf"{re.escape(base)}-{error_key}(?:-\d+)?", stem) is not None
+                    for base in expected_error_stems
+                )
+
             candidate["heal"]["errors"] = [
                 _redact_error_text(item)
                 for item in heal_errors
-                if str(item).startswith(f"{function_name}:")
-                or Path(str(item).split(":", 1)[0]).stem in expected_error_stems
+                if heal_error_matches(item)
             ]
             candidate["heal"]["attempted"] = heal_attempted or healed_path is not None or bool(candidate["heal"]["errors"])
             if candidate["heal"]["errors"]:
@@ -541,18 +552,25 @@ def build_migration_execution(
                     or original_contract["ensures"] != contract["ensures"]
                 ),
             }
+            behavior_entries = _behavior_entries(file_result, function_name)
+            candidate["unbound_audit_diagnostics"] = {
+                "status": "available" if behavior_entries else "not_available",
+                "reason": None if behavior_entries else "audit did not produce native-replay or body-port diagnostics for this function",
+                "semantics": "diagnostic evidence only; not semantic-equivalence proof",
+                "binding": {
+                    "status": "not_bound_to_generated_mm",
+                    "generated_mm_sha256": None,
+                    "reason": "entries come from host-code audit lanes, not execution of the generated/healed .mm artifact",
+                },
+                "entries": behavior_entries,
+            }
             if not final_text.strip():
                 candidate["evidence_blockers"].append("generated .mm content is empty")
                 candidate["execution_state"] = "blocked"
                 _write_partial(output_path, report)
                 continue
-            if migration_text_has_string_literals(final_text):
-                candidate["evidence_blockers"].append("generated .mm contains string literals; artifact generation suppressed because values may be sensitive")
-                candidate["execution_state"] = "blocked"
-                _write_partial(output_path, report)
-                continue
-            if _contains_credential_shaped_data(final_text):
-                candidate["evidence_blockers"].append("generated .mm contains credential-shaped data; artifact generation suppressed")
+            if migration_text_has_sensitive_literals(final_text):
+                candidate["evidence_blockers"].append("generated .mm contains sensitive credential-shaped data; artifact generation suppressed")
                 candidate["execution_state"] = "blocked"
                 _write_partial(output_path, report)
                 continue
@@ -583,18 +601,6 @@ def build_migration_execution(
                 candidate["evidence_blockers"].append("generated skeleton has weak true/true contracts")
             if contract["trusted_atom_declarations"]:
                 candidate["evidence_blockers"].append("generated .mm declares trusted atoms")
-            behavior_entries = _behavior_entries(file_result, function_name)
-            candidate["unbound_audit_diagnostics"] = {
-                "status": "available" if behavior_entries else "not_available",
-                "reason": None if behavior_entries else "audit did not produce native-replay or body-port diagnostics for this function",
-                "semantics": "diagnostic evidence only; not semantic-equivalence proof",
-                "binding": {
-                    "status": "not_bound_to_generated_mm",
-                    "generated_mm_sha256": None,
-                    "reason": "entries come from host-code audit lanes, not execution of the generated/healed .mm artifact",
-                },
-                "entries": behavior_entries,
-            }
             candidate["evidence_blockers"] = list(dict.fromkeys(str(item) for item in candidate["evidence_blockers"]))
             if candidate["operational_errors"]:
                 candidate["execution_state"] = "operational_error"

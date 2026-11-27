@@ -12,7 +12,7 @@ import jsonschema
 
 from agent.audit import AuditPipeline, build_parser, main
 from agent.audit_models import AuditResult
-from agent.migration_execution import SCHEMA, build_migration_execution
+from agent.migration_execution import SCHEMA, build_migration_execution, migration_output_key
 
 
 class FakeVerifyClient:
@@ -429,13 +429,17 @@ def test_credential_shaped_skeleton_is_not_written_or_copied(tmp_path: Path) -> 
     healed, errors = pipeline._heal_migration_hints([_hint("withdraw", skeleton)], tmp_path / "source.py")
 
     assert healed == []
-    assert errors == ["withdraw: migration skeleton contains string literals that may be sensitive"]
+    assert errors == ["withdraw: migration skeleton contains sensitive credential-like data"]
     assert not (tmp_path / "heal" / "withdraw.mm").exists()
 
     source = tmp_path / "payment.py"
     source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
     report = build_migration_execution(
-        _result(source, [_hint("withdraw", skeleton)]),
+        _result(
+            source,
+            [_hint("withdraw", skeleton)],
+            native_replays=[{"function": "withdraw", "input": {}, "verdict": "violates"}],
+        ),
         output_path=tmp_path / "execution.json",
         mumei_client=FakeVerifyClient(),
     )
@@ -443,6 +447,7 @@ def test_credential_shaped_skeleton_is_not_written_or_copied(tmp_path: Path) -> 
     assert candidate["execution_state"] == "blocked"
     assert candidate["generated_mm"]["path"] is None
     assert secret not in json.dumps(report)
+    assert candidate["unbound_audit_diagnostics"]["status"] == "available"
     assert not list(Path(report["artifact_paths"]["generated_artifacts"]).glob("*.mm"))
 
 
@@ -699,6 +704,8 @@ def test_real_mumei_cli_audit_writes_migration_execution(tmp_path: Path) -> None
     assert len(report["candidates"]) == 1
     candidate = report["candidates"][0]
     assert candidate["heal"]["attempted"] is True
+    assert candidate["heal"]["errors"]
+    assert "heal completed with errors" in candidate["evidence_blockers"]
     assert candidate["verification"]["contract_proved"] is True
     assert candidate["verification"]["proof_certificate"]["written"] is True
     assert candidate["verification"]["sarif"]["written"] is True
@@ -712,11 +719,69 @@ def test_rerun_reuses_identical_output_and_suffixes_healed_divergence(tmp_path: 
     source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
     hint = _hint("withdraw")
     def mutate(target: Path) -> None:
-        target.write_text(target.read_text(encoding="utf-8") + "// healed\n", encoding="utf-8")
+        marker = "copy" if target.stem.endswith("-1") else "base"
+        target.write_text(target.read_text(encoding="utf-8") + f"// {marker}\n", encoding="utf-8")
 
     pipeline._run_heal_loop = mutate
     first, first_errors = pipeline._heal_migration_hints([hint], source)
+    first_content = Path(first[0]).read_text(encoding="utf-8")
     diverged, diverged_errors = pipeline._heal_migration_hints([hint], source)
     assert first_errors == diverged_errors == []
     assert diverged[0] != first[0]
     assert Path(diverged[0]).name.endswith("-1.mm")
+    assert Path(first[0]).read_text(encoding="utf-8") == first_content
+
+
+def test_non_secret_string_literals_are_preserved_and_not_blocked(tmp_path: Path) -> None:
+    source = tmp_path / "payment.py"
+    source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+    skeleton = 'atom withdraw() -> i64 {\n    requires: mode == "admin";\n    ensures: result >= 0;\n    body: { 0 }\n}'
+
+    report = build_migration_execution(
+        _result(source, [_hint("withdraw", skeleton)]),
+        output_path=tmp_path / "execution.json",
+        mumei_client=FakeVerifyClient(),
+    )
+
+    candidate = report["candidates"][0]
+    assert candidate["execution_state"] == "ready_for_human_review"
+    assert candidate["extracted_contract"]["requires"] == ['mode == "admin"']
+    assert candidate["extracted_contract"]["string_literals_present"] is True
+    assert candidate["extracted_contract"]["string_literals_redacted"] is False
+    assert Path(candidate["generated_mm"]["path"]).is_file()
+
+
+def test_keyed_heal_error_is_bound_to_candidate(tmp_path: Path) -> None:
+    source = tmp_path / "payment.py"
+    source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+    hint = _hint("withdraw")
+    key = migration_output_key(source, hint["skeleton"])
+    error = f"withdraw-{key}.mm: LLM unavailable"
+
+    report = build_migration_execution(
+        _result(source, [hint], heal_errors=[error]),
+        output_path=tmp_path / "execution.json",
+        mumei_client=FakeVerifyClient(),
+    )
+
+    candidate = report["candidates"][0]
+    assert candidate["heal"]["errors"] == [error]
+    assert "heal completed with errors" in candidate["evidence_blockers"]
+    assert candidate["execution_state"] == "blocked"
+
+
+def test_non_utf8_existing_output_does_not_break_retry_naming(tmp_path: Path) -> None:
+    source = tmp_path / "source.py"
+    source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+    hint = _hint("withdraw")
+    key = migration_output_key(source, hint["skeleton"])
+    (tmp_path / f"withdraw-{key}.mm").write_bytes(b"\xff\xfe\x00")
+    pipeline = object.__new__(AuditPipeline)
+    pipeline.heal_output_dir = tmp_path
+    pipeline._run_heal_loop = lambda target: None
+
+    healed, errors = pipeline._heal_migration_hints([hint], source)
+
+    assert errors == []
+    assert len(healed) == 1
+    assert Path(healed[0]).name.endswith("-1.mm")
