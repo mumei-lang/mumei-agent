@@ -745,3 +745,8 @@ def test_ts_find_guard_in_same_switch_default_clause_dominates_use() -> None:
         "default: if (!el) return; return { value: el.value }; }"
     )
     assert not _sentinel_issues(body, "TypeScript")
+
+
+def test_ts_find_use_in_else_after_guard_is_guarded() -> None:
+    body = "const item = xs.find(x => x.ok); if (!item) return; else return item.value;"
+    assert not _sentinel_issues(body, "TypeScript")

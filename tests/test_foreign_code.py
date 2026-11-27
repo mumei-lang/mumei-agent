@@ -8307,6 +8307,7 @@ def test_typescript_contract_requires_keep_nullable_length_param() -> None:
 
     source = "export function size(items?: number[]): number { return items.length; }\n"
     atom = _infer_typescript_contracts(source)[0]
+    assert atom.params[0].name == "items"
     assert "items != null" in atom.requires
     assert "items != undefined" in atom.requires
 
@@ -8346,3 +8347,44 @@ def test_typescript_contract_requires_skip_nonnullable_default_param() -> None:
     source = "export function size(items: number[] = []): number { return items.length; }\n"
     atom = _infer_typescript_contracts(source)[0]
     assert atom.requires == "true"
+
+
+def test_solidity_payable_caller_alias_scopes_caller_balance_withdrawal() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_solidity_contract_issues
+
+    source = """
+contract Vault {
+    mapping(address => uint256) balances;
+    function withdraw() external {
+        address payable recipient = payable(msg.sender);
+        uint256 amount = balances[recipient];
+        balances[recipient] = 0;
+        (bool ok, ) = recipient.call{value: amount}("");
+        require(ok, "payout failed");
+    }
+}
+"""
+    assert not any(
+        issue.function_name == "withdraw" and "no access-control guard" in issue.message
+        for issue in _detect_solidity_contract_issues(source)
+    )
+
+
+def test_solidity_settlement_equality_emit_is_not_caller_recipient_assignment() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_solidity_contract_issues
+
+    source = """
+contract Auction {
+    address seller;
+    event Settled(bool callerIsSeller);
+    function settle() external {
+        (bool ok, ) = seller.call{value: 1 ether}("");
+        require(ok, "payout failed");
+        emit Settled(seller == msg.sender);
+    }
+}
+"""
+    assert not any(
+        issue.function_name == "settle" and "no access-control guard" in issue.message
+        for issue in _detect_solidity_contract_issues(source)
+    )

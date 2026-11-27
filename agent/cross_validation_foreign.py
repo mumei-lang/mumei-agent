@@ -1989,9 +1989,14 @@ def _params_from_signature(params_text: str) -> list[ContractParam]:
             flags=re.IGNORECASE,
         ):
             continue
-        pieces = raw.split(":")
-        name = pieces[0].strip().split()[0].rstrip("?") if pieces[0].strip() else f"arg{index}"
-        type_text = pieces[1].strip() if len(pieces) > 1 else "i64"
+        if "=" in raw:
+            name_text, annotation = _typescript_param_annotation(raw)
+            name = name_text.strip().split()[0].rstrip("?") if name_text.strip() else f"arg{index}"
+            type_text = annotation.strip() if annotation else "i64"
+        else:
+            pieces = raw.split(":")
+            name = pieces[0].strip().split()[0].rstrip("?") if pieces[0].strip() else f"arg{index}"
+            type_text = pieces[1].strip() if len(pieces) > 1 else "i64"
         params.append(
             ContractParam(
                 name=_safe_identifier(name),

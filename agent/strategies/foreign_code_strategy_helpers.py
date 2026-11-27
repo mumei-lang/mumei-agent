@@ -8124,11 +8124,14 @@ def _braceless_exit_dominates_use(
 
     use_byte = byte_pos(use_pos)
     use_node = tree.root_node.descendant_for_byte_range(use_byte, use_byte)
+    child = None
     while use_node is not None:
         if use_node == check_node:
-            return False
+            alternative = check_node.child_by_field_name("alternative")
+            return alternative is not None and child == alternative
         if use_node == sequence:
             return True
+        child = use_node
         use_node = use_node.parent
     return False
 
@@ -8947,6 +8950,31 @@ _SOLIDITY_LOCAL_DECLARATION = re.compile(
 )
 
 
+_SOLIDITY_CALLER_ALIAS_DECLARATION = re.compile(
+    r"\b(?:address(?:\s+payable)?|u?int\d*)(?:\s+(?:memory|storage|calldata))*\s+"
+    r"(?P<name>[A-Za-z_]\w*)\s*=\s*(?:payable\s*\(\s*)?msg\.sender\s*\)?\s*;"
+)
+
+
+def _solidity_caller_scoped_access(body: str) -> bool:
+    if _SOLIDITY_CALLER_SCOPED_PATTERN.search(body):
+        return True
+    aliases = {
+        match.group("name")
+        for match in _SOLIDITY_CALLER_ALIAS_DECLARATION.finditer(body)
+    }
+    for alias in aliases:
+        caller = re.escape(alias)
+        if re.search(
+            rf"\[\s*{caller}\s*\]"
+            rf"|,\s*{caller}\s*[,)]"
+            rf"|\(\s*{caller}\s*[,)]",
+            body,
+        ):
+            return True
+    return False
+
+
 def _solidity_function_is_protocol_settlement(params: str, body: str) -> bool:
     """Whether a parameterless function settles value to protocol state.
 
@@ -8969,7 +8997,7 @@ def _solidity_function_is_protocol_settlement(params: str, body: str) -> bool:
         return False
     recipient_base = re.match(r"[A-Za-z_]\w*", value_call.group("recipient"))
     if recipient_base and re.search(
-        rf"\b{re.escape(recipient_base.group(0))}\s*=[^;]*\bmsg\.sender\b",
+        rf"\b{re.escape(recipient_base.group(0))}\s*(?<![=!<>])=(?![=])[^;]*\bmsg\.sender\b",
         body,
     ):
         return False
@@ -8999,7 +9027,7 @@ def _solidity_function_is_caller_scoped(body: str) -> bool:
         member = masked[: m.start()].rstrip().endswith(".")
         if name is None or member or not declared_local(name.group(0), m.start()):
             return False
-    return bool(_SOLIDITY_CALLER_SCOPED_PATTERN.search(body))
+    return _solidity_caller_scoped_access(body)
 
 
 def _solidity_named_return_params(attrs: str) -> set[str]:
