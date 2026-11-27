@@ -629,7 +629,14 @@ def _typescript_associative_containers(code: str) -> set[str]:
                     break
         if close < 0:
             continue
-        if masked[close + 1 :].lstrip().startswith("["):
+        type_tail = masked[close + 1 :]
+        annotation_end = len(type_tail)
+        for delimiter in ("=", ";"):
+            position = type_tail.find(delimiter)
+            if position >= 0:
+                annotation_end = min(annotation_end, position)
+        union_tail = type_tail[:annotation_end]
+        if "[" in union_tail or re.search(r"\b(?:Readonly)?Array\s*<", union_tail):
             continue
         containers.add(match.group(1))
     return containers
@@ -669,7 +676,7 @@ def _typescript_pattern_names(node) -> set[str]:
         return set()
     if node.type == "identifier":
         return {node.text.decode("utf-8", "replace")}
-    if node.type in {"object_pattern", "array_pattern"}:
+    if node.type in {"object_pattern", "array_pattern", "rest_pattern"}:
         return set(_pattern_binders(node))
     return set()
 

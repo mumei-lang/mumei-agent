@@ -2002,6 +2002,24 @@ export function arrow(index: number): number {
     )
 
 
+def test_typescript_rest_parameter_and_union_array_keep_array_bounds() -> None:
+    from agent.cross_validation_foreign import _infer_typescript_contracts
+
+    source = """
+export const values: Record<string, number> = {};
+export const table: Record<string, number> | number[] = [];
+export function restAt(index: number, ...values: number[]): number {
+  return values[index];
+}
+export function unionAt(index: number): number {
+  return table[index];
+}
+"""
+    atoms = {atom.name: atom for atom in _infer_typescript_contracts(source)}
+    assert "index < len_values" in atoms["restAt"].requires
+    assert "index < len_table" in atoms["unionAt"].requires
+
+
 def test_typescript_nested_record_and_typeof_reference_do_not_generate_array_bounds() -> None:
     from agent.cross_validation_foreign import _infer_typescript_contracts
 
