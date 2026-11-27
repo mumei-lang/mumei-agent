@@ -1,7 +1,7 @@
 name: Mumei audit
 description: >-
   Install mumei and mumei-agent dependencies, audit existing source code,
-  upload SARIF, and write a GitHub Actions step summary.
+  upload SARIF, optionally collect migration execution evidence, and write a GitHub Actions step summary.
 author: mumei-lang
 branding:
   icon: shield
@@ -34,6 +34,10 @@ inputs:
     description: SARIF output path, relative to the caller workspace.
     required: false
     default: .mumei-audit/audit.sarif
+  migration-execution-output:
+    description: Optional migration execution JSON path inside the caller workspace. Enables migration execution evidence collection.
+    required: false
+    default: ""
   artifact-name:
     description: Name for the audit evidence artifact.
     required: false
@@ -56,6 +60,12 @@ outputs:
   total_seconds:
     description: Seconds from setup start through audit completion.
     value: ${{ steps.timing.outputs.total_seconds }}
+  migration_execution_status:
+    description: Migration execution collection status, or not_requested when disabled.
+    value: ${{ steps.audit.outputs.migration_execution_status }}
+  migration_execution_ready_count:
+    description: Number of migration execution candidates ready for human review.
+    value: ${{ steps.audit.outputs.migration_execution_ready_count }}
 runs:
   using: composite
   steps:
@@ -119,6 +129,7 @@ runs:
         AUDIT_ARGS: ${{ inputs['audit-args'] }}
         AUDIT_OUTPUT: ${{ inputs['audit-output'] }}
         SARIF_OUTPUT: ${{ inputs['sarif-output'] }}
+        MIGRATION_EXECUTION_OUTPUT: ${{ inputs['migration-execution-output'] }}
       run: |
         case "$CODE_FILE" in
           /*) TARGET="$CODE_FILE" ;;
@@ -137,7 +148,15 @@ runs:
         }
         prepare_output_path "$AUDIT_JSON"
         prepare_output_path "$SARIF_FILE"
+        MIGRATION_JSON=""
+        MIGRATION_CLI_SUPPORTED=false
+        if [ -n "$MIGRATION_EXECUTION_OUTPUT" ]; then
+          MIGRATION_JSON="$(python "${{ github.action_path }}/scripts/prepare_workspace_output_path.py" "$GITHUB_WORKSPACE" "$MIGRATION_EXECUTION_OUTPUT")"
+          prepare_output_path "$MIGRATION_JSON"
+          rm -f "$MIGRATION_JSON"
+        fi
         ARGS=(audit --code-file "$TARGET" --format json --output "$AUDIT_JSON" --sarif-output "$SARIF_FILE")
+        EXTRA_ARGS=()
         if [ -n "$LANGUAGE" ]; then
           ARGS+=(--language "$LANGUAGE")
         fi
@@ -193,6 +212,27 @@ runs:
             fi
           fi
         fi
+        if [ -n "$MIGRATION_JSON" ]; then
+          AUDIT_HELP="$(UV_PROJECT="$AGENT_ROOT" uv run python -I -m agent audit --help 2>/dev/null || true)"
+          if grep -q -- '--migration-execution-output' <<< "$AUDIT_HELP"; then
+            MIGRATION_CLI_SUPPORTED=true
+            AUTO_MIGRATE_PRESENT=false
+            for token in "${EXTRA_ARGS[@]}"; do
+              if [ "$token" = "--auto-migrate" ]; then
+                AUTO_MIGRATE_PRESENT=true
+              fi
+            done
+            if [ "$AUTO_MIGRATE_PRESENT" = false ]; then
+              ARGS+=(--auto-migrate)
+              echo added > "$ACTION_STATE/migration-auto-migrate"
+            else
+              echo requested > "$ACTION_STATE/migration-auto-migrate"
+            fi
+            ARGS+=(--migration-execution-output "$MIGRATION_JSON")
+          else
+            echo unsupported > "$ACTION_STATE/migration-cli-support"
+          fi
+        fi
         date +%s > "$ACTION_STATE/timing/audit_start"
         set +e
         UV_PROJECT="$AGENT_ROOT" uv run python -I -m agent "${ARGS[@]}" \
@@ -213,6 +253,21 @@ runs:
           fi
         fi
         echo "audit_exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+        MIGRATION_COLLECTOR_EXIT=0
+        set +e
+        python "${{ github.action_path }}/scripts/collect_migration_execution.py" \
+          --requested "$(if [ -n "$MIGRATION_JSON" ]; then echo true; else echo false; fi)" \
+          --cli-supported "$MIGRATION_CLI_SUPPORTED" \
+          --migration-json "$MIGRATION_JSON" \
+          --workspace "$GITHUB_WORKSPACE" \
+          --state-dir "$ACTION_STATE" \
+          --github-output "$GITHUB_OUTPUT"
+        MIGRATION_COLLECTOR_EXIT=$?
+        set -e
+        if [ "$MIGRATION_COLLECTOR_EXIT" -ne 0 ]; then
+          echo "::error::migration execution evidence collection failed; inspect migration-execution/status.json in the evidence artifact."
+          exit 2
+        fi
 
     - name: Check SARIF artifact
       id: sarif
@@ -255,7 +310,8 @@ runs:
           --audit-json "$AUDIT_JSON" \
           --exit-code "$AUDIT_EXIT_CODE" \
           --timing-dir "$ACTION_STATE/timing" \
-          --github-output "$GITHUB_OUTPUT"
+          --github-output "$GITHUB_OUTPUT" \
+          --migration-status-json "$ACTION_STATE/migration-execution/status.json"
 
     - name: Upload audit evidence artifact
       if: always()

@@ -46,6 +46,7 @@ def main() -> int:
     parser.add_argument("--exit-code", required=True, type=int)
     parser.add_argument("--timing-dir", required=True)
     parser.add_argument("--github-output", default="")
+    parser.add_argument("--migration-status-json", default="")
     args = parser.parse_args()
 
     audit_path = Path(args.audit_json)
@@ -65,6 +66,27 @@ def main() -> int:
         f"- Findings: code `{counts.get('code', 0)}`, confirmed `{counts.get('confirmed', 0)}`, spec `{counts.get('spec', 0)}`, model limitations `{counts.get('model_limitations', 0)}`, errors `{counts.get('errors', 0)}`",
         f"- Runtime: setup `{setup_seconds if setup_seconds is not None else 'unknown'}s`, audit `{audit_seconds if audit_seconds is not None else 'unknown'}s`, total `{total_seconds if total_seconds is not None else 'unknown'}s`",
     ]
+    migration = _load_audit(Path(args.migration_status_json)) if args.migration_status_json else {}
+    migration_status = migration.get("status")
+    if migration_status and migration_status != "not_requested":
+        counts = migration.get("counts") if isinstance(migration.get("counts"), dict) else {}
+        lines.extend(
+            [
+                "",
+                "### migration execution",
+                f"- Status: `{migration_status}`; ready `{counts.get('ready_for_human_review', 0)}`, blocked `{counts.get('blocked', 0)}`, operational_error `{counts.get('operational_error', 0)}`; review_required `{str(migration.get('review_required', False)).lower()}`",
+                f"- Evidence boundary: {migration.get('boundary', 'generated .mm evidence only; not host-code semantic equivalence proof')}",
+            ]
+        )
+        auto_migrate_note = timing.parent / "migration-auto-migrate"
+        if auto_migrate_note.is_file():
+            note = auto_migrate_note.read_text(encoding="utf-8").strip()
+            if note == "added":
+                lines.append("- `--auto-migrate` was added automatically because migration execution was requested.")
+            elif note == "requested":
+                lines.append("- `--auto-migrate` was supplied explicitly by the caller.")
+        if migration.get("error"):
+            lines.append(f"- Operational error: {migration['error']}")
     violations = audit.get("verification_violations") if isinstance(audit.get("verification_violations"), list) else []
     gaps = audit.get("cross_validation_gaps") if isinstance(audit.get("cross_validation_gaps"), list) else []
     next_steps = audit.get("next_steps") if isinstance(audit.get("next_steps"), list) else []
