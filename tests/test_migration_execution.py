@@ -12,7 +12,7 @@ import jsonschema
 
 from agent.audit import AuditPipeline, build_parser, main
 from agent.audit_models import AuditResult
-from agent.migration_execution import SCHEMA, build_migration_execution, migration_output_key
+from agent.migration_execution import SCHEMA, _is_credential_name, build_migration_execution, migration_output_key
 
 
 class FakeVerifyClient:
@@ -963,6 +963,13 @@ def test_author_name_public_label_is_not_credential_like(tmp_path: Path) -> None
     candidate = report["candidates"][0]
     assert candidate["execution_state"] == "ready_for_human_review"
     assert candidate["extracted_contract"]["string_literals_redacted"] is False
+
+
+def test_credential_name_compound_boundaries() -> None:
+    positive = ["secretaccesskey", "ACCESSTOKENVALUE", "tokenvalue", "apikey", "private_key", "sessionkey", "signingkey"]
+    negative = ["author", "tokenizer", "secretary", "authorization", "monkey", "publickey"]
+    assert all(_is_credential_name(value) for value in positive)
+    assert not any(_is_credential_name(value) for value in negative)
 
 
 def test_uppercase_credential_constants_are_redacted_and_blocked(tmp_path: Path, capsys) -> None:

@@ -228,7 +228,7 @@ def _simple_token(tokens: list[tuple[str, str]], kind: str) -> tuple[str, str] |
 
 def _is_credential_name(value: str) -> bool:
     words: list[str] = []
-    credential_words = {"password", "passwd", "secret", "token", "auth", "authentication", "credential", "credentials", "apikey", "privatekey"}
+    credential_words = {"password", "passwd", "secret", "token", "auth", "authentication", "credential", "credentials", "apikey", "privatekey", "accesskey", "sessionkey", "signingkey", "encryptionkey"}
     compound_suffixes = {"value", "hash", "digest", "key", "accesskey", "token", "secret", "password", "passwd", "credential", "credentials", "code", "store"}
     for part in re.split(r"[._$\-]+", value):
         lowered_part = part.lower()
@@ -244,7 +244,7 @@ def _is_credential_name(value: str) -> bool:
         words.extend(match.group(0).lower() for match in re.finditer(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|\d+", part))
     if any(word in credential_words for word in words):
         return True
-    return any(pair in {("api", "key"), ("private", "key")} for pair in zip(words, words[1:]))
+    return any(pair in {("api", "key"), ("private", "key"), ("access", "key"), ("session", "key"), ("signing", "key"), ("encryption", "key")} for pair in zip(words, words[1:]))
 
 def _is_credential_operand(tokens: list[tuple[str, str]]) -> bool:
     token = _simple_token(tokens, "name")
