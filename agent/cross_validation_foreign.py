@@ -631,10 +631,24 @@ def _typescript_associative_containers(code: str) -> set[str]:
             continue
         type_tail = masked[close + 1 :]
         annotation_end = len(type_tail)
-        for delimiter in ("=", ";"):
-            position = type_tail.find(delimiter)
-            if position >= 0:
-                annotation_end = min(annotation_end, position)
+        nested_depth = 0
+        for position, char in enumerate(type_tail):
+            if char in "([{<":
+                nested_depth += 1
+            elif char in ")]}>" and nested_depth > 0:
+                if char == ">" and position > 0 and type_tail[position - 1] in "=-":
+                    continue
+                nested_depth -= 1
+            elif nested_depth == 0 and char == ";":
+                annotation_end = position
+                break
+            elif nested_depth == 0 and char == "=":
+                next_char = type_tail[position + 1] if position + 1 < len(type_tail) else ""
+                previous_char = type_tail[position - 1] if position > 0 else ""
+                if next_char == ">" or previous_char in "=!<>":
+                    continue
+                annotation_end = position
+                break
         union_tail = type_tail[:annotation_end]
         if "[" in union_tail or re.search(r"\b(?:Readonly)?Array\s*<", union_tail):
             continue

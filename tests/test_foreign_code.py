@@ -2008,16 +2008,20 @@ def test_typescript_rest_parameter_and_union_array_keep_array_bounds() -> None:
     source = """
 export const values: Record<string, number> = {};
 export const table: Record<string, number> | number[] = [];
+export const callbackTable: Record<string, number> | ((key: string) => number[]) | number[] = [];
+export const objectTable: Record<string, number> | { nested: number; other: number } | number[] = [];
 export function restAt(index: number, ...values: number[]): number {
   return values[index];
 }
 export function unionAt(index: number): number {
-  return table[index];
+  return table[index] + callbackTable[index] + objectTable[index];
 }
 """
     atoms = {atom.name: atom for atom in _infer_typescript_contracts(source)}
     assert "index < len_values" in atoms["restAt"].requires
     assert "index < len_table" in atoms["unionAt"].requires
+    assert "index < len_callbackTable" in atoms["unionAt"].requires
+    assert "index < len_objectTable" in atoms["unionAt"].requires
 
 
 def test_typescript_nested_record_and_typeof_reference_do_not_generate_array_bounds() -> None:
