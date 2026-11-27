@@ -14,7 +14,6 @@ import re
 from pathlib import Path
 from urllib.parse import quote
 
-from agent.audit_findings import _stable_source_key
 from agent.audit_baseline import (
     FAIL_ON_CHOICES,
     active_code_findings,
@@ -287,7 +286,7 @@ def _baseline_state_map(
     return {
         (
             str(row.get("message")),
-            _stable_source_key(str(row.get("source_file") or "")),
+            os.path.realpath(os.path.expanduser(str(row.get("source_file") or ""))),
             row.get("line") if type(row.get("line")) is int else None,
         ): str(row["baseline"])
         for row in rows
@@ -302,7 +301,7 @@ def _baseline_state(
     line: int | None,
 ) -> str | None:
     state = states.get(
-        (str(message), _stable_source_key(source_file), line)
+        (str(message), os.path.realpath(os.path.expanduser(source_file)), line)
     )
     if state == "suppressed":
         return "unchanged"
