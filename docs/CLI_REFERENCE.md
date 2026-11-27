@@ -24,7 +24,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `harness-ablation` | 3 | Compare harness_metrics aggregates across --harness-profile runs against a baseline (module ablation report). |
 | `scale-report` | 5 | Report large-scale composability and trust-surface measurements through the fixed verification_status / verification_violations / next_steps keys. |
 | `health` | 3 | Measure proof health metrics for the mumei std library (SI-5 Phase 3-A). |
-| `audit` | 35 | Audit existing code by extracting specs, verifying contracts, emitting cross_validation_gaps, and optionally producing migration_hints. |
+| `audit` | 36 | Audit existing code by extracting specs, verifying contracts, emitting cross_validation_gaps, and optionally producing migration_hints. |
 | `extract-spec` | 20 | Extract Mumei specifications from natural language text. Optionally generate and verify code in one step. |
 | `validate-spec` | 6 | Validate natural-language specifications for logical health. |
 | `validate-code` | 7 | Infer and verify contracts from existing code (Python, Rust, TypeScript, Go, Solidity). |
@@ -282,6 +282,7 @@ Audit existing code by extracting specs, verifying contracts, emitting cross_val
 | `--json` | — | no | — | Output the full result as JSON. |
 | `--format` | `{human, markdown, json, text}` | no | human | Output format (default: human). |
 | `--output` | `<OUTPUT>` | no | — | Optional output path. |
+| `--sarif-output` | `<PATH>` | no | — | Write a SARIF 2.1.0 report for CI annotation. This artifact is independent of --format/--output and uses the stable audit keys. |
 | `--domain-hint` | `<DOMAIN_HINT>` | no | — | Optional domain hint for spec extraction. |
 | `--auto-migrate` | — | no | — | Emit migration_hints by generating .mm migration skeletons for functions with issues. |
 | `--auto-heal` | — | no | — | Run the self-healing loop on each skeleton produced by --auto-migrate. |

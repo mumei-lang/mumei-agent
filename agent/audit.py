@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import cast
 
 from agent import evidence_check_schedule, telemetry
+from agent.audit_sarif import write_sarif
 from agent.audit_models import (
     AuditDirectoryResult,
     AuditResult,
@@ -1111,6 +1112,14 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
         help="Output format (default: human).",
     )
     parser.add_argument("--output", help="Optional output path.")
+    parser.add_argument(
+        "--sarif-output",
+        metavar="PATH",
+        help=(
+            "Write a SARIF 2.1.0 report for CI annotation. This artifact is "
+            "independent of --format/--output and uses the stable audit keys."
+        ),
+    )
     parser.add_argument("--domain-hint", default="", help="Optional domain hint for spec extraction.")
     parser.add_argument(
         "--auto-migrate",
@@ -1782,6 +1791,27 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
                 file=sys.stderr,
             )
             raise SystemExit(2)
+    sarif_output = getattr(args, "sarif_output", None)
+    if sarif_output:
+        def _same_output_path(left: str | None, right: str | None) -> bool:
+            if not left or not right:
+                return False
+            return os.path.realpath(left) == os.path.realpath(right)
+
+        conflicting = _same_output_path(sarif_output, args.output) or _same_output_path(
+            sarif_output, args.code_file
+        ) or any(
+            _same_output_path(sarif_output, path)
+            for path in _scheduled_verification_declared_paths(args)
+        )
+        if conflicting:
+            print(
+                "audit: --sarif-output must not overwrite --output, --code-file, "
+                "or a declared schedule input",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+
     config = AgentConfig(mumei_lean_repo=getattr(args, "mumei_lean_repo", None))
     result = AuditPipeline(config=config, heal_output_dir=args.heal_output_dir).audit_file(
         args.code_file,
@@ -1816,6 +1846,12 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
         Path(args.output).write_text(payload + "\n", encoding="utf-8")
     else:
         print(payload)
+    if sarif_output:
+        try:
+            write_sarif(result, sarif_output)
+        except OSError as exc:
+            print(f"audit: failed to write SARIF output: {exc}", file=sys.stderr)
+            raise SystemExit(2) from exc
     return result
 
 _RATE_LIMIT_MARKERS = (
