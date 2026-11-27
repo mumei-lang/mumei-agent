@@ -71,6 +71,15 @@ _GUARD_STATEMENT_RE = re.compile(
     r"\b(if|elif|assert|raise|match|guard|require|ensure|throw|panic!|except)\b"
 )
 _IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_TYPE_CONVERSION_IDENTIFIERS = {
+    "int", "int8", "int16", "int32", "int64", "int128", "int256",
+    "uint", "uint8", "uint16", "uint32", "uint64", "uint128", "uint256",
+    "i8", "i16", "i32", "i64", "i128",
+    "u8", "u16", "u32", "u64", "u128",
+    "usize", "isize", "byte", "bytes32", "bool", "string",
+}
+
+
 _CLAUSE_KEYWORDS = {
     "and", "or", "not", "in", "is", "forall", "exists", "implies",
     "true", "false", "True", "False", "None", "Some", "Ok", "Err",
@@ -93,7 +102,7 @@ def _condition_identifiers(condition: str) -> set[str]:
     return {
         token
         for token in _IDENTIFIER_RE.findall(condition)
-        if token not in _CLAUSE_KEYWORDS
+        if token not in _CLAUSE_KEYWORDS and token not in _TYPE_CONVERSION_IDENTIFIERS
     }
 
 

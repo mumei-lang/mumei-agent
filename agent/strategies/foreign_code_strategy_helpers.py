@@ -4,6 +4,7 @@ from __future__ import annotations
 import ast
 from datetime import datetime, timezone
 from fractions import Fraction
+from functools import lru_cache
 from dataclasses import dataclass, field
 import hashlib
 import json
@@ -7414,8 +7415,17 @@ def _guard_mechanism(
 
     if any(_bare_position(m.start()) for m in re.finditer(r"\|\|", between)):
         return None
+    def _ternary_question(rel_pos: int) -> bool:
+        if not _bare_position(rel_pos):
+            return False
+        # Rust error propagation (``expr?;``/``expr?.``) is not a ternary
+        # condition. Treating it as one makes every later use look guarded by
+        # the wrong branch and hides an earlier early-exit comparison.
+        following = between[rel_pos + 1 :].lstrip()
+        return not following.startswith((";", "."))
+
     qpos = next(
-        (m.start() for m in re.finditer(r"\?", between) if _bare_position(m.start())),
+        (m.start() for m in re.finditer(r"\?", between) if _ternary_question(m.start())),
         -1,
     )
     cpos = next(
@@ -8060,6 +8070,72 @@ _SENTINEL_NESTED_INDEX_RES: dict[str, re.Pattern[str]] = {
 }
 
 
+@lru_cache(maxsize=32)
+def _typescript_sentinel_parse(body: str):
+    prefix = "async function __mumei_sentinel_guard__() {\n"
+    tree, source_bytes = tree_sitter_extract.parse(prefix + body + "\n}", "typescript")
+    return tree, source_bytes, len(prefix.encode("utf-8"))
+
+
+def _unwrap_parenthesized(node):
+    while node is not None and node.type == "parenthesized_expression":
+        named = [child for child in node.children if child.is_named]
+        if len(named) != 1:
+            break
+        node = named[0]
+    return node
+
+
+def _braceless_exit_dominates_use(
+    body: str, match: re.Match[str], use_pos: int, var: str
+) -> bool:
+    """Whether a braceless early-exit ``if`` dominates a later use.
+
+    The TypeScript syntax tree provides lexical structure and switch/block
+    scoping. The guard must be unconditional except for the sentinel test
+    itself, and a use inside the early-exit statement is never guarded by it.
+    Parse failures fail closed: the use remains visible as a warning.
+    """
+    tree, source_bytes, prefix_len = _typescript_sentinel_parse(body)
+    if tree is None or tree.root_node.has_error:
+        return False
+
+    def byte_pos(char_pos: int) -> int:
+        return prefix_len + len(body[:char_pos].encode("utf-8"))
+
+    check_node = tree.root_node.descendant_for_byte_range(byte_pos(match.start()), byte_pos(match.start()))
+    while check_node is not None and check_node.type != "if_statement":
+        check_node = check_node.parent
+    if check_node is None or check_node.parent is None:
+        return False
+    sequence = check_node.parent
+    if sequence.type not in {"statement_block", "switch_case", "switch_default", "program"}:
+        return False
+
+    condition = _unwrap_parenthesized(check_node.child_by_field_name("condition"))
+    if condition is None:
+        return False
+    if match.group(0).lstrip().startswith("if"):
+        condition_text = source_bytes[condition.start_byte : condition.end_byte].decode("utf-8", errors="replace")
+        if re.sub(r"\s+", "", condition_text) != "!" + var:
+            return False
+    elif (condition.start_byte, condition.end_byte) != (byte_pos(match.start()), byte_pos(match.end())):
+        return False
+
+    use_byte = byte_pos(use_pos)
+    use_node = tree.root_node.descendant_for_byte_range(use_byte, use_byte)
+    child = None
+    while use_node is not None:
+        if use_node == check_node:
+            alternative = check_node.child_by_field_name("alternative")
+            return alternative is not None and child == alternative
+        if use_node == sequence:
+            return True
+        child = use_node
+        use_node = use_node.parent
+    return False
+
+
 def _sentinel_guarded(
     body: str, var: str, use_pos: int, kind: str, since: int = 0
 ) -> bool:
@@ -8070,6 +8146,18 @@ def _sentinel_guarded(
     closed before the use does not reach it. ``since`` ignores checks that
     precede the sentinel-producing assignment — ``if i < 0 { return }``
     placed before ``i = s.find(…)`` protects a different value."""
+    def single_statement_early_exit(match: re.Match[str]) -> bool:
+        """Whether this bad-direction check immediately returns/throws.
+
+        TypeScript commonly writes ``if (!value) return …;`` without braces;
+        the structural guard matcher only understands braced blocks, so the
+        sentinel check handles this statement form locally.
+        """
+        tail = body[match.end() : use_pos]
+        if re.match(r"\s*\)*\s*(?:return|throw)\b", tail) is None:
+            return False
+        return _braceless_exit_dominates_use(body, match, use_pos, var)
+
     if kind == "minus1":
         safe_re = re.compile(
             rf"\b{re.escape(var)}\s*!=+\s*-\s*1\b"
@@ -8093,13 +8181,33 @@ def _sentinel_guarded(
             rf"\b{re.escape(var)}\s*={{2,3}}\s*(?:undefined|null)\b"
             rf"|\b(?:undefined|null)\s*={{2,3}}\s*{re.escape(var)}\b"
         )
+    reassignment = re.compile(
+        rf"(?<![\w$.]){re.escape(var)}\s*(?<![=!<>])=(?![=>])"
+    )
+
+    def not_reassigned_after(match: re.Match[str]) -> bool:
+        for overwrite in reassignment.finditer(body, match.end(), use_pos):
+            rhs = body[overwrite.end() : use_pos].lstrip()
+            if kind == "undefined" and re.match(
+                r"(?:\{[^{};]*\}|\[[^\[\];]*\]|[-+]?\d+(?:\.\d+)?|true|false|new\s+[A-Za-z_]\w*\s*\([^;]*\)|\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)\s*;",
+                rhs,
+            ):
+                continue
+            return False
+        return True
+
     if any(
-        _guard_mechanism(body, m, use_pos) in _GUARD_HOLDS_MECHANISMS
+        not_reassigned_after(m)
+        and _guard_mechanism(body, m, use_pos) in _GUARD_HOLDS_MECHANISMS
         for m in safe_re.finditer(body, since, use_pos)
     ):
         return True
     if any(
-        _guard_mechanism(body, m, use_pos) in _GUARD_NEGATED_MECHANISMS
+        not_reassigned_after(m)
+        and (
+            _guard_mechanism(body, m, use_pos) in _GUARD_NEGATED_MECHANISMS
+            or single_statement_early_exit(m)
+        )
         for m in bad_re.finditer(body, since, use_pos)
     ):
         return True
@@ -8111,12 +8219,17 @@ def _sentinel_guarded(
         )
         falsy = re.compile(rf"\bif\s*\(\s*!\s*{re.escape(var)}\b")
         if any(
-            _guard_mechanism(body, m, use_pos) in _GUARD_HOLDS_MECHANISMS
+            not_reassigned_after(m)
+            and _guard_mechanism(body, m, use_pos) in _GUARD_HOLDS_MECHANISMS
             for m in truthy.finditer(body, since, use_pos)
         ):
             return True
         if any(
-            _guard_mechanism(body, m, use_pos) in _GUARD_NEGATED_MECHANISMS
+            not_reassigned_after(m)
+            and (
+                _guard_mechanism(body, m, use_pos) in _GUARD_NEGATED_MECHANISMS
+                or single_statement_early_exit(m)
+            )
             for m in falsy.finditer(body, since, use_pos)
         ):
             return True
@@ -8183,6 +8296,33 @@ def _sentinel_index_issues(
     nested = _SENTINEL_NESTED_INDEX_RES.get(label)
     if nested is not None:
         for match in nested.finditer(body):
+            proven_index = re.match(
+                r"\[\s*(?P<array>[A-Za-z_]\w*)\.(?:indexOf|lastIndexOf)\s*\(\s*(?P<var>[A-Za-z_]\w*)\s*\)",
+                body[match.start() : match.start() + 200],
+            )
+            if proven_index is not None and label == "TypeScript":
+                array_name = proven_index.group("array")
+                var = proven_index.group("var")
+                assignment = re.search(
+                    rf"\b(?:let|const|var)\s+{re.escape(var)}\s*=\s*{re.escape(array_name)}\.find\s*\(",
+                    body,
+                )
+                if assignment is not None and _sentinel_guarded(
+                    body, var, match.start(), "undefined", since=assignment.end()
+                ):
+                    intervening = body[assignment.end() : match.start()]
+                    array_mutated = re.search(
+                        rf"\b{re.escape(array_name)}\s*(?:\.\s*(?:pop|shift|splice)\s*\(|(?<![=!<>])=(?![=>])|\.length\s*(?<![=!<>])=(?![=>])|\[[^\]]+\]\s*(?<![=!<>])=(?![=>]))",
+                        intervening,
+                    )
+                    var_reassigned = re.search(
+                        rf"(?<![\w$.]){re.escape(var)}\s*(?<![=!<>])=(?![=>])",
+                        intervening,
+                    )
+                    if array_mutated is None and var_reassigned is None:
+                        # ``array.find`` established membership and no mutation
+                        # before this use could remove the object.
+                        continue
             call = re.search(
                 r"\.(?:indexOf|lastIndexOf|findIndex|find)\s*\(|(?:strings|bytes)\.Index\w*",
                 match.group(0),
@@ -8725,13 +8865,13 @@ def _solidity_function_blocks(source: str) -> list[tuple[str, str]]:
         blocks.append((_safe_identifier(match.group("name")), body))
     return blocks
 
-def _solidity_function_blocks_with_attrs(source: str) -> list[tuple[str, str, str]]:
+def _solidity_function_blocks_with_attrs(source: str) -> list[tuple[str, str, str, str]]:
     functions = tree_sitter_extract.extract_contract_functions(
         source, "solidity", _safe_identifier
     )
     if functions is not None:
         return [
-            (fn.name, fn.attrs_text, fn.body)
+            (fn.name, fn.attrs_text, fn.body, fn.params_text)
             for fn in functions
             if fn.has_body
         ]
@@ -8744,6 +8884,7 @@ def _solidity_function_blocks_with_attrs(source: str) -> list[tuple[str, str, st
                 _safe_identifier(match.group("name")),
                 match.group("attrs") or "",
                 body,
+                match.group("params") or "",
             )
         )
     return blocks
@@ -8767,7 +8908,7 @@ def _detect_solidity_contract_issues(
     if _is_solidity_mock_source(source):
         return []
     issues: list[ForeignSafetyIssue] = []
-    for name, attrs, body in _solidity_function_blocks_with_attrs(source):
+    for name, attrs, body, params in _solidity_function_blocks_with_attrs(source):
         if _solidity_function_is_mutating_external(attrs, body):
             maybe_cei_issue = _solidity_cei_issue(name, attrs, body)
             if maybe_cei_issue is not None:
@@ -8776,6 +8917,7 @@ def _detect_solidity_contract_issues(
                 _solidity_function_is_externally_callable(attrs)
                 and not _solidity_function_has_access_guard(attrs, body)
                 and not _solidity_function_is_caller_scoped(body)
+                and not _solidity_function_is_protocol_settlement(params, body)
             ):
                 issues.append(
                     ForeignSafetyIssue(
@@ -8814,8 +8956,8 @@ def _solidity_function_has_access_guard(attrs: str, body: str) -> bool:
 # `emit` arguments are left out, since logging the caller scopes nothing.
 _SOLIDITY_CALLER_SCOPED_PATTERN = re.compile(
     r"\[\s*msg\.sender\s*\]"
-    r"|[(,]\s*msg\.sender\s*[,)]"
-    r"|\bmsg\.sender\s*\.\s*(?:call|transfer|send)\b"
+    r"|,\s*msg\.sender\s*[,)]"
+    r"|(?<!payable)\(\s*msg\.sender\s*[,)]"
     r"|\bmsg\.value\b"
 )
 _SOLIDITY_EMIT_STATEMENT = re.compile(r"\bemit\b[^;]*;")
@@ -8835,10 +8977,65 @@ _SOLIDITY_LOCAL_DECLARATION = re.compile(
 )
 
 
+_SOLIDITY_CALLER_ALIAS_DECLARATION = re.compile(
+    r"\b(?:address(?:\s+payable)?|u?int\d*)(?:\s+(?:memory|storage|calldata))*\s+"
+    r"(?P<name>[A-Za-z_]\w*)\s*=\s*(?:payable\s*\(\s*)?msg\.sender\s*\)?\s*;"
+)
+
+
+def _solidity_caller_scoped_access(body: str) -> bool:
+    if _SOLIDITY_CALLER_SCOPED_PATTERN.search(body):
+        return True
+    for declaration in _SOLIDITY_CALLER_ALIAS_DECLARATION.finditer(body):
+        caller = re.escape(declaration.group("name"))
+        use_pattern = re.compile(
+            rf"\[\s*{caller}\s*\]"
+            rf"|,\s*{caller}\s*[,)]"
+            rf"|\(\s*{caller}\s*[,)]"
+        )
+        reassignment = re.compile(
+            rf"(?<![\w$.]){caller}\s*(?<![=!<>])=(?![=])"
+        )
+        for use in use_pattern.finditer(body, declaration.end()):
+            if reassignment.search(body, declaration.end(), use.start()) is None:
+                return True
+    return False
+
+
+def _solidity_function_is_protocol_settlement(params: str, body: str) -> bool:
+    """Whether a parameterless function settles value to protocol state.
+
+    Auction finalization, bonus draws and similar entry points are often
+    intentionally permissionless: the caller cannot choose the beneficiary
+    or amount because both are fixed by prior protocol state. They still
+    need reentrancy and CEI scrutiny, but missing access control is not by
+    itself useful evidence. A caller-paid function or one with caller-chosen
+    parameters does not qualify.
+    """
+    if params.strip() or _SOLIDITY_PRIVILEGED_WRITE.search(body):
+        return False
+    if re.search(r"\bmsg\.sender\s*\.\s*(?:call|transfer|send)\b", body):
+        return False
+    value_call = re.search(
+        r"\b(?P<recipient>[A-Za-z_]\w*(?:\[[^\]]+\])?(?:\.[A-Za-z_]\w*)?)\s*\.\s*(?:call\s*\{[^}]*value\s*:|transfer\s*\(|send\s*\()",
+        body,
+    )
+    if value_call is None:
+        return False
+    recipient_base = re.match(r"[A-Za-z_]\w*", value_call.group("recipient"))
+    if recipient_base and re.search(
+        rf"\b{re.escape(recipient_base.group(0))}\s*(?<![=!<>])=(?![=])[^;]*\bmsg\.sender\b",
+        body,
+    ):
+        return False
+    return True
+
+
 def _solidity_function_is_caller_scoped(body: str) -> bool:
-    body = _SOLIDITY_EMIT_STATEMENT.sub("", body)
-    # Braces inside strings and comments are masked so they don't count as blocks.
-    masked = _strip_go_rust_literals_and_comments(body)
+    # Braces and apparent statements inside strings and comments are masked first
+    # so they neither count as blocks nor look like ``emit`` statements.
+    masked = _strip_go_rust_literals_and_comments(body, single_quoted_strings=True)
+    masked = _SOLIDITY_EMIT_STATEMENT.sub("", masked)
     # Solidity also quotes strings with ``'``; the Go/Rust masker only knows char literals.
     masked = re.sub(r"'(?:\\.|[^'\\\n])*'", lambda q: " " * len(q.group(0)), masked)
     depth = [0]
@@ -8858,7 +9055,7 @@ def _solidity_function_is_caller_scoped(body: str) -> bool:
         member = masked[: m.start()].rstrip().endswith(".")
         if name is None or member or not declared_local(name.group(0), m.start()):
             return False
-    return bool(_SOLIDITY_CALLER_SCOPED_PATTERN.search(body))
+    return _solidity_caller_scoped_access(masked)
 
 
 def _solidity_named_return_params(attrs: str) -> set[str]:

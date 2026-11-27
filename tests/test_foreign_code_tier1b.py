@@ -610,3 +610,168 @@ def test_sentinel_fresh_guard_after_assign_ok() -> None:
     body = ' i := strings.Index(s, "x")\n if i < 0 { return 0 }\n return s[i] '
     issues = _sentinel_issues(body, "Go")
     assert not issues
+
+
+def test_ts_find_braceless_early_exit_guarded() -> None:
+    body = 'const el = xs.find(x => x > 0); if (!el) return 0; return el.value;'
+    assert not _sentinel_issues(body, "TypeScript")
+
+
+def test_ts_indexof_find_provenance_after_braceless_check_guarded() -> None:
+    body = (
+        "const task = tasks.find((t) => t.id === id); "
+        "if (!task) return sendJson(res, 404, { error: 'missing' }); "
+        "tasks[tasks.indexOf(task)] = task;"
+    )
+    assert not _sentinel_issues(body, "TypeScript")
+
+
+def test_ts_indexof_find_provenance_without_check_still_flagged() -> None:
+    body = (
+        "const task = tasks.find((t) => t.id === id); "
+        "tasks[tasks.indexOf(task)] = task;"
+    )
+    issues = _sentinel_issues(body, "TypeScript")
+    assert any("indexOf" in issue.message for issue in issues)
+
+
+def test_ts_find_nested_early_exit_does_not_guard_outer_use() -> None:
+    body = "const el = xs.find(x => x > 0); if (outer) { if (!el) return 0; } return el.value;"
+    assert any("undefined" in issue.message for issue in _sentinel_issues(body, "TypeScript"))
+
+
+def test_ts_indexof_first_expression_is_not_proven_by_later_search() -> None:
+    body = (
+        "const task = tasks.find((t) => t.id === id); if (!task) return 0; "
+        "items[items.indexOf(task)] = task; tasks[tasks.indexOf(task)] = task;"
+    )
+    issues = [issue for issue in _sentinel_issues(body, "TypeScript") if "indexOf" in issue.message]
+    assert len(issues) == 1
+
+
+def test_ts_indexof_find_provenance_still_flagged_after_mutation() -> None:
+    body = (
+        "const task = tasks.find((t) => t.id === id); if (!task) return 0; "
+        "tasks.splice(0, 1); tasks[tasks.indexOf(task)] = task;"
+    )
+    assert any("indexOf" in issue.message for issue in _sentinel_issues(body, "TypeScript"))
+
+def test_ts_find_object_literal_after_early_exit_still_guarded() -> None:
+    body = (
+        "const el = xs.find(x => x > 0); if (!el) return; "
+        "const out = { value: el.value }; return out.value;"
+    )
+    assert not _sentinel_issues(body, "TypeScript")
+
+
+def test_ts_indexof_length_comparison_and_push_do_not_invalidate_membership() -> None:
+    body = (
+        "const task = tasks.find((t) => t.id === id); if (!task) return 0; "
+        "if (tasks.length === 1) tasks.push(task); tasks[tasks.indexOf(task)] = task;"
+    )
+    assert not _sentinel_issues(body, "TypeScript")
+
+
+def test_ts_indexof_pop_still_invalidates_membership() -> None:
+    body = (
+        "const task = tasks.find((t) => t.id === id); if (!task) return 0; "
+        "tasks.pop(); tasks[tasks.indexOf(task)] = task;"
+    )
+    assert any("indexOf" in issue.message for issue in _sentinel_issues(body, "TypeScript"))
+
+def test_ts_find_regex_literal_does_not_hide_nested_guard_boundary() -> None:
+    body = (
+        "const el = xs.find(x => x > 0); if (outer) { if (!el) return; "
+        "const re = /\"/g; } return el.value;"
+    )
+    assert any("undefined" in issue.message for issue in _sentinel_issues(body, "TypeScript"))
+
+
+def test_ts_find_guard_in_other_switch_case_does_not_guard_use() -> None:
+    body = (
+        "const el = xs.find(x => x > 0); switch (kind) { case 'a': if (!el) return; "
+        "const out = { x: 1 }; break; case 'b': return el.value; }"
+    )
+    assert any("undefined" in issue.message for issue in _sentinel_issues(body, "TypeScript"))
+
+
+def test_ts_find_guard_before_switch_still_dominates_later_use() -> None:
+    body = (
+        "const el = xs.find(x => x > 0); if (!el) return; "
+        "switch (kind) { case 'a': console.log(1); } return el.value;"
+    )
+    assert not _sentinel_issues(body, "TypeScript")
+
+
+def test_ts_find_slash_in_comment_or_string_does_not_hide_nested_guard_boundary() -> None:
+    for separator in ("// /\n const x = 1;", 'const s = "/";'):
+        body = (
+            "const el = xs.find(x => x > 0); if (outer) { if (!el) return; "
+            f"{separator} }} return el.value;"
+        )
+        assert any("undefined" in issue.message for issue in _sentinel_issues(body, "TypeScript"))
+
+
+def test_ts_find_object_case_keys_do_not_invalidate_prior_guard() -> None:
+    body = (
+        "const el = xs.find(x => x > 0); if (!el) return; "
+        "const labels = { case: 'a', default: 'b' }; return el.value;"
+    )
+    assert not _sentinel_issues(body, "TypeScript")
+
+
+def test_ts_find_nested_switch_and_object_discriminant_remain_guarded() -> None:
+    body = (
+        "const el = xs.find(x => x > 0); if (!el) return; "
+        "switch ({ tag: kind }.tag) { case 'a': switch (inner) { case 1: console.log(1); } } "
+        "return el.value;"
+    )
+    assert not _sentinel_issues(body, "TypeScript")
+
+
+def test_ts_find_use_inside_guard_return_value_is_not_guarded() -> None:
+    body = "const el = xs.find(x => x > 0); if (!el) return { value: el.value }; return el.value;"
+    assert any("undefined" in issue.message for issue in _sentinel_issues(body, "TypeScript"))
+
+
+def test_ts_compound_early_exit_condition_does_not_guard_sentinel_use() -> None:
+    body = 'const i = s.indexOf(x); if (debug && i === -1) return\n return s[i];'
+    assert any("indexOf" in issue.message or "-1" in issue.message for issue in _sentinel_issues(body, "TypeScript"))
+
+
+def test_ts_find_guard_in_same_switch_default_clause_dominates_use() -> None:
+    body = (
+        "const el = xs.find(x => x > 0); switch (kind) { case 'a': break; "
+        "default: if (!el) return; return { value: el.value }; }"
+    )
+    assert not _sentinel_issues(body, "TypeScript")
+
+
+def test_ts_find_use_in_else_after_guard_is_guarded() -> None:
+    body = "const item = xs.find(x => x.ok); if (!item) return; else { return item.value; }"
+    assert not _sentinel_issues(body, "TypeScript")
+
+
+def test_ts_find_reassignment_in_else_invalidates_guard() -> None:
+    body = "let item = xs.find(x => x.ok); if (!item) return; else { item = lookup(); return item.value; }"
+    assert any("undefined" in issue.message for issue in _sentinel_issues(body, "TypeScript"))
+
+
+def test_ts_property_assignment_does_not_invalidate_local_sentinel_guard() -> None:
+    body = "const item = xs.find(x => x.ok); if (!item) return; state.item = item; return item.value;"
+    assert not _sentinel_issues(body, "TypeScript")
+
+
+def test_ts_object_literal_overwrite_does_not_invalidate_undefined_guard() -> None:
+    body = "let item = xs.find(x => x.ok); if (!item) return; else { item = { value: 1 }; return item.value; }"
+    assert not _sentinel_issues(body, "TypeScript")
+
+
+def test_ts_indexed_array_literal_overwrite_invalidates_undefined_guard() -> None:
+    body = "let item = xs.find(x => x.ok); if (!item) return; else { item = [fallback][selected]; return item.value; }"
+    assert any("undefined" in issue.message for issue in _sentinel_issues(body, "TypeScript"))
+
+
+def test_ts_object_reassignment_invalidates_inline_index_membership() -> None:
+    body = "let item = items.find(x => x.ok); if (!item) return; item = { value: 1 }; return items[items.indexOf(item)];"
+    assert any("inline" in issue.message for issue in _sentinel_issues(body, "TypeScript"))

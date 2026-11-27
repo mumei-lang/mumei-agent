@@ -1925,7 +1925,7 @@ def _solidity_pattern_issues(
     issues: list[ForeignSafetyIssue] = []
     used_offsets: set[int] = set()
     non_code = _non_code_states(source, "solidity")
-    for name, _attrs, raw_body in _solidity_function_blocks_with_attrs(source):
+    for name, _attrs, raw_body, _params in _solidity_function_blocks_with_attrs(source):
         offset = _body_offset((source,), raw_body, used_offsets, non_code)
         body = _strip_go_rust_literals_and_comments(raw_body)
         # ``blockhash``/``block.*`` sources are miner-influenced or public —

@@ -422,6 +422,24 @@ class TestValidateSpecVsImpl:
         assert report.uncovered_atoms == []
         assert report.spec_stronger_than_impl == ["withdraw"]
 
+    def test_go_cast_precondition_matches_uncast_len_guard(self):
+        spec_path = self._write_spec("reorderPoint", "int32(len(locations)) != 0")
+        impl_path = Path(self.tmpdir) / "calc.go"
+        impl_path.write_text(
+            "package main\n\n"
+            "func reorderPoint(total int32, locations []string) int32 {\n"
+            "\tif len(locations) == 0 {\n"
+            "\t\treturn 0\n"
+            "\t}\n"
+            "\treturn total / int32(len(locations))\n"
+            "}\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path), impl_path=str(impl_path), language="go"
+        )
+        assert report.spec_stronger_than_impl == []
+        assert report.details == []
+
     def test_enforced_precondition_is_not_flagged(self):
         spec_path = self._write_spec(
             "withdraw", "amount > 0 && amount <= balance"

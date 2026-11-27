@@ -8198,3 +8198,276 @@ def test_solidity_brace_in_a_single_quoted_string_does_not_keep_a_block_local_li
         "        balances[msg.sender] += 1;\n        owner = next;\n    }\n}\n"
     )
     assert any("take" == i.function_name for i in _detect_solidity_contract_issues(src))
+
+
+def test_solidity_protocol_settlement_entrypoint_is_not_access_control_advisory() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_solidity_contract_issues
+
+    source = """
+contract EnglishAuction {
+    address seller;
+    bool finalized;
+    uint256 highestBid;
+    function finalize() external {
+        require(!finalized, "already finalized");
+        finalized = true;
+        (bool ok, ) = seller.call{value: highestBid}("");
+        require(ok, "payout failed");
+    }
+}
+"""
+    assert not [
+        issue for issue in _detect_solidity_contract_issues(source)
+        if "no access-control guard" in issue.message
+    ]
+
+
+def test_solidity_parameterless_caller_payout_remains_access_control_advisory() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_solidity_contract_issues
+
+    source = """
+contract Vault {
+    uint256 pool;
+    function withdrawAll() external {
+        uint256 amount = pool;
+        pool = 0;
+        (bool ok, ) = msg.sender.call{value: amount}("");
+        require(ok, "payout failed");
+    }
+}
+"""
+    assert any(
+        issue.function_name == "withdrawAll" and "no access-control guard" in issue.message
+        for issue in _detect_solidity_contract_issues(source)
+    )
+
+
+def test_solidity_settlement_recipient_setter_remains_access_control_advisory() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_solidity_contract_issues
+
+    source = """
+contract Vault {
+    address beneficiary;
+    uint256 pool;
+    function setBeneficiary(address next) external {
+        beneficiary = next;
+    }
+    function settle() external {
+        uint256 amount = pool;
+        pool = 0;
+        (bool ok, ) = beneficiary.call{value: amount}("");
+        require(ok, "payout failed");
+    }
+}
+"""
+    assert any(
+        issue.function_name == "setBeneficiary" and "no access-control guard" in issue.message
+        for issue in _detect_solidity_contract_issues(source)
+    )
+
+
+def test_solidity_caller_chosen_settlement_amount_remains_access_control_advisory() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_solidity_contract_issues
+
+    source = """
+contract Vault {
+    address seller;
+    function settle(uint256 amount) external {
+        (bool ok, ) = seller.call{value: amount}("");
+        require(ok, "payout failed");
+    }
+}
+"""
+    assert any(
+        issue.function_name == "settle" and "no access-control guard" in issue.message
+        for issue in _detect_solidity_contract_issues(source)
+    )
+
+
+def test_typescript_contract_requires_skip_nonnullable_and_local_length_values() -> None:
+    from agent.cross_validation_foreign import _infer_typescript_contracts
+
+    source = """
+export function summarize(items: number[]): number {
+  return items.length;
+}
+export function readBody(req: Request): Promise<string> {
+  return new Promise((resolve) => {
+    req.on('data', (chunk: Buffer) => resolve(chunk.length));
+  });
+}
+"""
+    atoms = {atom.name: atom for atom in _infer_typescript_contracts(source)}
+    assert atoms["summarize"].requires == "true"
+    assert atoms["readBody"].requires == "true"
+
+
+def test_typescript_contract_requires_keep_nullable_length_param() -> None:
+    from agent.cross_validation_foreign import _infer_typescript_contracts
+
+    source = "export function size(items?: number[]): number { return items.length; }\n"
+    atom = _infer_typescript_contracts(source)[0]
+    assert atom.params[0].name == "items"
+    assert "items != null" in atom.requires
+    assert "items != undefined" in atom.requires
+
+
+def test_solidity_aliased_caller_payout_remains_access_control_advisory() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_solidity_contract_issues
+
+    source = """
+contract Vault {
+    uint256 pool;
+    function withdrawAll() external {
+        uint256 amount = pool;
+        pool = 0;
+        address payable recipient = payable(msg.sender);
+        (bool ok, ) = recipient.call{value: amount}("");
+        require(ok, "payout failed");
+    }
+}
+"""
+    assert any(
+        issue.function_name == "withdrawAll" and "no access-control guard" in issue.message
+        for issue in _detect_solidity_contract_issues(source)
+    )
+
+
+def test_typescript_contract_requires_keep_untyped_default_object_param_nullable() -> None:
+    from agent.cross_validation_foreign import _infer_typescript_contracts
+
+    source = "export function size(items = { values: [] }): number { return items.length; }\n"
+    atom = _infer_typescript_contracts(source)[0]
+    assert "items != null" in atom.requires
+
+
+def test_typescript_contract_requires_skip_nonnullable_default_param() -> None:
+    from agent.cross_validation_foreign import _infer_typescript_contracts
+
+    source = "export function size(items: number[] = []): number { return items.length; }\n"
+    atom = _infer_typescript_contracts(source)[0]
+    assert atom.requires == "true"
+
+
+def test_solidity_payable_caller_alias_scopes_caller_balance_withdrawal() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_solidity_contract_issues
+
+    source = """
+contract Vault {
+    mapping(address => uint256) balances;
+    function withdraw() external {
+        address payable recipient = payable(msg.sender);
+        uint256 amount = balances[recipient];
+        balances[recipient] = 0;
+        (bool ok, ) = recipient.call{value: amount}("");
+        require(ok, "payout failed");
+    }
+}
+"""
+    assert not any(
+        issue.function_name == "withdraw" and "no access-control guard" in issue.message
+        for issue in _detect_solidity_contract_issues(source)
+    )
+
+
+def test_solidity_settlement_equality_emit_is_not_caller_recipient_assignment() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_solidity_contract_issues
+
+    source = """
+contract Auction {
+    address seller;
+    event Settled(bool callerIsSeller);
+    function settle() external {
+        (bool ok, ) = seller.call{value: 1 ether}("");
+        require(ok, "payout failed");
+        emit Settled(seller == msg.sender);
+    }
+}
+"""
+    assert not any(
+        issue.function_name == "settle" and "no access-control guard" in issue.message
+        for issue in _detect_solidity_contract_issues(source)
+    )
+
+
+def test_solidity_reassigned_caller_alias_does_not_scope_later_balance_access() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_solidity_contract_issues
+
+    source = """
+contract Vault {
+    mapping(address => uint256) balances;
+    address beneficiary;
+    function withdraw() external {
+        address payable recipient = payable(msg.sender);
+        recipient = payable(beneficiary);
+        uint256 amount = balances[recipient];
+        balances[recipient] = 0;
+        (bool ok, ) = recipient.call{value: amount}("");
+        require(ok, "payout failed");
+    }
+}
+"""
+    assert any(
+        issue.function_name == "withdraw" and "no access-control guard" in issue.message
+        for issue in _detect_solidity_contract_issues(source)
+    )
+
+
+def test_solidity_comment_alias_assignment_does_not_invalidate_caller_scope() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_solidity_contract_issues
+
+    source = """
+contract Vault {
+    mapping(address => uint256) balances;
+    function withdraw() external {
+        address payable recipient = payable(msg.sender);
+        // recipient = payable(beneficiary);
+        uint256 amount = balances[recipient];
+        balances[recipient] = 0;
+        (bool ok, ) = recipient.call{value: amount}("");
+        require(ok, "payout failed");
+    }
+}
+"""
+    assert not any(
+        issue.function_name == "withdraw" and "no access-control guard" in issue.message
+        for issue in _detect_solidity_contract_issues(source)
+    )
+
+
+def test_solidity_single_quoted_error_message_does_not_hide_caller_scope() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_solidity_contract_issues
+
+    source = """
+contract Vault {
+    mapping(address => uint256) balances;
+    function withdraw() external {
+        uint256 amount = balances[msg.sender];
+        require(amount > 0, 'missing "balance');
+        balances[msg.sender] = 0;
+    }
+}
+"""
+    assert not any(
+        issue.function_name == "withdraw" and "no access-control guard" in issue.message
+        for issue in _detect_solidity_contract_issues(source)
+    )
+
+
+def test_solidity_emit_word_inside_error_message_does_not_hide_updates() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_solidity_contract_issues
+
+    source = """
+contract Vault {
+    mapping(address => uint256) balances;
+    function withdraw() external {
+        uint256 amount = 1;
+        require(amount > 0, 'cannot emit payout');
+        balances[msg.sender] = 0;
+    }
+}
+"""
+    assert not any(
+        issue.function_name == "withdraw" and "no access-control guard" in issue.message
+        for issue in _detect_solidity_contract_issues(source)
+    )
