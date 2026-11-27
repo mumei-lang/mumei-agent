@@ -455,7 +455,13 @@ def test_cli_rejects_migration_readiness_output_conflicts(tmp_path: Path) -> Non
     source = tmp_path / "payment.py"
     source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
 
-    for conflict in (str(source), str(tmp_path / "audit.json"), str(tmp_path / "audit.sarif")):
+    for conflict in (
+        str(source),
+        str(tmp_path / "audit.json"),
+        str(tmp_path / "audit.sarif"),
+        str(tmp_path / "baseline.json"),
+        str(tmp_path / "new-baseline.json"),
+    ):
         args = build_parser().parse_args(
             [
                 "--code-file", str(source),
@@ -463,6 +469,8 @@ def test_cli_rejects_migration_readiness_output_conflicts(tmp_path: Path) -> Non
                 "--auto-migrate",
                 "--output", str(tmp_path / "audit.json"),
                 "--sarif-output", str(tmp_path / "audit.sarif"),
+                "--baseline", str(tmp_path / "baseline.json"),
+                "--write-baseline", str(tmp_path / "new-baseline.json"),
                 "--migration-readiness-output", conflict,
             ]
         )

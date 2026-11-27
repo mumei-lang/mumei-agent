@@ -1982,6 +1982,8 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
             _same_migration_path(migration_readiness_output, args.output)
             or _same_migration_path(migration_readiness_output, os.path.expanduser(args.code_file))
             or _same_migration_path(migration_readiness_output, sarif_output)
+            or _same_migration_path(migration_readiness_output, getattr(args, "baseline", None))
+            or _same_migration_path(migration_readiness_output, getattr(args, "write_baseline", None))
             or any(_same_migration_path(migration_readiness_output, path) for path in declared_input_paths)
         )
         audit_input_path = Path(os.path.expanduser(args.code_file))
@@ -1993,7 +1995,7 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
             )
         if conflicting:
             print(
-                "audit: --migration-readiness-output must not overwrite --output, --sarif-output, --code-file, or a declared schedule input",
+                "audit: --migration-readiness-output must not overwrite --output, --sarif-output, --baseline, --write-baseline, --code-file, or a declared schedule input",
                 file=sys.stderr,
             )
             raise SystemExit(2)
