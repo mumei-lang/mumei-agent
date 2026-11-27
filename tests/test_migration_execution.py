@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import jsonschema
 
 from agent.audit import build_parser, main
 from agent.audit_models import AuditResult
@@ -71,6 +72,8 @@ def test_migration_execution_records_acceptance_evidence_and_boundary(tmp_path: 
     report = build_migration_execution(result, output_path=output, mumei_client=client)
 
     assert report["schema"] == SCHEMA
+    schema = json.loads((Path(__file__).parents[1] / "schema" / "migration-execution.schema.json").read_text(encoding="utf-8"))
+    jsonschema.validate(report, schema)
     assert output.exists()
     assert json.loads(output.read_text(encoding="utf-8"))["schema"] == SCHEMA
     candidate = report["candidates"][0]
