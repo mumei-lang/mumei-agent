@@ -428,19 +428,10 @@ def _dedupe_counterexample_values(values: list[dict]) -> list[dict]:
         deduped.append(value)
     return deduped
 
-def _precondition_gap_key(name: str) -> str:
-    return name.split(".")[-1].replace("_", "").lower()
-
-
 def _cross_validation_gap_strings(report: CrossValidationReport) -> list[str]:
     gaps: list[str] = []
-    precondition_keys = {
-        _precondition_gap_key(match.group(1))
-        for detail in report.details
-        if (match := re.search(r"spec precondition assumed, not enforced, by `([^`]+)`", detail))
-    }
     for atom in report.spec_stronger_than_impl:
-        if _precondition_gap_key(atom) in precondition_keys:
+        if report.has_precondition_detail(atom):
             continue
         gaps.append(f"spec stronger than implementation: {atom}")
     for atom in report.impl_stronger_than_spec:

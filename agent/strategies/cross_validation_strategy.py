@@ -891,9 +891,18 @@ class CrossValidationReport:
     drift_detected: bool = False
     coverage_ratio: float = 0.0
     details: list[str] = field(default_factory=list)
+    # Internal exact atom mapping used by audit reporting to avoid emitting both
+    # a generic atom gap and its more actionable detail for the same root cause.
+    # Kept out of ``to_dict`` because the public report shape is a fixed contract.
+    _precondition_gap_atoms: list[str] = field(default_factory=list, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        data.pop("_precondition_gap_atoms", None)
+        return data
+
+    def has_precondition_detail(self, atom_name: str) -> bool:
+        return atom_name in self._precondition_gap_atoms
 
     @property
     def is_consistent(self) -> bool:
@@ -1019,6 +1028,7 @@ class CrossValidator:
                 )
                 if body and _has_unenforced_precondition(atom["requires"], body, language):
                     report.spec_stronger_than_impl.append(atom["name"])
+                    report._precondition_gap_atoms.append(atom["name"])
                     # The requires literal itself is not echoed: spec text may
                     # contain sensitive values and diagnostics are forwarded to
                     # MCP clients.
