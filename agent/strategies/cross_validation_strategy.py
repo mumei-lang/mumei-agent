@@ -929,7 +929,17 @@ def _go_handler_registration_spans(text: str, handler_name: str) -> list[tuple[i
         servemux_init = re.compile(
             rf"\b(?:var\s+{re.escape(receiver)}\s*=|{re.escape(receiver)}\s*:=)\s*http\.NewServeMux\s*\("
         )
-        if len(args) >= 2 and args[1] == handler_name and (receiver == "http" or servemux_init.search(text)):
+        handler_elsewhere = any(
+            re.search(rf"\b{re.escape(handler_name)}\b", arg)
+            for index, arg in enumerate(args)
+            if index != 1
+        )
+        if (
+            len(args) >= 2
+            and args[1] == handler_name
+            and not handler_elsewhere
+            and (receiver == "http" or servemux_init.search(text))
+        ):
             spans.append((match.start(), end))
     handler_conversion = re.compile(r"\bhttp\.HandlerFunc\s*\(")
     for match in re.finditer(handler_conversion, text):
@@ -1037,7 +1047,7 @@ def _go_nil_precondition_caller_guaranteed(impl_path: str, function_name: str, p
                 return False
             body_prefix = text[enclosing.body_start_char:start]
             assignment_re = re.compile(
-                rf"(?:^|[;{{\n])\s*(?:[\w.]+,\s*)*{re.escape(arg)}(?:\s*,[^=;\n]*)?\s*(?::=|=(?!=))",
+                rf"(?:^|[;{{\n]|\bif\s+|\bfor\s+|\bswitch\s+)\s*(?:[\w.]+,\s*)*{re.escape(arg)}(?:\s*,[^=;\n]*)?\s*(?::=|=(?!=))",
                 re.MULTILINE,
             )
             if assignment_re.search(body_prefix):

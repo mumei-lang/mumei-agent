@@ -1920,3 +1920,41 @@ func main() {
     report = CrossValidator().validate_spec_vs_impl(str(spec), str(tmp_path / "main.go"), "go")
 
     assert report.spec_stronger_than_impl == ["adminAuthorized"]
+
+
+
+def test_go_if_initializer_reassignment_prevents_framework_suppression(tmp_path):
+    (tmp_path / "main.go").write_text("""package main
+
+func adminAuthorized(r *http.Request) bool { return r.Header.Get("X") != "" }
+func resetHandler(w http.ResponseWriter, r *http.Request) {
+    if r = nil; !adminAuthorized(r) { return }
+}
+func main() {
+    mux := http.NewServeMux()
+    mux.HandleFunc("/admin/reset", resetHandler)
+}
+""")
+    spec = tmp_path / "spec.mm"
+    spec.write_text('atom adminAuthorized(r: i64) -> bool {\n  requires: r != nil;\n  ensures: true;\n}\n')
+    report = CrossValidator().validate_spec_vs_impl(str(spec), str(tmp_path / "main.go"), "go")
+    assert report.spec_stronger_than_impl == ["adminAuthorized"]
+
+
+def test_go_handler_reference_in_route_prevents_framework_suppression(tmp_path):
+    (tmp_path / "main.go").write_text("""package main
+
+func adminAuthorized(r *http.Request) bool { return r.Header.Get("X") != "" }
+func resetHandler(w http.ResponseWriter, r *http.Request) {
+    if !adminAuthorized(r) { return }
+}
+func routeFor(handler func(http.ResponseWriter, *http.Request)) string { return "/admin/reset" }
+func main() {
+    mux := http.NewServeMux()
+    mux.HandleFunc(routeFor(resetHandler), resetHandler)
+}
+""")
+    spec = tmp_path / "spec.mm"
+    spec.write_text('atom adminAuthorized(r: i64) -> bool {\n  requires: r != nil;\n  ensures: true;\n}\n')
+    report = CrossValidator().validate_spec_vs_impl(str(spec), str(tmp_path / "main.go"), "go")
+    assert report.spec_stronger_than_impl == ["adminAuthorized"]
