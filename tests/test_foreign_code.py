@@ -8461,7 +8461,7 @@ def test_solidity_emit_word_inside_error_message_does_not_hide_updates() -> None
 contract Vault {
     mapping(address => uint256) balances;
     function withdraw() external {
-        uint256 amount = balances[msg.sender];
+        uint256 amount = 1;
         require(amount > 0, 'cannot emit payout');
         balances[msg.sender] = 0;
     }
