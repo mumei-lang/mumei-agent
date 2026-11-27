@@ -119,26 +119,22 @@ def _outside_string_mask(code: str) -> str:
     return "".join(out)
 
 
-_CREDENTIAL_WORD = r"[\w$]*(?:password|passwd|secret|token|api_?key|apikey|private_?key|auth|credential)[\w$]*"
-_CREDENTIAL_EXPR = rf"(?:[\w$]+\.)*{_CREDENTIAL_WORD}"
+_CREDENTIAL_NAME_RE = re.compile(
+    r"(?:password|passwd|secret|token|api_?key|apikey|private_?key|auth|credential)",
+    re.IGNORECASE,
+)
 _STRING_LITERAL = r'"(?:\\.|[^"\\])*"'
 _MASKED_STRING = r"__MUMEI_STRING_\d+__"
-_OPEN_PARENS = r"(?:\(\s*)*"
-_CLOSE_PARENS = r"(?:\s*\))*"
-_PAREN_CREDENTIAL_EXPR = rf"{_OPEN_PARENS}{_CREDENTIAL_EXPR}{_CLOSE_PARENS}"
-_CREDENTIAL_NAME_PATTERN = rf"(?<![\w$])(?P<name>{_PAREN_CREDENTIAL_EXPR})(?![\w$])"
-_CREDENTIAL_COMPARISON_FORWARD = re.compile(
-    rf"{_CREDENTIAL_NAME_PATTERN}\s*(?P<op>==|!=)\s*{_OPEN_PARENS}(?P<literal>{_MASKED_STRING})",
-    re.IGNORECASE,
+_TOKEN_RE = re.compile(
+    rf"(?P<string>{_MASKED_STRING})"
+    r"|(?P<boolop>&&|\|\|)"
+    r"|(?P<op>==|!=|:=|=)"
+    r"|(?P<name>[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)"
+    r"|(?P<punct>[(){};:,])"
+    r"|(?P<space>\s+)"
+    r"|(?P<other>.)"
 )
-_CREDENTIAL_COMPARISON_REVERSE = re.compile(
-    rf"{_OPEN_PARENS}(?P<literal>{_MASKED_STRING}){_CLOSE_PARENS}\s*(?P<op>==|!=)\s*{_CREDENTIAL_NAME_PATTERN}",
-    re.IGNORECASE,
-)
-_CREDENTIAL_ASSIGNMENT = re.compile(
-    rf"{_CREDENTIAL_NAME_PATTERN}\s*(?::=|=(?!=))\s*{_OPEN_PARENS}(?P<literal>{_MASKED_STRING})",
-    re.IGNORECASE,
-)
+_OPERAND_SEPARATORS = {";", ",", ":", "{", "}"}
 
 
 def _mask_string_literals(text: str) -> tuple[str, dict[str, tuple[int, int]]]:
@@ -174,19 +170,85 @@ def _mask_string_literals(text: str) -> tuple[str, dict[str, tuple[int, int]]]:
     return "".join(out), mapping
 
 
+def _lex_masked_text(masked: str) -> list[tuple[str, str]]:
+    return [
+        (match.lastgroup or "other", match.group())
+        for match in _TOKEN_RE.finditer(masked)
+        if match.lastgroup != "space"
+    ]
+
+
+def _is_boolean_separator(token: tuple[str, str]) -> bool:
+    return token[0] == "boolop" or (token[0] == "name" and token[1].lower() in {"and", "or"})
+
+
+def _operand_before(tokens: list[tuple[str, str]], operator_index: int) -> list[tuple[str, str]]:
+    start = 0
+    for index in range(operator_index):
+        if tokens[index][1] in _OPERAND_SEPARATORS or _is_boolean_separator(tokens[index]):
+            start = index + 1
+    return tokens[start:operator_index]
+
+
+def _operand_after(tokens: list[tuple[str, str]], operator_index: int) -> list[tuple[str, str]]:
+    end = len(tokens)
+    for index in range(operator_index + 1, len(tokens)):
+        if tokens[index][1] in _OPERAND_SEPARATORS or _is_boolean_separator(tokens[index]):
+            end = index
+            break
+    return tokens[operator_index + 1:end]
+
+
+def _trim_grouping(tokens: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    trimmed = list(tokens)
+    while trimmed and trimmed[0][1] == "(":
+        trimmed.pop(0)
+    while trimmed and trimmed[-1][1] == ")":
+        trimmed.pop()
+    return trimmed
+
+
+def _simple_token(tokens: list[tuple[str, str]], kind: str) -> tuple[str, str] | None:
+    trimmed = _trim_grouping(tokens)
+    if len(trimmed) == 1 and trimmed[0][0] == kind:
+        return trimmed[0]
+    return None
+
+
+def _is_credential_operand(tokens: list[tuple[str, str]]) -> bool:
+    token = _simple_token(tokens, "name")
+    return token is not None and _CREDENTIAL_NAME_RE.search(token[1]) is not None
+
+
+def _string_operand(tokens: list[tuple[str, str]]) -> str | None:
+    token = _simple_token(tokens, "string")
+    return token[1] if token is not None else None
+
+
 def _redact_credential_comparison_literals(text: str) -> str:
     masked, mapping = _mask_string_literals(text)
-    spans: list[tuple[int, int]] = []
-    for pattern in (_CREDENTIAL_COMPARISON_FORWARD, _CREDENTIAL_COMPARISON_REVERSE, _CREDENTIAL_ASSIGNMENT):
-        for match in pattern.finditer(masked):
-            span = mapping.get(match.group("literal"))
-            if span is not None:
-                spans.append(span)
+    tokens = _lex_masked_text(masked)
+    placeholders: set[str] = set()
+    for index, token in enumerate(tokens):
+        if token[0] != "op":
+            continue
+        before = _operand_before(tokens, index)
+        after = _operand_after(tokens, index)
+        left_string = _string_operand(before)
+        right_string = _string_operand(after)
+        if token[1] in {"==", "!="}:
+            if _is_credential_operand(before) and right_string is not None:
+                placeholders.add(right_string)
+            if left_string is not None and _is_credential_operand(after):
+                placeholders.add(left_string)
+        elif token[1] in {"=", ":="} and _is_credential_operand(before) and right_string is not None:
+            placeholders.add(right_string)
+    spans = sorted(mapping[placeholder] for placeholder in placeholders if placeholder in mapping)
     if not spans:
         return text
     out: list[str] = []
     cursor = 0
-    for start, end in sorted(spans):
+    for start, end in spans:
         if start < cursor:
             continue
         out.append(text[cursor:start])

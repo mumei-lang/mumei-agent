@@ -856,3 +856,21 @@ def test_string_content_ending_in_credential_assignment_text_is_not_blocked(tmp_
     assert candidate["extracted_contract"]["requires"] == ['mode == "token="']
     assert candidate["extracted_contract"]["ensures"] == ['message == "hello"']
     assert candidate["extracted_contract"]["string_literals_redacted"] is False
+
+
+
+def test_credential_like_function_argument_is_not_a_direct_comparison(tmp_path: Path) -> None:
+    source = tmp_path / "payment.py"
+    source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+    skeleton = 'atom withdraw() -> i64 {\n    requires: classify(token_kind) == "public";\n    ensures: result >= 0;\n    body: { 0 }\n}'
+
+    report = build_migration_execution(
+        _result(source, [_hint("withdraw", skeleton)]),
+        output_path=tmp_path / "execution.json",
+        mumei_client=FakeVerifyClient(),
+    )
+
+    candidate = report["candidates"][0]
+    assert candidate["execution_state"] == "ready_for_human_review"
+    assert candidate["extracted_contract"]["requires"] == ['classify(token_kind) == "public"']
+    assert candidate["extracted_contract"]["string_literals_redacted"] is False
