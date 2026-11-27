@@ -8901,7 +8901,8 @@ def _solidity_function_has_access_guard(attrs: str, body: str) -> bool:
 # `emit` arguments are left out, since logging the caller scopes nothing.
 _SOLIDITY_CALLER_SCOPED_PATTERN = re.compile(
     r"\[\s*msg\.sender\s*\]"
-    r"|[(,]\s*msg\.sender\s*[,)]"
+    r"|,\s*msg\.sender\s*[,)]"
+    r"|(?<!payable)\(\s*msg\.sender\s*[,)]"
     r"|\bmsg\.value\b"
 )
 _SOLIDITY_EMIT_STATEMENT = re.compile(r"\bemit\b[^;]*;")
@@ -8939,7 +8940,15 @@ def _solidity_function_is_protocol_settlement(params: str, body: str) -> bool:
         r"\b(?P<recipient>[A-Za-z_]\w*(?:\[[^\]]+\])?(?:\.[A-Za-z_]\w*)?)\s*\.\s*(?:call\s*\{[^}]*value\s*:|transfer\s*\(|send\s*\()",
         body,
     )
-    return value_call is not None
+    if value_call is None:
+        return False
+    recipient_base = re.match(r"[A-Za-z_]\w*", value_call.group("recipient"))
+    if recipient_base and re.search(
+        rf"\b{re.escape(recipient_base.group(0))}\s*=[^;]*\bmsg\.sender\b",
+        body,
+    ):
+        return False
+    return True
 
 
 def _solidity_function_is_caller_scoped(body: str) -> bool:

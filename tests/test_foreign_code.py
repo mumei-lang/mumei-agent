@@ -8309,3 +8309,40 @@ def test_typescript_contract_requires_keep_nullable_length_param() -> None:
     atom = _infer_typescript_contracts(source)[0]
     assert "items != null" in atom.requires
     assert "items != undefined" in atom.requires
+
+
+def test_solidity_aliased_caller_payout_remains_access_control_advisory() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_solidity_contract_issues
+
+    source = """
+contract Vault {
+    uint256 pool;
+    function withdrawAll() external {
+        uint256 amount = pool;
+        pool = 0;
+        address payable recipient = payable(msg.sender);
+        (bool ok, ) = recipient.call{value: amount}("");
+        require(ok, "payout failed");
+    }
+}
+"""
+    assert any(
+        issue.function_name == "withdrawAll" and "no access-control guard" in issue.message
+        for issue in _detect_solidity_contract_issues(source)
+    )
+
+
+def test_typescript_contract_requires_keep_untyped_default_object_param_nullable() -> None:
+    from agent.cross_validation_foreign import _infer_typescript_contracts
+
+    source = "export function size(items = { values: [] }): number { return items.length; }\n"
+    atom = _infer_typescript_contracts(source)[0]
+    assert "items != null" in atom.requires
+
+
+def test_typescript_contract_requires_skip_nonnullable_default_param() -> None:
+    from agent.cross_validation_foreign import _infer_typescript_contracts
+
+    source = "export function size(items: number[] = []): number { return items.length; }\n"
+    atom = _infer_typescript_contracts(source)[0]
+    assert atom.requires == "true"

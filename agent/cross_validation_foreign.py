@@ -597,6 +597,55 @@ def _single_return_expr(function_node: ast.FunctionDef | ast.AsyncFunctionDef) -
         return ""
 
 
+def _typescript_param_annotation(raw: str) -> tuple[str, str | None]:
+    """Split one TypeScript parameter into name text and optional annotation.
+
+    Only top-level ``:`` and ``=`` delimiters count. Colons inside object
+    defaults or object/arrow types, and the ``=`` in an arrow type, are not
+    signature delimiters.
+    """
+    depth = 0
+    quote = ""
+    escaped = False
+    colon = -1
+    equals = -1
+    for index, ch in enumerate(raw):
+        if quote:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == quote:
+                quote = ""
+            continue
+        if ch in {"'", '"', "`"}:
+            quote = ch
+            continue
+        if ch in "([{<":
+            depth += 1
+            continue
+        if ch in ")]}":
+            depth = max(depth - 1, 0)
+            continue
+        if ch == ">":
+            depth = max(depth - 1, 0)
+            continue
+        if depth != 0:
+            continue
+        if ch == ":" and colon < 0 and equals < 0:
+            colon = index
+        elif ch == "=" and not raw[index : index + 2] == "=>" and equals < 0:
+            equals = index
+            if colon >= 0:
+                break
+    delimiter_positions = [pos for pos in (colon, equals) if pos >= 0]
+    name_end = min(delimiter_positions) if delimiter_positions else len(raw)
+    if colon < 0 or (equals >= 0 and equals < colon):
+        return raw[:name_end], None
+    type_end = equals if equals >= 0 else len(raw)
+    return raw[:name_end], raw[colon + 1 : type_end].strip()
+
+
 def _typescript_nullable_params(params_text: str) -> set[str]:
     """Return TypeScript parameters that may actually be null/undefined.
 
@@ -609,14 +658,14 @@ def _typescript_nullable_params(params_text: str) -> set[str]:
     for raw in _split_signature_params(params_text):
         if not raw.strip():
             continue
-        parts = raw.split(":", 1)
-        pname = parts[0].strip().split("=")[0].strip().rstrip("?")
+        name_text, annotation = _typescript_param_annotation(raw)
+        pname = name_text.strip().rstrip("?")
         if not pname:
             continue
-        if len(parts) < 2:
+        if annotation is None:
             nullable.add(_safe_identifier(pname))
             continue
-        type_text = parts[1].strip().lower()
+        type_text = annotation.strip().lower()
         if (
             raw.strip().startswith(pname + "?")
             or "null" in type_text
