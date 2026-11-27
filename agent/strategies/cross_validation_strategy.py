@@ -876,6 +876,133 @@ def _has_unenforced_precondition(requires: str, body: str, language: str = "") -
     return False
 
 
+def _split_go_call_args(text: str) -> list[str]:
+    args: list[str] = []
+    start = 0
+    depth = 0
+    quote = ""
+    for index, char in enumerate(text):
+        if quote:
+            if char == quote and (index == 0 or text[index - 1] != "\\"):
+                quote = ""
+            continue
+        if char in {'"', "'", "`"}:
+            quote = char
+        elif char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+        elif char == "," and depth == 0:
+            args.append(text[start:index].strip())
+            start = index + 1
+    tail = text[start:].strip()
+    if tail:
+        args.append(tail)
+    return args
+
+
+def _go_function_bodies(source: str) -> list[tuple[str, str, str]]:
+    pattern = re.compile(r"\bfunc\s+(?:\([^)]*\)\s*)?(\w+)\s*\(([^)]*)\)[^{};]*\{")
+    functions: list[tuple[str, str, str]] = []
+    for match in pattern.finditer(source):
+        depth = 1
+        index = match.end()
+        while index < len(source) and depth:
+            if source[index] == "{":
+                depth += 1
+            elif source[index] == "}":
+                depth -= 1
+            index += 1
+        if depth == 0:
+            functions.append((match.group(1), match.group(2), source[match.end():index - 1]))
+    return functions
+
+
+def _go_constructor_returns_pointer(source: str, constructor: str) -> bool:
+    pattern = re.compile(rf"\bfunc\s+{re.escape(constructor)}\s*\([^)]*\)\s*\*")
+    if not pattern.search(source):
+        return False
+    body = next((body for name, _params, body in _go_function_bodies(source) if name == constructor), "")
+    returns = re.findall(r"\breturn\s+([^\n]+)", body)
+    return bool(returns) and all(value.strip().startswith("&") for value in returns)
+
+
+def _go_nonnil_provenance(source: str, prefix: str, arg: str) -> bool:
+    local_re = re.compile(rf"\b{re.escape(arg)}\s*(?:,\s*\w+\s*)?:?=\s*(\w+)\s*\(")
+    local = local_re.search(prefix)
+    if local and not re.search(rf"\b{re.escape(arg)}\s*=\s*nil\b", prefix[local.end():]):
+        return _go_constructor_returns_pointer(source, local.group(1))
+    global_re = re.compile(rf"\bvar\s+{re.escape(arg)}\s*=\s*(\w+)\s*\(")
+    global_init = global_re.search(source)
+    if global_init and not re.search(rf"\b{re.escape(arg)}\s*=\s*nil\b", source):
+        return _go_constructor_returns_pointer(source, global_init.group(1))
+    lookup = re.search(rf"\b{re.escape(arg)}\s*,\s*(\w+)\s*:=\s*[\w.]+\[[^\n;]+\]", prefix)
+    if lookup:
+        guard = re.search(rf"\bif\s*!\s*{re.escape(lookup.group(1))}\s*\{{[^{{}}]*\breturn\b", prefix[lookup.end():])
+        return bool(guard) and not re.search(rf"\b{re.escape(arg)}\s*=\s*nil\b", prefix[lookup.end():])
+    return False
+
+
+def _go_nil_precondition_caller_guaranteed(impl_path: str, function_name: str, param_name: str) -> bool:
+    if not function_name or function_name[0].isupper():
+        return False
+    directory = Path(impl_path).parent
+    sources: list[str] = []
+    try:
+        for path in sorted(directory.glob("*.go")):
+            if not path.name.endswith("_test.go"):
+                sources.append(path.read_text(encoding="utf-8"))
+    except OSError:
+        return False
+    source = "\n".join(sources)
+    functions = _go_function_bodies(source)
+    calls: list[tuple[str, str, int, list[str]]] = []
+    call_re = re.compile(rf"(?<![\w.]){re.escape(function_name)}\s*\(")
+    for caller, params, body in functions:
+        if caller == function_name:
+            continue
+        for match in call_re.finditer(body):
+            depth = 1
+            index = match.end()
+            while index < len(body) and depth:
+                if body[index] == "(":
+                    depth += 1
+                elif body[index] == ")":
+                    depth -= 1
+                index += 1
+            if depth:
+                return False
+            args = _split_go_call_args(body[match.end():index - 1])
+            calls.append((caller, params, match.start(), args))
+    if not calls:
+        return False
+    target_params = next((params for name, params, _body in functions if name == function_name), "")
+    param_names = []
+    for part in target_params.split(","):
+        match = re.match(r"\s*(\w+)\s+", part)
+        if match:
+            param_names.append(match.group(1))
+    if param_name not in param_names:
+        return False
+    param_index = param_names.index(param_name)
+    for _caller, params, call_start, args in calls:
+        if len(args) <= param_index:
+            return False
+        arg = args[param_index]
+        if not re.fullmatch(r"[A-Za-z_]\w*", arg):
+            return False
+        framework_request = (
+            "http.ResponseWriter" in params
+            and re.search(rf"\b{re.escape(arg)}\s+\*?http\.Request\b", params) is not None
+        )
+        if not framework_request:
+            body = next(body for name, _params, body in functions if name == _caller)
+            prefix = body[:call_start]
+            if not _go_nonnil_provenance(source, prefix, arg):
+                return False
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
@@ -1027,6 +1154,13 @@ class CrossValidator:
                     if function is not None else _extract_function_body(impl_source, language, impl_name)
                 )
                 if body and _has_unenforced_precondition(atom["requires"], body, language):
+                    nil_match = re.fullmatch(r"\s*(\w+)\s*!=\s*nil\s*;?\s*", atom["requires"])
+                    if (
+                        language == "go"
+                        and nil_match
+                        and _go_nil_precondition_caller_guaranteed(impl_path, impl_name, nil_match.group(1))
+                    ):
+                        continue
                     report.spec_stronger_than_impl.append(atom["name"])
                     report._precondition_gap_atoms.append(atom["name"])
                     # The requires literal itself is not echoed: spec text may
