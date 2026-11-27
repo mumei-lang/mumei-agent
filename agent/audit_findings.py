@@ -86,16 +86,12 @@ def build_file_findings(result: AuditResult) -> list[dict]:
 
 
 def _lexical_absolute_path(path: str) -> Path:
-    """Normalize parent directories without collapsing a symlinked input file."""
-    lexical = Path(os.path.abspath(os.path.expanduser(path)))
-    try:
-        return lexical.parent.resolve() / lexical.name
-    except OSError:
-        return lexical
+    """Return a cwd-independent path without collapsing symlinked audit inputs."""
+    return Path(os.path.abspath(os.path.expanduser(path)))
 
 
 def _root_relative_source_key(source_file: str, source_dir: str) -> str:
-    root = Path(os.path.expanduser(source_dir)).resolve()
+    root = _lexical_absolute_path(source_dir)
     if any((candidate / ".git").exists() for candidate in (root, *root.parents)):
         # In a git checkout the durable identity is the repository-relative
         # file path. This is independent of the checkout directory name and
