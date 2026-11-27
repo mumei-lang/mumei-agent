@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from pathlib import Path
 
 from agent.audit_models import AuditDirectoryResult, AuditResult
 from agent.audit_reporting import _aggregate_directory_fixed_keys, _finalize_audit_result
@@ -172,3 +173,76 @@ def test_fingerprint_uses_checkout_relative_source_key(tmp_path, monkeypatch) ->
         verification_violations=["counterexample"],
     )
     assert absolute.findings[0]["fingerprint"] == relative.findings[0]["fingerprint"]
+
+
+def test_findings_redact_machine_local_paths(tmp_path: Path) -> None:
+    source = tmp_path / "src" / "missing.py"
+    result = _finalize(errors=[f"failed to read source file: {source}"], source_file=str(source))
+
+    assert str(source) not in result.findings[0]["message"]
+    assert "<path>" in result.findings[0]["message"]
+
+
+def test_directory_findings_redact_machine_local_paths(tmp_path: Path) -> None:
+    directory = AuditDirectoryResult(
+        success=False,
+        source_dir=str(tmp_path),
+        language="mixed",
+        errors=[f"no supported source-code files found in directory: {tmp_path}"],
+    )
+    _aggregate_directory_fixed_keys(directory)
+
+    assert str(tmp_path) not in directory.findings[0]["message"]
+    assert "<path>" in directory.findings[0]["message"]
+
+
+def test_directory_trusted_atom_source_is_anchored_to_audit_root() -> None:
+    directory = AuditDirectoryResult(
+        success=True,
+        source_dir="src",
+        language="mixed",
+        trusted_atoms=[{"file": "specs/payment.mm", "atom": "withdraw", "line": 3}],
+    )
+    _aggregate_directory_fixed_keys(directory)
+
+    assert directory.findings[0]["source_file"] == "src/specs/payment.mm"
+
+
+def test_z3_counter_example_spelling_is_classified_as_z3() -> None:
+    result = _finalize(verification_violations=["Z3 Counter-example: {'x': 0}"])
+
+    assert result.findings[0]["verification_basis"] == "z3"
+    assert result.findings[0]["confidence"] == "high"
+
+
+def test_spec_rate_limit_text_is_not_operational_rate_limit() -> None:
+    result = _finalize(
+        verification_status="unverifiable",
+        spec_health_issues=["missing requirement: rate limits apply to every endpoint"],
+    )
+
+    assert result.triage["unverifiable"]["skipped_rate_limited"] == []
+    assert result.triage["unverifiable"]["other"] == ["src/example.py"]
+
+
+def test_fingerprint_stable_when_invoked_from_checkout_subdirectory(tmp_path: Path, monkeypatch) -> None:
+    checkout = tmp_path / "checkout"
+    nested = checkout / "tools" / "ci"
+    nested.mkdir(parents=True)
+    (checkout / ".git").mkdir()
+    monkeypatch.chdir(nested)
+    from agent.audit_findings import _stable_source_key
+
+    assert _stable_source_key("../../src/example.py") == "src/example.py"
+    assert _stable_source_key(str(checkout / "src" / "example.py")) == "src/example.py"
+
+
+def test_directory_input_validation_error_has_findings_and_triage(tmp_path: Path) -> None:
+    from agent.audit import AuditPipeline
+    from agent.config import AgentConfig
+
+    result = AuditPipeline(config=AgentConfig()).audit_directory(str(tmp_path), "c++")
+
+    assert result.errors
+    assert result.findings[0]["category"] == "error"
+    assert result.triage["schema"] == "mumei.audit-triage/v1"

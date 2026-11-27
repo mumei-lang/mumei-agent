@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from pathlib import Path
 
 from agent.audit_models import AuditDirectoryResult, AuditResult
@@ -97,29 +98,22 @@ def build_directory_findings(result: AuditDirectoryResult) -> list[dict]:
             if isinstance(atom, dict)
             else result.source_dir
         )
+        if isinstance(atom, dict) and atom.get("file") and not os.path.isabs(source_file):
+            source_file = str(Path(result.source_dir) / source_file)
         row = _trusted_atom_finding(source_file, atom)
         if row["fingerprint"] not in seen:
             seen.add(row["fingerprint"])
             rows.append(row)
     rows.extend(
-        {
-            "schema": FINDINGS_SCHEMA,
-            "category": "error",
-            "severity": "error",
-            "confidence": "high",
-            "verification_basis": "operational",
-            "message": message,
-            "source_file": result.source_dir,
-            "line": None,
-            "triage_bucket": "operational",
-            "fingerprint": _fingerprint(
-                "error",
-                "operational",
-                message,
-                _stable_source_key(result.source_dir),
-                None,
-            ),
-        }
+        _finding(
+            result.source_dir,
+            category="error",
+            severity="error",
+            confidence="high",
+            verification_basis="operational",
+            message=message,
+            triage_bucket="operational",
+        )
         for message in result.errors
     )
     return rows
@@ -170,14 +164,14 @@ def _finding(
         "severity": severity,
         "confidence": confidence,
         "verification_basis": verification_basis,
-        "message": str(message),
+        "message": _redact_message(str(message), [source_file]),
         "source_file": source_file,
         "line": line,
         "triage_bucket": triage_bucket,
         "fingerprint": _fingerprint(
             category,
             verification_basis,
-            str(message),
+            _redact_message(str(message), [source_file]),
             _stable_source_key(source_file),
             line,
         ),
@@ -210,7 +204,12 @@ def _violation_basis(message: str) -> str:
         return "native-replay"
     if lowered.startswith("body-port:"):
         return "body-port"
-    if "counterexample" in lowered or "status=refuted" in lowered or "status=failed" in lowered:
+    if (
+        "counterexample" in lowered
+        or "counter-example" in lowered
+        or "status=refuted" in lowered
+        or "status=failed" in lowered
+    ):
         return "z3"
     return "deterministic-static-analysis"
 
@@ -222,7 +221,7 @@ def _violation_confidence(message: str) -> str:
     if basis == "body-port":
         return "medium"
     if basis == "z3":
-        return "high" if "counterexample" in message.lower() else "medium"
+        return "high" if "counterexample" in message.lower() or "counter-example" in message.lower() else "medium"
     return "medium"
 
 
@@ -270,16 +269,17 @@ def _unverifiable_category(
         *result.cross_validation_gaps,
     ]
     lowered = [issue.lower() for issue in issues]
+    lowered_errors = [issue.lower() for issue in result.errors]
     if (
         result.skipped_rate_limited
         or (
             directory is not None
             and result.source_file in directory.skipped_rate_limited_files
         )
-        or any(marker in issue for issue in lowered for marker in _RATE_LIMIT_MARKERS)
+        or any(marker in issue for issue in lowered_errors for marker in _RATE_LIMIT_MARKERS)
     ):
         return "skipped_rate_limited"
-    if any(marker in issue for issue in lowered for marker in _TIMEOUT_MARKERS):
+    if any(marker in issue for issue in lowered_errors for marker in _TIMEOUT_MARKERS):
         return "timeout"
     lowering_markers = (
         "spec_lowering_failed",
@@ -324,13 +324,41 @@ def _triage_dict(
         },
     }
 
+_ABSOLUTE_PATH_RE = re.compile(r"(?<![\w:/])\/(?:[^\s\"'`<>|,.;:]+/)+[^\s\"'`<>|,.;:]*")
+
+
+def _display_path(path: str) -> str:
+    try:
+        resolved = Path(path).resolve()
+        return resolved.relative_to(Path.cwd().resolve()).as_posix()
+    except (OSError, ValueError):
+        return "<path>"
+
+
+def _redact_message(text: str, known_paths: list[str]) -> str:
+    redacted = str(text)
+    replacements: dict[str, str] = {}
+    for value in known_paths:
+        if not value:
+            continue
+        expanded = os.path.expanduser(value)
+        for form in {value, expanded, os.path.realpath(expanded)}:
+            if os.path.isabs(form):
+                replacements[form] = _display_path(form)
+    for form in sorted(replacements, key=len, reverse=True):
+        redacted = redacted.replace(form, replacements[form])
+    return _ABSOLUTE_PATH_RE.sub("<path>", redacted)
+
 
 def _stable_source_key(source_file: str) -> str:
     """Use a checkout-relative source key when possible for stable CI fingerprints."""
     try:
         path = Path(os.path.expanduser(source_file)).resolve()
-        if path.is_absolute():
-            return path.relative_to(Path.cwd().resolve()).as_posix()
+        start = path if path.is_dir() else path.parent
+        for candidate in (start, *start.parents):
+            if (candidate / ".git").exists():
+                return path.relative_to(candidate).as_posix()
+        return path.relative_to(Path.cwd().resolve()).as_posix()
     except (OSError, ValueError):
         pass
     return Path(source_file).as_posix()
