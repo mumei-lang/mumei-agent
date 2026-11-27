@@ -89,6 +89,11 @@ def parse_int_literal(text: str) -> int | None:
     text = re.split(r"\s+as\b", text, maxsplit=1)[0].strip()
     text = re.split(r"[iu](?:8|16|32|64|128|size)$", text, maxsplit=1)[0].strip()
     text = text.replace("_", "")
+    exponent = re.fullmatch(r"(\d+)[eE](\d+)", text)
+    if exponent is not None:
+        if len(exponent.group(2)) > 4 or int(exponent.group(2)) > 1000:
+            return None
+        return int(exponent.group(1)) * 10 ** int(exponent.group(2))
     try:
         return int(text, 0)
     except ValueError:
@@ -118,7 +123,10 @@ def collect_declared_constants(source: str, language: str) -> dict[str, int]:
 
 
 def divisor_provably_nonzero(name: str, known_constants: dict[str, int]) -> bool:
-    """True when ``name`` is a declared constant with a known non-zero value (#296)."""
+    """True when ``name`` is a non-zero literal or known non-zero constant."""
+    literal = parse_int_literal(name)
+    if literal is not None:
+        return literal != 0
     return known_constants.get(name, 0) != 0
 
 

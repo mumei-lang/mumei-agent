@@ -9,6 +9,7 @@ import re
 from typing import Callable, cast
 
 from agent import dataflow_facts, semantic_safety, tree_sitter_extract
+from agent.ts_interprocedural import _pattern_binders
 from agent.config import AgentConfig
 from agent.cross_validation_models import (
     ContractParam,
@@ -597,6 +598,223 @@ def _single_return_expr(function_node: ast.FunctionDef | ast.AsyncFunctionDef) -
         return ""
 
 
+_TYPESCRIPT_RECORD_DECLARATION_START = re.compile(
+    r"^\ufeff?(?:export\s+)?(?:const|let|var)\s+([A-Za-z_]\w*)\s*:\s*Record\s*<",
+    re.MULTILINE,
+)
+_SOLIDITY_MAPPING_DECLARATION = re.compile(
+    r"\bmapping\s*\((?:[^()]|\([^()]*\))*\)\s*(?:(?:public|private|internal|override)\s+)*([A-Za-z_]\w*)",
+    re.DOTALL,
+)
+_SOLIDITY_ARRAY_DECLARATION = re.compile(
+    r"\b(?:[A-Za-z_]\w*(?:\s*\[\s*\d*\s*\])+|bytes)\s+(?:(?:public|private|internal|memory|storage|calldata)\s+)*([A-Za-z_]\w*)"
+)
+
+
+def _typescript_associative_containers(code: str) -> set[str]:
+    """Names declared as top-level TypeScript ``Record`` objects, not arrays."""
+    masked = _strip_go_rust_literals_and_comments(code, single_quoted_strings=True)
+    containers: set[str] = set()
+    for match in _TYPESCRIPT_RECORD_DECLARATION_START.finditer(masked):
+        depth = 1
+        close = -1
+        for index in range(match.end(), len(masked)):
+            char = masked[index]
+            if char == "<":
+                depth += 1
+            elif char == ">" and masked[index - 1] not in "=-":
+                depth -= 1
+                if depth == 0:
+                    close = index
+                    break
+        if close < 0:
+            continue
+        type_tail = masked[close + 1 :]
+        annotation_end = len(type_tail)
+        nested_depth = 0
+        for position, char in enumerate(type_tail):
+            if char in "([{<":
+                nested_depth += 1
+            elif char in ")]}>" and nested_depth > 0:
+                if char == ">" and position > 0 and type_tail[position - 1] in "=-":
+                    continue
+                nested_depth -= 1
+            elif nested_depth == 0 and char == ";":
+                annotation_end = position
+                break
+            elif nested_depth == 0 and char == "=":
+                next_char = type_tail[position + 1] if position + 1 < len(type_tail) else ""
+                previous_char = type_tail[position - 1] if position > 0 else ""
+                if next_char == ">" or previous_char in "=!<>":
+                    continue
+                annotation_end = position
+                break
+        union_tail = type_tail[:annotation_end]
+        if "[" in union_tail or re.search(r"\b(?:Readonly)?Array\s*<", union_tail):
+            continue
+        containers.add(match.group(1))
+    return containers
+
+
+def _solidity_mapping_spans(masked: str) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    for match in re.finditer(r"\bmapping\s*\(", masked):
+        opening = masked.find("(", match.start())
+        depth = 0
+        for index in range(opening, len(masked)):
+            if masked[index] == "(":
+                depth += 1
+            elif masked[index] == ")":
+                depth -= 1
+                if depth == 0:
+                    spans.append((match.start(), index + 1))
+                    break
+    return spans
+
+
+def _solidity_mapping_names(code: str) -> set[str]:
+    """Names declared as Solidity mappings and never as arrays in this file."""
+    masked = _strip_go_rust_literals_and_comments(code, single_quoted_strings=True)
+    mappings = set(_SOLIDITY_MAPPING_DECLARATION.findall(masked))
+    mapping_spans = _solidity_mapping_spans(masked)
+    arrays = {
+        match.group(1)
+        for match in _SOLIDITY_ARRAY_DECLARATION.finditer(masked)
+        if not any(start <= match.start() < end for start, end in mapping_spans)
+    }
+    return mappings - arrays
+
+
+def _typescript_pattern_names(node) -> set[str]:
+    if node is None:
+        return set()
+    if node.type == "identifier":
+        return {node.text.decode("utf-8", "replace")}
+    if node.type in {"object_pattern", "array_pattern", "rest_pattern"}:
+        return set(_pattern_binders(node))
+    return set()
+
+
+def _typescript_binding_names_from_tree(root) -> set[str]:
+    names: set[str] = set()
+
+    def walk(node) -> None:
+        if node.type == "variable_declarator":
+            pattern = node.child_by_field_name("name")
+            if pattern is None and node.named_children:
+                pattern = node.named_children[0]
+            names.update(_typescript_pattern_names(pattern))
+        elif node.type in {"required_parameter", "optional_parameter", "rest_parameter"}:
+            pattern = next(iter(node.named_children), None)
+            names.update(_typescript_pattern_names(pattern))
+        elif node.type in {
+            "function_declaration",
+            "generator_function_declaration",
+            "class_declaration",
+            "abstract_class_declaration",
+        }:
+            name_node = node.child_by_field_name("name")
+            if name_node is not None:
+                names.add(name_node.text.decode("utf-8", "replace"))
+        elif node.type == "arrow_function":
+            # Unparenthesized arrow parameters are direct identifier children;
+            # parenthesized parameters are visited through formal_parameters.
+            for child in node.children:
+                if child.type == "=>":
+                    break
+                names.update(_typescript_pattern_names(child))
+        elif node.type == "catch_clause":
+            in_parameter = False
+            for child in node.children:
+                if child.type == "(":
+                    in_parameter = True
+                elif child.type == ")":
+                    break
+                elif in_parameter:
+                    names.update(_typescript_pattern_names(child))
+        elif node.type == "for_in_statement":
+            declares_binding = False
+            for child in node.children:
+                if child.type in {"const", "let", "var"}:
+                    declares_binding = True
+                elif child.type in {"of", "in"}:
+                    break
+                elif declares_binding:
+                    names.update(_typescript_pattern_names(child))
+        for child in node.children:
+            walk(child)
+
+    walk(root)
+    return names
+
+
+def _typescript_body_binding_names(body: str) -> set[str] | None:
+    """Local/callback binding names in a function body, or ``None`` to fail closed."""
+    prefix = "async function __mumei_binding_scan__() {\n"
+    tree, _source_bytes = tree_sitter_extract.parse(prefix + body + "\n}", "typescript")
+    if tree is None or tree.root_node.has_error:
+        return None
+    return _typescript_binding_names_from_tree(tree.root_node)
+
+
+def _typescript_param_binding_names(params_text: str) -> set[str] | None:
+    """Binding identifiers in a parameter list, ignoring type-only references."""
+    tree, _source_bytes = tree_sitter_extract.parse(
+        f"function __mumei_param_scan__({params_text}) {{}}", "typescript"
+    )
+    if tree is None or tree.root_node.has_error:
+        return None
+
+    def first_formal_parameters(node):
+        if node.type == "formal_parameters":
+            return node
+        for child in node.children:
+            found = first_formal_parameters(child)
+            if found is not None:
+                return found
+        return None
+
+    formal = first_formal_parameters(tree.root_node)
+    if formal is None:
+        return set()
+    names: set[str] = set()
+    for parameter in formal.children:
+        if parameter.type not in {"required_parameter", "optional_parameter", "rest_parameter"}:
+            continue
+        names.update(_typescript_pattern_names(next(iter(parameter.named_children), None)))
+    return names
+
+
+def _typescript_visible_associative_containers(
+    containers: set[str], body: str, param_names: set[str], params_text: str
+) -> set[str]:
+    """Drop global ``Record`` names shadowed by the function being analyzed."""
+    visible = set(containers) - param_names
+    parameter_bindings = _typescript_param_binding_names(params_text)
+    if parameter_bindings is None:
+        # Parser fallback: any mention in the raw parameter list may be a binding.
+        visible = {
+            name
+            for name in visible
+            if not re.search(rf"\b{re.escape(name)}\b", params_text)
+        }
+    else:
+        visible -= parameter_bindings
+    if not visible:
+        return visible
+    body_bindings = _typescript_body_binding_names(body)
+    if body_bindings is not None:
+        return visible - body_bindings
+    # Without tree-sitter, fail closed when a declaration or callback may shadow
+    # the global Record. This loses precision but never drops array bounds.
+    masked = _strip_go_rust_literals_and_comments(body, single_quoted_strings=True)
+    for name in list(visible):
+        name_used = re.search(rf"\b{re.escape(name)}\b", masked)
+        if name_used and (re.search(r"\b(?:const|let|var)\b", masked) or "=>" in masked):
+            visible.discard(name)
+    return visible
+
+
 def _typescript_param_annotation(raw: str) -> tuple[str, str | None]:
     """Split one TypeScript parameter into name text and optional annotation.
 
@@ -681,6 +899,7 @@ def _safety_requires_for_expression(
     language: str = "python",
     known_constants: dict[str, int] | None = None,
     nullable_params: set[str] | None = None,
+    associative_containers: set[str] | None = None,
 ) -> str:
     known_constants = known_constants or {}
     if not expression:
@@ -693,11 +912,11 @@ def _safety_requires_for_expression(
         findings = tree_sitter_extract.analyze_expression(expression, canonical)
         if findings is not None:
             requirements = _generic_requirements_from_findings(
-                findings, canonical, known_constants, nullable_params
+                findings, canonical, known_constants, nullable_params, associative_containers
             )
             return " && ".join(_dedupe_strings(requirements)) if requirements else "true"
         requirements = _generic_safety_requires_for_expression(
-            expression, known_constants, canonical, nullable_params
+            expression, known_constants, canonical, nullable_params, associative_containers
         )
         return " && ".join(_dedupe_strings(requirements)) if requirements else "true"
     requirements: list[str] = []
@@ -726,6 +945,7 @@ def _generic_requirements_from_findings(
     language: str = "typescript",
     known_constants: dict[str, int] | None = None,
     nullable_params: set[str] | None = None,
+    associative_containers: set[str] | None = None,
 ) -> list[str]:
     """Divide-by-zero / bounds / null requirements from syntax-tree findings.
 
@@ -737,6 +957,7 @@ def _generic_requirements_from_findings(
     permits a bare null dereference (#295).
     """
     known_constants = known_constants or {}
+    associative_containers = associative_containers or set()
     requirements: list[str] = []
     # JavaScript / TypeScript ``/`` and ``%`` with a zero divisor do not throw;
     # they return ``Infinity`` / ``NaN``.  Requiring a non-zero divisor for these
@@ -748,6 +969,8 @@ def _generic_requirements_from_findings(
         if not semantic_safety.divisor_provably_nonzero(divisor, known_constants):
             requirements.append(f"{divisor} != 0")
     for container, index in findings.index_accesses:
+        if container in associative_containers:
+            continue
         if semantic_safety.known_nonnegative_index(index, known_constants) is None:
             requirements.append(f"{index} >= 0")
         requirements.append(f"{index} < len_{container}")
@@ -800,8 +1023,10 @@ def _generic_safety_requires_for_expression(
     known_constants: dict[str, int] | None = None,
     language: str = "typescript",
     nullable_params: set[str] | None = None,
+    associative_containers: set[str] | None = None,
 ) -> list[str]:
     known_constants = known_constants or {}
+    associative_containers = associative_containers or set()
     requirements: list[str] = []
     # JavaScript / TypeScript division/modulo by zero is not an exception.
     if language not in {"typescript", "javascript"}:
@@ -815,8 +1040,9 @@ def _generic_safety_requires_for_expression(
     ):
         container = match.group("container")
         index = match.group("index")
-        if container == "map":
-            # ``map[K]V{...}`` is a Go map type/composite literal, not an index.
+        if container == "map" or container in associative_containers:
+            # ``map[K]V{...}`` is a Go map type/composite literal, not an index;
+            # declared associative containers are key lookups, not array indexing.
             continue
         if semantic_safety.known_nonnegative_index(index, known_constants) is None:
             requirements.append(f"{index} >= 0")
@@ -1246,6 +1472,7 @@ def _infer_rust_contracts(code: str) -> list[MumeiContractAtom]:
 
 def _infer_solidity_contracts(code: str) -> list[MumeiContractAtom]:
     known_constants = semantic_safety.collect_declared_constants(code, "solidity")
+    associative_containers = _solidity_mapping_names(code)
     extracted = tree_sitter_extract.extract_contract_functions(
         code, "solidity", _safe_identifier
     )
@@ -1265,6 +1492,7 @@ def _infer_solidity_contracts(code: str) -> list[MumeiContractAtom]:
                     raw_return_expr,
                     param_types,
                     known_constants,
+                    associative_containers,
                 )
                 local_names = _local_variable_names(fn.body, "solidity")
                 ensures = _ensures_for_return_expression(return_expr, return_type, param_names, known_constants, local_names)
@@ -1313,6 +1541,7 @@ def _infer_solidity_contracts(code: str) -> list[MumeiContractAtom]:
                 raw_return_expr,
                 param_types,
                 known_constants,
+                associative_containers,
             )
             local_names = _local_variable_names(body, "solidity")
             ensures = _ensures_for_return_expression(return_expr, return_type, param_names, known_constants, local_names)
@@ -1369,9 +1598,12 @@ def _solidity_safety_requires_for_expression(
     expression: str,
     param_types: dict[str, str] | None = None,
     known_constants: dict[str, int] | None = None,
+    associative_containers: set[str] | None = None,
 ) -> str:
     requirements: list[str] = []
-    base = _safety_requires_for_expression(expression, "solidity", known_constants)
+    base = _safety_requires_for_expression(
+        expression, "solidity", known_constants, associative_containers=associative_containers
+    )
     if base != "true":
         requirements.extend(part.strip() for part in base.split("&&") if part.strip())
     requirements.extend(
@@ -1568,6 +1800,7 @@ def _infer_typescript_arrow_functions_with_tree_sitter(
 
 def _infer_typescript_contracts(code: str) -> list[MumeiContractAtom]:
     known_constants = semantic_safety.collect_declared_constants(code, "typescript")
+    associative_containers = _typescript_associative_containers(code)
     extracted = tree_sitter_extract.extract_contract_functions(
         code, "typescript", _safe_identifier
     )
@@ -1592,6 +1825,9 @@ def _infer_typescript_contracts(code: str) -> list[MumeiContractAtom]:
                     "typescript",
                     known_constants,
                     _typescript_nullable_params(fn.params_text),
+                    _typescript_visible_associative_containers(
+                        associative_containers, fn.body, param_names, fn.params_text
+                    ),
                 )
                 local_names = _local_variable_names(fn.body, "typescript")
                 ensures = _ensures_for_return_expression(return_expr, return_type, param_names, known_constants, local_names, param_types=param_types)
@@ -1676,6 +1912,9 @@ def _infer_typescript_contracts(code: str) -> list[MumeiContractAtom]:
                         "typescript",
                         known_constants,
                         _typescript_nullable_params(match.group("params")),
+                        _typescript_visible_associative_containers(
+                            associative_containers, body, param_names, match.group("params")
+                        ),
                     ),
                     ensures=_ensures_for_return_expression(return_expr, return_type, param_names, known_constants, local_names, param_types=param_types),
                 )

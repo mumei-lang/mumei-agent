@@ -1821,6 +1821,275 @@ def test_solidity_contract_inference_balances_function_type_params() -> None:
     assert atoms[0].ensures == "result == array"
 
 
+def test_solidity_mapping_lookup_does_not_generate_array_bounds_requires() -> None:
+    """Mappings are total key lookups, not numeric arrays with a ``len``."""
+    from agent.cross_validation_foreign import _infer_solidity_contracts
+
+    source = """
+contract Vault {
+    mapping(address => uint256) private rewards;
+    function rewardsOf(address user) external view returns (uint256) {
+        return rewards[user];
+    }
+}
+"""
+    atom = _infer_solidity_contracts(source)[0]
+    assert atom.name == "rewardsOf"
+    assert atom.requires == "true"
+
+
+def test_solidity_array_lookup_still_generates_bounds_requires() -> None:
+    """Dynamic arrays must keep their index bounds contracts."""
+    from agent.cross_validation_foreign import _infer_solidity_contracts
+
+    source = """
+contract Vault {
+    uint256[] private values;
+    function valueAt(uint256 index) external view returns (uint256) {
+        return values[index];
+    }
+}
+"""
+    atom = _infer_solidity_contracts(source)[0]
+    assert "index >= 0" in atom.requires
+    assert "index < len_values" in atom.requires
+
+
+def test_solidity_array_declaration_collision_disables_mapping_suppression() -> None:
+    from agent.cross_validation_foreign import _infer_solidity_contracts
+
+    source = """
+contract A {
+    mapping(address => uint256) private values;
+}
+contract B {
+    uint256[] private values;
+    function valueAt(uint256 index) external view returns (uint256) {
+        return values[index];
+    }
+}
+"""
+    atoms = {atom.name: atom for atom in _infer_solidity_contracts(source)}
+    assert "index < len_values" in atoms["valueAt"].requires
+
+
+def test_solidity_commented_mapping_declaration_does_not_hide_array_bounds() -> None:
+    from agent.cross_validation_foreign import _infer_solidity_contracts
+
+    source = """
+contract Vault {
+    // mapping(address => uint256) private values;
+    uint256[] private values;
+    function valueAt(uint256 index) external view returns (uint256) {
+        return values[index];
+    }
+}
+"""
+    atom = _infer_solidity_contracts(source)[0]
+    assert "index < len_values" in atom.requires
+
+
+def test_solidity_mapping_lookup_does_not_hide_same_index_array_bounds() -> None:
+    from agent.cross_validation_foreign import _infer_solidity_contracts
+
+    source = """
+contract Vault {
+    mapping(address => uint256) private rewards;
+    uint256[] private values;
+    function combined(address user, uint256 index) external view returns (uint256) {
+        return (rewards[user]) + (values[index]);
+    }
+}
+"""
+    atom = _infer_solidity_contracts(source)[0]
+    assert "index >= 0" in atom.requires
+    assert "index < len_values" in atom.requires
+    assert "user < len_rewards" not in atom.requires
+
+
+def test_solidity_nonzero_exponent_divisor_and_constant_are_not_requires() -> None:
+    """``1e18`` and a constant initialized to it are statically non-zero."""
+    from agent.cross_validation_foreign import _infer_solidity_contracts
+
+    source = """
+contract Rewards {
+    uint256 private constant ACC_PRECISION = 1e18;
+    function scaled(uint256 amount) external pure returns (uint256) {
+        return amount / 1e18;
+    }
+    function scaledByConstant(uint256 amount) external pure returns (uint256) {
+        return amount / ACC_PRECISION;
+    }
+    function scaledByInput(uint256 amount, uint256 divisor) external pure returns (uint256) {
+        return amount / divisor;
+    }
+}
+"""
+    atoms = {atom.name: atom for atom in _infer_solidity_contracts(source)}
+    assert atoms["scaled"].requires == "true"
+    assert atoms["scaledByConstant"].requires == "true"
+    assert "divisor != 0" in atoms["scaledByInput"].requires
+
+
+
+
+def test_typescript_record_array_declaration_keeps_array_bounds() -> None:
+    from agent.cross_validation_foreign import _infer_typescript_contracts
+
+    source = """
+export const table: Record<string, number>[] = [];
+export function direct(index: number): number {
+  return table[index];
+}
+"""
+    atom = _infer_typescript_contracts(source)[0]
+    assert "index < len_table" in atom.requires
+
+
+def test_typescript_destructured_shadow_keeps_array_bounds() -> None:
+    from agent.cross_validation_foreign import _infer_typescript_contracts
+
+    source = """
+export const values: Record<string, number> = {};
+export function destructured(index: number): number {
+  const { values } = { values: [1] };
+  return values[index];
+}
+"""
+    atom = _infer_typescript_contracts(source)[0]
+    assert "index < len_values" in atom.requires
+
+
+def test_typescript_loop_catch_and_arrow_shadowing_keep_array_bounds() -> None:
+    from agent.cross_validation_foreign import _infer_typescript_contracts
+
+    source = """
+export const values: Record<string, number> = {};
+export function shadows(rows: number[][], index: number): number {
+  for (const values of rows) {
+    return values[index];
+  }
+  try {
+    return rows[0][index];
+  } catch (values) {
+    return values[index];
+  }
+}
+export function arrow(index: number): number {
+  return [[1]].map(values => values[index])[0];
+}
+"""
+    atoms = {atom.name: atom for atom in _infer_typescript_contracts(source)}
+    assert "index < len_values" in atoms["arrow"].requires
+
+    from agent.cross_validation_foreign import _typescript_visible_associative_containers
+
+    loop_catch_body = """
+  for (const values of rows) {
+    return values[index];
+  }
+  try {
+    return rows[0][index];
+  } catch (values) {
+    return values[index];
+  }
+"""
+    assert (
+        _typescript_visible_associative_containers(
+            {"values"}, loop_catch_body, {"rows", "index"}, "rows: number[][], index: number"
+        )
+        == set()
+    )
+
+
+def test_typescript_rest_parameter_and_union_array_keep_array_bounds() -> None:
+    from agent.cross_validation_foreign import _infer_typescript_contracts
+
+    source = """
+export const values: Record<string, number> = {};
+export const table: Record<string, number> | number[] = [];
+export const callbackTable: Record<string, number> | ((key: string) => number[]) | number[] = [];
+export const objectTable: Record<string, number> | { nested: number; other: number } | number[] = [];
+export function restAt(index: number, ...values: number[]): number {
+  return values[index];
+}
+export function unionAt(index: number): number {
+  return table[index] + callbackTable[index] + objectTable[index];
+}
+"""
+    atoms = {atom.name: atom for atom in _infer_typescript_contracts(source)}
+    assert "index < len_values" in atoms["restAt"].requires
+    assert "index < len_table" in atoms["unionAt"].requires
+    assert "index < len_callbackTable" in atoms["unionAt"].requires
+    assert "index < len_objectTable" in atoms["unionAt"].requires
+
+
+def test_typescript_nested_record_and_typeof_reference_do_not_generate_array_bounds() -> None:
+    from agent.cross_validation_foreign import _infer_typescript_contracts
+
+    source = """
+export const nested: Record<number, Record<string, number>> = {};
+export const costs: Record<string, number> = {};
+export function nestedAt(index: number): Record<string, number> {
+  return nested[index];
+}
+export function costOf(key: keyof typeof costs): number {
+  return costs[key];
+}
+"""
+    atoms = {atom.name: atom for atom in _infer_typescript_contracts(source)}
+    assert atoms["nestedAt"].requires == "true"
+    assert atoms["costOf"].requires == "true"
+
+
+def test_typescript_unrelated_local_does_not_shadow_record() -> None:
+    from agent.cross_validation_foreign import _infer_typescript_contracts
+
+    source = """
+export const prices: Record<string, number> = {};
+export function priceOf(key: string): number {
+  const fee = 2;
+  return prices[key] + fee;
+}
+"""
+    atom = _infer_typescript_contracts(source)[0]
+    assert atom.requires == "true"
+
+
+def test_solidity_fixed_array_bytes_collision_and_override_mapping() -> None:
+    from agent.cross_validation_foreign import _infer_solidity_contracts
+
+    source = """
+contract A {
+    mapping(address => uint256) private values;
+    mapping(address => bytes) private data;
+    mapping(address => uint256) public override balances;
+    function balanceOf(address user) external view returns (uint256) { return balances[user]; }
+}
+contract B {
+    uint256[4] private values;
+    bytes data;
+    function valueAt(uint256 index) external view returns (uint256) { return values[index]; }
+    function byteAt(uint256 index) external view returns (bytes1) { return data[index]; }
+}
+"""
+    atoms = {atom.name: atom for atom in _infer_solidity_contracts(source)}
+    assert atoms["balanceOf"].requires == "true"
+    assert "index < len_values" in atoms["valueAt"].requires
+    assert "index < len_data" in atoms["byteAt"].requires
+
+
+def test_solidity_mapping_value_label_does_not_disable_mapping_suppression() -> None:
+    from agent.cross_validation_foreign import _solidity_mapping_names
+
+    source = """
+contract A {
+    mapping(uint256 => bytes payload) public payload;
+}
+"""
+    assert _solidity_mapping_names(source) == {"payload"}
+
+
 def test_solidity_interface_functions_are_extracted_as_trusted_atoms() -> None:
     """Solidity interface declarations without a body must still produce atoms."""
     from agent.cross_validation_foreign import _infer_solidity_contracts
@@ -8282,6 +8551,77 @@ contract Vault {
         issue.function_name == "settle" and "no access-control guard" in issue.message
         for issue in _detect_solidity_contract_issues(source)
     )
+
+
+def test_typescript_record_lookup_does_not_generate_array_bounds_requires() -> None:
+    """``Record`` key lookup is associative access, not numeric array indexing."""
+    from agent.cross_validation_foreign import _infer_typescript_contracts
+
+    source = """
+export type Status = "todo" | "done";
+export const NEXT_STATUSES: Record<Status, Status[]> = {
+  todo: ["done"],
+  done: [],
+};
+export function canMove(from: Status, to: Status): boolean {
+  return NEXT_STATUSES[from].includes(to);
+}
+"""
+    atoms = {atom.name: atom for atom in _infer_typescript_contracts(source)}
+    assert atoms["canMove"].requires == "true"
+
+
+def test_typescript_commented_record_declaration_does_not_hide_array_bounds() -> None:
+    from agent.cross_validation_foreign import _infer_typescript_contracts
+
+    source = """
+// export const values: Record<string, number> = {};
+export function valueAt(values: number[], index: number): number {
+  return values[index];
+}
+"""
+    atom = _infer_typescript_contracts(source)[0]
+    assert "index < len_values" in atom.requires
+
+
+def test_typescript_local_record_declaration_does_not_hide_outer_array_bounds() -> None:
+    from agent.cross_validation_foreign import _infer_typescript_contracts
+
+    source = """
+export function valueAt(values: number[], index: number): number {
+  const local: Record<string, number> = {};
+  return values[index] + local["x"];
+}
+"""
+    atom = _infer_typescript_contracts(source)[0]
+    assert "index < len_values" in atom.requires
+
+
+def test_typescript_parameter_shadowing_record_keeps_array_bounds() -> None:
+    from agent.cross_validation_foreign import _infer_typescript_contracts
+
+    source = """
+export const values: Record<string, number> = {};
+export function valueAt(values: number[], index: number): number {
+  return values[index];
+}
+"""
+    atoms = {atom.name: atom for atom in _infer_typescript_contracts(source)}
+    assert "index < len_values" in atoms["valueAt"].requires
+
+
+def test_typescript_array_lookup_still_generates_bounds_requires() -> None:
+    """Ordinary arrays must keep their index bounds contracts."""
+    from agent.cross_validation_foreign import _infer_typescript_contracts
+
+    source = """
+export function valueAt(values: number[], index: number): number {
+  return values[index];
+}
+"""
+    atom = _infer_typescript_contracts(source)[0]
+    assert "index >= 0" in atom.requires
+    assert "index < len_values" in atom.requires
 
 
 def test_typescript_contract_requires_skip_nonnullable_and_local_length_values() -> None:

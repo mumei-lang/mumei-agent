@@ -955,6 +955,11 @@ def _parse_constant_value(text: str) -> int | None:
     text = text.replace("_", "")
     if not text:
         return None
+    exponent = re.fullmatch(r"(\d+)[eE](\d+)", text)
+    if exponent is not None:
+        if len(exponent.group(2)) > 4 or int(exponent.group(2)) > 1000:
+            return None
+        return int(exponent.group(1)) * 10 ** int(exponent.group(2))
     try:
         if text.lower().startswith(("0x", "0b", "0o")):
             return int(text, 0)
