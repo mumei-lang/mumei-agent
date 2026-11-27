@@ -184,9 +184,21 @@ def _is_boolean_separator(token: tuple[str, str]) -> bool:
 
 def _operand_before(tokens: list[tuple[str, str]], operator_index: int) -> list[tuple[str, str]]:
     start = 0
-    for index in range(operator_index):
-        if tokens[index][1] in _OPERAND_SEPARATORS or _is_boolean_separator(tokens[index]):
+    depth = 0
+    for index in range(operator_index - 1, -1, -1):
+        value = tokens[index][1]
+        if value == ")":
+            depth += 1
+            continue
+        if value == "(":
+            if depth == 0:
+                start = index + 1
+                break
+            depth -= 1
+            continue
+        if depth == 0 and (value in _OPERAND_SEPARATORS or _is_boolean_separator(tokens[index])):
             start = index + 1
+            break
     return tokens[start:operator_index]
 
 

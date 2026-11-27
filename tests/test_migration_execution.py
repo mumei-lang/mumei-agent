@@ -807,6 +807,7 @@ def test_parenthesized_credential_literals_are_redacted_and_blocked(tmp_path: Pa
         f'("{secret}") == password',
         f'"{secret}" == (password)',
         f'!(password == "{secret}")',
+        f'check(password == "{secret}")',
     ]
     for expression in expressions:
         skeleton = f'atom withdraw() -> i64 {{\n    requires: {expression};\n    ensures: result >= 0;\n    body: {{ 0 }}\n}}'
