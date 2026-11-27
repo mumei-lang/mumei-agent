@@ -85,12 +85,36 @@ def build_file_findings(result: AuditResult) -> list[dict]:
     return rows
 
 
+def _root_relative_source_key(source_file: str, source_dir: str) -> str:
+    try:
+        return Path(os.path.expanduser(source_file)).resolve().relative_to(
+            Path(os.path.expanduser(source_dir)).resolve()
+        ).as_posix()
+    except (OSError, ValueError):
+        return _stable_source_key(source_file)
+
+
+def _refingerprint_for_audit_root(row: dict, source_dir: str) -> None:
+    row["fingerprint"] = _fingerprint(
+        str(row["category"]),
+        str(row["verification_basis"]),
+        str(row["message"]),
+        _root_relative_source_key(str(row["source_file"]), source_dir),
+        row.get("line") if type(row.get("line")) is int else None,
+    )
+
+
 def build_directory_findings(result: AuditDirectoryResult) -> list[dict]:
     rows = [
         finding
         for file_result in result.file_results
         for finding in (file_result.findings or build_file_findings(file_result))
     ]
+    for row in rows:
+        # Directory baselines are keyed relative to the audited root. This keeps
+        # identical diagnostics in independent nested checkouts distinct while
+        # remaining stable across invocation subdirectories.
+        _refingerprint_for_audit_root(row, result.source_dir)
     seen = {finding["fingerprint"] for finding in rows}
     for atom in result.trusted_atoms:
         source_file = (

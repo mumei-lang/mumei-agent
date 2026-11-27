@@ -209,3 +209,124 @@ def test_sarif_baseline_state_distinguishes_same_message_in_different_files() ->
 
     assert rows[0]["baselineState"] == "unchanged"
     assert rows[1]["baselineState"] == "new"
+
+
+def test_cli_rejects_write_baseline_over_uppercase_source_in_directory(tmp_path: Path) -> None:
+    source_dir = tmp_path / "src"
+    source_dir.mkdir()
+    source = source_dir / "Calc.PY"
+    source.write_text("def calc():\n    pass\n", encoding="utf-8")
+    args = build_parser().parse_args([
+        "--code-file", str(source_dir),
+        "--language", "python",
+        "--write-baseline", str(source),
+    ])
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(args)
+
+    assert excinfo.value.code == 2
+    assert source.read_text(encoding="utf-8") == "def calc():\n    pass\n"
+
+
+def test_cli_rejects_baseline_input_overwritten_by_report_outputs(tmp_path: Path) -> None:
+    source = tmp_path / "payment.py"
+    source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text('{"version":"mumei.audit-baseline/v1","fingerprints":[]}', encoding="utf-8")
+    for output_flag in ("--output", "--sarif-output"):
+        args = build_parser().parse_args([
+            "--code-file", str(source),
+            "--language", "python",
+            "--baseline", str(baseline),
+            output_flag, str(baseline),
+        ])
+
+        with pytest.raises(SystemExit) as excinfo:
+            main(args)
+
+        assert excinfo.value.code == 2
+        assert baseline.read_text(encoding="utf-8").startswith('{"version"')
+
+
+def test_cli_rejects_write_baseline_over_summary_inputs(tmp_path: Path) -> None:
+    source = tmp_path / "payment.py"
+    source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+    for flag in ("--summaries-manifest-map", "--summary-plan-histories"):
+        input_path = tmp_path / f"{flag[2:]}.json"
+        input_path.write_text("{}", encoding="utf-8")
+        args = build_parser().parse_args([
+            "--code-file", str(source),
+            "--language", "python",
+            flag, str(input_path),
+            "--write-baseline", str(input_path),
+        ])
+
+        with pytest.raises(SystemExit) as excinfo:
+            main(args)
+
+        assert excinfo.value.code == 2
+        assert input_path.read_text(encoding="utf-8") == "{}"
+
+
+def test_directory_fingerprints_distinguish_independent_nested_checkouts(tmp_path: Path) -> None:
+    from agent.audit_models import AuditDirectoryResult
+    from agent.audit_reporting import _aggregate_directory_fixed_keys
+
+    root = tmp_path / "scan-root"
+    files = []
+    for repo in ("repo-one", "repo-two"):
+        checkout = root / repo
+        (checkout / ".git").mkdir(parents=True)
+        target = checkout / "src" / "payment.py"
+        target.parent.mkdir()
+        target.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+        files.append(
+            _result(
+                source_file=str(target),
+                verification_violations=["body-port: counterexample x=0"],
+            )
+        )
+    directory = AuditDirectoryResult(
+        success=False,
+        source_dir=str(root),
+        language="python",
+        file_results=files,
+    )
+
+    _aggregate_directory_fixed_keys(directory)
+
+    assert directory.findings[0]["fingerprint"] != directory.findings[1]["fingerprint"]
+
+
+def test_exit_code_preserves_raw_refuted_signal_before_findings_exist() -> None:
+    result = AuditResult(
+        success=False,
+        source_file="src/example.py",
+        language="python",
+        spec_extracted=True,
+        verification_status="unverifiable",
+        verification_violations=["body-port: counterexample x=0"],
+    )
+
+    assert not result.findings
+    assert audit_exit_code(result) == 1
+
+
+def test_cli_skips_baseline_write_when_audit_has_operational_errors(tmp_path: Path, capsys) -> None:
+    source = tmp_path / "payment.py"
+    source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+    baseline = tmp_path / "audit-baseline.json"
+    result = _result(source_file=str(source), errors=["mumei verify did not produce a verification report"])
+    args = build_parser().parse_args([
+        "--code-file", str(source),
+        "--language", "python",
+        "--write-baseline", str(baseline),
+    ])
+
+    with patch("agent.audit.AuditPipeline") as pipeline_cls:
+        pipeline_cls.return_value.audit_file.return_value = result
+        main(args)
+
+    assert not baseline.exists()
+    assert "baseline output skipped" in capsys.readouterr().err

@@ -106,6 +106,13 @@ def audit_exit_code(
         )
     if active_code or unbaselined_refuted:
         return 1
+    if not any((file_result.findings or []) for file_result in files) and any(
+        file_result.verification_status == "refuted" or bool(file_result.verification_violations)
+        for file_result in files
+    ):
+        # Direct callers may pass a result before audit reporting derives the
+        # finding projection. Preserve the A-1 raw-signal classification there.
+        return 1
     return 0
 
 

@@ -1739,7 +1739,7 @@ def _output_conflicts_with_audit_inputs(
                 candidate
                 for candidate in audit_input_path.rglob("*")
                 if candidate.is_file()
-                and candidate.suffix in {*AUDIT_EXTENSION_MAP, ".mm"}
+                and candidate.suffix.lower() in {*AUDIT_EXTENSION_MAP, ".mm"}
             )
         ]
         conflicting = any(
@@ -1867,6 +1867,9 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
             "schedule_core",
             "schedule_core_requirement",
             "schedule_core_requirement_list",
+            "summaries_manifest_map",
+            "summary_plan_histories",
+            "go_types",
         )
         if (path := getattr(args, name, None)) is not None
     )
@@ -1901,10 +1904,21 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
         )
         raise SystemExit(2)
 
+    baseline_input = getattr(args, "baseline", None)
+    if baseline_input and (
+        _same_output_path(baseline_input, args.output)
+        or _same_output_path(baseline_input, sarif_output)
+    ):
+        print(
+            "audit: --baseline must not be overwritten by --output or --sarif-output",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
     baseline_fingerprints: set[str] = set()
-    if getattr(args, "baseline", None):
+    if baseline_input:
         try:
-            baseline_fingerprints = load_baseline(args.baseline)
+            baseline_fingerprints = load_baseline(baseline_input)
         except ValueError as exc:
             print(f"audit: {exc}", file=sys.stderr)
             raise SystemExit(2) from exc
@@ -1937,14 +1951,22 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
         summary_plan_histories=getattr(args, "summary_plan_histories", None),
         scheduled_verification=scheduled_verification,
     )
-    if getattr(args, "baseline", None):
+    if baseline_input:
         apply_baseline(result, baseline_fingerprints)
     if write_baseline_path:
-        try:
-            write_baseline(result, write_baseline_path)
-        except OSError as exc:
-            print(f"audit: failed to write baseline output: {exc}", file=sys.stderr)
-            raise SystemExit(2) from exc
+        from agent.audit_sarif import audit_exit_code
+
+        if audit_exit_code(result, fail_on="never") == 2:
+            print(
+                "audit: baseline output skipped because the audit had operational errors",
+                file=sys.stderr,
+            )
+        else:
+            try:
+                write_baseline(result, write_baseline_path)
+            except OSError as exc:
+                print(f"audit: failed to write baseline output: {exc}", file=sys.stderr)
+                raise SystemExit(2) from exc
     output_format = "json" if args.json else args.format
     payload = _format_result(result, output_format)
     if args.output:
