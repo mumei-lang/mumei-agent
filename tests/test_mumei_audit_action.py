@@ -12,6 +12,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 ACTION_PATH = ROOT / ".github" / "actions" / "mumei-audit" / "action.yml"
 SUMMARY_SCRIPT = ROOT / ".github" / "actions" / "mumei-audit" / "scripts" / "summarize_audit.py"
+VERIFY_ARTIFACT_SCRIPT = ROOT / ".github" / "actions" / "mumei-audit" / "scripts" / "verify_audit_evidence_artifact.py"
 SELFTEST_PATH = ROOT / ".github" / "workflows" / "mumei-audit-selftest.yml"
 
 
@@ -89,16 +90,17 @@ def test_selftest_workflow_exercises_small_repo_and_publishes_timing() -> None:
     assert "--write-baseline .mumei-audit/generated-baseline.json" in audit_args
     verify = workflow["jobs"]["verify-artifact"]
     assert verify["needs"] == "small-repo"
-    verify_text = "\n".join(step.get("run", "") for step in verify["steps"])
-    assert "evidence/generated-baseline.json" in verify_text
-    assert "evidence/audit.sarif" in verify_text
-    assert "evidence/migration-execution/migration_execution.json" in verify_text
-    assert "evidence/migration-execution/generated-artifacts/.mumei-generated-artifacts" in verify_text
-    assert "mumei.migration-execution/v1" in verify_text
-    assert "emitted_by_audit_cli" in verify_text
-    assert "grep -R -q 'fake-password-value'" in verify_text
-    assert "test -e evidence/audit.stdout.log\n" in verify_text
-    assert "test -e evidence/audit.stderr.log\n" in verify_text
+    verify_steps = verify["steps"]
+    assert any(step.get("uses") == "actions/checkout@v4" for step in verify_steps)
+    download_step = next(step for step in verify_steps if step.get("uses") == "actions/download-artifact@v4")
+    assert download_step["with"] == {"name": "mumei-audit-evidence", "path": "evidence"}
+    assert "if" not in download_step
+    verify_step = next(step for step in verify_steps if step.get("name") == "Verify downloaded action evidence artifact")
+    verify_text = verify_step["run"]
+    assert "verify_audit_evidence_artifact.py evidence" in verify_text
+    assert "--require-hidden-companion" in verify_text
+    assert "--forbidden-literal fake-password-value" in verify_text
+    assert "if" not in verify_step
     assert "--fail-on high-confidence" in audit_args
     assert action_step["with"]["migration-execution-output"] == ".mumei-audit/migration_execution.json"
     baseline = json.loads((ROOT / "examples" / "ci-small-repo" / "baseline.json").read_text(encoding="utf-8"))
@@ -735,3 +737,236 @@ def test_collect_migration_execution_not_requested_has_machine_readable_default(
     assert completed.returncode == 0
     assert output.read_text(encoding="utf-8") == "migration_execution_status=not_requested\nmigration_execution_ready_count=0\nmigration_execution_operational_error_count=0\n"
     assert not (tmp_path / "state" / "migration-execution").exists()
+
+
+def _sha256_text(text: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _write_downloaded_action_artifact(root: Path, *, state: str = "blocked") -> None:
+    root.mkdir(parents=True)
+    (root / "audit.json").write_text(
+        json.dumps({"verification_status": "unverifiable", "finding_counts": {}, "migration_hints": [], "trusted_atoms": []}),
+        encoding="utf-8",
+    )
+    (root / "audit.sarif").write_text(json.dumps({"version": "2.1.0"}), encoding="utf-8")
+    (root / "generated-baseline.json").write_text(
+        json.dumps({"version": "mumei.audit-baseline/v1", "fingerprints": []}), encoding="utf-8"
+    )
+    (root / "audit.stdout.log").write_text("", encoding="utf-8")
+    (root / "audit.stderr.log").write_text("audit diagnostics\n", encoding="utf-8")
+    timing = root / "timing"
+    timing.mkdir()
+    for name, value in {"start": 100, "setup_end": 110, "audit_start": 111, "audit_end": 120}.items():
+        (timing / name).write_text(f"{value}\n", encoding="utf-8")
+    (root / "migration-auto-migrate").write_text("added\n", encoding="utf-8")
+
+    migration_dir = root / "migration-execution"
+    generated = migration_dir / "generated-artifacts"
+    cache = generated / ".mumei" / "cache"
+    cache.mkdir(parents=True)
+    (generated / ".mumei-generated-artifacts").write_text("generated\n", encoding="utf-8")
+    (cache / "verification_cache.json").write_text("{}\n", encoding="utf-8")
+    mm_text = "atom divide() -> i64 { requires: divisor != 0; ensures: true; body: { 0 } }\n"
+    proof_text = '{"proof": true}\n'
+    sarif_text = '{"version": "2.1.0"}\n'
+    (generated / "divide.mm").write_text(mm_text, encoding="utf-8")
+    (generated / "divide.proof.json").write_text(proof_text, encoding="utf-8")
+    (generated / "divide.sarif").write_text(sarif_text, encoding="utf-8")
+
+    counts = {"ready_for_human_review": 0, "blocked": 0, "operational_error": 0}
+    counts[state] = 1
+    original_generated = "/original/workspace/.mumei-audit/migration_execution.migration-execution"
+    boundary = "A verified generated .mm skeleton proves only the skeleton contract as written; it is not proof that host-language code implements the same behavior."
+    execution = {
+        "schema": "mumei.migration-execution/v1",
+        "candidates": [
+            {
+                "execution_state": state,
+                "generated_mm": {
+                    "path": f"{original_generated}/divide.mm",
+                    "sha256": _sha256_text(mm_text),
+                },
+                "verification": {
+                    "proof_certificate": {
+                        "written": True,
+                        "path": f"{original_generated}/divide.proof.json",
+                        "sha256": _sha256_text(proof_text),
+                    },
+                    "sarif": {
+                        "written": True,
+                        "path": f"{original_generated}/divide.sarif",
+                        "sha256": _sha256_text(sarif_text),
+                    },
+                },
+            }
+        ],
+        "summary": {**counts, "candidate_count": 1, "review_required": True},
+        "artifact_paths": {
+            "migration_execution": "/original/workspace/.mumei-audit/migration_execution.json",
+            "generated_artifacts": original_generated,
+        },
+        "evidence_boundary": [boundary],
+    }
+    migration_dir.mkdir(exist_ok=True)
+    (migration_dir / "migration_execution.json").write_text(json.dumps(execution), encoding="utf-8")
+    status = {
+        "status": "emitted_by_audit_cli",
+        "ready_count": counts["ready_for_human_review"],
+        "counts": counts,
+        "review_required": True,
+        "boundary": boundary,
+        "generated_artifacts_copied": sum(1 for path in generated.rglob("*") if path.is_file()),
+    }
+    (migration_dir / "status.json").write_text(json.dumps(status), encoding="utf-8")
+
+
+def _run_downloaded_artifact_verifier(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(VERIFY_ARTIFACT_SCRIPT), str(root), *args],
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_verify_downloaded_action_artifact_accepts_blocked_review_success_path(tmp_path: Path) -> None:
+    artifact = tmp_path / "evidence"
+    _write_downloaded_action_artifact(artifact)
+
+    completed = _run_downloaded_artifact_verifier(artifact, "--require-hidden-companion", "--forbidden-literal", "fake-password-value")
+
+    assert completed.returncode == 0, completed.stderr
+    assert "generated companion files verified: 5" in completed.stdout
+    assert "hidden generated companion files verified: 2" in completed.stdout
+    assert "not host semantic-equivalence proof" in completed.stdout
+    assert "baseline boundary: generated CI policy artifact; not evidence" in completed.stdout
+
+
+def test_verify_downloaded_action_artifact_accepts_unwritten_proof_and_sarif_as_nonclaims(tmp_path: Path) -> None:
+    artifact = tmp_path / "evidence"
+    _write_downloaded_action_artifact(artifact)
+    generated = artifact / "migration-execution" / "generated-artifacts"
+    (generated / "divide.proof.json").unlink()
+    (generated / "divide.sarif").unlink()
+    execution_path = artifact / "migration-execution" / "migration_execution.json"
+    execution = json.loads(execution_path.read_text(encoding="utf-8"))
+    verification = execution["candidates"][0]["verification"]
+    verification["proof_certificate"] = {
+        "written": False,
+        "path": verification["proof_certificate"]["path"],
+        "sha256": None,
+    }
+    verification["sarif"] = {
+        "written": False,
+        "path": verification["sarif"]["path"],
+        "sha256": None,
+    }
+    execution_path.write_text(json.dumps(execution), encoding="utf-8")
+    status_path = artifact / "migration-execution" / "status.json"
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    status["generated_artifacts_copied"] = 3
+    status_path.write_text(json.dumps(status), encoding="utf-8")
+
+    completed = _run_downloaded_artifact_verifier(artifact)
+
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_verify_downloaded_action_artifact_rejects_candidate_operational_error(tmp_path: Path) -> None:
+    artifact = tmp_path / "evidence"
+    _write_downloaded_action_artifact(artifact, state="operational_error")
+
+    completed = _run_downloaded_artifact_verifier(artifact)
+
+    assert completed.returncode != 0
+    assert "candidate operational_error" in completed.stderr
+
+
+def test_verify_downloaded_action_artifact_rejects_missing_timing(tmp_path: Path) -> None:
+    artifact = tmp_path / "evidence"
+    _write_downloaded_action_artifact(artifact)
+    (artifact / "timing" / "audit_end").unlink()
+
+    completed = _run_downloaded_artifact_verifier(artifact)
+
+    assert completed.returncode != 0
+    assert "timing" in completed.stderr
+
+
+def test_verify_downloaded_action_artifact_rejects_missing_hidden_companion_when_required(tmp_path: Path) -> None:
+    artifact = tmp_path / "evidence"
+    _write_downloaded_action_artifact(artifact)
+    generated = artifact / "migration-execution" / "generated-artifacts"
+    (generated / ".mumei-generated-artifacts").unlink()
+    status_path = artifact / "migration-execution" / "status.json"
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    status["generated_artifacts_copied"] = 4
+    status_path.write_text(json.dumps(status), encoding="utf-8")
+
+    completed = _run_downloaded_artifact_verifier(artifact, "--require-hidden-companion")
+
+    assert completed.returncode != 0
+    assert ".mumei-generated-artifacts" in completed.stderr
+
+
+def test_verify_downloaded_action_artifact_accepts_fixture_without_hidden_companions(tmp_path: Path) -> None:
+    artifact = tmp_path / "evidence"
+    _write_downloaded_action_artifact(artifact)
+    generated = artifact / "migration-execution" / "generated-artifacts"
+    (generated / ".mumei-generated-artifacts").unlink()
+    (generated / ".mumei" / "cache" / "verification_cache.json").unlink()
+    status_path = artifact / "migration-execution" / "status.json"
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    status["generated_artifacts_copied"] = 3
+    status_path.write_text(json.dumps(status), encoding="utf-8")
+
+    completed = _run_downloaded_artifact_verifier(artifact)
+
+    assert completed.returncode == 0, completed.stderr
+    assert "hidden generated companion files verified: 0" in completed.stdout
+
+
+def test_verify_downloaded_action_artifact_rejects_generated_hash_mismatch(tmp_path: Path) -> None:
+    artifact = tmp_path / "evidence"
+    _write_downloaded_action_artifact(artifact)
+    (artifact / "migration-execution" / "generated-artifacts" / "divide.mm").write_text("tampered\n", encoding="utf-8")
+
+    completed = _run_downloaded_artifact_verifier(artifact)
+
+    assert completed.returncode != 0
+    assert "generated .mm sha256" in completed.stderr
+
+
+def test_verify_downloaded_action_artifact_rejects_forbidden_literal(tmp_path: Path) -> None:
+    artifact = tmp_path / "evidence"
+    _write_downloaded_action_artifact(artifact)
+    (artifact / "audit.stderr.log").write_text("fake-password-value\n", encoding="utf-8")
+
+    completed = _run_downloaded_artifact_verifier(artifact, "--forbidden-literal", "fake-password-value")
+
+    assert completed.returncode != 0
+    assert "credential-like sentinel" in completed.stderr
+
+
+def test_verify_downloaded_action_artifact_rejects_symlink_and_escaping_claim(tmp_path: Path) -> None:
+    artifact = tmp_path / "evidence"
+    _write_downloaded_action_artifact(artifact)
+    generated = artifact / "migration-execution" / "generated-artifacts"
+    victim = tmp_path / "victim"
+    victim.write_text("victim\n", encoding="utf-8")
+    (generated / "linked.mm").symlink_to(victim)
+
+    completed = _run_downloaded_artifact_verifier(artifact)
+    assert completed.returncode != 0
+    assert "symlink" in completed.stderr
+
+    (generated / "linked.mm").unlink()
+    execution_path = artifact / "migration-execution" / "migration_execution.json"
+    execution = json.loads(execution_path.read_text(encoding="utf-8"))
+    execution["candidates"][0]["generated_mm"]["path"] = "/original/workspace/outside.mm"
+    execution_path.write_text(json.dumps(execution), encoding="utf-8")
+    completed = _run_downloaded_artifact_verifier(artifact)
+    assert completed.returncode != 0
+    assert "outside the generated artifact directory" in completed.stderr
