@@ -8467,8 +8467,7 @@ fn f(amount: Amount, recipients: &[String]) -> Amount {
     amount / recipients.len()
 }
 """
-    primitive_local = """fn f(recipients: &[String]) -> i64 {
-    let amount: i64 = 10;
+    primitive_parameter = """fn f(amount: i64, recipients: &[String]) -> i64 {
     amount / recipients.len() as i64
 }
 """
@@ -8486,8 +8485,17 @@ fn f(recipients: &[String], cond: bool) -> Amount {
 }
 """
     assert not [i for i in _detect_safety_issues(operator_overloaded, "rust") if "divide" in i.message]
+    nested_custom_shadow = """fn f(recipients: &[String], cond: bool) {
+    let x = 1i64;
+    if cond {
+        let x = Amount;
+        x / recipients.len()
+    }
+}
+"""
     assert not [i for i in _detect_safety_issues(nested_shadowing, "rust") if "divide" in i.message]
-    assert [i for i in _detect_safety_issues(primitive_local, "rust") if "divide" in i.message]
+    assert not [i for i in _detect_safety_issues(nested_custom_shadow, "rust") if "divide" in i.message]
+    assert [i for i in _detect_safety_issues(primitive_parameter, "rust") if "divide" in i.message]
 
 
 def test_rust_arbitrary_member_divisor_remains_conservative() -> None:
