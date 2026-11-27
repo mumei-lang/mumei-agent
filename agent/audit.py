@@ -1796,13 +1796,30 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
         def _same_output_path(left: str | None, right: str | None) -> bool:
             if not left or not right:
                 return False
-            return os.path.realpath(left) == os.path.realpath(right)
+            try:
+                return os.path.samefile(left, right)
+            except OSError:
+                return os.path.realpath(left) == os.path.realpath(right)
 
+        declared_input_paths = tuple(
+            path
+            for name in (
+                "schedule_request",
+                "schedule_adapters",
+                "schedule_argv_map",
+                "schedule_policy",
+                "schedule_observations",
+                "schedule_core",
+                "schedule_core_requirement",
+                "schedule_core_requirement_list",
+            )
+            if (path := getattr(args, name, None)) is not None
+        )
         conflicting = _same_output_path(sarif_output, args.output) or _same_output_path(
             sarif_output, args.code_file
         ) or any(
             _same_output_path(sarif_output, path)
-            for path in _scheduled_verification_declared_paths(args)
+            for path in declared_input_paths
         )
         if conflicting:
             print(

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -182,7 +183,14 @@ def test_cli_rejects_sarif_output_conflicts(tmp_path: Path) -> None:
     source = tmp_path / "payment.py"
     source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
 
-    for conflict in (str(source), str(tmp_path / "report.json")):
+    hardlink = tmp_path / "payment-hardlink.py"
+    try:
+        os.link(source, hardlink)
+        conflicts = (str(source), str(tmp_path / "report.json"), str(hardlink))
+    except OSError:
+        conflicts = (str(source), str(tmp_path / "report.json"))
+
+    for conflict in conflicts:
         args = build_parser().parse_args(
             [
                 "--code-file", str(source),
