@@ -88,6 +88,7 @@ from agent.lean_bridge_helpers import run_lean_bridge_and_merge_proof_cert
 from agent.body_port import BodyPorter, body_port_violations
 from agent.native_replay import NativeReplayer, native_replay_violations, reconcile_body_ports
 from agent.llm_provider import LLMProvider, openai_client_adapter
+from agent.migration_execution import append_execution_next_step, build_migration_execution
 from agent.migration_readiness import append_next_step_summary, build_migration_readiness
 from agent.mumei_client import create_mumei_client
 from agent.prompts.report_formatter import format_counterexample
@@ -1170,6 +1171,26 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
             "the highest-ranked skeleton as a scaffold, not as host-code equivalence proof."
         ),
     )
+    parser.add_argument(
+        "--migration-execution-output",
+        metavar="PATH",
+        help=(
+            "Write a mumei.migration-execution/v1 acceptance artifact. Requires "
+            "--auto-migrate; requesting it also runs the existing self-healing loop "
+            "and records generated .mm, proof-certificate, SARIF, heal, and "
+            "behavioral diagnostic evidence without changing the fixed audit keys."
+        ),
+    )
+    parser.add_argument(
+        "--migration-function",
+        action="append",
+        default=[],
+        metavar="FUNCTION",
+        help=(
+            "Restrict migration execution evidence to a function name. Repeatable; "
+            "the fixed migration_hints audit key still contains all candidates."
+        ),
+    )
     parser.add_argument("--domain-hint", default="", help="Optional domain hint for spec extraction.")
     parser.add_argument(
         "--auto-migrate",
@@ -1950,9 +1971,16 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
             raise SystemExit(2) from exc
 
     migration_readiness_output = getattr(args, "migration_readiness_output", None)
+    migration_execution_output = getattr(args, "migration_execution_output", None)
     if migration_readiness_output and not args.auto_migrate:
         print(
             "audit: --migration-readiness-output requires --auto-migrate",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    if migration_execution_output and not args.auto_migrate:
+        print(
+            "audit: --migration-execution-output requires --auto-migrate",
             file=sys.stderr,
         )
         raise SystemExit(2)
@@ -2000,6 +2028,28 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
             )
             raise SystemExit(2)
 
+    if migration_execution_output:
+        execution_conflicting = (
+            _output_conflicts_with_audit_inputs(migration_execution_output, args, declared_input_paths)
+            or _same_output_path(migration_execution_output, sarif_output)
+            or _same_output_path(migration_execution_output, migration_readiness_output)
+            or _same_output_path(migration_execution_output, getattr(args, "baseline", None))
+            or _same_output_path(migration_execution_output, getattr(args, "write_baseline", None))
+        )
+        audit_input_path = Path(os.path.expanduser(args.code_file))
+        if not execution_conflicting and audit_input_path.is_dir():
+            execution_conflicting = any(
+                _same_output_path(migration_execution_output, str(candidate))
+                for candidate in audit_input_path.rglob("*")
+                if candidate.is_file() and candidate.suffix.lower() in {ext.lower() for ext in AUDIT_EXTENSION_MAP} | {".mm"}
+            )
+        if execution_conflicting:
+            print(
+                "audit: --migration-execution-output must not overwrite --output, --sarif-output, --migration-readiness-output, --baseline, --write-baseline, --code-file, or a declared schedule input",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+
     config = AgentConfig(mumei_lean_repo=getattr(args, "mumei_lean_repo", None))
     pipeline = AuditPipeline(config=config, heal_output_dir=args.heal_output_dir)
     result = pipeline.audit_file(
@@ -2007,7 +2057,7 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
         args.language,
         domain_hint=args.domain_hint,
         auto_migrate=args.auto_migrate,
-        auto_heal=args.auto_heal,
+        auto_heal=args.auto_heal or bool(migration_execution_output),
         enable_lean_bridge=bool(getattr(args, "enable_lean_bridge", False)),
         include_tests=bool(getattr(args, "include_tests", False)),
         enable_body_port=bool(getattr(args, "enable_body_port", False)),
@@ -2060,6 +2110,26 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
             result,
             readiness_report,
             Path(migration_readiness_output).expanduser(),
+        )
+        if isinstance(result, AuditResult):
+            result.report = _build_report(result)
+        else:
+            result.summary = _build_directory_report(result)
+    if migration_execution_output:
+        try:
+            execution_report = build_migration_execution(
+                result,
+                output_path=Path(migration_execution_output).expanduser(),
+                mumei_client=pipeline.mumei_client,
+                selected_functions=list(getattr(args, "migration_function", []) or []),
+            )
+        except OSError as exc:
+            print(f"audit: failed to write migration execution output: {exc}", file=sys.stderr)
+            raise SystemExit(2) from exc
+        append_execution_next_step(
+            result,
+            execution_report,
+            Path(migration_execution_output).expanduser(),
         )
         if isinstance(result, AuditResult):
             result.report = _build_report(result)

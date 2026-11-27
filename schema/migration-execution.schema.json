@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mumei.dev/schemas/migration-execution.schema.json",
+  "title": "mumei.migration-execution/v1",
+  "type": "object",
+  "required": [
+    "schema",
+    "generated_at",
+    "source",
+    "audit",
+    "selection",
+    "candidates",
+    "operational_errors",
+    "artifact_paths",
+    "evidence_boundary",
+    "summary"
+  ],
+  "properties": {
+    "schema": {"const": "mumei.migration-execution/v1"},
+    "generated_at": {"type": "string"},
+    "source": {
+      "type": "object",
+      "required": ["path", "language", "kind", "sha256"],
+      "properties": {
+        "path": {"type": "string"},
+        "language": {"type": "string"},
+        "kind": {"enum": ["file", "directory"]},
+        "sha256": {"type": ["string", "null"]}
+      }
+    },
+    "audit": {"type": "object"},
+    "selection": {
+      "type": "object",
+      "required": ["basis", "requested_functions", "missing_requested_functions"],
+      "properties": {
+        "basis": {"type": "string"},
+        "requested_functions": {"type": "array", "items": {"type": "string"}},
+        "missing_requested_functions": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "candidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "function_name",
+          "source_provenance",
+          "selection",
+          "extracted_contract",
+          "generated_mm",
+          "heal",
+          "verification",
+          "behavioral_evidence",
+          "evidence_blockers",
+          "operational_errors",
+          "review_required",
+          "execution_state"
+        ],
+        "properties": {
+          "function_name": {"type": "string"},
+          "source_provenance": {"type": "object"},
+          "selection": {"type": "object"},
+          "extracted_contract": {"type": "object"},
+          "generated_mm": {"type": "object"},
+          "heal": {"type": "object"},
+          "verification": {"type": "object"},
+          "behavioral_evidence": {"type": "object"},
+          "evidence_blockers": {"type": "array"},
+          "operational_errors": {"type": "array", "items": {"type": "string"}},
+          "review_required": {"type": "boolean"},
+          "execution_state": {"enum": ["not_attempted", "blocked", "operational_error", "ready_for_human_review"]}
+        }
+      }
+    },
+    "operational_errors": {"type": "array", "items": {"type": "string"}},
+    "artifact_paths": {"type": "object"},
+    "evidence_boundary": {"type": "array", "items": {"type": "string"}},
+    "summary": {"type": "object"}
+  },
+  "additionalProperties": true
+}
