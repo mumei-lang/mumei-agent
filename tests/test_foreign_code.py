@@ -1960,6 +1960,48 @@ export function destructured(index: number): number {
     assert "index < len_values" in atom.requires
 
 
+def test_typescript_loop_catch_and_arrow_shadowing_keep_array_bounds() -> None:
+    from agent.cross_validation_foreign import _infer_typescript_contracts
+
+    source = """
+export const values: Record<string, number> = {};
+export function shadows(rows: number[][], index: number): number {
+  for (const values of rows) {
+    return values[index];
+  }
+  try {
+    return rows[0][index];
+  } catch (values) {
+    return values[index];
+  }
+}
+export function arrow(index: number): number {
+  return [[1]].map(values => values[index])[0];
+}
+"""
+    atoms = {atom.name: atom for atom in _infer_typescript_contracts(source)}
+    assert "index < len_values" in atoms["arrow"].requires
+
+    from agent.cross_validation_foreign import _typescript_visible_associative_containers
+
+    loop_catch_body = """
+  for (const values of rows) {
+    return values[index];
+  }
+  try {
+    return rows[0][index];
+  } catch (values) {
+    return values[index];
+  }
+"""
+    assert (
+        _typescript_visible_associative_containers(
+            {"values"}, loop_catch_body, {"rows", "index"}, "rows: number[][], index: number"
+        )
+        == set()
+    )
+
+
 def test_typescript_nested_record_and_typeof_reference_do_not_generate_array_bounds() -> None:
     from agent.cross_validation_foreign import _infer_typescript_contracts
 

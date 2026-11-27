@@ -695,6 +695,31 @@ def _typescript_binding_names_from_tree(root) -> set[str]:
             name_node = node.child_by_field_name("name")
             if name_node is not None:
                 names.add(name_node.text.decode("utf-8", "replace"))
+        elif node.type == "arrow_function":
+            # Unparenthesized arrow parameters are direct identifier children;
+            # parenthesized parameters are visited through formal_parameters.
+            for child in node.children:
+                if child.type == "=>":
+                    break
+                names.update(_typescript_pattern_names(child))
+        elif node.type == "catch_clause":
+            in_parameter = False
+            for child in node.children:
+                if child.type == "(":
+                    in_parameter = True
+                elif child.type == ")":
+                    break
+                elif in_parameter:
+                    names.update(_typescript_pattern_names(child))
+        elif node.type == "for_in_statement":
+            declares_binding = False
+            for child in node.children:
+                if child.type in {"const", "let", "var"}:
+                    declares_binding = True
+                elif child.type in {"of", "in"}:
+                    break
+                elif declares_binding:
+                    names.update(_typescript_pattern_names(child))
         for child in node.children:
             walk(child)
 
