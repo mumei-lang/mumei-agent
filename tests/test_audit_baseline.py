@@ -376,11 +376,11 @@ def test_directory_fingerprints_change_when_audit_root_changes(tmp_path: Path, m
     from agent.audit_reporting import _aggregate_directory_fixed_keys
 
     monkeypatch.chdir(tmp_path)
+    (tmp_path / ".git").mkdir()
     results = []
     for root_name in ("src", "other"):
         root = tmp_path / root_name
         root.mkdir(parents=True)
-        _init_git_repo(root, root_name)
         target = root / "payment.py"
         target.write_text("def withdraw():\n    pass\n", encoding="utf-8")
         directory = AuditDirectoryResult(
