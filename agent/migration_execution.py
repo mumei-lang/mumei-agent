@@ -119,10 +119,6 @@ def _outside_string_mask(code: str) -> str:
     return "".join(out)
 
 
-_CREDENTIAL_NAME_RE = re.compile(
-    r"(?:password|passwd|secret|token|api_?key|apikey|private_?key|auth|credential)",
-    re.IGNORECASE,
-)
 _STRING_LITERAL = r'"(?:\\.|[^"\\])*"'
 _MASKED_STRING = r"__MUMEI_STRING_\d+__"
 _TOKEN_RE = re.compile(
@@ -230,11 +226,9 @@ def _simple_token(tokens: list[tuple[str, str]], kind: str) -> tuple[str, str] |
     return None
 
 
-
-
 def _is_credential_name(value: str) -> bool:
     words: list[str] = []
-    credential_words = {"password", "passwd", "secret", "token", "auth", "authentication", "credential", "credentials", "apikey"}
+    credential_words = {"password", "passwd", "secret", "token", "auth", "authentication", "credential", "credentials", "apikey", "privatekey"}
     compound_suffixes = {"value", "hash", "digest", "key", "token", "secret", "password", "passwd", "credential", "credentials", "code", "store"}
     for part in re.split(r"[._$\-]+", value):
         lowered_part = part.lower()
