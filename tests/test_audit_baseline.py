@@ -330,3 +330,26 @@ def test_cli_skips_baseline_write_when_audit_has_operational_errors(tmp_path: Pa
 
     assert not baseline.exists()
     assert "baseline output skipped" in capsys.readouterr().err
+
+
+def test_directory_trusted_atom_fingerprints_distinguish_independent_checkouts(tmp_path: Path) -> None:
+    from agent.audit_models import AuditDirectoryResult
+    from agent.audit_reporting import _aggregate_directory_fixed_keys
+
+    root = tmp_path / "scan-root"
+    for repo in ("repo-one", "repo-two"):
+        (root / repo / ".git").mkdir(parents=True)
+    directory = AuditDirectoryResult(
+        success=True,
+        source_dir=str(root),
+        language="mixed",
+        trusted_atoms=[
+            {"file": "repo-one/specs/payment.mm", "atom": "withdraw", "line": 3},
+            {"file": "repo-two/specs/payment.mm", "atom": "withdraw", "line": 3},
+        ],
+    )
+
+    _aggregate_directory_fixed_keys(directory)
+
+    assert len(directory.findings) == 2
+    assert directory.findings[0]["fingerprint"] != directory.findings[1]["fingerprint"]

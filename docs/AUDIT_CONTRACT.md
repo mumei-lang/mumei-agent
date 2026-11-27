@@ -102,7 +102,7 @@ The `python -m agent audit` process classifies completion independently of the s
 
 ### Baseline and fail-on policy
 
-`--write-baseline <PATH>` writes a deterministic `mumei.audit-baseline/v1` JSON file containing the sorted fingerprints of the current `findings`. `--baseline <PATH>` reads that schema, annotates each matching finding as `baseline: "suppressed"` (others are `baseline: "new"`), and excludes suppressed code findings from exit-code failure evaluation. The fixed audit keys are not rewritten: baseline suppression is a CI policy overlay, not evidence removal. Operational errors and malformed extraction still exit `2`, even when their rows match a baseline, because the code was not checked normally.
+`--write-baseline <PATH>` writes a deterministic `mumei.audit-baseline/v1` JSON file containing the sorted fingerprints of the current `findings` when the audit has no operational errors; operational-error audits still exit `2` and do not refresh the baseline. `--baseline <PATH>` reads that schema, annotates each matching finding as `baseline: "suppressed"` (others are `baseline: "new"`), and excludes suppressed code findings from exit-code failure evaluation. The fixed audit keys are not rewritten: baseline suppression is a CI policy overlay, not evidence removal. Operational errors and malformed extraction still exit `2`, even when their rows match a baseline, because the code was not checked normally.
 
 `--fail-on` selects the finding-driven exit-1 policy after baseline suppression:
 

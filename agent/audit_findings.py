@@ -125,6 +125,7 @@ def build_directory_findings(result: AuditDirectoryResult) -> list[dict]:
         if isinstance(atom, dict) and atom.get("file") and not os.path.isabs(source_file):
             source_file = str(Path(result.source_dir) / source_file)
         row = _trusted_atom_finding(source_file, atom)
+        _refingerprint_for_audit_root(row, result.source_dir)
         if row["fingerprint"] not in seen:
             seen.add(row["fingerprint"])
             rows.append(row)
