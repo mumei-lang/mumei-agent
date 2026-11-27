@@ -201,7 +201,10 @@ def _operand_after(tokens: list[tuple[str, str]], operator_index: int) -> list[t
 
 def _trim_grouping(tokens: list[tuple[str, str]]) -> list[tuple[str, str]]:
     trimmed = list(tokens)
-    while trimmed and trimmed[0][1] == "(":
+    while trimmed and (
+        trimmed[0][1] in {"(", "!"}
+        or (trimmed[0][0] == "name" and trimmed[0][1].lower() == "not")
+    ):
         trimmed.pop(0)
     while trimmed and trimmed[-1][1] == ")":
         trimmed.pop()
