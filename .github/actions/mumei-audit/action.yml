@@ -141,26 +141,57 @@ runs:
         if [ -n "$LANGUAGE" ]; then
           ARGS+=(--language "$LANGUAGE")
         fi
+        expand_argument_path() {
+          case "$1" in
+            /*) printf '%s\n' "$1" ;;
+            ~) printf '%s\n' "$HOME" ;;
+            ~/*) printf '%s/%s\n' "$HOME" "${1#~/}" ;;
+            *) printf '%s/%s\n' "$GITHUB_WORKSPACE" "$1" ;;
+          esac
+        }
         WRITE_BASELINE_PATH=""
+        BASELINE_PATH=""
         if [ -n "$AUDIT_ARGS" ]; then
           read -r -a EXTRA_ARGS <<< "$AUDIT_ARGS"
           ARGS+=("${EXTRA_ARGS[@]}")
           for ((i = 0; i < ${#EXTRA_ARGS[@]}; i++)); do
             token="${EXTRA_ARGS[i]}"
             value=""
+            kind=""
             if [ "$token" = "--write-baseline" ] && [ $((i + 1)) -lt ${#EXTRA_ARGS[@]} ]; then
               value="${EXTRA_ARGS[i + 1]}"
+              kind=write
             elif [[ "$token" == --write-baseline=* ]]; then
               value="${token#--write-baseline=}"
+              kind=write
+            elif [ "$token" = "--baseline" ] && [ $((i + 1)) -lt ${#EXTRA_ARGS[@]} ]; then
+              value="${EXTRA_ARGS[i + 1]}"
+              kind=read
+            elif [[ "$token" == --baseline=* ]]; then
+              value="${token#--baseline=}"
+              kind=read
             fi
             if [ -n "$value" ]; then
-              case "$value" in
-                /*) WRITE_BASELINE_PATH="$value" ;;
-                *) WRITE_BASELINE_PATH="$GITHUB_WORKSPACE/$value" ;;
-              esac
-              prepare_output_path "$WRITE_BASELINE_PATH"
+              expanded="$(expand_argument_path "$value")"
+              if [ "$kind" = write ]; then
+                WRITE_BASELINE_PATH="$expanded"
+              else
+                BASELINE_PATH="$expanded"
+              fi
             fi
           done
+          if [ -n "$WRITE_BASELINE_PATH" ]; then
+            if [ -n "$BASELINE_PATH" ] && [ "$BASELINE_PATH" = "$WRITE_BASELINE_PATH" ] && [ -L "$WRITE_BASELINE_PATH" ]; then
+              echo "::error::--baseline and --write-baseline cannot share a symlink path; use a regular baseline file or separate output."
+              exit 2
+            fi
+            if [ -e "$WRITE_BASELINE_PATH" ] || [ -L "$WRITE_BASELINE_PATH" ]; then
+              WRITE_BASELINE_BEFORE="$(stat -c %y "$WRITE_BASELINE_PATH" 2>/dev/null || echo unreadable)"
+            else
+              WRITE_BASELINE_BEFORE=absent
+            fi
+            prepare_output_path "$WRITE_BASELINE_PATH"
+          fi
         fi
         date +%s > "$ACTION_STATE/timing/audit_start"
         set +e
@@ -176,7 +207,10 @@ runs:
           cp "$SARIF_FILE" "$ACTION_STATE/audit.sarif"
         fi
         if [ -n "$WRITE_BASELINE_PATH" ] && [ -f "$WRITE_BASELINE_PATH" ] && [ ! -L "$WRITE_BASELINE_PATH" ]; then
-          cp "$WRITE_BASELINE_PATH" "$ACTION_STATE/generated-baseline.json"
+          WRITE_BASELINE_AFTER="$(stat -c %y "$WRITE_BASELINE_PATH" 2>/dev/null || echo unreadable)"
+          if [ "$WRITE_BASELINE_BEFORE" = absent ] || [ "$WRITE_BASELINE_AFTER" != "$WRITE_BASELINE_BEFORE" ]; then
+            cp "$WRITE_BASELINE_PATH" "$ACTION_STATE/generated-baseline.json"
+          fi
         fi
         echo "audit_exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
 

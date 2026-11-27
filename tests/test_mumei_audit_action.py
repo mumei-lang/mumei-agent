@@ -58,6 +58,10 @@ def test_composite_action_contract_and_cache_steps() -> None:
     assert "prepare_output_path" in audit_step["run"]
     assert "WRITE_BASELINE_PATH" in audit_step["run"]
     assert "generated-baseline.json" in audit_step["run"]
+    assert "WRITE_BASELINE_BEFORE" in audit_step["run"]
+    assert "WRITE_BASELINE_AFTER" in audit_step["run"]
+    assert "expand_argument_path" in audit_step["run"]
+    assert "cannot share a symlink path" in audit_step["run"]
     assert "audit.sarif" in audit_step["run"]
     assert "mumei-agent-uv.lock" not in ACTION_PATH.read_text(encoding="utf-8")
 
@@ -82,6 +86,11 @@ def test_selftest_workflow_exercises_small_repo_and_publishes_timing() -> None:
     audit_args = action_step["with"]["audit-args"]
     assert "--baseline examples/ci-small-repo/baseline.json" in audit_args
     assert "--write-baseline .mumei-audit/generated-baseline.json" in audit_args
+    verify = workflow["jobs"]["verify-artifact"]
+    assert verify["needs"] == "small-repo"
+    verify_text = "\n".join(step.get("run", "") for step in verify["steps"])
+    assert "evidence/generated-baseline.json" in verify_text
+    assert "evidence/audit.sarif" in verify_text
     assert "--fail-on high-confidence" in audit_args
     baseline = json.loads((ROOT / "examples" / "ci-small-repo" / "baseline.json").read_text(encoding="utf-8"))
     assert baseline == {"version": "mumei.audit-baseline/v1", "fingerprints": []}

@@ -43,3 +43,25 @@ jobs:
             echo "- audit_seconds: \`${{ steps.audit.outputs.audit_seconds }}\`";
             echo "- total_seconds: \`${{ steps.audit.outputs.total_seconds }}\`";
           } >> "$GITHUB_STEP_SUMMARY"
+
+  verify-artifact:
+    runs-on: ubuntu-latest
+    needs: small-repo
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Download audit evidence artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: mumei-audit-evidence
+          path: evidence
+
+      - name: Verify canonical evidence files
+        run: |
+          test -s evidence/audit.json
+          test -s evidence/audit.sarif
+          test -s evidence/generated-baseline.json
+          test -s evidence/audit.stdout.log || test -s evidence/audit.stderr.log
+          python3 -c "import json; baseline=json.load(open('evidence/generated-baseline.json', encoding='utf-8')); sarif=json.load(open('evidence/audit.sarif', encoding='utf-8')); assert baseline['version'] == 'mumei.audit-baseline/v1'; assert sarif['version'] == '2.1.0'"
