@@ -24,7 +24,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `harness-ablation` | 3 | Compare harness_metrics aggregates across --harness-profile runs against a baseline (module ablation report). |
 | `scale-report` | 5 | Report large-scale composability and trust-surface measurements through the fixed verification_status / verification_violations / next_steps keys. |
 | `health` | 3 | Measure proof health metrics for the mumei std library (SI-5 Phase 3-A). |
-| `audit` | 39 | Audit existing code by extracting specs, verifying contracts, emitting cross_validation_gaps, and optionally producing migration_hints. |
+| `audit` | 40 | Audit existing code by extracting specs, verifying contracts, emitting cross_validation_gaps, and optionally producing migration_hints. |
 | `extract-spec` | 20 | Extract Mumei specifications from natural language text. Optionally generate and verify code in one step. |
 | `validate-spec` | 6 | Validate natural-language specifications for logical health. |
 | `validate-code` | 7 | Infer and verify contracts from existing code (Python, Rust, TypeScript, Go, Solidity). |
@@ -286,6 +286,7 @@ Audit existing code by extracting specs, verifying contracts, emitting cross_val
 | `--baseline` | `<PATH>` | no | — | Read an audit baseline (mumei.audit-baseline/v1) and suppress matching finding fingerprints. |
 | `--write-baseline` | `<PATH>` | no | — | Write the current audit finding fingerprints as a baseline file. |
 | `--fail-on` | `{refuted, error, high-confidence, never}` | no | refuted | CI failure policy for non-suppressed findings (default: refuted). Operational/extraction errors still exit 2. |
+| `--migration-readiness-output` | `<PATH>` | no | — | Write a mumei.migration-readiness/v1 JSON report. Requires --auto-migrate; the report prioritizes migration_hints and verifies the highest-ranked skeleton as a scaffold, not as host-code equivalence proof. |
 | `--domain-hint` | `<DOMAIN_HINT>` | no | — | Optional domain hint for spec extraction. |
 | `--auto-migrate` | — | no | — | Emit migration_hints by generating .mm migration skeletons for functions with issues. |
 | `--auto-heal` | — | no | — | Run the self-healing loop on each skeleton produced by --auto-migrate. |

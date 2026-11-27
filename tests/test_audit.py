@@ -2606,6 +2606,13 @@ def test_audit_directory_surfaces_trusted_atoms(tmp_path: Path) -> None:
         "{\n    x\n}\n",
         encoding="utf-8",
     )
+    generated = src / "readiness.migration-readiness"
+    generated.mkdir()
+    (generated / ".mumei-generated-artifacts").write_text("generated\n", encoding="utf-8")
+    (generated / "skeleton.mm").write_text(
+        "trusted atom generated_skeleton(x: i64) -> i64 {\n    x\n}\n",
+        encoding="utf-8",
+    )
     extractor = MagicMock()
     # forge_task_spec=None lands the .py audit on the extraction-failure
     # path; the .mm scan is independent of the per-file audit outcome.
