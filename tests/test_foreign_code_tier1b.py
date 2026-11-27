@@ -727,3 +727,21 @@ def test_ts_find_nested_switch_and_object_discriminant_remain_guarded() -> None:
         "return el.value;"
     )
     assert not _sentinel_issues(body, "TypeScript")
+
+
+def test_ts_find_use_inside_guard_return_value_is_not_guarded() -> None:
+    body = "const el = xs.find(x => x > 0); if (!el) return { value: el.value }; return el.value;"
+    assert any("undefined" in issue.message for issue in _sentinel_issues(body, "TypeScript"))
+
+
+def test_ts_compound_early_exit_condition_does_not_guard_sentinel_use() -> None:
+    body = 'const i = s.indexOf(x); if (debug && i === -1) return\n return s[i];'
+    assert any("indexOf" in issue.message or "-1" in issue.message for issue in _sentinel_issues(body, "TypeScript"))
+
+
+def test_ts_find_guard_in_same_switch_default_clause_dominates_use() -> None:
+    body = (
+        "const el = xs.find(x => x > 0); switch (kind) { case 'a': break; "
+        "default: if (!el) return; return { value: el.value }; }"
+    )
+    assert not _sentinel_issues(body, "TypeScript")

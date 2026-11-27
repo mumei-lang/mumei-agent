@@ -4,6 +4,7 @@ from __future__ import annotations
 import ast
 from datetime import datetime, timezone
 from fractions import Fraction
+from functools import lru_cache
 from dataclasses import dataclass, field
 import hashlib
 import json
@@ -8069,39 +8070,63 @@ _SENTINEL_NESTED_INDEX_RES: dict[str, re.Pattern[str]] = {
 }
 
 
-def _braceless_exit_dominates_use(body: str, check_pos: int, use_pos: int) -> bool:
+@lru_cache(maxsize=32)
+def _typescript_sentinel_parse(body: str):
+    prefix = "async function __mumei_sentinel_guard__() {\n"
+    tree, source_bytes = tree_sitter_extract.parse(prefix + body + "\n}", "typescript")
+    return tree, source_bytes, len(prefix.encode("utf-8"))
+
+
+def _unwrap_parenthesized(node):
+    while node is not None and node.type == "parenthesized_expression":
+        named = [child for child in node.children if child.is_named]
+        if len(named) != 1:
+            break
+        node = named[0]
+    return node
+
+
+def _braceless_exit_dominates_use(
+    body: str, match: re.Match[str], use_pos: int, var: str
+) -> bool:
     """Whether a braceless early-exit ``if`` dominates a later use.
 
-    When tree-sitter is available, use the real TypeScript syntax tree rather
-    than approximating JavaScript lexical structure with regexes. A guard
-    dominates the use only when both belong to the same statement sequence
-    (function/block body or switch case); object literals, strings, comments,
-    regexes and nested switch syntax are then handled by the parser instead of
-    by ad-hoc brace matching. Unparseable fragments fail closed: the guard is
-    not treated as dominating, so the use remains visible as a warning.
+    The TypeScript syntax tree provides lexical structure and switch/block
+    scoping. The guard must be unconditional except for the sentinel test
+    itself, and a use inside the early-exit statement is never guarded by it.
+    Parse failures fail closed: the use remains visible as a warning.
     """
-    prefix = "async function __mumei_sentinel_guard__() {\n"
-    tree, _source_bytes = tree_sitter_extract.parse(prefix + body + "\n}", "typescript")
+    tree, source_bytes, prefix_len = _typescript_sentinel_parse(body)
     if tree is None or tree.root_node.has_error:
         return False
-
-    prefix_len = len(prefix.encode("utf-8"))
 
     def byte_pos(char_pos: int) -> int:
         return prefix_len + len(body[:char_pos].encode("utf-8"))
 
-    check_node = tree.root_node.descendant_for_byte_range(byte_pos(check_pos), byte_pos(check_pos))
+    check_node = tree.root_node.descendant_for_byte_range(byte_pos(match.start()), byte_pos(match.start()))
     while check_node is not None and check_node.type != "if_statement":
         check_node = check_node.parent
     if check_node is None or check_node.parent is None:
         return False
     sequence = check_node.parent
-    if sequence.type not in {"statement_block", "switch_case", "program"}:
+    if sequence.type not in {"statement_block", "switch_case", "switch_default", "program"}:
+        return False
+
+    condition = _unwrap_parenthesized(check_node.child_by_field_name("condition"))
+    if condition is None:
+        return False
+    if match.group(0).lstrip().startswith("if"):
+        condition_text = source_bytes[condition.start_byte : condition.end_byte].decode("utf-8", errors="replace")
+        if re.sub(r"\s+", "", condition_text) != "!" + var:
+            return False
+    elif (condition.start_byte, condition.end_byte) != (byte_pos(match.start()), byte_pos(match.end())):
         return False
 
     use_byte = byte_pos(use_pos)
     use_node = tree.root_node.descendant_for_byte_range(use_byte, use_byte)
     while use_node is not None:
+        if use_node == check_node:
+            return False
         if use_node == sequence:
             return True
         use_node = use_node.parent
@@ -8128,7 +8153,7 @@ def _sentinel_guarded(
         tail = body[match.end() : use_pos]
         if re.match(r"\s*\)*\s*(?:return|throw)\b", tail) is None:
             return False
-        return _braceless_exit_dominates_use(body, match.start(), use_pos)
+        return _braceless_exit_dominates_use(body, match, use_pos, var)
 
     if kind == "minus1":
         safe_re = re.compile(
