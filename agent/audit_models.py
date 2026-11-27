@@ -58,6 +58,9 @@ class AuditResult:
     # clauses mumei could not encode) and ``errors``. Only ``code`` and
     # ``errors`` make ``success`` false.
     finding_counts: dict[str, int] = field(default_factory=dict)
+    # Additive machine-readable projections derived from the fixed audit keys.
+    findings: list[dict] = field(default_factory=list, kw_only=True)
+    triage: dict = field(default_factory=dict, kw_only=True)
     proof_certificate: dict[str, object] | None = None
     lean_bridge: dict[str, object] | None = None
     report: str = ""
@@ -98,6 +101,8 @@ class AuditDirectoryResult:
     summary_plans: list[dict] = field(default_factory=list)
     next_steps: list[dict] = field(default_factory=list)
     finding_counts: dict[str, int] = field(default_factory=dict)
+    findings: list[dict] = field(default_factory=list, kw_only=True)
+    triage: dict = field(default_factory=dict, kw_only=True)
     errors: list[str] = field(default_factory=list)
     skipped_rate_limited_files: list[str] = field(default_factory=list)
 

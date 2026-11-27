@@ -810,6 +810,7 @@ class AuditPipeline:
                 errors=errors,
             )
             result.finding_counts = _finding_counts([], [], [], errors)
+            _aggregate_directory_fixed_keys(result)
             result.next_steps = _generate_directory_next_steps(result)
             result.summary = _build_directory_report(result)
             return result

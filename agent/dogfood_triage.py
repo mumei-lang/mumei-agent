@@ -3,11 +3,8 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 
-from agent.audit import _errors_indicate_rate_limit
+from agent.audit_findings import build_directory_triage
 from agent.audit_models import AuditDirectoryResult, AuditResult
-from agent.audit_reporting import _is_spec_lowering_or_unsupported_error
-
-_TIMEOUT_MARKERS = ("timeout", "timed out", "deadline exceeded")
 
 
 @dataclass
@@ -28,80 +25,20 @@ class DogfoodTriageReport:
         return asdict(self)
 
 
-def _issue_strings(file_result: AuditResult) -> list[str]:
-    return [
-        *file_result.errors,
-        *file_result.spec_health_issues,
-        *file_result.verification_violations,
-        *file_result.cross_validation_gaps,
-    ]
-
-
-def _unverifiable_category(
-    file_result: AuditResult, result: AuditDirectoryResult
-) -> str:
-    issues = _issue_strings(file_result)
-    if (
-        file_result.skipped_rate_limited
-        or file_result.source_file in result.skipped_rate_limited_files
-        or _errors_indicate_rate_limit(file_result.errors)
-    ):
-        return "skipped_rate_limited"
-    lowered_issues = [issue.lower() for issue in issues]
-    if any(
-        marker in issue
-        for issue in lowered_issues
-        for marker in _TIMEOUT_MARKERS
-    ):
-        return "timeout"
-    if any(
-        issue.startswith("encoding-gap")
-        or _is_spec_lowering_or_unsupported_error(issue)
-        or "Skipped unsupported Z3 clause" in issue
-        for issue in file_result.spec_health_issues
-    ):
-        return "encoding_gap"
-    if (
-        not file_result.spec_extracted
-        or any(
-            marker in issue.lower()
-            for issue in file_result.errors
-            for marker in ("no mumei atoms", "no supported source", "no functions")
-        )
-    ):
-        return "no_function_declarations"
-    return "other"
-
-
 def triage_directory_result(result: AuditDirectoryResult) -> DogfoodTriageReport:
-    """Bucket files using the verdict already assigned by the audit pipeline."""
-    human_review: list[str] = []
-    verified: list[str] = []
-    unverifiable: dict[str, list[str]] = {
-        "skipped_rate_limited": [],
-        "timeout": [],
-        "encoding_gap": [],
-        "no_function_declarations": [],
-        "other": [],
+    """Bucket files through the same stable triage projection exposed by audit."""
+    triage = result.triage or build_directory_triage(result)
+    unverifiable = {
+        category: list(files)
+        for category, files in triage["unverifiable"].items()
     }
-
-    for file_result in result.file_results:
-        if file_result.verification_status == "refuted":
-            human_review.append(file_result.source_file)
-        elif file_result.verification_status == "verified":
-            verified.append(file_result.source_file)
-        else:
-            unverifiable[_unverifiable_category(file_result, result)].append(
-                file_result.source_file
-            )
-
     return DogfoodTriageReport(
-        human_review=human_review,
-        verified=verified,
+        human_review=list(triage["refuted"]),
+        verified=list(triage["verified"]),
         unverifiable=unverifiable,
         total_files=len(result.file_results),
-        human_review_count=len(human_review),
-        verified_count=len(verified),
+        human_review_count=len(triage["refuted"]),
+        verified_count=len(triage["verified"]),
         unverifiable_count=sum(len(files) for files in unverifiable.values()),
         unverifiable_counts={
             category: len(files) for category, files in unverifiable.items()

@@ -7,6 +7,12 @@ from pathlib import Path
 import re
 from typing import Collection, Literal, Mapping, Sequence
 
+from agent.audit_findings import (
+    build_directory_findings,
+    build_directory_triage,
+    build_file_findings,
+    build_file_triage,
+)
 from agent.audit_models import AuditDirectoryResult, AuditResult
 from agent.cross_validation_models import ForeignCodeVerdict
 from agent.prompts.report_formatter import (
@@ -598,6 +604,8 @@ def _finalize_audit_result(
         result.cross_validation_gaps,
         result.errors,
     )
+    result.findings = build_file_findings(result)
+    result.triage = build_file_triage(result)
     result.next_steps = _generate_next_steps(result)
     # Before the report is rendered, so every output format carries the same
     # clarification requests.
@@ -819,6 +827,8 @@ def _aggregate_directory_fixed_keys(result: AuditDirectoryResult) -> None:
         gaps,
         [*result.errors, *(e for fr in result.file_results for e in fr.errors)],
     )
+    result.findings = build_directory_findings(result)
+    result.triage = build_directory_triage(result)
 
 def _build_directory_report(result: AuditDirectoryResult) -> str:
     lines = [f"Audit directory: {result.source_dir}"]
@@ -841,6 +851,14 @@ def _build_directory_report(result: AuditDirectoryResult) -> str:
         f"{_pluralize('file', result.files_with_spec_diagnostics)} with spec diagnostics"
     )
     lines.append(f"finding_counts: {_finding_counts_text(result.finding_counts)}")
+    if result.triage:
+        counts = result.triage.get("counts", {})
+        lines.append(
+            "triage: "
+            f"refuted={counts.get('refuted', 0)}, "
+            f"verified={counts.get('verified', 0)}, "
+            f"unverifiable={counts.get('unverifiable', 0)}"
+        )
     if result.trusted_atoms:
         lines.append("trusted_atoms:")
         lines.extend(
