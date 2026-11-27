@@ -238,7 +238,7 @@ def _is_credential_name(value: str) -> bool:
         lowered_part = part.lower()
         if re.fullmatch(r"(?:api[_-]?key|private[_-]?key)", part, re.IGNORECASE):
             return True
-        if lowered_part.endswith(("password", "passwd", "secret", "token", "apikey", "credential", "credentials")) or lowered_part.startswith(("password", "passwd", "secret", "token", "credential")):
+        if lowered_part.endswith(("password", "passwd", "secret", "token", "apikey", "credential", "credentials")) or lowered_part.startswith(("password", "passwd", "secret", "credential")):
             return True
         words.extend(match.group(0).lower() for match in re.finditer(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|\d+", part))
     if any(word in {"password", "passwd", "secret", "token", "auth", "authentication", "credential", "credentials", "apikey"} for word in words):

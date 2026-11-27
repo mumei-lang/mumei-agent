@@ -954,7 +954,7 @@ def test_long_private_function_binds_truncated_healed_output(tmp_path: Path) -> 
 def test_author_name_public_label_is_not_credential_like(tmp_path: Path) -> None:
     source = tmp_path / "payment.py"
     source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
-    skeleton = 'atom withdraw() -> i64 {\n    requires: author.name == "editor";\n    ensures: result >= 0;\n    body: { 0 }\n}'
+    skeleton = 'atom withdraw() -> i64 {\n    requires: author.name == "editor" and tokenizer == "gpt2";\n    ensures: result >= 0;\n    body: { 0 }\n}'
     report = build_migration_execution(
         _result(source, [_hint("withdraw", skeleton)]),
         output_path=tmp_path / "execution.json",
