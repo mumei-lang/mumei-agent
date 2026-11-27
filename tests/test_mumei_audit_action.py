@@ -233,6 +233,8 @@ def test_migration_execution_action_contract_strings() -> None:
     assert '--precheck-error "$MIGRATION_PRECHECK_ERROR"' in text
     assert "collect_migration_execution.py" in text
     assert "migration-execution/status.json" in text
+    assert '--audit-json "$ACTION_STATE/audit.json"' in text
+    assert 'sarif_file: ${{ env.ACTION_STATE }}/audit.sarif' in text
 
 
 def test_prepare_workspace_output_path_contains_traversal(tmp_path: Path) -> None:

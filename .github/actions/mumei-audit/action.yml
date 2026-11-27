@@ -293,18 +293,13 @@ runs:
       if: always()
       shell: bash
       env:
-        SARIF_OUTPUT: ${{ inputs['sarif-output'] }}
         UPLOAD_SARIF: ${{ inputs['upload-sarif'] }}
       run: |
-        case "$SARIF_OUTPUT" in
-          /*) SARIF_FILE="$SARIF_OUTPUT" ;;
-          *) SARIF_FILE="$GITHUB_WORKSPACE/$SARIF_OUTPUT" ;;
-        esac
         case "${UPLOAD_SARIF,,}" in
           true|1|yes) WANT_UPLOAD=true ;;
           *) WANT_UPLOAD=false ;;
         esac
-        if [ "$WANT_UPLOAD" = true ] && [ -s "$SARIF_FILE" ]; then
+        if [ "$WANT_UPLOAD" = true ] && [ -s "$ACTION_STATE/audit.sarif" ]; then
           echo "present=true" >> "$GITHUB_OUTPUT"
         else
           echo "present=false" >> "$GITHUB_OUTPUT"
@@ -315,18 +310,13 @@ runs:
       if: always()
       shell: bash
       env:
-        AUDIT_OUTPUT: ${{ inputs['audit-output'] }}
         AUDIT_EXIT_CODE: ${{ steps.audit.outputs.audit_exit_code }}
       run: |
-        case "$AUDIT_OUTPUT" in
-          /*) AUDIT_JSON="$AUDIT_OUTPUT" ;;
-          *) AUDIT_JSON="$GITHUB_WORKSPACE/$AUDIT_OUTPUT" ;;
-        esac
         if [ -z "$AUDIT_EXIT_CODE" ]; then
           AUDIT_EXIT_CODE=2
         fi
         python "${{ github.action_path }}/scripts/summarize_audit.py" \
-          --audit-json "$AUDIT_JSON" \
+          --audit-json "$ACTION_STATE/audit.json" \
           --exit-code "$AUDIT_EXIT_CODE" \
           --timing-dir "$ACTION_STATE/timing" \
           --github-output "$GITHUB_OUTPUT" \
@@ -345,7 +335,7 @@ runs:
       if: always() && steps.sarif.outputs.present == 'true'
       uses: github/codeql-action/upload-sarif@v3
       with:
-        sarif_file: ${{ inputs['sarif-output'] }}
+        sarif_file: ${{ env.ACTION_STATE }}/audit.sarif
 
     - name: Enforce audit result
       if: always() && steps.audit.outputs.audit_exit_code != '0'
