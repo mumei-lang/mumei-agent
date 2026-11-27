@@ -195,6 +195,20 @@ def _mm_code_lines(source: str) -> list[str]:
     return code_lines
 
 
+def _is_generated_migration_artifact(path: Path, source_root: Path) -> bool:
+    """Return true for files inside a migration-readiness generated artifact directory."""
+    try:
+        relative = path.relative_to(source_root)
+    except ValueError:
+        return False
+    current = source_root
+    for part in relative.parts[:-1]:
+        current = current / part
+        if (current / ".mumei-generated-artifacts").is_file():
+            return True
+    return False
+
+
 def _trusted_atom_entries(
     source: str, file_label: str
 ) -> list[dict[str, object]]:
@@ -833,6 +847,8 @@ class AuditPipeline:
             key=lambda path: path.relative_to(source_path).as_posix(),
         ):
             if not include_tests and _is_test_file(mm_path, source_path):
+                continue
+            if _is_generated_migration_artifact(mm_path, source_path):
                 continue
             mm_label = _directory_file_label(source_label, str(mm_path))
             try:

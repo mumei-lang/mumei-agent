@@ -8,7 +8,7 @@ import pytest
 
 from agent.audit import build_parser, main
 from agent.audit_models import AuditDirectoryResult, AuditResult
-from agent.migration_readiness import SCHEMA, build_migration_readiness
+from agent.migration_readiness import SCHEMA, _artifact_directory, build_migration_readiness
 
 
 class FakeVerifyClient:
@@ -165,7 +165,7 @@ def test_critical_verification_diagnostics_are_redacted_and_sarif_is_declared(tm
     verification = report["critical_function"]["verification"]
     assert verification["status"] == "refuted"
     assert verification["sarif_path"].endswith(".sarif")
-    assert not verification["sarif_path"].endswith("report.sarif")
+    assert verification["sarif_path"].endswith("report.sarif")
     assert "sk-1234567890abcdefghij" not in json.dumps(report)
     assert "<redacted>" in json.dumps(report)
 
@@ -377,6 +377,33 @@ def test_migration_readiness_output_replaces_symlink_without_overwriting_target(
     assert victim.read_text(encoding="utf-8") == "user data\n"
     assert not output.is_symlink()
     assert json.loads(output.read_text(encoding="utf-8"))["schema"] == SCHEMA
+
+
+def test_migration_readiness_output_preserves_existing_group_read_mode(tmp_path: Path) -> None:
+    source = tmp_path / "payment.py"
+    source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+    output = tmp_path / "readiness.json"
+    output.write_text("old\n", encoding="utf-8")
+    output.chmod(0o640)
+
+    build_migration_readiness(
+        _result(source, [_hint("withdraw", "high")]),
+        output_path=output,
+        mumei_client=FakeVerifyClient(),
+    )
+
+    assert output.stat().st_mode & 0o777 == 0o640
+
+
+def test_artifact_directory_allocation_has_no_fixed_collision_cap(tmp_path: Path) -> None:
+    output = tmp_path / "readiness.json"
+    for index in range(1000):
+        name = "readiness.migration-readiness" if index == 0 else f"readiness.migration-readiness-{index}"
+        (tmp_path / name).mkdir()
+
+    allocated = _artifact_directory(output)
+
+    assert allocated.name == "readiness.migration-readiness-1000"
 
 
 def test_cli_requires_auto_migrate_for_migration_readiness(tmp_path: Path) -> None:
