@@ -928,3 +928,6 @@ def test_long_function_names_keep_backup_probe_within_filename_limits(tmp_path: 
 
     assert errors == []
     assert len(Path(healed[0]).name + ".bak") <= 255
+    healed_again, errors_again = pipeline._heal_migration_hints([_hint(long_name)], source)
+    assert errors_again == []
+    assert healed_again == healed

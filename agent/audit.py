@@ -89,7 +89,7 @@ from agent.lean_bridge_helpers import run_lean_bridge_and_merge_proof_cert
 from agent.body_port import BodyPorter, body_port_violations
 from agent.native_replay import NativeReplayer, native_replay_violations, reconcile_body_ports
 from agent.llm_provider import LLMProvider, openai_client_adapter
-from agent.migration_execution import append_execution_next_step, build_migration_execution, migration_output_key, migration_output_target, migration_text_has_sensitive_literals
+from agent.migration_execution import append_execution_next_step, build_migration_execution, migration_output_function_stem, migration_output_key, migration_output_target, migration_text_has_sensitive_literals
 from agent.migration_readiness import append_next_step_summary, build_migration_readiness
 from agent.mumei_client import create_mumei_client
 from agent.prompts.report_formatter import format_counterexample
@@ -1035,7 +1035,7 @@ class AuditPipeline:
                 continue
             duplicate: Path | None = None
             output_key = migration_output_key(source_path, skeleton)
-            for existing in output_dir.glob(f"{function_name}-{output_key}*.mm"):
+            for existing in output_dir.glob(f"{migration_output_function_stem(function_name)}-{output_key}*.mm"):
                 if existing == target or not existing.is_file():
                     continue
                 try:
