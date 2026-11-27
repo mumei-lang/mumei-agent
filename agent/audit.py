@@ -88,6 +88,7 @@ from agent.lean_bridge_helpers import run_lean_bridge_and_merge_proof_cert
 from agent.body_port import BodyPorter, body_port_violations
 from agent.native_replay import NativeReplayer, native_replay_violations, reconcile_body_ports
 from agent.llm_provider import LLMProvider, openai_client_adapter
+from agent.migration_readiness import append_next_step_summary, build_migration_readiness
 from agent.mumei_client import create_mumei_client
 from agent.prompts.report_formatter import format_counterexample
 from agent.python_implementation_check import check_python_implementations, python_contract_sources
@@ -1144,6 +1145,15 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
             "Operational/extraction errors still exit 2."
         ),
     )
+    parser.add_argument(
+        "--migration-readiness-output",
+        metavar="PATH",
+        help=(
+            "Write a mumei.migration-readiness/v1 JSON report. Requires "
+            "--auto-migrate; the report prioritizes migration_hints and verifies "
+            "the highest-ranked skeleton as a scaffold, not as host-code equivalence proof."
+        ),
+    )
     parser.add_argument("--domain-hint", default="", help="Optional domain hint for spec extraction.")
     parser.add_argument(
         "--auto-migrate",
@@ -1923,8 +1933,58 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
             print(f"audit: {exc}", file=sys.stderr)
             raise SystemExit(2) from exc
 
+    migration_readiness_output = getattr(args, "migration_readiness_output", None)
+    if migration_readiness_output and not args.auto_migrate:
+        print(
+            "audit: --migration-readiness-output requires --auto-migrate",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    if migration_readiness_output:
+        def _same_migration_path(left: str | None, right: str | None) -> bool:
+            if not left or not right:
+                return False
+            try:
+                return os.path.samefile(left, right)
+            except OSError:
+                return os.path.realpath(os.path.expanduser(left)) == os.path.realpath(os.path.expanduser(right))
+        declared_input_paths = tuple(
+            path
+            for name in (
+                "schedule_request",
+                "schedule_adapters",
+                "schedule_argv_map",
+                "schedule_policy",
+                "schedule_observations",
+                "schedule_core",
+                "schedule_core_requirement",
+                "schedule_core_requirement_list",
+            )
+            if (path := getattr(args, name, None)) is not None
+        )
+        conflicting = (
+            _same_migration_path(migration_readiness_output, args.output)
+            or _same_migration_path(migration_readiness_output, os.path.expanduser(args.code_file))
+            or _same_migration_path(migration_readiness_output, sarif_output)
+            or any(_same_migration_path(migration_readiness_output, path) for path in declared_input_paths)
+        )
+        audit_input_path = Path(os.path.expanduser(args.code_file))
+        if not conflicting and audit_input_path.is_dir():
+            conflicting = any(
+                _same_migration_path(migration_readiness_output, str(candidate))
+                for candidate in audit_input_path.rglob("*")
+                if candidate.is_file() and candidate.suffix in {*AUDIT_EXTENSION_MAP, ".mm"}
+            )
+        if conflicting:
+            print(
+                "audit: --migration-readiness-output must not overwrite --output, --sarif-output, --code-file, or a declared schedule input",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+
     config = AgentConfig(mumei_lean_repo=getattr(args, "mumei_lean_repo", None))
-    result = AuditPipeline(config=config, heal_output_dir=args.heal_output_dir).audit_file(
+    pipeline = AuditPipeline(config=config, heal_output_dir=args.heal_output_dir)
+    result = pipeline.audit_file(
         args.code_file,
         args.language,
         domain_hint=args.domain_hint,
@@ -1967,6 +2027,26 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
             except OSError as exc:
                 print(f"audit: failed to write baseline output: {exc}", file=sys.stderr)
                 raise SystemExit(2) from exc
+    readiness_report = None
+    if migration_readiness_output:
+        try:
+            readiness_report = build_migration_readiness(
+                result,
+                output_path=Path(migration_readiness_output).expanduser(),
+                mumei_client=pipeline.mumei_client,
+            )
+        except OSError as exc:
+            print(f"audit: failed to write migration readiness output: {exc}", file=sys.stderr)
+            raise SystemExit(2) from exc
+        append_next_step_summary(
+            result,
+            readiness_report,
+            Path(migration_readiness_output).expanduser(),
+        )
+        if isinstance(result, AuditResult):
+            result.report = _build_report(result)
+        else:
+            result.summary = _build_directory_report(result)
     output_format = "json" if args.json else args.format
     payload = _format_result(result, output_format)
     if args.output:
