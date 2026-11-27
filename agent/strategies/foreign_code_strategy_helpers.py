@@ -1987,6 +1987,33 @@ def _rust_guarded_indices(body: str) -> set[str]:
     return guarded
 
 
+def _rust_guarded_nonempty_len_divisors(body: str) -> set[str]:
+    """Return simple ``x.len()`` divisors dominated by an empty-check exit.
+
+    This intentionally recognises only the conservative early-exit shape used
+    for empty collections. A missing fact merely keeps the warning; it never
+    creates one.
+    """
+    stripped = _strip_go_rust_literals_and_comments(body)
+    guarded: set[str] = set()
+    patterns = (
+        r"if\s+(?P<name>[A-Za-z_]\w*)\.is_empty\(\)\s*\{(?P<body>[^{}]{0,400})\}",
+        r"if\s+(?P<name>[A-Za-z_]\w*)\.len\(\)\s*==\s*0\s*\{(?P<body>[^{}]{0,400})\}",
+    )
+    for pattern in patterns:
+        for match in re.finditer(pattern, stripped, re.DOTALL):
+            if not re.search(r"\breturn\b|panic!|unreachable!", match.group("body")):
+                continue
+            name = match.group("name")
+            use_pattern = re.compile(rf"\b{re.escape(name)}\.len\(\)")
+            for use in use_pattern.finditer(stripped, match.end()):
+                between = stripped[match.end() : use.start()]
+                if not re.search(rf"\b{re.escape(name)}\s*=", between):
+                    guarded.add(f"{name}.len()")
+                    break
+    return guarded
+
+
 def _rust_doc_comment_nonzero_params(source: str, name: str) -> set[str]:
     """Extract parameter names whose doc comment states they must be non-zero.
 
@@ -3970,6 +3997,7 @@ def _detect_block_safety_issues(
             per_function_float_vars = _rust_float_variables(body)
             per_function_guarded_indices = _rust_guarded_indices(body)
             per_function_nonzero |= _rust_doc_comment_nonzero_params(source, name)
+            per_function_nonzero |= _rust_guarded_nonempty_len_divisors(body)
             per_function_unsigned_vars = _rust_unsigned_variables(source, body, name)
         function_has_unchecked = (
             solidity_checked_arithmetic and re.search(r"\bunchecked\b", body) is not None
@@ -5469,6 +5497,48 @@ def _detect_go_safety_issues(
                         issue for issue in expr_issues if not _is_sort_interface_index_issue(issue)
                     ]
                 issues.extend(expr_issues)
+            existing_division_messages = {
+                issue.message for issue in issues[fn_issues_start:] if "can divide by" in issue.message
+            }
+            for expression in _go_assignment_division_expressions(body):
+                facts = flow.facts_for_assignment_expression(expression) if flow is not None else None
+                expr_constants = dict(known_constants or {})
+                if flow is not None:
+                    expr_constants.update(flow.constants)
+                if facts is not None:
+                    expr_constants.update(facts.consts)
+                expr_nonzero = guaranteed_nonzero | (facts.nonzero if facts is not None else set())
+                expr_guarded = guarded_indices | (
+                    facts.bounded_indices(_go_index_accesses(expression))
+                    if facts is not None
+                    else set()
+                )
+                expr_issues = _issues_for_expression(
+                    fn.name,
+                    expression,
+                    "Go",
+                    dereference_values=set(),
+                    local_names=local_names,
+                    param_types=param_types,
+                    mapping_names=go_map_names,
+                    known_constants=expr_constants,
+                    parallel_slicing=parallel_slicing,
+                    guaranteed_nonzero=expr_nonzero,
+                    float_variables=float_variables,
+                    known_strings=known_strings,
+                    known_array_keys=global_array_keys,
+                    known_types=known_types,
+                    float_arrays=go_float_arrays,
+                    guarded_indices=expr_guarded,
+                    unsigned_locals=unsigned_vars,
+                    source=source,
+                    params_text=fn.params_text,
+                )
+                for issue in expr_issues:
+                    if "can divide by" not in issue.message or issue.message in existing_division_messages:
+                        continue
+                    existing_division_messages.add(issue.message)
+                    issues.append(issue)
             if flow is not None:
                 issues.extend(_dataflow_safety_issues(fn.name, flow))
             # Body-level scan for casts/subtractions outside return
@@ -6393,6 +6463,36 @@ def _is_float_expression(
     return False
 
 
+def _go_assignment_division_expressions(body: str) -> tuple[str, ...]:
+    """Return RHS expressions of Go assignments that contain division/modulo.
+
+    Safety scanning historically followed return expressions only. Division in
+    an intermediate assignment is the same runtime operation, so collect those
+    RHS expressions syntax-aware-ly and let the caller reuse the normal
+    expression checker. Non-division expressions are ignored to keep this a
+    narrow recall fix rather than a broad new dataflow analysis.
+    """
+    tree = tree_sitter_extract.extract_statements(body, "go")
+    if tree is None:
+        return ()
+    expressions: list[str] = []
+
+    def visit(statements: tuple[tree_sitter_extract.Statement, ...]) -> None:
+        for statement in statements:
+            if statement.kind in {"define", "assign"}:
+                for value in statement.values:
+                    if "/" not in value and "%" not in value:
+                        continue
+                    findings = tree_sitter_extract.analyze_expression(value, "go")
+                    if findings is not None and any("len(" in divisor for divisor in findings.divisors):
+                        expressions.append(value)
+            for nested in (statement.init, statement.body, statement.orelse, statement.post):
+                visit(nested)
+
+    visit(tree.statements)
+    return tuple(dict.fromkeys(expressions))
+
+
 def _division_safety_issue(
     function_name: str,
     divisor: str,
@@ -6410,6 +6510,16 @@ def _division_safety_issue(
     # ``uintptr(len(locktab))`` and similar casts of compile-time ``len(...)``
     # evaluate to the array's non-zero length.
     stripped = _strip_outer_parentheses(divisor)
+    if label == "Rust":
+        compact = re.sub(r"\s+", "", stripped)
+        castless = re.sub(r"(?:as(?:i|u)(?:8|16|32|64|128|size))+$", "", compact)
+        if re.fullmatch(r"[A-Za-z_]\w*\.len\(\)", castless):
+            # ``xs.len() as i64`` is zero exactly when ``xs.len()`` is zero.
+            # Tree-sitter normalisation removes whitespace inside the cast, so
+            # recover the semantic length expression before the member-divisor
+            # noise filter below.
+            divisor = castless
+            stripped = castless
     # Every layer of a cast like ``int32(len(xs))``: a guard may name any of them.
     unwrapped = {divisor, stripped}
     while re.fullmatch(r"\w+\s*\(.*\)", stripped):
@@ -6440,7 +6550,8 @@ def _division_safety_issue(
     if float_variables and (divisor in float_variables or stripped in float_variables):
         # Go float division by zero produces +/-Inf or NaN, not a panic.
         return None
-    if "." in divisor and (guaranteed_nonzero is None or (divisor not in guaranteed_nonzero and stripped not in guaranteed_nonzero)):
+    is_simple_rust_len = label == "Rust" and re.fullmatch(r"[A-Za-z_]\w*\.len\(\)", stripped) is not None
+    if "." in divisor and not is_simple_rust_len and (guaranteed_nonzero is None or (divisor not in guaranteed_nonzero and stripped not in guaranteed_nonzero)):
         # Member/selector divisors such as ``obj.b`` or ``time.Second`` that are
         # not provably non-zero are too noisy to model as a free variable.
         return None

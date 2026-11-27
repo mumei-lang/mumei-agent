@@ -8362,6 +8362,69 @@ def test_go_division_by_a_cast_length_respects_the_length_guard() -> None:
     assert errors(unguarded)
 
 
+def test_go_division_in_assignment_uses_collection_length_guard_facts() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    unguarded = """package main
+func average(total int64, records []int64) int64 {
+    average := total / int64(len(records))
+    return average
+}
+"""
+    guarded = """package main
+func average(total int64, records []int64) int64 {
+    if len(records) == 0 {
+        return 0
+    }
+    average := total / int64(len(records))
+    return average
+}
+"""
+    unguarded_issues = [i for i in _detect_safety_issues(unguarded, "go") if "divide" in i.message]
+    guarded_issues = [i for i in _detect_safety_issues(guarded, "go") if "divide" in i.message]
+    assert any("int64(len(records))" in i.message for i in unguarded_issues)
+    assert guarded_issues == []
+
+    non_length = """package main
+func average(total int64, divisor int64) int64 {
+    average := total / divisor
+    return average
+}
+"""
+    assert not [i for i in _detect_safety_issues(non_length, "go") if "divide" in i.message]
+
+
+def test_rust_collection_len_divisor_detected_only_without_empty_guard() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    unguarded = """pub fn split_payment(amount_cents: i64, recipients: &[String]) -> i64 {
+    amount_cents / recipients.len() as i64
+}
+"""
+    guarded = """pub fn split_payment(amount_cents: i64, recipients: &[String]) -> i64 {
+    if recipients.is_empty() {
+        return 0;
+    }
+    amount_cents / recipients.len() as i64
+}
+"""
+    unguarded_issues = [i for i in _detect_safety_issues(unguarded, "rust") if "divide" in i.message]
+    guarded_issues = [i for i in _detect_safety_issues(guarded, "rust") if "divide" in i.message]
+    assert any("recipients.len()" in i.message for i in unguarded_issues)
+    assert guarded_issues == []
+
+
+
+def test_rust_arbitrary_member_divisor_remains_conservative() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """pub fn ratio(total: i64, stats: Stats) -> i64 {
+    total / stats.count
+}
+"""
+    assert not [i for i in _detect_safety_issues(source, "rust") if "divide" in i.message]
+
+
 def test_go_guard_on_a_length_does_not_cover_an_8_bit_cast_of_it() -> None:
     mumei = MagicMock()
     mumei.verify.return_value = {"success": True, "report": {"status": "ok"}, "stdout": "{}", "stderr": ""}

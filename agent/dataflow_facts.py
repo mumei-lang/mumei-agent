@@ -1436,11 +1436,17 @@ class FunctionDataflow:
     constants: dict[str, int]
     # Normalised return-expression text -> facts holding at every such return.
     return_facts: dict[str, PathFacts]
+    # Normalised assignment/definition RHS text -> facts holding before it is evaluated.
+    expression_facts: dict[str, PathFacts] = field(default_factory=dict)
     # Facts holding at the fall-through end of the body (no explicit return).
     issues: tuple[DataflowIssue, ...] = ()
     cfg: control_flow.ControlFlowGraph | None = None
     cfg_gaps: tuple[control_flow.CFGGap, ...] = ()
     return_site_facts: dict[int, PathFacts] = field(default_factory=dict)
+
+    def facts_for_assignment_expression(self, expression: str) -> PathFacts | None:
+        """Return must-facts immediately before an assignment RHS is evaluated."""
+        return self.expression_facts.get(_norm(expression))
 
     def facts_for_return(self, node_id: int) -> PathFacts | None:
         """Existing walker facts at one CFG return site, not a CFG-solver result."""
@@ -1522,6 +1528,7 @@ class _Walker:
         self.unreliable = set(tree.closure_assigned) | set(tree.address_taken)
         self.return_facts: dict[str, list[_Env]] = {}
         self.return_site_facts: dict[int, list[_Env]] = {}
+        self.expression_facts: dict[str, list[_Env]] = {}
         self.issues: list[DataflowIssue] = []
         # Contract-referenced outputs: named results and ``*T`` params named
         # by the function's ``ensures`` doc-comment contract.
@@ -1767,6 +1774,10 @@ class _Walker:
                 env, before, self._backward_regions[label]
             )
         kind = statement.kind
+        if kind in {"define", "assign"}:
+            for value in statement.values:
+                if value and ("/" in value or "%" in value):
+                    self.expression_facts.setdefault(_norm(value), []).append(env.copy())
         if kind in {
             "define", "assign", "inc", "dec", "expr",
             "return", "defer", "terminate", "go", "case",
@@ -3375,10 +3386,17 @@ class _Walker:
             for other in envs[1:]:
                 merged = merged.merge(other)
             return_site_facts[offset] = _freeze(merged)
+        expression_facts: dict[str, PathFacts] = {}
+        for key, envs in self.expression_facts.items():
+            merged = envs[0]
+            for other in envs[1:]:
+                merged = merged.merge(other)
+            expression_facts[key] = _freeze(merged)
         construction = control_flow._from_tree(self.body, self.tree)
         return FunctionDataflow(
             constants=dict(self.constants),
             return_facts=return_facts,
+            expression_facts=expression_facts,
             issues=tuple(self.issues),
             cfg=construction.graph,
             cfg_gaps=construction.gaps,
