@@ -643,9 +643,10 @@ def test_ts_find_nested_early_exit_does_not_guard_outer_use() -> None:
 def test_ts_indexof_first_expression_is_not_proven_by_later_search() -> None:
     body = (
         "const task = tasks.find((t) => t.id === id); if (!task) return 0; "
-        "const other = tasks[tasks.indexOf(task)]; rows[rows.indexOf(row)] = row;"
+        "items[items.indexOf(task)] = task; tasks[tasks.indexOf(task)] = task;"
     )
-    assert any("indexOf" in issue.message for issue in _sentinel_issues(body, "TypeScript"))
+    issues = [issue for issue in _sentinel_issues(body, "TypeScript") if "indexOf" in issue.message]
+    assert len(issues) == 1
 
 
 def test_ts_indexof_find_provenance_still_flagged_after_mutation() -> None:
