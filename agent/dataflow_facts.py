@@ -1983,6 +1983,10 @@ class _Walker:
             return env, ""
         if kind == "expr":
             for value in statement.values:
+                clear_call = re.fullmatch(r"clear\(([_A-Za-z]\w*)\)", _norm(value))
+                if clear_call:
+                    for name in env.containers_equal_len(clear_call.group(1)):
+                        env.kill(name)
                 self._expression(value, env, statement.start)
             return env, ""
         return env, ""

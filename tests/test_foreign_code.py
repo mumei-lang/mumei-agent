@@ -8393,6 +8393,31 @@ func average(total int64, divisor int64) int64 {
 """
     assert not [i for i in _detect_safety_issues(non_length, "go") if "divide" in i.message]
 
+    mixed = """package main
+func mixed(total int, xs []int, d int) int {
+    if len(xs) == 0 { return 0 }
+    q := total/len(xs) + total/d
+    return q
+}
+"""
+    fixed_array = """package main
+func fixed(total int, xs [4]int) int {
+    q := total / len(xs)
+    return q
+}
+"""
+    cleared = """package main
+func cleared(total int, xs map[string]int) int {
+    if len(xs) == 0 { return 0 }
+    clear(xs)
+    q := total / len(xs)
+    return q
+}
+"""
+    assert not [i for i in _detect_safety_issues(mixed, "go") if "divide" in i.message]
+    assert not [i for i in _detect_safety_issues(fixed_array, "go") if "divide" in i.message]
+    assert [i for i in _detect_safety_issues(cleared, "go") if "divide" in i.message]
+
 
 def test_rust_collection_len_divisor_detected_only_without_empty_guard() -> None:
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
@@ -8496,6 +8521,44 @@ fn f(recipients: &[String], cond: bool) -> Amount {
     assert not [i for i in _detect_safety_issues(nested_shadowing, "rust") if "divide" in i.message]
     assert not [i for i in _detect_safety_issues(nested_custom_shadow, "rust") if "divide" in i.message]
     assert [i for i in _detect_safety_issues(primitive_parameter, "rust") if "divide" in i.message]
+
+
+def test_rust_collection_len_division_syntax_and_guard_edge_cases() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    parenthesized = """fn f(total: i64, xs: &[i64]) -> i64 {
+    total / (xs.len() as i64)
+}
+"""
+    tail_return_guard = """fn f(total: i64, xs: &[i64]) -> i64 {
+    if xs.is_empty() { return 0 }
+    total / xs.len() as i64
+}
+"""
+    loop_reassigned = """fn f(total: i64, mut xs: &[i64]) -> i64 {
+    if xs.is_empty() { return 0 }
+    loop {
+        let y = total / xs.len() as i64;
+        xs = &[];
+        return y
+    }
+}
+"""
+    fixed_array = """fn f(total: i64, xs: &[i64; 4]) -> i64 {
+    total / xs.len() as i64
+}
+"""
+    tuple_shadow = """fn f(total: i64, xs: &[i64]) -> i64 {
+    if xs.is_empty() { return 0 }
+    let (xs,) = (&[],);
+    total / xs.len() as i64
+}
+"""
+    assert [i for i in _detect_safety_issues(parenthesized, "rust") if "divide" in i.message]
+    assert not [i for i in _detect_safety_issues(tail_return_guard, "rust") if "divide" in i.message]
+    assert [i for i in _detect_safety_issues(loop_reassigned, "rust") if "divide" in i.message]
+    assert not [i for i in _detect_safety_issues(fixed_array, "rust") if "divide" in i.message]
+    assert [i for i in _detect_safety_issues(tuple_shadow, "rust") if "divide" in i.message]
 
 
 def test_rust_arbitrary_member_divisor_remains_conservative() -> None:

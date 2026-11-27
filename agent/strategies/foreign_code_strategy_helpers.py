@@ -2085,6 +2085,8 @@ def _rust_collection_len_division_issues(
         direct = simple_len_call(node)
         if direct is not None:
             return direct
+        if node.type == "parenthesized_expression" and node.named_children:
+            return len_divisor_receiver(node.named_children[0])
         if node.type != "type_cast_expression":
             return None
         cast_type = node.child_by_field_name("type")
@@ -2117,15 +2119,20 @@ def _rust_collection_len_division_issues(
     def exits_directly(consequence) -> bool:
         if consequence is None or consequence.type != "block":
             return False
-        for statement in consequence.named_children:
-            if statement.type != "expression_statement" or not statement.named_children:
-                continue
-            expression = statement.named_children[0]
+
+        def is_exit(expression) -> bool:
             if expression.type == "return_expression":
                 return True
             if expression.type == "macro_invocation":
                 macro = expression.child_by_field_name("macro")
-                if macro is not None and text(macro) in {"panic", "unreachable"}:
+                return macro is not None and text(macro) in {"panic", "unreachable"}
+            return False
+
+        for statement in consequence.named_children:
+            if is_exit(statement):
+                return True
+            if statement.type == "expression_statement" and statement.named_children:
+                if is_exit(statement.named_children[0]):
                     return True
         return False
 
@@ -2150,7 +2157,7 @@ def _rust_collection_len_division_issues(
                 return True
         if node.type == "let_declaration":
             pattern = node.child_by_field_name("pattern")
-            if pattern is not None and pattern.type == "identifier" and text(pattern) == receiver:
+            if pattern is not None and re.search(rf"\b{re.escape(receiver)}\b", text(pattern)):
                 return True
         return any(
             contains_receiver_write(child, receiver, start, end)
@@ -2163,7 +2170,7 @@ def _rust_collection_len_division_issues(
         for guard_receiver_name, _guard_start, guard_end in guards:
             if guard_receiver_name != receiver or guard_end > node.start_byte:
                 continue
-            if not contains_receiver_write(block, receiver, guard_end, node.start_byte):
+            if not contains_receiver_write(block, receiver, guard_end, block.end_byte):
                 return True
         return False
 
@@ -5727,6 +5734,15 @@ def _detect_go_safety_issues(
                 )
                 for issue in expr_issues:
                     if "can divide by" not in issue.message or issue.message in existing_division_messages:
+                        continue
+                    contract = issue.required_contracts[0] if issue.required_contracts else ""
+                    if "len(" not in contract:
+                        continue
+                    length_receiver = re.search(r"len\(\s*([A-Za-z_]\w*)\s*\)", contract)
+                    if length_receiver and re.fullmatch(
+                        r"\*?\[(?:0*[1-9]\d*)\][^\s]+",
+                        re.sub(r"\s+", "", param_types.get(length_receiver.group(1), "")),
+                    ):
                         continue
                     existing_division_messages.add(issue.message)
                     issues.append(issue)
