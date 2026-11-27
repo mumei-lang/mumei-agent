@@ -66,8 +66,8 @@ def _safe_stem(function_name: str) -> str:
     return re.sub(r"[^A-Za-z0-9_-]+", "_", function_name).strip("._-") or "migration_candidate"
 
 
-def _mm_code_lines(source: str) -> list[str]:
-    """``.mm`` lines with line comments and string-literal contents masked."""
+def _strip_mm_comments(source: str, *, mask_strings: bool) -> list[str]:
+    """``.mm`` lines without line comments, optionally with string contents masked."""
     in_string = False
     code_lines: list[str] = []
     for line in source.splitlines():
@@ -77,29 +77,59 @@ def _mm_code_lines(source: str) -> list[str]:
             char = line[index]
             if in_string:
                 if char == "\\" and index + 1 < len(line):
+                    if not mask_strings:
+                        out.append(line[index : index + 2])
                     index += 2
                     continue
                 if char == '"':
                     in_string = False
+                if not mask_strings or char == '"':
+                    out.append(char)
                 index += 1
                 continue
             if char == "/" and index + 1 < len(line) and line[index + 1] == "/":
                 break
             if char == '"':
                 in_string = True
-                index += 1
-                continue
             out.append(char)
             index += 1
         code_lines.append("".join(out))
     return code_lines
 
 
+def _extract_mm_clauses(code: str, keyword: str) -> list[str]:
+    clauses: list[str] = []
+    for match in re.finditer(rf"\b{keyword}\s*:", code):
+        index = match.end()
+        start = index
+        in_string = False
+        while index < len(code):
+            char = code[index]
+            if in_string:
+                if char == "\\":
+                    index += 2
+                    continue
+                if char == '"':
+                    in_string = False
+                index += 1
+                continue
+            if char == '"':
+                in_string = True
+                index += 1
+                continue
+            if char == ";":
+                clauses.append(code[start:index].strip())
+                break
+            index += 1
+    return clauses
+
+
 def _extracted_contract(skeleton: str) -> dict[str, object]:
-    code = "\n".join(_mm_code_lines(skeleton))
-    requires = [redact_secrets(item.strip()) for item in re.findall(r"\brequires\s*:\s*([^;]+);", code)]
-    ensures = [redact_secrets(item.strip()) for item in re.findall(r"\bensures\s*:\s*([^;]+);", code)]
-    trusted_atoms = re.findall(r"\btrusted\s+atom\s+([A-Za-z_]\w*)", code)
+    code = "\n".join(_strip_mm_comments(skeleton, mask_strings=False))
+    masked = "\n".join(_strip_mm_comments(skeleton, mask_strings=True))
+    requires = [redact_secrets(item) for item in _extract_mm_clauses(code, "requires")]
+    ensures = [redact_secrets(item) for item in _extract_mm_clauses(code, "ensures")]
+    trusted_atoms = re.findall(r"\btrusted\s+atom\s+([A-Za-z_]\w*)", masked)
     weak = bool(requires and ensures and all(item == "true" for item in requires + ensures))
     return {
         "requires": requires,
@@ -117,16 +147,31 @@ def _candidate_source(result: AuditResult | AuditDirectoryResult, hint: dict[str
     return file_result, file_result.source_file, file_result.language
 
 
+def _canonical_mm_text(text: str) -> str:
+    return text.rstrip() + "\n" if text.strip() else text
+
+
+def _contains_credential_shaped_data(text: str) -> bool:
+    return redact_secrets(text) != text
+
+
+_ABSOLUTE_PATH_FRAGMENT = re.compile(r"(?<![\w])(?:/[^\s:;,()\[\]{}'\"]+)+")
+
+
+def _redact_error_text(text: str) -> str:
+    return redact_secrets(_ABSOLUTE_PATH_FRAGMENT.sub("<path>", str(text)))
+
+
 def _healed_content(function_name: str, healed_files: list[str], skeleton: str) -> tuple[str, str | None, bool]:
     expected_names = {f"{function_name}.mm", f"{_safe_stem(function_name)}.mm", f"{_safe_identifier(function_name)}.mm"}
-    for healed in healed_files:
-        path = Path(healed)
-        if path.name in expected_names and path.is_file():
-            try:
-                return path.read_text(encoding="utf-8"), str(path), True
-            except OSError:
-                return skeleton, str(path), False
-    return skeleton, None, False
+    matches = [Path(healed) for healed in healed_files if Path(healed).name in expected_names and Path(healed).is_file()]
+    if len(matches) != 1:
+        return skeleton, None, False
+    path = matches[0]
+    try:
+        return path.read_text(encoding="utf-8"), str(path), True
+    except OSError:
+        return skeleton, str(path), False
 
 
 def _behavior_entries(file_result: AuditResult | AuditDirectoryResult, function_name: str) -> list[dict[str, object]]:
@@ -135,8 +180,7 @@ def _behavior_entries(file_result: AuditResult | AuditDirectoryResult, function_
         return entries
 
     def matches(value: object) -> bool:
-        text = str(value or "")
-        return text == function_name or text.split(".")[-1] == function_name.split(".")[-1]
+        return str(value or "") == function_name
 
     for item in file_result.native_replays:
         if isinstance(item, dict) and matches(item.get("function") or item.get("function_name") or item.get("atom")):
@@ -250,7 +294,7 @@ def build_migration_execution(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     artifact_dir = artifact_base
     index = 0
-    while artifact_dir.exists() or artifact_dir.is_symlink():
+    while artifact_dir == output_path or artifact_dir.exists() or artifact_dir.is_symlink():
         index += 1
         artifact_dir = output_path.parent / f"{output_path.stem}.migration-execution-{index}"
     artifact_dir.mkdir(parents=True)
@@ -358,43 +402,52 @@ def build_migration_execution(
             if healed_path is not None:
                 candidate["heal"]["healed_file"] = healed_path
                 candidate["generated_mm"]["origin"] = "healed_file" if used_healed else "generated_skeleton"
+            heal_errors = file_result.heal_errors if isinstance(file_result, AuditResult) else result.heal_errors
+            expected_error_stems = {function_name, _safe_stem(function_name), _safe_identifier(function_name)}
             candidate["heal"]["errors"] = [
-                redact_secrets(item)
-                for item in result.heal_errors
-                if item.startswith(f"{function_name}:")
-                or Path(str(item).split(":", 1)[0]).stem in {function_name, _safe_stem(function_name), _safe_identifier(function_name)}
+                _redact_error_text(item)
+                for item in heal_errors
+                if str(item).startswith(f"{function_name}:")
+                or Path(str(item).split(":", 1)[0]).stem in expected_error_stems
             ]
             candidate["heal"]["attempted"] = heal_attempted or healed_path is not None or bool(candidate["heal"]["errors"])
             if candidate["heal"]["errors"]:
                 candidate["evidence_blockers"].append("heal completed with errors")
-            contract = _extracted_contract(healed_text)
-            original_contract = _extracted_contract(skeleton)
+            original_text = _canonical_mm_text(skeleton)
+            final_text = _canonical_mm_text(healed_text)
+            contract = _extracted_contract(final_text)
+            original_contract = _extracted_contract(original_text)
             candidate["extracted_contract"] = contract
             candidate["contract_provenance"] = {
-                "original_skeleton_sha256": _sha256_text(skeleton),
+                "original_skeleton_sha256": _sha256_text(original_text),
                 "original_requires": original_contract["requires"],
                 "original_ensures": original_contract["ensures"],
-                "final_sha256": _sha256_text(healed_text),
+                "final_sha256": _sha256_text(final_text),
                 "final_requires": contract["requires"],
                 "final_ensures": contract["ensures"],
-                "content_changed": healed_text != skeleton,
+                "content_changed": final_text != original_text,
                 "contract_clauses_changed": (
                     original_contract["requires"] != contract["requires"]
                     or original_contract["ensures"] != contract["ensures"]
                 ),
             }
-            if not healed_text.strip():
+            if not final_text.strip():
                 candidate["evidence_blockers"].append("generated .mm content is empty")
                 candidate["execution_state"] = "blocked"
                 _write_partial(output_path, report)
                 continue
-            stem = _safe_stem(function_name) + "-" + _sha256_text(healed_text)[:12]
+            if _contains_credential_shaped_data(final_text):
+                candidate["evidence_blockers"].append("generated .mm contains credential-shaped data; artifact generation suppressed")
+                candidate["execution_state"] = "blocked"
+                _write_partial(output_path, report)
+                continue
+            stem = _safe_stem(function_name) + "-" + _sha256_text(final_text)[:12]
             mm_path = artifact_dir / f"{stem}.mm"
             suffix = 1
             while mm_path.exists():
                 mm_path = artifact_dir / f"{stem}-{suffix}.mm"
                 suffix += 1
-            _write_text_exclusive(mm_path, healed_text.rstrip() + "\n")
+            _write_text_exclusive(mm_path, final_text)
             candidate["generated_mm"].update(
                 {
                     "path": str(mm_path),

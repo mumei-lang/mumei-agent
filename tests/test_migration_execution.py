@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -99,6 +100,7 @@ def test_migration_execution_records_acceptance_evidence_and_boundary(tmp_path: 
     assert provenance["original_skeleton_sha256"] == provenance["final_sha256"]
     assert provenance["content_changed"] is False
     assert provenance["contract_clauses_changed"] is False
+    assert provenance["final_sha256"] == candidate["generated_mm"]["sha256"]
     boundary = "\n".join(report["evidence_boundary"])
     assert "not proof that host-language code implements the same behavior" in boundary
     assert "diagnostic evidence only" in candidate["unbound_audit_diagnostics"]["semantics"]
@@ -368,3 +370,188 @@ def test_heal_migration_hints_respects_selected_functions(tmp_path: Path) -> Non
     assert healed == [str(tmp_path / "withdraw.mm")]
     assert (tmp_path / "withdraw.mm").exists()
     assert not (tmp_path / "deposit.mm").exists()
+
+
+
+def test_string_literals_in_contracts_are_preserved_for_provenance(tmp_path: Path) -> None:
+    source = tmp_path / "payment.py"
+    source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+    original = 'atom withdraw() -> i64 {\n    requires: message == "hello;world";\n    ensures: result >= 0;\n    body: { 0 }\n}'
+    healed_text = 'atom withdraw() -> i64 {\n    requires: message == "goodbye;world";\n    ensures: result >= 0;\n    body: { 0 }\n}'
+    healed = tmp_path / "withdraw.mm"
+    healed.write_text(healed_text, encoding="utf-8")
+
+    report = build_migration_execution(
+        _result(source, [_hint("withdraw", original)], healed_files=[str(healed)]),
+        output_path=tmp_path / "execution.json",
+        mumei_client=FakeVerifyClient(),
+    )
+
+    provenance = report["candidates"][0]["contract_provenance"]
+    assert provenance["original_requires"] == ['message == "hello;world"']
+    assert provenance["final_requires"] == ['message == "goodbye;world"']
+    assert provenance["contract_clauses_changed"] is True
+
+
+def test_migration_output_never_overwrites_existing_mm(tmp_path: Path) -> None:
+    existing = tmp_path / "withdraw.mm"
+    existing.write_text("atom existing() -> i64 { body: { 1 } }\n", encoding="utf-8")
+    pipeline = object.__new__(AuditPipeline)
+    pipeline.heal_output_dir = tmp_path
+    pipeline._run_heal_loop = lambda target: None
+
+    healed, errors = pipeline._heal_migration_hints([_hint("withdraw")], tmp_path / "source.py")
+
+    assert healed == []
+    assert errors == ["withdraw: migration output already exists: withdraw.mm"]
+    assert existing.read_text(encoding="utf-8") == "atom existing() -> i64 { body: { 1 } }\n"
+
+
+def test_credential_shaped_skeleton_is_not_written_or_copied(tmp_path: Path) -> None:
+    secret = "ghp_" + "a" * 30
+    skeleton = f'atom withdraw() -> i64 {{\n    requires: token == "{secret}";\n    ensures: result >= 0;\n    body: {{ 0 }}\n}}'
+    pipeline = object.__new__(AuditPipeline)
+    pipeline.heal_output_dir = tmp_path / "heal"
+    pipeline._run_heal_loop = lambda target: None
+
+    healed, errors = pipeline._heal_migration_hints([_hint("withdraw", skeleton)], tmp_path / "source.py")
+
+    assert healed == []
+    assert errors == ["withdraw: migration skeleton contains credential-shaped data"]
+    assert not (tmp_path / "heal" / "withdraw.mm").exists()
+
+    source = tmp_path / "payment.py"
+    source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+    report = build_migration_execution(
+        _result(source, [_hint("withdraw", skeleton)]),
+        output_path=tmp_path / "execution.json",
+        mumei_client=FakeVerifyClient(),
+    )
+    candidate = report["candidates"][0]
+    assert candidate["execution_state"] == "blocked"
+    assert candidate["generated_mm"]["path"] is None
+    assert secret not in json.dumps(report)
+    assert not list(Path(report["artifact_paths"]["generated_artifacts"]).glob("*.mm"))
+
+
+def test_heal_errors_are_attributed_per_file_and_paths_are_redacted(tmp_path: Path) -> None:
+    source = tmp_path / "payment.py"
+    source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+    absolute_error = f"{tmp_path}/withdraw.mm: proof failed"
+    report = build_migration_execution(
+        _result(source, [_hint("withdraw")], heal_errors=[absolute_error]),
+        output_path=tmp_path / "execution.json",
+        mumei_client=FakeVerifyClient(),
+    )
+
+    candidate = report["candidates"][0]
+    assert candidate["execution_state"] == "blocked"
+    assert "heal completed with errors" in candidate["evidence_blockers"]
+    assert candidate["heal"]["errors"] == ["<path>: proof failed"]
+    assert str(tmp_path) not in json.dumps(candidate["heal"])
+
+
+def test_ambiguous_same_named_healed_files_are_not_bound(tmp_path: Path) -> None:
+    source = tmp_path / "payment.py"
+    source.write_text("def same():\n    pass\n", encoding="utf-8")
+    first_dir = tmp_path / "first"
+    second_dir = tmp_path / "second"
+    first_dir.mkdir()
+    second_dir.mkdir()
+    first = first_dir / "same.mm"
+    second = second_dir / "same.mm"
+    first.write_text("atom same() -> i64 { body: { 1 } }\n", encoding="utf-8")
+    second.write_text("atom same() -> i64 { body: { 2 } }\n", encoding="utf-8")
+
+    report = build_migration_execution(
+        _result(source, [_hint("same")], healed_files=[str(first), str(second)]),
+        output_path=tmp_path / "execution.json",
+        mumei_client=FakeVerifyClient(),
+    )
+
+    candidate = report["candidates"][0]
+    assert candidate["heal"]["healed_file"] is None
+    assert candidate["generated_mm"]["origin"] == "generated_skeleton"
+
+
+def test_unqualified_diagnostic_does_not_match_qualified_candidate(tmp_path: Path) -> None:
+    source = tmp_path / "service.py"
+    source.write_text("class Service:\n    def check(self):\n        pass\n", encoding="utf-8")
+    result = _result(
+        source,
+        [_hint("Service.check")],
+        native_replays=[
+            {"function": "check", "input": {}, "verdict": "violates"},
+            {"function": "Service.check", "input": {}, "verdict": "consistent"},
+        ],
+    )
+
+    report = build_migration_execution(result, output_path=tmp_path / "execution.json", mumei_client=FakeVerifyClient())
+
+    entries = report["candidates"][0]["unbound_audit_diagnostics"]["entries"]
+    assert [entry["outcome"] for entry in entries] == ["consistent"]
+
+
+def test_output_stem_collision_still_writes_report(tmp_path: Path) -> None:
+    source = tmp_path / "payment.py"
+    source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+    output = tmp_path / "review.migration-execution"
+
+    report = build_migration_execution(
+        _result(source, [_hint("withdraw")]),
+        output_path=output,
+        mumei_client=FakeVerifyClient(),
+    )
+
+    assert output.is_file()
+    assert Path(report["artifact_paths"]["generated_artifacts"]).is_dir()
+    assert report["artifact_paths"]["generated_artifacts"] != str(output)
+
+
+@pytest.mark.integration
+def test_real_mumei_verify_writes_proof_and_sarif(tmp_path: Path) -> None:
+    binary = os.environ.get("MUMEI_BIN", "")
+    if not binary or not Path(binary).is_absolute() or not Path(binary).is_file():
+        pytest.skip("set MUMEI_BIN to an absolute trusted Core executable")
+    from agent.mumei_client import create_mumei_client
+
+    source = tmp_path / "payment.py"
+    source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+    report = build_migration_execution(
+        _result(source, [_hint("withdraw")]),
+        output_path=tmp_path / "execution.json",
+        mumei_client=create_mumei_client(binary),
+    )
+
+    verification = report["candidates"][0]["verification"]
+    assert verification["contract_proved"] is True
+    assert verification["proof_certificate"]["written"] is True
+    assert verification["proof_certificate"]["sha256"]
+    assert verification["sarif"]["written"] is True
+    assert verification["sarif"]["sha256"]
+
+
+def test_directory_heal_errors_stay_attached_to_file_candidate(tmp_path: Path) -> None:
+    from agent.audit_models import AuditDirectoryResult
+
+    source = tmp_path / "src" / "payment.py"
+    source.parent.mkdir()
+    source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+    hint = _hint("withdraw")
+    file_result = _result(source, [hint], heal_errors=["withdraw.mm: proof still failing"])
+    directory = AuditDirectoryResult(
+        success=False,
+        source_dir=str(source.parent),
+        language="python",
+        file_results=[file_result],
+        verification_status="unverifiable",
+        migration_hints=[hint],
+        heal_errors=[f"payment.py: {file_result.heal_errors[0]}"],
+    )
+
+    report = build_migration_execution(directory, output_path=tmp_path / "execution.json", mumei_client=FakeVerifyClient())
+
+    candidate = report["candidates"][0]
+    assert candidate["heal"]["errors"] == ["withdraw.mm: proof still failing"]
+    assert "heal completed with errors" in candidate["evidence_blockers"]
+    assert candidate["execution_state"] == "blocked"

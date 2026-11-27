@@ -18,6 +18,7 @@ from typing import cast
 
 from agent import evidence_check_schedule, telemetry
 from agent.audit_sarif import write_sarif
+from agent.secret_redaction import redact_secrets
 from agent.audit_models import (
     AuditDirectoryResult,
     AuditResult,
@@ -1002,12 +1003,27 @@ class AuditPipeline:
             if not skeleton.strip():
                 heal_errors.append(f"{function_name}: migration skeleton is empty")
                 continue
+            if redact_secrets(skeleton) != skeleton:
+                heal_errors.append(f"{function_name}: migration skeleton contains credential-shaped data")
+                continue
             target = output_dir / f"{function_name}.mm"
-            target.write_text(skeleton.rstrip() + "\n", encoding="utf-8")
+            if target.exists() or target.is_symlink():
+                heal_errors.append(f"{function_name}: migration output already exists: {target.name}")
+                continue
+            try:
+                with target.open("x", encoding="utf-8") as output_file:
+                    output_file.write(skeleton.rstrip() + "\n")
+            except FileExistsError:
+                heal_errors.append(f"{function_name}: migration output already exists: {target.name}")
+                continue
+            except OSError as exc:
+                heal_errors.append(f"{function_name}: could not write migration output: {type(exc).__name__}")
+                continue
             try:
                 self._run_heal_loop(target)
             except Exception as exc:
-                heal_errors.append(f"{target}: {exc}")
+                message = redact_secrets(str(exc).replace(str(target), target.name).replace(str(output_dir), "<heal-output>"))
+                heal_errors.append(f"{target.name}: {message}")
                 continue
             healed_files.append(str(target))
         return healed_files, heal_errors
