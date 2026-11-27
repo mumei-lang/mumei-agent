@@ -122,28 +122,66 @@ def _outside_string_mask(code: str) -> str:
 _CREDENTIAL_WORD = r"[\w$]*(?:password|passwd|secret|token|api_?key|apikey|private_?key|auth|credential)[\w$]*"
 _CREDENTIAL_EXPR = rf"(?:[\w$]+\.)*{_CREDENTIAL_WORD}"
 _STRING_LITERAL = r'"(?:\\.|[^"\\])*"'
+_MASKED_STRING = r"__MUMEI_STRING_\d+__"
 _OPEN_PARENS = r"(?:\(\s*)*"
 _CLOSE_PARENS = r"(?:\s*\))*"
 _PAREN_CREDENTIAL_EXPR = rf"{_OPEN_PARENS}{_CREDENTIAL_EXPR}{_CLOSE_PARENS}"
 _CREDENTIAL_NAME_PATTERN = rf"(?<![\w$])(?P<name>{_PAREN_CREDENTIAL_EXPR})(?![\w$])"
 _CREDENTIAL_COMPARISON_FORWARD = re.compile(
-    rf"{_CREDENTIAL_NAME_PATTERN}\s*(?P<op>==|!=)\s*{_OPEN_PARENS}(?P<literal>{_STRING_LITERAL})",
+    rf"{_CREDENTIAL_NAME_PATTERN}\s*(?P<op>==|!=)\s*{_OPEN_PARENS}(?P<literal>{_MASKED_STRING})",
     re.IGNORECASE,
 )
 _CREDENTIAL_COMPARISON_REVERSE = re.compile(
-    rf"{_OPEN_PARENS}(?P<literal>{_STRING_LITERAL}){_CLOSE_PARENS}\s*(?P<op>==|!=)\s*{_CREDENTIAL_NAME_PATTERN}",
+    rf"{_OPEN_PARENS}(?P<literal>{_MASKED_STRING}){_CLOSE_PARENS}\s*(?P<op>==|!=)\s*{_CREDENTIAL_NAME_PATTERN}",
     re.IGNORECASE,
 )
 _CREDENTIAL_ASSIGNMENT = re.compile(
-    rf"{_CREDENTIAL_NAME_PATTERN}\s*(?::=|=(?!=))\s*{_OPEN_PARENS}(?P<literal>{_STRING_LITERAL})",
+    rf"{_CREDENTIAL_NAME_PATTERN}\s*(?::=|=(?!=))\s*{_OPEN_PARENS}(?P<literal>{_MASKED_STRING})",
     re.IGNORECASE,
 )
 
 
+def _mask_string_literals(text: str) -> tuple[str, dict[str, tuple[int, int]]]:
+    out: list[str] = []
+    mapping: dict[str, tuple[int, int]] = {}
+    index = 0
+    count = 0
+    while index < len(text):
+        if text[index] != '"':
+            out.append(text[index])
+            index += 1
+            continue
+        start = index
+        index += 1
+        escaped = False
+        closed = False
+        while index < len(text):
+            char = text[index]
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                closed = True
+                break
+            index += 1
+        end = index + 1 if closed else len(text)
+        placeholder = f"__MUMEI_STRING_{count}__"
+        mapping[placeholder] = (start, end)
+        out.append(placeholder)
+        count += 1
+        index = end
+    return "".join(out), mapping
+
+
 def _redact_credential_comparison_literals(text: str) -> str:
+    masked, mapping = _mask_string_literals(text)
     spans: list[tuple[int, int]] = []
     for pattern in (_CREDENTIAL_COMPARISON_FORWARD, _CREDENTIAL_COMPARISON_REVERSE, _CREDENTIAL_ASSIGNMENT):
-        spans.extend((match.start("literal"), match.end("literal")) for match in pattern.finditer(text))
+        for match in pattern.finditer(masked):
+            span = mapping.get(match.group("literal"))
+            if span is not None:
+                spans.append(span)
     if not spans:
         return text
     out: list[str] = []
