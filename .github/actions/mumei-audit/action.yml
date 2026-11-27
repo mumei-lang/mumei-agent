@@ -185,12 +185,12 @@ runs:
               echo "::error::--baseline and --write-baseline cannot share a symlink path; use a regular baseline file or separate output."
               exit 2
             fi
+            prepare_output_path "$WRITE_BASELINE_PATH"
             if [ -e "$WRITE_BASELINE_PATH" ] || [ -L "$WRITE_BASELINE_PATH" ]; then
               WRITE_BASELINE_BEFORE="$(python -c 'import os,sys; print(os.stat(sys.argv[1]).st_mtime_ns)' "$WRITE_BASELINE_PATH" 2>/dev/null || echo unreadable)"
             else
               WRITE_BASELINE_BEFORE=absent
             fi
-            prepare_output_path "$WRITE_BASELINE_PATH"
           fi
         fi
         date +%s > "$ACTION_STATE/timing/audit_start"
