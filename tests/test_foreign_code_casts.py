@@ -739,3 +739,27 @@ def test_solidity_cast_bounded_by_a_narrower_struct_field_is_safe() -> None:
     assert _detect_truncations(src("uint128", "require(shares <= type(uint128).max);"), "solidity") == []
     assert _detect_truncations(src("uint256", 'require(pos.shares >= shares, "low");'), "solidity")
     assert _detect_truncations(src("uint128", ""), "solidity")
+
+
+def test_rust_error_propagation_question_does_not_hide_early_exit_cast_guard() -> None:
+    body = """
+        if amount_cents <= 0 {
+            return Err("transfer amount must be positive".into());
+        }
+        let src = ledger.get_mut(from).ok_or("no such account")?;
+        if amount_cents as u64 > allowance {
+            return Err("over daily limit".into());
+        }
+        src.spent_today_cents += amount_cents as u64;
+    """
+    assert not _cast_issues(body, "Rust", param_types={"amount_cents": "i64"})
+
+
+def test_rust_error_propagation_question_still_flags_unguarded_cast() -> None:
+    body = """
+        let src = ledger.get_mut(from).ok_or("no such account")?;
+        src.spent_today_cents += amount_cents as u64;
+    """
+    issues = _cast_issues(body, "Rust", param_types={"amount_cents": "i64"})
+    assert len(issues) == 1
+    assert issues[0].required_contracts == ("amount_cents >= 0",)

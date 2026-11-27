@@ -610,3 +610,26 @@ def test_sentinel_fresh_guard_after_assign_ok() -> None:
     body = ' i := strings.Index(s, "x")\n if i < 0 { return 0 }\n return s[i] '
     issues = _sentinel_issues(body, "Go")
     assert not issues
+
+
+def test_ts_find_braceless_early_exit_guarded() -> None:
+    body = 'const el = xs.find(x => x > 0); if (!el) return 0; return el.value;'
+    assert not _sentinel_issues(body, "TypeScript")
+
+
+def test_ts_indexof_find_provenance_after_braceless_check_guarded() -> None:
+    body = (
+        "const task = tasks.find((t) => t.id === id); "
+        "if (!task) return sendJson(res, 404, { error: 'missing' }); "
+        "tasks[tasks.indexOf(task)] = task;"
+    )
+    assert not _sentinel_issues(body, "TypeScript")
+
+
+def test_ts_indexof_find_provenance_without_check_still_flagged() -> None:
+    body = (
+        "const task = tasks.find((t) => t.id === id); "
+        "tasks[tasks.indexOf(task)] = task;"
+    )
+    issues = _sentinel_issues(body, "TypeScript")
+    assert any("indexOf" in issue.message for issue in issues)

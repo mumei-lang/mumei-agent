@@ -7414,8 +7414,17 @@ def _guard_mechanism(
 
     if any(_bare_position(m.start()) for m in re.finditer(r"\|\|", between)):
         return None
+    def _ternary_question(rel_pos: int) -> bool:
+        if not _bare_position(rel_pos):
+            return False
+        # Rust error propagation (``expr?;``/``expr?.``) is not a ternary
+        # condition. Treating it as one makes every later use look guarded by
+        # the wrong branch and hides an earlier early-exit comparison.
+        following = between[rel_pos + 1 :].lstrip()
+        return not following.startswith((";", "."))
+
     qpos = next(
-        (m.start() for m in re.finditer(r"\?", between) if _bare_position(m.start())),
+        (m.start() for m in re.finditer(r"\?", between) if _ternary_question(m.start())),
         -1,
     )
     cpos = next(
@@ -8070,6 +8079,16 @@ def _sentinel_guarded(
     closed before the use does not reach it. ``since`` ignores checks that
     precede the sentinel-producing assignment — ``if i < 0 { return }``
     placed before ``i = s.find(…)`` protects a different value."""
+    def single_statement_early_exit(match: re.Match[str]) -> bool:
+        """Whether this bad-direction check immediately returns/throws.
+
+        TypeScript commonly writes ``if (!value) return …;`` without braces;
+        the structural guard matcher only understands braced blocks, so the
+        sentinel check handles this statement form locally.
+        """
+        tail = body[match.end() : use_pos]
+        return re.match(r"\s*\)*\s*(?:return|throw)\b", tail) is not None
+
     if kind == "minus1":
         safe_re = re.compile(
             rf"\b{re.escape(var)}\s*!=+\s*-\s*1\b"
@@ -8100,6 +8119,7 @@ def _sentinel_guarded(
         return True
     if any(
         _guard_mechanism(body, m, use_pos) in _GUARD_NEGATED_MECHANISMS
+        or single_statement_early_exit(m)
         for m in bad_re.finditer(body, since, use_pos)
     ):
         return True
@@ -8117,6 +8137,7 @@ def _sentinel_guarded(
             return True
         if any(
             _guard_mechanism(body, m, use_pos) in _GUARD_NEGATED_MECHANISMS
+            or single_statement_early_exit(m)
             for m in falsy.finditer(body, since, use_pos)
         ):
             return True
@@ -8183,6 +8204,23 @@ def _sentinel_index_issues(
     nested = _SENTINEL_NESTED_INDEX_RES.get(label)
     if nested is not None:
         for match in nested.finditer(body):
+            proven_index = re.search(
+                r"\b(?P<array>[A-Za-z_]\w*)\.(?:indexOf|lastIndexOf)\s*\(\s*(?P<var>[A-Za-z_]\w*)\s*\)",
+                body[match.start() : match.start() + 200],
+            )
+            if proven_index is not None and label == "TypeScript":
+                array_name = proven_index.group("array")
+                var = proven_index.group("var")
+                assignment = re.search(
+                    rf"\b(?:let|const|var)\s+{re.escape(var)}\s*=\s*{re.escape(array_name)}\.find\s*\(",
+                    body,
+                )
+                if assignment is not None and _sentinel_guarded(
+                    body, var, match.start(), "undefined", since=assignment.end()
+                ):
+                    # ``array.find`` already established that this object is
+                    # an element, so ``array.indexOf(object)`` cannot miss.
+                    continue
             call = re.search(
                 r"\.(?:indexOf|lastIndexOf|findIndex|find)\s*\(|(?:strings|bytes)\.Index\w*",
                 match.group(0),
@@ -8725,13 +8763,13 @@ def _solidity_function_blocks(source: str) -> list[tuple[str, str]]:
         blocks.append((_safe_identifier(match.group("name")), body))
     return blocks
 
-def _solidity_function_blocks_with_attrs(source: str) -> list[tuple[str, str, str]]:
+def _solidity_function_blocks_with_attrs(source: str) -> list[tuple[str, str, str, str]]:
     functions = tree_sitter_extract.extract_contract_functions(
         source, "solidity", _safe_identifier
     )
     if functions is not None:
         return [
-            (fn.name, fn.attrs_text, fn.body)
+            (fn.name, fn.attrs_text, fn.body, fn.params_text)
             for fn in functions
             if fn.has_body
         ]
@@ -8744,6 +8782,7 @@ def _solidity_function_blocks_with_attrs(source: str) -> list[tuple[str, str, st
                 _safe_identifier(match.group("name")),
                 match.group("attrs") or "",
                 body,
+                match.group("params") or "",
             )
         )
     return blocks
@@ -8767,7 +8806,7 @@ def _detect_solidity_contract_issues(
     if _is_solidity_mock_source(source):
         return []
     issues: list[ForeignSafetyIssue] = []
-    for name, attrs, body in _solidity_function_blocks_with_attrs(source):
+    for name, attrs, body, params in _solidity_function_blocks_with_attrs(source):
         if _solidity_function_is_mutating_external(attrs, body):
             maybe_cei_issue = _solidity_cei_issue(name, attrs, body)
             if maybe_cei_issue is not None:
@@ -8776,6 +8815,7 @@ def _detect_solidity_contract_issues(
                 _solidity_function_is_externally_callable(attrs)
                 and not _solidity_function_has_access_guard(attrs, body)
                 and not _solidity_function_is_caller_scoped(body)
+                and not _solidity_function_is_protocol_settlement(params, body)
             ):
                 issues.append(
                     ForeignSafetyIssue(
@@ -8815,7 +8855,6 @@ def _solidity_function_has_access_guard(attrs: str, body: str) -> bool:
 _SOLIDITY_CALLER_SCOPED_PATTERN = re.compile(
     r"\[\s*msg\.sender\s*\]"
     r"|[(,]\s*msg\.sender\s*[,)]"
-    r"|\bmsg\.sender\s*\.\s*(?:call|transfer|send)\b"
     r"|\bmsg\.value\b"
 )
 _SOLIDITY_EMIT_STATEMENT = re.compile(r"\bemit\b[^;]*;")
@@ -8833,6 +8872,27 @@ _SOLIDITY_PRIVILEGED_WRITE = re.compile(
 _SOLIDITY_LOCAL_DECLARATION = re.compile(
     r"\b(?:address|bool|string|bytes\d*|u?int\d*)(?:\s+(?:payable|memory|storage|calldata))*\s+(\w+)\s*[=;]"
 )
+
+
+def _solidity_function_is_protocol_settlement(params: str, body: str) -> bool:
+    """Whether a parameterless function settles value to protocol state.
+
+    Auction finalization, bonus draws and similar entry points are often
+    intentionally permissionless: the caller cannot choose the beneficiary
+    or amount because both are fixed by prior protocol state. They still
+    need reentrancy and CEI scrutiny, but missing access control is not by
+    itself useful evidence. A caller-paid function or one with caller-chosen
+    parameters does not qualify.
+    """
+    if params.strip() or _SOLIDITY_PRIVILEGED_WRITE.search(body):
+        return False
+    if re.search(r"\bmsg\.sender\s*\.\s*(?:call|transfer|send)\b", body):
+        return False
+    value_call = re.search(
+        r"\b(?P<recipient>[A-Za-z_]\w*(?:\[[^\]]+\])?(?:\.[A-Za-z_]\w*)?)\s*\.\s*(?:call\s*\{[^}]*value\s*:|transfer\s*\(|send\s*\()",
+        body,
+    )
+    return value_call is not None
 
 
 def _solidity_function_is_caller_scoped(body: str) -> bool:

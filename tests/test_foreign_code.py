@@ -8198,3 +8198,45 @@ def test_solidity_brace_in_a_single_quoted_string_does_not_keep_a_block_local_li
         "        balances[msg.sender] += 1;\n        owner = next;\n    }\n}\n"
     )
     assert any("take" == i.function_name for i in _detect_solidity_contract_issues(src))
+
+
+def test_solidity_protocol_settlement_entrypoint_is_not_access_control_advisory() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_solidity_contract_issues
+
+    source = """
+contract EnglishAuction {
+    address seller;
+    bool finalized;
+    uint256 highestBid;
+    function finalize() external {
+        require(!finalized, "already finalized");
+        finalized = true;
+        (bool ok, ) = seller.call{value: highestBid}("");
+        require(ok, "payout failed");
+    }
+}
+"""
+    assert not [
+        issue for issue in _detect_solidity_contract_issues(source)
+        if "no access-control guard" in issue.message
+    ]
+
+
+def test_solidity_parameterless_caller_payout_remains_access_control_advisory() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_solidity_contract_issues
+
+    source = """
+contract Vault {
+    uint256 pool;
+    function withdrawAll() external {
+        uint256 amount = pool;
+        pool = 0;
+        (bool ok, ) = msg.sender.call{value: amount}("");
+        require(ok, "payout failed");
+    }
+}
+"""
+    assert any(
+        issue.function_name == "withdrawAll" and "no access-control guard" in issue.message
+        for issue in _detect_solidity_contract_issues(source)
+    )
