@@ -636,13 +636,13 @@ def _typescript_visible_associative_containers(
         if re.search(rf"\b{re.escape(name)}\b", params_text):
             visible.discard(name)
             continue
-        local_declaration = any(
-            re.search(r"\b(?:const|let|var)\b", line)
-            and re.search(rf"\b{re.escape(name)}\b", line)
-            for line in masked.splitlines()
-        )
-        arrow_parameter = re.search(rf"\b{re.escape(name)}\s*=>", masked)
-        if local_declaration or arrow_parameter:
+        name_used = re.search(rf"\b{re.escape(name)}\b", masked)
+        possible_local_binding = re.search(r"\b(?:const|let|var)\b", masked)
+        possible_arrow = "=>" in masked
+        if name_used and (possible_local_binding or possible_arrow):
+            # Lexical shadowing is hard to prove with this lightweight extractor;
+            # keep array bounds whenever a local binding or callback may shadow
+            # the global Record. This is conservative and only loses precision.
             visible.discard(name)
     return visible
 
