@@ -54,7 +54,7 @@ python scripts/ci_verify.py src/*.mm --proof-cert
 
 ## Existing-code audit composite action
 
-`.github/actions/mumei-audit` is the adoption-oriented composite action for repositories that do not yet use `.mm`. It installs the mumei binary, sets up Python/uv with a dependency cache keyed by this repository's `uv.lock`, runs `python -m agent audit`, writes SARIF and JSON evidence, uploads SARIF to code scanning when present, and appends a concise audit summary plus timing to `GITHUB_STEP_SUMMARY`. The uploaded evidence artifact has a flat layout (`audit.json`, `audit.sarif`, audit logs, timing files, and `generated-baseline.json` when `--write-baseline` is used), independent of the caller workspace layout.
+`.github/actions/mumei-audit` is the adoption-oriented composite action for repositories that do not yet use `.mm`. It installs the mumei binary, sets up Python/uv with a dependency cache keyed by this repository's `uv.lock`, runs `python -m agent audit`, writes SARIF and JSON evidence, uploads SARIF to code scanning when present, and appends a concise audit summary plus timing to `GITHUB_STEP_SUMMARY`. The uploaded evidence artifact keeps audit evidence at the top level (`audit.json`, `audit.sarif`, audit logs, timing files, and `generated-baseline.json` when `--write-baseline` is used). Opt-in migration execution evidence is role-separated under `migration-execution/`: the upstream `migration_execution.json`, a machine-readable `status.json`, and copied generated artifacts. Generated `.mm` proof artifacts are not relabeled as audit proof certificates or host semantic-equivalence evidence.
 
 Minimal caller workflow:
 
@@ -76,6 +76,8 @@ jobs:
           code-file: src/
           language: python
           audit-args: --baseline audit-baseline.json --write-baseline .mumei-audit/generated-baseline.json --fail-on high-confidence
+          # Optional: collect upstream generated-.mm migration execution evidence.
+          migration-execution-output: .mumei-audit/migration_execution.json
 ```
 
 The `audit-args` example uses the merged baseline contract directly: `audit-baseline.json` is a copyable `mumei.audit-baseline/v1` file such as `{"version":"mumei.audit-baseline/v1","fingerprints":[]}`, `--write-baseline` refreshes the fingerprint set for review, and `--fail-on high-confidence` keeps informational/model-limitation evidence visible without failing the job on lower-confidence findings. Keep `audit-args` on one line because the composite action treats it as a space-separated argument list.
@@ -90,9 +92,12 @@ Relevant inputs:
 | `audit-args` | empty | Extra space-separated `mumei-agent audit` arguments |
 | `audit-output` | `.mumei-audit/audit.json` | Stable audit JSON artifact |
 | `sarif-output` | `.mumei-audit/audit.sarif` | SARIF artifact for code scanning |
+| `migration-execution-output` | empty (disabled) | Workspace-contained migration execution JSON path; enables collection |
 | `upload-sarif` | `true` | Upload SARIF when produced |
 
 The action preserves the audit CLI exit classification as the `audit_exit_code` output (`0` no failing code findings, `1` code evidence, `2` operational/extraction error) and fails the step for nonzero classifications after artifacts and the summary are written. LLM keys are never required: without `LLM_API_KEY`/`OPENAI_API_KEY`, audit uses the deterministic extraction path and records that limitation in the existing audit keys. If a caller opts into LLM-backed extraction, configure secrets at the job or environment level; do not pass secret values through action inputs.
+
+When `migration-execution-output` is set, the action resolves the path inside the caller workspace, rejects traversal, symlinked output directories, and pre-existing output paths rather than deleting caller-controlled files, adds `--auto-migrate` automatically when the caller did not supply it, and passes `--migration-execution-output` only after probing the bundled audit CLI. Missing, malformed, schema-inconsistent, escaping, or unsupported migration output is an operational error rather than silently absent evidence. The action copies the upstream JSON plus non-symlink files from its generated-artifact directory into `migration-execution/` and exposes `migration_execution_status` and `migration_execution_ready_count`. The step summary reports `ready_for_human_review` / `blocked` / `operational_error` counts and `review_required`. This evidence means only that generated `.mm` artifacts were accepted or blocked as written; it is not proof that the host-language implementation is semantically equivalent, and it does not change audit exit-code, baseline, fail-on, or formal verdict semantics.
 
 Timing outputs are `setup_seconds`, `audit_seconds`, and `total_seconds`. The repository self-test workflow `.github/workflows/mumei-audit-selftest.yml` runs the action against `examples/ci-small-repo` and publishes those values in each job summary. Initial local measurement for that small fixture on the validation VM was `0.01s` dependency setup with a warm uv cache, `1.23s` audit execution, and `1.24s` dependency-setup-plus-audit total; the composite action's own `setup_seconds` additionally includes Python setup and mumei installation on GitHub-hosted runners.
 

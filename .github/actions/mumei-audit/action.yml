@@ -1,7 +1,7 @@
 name: Mumei audit
 description: >-
   Install mumei and mumei-agent dependencies, audit existing source code,
-  upload SARIF, and write a GitHub Actions step summary.
+  upload SARIF, optionally collect migration execution evidence, and write a GitHub Actions step summary.
 author: mumei-lang
 branding:
   icon: shield
@@ -34,6 +34,10 @@ inputs:
     description: SARIF output path, relative to the caller workspace.
     required: false
     default: .mumei-audit/audit.sarif
+  migration-execution-output:
+    description: Optional migration execution JSON path inside the caller workspace. Enables migration execution evidence collection.
+    required: false
+    default: ""
   artifact-name:
     description: Name for the audit evidence artifact.
     required: false
@@ -56,6 +60,12 @@ outputs:
   total_seconds:
     description: Seconds from setup start through audit completion.
     value: ${{ steps.timing.outputs.total_seconds }}
+  migration_execution_status:
+    description: Migration execution collection status, or not_requested when disabled.
+    value: ${{ steps.audit.outputs.migration_execution_status }}
+  migration_execution_ready_count:
+    description: Number of migration execution candidates ready for human review.
+    value: ${{ steps.audit.outputs.migration_execution_ready_count }}
 runs:
   using: composite
   steps:
@@ -119,6 +129,7 @@ runs:
         AUDIT_ARGS: ${{ inputs['audit-args'] }}
         AUDIT_OUTPUT: ${{ inputs['audit-output'] }}
         SARIF_OUTPUT: ${{ inputs['sarif-output'] }}
+        MIGRATION_EXECUTION_OUTPUT: ${{ inputs['migration-execution-output'] }}
       run: |
         case "$CODE_FILE" in
           /*) TARGET="$CODE_FILE" ;;
@@ -137,7 +148,34 @@ runs:
         }
         prepare_output_path "$AUDIT_JSON"
         prepare_output_path "$SARIF_FILE"
+        MIGRATION_JSON=""
+        MIGRATION_CLI_SUPPORTED=false
+        MIGRATION_PRECHECK_ERROR=""
+        if [ -n "$MIGRATION_EXECUTION_OUTPUT" ]; then
+          if ! MIGRATION_JSON="$(python "${{ github.action_path }}/scripts/prepare_workspace_output_path.py" "$GITHUB_WORKSPACE" "$MIGRATION_EXECUTION_OUTPUT" 2>/dev/null)"; then
+            MIGRATION_PRECHECK_ERROR="migration execution output path escapes the caller workspace or is invalid"
+            MIGRATION_JSON=""
+          elif [ -e "$MIGRATION_JSON" ] || [ -L "$MIGRATION_JSON" ]; then
+            MIGRATION_PRECHECK_ERROR="migration execution output path already exists; choose a fresh output path"
+          elif ! prepare_output_path "$MIGRATION_JSON"; then
+            MIGRATION_PRECHECK_ERROR="migration execution output path is unsafe"
+          fi
+          if [ -n "$MIGRATION_PRECHECK_ERROR" ]; then
+            echo "audit_exit_code=2" >> "$GITHUB_OUTPUT"
+            python "${{ github.action_path }}/scripts/collect_migration_execution.py" \
+              --requested true \
+              --cli-supported false \
+              --migration-json "" \
+              --workspace "$GITHUB_WORKSPACE" \
+              --state-dir "$ACTION_STATE" \
+              --github-output "$GITHUB_OUTPUT" \
+              --precheck-error "$MIGRATION_PRECHECK_ERROR" || true
+            echo "::error::$MIGRATION_PRECHECK_ERROR"
+            exit 2
+          fi
+        fi
         ARGS=(audit --code-file "$TARGET" --format json --output "$AUDIT_JSON" --sarif-output "$SARIF_FILE")
+        EXTRA_ARGS=()
         if [ -n "$LANGUAGE" ]; then
           ARGS+=(--language "$LANGUAGE")
         fi
@@ -193,6 +231,27 @@ runs:
             fi
           fi
         fi
+        if [ -n "$MIGRATION_JSON" ]; then
+          AUDIT_HELP="$(UV_PROJECT="$AGENT_ROOT" uv run python -I -m agent audit --help 2>/dev/null || true)"
+          if grep -q -- '--migration-execution-output' <<< "$AUDIT_HELP"; then
+            MIGRATION_CLI_SUPPORTED=true
+            AUTO_MIGRATE_PRESENT=false
+            for token in "${EXTRA_ARGS[@]}"; do
+              if [ "$token" = "--auto-migrate" ]; then
+                AUTO_MIGRATE_PRESENT=true
+              fi
+            done
+            if [ "$AUTO_MIGRATE_PRESENT" = false ]; then
+              ARGS+=(--auto-migrate)
+              echo added > "$ACTION_STATE/migration-auto-migrate"
+            else
+              echo requested > "$ACTION_STATE/migration-auto-migrate"
+            fi
+            ARGS+=(--migration-execution-output "$MIGRATION_JSON")
+          else
+            echo unsupported > "$ACTION_STATE/migration-cli-support"
+          fi
+        fi
         date +%s > "$ACTION_STATE/timing/audit_start"
         set +e
         UV_PROJECT="$AGENT_ROOT" uv run python -I -m agent "${ARGS[@]}" \
@@ -213,24 +272,34 @@ runs:
           fi
         fi
         echo "audit_exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+        MIGRATION_COLLECTOR_EXIT=0
+        set +e
+        python "${{ github.action_path }}/scripts/collect_migration_execution.py" \
+          --requested "$(if [ -n "$MIGRATION_JSON" ]; then echo true; else echo false; fi)" \
+          --cli-supported "$MIGRATION_CLI_SUPPORTED" \
+          --migration-json "$MIGRATION_JSON" \
+          --workspace "$GITHUB_WORKSPACE" \
+          --state-dir "$ACTION_STATE" \
+          --github-output "$GITHUB_OUTPUT"
+        MIGRATION_COLLECTOR_EXIT=$?
+        set -e
+        if [ "$MIGRATION_COLLECTOR_EXIT" -ne 0 ]; then
+          echo "::error::migration execution evidence collection failed; inspect migration-execution/status.json in the evidence artifact."
+          exit 2
+        fi
 
     - name: Check SARIF artifact
       id: sarif
       if: always()
       shell: bash
       env:
-        SARIF_OUTPUT: ${{ inputs['sarif-output'] }}
         UPLOAD_SARIF: ${{ inputs['upload-sarif'] }}
       run: |
-        case "$SARIF_OUTPUT" in
-          /*) SARIF_FILE="$SARIF_OUTPUT" ;;
-          *) SARIF_FILE="$GITHUB_WORKSPACE/$SARIF_OUTPUT" ;;
-        esac
         case "${UPLOAD_SARIF,,}" in
           true|1|yes) WANT_UPLOAD=true ;;
           *) WANT_UPLOAD=false ;;
         esac
-        if [ "$WANT_UPLOAD" = true ] && [ -s "$SARIF_FILE" ]; then
+        if [ "$WANT_UPLOAD" = true ] && [ -s "$ACTION_STATE/audit.sarif" ]; then
           echo "present=true" >> "$GITHUB_OUTPUT"
         else
           echo "present=false" >> "$GITHUB_OUTPUT"
@@ -241,21 +310,17 @@ runs:
       if: always()
       shell: bash
       env:
-        AUDIT_OUTPUT: ${{ inputs['audit-output'] }}
         AUDIT_EXIT_CODE: ${{ steps.audit.outputs.audit_exit_code }}
       run: |
-        case "$AUDIT_OUTPUT" in
-          /*) AUDIT_JSON="$AUDIT_OUTPUT" ;;
-          *) AUDIT_JSON="$GITHUB_WORKSPACE/$AUDIT_OUTPUT" ;;
-        esac
         if [ -z "$AUDIT_EXIT_CODE" ]; then
           AUDIT_EXIT_CODE=2
         fi
         python "${{ github.action_path }}/scripts/summarize_audit.py" \
-          --audit-json "$AUDIT_JSON" \
+          --audit-json "$ACTION_STATE/audit.json" \
           --exit-code "$AUDIT_EXIT_CODE" \
           --timing-dir "$ACTION_STATE/timing" \
-          --github-output "$GITHUB_OUTPUT"
+          --github-output "$GITHUB_OUTPUT" \
+          --migration-status-json "$ACTION_STATE/migration-execution/status.json"
 
     - name: Upload audit evidence artifact
       if: always()
@@ -270,7 +335,7 @@ runs:
       if: always() && steps.sarif.outputs.present == 'true'
       uses: github/codeql-action/upload-sarif@v3
       with:
-        sarif_file: ${{ inputs['sarif-output'] }}
+        sarif_file: ${{ env.ACTION_STATE }}/audit.sarif
 
     - name: Enforce audit result
       if: always() && steps.audit.outputs.audit_exit_code != '0'

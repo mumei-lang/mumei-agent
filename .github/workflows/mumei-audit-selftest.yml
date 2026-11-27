@@ -32,6 +32,7 @@ jobs:
           code-file: examples/ci-small-repo/src
           language: python
           audit-args: --baseline examples/ci-small-repo/baseline.json --write-baseline .mumei-audit/generated-baseline.json --fail-on high-confidence
+          migration-execution-output: .mumei-audit/migration_execution.json
           upload-sarif: true
 
       - name: Publish measured action runtime
@@ -42,6 +43,8 @@ jobs:
             echo "- setup_seconds: \`${{ steps.audit.outputs.setup_seconds }}\`";
             echo "- audit_seconds: \`${{ steps.audit.outputs.audit_seconds }}\`";
             echo "- total_seconds: \`${{ steps.audit.outputs.total_seconds }}\`";
+            echo "- migration_execution_status: \`${{ steps.audit.outputs.migration_execution_status }}\`";
+            echo "- migration_execution_ready_count: \`${{ steps.audit.outputs.migration_execution_ready_count }}\`";
           } >> "$GITHUB_STEP_SUMMARY"
 
   verify-artifact:
@@ -65,4 +68,25 @@ jobs:
           test -s evidence/generated-baseline.json
           test -e evidence/audit.stdout.log
           test -e evidence/audit.stderr.log
-          python3 -c "import json; baseline=json.load(open('evidence/generated-baseline.json', encoding='utf-8')); sarif=json.load(open('evidence/audit.sarif', encoding='utf-8')); assert baseline['version'] == 'mumei.audit-baseline/v1'; assert sarif['version'] == '2.1.0'"
+          test -s evidence/migration-execution/migration_execution.json
+          test -s evidence/migration-execution/status.json
+          test -e evidence/migration-execution/generated-artifacts/.mumei-generated-artifacts
+          if grep -R -q 'fake-password-value' evidence/migration-execution; then
+            echo "::error::credential-like sentinel appeared in migration execution evidence"
+            exit 1
+          fi
+          python3 - <<'PY'
+          import json
+          baseline=json.load(open('evidence/generated-baseline.json', encoding='utf-8'))
+          sarif=json.load(open('evidence/audit.sarif', encoding='utf-8'))
+          execution=json.load(open('evidence/migration-execution/migration_execution.json', encoding='utf-8'))
+          status=json.load(open('evidence/migration-execution/status.json', encoding='utf-8'))
+          assert baseline['version'] == 'mumei.audit-baseline/v1'
+          assert sarif['version'] == '2.1.0'
+          assert execution['schema'] == 'mumei.migration-execution/v1'
+          assert status['status'] == 'emitted_by_audit_cli'
+          assert status['counts']['blocked'] >= 1
+          assert status['review_required'] is True
+          assert 'host-language code implements the same behavior' in status['boundary']
+          assert 'fake-password-value' not in json.dumps(execution)
+          PY

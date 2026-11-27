@@ -92,15 +92,23 @@ def test_selftest_workflow_exercises_small_repo_and_publishes_timing() -> None:
     verify_text = "\n".join(step.get("run", "") for step in verify["steps"])
     assert "evidence/generated-baseline.json" in verify_text
     assert "evidence/audit.sarif" in verify_text
+    assert "evidence/migration-execution/migration_execution.json" in verify_text
+    assert "evidence/migration-execution/generated-artifacts/.mumei-generated-artifacts" in verify_text
+    assert "mumei.migration-execution/v1" in verify_text
+    assert "emitted_by_audit_cli" in verify_text
+    assert "grep -R -q 'fake-password-value'" in verify_text
     assert "test -e evidence/audit.stdout.log\n" in verify_text
     assert "test -e evidence/audit.stderr.log\n" in verify_text
     assert "--fail-on high-confidence" in audit_args
+    assert action_step["with"]["migration-execution-output"] == ".mumei-audit/migration_execution.json"
     baseline = json.loads((ROOT / "examples" / "ci-small-repo" / "baseline.json").read_text(encoding="utf-8"))
     assert baseline == {"version": "mumei.audit-baseline/v1", "fingerprints": []}
     publish = next(step for step in steps if step.get("name") == "Publish measured action runtime")
     assert "setup_seconds" in publish["run"]
     assert "audit_seconds" in publish["run"]
     assert "total_seconds" in publish["run"]
+    assert "migration_execution_status" in publish["run"]
+    assert "migration_execution_ready_count" in publish["run"]
 
 
 def test_composite_run_scripts_have_valid_bash_syntax(tmp_path: Path) -> None:
@@ -208,3 +216,341 @@ def test_summarize_audit_tolerates_missing_or_malformed_audit_json(tmp_path: Pat
     )
 
     assert "Audit JSON was not produced or was malformed" in summary.read_text(encoding="utf-8")
+
+
+def test_migration_execution_action_contract_strings() -> None:
+    action = _action()
+    text = ACTION_PATH.read_text(encoding="utf-8")
+
+    assert "migration-execution-output" in action["inputs"]
+    assert "migration_execution_status" in action["outputs"]
+    assert "migration_execution_ready_count" in action["outputs"]
+    assert "--migration-execution-output" in text
+    assert "ARGS+=(--auto-migrate)" in text
+    assert "prepare_workspace_output_path.py" in text
+    assert 'rm -f "$MIGRATION_JSON"' not in text
+    assert 'migration execution output path already exists; choose a fresh output path' in text
+    assert '--precheck-error "$MIGRATION_PRECHECK_ERROR"' in text
+    assert "collect_migration_execution.py" in text
+    assert "migration-execution/status.json" in text
+    assert '--audit-json "$ACTION_STATE/audit.json"' in text
+    assert 'sarif_file: ${{ env.ACTION_STATE }}/audit.sarif' in text
+
+
+def test_prepare_workspace_output_path_contains_traversal(tmp_path: Path) -> None:
+    helper = SUMMARY_SCRIPT.parent / "prepare_workspace_output_path.py"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    inside = subprocess.run(
+        [sys.executable, str(helper), str(workspace), "evidence/migration.json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert inside.stdout.strip() == str(workspace / "evidence" / "migration.json")
+    outside = subprocess.run(
+        [sys.executable, str(helper), str(workspace), "../migration.json"],
+        capture_output=True,
+        text=True,
+    )
+    assert outside.returncode != 0
+    absolute_outside = subprocess.run(
+        [sys.executable, str(helper), str(workspace), str(tmp_path / "migration.json")],
+        capture_output=True,
+        text=True,
+    )
+    assert absolute_outside.returncode != 0
+
+
+def test_collect_migration_execution_copies_role_separated_evidence_and_redacts_secrets(tmp_path: Path) -> None:
+    from agent.audit_models import AuditResult
+    from agent.migration_execution import build_migration_execution
+
+    class VerifyClient:
+        def verify(self, source_path, report_dir=None, extra_args=None, spec_code_mapping=None, collect_decidable_metrics=False):
+            if extra_args and "--output" in extra_args:
+                Path(extra_args[extra_args.index("--output") + 1]).write_text('{"proof":"fake"}\n', encoding="utf-8")
+            return {"success": True, "report": {"status": "success"}, "stdout": "{}", "stderr": ""}
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = workspace / "payment.py"
+    source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+    secret = "fake-password-value"
+    skeleton = (
+        'atom withdraw() -> i64 {\n'
+        '    requires: author == "editor" and password == "' + secret + '";\n'
+        '    ensures: result >= 0;\n'
+        '    body: { 0 }\n'
+        '}'
+    )
+    result = AuditResult(
+        success=False,
+        source_file=str(source),
+        language="python",
+        spec_extracted=True,
+        verification_status="unverifiable",
+        migration_hints=[{"function_name": "withdraw", "priority": "high", "reason": "contract violation", "skeleton": skeleton, "next_step": "review"}],
+        finding_counts={"code": 1, "spec": 0, "errors": 0},
+    )
+    migration_json = workspace / "migration_execution.json"
+    build_migration_execution(result, output_path=migration_json, mumei_client=VerifyClient())
+    state = tmp_path / "state"
+    output = tmp_path / "outputs"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(SUMMARY_SCRIPT.parent / "collect_migration_execution.py"),
+            "--requested", "true",
+            "--cli-supported", "true",
+            "--migration-json", str(migration_json),
+            "--workspace", str(workspace),
+            "--state-dir", str(state),
+            "--github-output", str(output),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    copied = state / "migration-execution" / "migration_execution.json"
+    assert copied.is_file()
+    assert (state / "migration-execution" / "generated-artifacts").is_dir()
+    artifact_text = "\n".join(path.read_text(encoding="utf-8", errors="ignore") for path in (state / "migration-execution").rglob("*") if path.is_file())
+    assert "editor" in artifact_text
+    assert secret not in artifact_text
+    status = json.loads((state / "migration-execution" / "status.json").read_text(encoding="utf-8"))
+    assert status["status"] == "emitted_by_audit_cli"
+    assert status["counts"]["blocked"] == 1
+    assert "migration_execution_status=emitted_by_audit_cli" in output.read_text(encoding="utf-8")
+
+
+def test_collect_migration_execution_missing_or_escaping_artifact_is_operational_error(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state = tmp_path / "state"
+    output = tmp_path / "outputs"
+    helper = SUMMARY_SCRIPT.parent / "collect_migration_execution.py"
+    missing = subprocess.run(
+        [
+            sys.executable,
+            str(helper),
+            "--requested", "true",
+            "--cli-supported", "true",
+            "--migration-json", str(workspace / "missing.json"),
+            "--workspace", str(workspace),
+            "--state-dir", str(state),
+            "--github-output", str(output),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert missing.returncode == 2
+    status = json.loads((state / "migration-execution" / "status.json").read_text(encoding="utf-8"))
+    assert status["status"] == "operational_error"
+    assert "migration_execution_status=operational_error" in output.read_text(encoding="utf-8")
+
+    unsupported = subprocess.run(
+        [
+            sys.executable,
+            str(helper),
+            "--requested", "true",
+            "--cli-supported", "false",
+            "--migration-json", str(workspace / "missing.json"),
+            "--workspace", str(workspace),
+            "--state-dir", str(tmp_path / "state2"),
+            "--github-output", str(tmp_path / "outputs2"),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert unsupported.returncode == 2
+
+
+def test_summarize_audit_includes_migration_execution_counts_and_boundary(tmp_path: Path) -> None:
+    audit_json = tmp_path / "audit.json"
+    audit_json.write_text('{"verification_status":"unverifiable","finding_counts":{}}', encoding="utf-8")
+    timing = tmp_path / "timing"
+    timing.mkdir()
+    migration = tmp_path / "migration-status.json"
+    migration.write_text(
+        json.dumps(
+            {
+                "status": "emitted_by_audit_cli",
+                "counts": {"ready_for_human_review": 0, "blocked": 2, "operational_error": 1},
+                "review_required": True,
+                "boundary": "Generated .mm evidence only; not host-code semantic equivalence proof.",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "migration-auto-migrate").write_text("added\n", encoding="utf-8")
+    summary = tmp_path / "summary.md"
+    env = {**os.environ, "GITHUB_STEP_SUMMARY": str(summary)}
+
+    subprocess.run(
+        [
+            sys.executable,
+            str(SUMMARY_SCRIPT),
+            "--audit-json", str(audit_json),
+            "--exit-code", "1",
+            "--timing-dir", str(timing),
+            "--migration-status-json", str(migration),
+        ],
+        env=env,
+        check=True,
+    )
+
+    text = summary.read_text(encoding="utf-8")
+    assert "ready `0`, blocked `2`, operational_error `1`" in text
+    assert "review_required `true`" in text
+    assert "not host-code semantic equivalence proof" in text
+    assert "`--auto-migrate` was added automatically" in text
+
+
+def test_collect_migration_execution_rejects_malformed_and_escaping_generated_dir(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    helper = SUMMARY_SCRIPT.parent / "collect_migration_execution.py"
+
+    def run(state: Path, migration_json: Path) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                sys.executable,
+                str(helper),
+                "--requested", "true",
+                "--cli-supported", "true",
+                "--migration-json", str(migration_json),
+                "--workspace", str(workspace),
+                "--state-dir", str(state),
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+    malformed = workspace / "malformed.json"
+    malformed.write_text("{not json", encoding="utf-8")
+    assert run(tmp_path / "malformed-state", malformed).returncode == 2
+
+    outside = tmp_path / "outside-generated"
+    outside.mkdir()
+    escaping = workspace / "escaping.json"
+    escaping.write_text(
+        json.dumps(
+            {
+                "schema": "mumei.migration-execution/v1",
+                "generated_at": "2026-01-01T00:00:00Z",
+                "source": {},
+                "audit": {},
+                "selection": {},
+                "operational_errors": [],
+                "candidates": [],
+                "summary": {"ready_for_human_review": 0, "blocked": 0, "operational_error": 0, "candidate_count": 0, "review_required": False},
+                "artifact_paths": {"migration_execution": str(escaping), "generated_artifacts": str(outside)},
+                "evidence_boundary": ["generated .mm only"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    escaped = run(tmp_path / "escaping-state", escaping)
+    assert escaped.returncode == 2
+    status = json.loads((tmp_path / "escaping-state" / "migration-execution" / "status.json").read_text(encoding="utf-8"))
+    assert "escapes the caller workspace" in status["error"]
+
+
+def test_collect_migration_execution_rejects_inconsistent_summary(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    generated = workspace / "execution.migration-execution"
+    generated.mkdir()
+    migration_json = workspace / "execution.json"
+    migration_json.write_text(
+        json.dumps(
+            {
+                "schema": "mumei.migration-execution/v1",
+                "generated_at": "2026-01-01T00:00:00Z",
+                "source": {},
+                "audit": {},
+                "selection": {},
+                "operational_errors": [],
+                "candidates": [{
+                    "execution_state": "blocked",
+                    "function_name": "f",
+                    "source_provenance": {},
+                    "selection": {},
+                    "extracted_contract": {},
+                    "generated_mm": {},
+                    "heal": {},
+                    "verification": {},
+                    "unbound_audit_diagnostics": {},
+                    "contract_provenance": {},
+                    "evidence_blockers": [],
+                    "operational_errors": [],
+                    "review_required": True,
+                }],
+                "summary": {"ready_for_human_review": 0, "blocked": 0, "operational_error": 0, "candidate_count": 1, "review_required": True},
+                "artifact_paths": {"migration_execution": str(migration_json), "generated_artifacts": str(generated)},
+                "evidence_boundary": ["generated .mm only"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(SUMMARY_SCRIPT.parent / "collect_migration_execution.py"),
+            "--requested", "true",
+            "--cli-supported", "true",
+            "--migration-json", str(migration_json),
+            "--workspace", str(workspace),
+            "--state-dir", str(tmp_path / "state"),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 2
+
+
+def test_collect_migration_execution_precheck_error_is_machine_readable(tmp_path: Path) -> None:
+    output = tmp_path / "outputs"
+    state = tmp_path / "state"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(SUMMARY_SCRIPT.parent / "collect_migration_execution.py"),
+            "--requested", "true",
+            "--cli-supported", "false",
+            "--workspace", str(tmp_path),
+            "--state-dir", str(state),
+            "--github-output", str(output),
+            "--precheck-error", "migration execution output path already exists; choose a fresh output path",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 2
+    status = json.loads((state / "migration-execution" / "status.json").read_text(encoding="utf-8"))
+    assert status["status"] == "operational_error"
+    assert "already exists" in status["error"]
+    assert "migration_execution_status=operational_error" in output.read_text(encoding="utf-8")
+
+
+def test_collect_migration_execution_not_requested_has_machine_readable_default(tmp_path: Path) -> None:
+    output = tmp_path / "outputs"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(SUMMARY_SCRIPT.parent / "collect_migration_execution.py"),
+            "--requested", "false",
+            "--cli-supported", "false",
+            "--workspace", str(tmp_path),
+            "--state-dir", str(tmp_path / "state"),
+            "--github-output", str(output),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0
+    assert output.read_text(encoding="utf-8") == "migration_execution_status=not_requested\nmigration_execution_ready_count=0\n"
+    assert not (tmp_path / "state" / "migration-execution").exists()
