@@ -431,6 +431,8 @@ def _dedupe_counterexample_values(values: list[dict]) -> list[dict]:
 def _cross_validation_gap_strings(report: CrossValidationReport) -> list[str]:
     gaps: list[str] = []
     for atom in report.spec_stronger_than_impl:
+        if report.has_precondition_detail(atom):
+            continue
         gaps.append(f"spec stronger than implementation: {atom}")
     for atom in report.impl_stronger_than_spec:
         gaps.append(f"implementation stronger than spec: {atom}")

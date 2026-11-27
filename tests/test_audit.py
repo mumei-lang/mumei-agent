@@ -33,6 +33,7 @@ from agent.attempt_schedule import MAX_SCHEDULE_ATTEMPTS
 from agent.audit_reporting import (
     _finding_counts,
     _finding_counts_text,
+    _cross_validation_gap_strings,
     _malformed_extraction_issue_strings,
     _spec_health_issue_strings,
     _verification_issue_strings,
@@ -70,6 +71,33 @@ def _triage_file(
         spec_health_issues=spec_health_issues or [],
         skipped_rate_limited=skipped_rate_limited,
     )
+
+
+def test_cross_validation_gap_strings_keeps_precondition_detail_once() -> None:
+    report = CrossValidationReport(
+        spec_stronger_than_impl=["adminAuthorized", "other"],
+        details=["spec precondition assumed, not enforced, by `adminAuthorized`"],
+        _precondition_gap_atoms=["adminAuthorized"],
+    )
+
+    assert _cross_validation_gap_strings(report) == [
+        "spec stronger than implementation: other",
+        "spec precondition assumed, not enforced, by `adminAuthorized`",
+    ]
+    assert "_precondition_gap_atoms" not in report.to_dict()
+
+
+def test_cross_validation_gap_strings_does_not_dedupe_lookalike_names() -> None:
+    report = CrossValidationReport(
+        spec_stronger_than_impl=["normalize", "_normalize"],
+        details=["spec precondition assumed, not enforced, by `normalize`"],
+        _precondition_gap_atoms=["normalize"],
+    )
+
+    assert _cross_validation_gap_strings(report) == [
+        "spec stronger than implementation: _normalize",
+        "spec precondition assumed, not enforced, by `normalize`",
+    ]
 
 
 def test_dogfood_triage_buckets_verdicts_and_unverifiable_noise() -> None:
@@ -1417,10 +1445,7 @@ def test_audit_does_not_treat_python_method_as_module_contract(
     )
 
     assert result.cross_validation_gaps == (
-        [] if has_guard else [
-            "spec stronger than implementation: call_",
-            "spec precondition assumed, not enforced, by `Service.call`",
-        ]
+        [] if has_guard else ["spec precondition assumed, not enforced, by `Service.call`"]
     )
     assert result.verification_status == "unverifiable"
     assert result.counterexample_values == []
