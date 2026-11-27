@@ -1973,7 +1973,7 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
             conflicting = any(
                 _same_migration_path(migration_readiness_output, str(candidate))
                 for candidate in audit_input_path.rglob("*")
-                if candidate.is_file() and candidate.suffix in {*AUDIT_EXTENSION_MAP, ".mm"}
+                if candidate.is_file() and candidate.suffix.lower() in {ext.lower() for ext in AUDIT_EXTENSION_MAP} | {".mm"}
             )
         if conflicting:
             print(

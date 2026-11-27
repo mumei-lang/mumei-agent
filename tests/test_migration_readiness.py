@@ -7,7 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from agent.audit import build_parser, main
-from agent.audit_models import AuditResult
+from agent.audit_models import AuditDirectoryResult, AuditResult
 from agent.migration_readiness import SCHEMA, build_migration_readiness
 
 
@@ -93,7 +93,8 @@ def test_migration_readiness_ranks_candidates_and_verifies_critical_skeleton(tmp
     assert verification["status"] == "verified"
     assert verification["proof_certificate_written"] is True
     assert len(client.calls) == 1
-    assert client.calls[0]["source_path"].endswith("divide.mm")
+    assert "/divide-" in client.calls[0]["source_path"]
+    assert client.calls[0]["source_path"].endswith(".mm")
     assert "--proof-cert" in client.calls[0]["extra_args"]
     assert "not proof that host-language code implements" in "\n".join(report["evidence_boundary"])
 
@@ -188,6 +189,92 @@ def test_effect_detection_uses_python_function_ast_scope(tmp_path: Path) -> None
     assert entry["external_effects"] == []
 
 
+def test_directory_hints_keep_per_file_health_and_duplicate_attribution(tmp_path: Path) -> None:
+    first = tmp_path / "src" / "first.py"
+    second = tmp_path / "src" / "second.py"
+    first.parent.mkdir()
+    first.write_text("def same():\n    open('x', 'w').write('x')\n", encoding="utf-8")
+    second.write_text("def same():\n    return 1\n", encoding="utf-8")
+    first_hint = _hint("same", "high")
+    second_hint = _hint("same", "high")
+    first_result = _result(first, [first_hint], spec_health_issues=["malformed-extraction: first broken"])
+    second_result = _result(second, [second_hint], spec_health_issues=[])
+    directory = AuditDirectoryResult(
+        success=False,
+        source_dir=str(first.parent),
+        language="python",
+        file_results=[first_result, second_result],
+        verification_status="unverifiable",
+        spec_health_issues=[
+            "first.py: malformed-extraction: first broken",
+        ],
+        migration_hints=[first_hint, second_hint],
+    )
+
+    report = build_migration_readiness(
+        directory,
+        output_path=tmp_path / "readiness.json",
+        mumei_client=FakeVerifyClient(),
+    )
+
+    entries = {entry["source_file"]: entry for entry in report["migration_plan"]}
+    assert entries[str(first)]["verification_feasibility"] == "blocked"
+    assert entries[str(second)]["verification_feasibility"] != "blocked"
+    assert entries[str(first)]["external_effects"] == ["filesystem"]
+    assert entries[str(second)]["external_effects"] == []
+
+
+def test_artifact_directory_does_not_take_over_foreign_directory(tmp_path: Path) -> None:
+    source = tmp_path / "payment.py"
+    source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+    foreign = tmp_path / "readiness.migration-readiness"
+    foreign.mkdir()
+    sentinel = foreign / "sentinel.mm"
+    sentinel.write_text("atom user_owned() -> i64 {\n    requires: true;\n    ensures: true;\n    body: { 0 }\n}\n", encoding="utf-8")
+
+    report = build_migration_readiness(
+        _result(source, [_hint("withdraw", "high")]),
+        output_path=tmp_path / "readiness.json",
+        mumei_client=FakeVerifyClient(),
+    )
+
+    assert sentinel.read_text(encoding="utf-8").startswith("atom user_owned")
+    assert "readiness.migration-readiness-1" in report["artifact_paths"]["critical_artifacts"]
+
+
+def test_diagnostics_redact_credentials_before_truncation_and_remove_absolute_paths(tmp_path: Path) -> None:
+    source = tmp_path / "payment.py"
+    source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+    token = "sk-1234567890abcdefghij" + ("x" * 600)
+
+    class FailingClient(FakeVerifyClient):
+        def verify(self, *args, **kwargs):
+            super().verify(*args, **kwargs)
+            return {
+                "success": False,
+                "report": {
+                    "status": "refuted",
+                    "message": f"failed at {tmp_path}/payment.py",
+                    "counterexample": {"token": token},
+                },
+                "stdout": "{}",
+                "stderr": "",
+            }
+
+    report = build_migration_readiness(
+        _result(source, [_hint("withdraw", "high")]),
+        output_path=tmp_path / "readiness.json",
+        mumei_client=FailingClient(success=False),
+    )
+    serialized = json.dumps(report)
+
+    diagnostics = json.dumps(report["critical_function"]["verification"]["diagnostics"])
+    assert token not in serialized
+    assert str(tmp_path) not in diagnostics
+    assert "<redacted>" in serialized
+    assert "<path>" in diagnostics
+
+
 def test_cli_requires_auto_migrate_for_migration_readiness(tmp_path: Path) -> None:
     source = tmp_path / "payment.py"
     source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
@@ -248,3 +335,22 @@ def test_cli_rejects_migration_readiness_output_conflicts(tmp_path: Path) -> Non
         with pytest.raises(SystemExit) as exc:
             main(args)
         assert exc.value.code == 2
+
+
+def test_cli_rejects_case_insensitive_source_collision_in_directory(tmp_path: Path) -> None:
+    source_dir = tmp_path / "src"
+    source_dir.mkdir()
+    source = source_dir / "ledger.PY"
+    source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+    args = build_parser().parse_args(
+        [
+            "--code-file", str(source_dir),
+            "--language", "python",
+            "--auto-migrate",
+            "--migration-readiness-output", str(source),
+        ]
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        main(args)
+    assert exc.value.code == 2
