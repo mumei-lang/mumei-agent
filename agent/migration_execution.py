@@ -119,10 +119,6 @@ def _outside_string_mask(code: str) -> str:
     return "".join(out)
 
 
-_CREDENTIAL_NAME_RE = re.compile(
-    r"(?:password|passwd|secret|token|api_?key|apikey|private_?key|auth|credential)",
-    re.IGNORECASE,
-)
 _STRING_LITERAL = r'"(?:\\.|[^"\\])*"'
 _MASKED_STRING = r"__MUMEI_STRING_\d+__"
 _TOKEN_RE = re.compile(
@@ -230,9 +226,41 @@ def _simple_token(tokens: list[tuple[str, str]], kind: str) -> tuple[str, str] |
     return None
 
 
+def _is_credential_name(value: str) -> bool:
+    credential_words = {"password", "passwd", "secret", "token", "auth", "authentication", "credential", "credentials", "apikey", "privatekey", "accesskey", "sessionkey", "signingkey", "encryptionkey"}
+    compound_suffixes = {"value", "hash", "digest", "key", "accesskey", "token", "secret", "password", "passwd", "credential", "credentials", "code", "store"}
+    numeric_compound_roots = {"password", "passwd", "secret", "token", "credential", "apikey", "privatekey", "accesskey", "sessionkey"}
+    key_pairs = {("api", "key"), ("private", "key"), ("access", "key"), ("session", "key"), ("signing", "key"), ("encryption", "key")}
+    dot_components = value.split(".")
+    key_contexts = {"access", "session", "signing", "encryption", "private", "api", "client"}
+    if len(dot_components) > 1 and dot_components[-1].lower() == "key" and dot_components[-2].lower() in key_contexts:
+        return True
+    weak_root_prefixes = {"access", "refresh", "bearer", "session", "api", "client", "user", "service", "app", "auth", "authentication", "oauth", "csrf", "xsrf", "id", "signing", "encryption", "private"}
+    for component in dot_components:
+        component_words: list[str] = []
+        for part in re.split(r"[_$\-]+", component):
+            lowered_part = part.lower()
+            if re.fullmatch(r"(?:api[_-]?key|private[_-]?key)", part, re.IGNORECASE):
+                return True
+            for root in credential_words:
+                position = lowered_part.find(root)
+                while position >= 0:
+                    remainder = lowered_part[position + len(root):]
+                    prefix = lowered_part[:position]
+                    weak_blocked = root in {"auth", "authentication"} and prefix and prefix not in weak_root_prefixes
+                    if not weak_blocked and (not remainder or remainder in compound_suffixes or (root in numeric_compound_roots and remainder.isdigit())):
+                        return True
+                    position = lowered_part.find(root, position + 1)
+            component_words.extend(match.group(0).lower() for match in re.finditer(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|\d+", part))
+        if any(word in credential_words for word in component_words):
+            return True
+        if any(pair in key_pairs for pair in zip(component_words, component_words[1:])):
+            return True
+    return False
+
 def _is_credential_operand(tokens: list[tuple[str, str]]) -> bool:
     token = _simple_token(tokens, "name")
-    return token is not None and _CREDENTIAL_NAME_RE.search(token[1]) is not None
+    return token is not None and _is_credential_name(token[1])
 
 
 def _string_operand(tokens: list[tuple[str, str]]) -> str | None:
@@ -375,7 +403,8 @@ def _redact_error_text(text: str) -> str:
 
 
 def _healed_content(function_name: str, healed_files: list[str], skeleton: str, source_path: str, excluded_paths: set[str]) -> tuple[str, str | None, bool]:
-    base_names = {function_name, _safe_stem(function_name), _safe_identifier(function_name), migration_output_function_stem(function_name)}
+    raw_base_names = {function_name, _safe_stem(function_name), _safe_identifier(function_name)}
+    base_names = raw_base_names | {migration_output_function_stem(base) for base in raw_base_names}
     expected_names = {f"{base}.mm" for base in base_names}
     key = migration_output_key(source_path, skeleton)
 
@@ -649,7 +678,8 @@ def build_migration_execution(
                 candidate["heal"]["healed_file"] = healed_path
                 candidate["generated_mm"]["origin"] = "healed_file" if used_healed else "generated_skeleton"
             heal_errors = file_result.heal_errors if isinstance(file_result, AuditResult) else result.heal_errors
-            expected_error_stems = {function_name, _safe_stem(function_name), _safe_identifier(function_name), migration_output_function_stem(function_name)}
+            raw_error_stems = {function_name, _safe_stem(function_name), _safe_identifier(function_name)}
+            expected_error_stems = raw_error_stems | {migration_output_function_stem(base) for base in raw_error_stems}
             error_key = migration_output_key(hint_source, skeleton)
 
             def heal_error_matches(item: object) -> bool:
