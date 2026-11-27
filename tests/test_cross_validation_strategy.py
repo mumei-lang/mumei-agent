@@ -1736,6 +1736,10 @@ func adminAuthorized(r *http.Request) bool { return r.Header.Get("X") != "" }
 func resetHandler(w http.ResponseWriter, r *http.Request) {
     if !adminAuthorized(r) { return }
 }
+func main() {
+    mux := http.NewServeMux()
+    mux.HandleFunc("/admin/reset", resetHandler)
+}
 ''')
     spec = tmp_path / "spec.mm"
     spec.write_text('atom adminAuthorized(r: i64) -> bool {\n  requires: r != nil;\n  ensures: true;\n}\n')
@@ -1746,30 +1750,24 @@ func resetHandler(w http.ResponseWriter, r *http.Request) {
     assert report.details == []
 
 
-def test_go_constructor_and_checked_map_nil_preconditions_are_caller_guaranteed(tmp_path):
-    (tmp_path / "auth.go").write_text('''package main
+def test_go_constructor_facts_alone_do_not_suppress_nil_precondition(tmp_path):
+    (tmp_path / "auth.go").write_text("""package main
 
 type user struct{}
 func newUser() *user { return &user{} }
 var dummyAccount = newUser()
-var users = map[string]*user{}
 func passwordMatches(account *user, password string) bool { return account != nil }
-func login(input string) bool {
-    account, known := users[input]
-    if !known || account == nil {
-        passwordMatches(dummyAccount, "x")
-        return false
-    }
-    return passwordMatches(account, "x")
+func login() bool {
+    return passwordMatches(dummyAccount, "x")
 }
-''')
+""")
     spec = tmp_path / "spec.mm"
     spec.write_text('atom passwordMatches(account: i64, password: string) -> bool {\n  requires: account != nil;\n  ensures: true;\n}\n')
 
     report = CrossValidator().validate_spec_vs_impl(str(spec), str(tmp_path / "auth.go"), "go")
 
-    assert report.spec_stronger_than_impl == []
-    assert report.details == []
+    assert report.spec_stronger_than_impl == ["passwordMatches"]
+    assert report.details == ["spec precondition assumed, not enforced, by `passwordMatches`"]
 
 
 def test_go_unchecked_map_lookup_nil_precondition_is_not_suppressed(tmp_path):
@@ -1790,3 +1788,79 @@ func login(input string) bool {
 
     assert report.spec_stronger_than_impl == ["passwordMatches"]
     assert report.details == ["spec precondition assumed, not enforced, by `passwordMatches`"]
+
+
+
+def test_go_direct_handler_call_prevents_framework_suppression(tmp_path):
+    (tmp_path / "main.go").write_text("""package main
+
+func adminAuthorized(r *http.Request) bool { return r.Header.Get("X") != "" }
+func resetHandler(w http.ResponseWriter, r *http.Request) {
+    if !adminAuthorized(r) { return }
+}
+func main() {
+    mux := http.NewServeMux()
+    mux.HandleFunc("/admin/reset", resetHandler)
+    resetHandler(nil, nil)
+}
+""")
+    spec = tmp_path / "spec.mm"
+    spec.write_text('atom adminAuthorized(r: i64) -> bool {\n  requires: r != nil;\n  ensures: true;\n}\n')
+
+    report = CrossValidator().validate_spec_vs_impl(str(spec), str(tmp_path / "main.go"), "go")
+
+    assert report.spec_stronger_than_impl == ["adminAuthorized"]
+
+
+def test_go_request_reassignment_prevents_framework_suppression(tmp_path):
+    (tmp_path / "main.go").write_text("""package main
+
+func adminAuthorized(r *http.Request) bool { return r.Header.Get("X") != "" }
+func resetHandler(w http.ResponseWriter, r *http.Request) {
+    r = nil
+    if !adminAuthorized(r) { return }
+}
+func main() { mux.HandleFunc("/admin/reset", resetHandler) }
+""")
+    spec = tmp_path / "spec.mm"
+    spec.write_text('atom adminAuthorized(r: i64) -> bool {\n  requires: r != nil;\n  ensures: true;\n}\n')
+
+    report = CrossValidator().validate_spec_vs_impl(str(spec), str(tmp_path / "main.go"), "go")
+
+    assert report.spec_stronger_than_impl == ["adminAuthorized"]
+
+
+
+def test_go_function_value_reference_prevents_suppression(tmp_path):
+    (tmp_path / "main.go").write_text("""package main
+
+func adminAuthorized(r *http.Request) bool { return r.Header.Get("X") != "" }
+func resetHandler(w http.ResponseWriter, r *http.Request) {
+    callback := adminAuthorized
+    if !callback(r) { return }
+}
+func main() { mux.HandleFunc("/admin/reset", resetHandler) }
+""")
+    spec = tmp_path / "spec.mm"
+    spec.write_text('atom adminAuthorized(r: i64) -> bool {\n  requires: r != nil;\n  ensures: true;\n}\n')
+
+    report = CrossValidator().validate_spec_vs_impl(str(spec), str(tmp_path / "main.go"), "go")
+
+    assert report.spec_stronger_than_impl == ["adminAuthorized"]
+
+
+def test_go_go_statement_call_prevents_suppression(tmp_path):
+    (tmp_path / "main.go").write_text("""package main
+
+func adminAuthorized(r *http.Request) bool { return r.Header.Get("X") != "" }
+func resetHandler(w http.ResponseWriter, r *http.Request) {
+    go adminAuthorized(r)
+}
+func main() { mux.HandleFunc("/admin/reset", resetHandler) }
+""")
+    spec = tmp_path / "spec.mm"
+    spec.write_text('atom adminAuthorized(r: i64) -> bool {\n  requires: r != nil;\n  ensures: true;\n}\n')
+
+    report = CrossValidator().validate_spec_vs_impl(str(spec), str(tmp_path / "main.go"), "go")
+
+    assert report.spec_stronger_than_impl == ["adminAuthorized"]
