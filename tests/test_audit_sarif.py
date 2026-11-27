@@ -271,7 +271,7 @@ def test_sarif_redacts_machine_local_absolute_paths(tmp_path: Path, monkeypatch)
     assert "<path>" in row["message"]["text"]
 
 
-def test_directory_sarif_redacts_directory_error_and_includes_trusted_atoms(tmp_path: Path) -> None:
+def test_directory_sarif_redacts_directory_error_and_includes_trusted_atoms(tmp_path: Path, monkeypatch) -> None:
     directory = AuditDirectoryResult(
         success=False,
         source_dir=str(tmp_path),
@@ -283,9 +283,23 @@ def test_directory_sarif_redacts_directory_error_and_includes_trusted_atoms(tmp_
     rows = sarif_document(directory)["runs"][0]["results"]
 
     assert rows[0]["ruleId"] == "mumei.audit/trusted-atom"
-    assert rows[0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"] == "specs/payment.mm"
+    assert rows[0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"].startswith("external/")
     assert rows[1]["ruleId"] == "mumei.audit/audit-error"
     assert str(tmp_path) not in rows[1]["message"]["text"]
+
+
+def test_directory_trusted_atom_uri_is_relative_to_audit_root(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    directory = AuditDirectoryResult(
+        success=True,
+        source_dir="audited",
+        language="mixed",
+        trusted_atoms=[{"file": "specs/payment.mm", "atom": "withdraw", "line": 3}],
+    )
+
+    row = sarif_document(directory)["runs"][0]["results"][0]
+
+    assert row["locations"][0]["physicalLocation"]["artifactLocation"]["uri"] == "audited/specs/payment.mm"
 
 
 def test_malformed_extraction_is_sarif_audit_error() -> None:
@@ -332,3 +346,14 @@ def test_cli_rejects_sarif_output_inside_directory_audit_inputs(tmp_path: Path) 
     else:  # pragma: no cover
         raise AssertionError("directory input overwrite was accepted")
     assert target.read_text(encoding="utf-8") == "def withdraw():\n    pass\n"
+
+def test_independent_counterexample_does_not_hide_verifier_crash() -> None:
+    foreign_result = {
+        "success": False,
+        "counterexample": {"x": 0},
+        "errors": ["mumei verify failed"],
+        "verification": {"success": False, "report": {}, "stderr": "panic"},
+    }
+    from agent.audit_reporting import _verification_tool_failure_without_evidence
+
+    assert _verification_tool_failure_without_evidence(foreign_result) is True

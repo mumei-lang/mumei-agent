@@ -249,11 +249,11 @@ def _is_inconclusive_non_failure(report: dict[str, object], *, counterexample_pr
 
 
 def _verification_tool_failure_without_evidence(result: dict[str, object]) -> bool:
-    """True when mumei exited unsuccessfully without a semantic failure report.
+    """True when mumei exited unsuccessfully without its own failure report.
 
-    ``success=False`` can mean either a refuted contract or a verifier/runtime
-    failure. Only failed atoms, explicit failure statuses or counterexamples
-    are evidence against code; an empty/unknown report is operational.
+    Independent foreign-code counterexamples can still refute the code, but
+    they do not prove that the verifier itself completed; an empty/unknown
+    verification report therefore remains an operational error.
     """
     verification = _dict_value(result.get("verification"))
     if not verification or verification.get("success") is not False:
@@ -263,15 +263,10 @@ def _verification_tool_failure_without_evidence(result: dict[str, object]) -> bo
     if status in _INCONCLUSIVE_VERIFY_STATUSES:
         return False
     report_counterexample = format_counterexample(report)
-    has_counterexample = bool(
-        result.get("counterexample")
-        or report.get("counterexample")
-        or report_counterexample
-        or format_counterexample(result)
-    )
+    has_report_counterexample = bool(report.get("counterexample") or report_counterexample)
     has_failed_atoms = bool(report.get("failed") or report.get("failed_clause"))
     has_failure_status = status in {"failed", "refuted"}
-    return not (has_counterexample or has_failed_atoms or has_failure_status)
+    return not (has_report_counterexample or has_failed_atoms or has_failure_status)
 
 
 def _verification_issue_strings(result: dict[str, object]) -> list[str]:

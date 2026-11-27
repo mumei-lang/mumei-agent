@@ -84,7 +84,13 @@ def sarif_document(result: AuditResult | AuditDirectoryResult) -> dict:
     if isinstance(result, AuditDirectoryResult):
         for file_result in result.file_results:
             results.extend(_file_sarif_results(file_result, include_trusted_atoms=False))
-        results.extend(_trusted_atom_sarif_results(result.trusted_atoms, result.source_dir))
+        results.extend(
+            _trusted_atom_sarif_results(
+                result.trusted_atoms,
+                result.source_dir,
+                base_dir=result.source_dir,
+            )
+        )
         results.extend(
             _finding_result(
                 "mumei.audit/audit-error",
@@ -178,13 +184,22 @@ def _file_sarif_results(result: AuditResult, *, include_trusted_atoms: bool = Tr
     return output
 
 
-def _trusted_atom_sarif_results(trusted_atoms: list[dict], fallback_source: str) -> list[dict]:
+def _trusted_atom_sarif_results(
+    trusted_atoms: list[dict],
+    fallback_source: str,
+    *,
+    base_dir: str | None = None,
+) -> list[dict]:
     output: list[dict] = []
     for atom in trusted_atoms:
         if not isinstance(atom, dict):
             continue
         line = atom.get("line")
         source = str(atom.get("file") or fallback_source)
+        if base_dir and atom.get("file") and not os.path.isabs(source):
+            # Directory trusted-atom labels are relative to the audit root,
+            # not necessarily to the process working directory used by SARIF.
+            source = str(Path(base_dir) / source)
         output.append(
             _finding_result(
                 "mumei.audit/trusted-atom",
