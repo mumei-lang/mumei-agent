@@ -8189,7 +8189,8 @@ def _sentinel_guarded(
         for overwrite in reassignment.finditer(body, match.end(), use_pos):
             rhs = body[overwrite.end() : use_pos].lstrip()
             if kind == "undefined" and re.match(
-                r"(?:[-+]?\d|[\[{'\"`]|new\b|true\b|false\b)", rhs
+                r"(?:\{[^{};]*\}|\[[^\[\];]*\]|[-+]?\d+(?:\.\d+)?|true|false|new\s+[A-Za-z_]\w*\s*\([^;]*\)|\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)\s*;",
+                rhs,
             ):
                 continue
             return False
@@ -8314,7 +8315,11 @@ def _sentinel_index_issues(
                         rf"\b{re.escape(array_name)}\s*(?:\.\s*(?:pop|shift|splice)\s*\(|(?<![=!<>])=(?![=>])|\.length\s*(?<![=!<>])=(?![=>])|\[[^\]]+\]\s*(?<![=!<>])=(?![=>]))",
                         intervening,
                     )
-                    if array_mutated is None:
+                    var_reassigned = re.search(
+                        rf"(?<![\w$.]){re.escape(var)}\s*(?<![=!<>])=(?![=>])",
+                        intervening,
+                    )
+                    if array_mutated is None and var_reassigned is None:
                         # ``array.find`` established membership and no mutation
                         # before this use could remove the object.
                         continue
@@ -9029,7 +9034,7 @@ def _solidity_function_is_protocol_settlement(params: str, body: str) -> bool:
 def _solidity_function_is_caller_scoped(body: str) -> bool:
     body = _SOLIDITY_EMIT_STATEMENT.sub("", body)
     # Braces inside strings and comments are masked so they don't count as blocks.
-    masked = _strip_go_rust_literals_and_comments(body)
+    masked = _strip_go_rust_literals_and_comments(body, single_quoted_strings=True)
     # Solidity also quotes strings with ``'``; the Go/Rust masker only knows char literals.
     masked = re.sub(r"'(?:\\.|[^'\\\n])*'", lambda q: " " * len(q.group(0)), masked)
     depth = [0]

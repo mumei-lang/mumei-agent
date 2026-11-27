@@ -8433,3 +8433,22 @@ contract Vault {
         issue.function_name == "withdraw" and "no access-control guard" in issue.message
         for issue in _detect_solidity_contract_issues(source)
     )
+
+
+def test_solidity_single_quoted_error_message_does_not_hide_caller_scope() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_solidity_contract_issues
+
+    source = """
+contract Vault {
+    mapping(address => uint256) balances;
+    function withdraw() external {
+        uint256 amount = balances[msg.sender];
+        require(amount > 0, 'missing "balance');
+        balances[msg.sender] = 0;
+    }
+}
+"""
+    assert not any(
+        issue.function_name == "withdraw" and "no access-control guard" in issue.message
+        for issue in _detect_solidity_contract_issues(source)
+    )

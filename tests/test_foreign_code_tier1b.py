@@ -765,3 +765,13 @@ def test_ts_property_assignment_does_not_invalidate_local_sentinel_guard() -> No
 def test_ts_object_literal_overwrite_does_not_invalidate_undefined_guard() -> None:
     body = "let item = xs.find(x => x.ok); if (!item) return; else { item = { value: 1 }; return item.value; }"
     assert not _sentinel_issues(body, "TypeScript")
+
+
+def test_ts_indexed_array_literal_overwrite_invalidates_undefined_guard() -> None:
+    body = "let item = xs.find(x => x.ok); if (!item) return; else { item = [fallback][selected]; return item.value; }"
+    assert any("undefined" in issue.message for issue in _sentinel_issues(body, "TypeScript"))
+
+
+def test_ts_object_reassignment_invalidates_inline_index_membership() -> None:
+    body = "let item = items.find(x => x.ok); if (!item) return; item = { value: 1 }; return items[items.indexOf(item)];"
+    assert any("inline" in issue.message for issue in _sentinel_issues(body, "TypeScript"))

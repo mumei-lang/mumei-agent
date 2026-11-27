@@ -44,7 +44,7 @@ def _dedupe_strings(values: list[str]) -> list[str]:
     return deduped
 
 
-def _strip_go_rust_literals_and_comments(text: str) -> str:
+def _strip_go_rust_literals_and_comments(text: str, *, single_quoted_strings: bool = False) -> str:
     def mask(span: str) -> str:
         return "".join("\n" if char == "\n" else " " for char in span)
 
@@ -160,7 +160,7 @@ def _strip_go_rust_literals_and_comments(text: str) -> str:
             i = end
             continue
         if char == "'":
-            end = consume_char_literal(i)
+            end = consume_string(i, char) if single_quoted_strings else consume_char_literal(i)
             if end:
                 stripped.append(mask_literal(text[i:end]))
                 i = end
