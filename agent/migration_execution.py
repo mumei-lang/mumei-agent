@@ -66,10 +66,40 @@ def _safe_stem(function_name: str) -> str:
     return re.sub(r"[^A-Za-z0-9_-]+", "_", function_name).strip("._-") or "migration_candidate"
 
 
+def _mm_code_lines(source: str) -> list[str]:
+    """``.mm`` lines with line comments and string-literal contents masked."""
+    in_string = False
+    code_lines: list[str] = []
+    for line in source.splitlines():
+        out: list[str] = []
+        index = 0
+        while index < len(line):
+            char = line[index]
+            if in_string:
+                if char == "\\" and index + 1 < len(line):
+                    index += 2
+                    continue
+                if char == '"':
+                    in_string = False
+                index += 1
+                continue
+            if char == "/" and index + 1 < len(line) and line[index + 1] == "/":
+                break
+            if char == '"':
+                in_string = True
+                index += 1
+                continue
+            out.append(char)
+            index += 1
+        code_lines.append("".join(out))
+    return code_lines
+
+
 def _extracted_contract(skeleton: str) -> dict[str, object]:
-    requires = [redact_secrets(item.strip()) for item in re.findall(r"\brequires\s*:\s*([^;]+);", skeleton)]
-    ensures = [redact_secrets(item.strip()) for item in re.findall(r"\bensures\s*:\s*([^;]+);", skeleton)]
-    trusted_atoms = re.findall(r"\btrusted\s+atom\s+([A-Za-z_]\w*)", skeleton)
+    code = "\n".join(_mm_code_lines(skeleton))
+    requires = [redact_secrets(item.strip()) for item in re.findall(r"\brequires\s*:\s*([^;]+);", code)]
+    ensures = [redact_secrets(item.strip()) for item in re.findall(r"\bensures\s*:\s*([^;]+);", code)]
+    trusted_atoms = re.findall(r"\btrusted\s+atom\s+([A-Za-z_]\w*)", code)
     weak = bool(requires and ensures and all(item == "true" for item in requires + ensures))
     return {
         "requires": requires,
@@ -209,6 +239,7 @@ def build_migration_execution(
     output_path: Path,
     mumei_client=None,
     selected_functions: list[str] | None = None,
+    heal_attempted: bool = False,
 ) -> dict[str, object]:
     """Build and write the additive migration-execution acceptance artifact."""
     source_path, language, source_kind = _source_payload(result)
@@ -294,7 +325,7 @@ def build_migration_execution(
             "selection": {"selected": True, "reason": redact_secrets(str(hint.get("reason") or ""))},
             "extracted_contract": _extracted_contract(skeleton),
             "generated_mm": {"path": None, "sha256": None, "origin": "generated_skeleton", "healed_source_path": None},
-            "heal": {"attempted": False, "errors": [], "healed_file": None},
+            "heal": {"attempted": heal_attempted, "errors": [], "healed_file": None},
             "verification": {},
             "behavioral_evidence": {
                 "status": "not_available",
@@ -319,7 +350,7 @@ def build_migration_execution(
                 if item.startswith(f"{function_name}:")
                 or Path(str(item).split(":", 1)[0]).stem in {function_name, _safe_stem(function_name), _safe_identifier(function_name)}
             ]
-            candidate["heal"]["attempted"] = healed_path is not None or bool(candidate["heal"]["errors"])
+            candidate["heal"]["attempted"] = heal_attempted or healed_path is not None or bool(candidate["heal"]["errors"])
             if candidate["heal"]["errors"]:
                 candidate["evidence_blockers"].append("heal completed with errors")
             contract = _extracted_contract(healed_text)

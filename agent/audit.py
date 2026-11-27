@@ -2128,6 +2128,7 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
                 output_path=Path(migration_execution_output).expanduser(),
                 mumei_client=pipeline.mumei_client,
                 selected_functions=list(getattr(args, "migration_function", []) or []),
+                heal_attempted=True,
             )
         except OSError as exc:
             print(f"audit: failed to write migration execution output: {exc}", file=sys.stderr)

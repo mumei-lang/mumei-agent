@@ -202,6 +202,7 @@ def test_cli_execution_output_enables_existing_heal_flow_and_adds_next_step(tmp_
     build.assert_called_once()
     assert build.call_args.kwargs["output_path"] == output
     assert build.call_args.kwargs["selected_functions"] == ["withdraw"]
+    assert build.call_args.kwargs["heal_attempted"] is True
     assert result.next_steps[-1]["migration_execution_report"] == str(output)
     assert "migration_hints" in result.report or result.report == ""
 
@@ -241,3 +242,26 @@ def test_cli_rejects_migration_function_without_execution_output(tmp_path: Path)
     with pytest.raises(SystemExit) as exc:
         main(args)
     assert exc.value.code == 2
+
+
+def test_commented_trusted_atom_text_is_not_a_contract_blocker(tmp_path: Path) -> None:
+    source = tmp_path / "payment.py"
+    source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+    skeleton = (
+        "atom withdraw() -> i64 {\n"
+        "    requires: true;\n"
+        "    ensures: result == 0;\n"
+        "    // trusted atom documented_only() -> i64\n"
+        "    body: { 0 }\n"
+        "}"
+    )
+
+    report = build_migration_execution(
+        _result(source, [_hint("withdraw", skeleton)]),
+        output_path=tmp_path / "execution.json",
+        mumei_client=FakeVerifyClient(),
+    )
+
+    candidate = report["candidates"][0]
+    assert candidate["extracted_contract"]["trusted_atom_declarations"] == []
+    assert not any("trusted atoms" in str(item) for item in candidate["evidence_blockers"])
