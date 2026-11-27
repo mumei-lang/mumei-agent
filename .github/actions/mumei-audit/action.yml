@@ -150,10 +150,29 @@ runs:
         prepare_output_path "$SARIF_FILE"
         MIGRATION_JSON=""
         MIGRATION_CLI_SUPPORTED=false
+        MIGRATION_PRECHECK_ERROR=""
         if [ -n "$MIGRATION_EXECUTION_OUTPUT" ]; then
-          MIGRATION_JSON="$(python "${{ github.action_path }}/scripts/prepare_workspace_output_path.py" "$GITHUB_WORKSPACE" "$MIGRATION_EXECUTION_OUTPUT")"
-          prepare_output_path "$MIGRATION_JSON"
-          rm -f "$MIGRATION_JSON"
+          if ! MIGRATION_JSON="$(python "${{ github.action_path }}/scripts/prepare_workspace_output_path.py" "$GITHUB_WORKSPACE" "$MIGRATION_EXECUTION_OUTPUT" 2>/dev/null)"; then
+            MIGRATION_PRECHECK_ERROR="migration execution output path escapes the caller workspace or is invalid"
+            MIGRATION_JSON=""
+          elif [ -e "$MIGRATION_JSON" ] || [ -L "$MIGRATION_JSON" ]; then
+            MIGRATION_PRECHECK_ERROR="migration execution output path already exists; choose a fresh output path"
+          elif ! prepare_output_path "$MIGRATION_JSON"; then
+            MIGRATION_PRECHECK_ERROR="migration execution output path is unsafe"
+          fi
+          if [ -n "$MIGRATION_PRECHECK_ERROR" ]; then
+            echo "audit_exit_code=2" >> "$GITHUB_OUTPUT"
+            python "${{ github.action_path }}/scripts/collect_migration_execution.py" \
+              --requested true \
+              --cli-supported false \
+              --migration-json "" \
+              --workspace "$GITHUB_WORKSPACE" \
+              --state-dir "$ACTION_STATE" \
+              --github-output "$GITHUB_OUTPUT" \
+              --precheck-error "$MIGRATION_PRECHECK_ERROR" || true
+            echo "::error::$MIGRATION_PRECHECK_ERROR"
+            exit 2
+          fi
         fi
         ARGS=(audit --code-file "$TARGET" --format json --output "$AUDIT_JSON" --sarif-output "$SARIF_FILE")
         EXTRA_ARGS=()

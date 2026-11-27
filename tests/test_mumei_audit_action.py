@@ -228,7 +228,9 @@ def test_migration_execution_action_contract_strings() -> None:
     assert "--migration-execution-output" in text
     assert "ARGS+=(--auto-migrate)" in text
     assert "prepare_workspace_output_path.py" in text
-    assert 'rm -f "$MIGRATION_JSON"' in text
+    assert 'rm -f "$MIGRATION_JSON"' not in text
+    assert 'migration execution output path already exists; choose a fresh output path' in text
+    assert '--precheck-error "$MIGRATION_PRECHECK_ERROR"' in text
     assert "collect_migration_execution.py" in text
     assert "migration-execution/status.json" in text
 
@@ -506,6 +508,30 @@ def test_collect_migration_execution_rejects_inconsistent_summary(tmp_path: Path
         text=True,
     )
     assert completed.returncode == 2
+
+
+def test_collect_migration_execution_precheck_error_is_machine_readable(tmp_path: Path) -> None:
+    output = tmp_path / "outputs"
+    state = tmp_path / "state"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(SUMMARY_SCRIPT.parent / "collect_migration_execution.py"),
+            "--requested", "true",
+            "--cli-supported", "false",
+            "--workspace", str(tmp_path),
+            "--state-dir", str(state),
+            "--github-output", str(output),
+            "--precheck-error", "migration execution output path already exists; choose a fresh output path",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 2
+    status = json.loads((state / "migration-execution" / "status.json").read_text(encoding="utf-8"))
+    assert status["status"] == "operational_error"
+    assert "already exists" in status["error"]
+    assert "migration_execution_status=operational_error" in output.read_text(encoding="utf-8")
 
 
 def test_collect_migration_execution_not_requested_has_machine_readable_default(tmp_path: Path) -> None:

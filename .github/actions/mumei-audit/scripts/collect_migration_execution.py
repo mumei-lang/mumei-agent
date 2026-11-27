@@ -161,10 +161,13 @@ def main() -> int:
     parser.add_argument("--workspace", required=True)
     parser.add_argument("--state-dir", required=True)
     parser.add_argument("--github-output", default="")
+    parser.add_argument("--precheck-error", default="")
     args = parser.parse_args()
 
     if args.requested == "false":
         return _finish(args, _status_payload("not_requested"))
+    if args.precheck_error:
+        return _finish(args, _status_payload("operational_error"), error=args.precheck_error)
     if args.cli_supported == "false":
         return _finish(args, _status_payload("operational_error"), error="the current audit CLI does not support --migration-execution-output")
     migration_json = Path(args.migration_json)
