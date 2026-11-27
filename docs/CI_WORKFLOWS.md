@@ -52,6 +52,47 @@ Or use the standalone script:
 python scripts/ci_verify.py src/*.mm --proof-cert
 ```
 
+## Existing-code audit composite action
+
+`.github/actions/mumei-audit` is the adoption-oriented composite action for repositories that do not yet use `.mm`. It installs the mumei binary, sets up Python/uv with a dependency cache keyed by this repository's `uv.lock`, runs `python -m agent audit`, writes SARIF and JSON evidence, uploads SARIF to code scanning when present, and appends a concise audit summary plus timing to `GITHUB_STEP_SUMMARY`.
+
+Minimal caller workflow:
+
+```yaml
+name: Mumei audit
+on: [pull_request]
+
+permissions:
+  contents: read
+  security-events: write  # required only for SARIF code-scanning upload
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mumei-lang/mumei-agent/.github/actions/mumei-audit@develop
+        with:
+          code-file: src/
+          language: python
+```
+
+Relevant inputs:
+
+| Input | Default | Meaning |
+|---|---:|---|
+| `code-file` | required | Source file or directory to audit |
+| `language` | auto-detect | Optional audit language override |
+| `mumei-version` | `latest` | Version passed to the mumei installer |
+| `audit-args` | empty | Extra space-separated `mumei-agent audit` arguments |
+| `audit-output` | `.mumei-audit/audit.json` | Stable audit JSON artifact |
+| `sarif-output` | `.mumei-audit/audit.sarif` | SARIF artifact for code scanning |
+| `upload-sarif` | `true` | Upload SARIF when produced |
+
+The action preserves the audit CLI exit classification as the `audit_exit_code` output (`0` no failing code findings, `1` code evidence, `2` operational/extraction error) and fails the step for nonzero classifications after artifacts and the summary are written. LLM keys are never required: without `LLM_API_KEY`/`OPENAI_API_KEY`, audit uses the deterministic extraction path and records that limitation in the existing audit keys. If a caller opts into LLM-backed extraction, configure secrets at the job or environment level; do not pass secret values through action inputs.
+
+Timing outputs are `setup_seconds`, `audit_seconds`, and `total_seconds`. The repository self-test workflow `.github/workflows/mumei-audit-selftest.yml` runs the action against `examples/ci-small-repo` and publishes those values in each job summary. Initial local measurement for that small fixture on the validation VM was `0.01s` dependency setup with a warm uv cache, `1.23s` audit execution, and `1.24s` dependency-setup-plus-audit total; the composite action's own `setup_seconds` additionally includes Python setup and mumei installation on GitHub-hosted runners.
+
 ## 外部コード dogfooding 集計層
 
 > **ステータス: ✅ Implemented** — 実装は `scripts/dogfood_triage_gate.py` と

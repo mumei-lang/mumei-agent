@@ -1,0 +1,44 @@
+name: Mumei audit action selftest
+
+on:
+  push:
+    branches: [develop]
+    paths:
+      - .github/actions/mumei-audit/**
+      - .github/workflows/mumei-audit-selftest.yml
+      - examples/ci-small-repo/**
+  pull_request:
+    branches: [develop]
+    paths:
+      - .github/actions/mumei-audit/**
+      - .github/workflows/mumei-audit-selftest.yml
+      - examples/ci-small-repo/**
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  small-repo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run composite audit action on a small repository fixture
+        id: audit
+        uses: ./.github/actions/mumei-audit
+        with:
+          code-file: examples/ci-small-repo/src
+          language: python
+          upload-sarif: true
+
+      - name: Publish measured action runtime
+        run: |
+          {
+            echo '## Small-repo composite action timing';
+            echo;
+            echo "- setup_seconds: \`${{ steps.audit.outputs.setup_seconds }}\`";
+            echo "- audit_seconds: \`${{ steps.audit.outputs.audit_seconds }}\`";
+            echo "- total_seconds: \`${{ steps.audit.outputs.total_seconds }}\`";
+          } >> "$GITHUB_STEP_SUMMARY"

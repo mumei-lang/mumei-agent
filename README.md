@@ -156,7 +156,7 @@ See [`forge_tasks/README.md`](forge_tasks/README.md) for the task schema.
 
 ## CI and Reports
 
-The `report.json` schema is documented in [mumei's REPORT_SCHEMA.md](https://github.com/mumei-lang/mumei/blob/develop/docs/REPORT_SCHEMA.md). The reusable CI verification gate and standalone script are in [`docs/CI_WORKFLOWS.md`](docs/CI_WORKFLOWS.md).
+The `report.json` schema is documented in [mumei's REPORT_SCHEMA.md](https://github.com/mumei-lang/mumei/blob/develop/docs/REPORT_SCHEMA.md). The reusable CI verification gate, existing-code audit composite action, timing publication, and standalone script are in [`docs/CI_WORKFLOWS.md`](docs/CI_WORKFLOWS.md).
 
 ### Distributed proof artifacts
 
@@ -184,7 +184,7 @@ See [`docs/ROADMAP.md`](docs/ROADMAP.md) and the [cross-project roadmap](https:/
 | [`docs/CLI_GUIDE.md`](docs/CLI_GUIDE.md) | Examples, generate mode, E2E demos, and P11 extraction |
 | [`docs/CLI_REFERENCE.md`](docs/CLI_REFERENCE.md) | Generated exhaustive command and option reference |
 | [`docs/MCP_SERVER.md`](docs/MCP_SERVER.md) | MCP tools, configuration, diagnostics, and verification |
-| [`docs/CI_WORKFLOWS.md`](docs/CI_WORKFLOWS.md) | CI verification gate and standalone usage |
+| [`docs/CI_WORKFLOWS.md`](docs/CI_WORKFLOWS.md) | CI verification gate, audit action, and standalone usage |
 | [`docs/NLAE_INTEGRATION.md`](docs/NLAE_INTEGRATION.md) | P9 NLAE integration |
 | [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) | OpenTelemetry spans, metrics, and SLO alerts |
 | [`docs/OLLAMA_TUNING.md`](docs/OLLAMA_TUNING.md) | Ollama KV-cache and long-context tuning |

@@ -1,0 +1,221 @@
+name: Mumei audit
+description: >-
+  Install mumei and mumei-agent dependencies, audit existing source code,
+  upload SARIF, and write a GitHub Actions step summary.
+author: mumei-lang
+branding:
+  icon: shield
+  color: blue
+inputs:
+  code-file:
+    description: Source file or directory to audit, relative to the caller workspace unless absolute.
+    required: true
+  language:
+    description: Optional source language passed to mumei-agent audit.
+    required: false
+    default: ""
+  mumei-version:
+    description: Mumei version to install, or latest.
+    required: false
+    default: latest
+  python-version:
+    description: Python version used for mumei-agent.
+    required: false
+    default: "3.11"
+  audit-args:
+    description: Additional space-separated arguments for mumei-agent audit.
+    required: false
+    default: ""
+  audit-output:
+    description: Audit JSON path, relative to the caller workspace.
+    required: false
+    default: .mumei-audit/audit.json
+  sarif-output:
+    description: SARIF output path, relative to the caller workspace.
+    required: false
+    default: .mumei-audit/audit.sarif
+  artifact-name:
+    description: Name for the audit evidence artifact.
+    required: false
+    default: mumei-audit-evidence
+  upload-sarif:
+    description: Upload SARIF to GitHub code scanning when the file is produced.
+    required: false
+    default: true
+    type: boolean
+outputs:
+  audit_exit_code:
+    description: mumei-agent audit process exit classification.
+    value: ${{ steps.audit.outputs.audit_exit_code }}
+  setup_seconds:
+    description: Seconds spent installing the pinned toolchain and dependencies.
+    value: ${{ steps.timing.outputs.setup_seconds }}
+  audit_seconds:
+    description: Seconds spent in mumei-agent audit.
+    value: ${{ steps.timing.outputs.audit_seconds }}
+  total_seconds:
+    description: Seconds from setup start through audit completion.
+    value: ${{ steps.timing.outputs.total_seconds }}
+runs:
+  using: composite
+  steps:
+    - name: Start timing
+      shell: bash
+      run: |
+        mkdir -p .mumei-audit/timing
+        date +%s > .mumei-audit/timing/start
+
+    - name: Locate bundled mumei-agent source
+      shell: bash
+      run: |
+        AGENT_ROOT="$(cd "${{ github.action_path }}/../../.." && pwd)"
+        test -f "$AGENT_ROOT/pyproject.toml"
+        test -f "$AGENT_ROOT/uv.lock"
+        echo "AGENT_ROOT=$AGENT_ROOT" >> "$GITHUB_ENV"
+        cp "$AGENT_ROOT/uv.lock" "$GITHUB_WORKSPACE/mumei-agent-uv.lock"
+
+    - name: Set up Python
+      uses: actions/setup-python@v7
+      with:
+        python-version: ${{ inputs['python-version'] }}
+
+    - name: Set up uv with dependency cache
+      uses: astral-sh/setup-uv@v5
+      with:
+        enable-cache: true
+        cache-dependency-glob: mumei-agent-uv.lock
+
+    - name: Install mumei
+      shell: bash
+      env:
+        VERSION: ${{ inputs['mumei-version'] }}
+      run: |
+        if [ "$VERSION" = "latest" ]; then
+          curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash
+        else
+          curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash -s -- --version "$VERSION"
+        fi
+        echo "$HOME/.mumei/bin" >> "$GITHUB_PATH"
+        echo "MUMEI_STD_PATH=$HOME/.mumei/std" >> "$GITHUB_ENV"
+
+    - name: Install mumei-agent dependencies
+      shell: bash
+      run: |
+        cd "$AGENT_ROOT"
+        uv sync --frozen
+        uv run python -c 'import agent; print("mumei-agent dependencies ready")'
+
+    - name: Finish setup timing
+      shell: bash
+      run: date +%s > .mumei-audit/timing/setup_end
+
+    - name: Run mumei-agent audit
+      id: audit
+      shell: bash
+      env:
+        CODE_FILE: ${{ inputs['code-file'] }}
+        LANGUAGE: ${{ inputs.language }}
+        AUDIT_ARGS: ${{ inputs['audit-args'] }}
+        AUDIT_OUTPUT: ${{ inputs['audit-output'] }}
+        SARIF_OUTPUT: ${{ inputs['sarif-output'] }}
+      run: |
+        case "$CODE_FILE" in
+          /*) TARGET="$CODE_FILE" ;;
+          *) TARGET="$GITHUB_WORKSPACE/$CODE_FILE" ;;
+        esac
+        case "$AUDIT_OUTPUT" in
+          /*) AUDIT_JSON="$AUDIT_OUTPUT" ;;
+          *) AUDIT_JSON="$GITHUB_WORKSPACE/$AUDIT_OUTPUT" ;;
+        esac
+        case "$SARIF_OUTPUT" in
+          /*) SARIF_FILE="$SARIF_OUTPUT" ;;
+          *) SARIF_FILE="$GITHUB_WORKSPACE/$SARIF_OUTPUT" ;;
+        esac
+        mkdir -p "$(dirname "$AUDIT_JSON")" "$(dirname "$SARIF_FILE")"
+        ARGS=(audit --code-file "$TARGET" --format json --output "$AUDIT_JSON" --sarif-output "$SARIF_FILE")
+        if [ -n "$LANGUAGE" ]; then
+          ARGS+=(--language "$LANGUAGE")
+        fi
+        if [ -n "$AUDIT_ARGS" ]; then
+          read -r -a EXTRA_ARGS <<< "$AUDIT_ARGS"
+          ARGS+=("${EXTRA_ARGS[@]}")
+        fi
+        date +%s > .mumei-audit/timing/audit_start
+        set +e
+        (
+          cd "$AGENT_ROOT"
+          uv run python -m agent "${ARGS[@]}"
+        ) > .mumei-audit/audit.stdout.log 2> .mumei-audit/audit.stderr.log
+        EXIT_CODE=$?
+        set -e
+        date +%s > .mumei-audit/timing/audit_end
+        echo "audit_exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+
+    - name: Check SARIF artifact
+      id: sarif
+      if: always()
+      shell: bash
+      env:
+        SARIF_OUTPUT: ${{ inputs['sarif-output'] }}
+        UPLOAD_SARIF: ${{ inputs['upload-sarif'] }}
+      run: |
+        case "$SARIF_OUTPUT" in
+          /*) SARIF_FILE="$SARIF_OUTPUT" ;;
+          *) SARIF_FILE="$GITHUB_WORKSPACE/$SARIF_OUTPUT" ;;
+        esac
+        case "${UPLOAD_SARIF,,}" in
+          true|1|yes) WANT_UPLOAD=true ;;
+          *) WANT_UPLOAD=false ;;
+        esac
+        if [ "$WANT_UPLOAD" = true ] && [ -s "$SARIF_FILE" ]; then
+          echo "present=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "present=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Write step summary and timing outputs
+      id: timing
+      if: always()
+      shell: bash
+      env:
+        AUDIT_OUTPUT: ${{ inputs['audit-output'] }}
+      run: |
+        case "$AUDIT_OUTPUT" in
+          /*) AUDIT_JSON="$AUDIT_OUTPUT" ;;
+          *) AUDIT_JSON="$GITHUB_WORKSPACE/$AUDIT_OUTPUT" ;;
+        esac
+        python "${{ github.action_path }}/scripts/summarize_audit.py" \
+          --audit-json "$AUDIT_JSON" \
+          --exit-code "${{ steps.audit.outputs.audit_exit_code }}" \
+          --timing-dir .mumei-audit/timing \
+          --github-output "$GITHUB_OUTPUT"
+
+    - name: Upload audit evidence artifact
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs['artifact-name'] }}
+        path: |
+          .mumei-audit/
+          ${{ inputs['audit-output'] }}
+          ${{ inputs['sarif-output'] }}
+        if-no-files-found: warn
+        include-hidden-files: true
+
+    - name: Upload SARIF to code scanning
+      if: always() && steps.sarif.outputs.present == 'true'
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: ${{ inputs['sarif-output'] }}
+
+    - name: Remove temporary cache key copy
+      if: always()
+      shell: bash
+      run: rm -f "$GITHUB_WORKSPACE/mumei-agent-uv.lock"
+
+    - name: Enforce audit result
+      if: always() && steps.audit.outputs.audit_exit_code != '0'
+      shell: bash
+      run: |
+        echo "::error::mumei-agent audit exited with classification ${{ steps.audit.outputs.audit_exit_code }}; inspect the step summary and SARIF artifact."
+        exit 1
