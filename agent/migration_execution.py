@@ -67,8 +67,8 @@ def _safe_stem(function_name: str) -> str:
 
 
 def _extracted_contract(skeleton: str) -> dict[str, object]:
-    requires = [item.strip() for item in re.findall(r"\brequires\s*:\s*([^;]+);", skeleton)]
-    ensures = [item.strip() for item in re.findall(r"\bensures\s*:\s*([^;]+);", skeleton)]
+    requires = [redact_secrets(item.strip()) for item in re.findall(r"\brequires\s*:\s*([^;]+);", skeleton)]
+    ensures = [redact_secrets(item.strip()) for item in re.findall(r"\bensures\s*:\s*([^;]+);", skeleton)]
     trusted_atoms = re.findall(r"\btrusted\s+atom\s+([A-Za-z_]\w*)", skeleton)
     weak = bool(requires and ensures and all(item == "true" for item in requires + ensures))
     return {
@@ -76,7 +76,7 @@ def _extracted_contract(skeleton: str) -> dict[str, object]:
         "ensures": ensures,
         "weak_true_contract": weak,
         "trusted_atom_declarations": trusted_atoms,
-        "skeleton_sha256": _sha256_text(skeleton),
+        "generated_contract_sha256": _sha256_text(skeleton),
     }
 
 
@@ -87,16 +87,16 @@ def _candidate_source(result: AuditResult | AuditDirectoryResult, hint: dict[str
     return file_result, file_result.source_file, file_result.language
 
 
-def _healed_content(function_name: str, healed_files: list[str], skeleton: str) -> tuple[str, str | None]:
+def _healed_content(function_name: str, healed_files: list[str], skeleton: str) -> tuple[str, str | None, bool]:
     expected_names = {f"{function_name}.mm", f"{_safe_stem(function_name)}.mm", f"{_safe_identifier(function_name)}.mm"}
     for healed in healed_files:
         path = Path(healed)
         if path.name in expected_names and path.is_file():
             try:
-                return path.read_text(encoding="utf-8"), str(path)
+                return path.read_text(encoding="utf-8"), str(path), True
             except OSError:
-                return skeleton, str(path)
-    return skeleton, None
+                return skeleton, str(path), False
+    return skeleton, None, False
 
 
 def _behavior_entries(file_result: AuditResult | AuditDirectoryResult, function_name: str) -> list[dict[str, object]]:
@@ -171,6 +171,11 @@ def _verify_generated_mm(
         verification["diagnostics"] = [type(exc).__name__]
         return verification
     report = result.get("report") if isinstance(result.get("report"), dict) else {}
+    if not report and result.get("success") is not True:
+        verification["status"] = "operational_error"
+        verification["operational_error"] = "VerifierOutputUnavailable"
+        verification["diagnostics"] = ["mumei verify did not produce a machine-readable report"]
+        return verification
     verification.update(
         {
             "success": result.get("success") is True,
@@ -241,6 +246,13 @@ def build_migration_execution(
         },
         "candidates": [],
         "operational_errors": [],
+        "summary": {
+            "candidate_count": 0,
+            "ready_for_human_review": 0,
+            "blocked": 0,
+            "operational_error": 0,
+            "review_required": False,
+        },
         "artifact_paths": {"migration_execution": str(output_path), "generated_artifacts": str(artifact_dir)},
         "evidence_boundary": [
             "A verified generated .mm skeleton proves only the skeleton contract as written; it is not proof that host-language code implements the same behavior.",
@@ -279,7 +291,7 @@ def build_migration_execution(
                 "audit_priority": str(hint.get("priority") or "review"),
                 "migration_hint_index": hint_index,
             },
-            "selection": {"selected": True, "reason": str(hint.get("reason") or "")},
+            "selection": {"selected": True, "reason": redact_secrets(str(hint.get("reason") or ""))},
             "extracted_contract": _extracted_contract(skeleton),
             "generated_mm": {"path": None, "sha256": None, "origin": "generated_skeleton", "healed_source_path": None},
             "heal": {"attempted": False, "errors": [], "healed_file": None},
@@ -297,11 +309,16 @@ def build_migration_execution(
         report["candidates"].append(candidate)
         _write_partial(output_path, report)
         try:
-            healed_text, healed_path = _healed_content(function_name, result.healed_files, skeleton)
+            healed_text, healed_path, used_healed = _healed_content(function_name, result.healed_files, skeleton)
             if healed_path is not None:
                 candidate["heal"]["healed_file"] = healed_path
-                candidate["generated_mm"]["origin"] = "healed_file"
-            candidate["heal"]["errors"] = [item for item in result.heal_errors if function_name in item or Path(str(item).split(":", 1)[0]).stem in {function_name, _safe_stem(function_name)}]
+                candidate["generated_mm"]["origin"] = "healed_file" if used_healed else "generated_skeleton"
+            candidate["heal"]["errors"] = [
+                redact_secrets(item)
+                for item in result.heal_errors
+                if item.startswith(f"{function_name}:")
+                or Path(str(item).split(":", 1)[0]).stem in {function_name, _safe_stem(function_name), _safe_identifier(function_name)}
+            ]
             candidate["heal"]["attempted"] = healed_path is not None or bool(candidate["heal"]["errors"])
             if candidate["heal"]["errors"]:
                 candidate["evidence_blockers"].append("heal completed with errors")
