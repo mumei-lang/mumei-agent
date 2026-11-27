@@ -966,8 +966,8 @@ def test_author_name_public_label_is_not_credential_like(tmp_path: Path) -> None
 
 
 def test_credential_name_compound_boundaries() -> None:
-    positive = ["secretaccesskey", "ACCESSTOKENVALUE", "tokenvalue", "apikey", "private_key", "sessionkey", "signingkey", "dbpassword2"]
-    negative = ["author", "tokenizer", "secretary", "authorization", "monkey", "publickey", "access_key"]
+    positive = ["secretaccesskey", "ACCESSTOKENVALUE", "tokenvalue", "apikey", "private_key", "sessionkey", "signingkey", "dbpassword2", "access_key"]
+    negative = ["author", "tokenizer", "secretary", "authorization", "monkey", "publickey", "oauth2"]
     assert all(_is_credential_name(value) for value in positive)
     assert not any(_is_credential_name(value) for value in negative)
 
