@@ -8,16 +8,21 @@ AI orchestration layer for the verification-native [Mumei](https://github.com/mu
 
 ```mermaid
 flowchart TD
-    Input["existing code / natural-language requirements / .mm"] --> Entry["CLI / MCP scan_and_fix"]
-    Entry --> Extract["specification extraction + existing-code audit"]
-    Extract --> LLM["optional LLM provider"]
-    LLM -->|candidate specs, ports, repairs| Work["generate / migrate / heal"]
-    Work -->|subprocess: check + verify --json| Core["mumei CLI + Z3"]
+    Code["existing code"] --> Audit["audit / MCP scan_and_fix"]
+    NL["natural-language requirements"] --> Extract["extract-spec / MCP extract_spec"]
+    MM[".mm source or forge spec"] --> Work["generate / heal_file"]
+    Audit -->|contracts and validation inputs| Core["mumei CLI + Z3"]
+    Extract -->|candidate specs| Work
+    LLM["optional LLM provider"] -->|untrusted extraction candidates| Extract
+    LLM -->|untrusted specs and ports| Audit
+    LLM -->|untrusted code and repairs| Work
+    Work -->|subprocess: check + verify --json| Core
     Core -->|counterexamples + diagnostics| Work
-    Core -->|Z3 unknown obligations| Lean["optional mumei-lean escalation"]
+    Proliferate["proliferate / forge fallback"] -->|Z3 unknown atoms| Lean["mumei-lean escalation"]
+    Audit -->|CLI-only Solidity guard-trace bridge| Lean
     Core --> Evidence["audit JSON / proof evidence"]
     Lean --> Evidence
-    Entry --> Adapters["external verifier adapters"]
+    Schedule["verify-schedule / explicit CLI audit schedules"] --> Adapters["external verifier adapters"]
     Adapters -->|normalized observations, not proof| Evidence
 ```
 
