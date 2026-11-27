@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 from urllib.parse import quote
 
@@ -82,12 +83,13 @@ def sarif_document(result: AuditResult | AuditDirectoryResult) -> dict:
     results: list[dict] = []
     if isinstance(result, AuditDirectoryResult):
         for file_result in result.file_results:
-            results.extend(_file_sarif_results(file_result))
+            results.extend(_file_sarif_results(file_result, include_trusted_atoms=False))
+        results.extend(_trusted_atom_sarif_results(result.trusted_atoms, result.source_dir))
         results.extend(
             _finding_result(
                 "mumei.audit/audit-error",
                 "error",
-                error,
+                _redact_message(error, [result.source_dir]),
                 result.source_dir,
                 None,
             )
@@ -124,18 +126,18 @@ def sarif_json(result: AuditResult | AuditDirectoryResult) -> str:
 
 def write_sarif(result: AuditResult | AuditDirectoryResult, output_path: str | os.PathLike[str]) -> None:
     """Write SARIF, creating only missing output directories."""
-    path = Path(output_path)
+    path = Path(os.path.expanduser(os.fspath(output_path)))
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(sarif_json(result) + "\n", encoding="utf-8")
 
 
-def _file_sarif_results(result: AuditResult) -> list[dict]:
+def _file_sarif_results(result: AuditResult, *, include_trusted_atoms: bool = True) -> list[dict]:
     output: list[dict] = []
     output.extend(
         _finding_result(
             "mumei.audit/verification-violation",
             "error",
-            violation,
+            _redact_message(violation, [result.source_file]),
             result.source_file,
             None,
         )
@@ -143,9 +145,9 @@ def _file_sarif_results(result: AuditResult) -> list[dict]:
     )
     output.extend(
         _finding_result(
-            "mumei.audit/spec-health",
-            "warning",
-            issue,
+            "mumei.audit/audit-error" if _is_malformed_extraction(issue) else "mumei.audit/spec-health",
+            "error" if _is_malformed_extraction(issue) else "warning",
+            _redact_message(issue, [result.source_file]),
             result.source_file,
             None,
         )
@@ -155,34 +157,44 @@ def _file_sarif_results(result: AuditResult) -> list[dict]:
         _finding_result(
             "mumei.audit/cross-validation-gap",
             "warning",
-            gap,
+            _redact_message(gap, [result.source_file]),
             result.source_file,
             None,
         )
         for gap in result.cross_validation_gaps
     )
-    for atom in result.trusted_atoms:
-        line = atom.get("line") if isinstance(atom, dict) else None
-        output.append(
-            _finding_result(
-                "mumei.audit/trusted-atom",
-                "warning",
-                "trusted atom bypasses Z3 verification"
-                + (f": {atom.get('atom')}" if isinstance(atom, dict) and atom.get("atom") else ""),
-                result.source_file,
-                line if type(line) is int and line > 0 else None,
-            )
-        )
+    if include_trusted_atoms:
+        output.extend(_trusted_atom_sarif_results(result.trusted_atoms, result.source_file))
     output.extend(
         _finding_result(
             "mumei.audit/audit-error",
             "error",
-            error,
+            _redact_message(error, [result.source_file]),
             result.source_file,
             None,
         )
         for error in result.errors
     )
+    return output
+
+
+def _trusted_atom_sarif_results(trusted_atoms: list[dict], fallback_source: str) -> list[dict]:
+    output: list[dict] = []
+    for atom in trusted_atoms:
+        if not isinstance(atom, dict):
+            continue
+        line = atom.get("line")
+        source = str(atom.get("file") or fallback_source)
+        output.append(
+            _finding_result(
+                "mumei.audit/trusted-atom",
+                "warning",
+                "trusted atom bypasses Z3 verification"
+                + (f": {atom.get('atom')}" if atom.get("atom") else ""),
+                source,
+                line if type(line) is int and line > 0 else None,
+            )
+        )
     return output
 
 
@@ -204,6 +216,38 @@ def _finding_result(rule_id: str, level: str, message: str, source_file: str, li
     }
 
 
+_ABSOLUTE_PATH_RE = re.compile(r"(?<![\w:/])\/(?:[^\s\"'`<>|,.;:]+/)+[^\s\"'`<>|,.;:]*")
+
+
+def _redact_message(text: str, known_paths: list[str]) -> str:
+    """Remove machine-local absolute paths from a SARIF message.
+
+    Audit text output may include user-supplied paths. SARIF is commonly
+    uploaded outside the runner, so repo paths are relativized and all other
+    absolute paths are replaced rather than copied into the artifact.
+    """
+    redacted = str(text)
+    replacements: dict[str, str] = {}
+    for value in known_paths:
+        if not value:
+            continue
+        expanded = os.path.expanduser(value)
+        for form in {value, expanded, os.path.realpath(expanded)}:
+            if os.path.isabs(form):
+                replacements[form] = _display_path(form)
+    for form in sorted(replacements, key=len, reverse=True):
+        redacted = redacted.replace(form, replacements[form])
+    return _ABSOLUTE_PATH_RE.sub("<path>", redacted)
+
+
+def _display_path(path: str) -> str:
+    try:
+        resolved = Path(path).resolve()
+        return resolved.relative_to(Path.cwd().resolve()).as_posix()
+    except (OSError, ValueError):
+        return "<path>"
+
+
 def _artifact_uri(source_file: str) -> str:
     """Produce a stable SARIF URI without requiring an absolute checkout path."""
     if not source_file or source_file.startswith("<"):
@@ -214,7 +258,8 @@ def _artifact_uri(source_file: str) -> str:
             try:
                 path = path.resolve().relative_to(Path.cwd().resolve())
             except ValueError:
-                return quote(path.as_posix())
+                digest = hashlib.sha256(path.as_posix().encode("utf-8", errors="replace")).hexdigest()[:16]
+                return f"external/{digest}"
     except OSError:
         pass
     return quote(path.as_posix(), safe="/:@._-~")

@@ -250,3 +250,85 @@ def test_python_module_dispatch_classifies_pre_result_operational_errors(monkeyp
     stderr = capsys.readouterr().err
     assert "operational error (FileNotFoundError)" in stderr
     assert "payment.py" not in stderr
+
+
+def test_sarif_redacts_machine_local_absolute_paths(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    source = tmp_path / "src" / "missing.py"
+    source.parent.mkdir()
+    absolute = str(source)
+    result = _file_result(
+        source_file=absolute,
+        success=False,
+        errors=[f"code_file does not exist: {absolute}; verifier cwd /tmp/private/run"],
+    )
+
+    row = sarif_document(result)["runs"][0]["results"][0]
+
+    assert absolute not in row["message"]["text"]
+    assert "/tmp/private/run" not in row["message"]["text"]
+    assert "src/missing.py" in row["message"]["text"]
+    assert "<path>" in row["message"]["text"]
+
+
+def test_directory_sarif_redacts_directory_error_and_includes_trusted_atoms(tmp_path: Path) -> None:
+    directory = AuditDirectoryResult(
+        success=False,
+        source_dir=str(tmp_path),
+        language="mixed",
+        errors=[f"no supported source-code files found in directory: {tmp_path}"],
+        trusted_atoms=[{"file": "specs/payment.mm", "atom": "withdraw", "line": 3}],
+    )
+
+    rows = sarif_document(directory)["runs"][0]["results"]
+
+    assert rows[0]["ruleId"] == "mumei.audit/trusted-atom"
+    assert rows[0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"] == "specs/payment.mm"
+    assert rows[1]["ruleId"] == "mumei.audit/audit-error"
+    assert str(tmp_path) not in rows[1]["message"]["text"]
+
+
+def test_malformed_extraction_is_sarif_audit_error() -> None:
+    result = _file_result(
+        success=False,
+        spec_health_issues=["malformed-extraction: withdraw ensures: garbled comparison operators"],
+    )
+
+    row = sarif_document(result)["runs"][0]["results"][0]
+
+    assert row["ruleId"] == "mumei.audit/audit-error"
+    assert row["level"] == "error"
+
+
+def test_verifier_crash_is_operational_not_code_finding() -> None:
+    foreign_result = {
+        "success": False,
+        "errors": ["mumei verify failed"],
+        "verification": {"success": False, "report": {}, "stderr": "panic"},
+    }
+    from agent.audit_reporting import _verification_issue_strings, _verification_status_from_foreign_result
+
+    assert _verification_issue_strings(foreign_result) == []
+    assert _verification_status_from_foreign_result(foreign_result) == "unverifiable"
+
+
+def test_cli_rejects_sarif_output_inside_directory_audit_inputs(tmp_path: Path) -> None:
+    source_dir = tmp_path / "src"
+    source_dir.mkdir()
+    target = source_dir / "payment.py"
+    target.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+    args = build_parser().parse_args(
+        [
+            "--code-file", str(source_dir),
+            "--language", "python",
+            "--sarif-output", str(target),
+        ]
+    )
+
+    try:
+        main(args)
+    except SystemExit as exc:
+        assert exc.code == 2
+    else:  # pragma: no cover
+        raise AssertionError("directory input overwrite was accepted")
+    assert target.read_text(encoding="utf-8") == "def withdraw():\n    pass\n"

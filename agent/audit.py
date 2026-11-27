@@ -74,6 +74,7 @@ from agent.audit_reporting import (
     _string_value,
     _verification_issue_strings,
     _verification_status_from_foreign_result,
+    _verification_tool_failure_without_evidence,
 )
 from agent.attempt_schedule import MAX_SCHEDULE_ATTEMPTS, run_attempt_schedule
 from agent.code_to_spec import CodeToSpecExtractor, CodeToSpecResult, Language
@@ -527,6 +528,8 @@ class AuditPipeline:
                     verification_violations=verification_violations,
                     spec_health_issues=spec_health_issues,
                 )
+                if _verification_tool_failure_without_evidence(foreign_result):
+                    errors.append("mumei verify did not produce a verification report")
             except ValueError as exc:
                 verification_violations.append(str(exc))
                 verification_status = "unverifiable"
@@ -1793,13 +1796,16 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
             raise SystemExit(2)
     sarif_output = getattr(args, "sarif_output", None)
     if sarif_output:
+        def _normalized_output_path(path: str) -> str:
+            return os.path.realpath(os.path.expanduser(path))
+
         def _same_output_path(left: str | None, right: str | None) -> bool:
             if not left or not right:
                 return False
             try:
                 return os.path.samefile(left, right)
             except OSError:
-                return os.path.realpath(left) == os.path.realpath(right)
+                return _normalized_output_path(left) == _normalized_output_path(right)
 
         declared_input_paths = tuple(
             path
@@ -1816,11 +1822,25 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
             if (path := getattr(args, name, None)) is not None
         )
         conflicting = _same_output_path(sarif_output, args.output) or _same_output_path(
-            sarif_output, args.code_file
+            sarif_output, os.path.expanduser(args.code_file)
         ) or any(
             _same_output_path(sarif_output, path)
             for path in declared_input_paths
         )
+        audit_input_path = Path(os.path.expanduser(args.code_file))
+        if not conflicting and audit_input_path.is_dir():
+            audited_candidates = [
+                *(
+                    candidate
+                    for candidate in audit_input_path.rglob("*")
+                    if candidate.is_file()
+                    and candidate.suffix in {*AUDIT_EXTENSION_MAP, ".mm"}
+                )
+            ]
+            conflicting = any(
+                _same_output_path(sarif_output, str(candidate))
+                for candidate in audited_candidates
+            )
         if conflicting:
             print(
                 "audit: --sarif-output must not overwrite --output, --code-file, "
