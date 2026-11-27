@@ -229,14 +229,11 @@ def _simple_token(tokens: list[tuple[str, str]], kind: str) -> tuple[str, str] |
 def _is_credential_name(value: str) -> bool:
     words: list[str] = []
     credential_words = {"password", "passwd", "secret", "token", "auth", "authentication", "credential", "credentials", "apikey", "privatekey"}
-    compound_suffixes = {"value", "hash", "digest", "key", "token", "secret", "password", "passwd", "credential", "credentials", "code", "store"}
+    compound_suffixes = {"value", "hash", "digest", "key", "accesskey", "token", "secret", "password", "passwd", "credential", "credentials", "code", "store"}
     for part in re.split(r"[._$\-]+", value):
         lowered_part = part.lower()
         if re.fullmatch(r"(?:api[_-]?key|private[_-]?key)", part, re.IGNORECASE):
             return True
-        for root in {"password", "passwd", "secret", "credential", "apikey", "privatekey"}:
-            if root in lowered_part:
-                return True
         for root in credential_words:
             position = lowered_part.find(root)
             while position >= 0:
