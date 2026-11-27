@@ -331,6 +331,7 @@ def build_migration_execution(
             "verification": {},
             "behavioral_evidence": {
                 "status": "not_available",
+                "reason": "audit did not produce native-replay or body-port diagnostics for this function",
                 "semantics": "diagnostic evidence only; not semantic-equivalence proof",
                 "entries": [],
             },
@@ -392,6 +393,7 @@ def build_migration_execution(
             behavior_entries = _behavior_entries(file_result, function_name)
             candidate["behavioral_evidence"] = {
                 "status": "available" if behavior_entries else "not_available",
+                "reason": None if behavior_entries else "audit did not produce native-replay or body-port diagnostics for this function",
                 "semantics": "diagnostic evidence only; not semantic-equivalence proof",
                 "entries": behavior_entries,
             }

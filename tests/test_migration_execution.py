@@ -267,3 +267,35 @@ def test_commented_trusted_atom_text_is_not_a_contract_blocker(tmp_path: Path) -
     candidate = report["candidates"][0]
     assert candidate["extracted_contract"]["trusted_atom_declarations"] == []
     assert not any("trusted atoms" in str(item) for item in candidate["evidence_blockers"])
+
+
+def test_directory_candidates_keep_per_file_provenance(tmp_path: Path) -> None:
+    from agent.audit_models import AuditDirectoryResult
+
+    first = tmp_path / "src" / "first.py"
+    second = tmp_path / "src" / "second.py"
+    first.parent.mkdir()
+    first.write_text("def same():\n    return 1\n", encoding="utf-8")
+    second.write_text("def same():\n    return 2\n", encoding="utf-8")
+    first_hint = _hint("same")
+    second_hint = _hint("same")
+    first_result = _result(first, [first_hint])
+    second_result = _result(second, [second_hint])
+    directory = AuditDirectoryResult(
+        success=False,
+        source_dir=str(first.parent),
+        language="python",
+        file_results=[first_result, second_result],
+        verification_status="unverifiable",
+        migration_hints=[first_hint, second_hint],
+    )
+
+    report = build_migration_execution(
+        directory,
+        output_path=tmp_path / "execution.json",
+        mumei_client=FakeVerifyClient(),
+    )
+
+    provenance = [item["source_provenance"] for item in report["candidates"]]
+    assert [item["path"] for item in provenance] == [str(first), str(second)]
+    assert len({item["sha256"] for item in provenance}) == 2
