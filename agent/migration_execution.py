@@ -181,6 +181,7 @@ def _verify_generated_mm(
         "status": "unavailable" if mumei_client is None else "not_attempted",
         "diagnostics": [],
         "operational_error": None,
+        "contract_proved": False,
         "sarif": {"path": str(sarif_path), "sha256": None, "written": False},
         "proof_certificate": {"path": str(proof_path), "sha256": None, "written": False},
     }
@@ -201,7 +202,7 @@ def _verify_generated_mm(
         verification["diagnostics"] = [type(exc).__name__]
         return verification
     report = result.get("report") if isinstance(result.get("report"), dict) else {}
-    if not report and result.get("success") is not True:
+    if not report:
         verification["status"] = "operational_error"
         verification["operational_error"] = "VerifierOutputUnavailable"
         verification["diagnostics"] = ["mumei verify did not produce a machine-readable report"]

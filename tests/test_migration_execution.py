@@ -321,3 +321,24 @@ def test_healed_contract_replaces_weak_skeleton_blocker(tmp_path: Path) -> None:
     candidate = report["candidates"][0]
     assert candidate["extracted_contract"]["weak_true_contract"] is False
     assert not any("weak true/true" in str(item) for item in candidate["evidence_blockers"])
+
+
+def test_empty_verifier_report_is_operational_even_with_zero_exit(tmp_path: Path) -> None:
+    source = tmp_path / "payment.py"
+    source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+
+    class EmptyReportClient(FakeVerifyClient):
+        def verify(self, *args, **kwargs):
+            super().verify(*args, **kwargs)
+            return {"success": True, "report": {}, "stdout": "", "stderr": ""}
+
+    report = build_migration_execution(
+        _result(source, [_hint("withdraw")]),
+        output_path=tmp_path / "execution.json",
+        mumei_client=EmptyReportClient(),
+    )
+
+    candidate = report["candidates"][0]
+    assert candidate["execution_state"] == "operational_error"
+    assert candidate["verification"]["operational_error"] == "VerifierOutputUnavailable"
+    assert candidate["verification"]["contract_proved"] is not True
