@@ -8240,3 +8240,45 @@ contract Vault {
         issue.function_name == "withdrawAll" and "no access-control guard" in issue.message
         for issue in _detect_solidity_contract_issues(source)
     )
+
+
+def test_solidity_settlement_recipient_setter_remains_access_control_advisory() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_solidity_contract_issues
+
+    source = """
+contract Vault {
+    address beneficiary;
+    uint256 pool;
+    function setBeneficiary(address next) external {
+        beneficiary = next;
+    }
+    function settle() external {
+        uint256 amount = pool;
+        pool = 0;
+        (bool ok, ) = beneficiary.call{value: amount}("");
+        require(ok, "payout failed");
+    }
+}
+"""
+    assert any(
+        issue.function_name == "setBeneficiary" and "no access-control guard" in issue.message
+        for issue in _detect_solidity_contract_issues(source)
+    )
+
+
+def test_solidity_caller_chosen_settlement_amount_remains_access_control_advisory() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_solidity_contract_issues
+
+    source = """
+contract Vault {
+    address seller;
+    function settle(uint256 amount) external {
+        (bool ok, ) = seller.call{value: amount}("");
+        require(ok, "payout failed");
+    }
+}
+"""
+    assert any(
+        issue.function_name == "settle" and "no access-control guard" in issue.message
+        for issue in _detect_solidity_contract_issues(source)
+    )
