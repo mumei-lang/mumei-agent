@@ -966,12 +966,17 @@ def test_author_name_public_label_is_not_credential_like(tmp_path: Path) -> None
 
 
 
-def test_uppercase_credential_constants_are_redacted_and_blocked(tmp_path: Path) -> None:
+def test_uppercase_credential_constants_are_redacted_and_blocked(tmp_path: Path, capsys) -> None:
     source = tmp_path / "payment.py"
     source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
     secret = "uppercase-secret"
-    for expression in [f'PASSWORD == "{secret}"', f'AUTH_TOKEN == "{secret}"']:
+    for expression in [f'PASSWORD == "{secret}"', f'AUTH_TOKEN == "{secret}"', f'accesstoken == "{secret}"']:
         skeleton = f'atom withdraw() -> i64 {{\n    requires: {expression};\n    ensures: result >= 0;\n    body: {{ 0 }}\n}}'
         report = build_migration_execution(_result(source, [_hint("withdraw", skeleton)]), output_path=tmp_path / "execution.json", mumei_client=FakeVerifyClient())
         assert report["candidates"][0]["execution_state"] == "blocked"
         assert secret not in json.dumps(report)
+        assert report["candidates"][0]["generated_mm"]["path"] is None
+    captured = capsys.readouterr()
+    assert secret not in captured.out
+    assert secret not in captured.err
+    assert secret not in (tmp_path / "execution.json").read_text(encoding="utf-8")
