@@ -234,14 +234,20 @@ def _simple_token(tokens: list[tuple[str, str]], kind: str) -> tuple[str, str] |
 
 def _is_credential_name(value: str) -> bool:
     words: list[str] = []
+    credential_words = {"password", "passwd", "secret", "token", "auth", "authentication", "credential", "credentials", "apikey"}
+    compound_suffixes = {"value", "hash", "digest", "key", "token", "secret", "password", "passwd", "credential", "credentials", "code", "store"}
     for part in re.split(r"[._$\-]+", value):
         lowered_part = part.lower()
         if re.fullmatch(r"(?:api[_-]?key|private[_-]?key)", part, re.IGNORECASE):
             return True
-        if lowered_part.endswith(("password", "passwd", "secret", "token", "apikey", "credential", "credentials")) or lowered_part.startswith(("password", "passwd", "secret", "credential")):
+        if lowered_part.endswith(("password", "passwd", "secret", "token", "apikey", "credential", "credentials")):
             return True
+        for root in credential_words:
+            remainder = lowered_part.removeprefix(root)
+            if remainder and remainder != lowered_part and remainder in compound_suffixes:
+                return True
         words.extend(match.group(0).lower() for match in re.finditer(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|\d+", part))
-    if any(word in {"password", "passwd", "secret", "token", "auth", "authentication", "credential", "credentials", "apikey"} for word in words):
+    if any(word in credential_words for word in words):
         return True
     return any(pair in {("api", "key"), ("private", "key")} for pair in zip(words, words[1:]))
 
