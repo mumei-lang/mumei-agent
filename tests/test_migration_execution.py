@@ -879,10 +879,11 @@ def test_credential_like_function_argument_is_not_a_direct_comparison(tmp_path: 
 
 
 
-def test_auth_mode_public_label_is_not_treated_as_credential_value(tmp_path: Path) -> None:
+def test_credential_namespace_values_are_redacted_conservatively(tmp_path: Path) -> None:
     source = tmp_path / "payment.py"
     source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
-    skeleton = 'atom withdraw() -> i64 {\n    requires: auth.mode == "public";\n    ensures: result >= 0;\n    body: { 0 }\n}'
+    secret = "nested-credential-value"
+    skeleton = f'atom withdraw() -> i64 {{\n    requires: credentials.value == "{secret}";\n    ensures: result >= 0;\n    body: {{ 0 }}\n}}'
 
     report = build_migration_execution(
         _result(source, [_hint("withdraw", skeleton)]),
@@ -891,9 +892,9 @@ def test_auth_mode_public_label_is_not_treated_as_credential_value(tmp_path: Pat
     )
 
     candidate = report["candidates"][0]
-    assert candidate["execution_state"] == "ready_for_human_review"
-    assert candidate["extracted_contract"]["requires"] == ['auth.mode == "public"']
-    assert candidate["extracted_contract"]["string_literals_redacted"] is False
+    assert candidate["execution_state"] == "blocked"
+    assert "<redacted>" in candidate["extracted_contract"]["requires"][0]
+    assert secret not in json.dumps(report)
 
 
 def test_existing_backup_marks_migration_target_as_occupied(tmp_path: Path) -> None:
@@ -912,3 +913,18 @@ def test_existing_backup_marks_migration_target_as_occupied(tmp_path: Path) -> N
     assert errors == []
     assert Path(healed[0]).name.endswith("-1.mm")
     assert backup.read_text(encoding="utf-8") == "pre-existing backup"
+
+
+
+def test_long_function_names_keep_backup_probe_within_filename_limits(tmp_path: Path) -> None:
+    source = tmp_path / "source.py"
+    source.write_text("def long_function():\n    pass\n", encoding="utf-8")
+    long_name = "withdraw_" + "x" * 240
+    pipeline = object.__new__(AuditPipeline)
+    pipeline.heal_output_dir = tmp_path
+    pipeline._run_heal_loop = lambda target: None
+
+    healed, errors = pipeline._heal_migration_hints([_hint(long_name)], source)
+
+    assert errors == []
+    assert len(Path(healed[0]).name + ".bak") <= 255

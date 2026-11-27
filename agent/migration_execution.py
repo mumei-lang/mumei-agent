@@ -232,7 +232,7 @@ def _simple_token(tokens: list[tuple[str, str]], kind: str) -> tuple[str, str] |
 
 def _is_credential_operand(tokens: list[tuple[str, str]]) -> bool:
     token = _simple_token(tokens, "name")
-    return token is not None and _CREDENTIAL_NAME_RE.search(token[1].split(".")[-1]) is not None
+    return token is not None and _CREDENTIAL_NAME_RE.search(token[1]) is not None
 
 
 def _string_operand(tokens: list[tuple[str, str]]) -> str | None:
@@ -342,18 +342,22 @@ def migration_output_key(source_path: str | Path, skeleton: str) -> str:
     return _sha256_text(source_identity + "\0" + skeleton)[:12]
 
 
+def migration_output_function_stem(function_name: str) -> str:
+    return function_name[:80]
+
+
 def migration_output_target(output_dir: Path, source_path: str | Path, function_name: str, skeleton: str) -> Path:
     def occupied(candidate: Path) -> bool:
         backup = Path(str(candidate) + ".bak")
         return candidate.exists() or candidate.is_symlink() or backup.exists() or backup.is_symlink()
 
     key = migration_output_key(source_path, skeleton)
-    candidate = output_dir / f"{function_name}-{key}.mm"
+    candidate = output_dir / f"{migration_output_function_stem(function_name)}-{key}.mm"
     if not occupied(candidate):
         return candidate
     suffix = 1
     while True:
-        candidate = output_dir / f"{function_name}-{key}-{suffix}.mm"
+        candidate = output_dir / f"{migration_output_function_stem(function_name)}-{key}-{suffix}.mm"
         if not occupied(candidate):
             return candidate
         suffix += 1
@@ -371,7 +375,7 @@ def _redact_error_text(text: str) -> str:
 
 
 def _healed_content(function_name: str, healed_files: list[str], skeleton: str, source_path: str, excluded_paths: set[str]) -> tuple[str, str | None, bool]:
-    base_names = {function_name, _safe_stem(function_name), _safe_identifier(function_name)}
+    base_names = {function_name, _safe_stem(function_name), _safe_identifier(function_name), migration_output_function_stem(function_name)}
     expected_names = {f"{base}.mm" for base in base_names}
     key = migration_output_key(source_path, skeleton)
 
@@ -645,7 +649,7 @@ def build_migration_execution(
                 candidate["heal"]["healed_file"] = healed_path
                 candidate["generated_mm"]["origin"] = "healed_file" if used_healed else "generated_skeleton"
             heal_errors = file_result.heal_errors if isinstance(file_result, AuditResult) else result.heal_errors
-            expected_error_stems = {function_name, _safe_stem(function_name), _safe_identifier(function_name)}
+            expected_error_stems = {function_name, _safe_stem(function_name), _safe_identifier(function_name), migration_output_function_stem(function_name)}
             error_key = migration_output_key(hint_source, skeleton)
 
             def heal_error_matches(item: object) -> bool:
