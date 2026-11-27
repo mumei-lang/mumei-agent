@@ -122,25 +122,38 @@ def _outside_string_mask(code: str) -> str:
 _CREDENTIAL_WORD = r"[\w$]*(?:password|passwd|secret|token|api_?key|apikey|private_?key|auth|credential)[\w$]*"
 _CREDENTIAL_EXPR = rf"(?:[\w$]+\.)*{_CREDENTIAL_WORD}"
 _STRING_LITERAL = r'"(?:\\.|[^"\\])*"'
+_OPEN_PARENS = r"(?:\(\s*)*"
+_CLOSE_PARENS = r"(?:\s*\))*"
 _CREDENTIAL_COMPARISON_FORWARD = re.compile(
-    rf"(?P<name>\b{_CREDENTIAL_EXPR}\b)\s*(?P<op>==|!=)\s*(?P<literal>{_STRING_LITERAL})",
+    rf"(?P<name>\b{_CREDENTIAL_EXPR}\b)\s*(?P<op>==|!=)\s*{_OPEN_PARENS}(?P<literal>{_STRING_LITERAL})",
     re.IGNORECASE,
 )
 _CREDENTIAL_COMPARISON_REVERSE = re.compile(
-    rf"(?P<literal>{_STRING_LITERAL})\s*(?P<op>==|!=)\s*(?P<name>\b{_CREDENTIAL_EXPR}\b)",
+    rf"{_OPEN_PARENS}(?P<literal>{_STRING_LITERAL}){_CLOSE_PARENS}\s*(?P<op>==|!=)\s*(?P<name>\b{_CREDENTIAL_EXPR}\b)",
+    re.IGNORECASE,
+)
+_CREDENTIAL_ASSIGNMENT = re.compile(
+    rf"(?P<name>\b{_CREDENTIAL_EXPR}\b)\s*(?::=|=(?!=))\s*{_OPEN_PARENS}(?P<literal>{_STRING_LITERAL})",
     re.IGNORECASE,
 )
 
 
 def _redact_credential_comparison_literals(text: str) -> str:
-    text = _CREDENTIAL_COMPARISON_FORWARD.sub(
-        lambda match: f'{match.group("name")} {match.group("op")} "<redacted>"',
-        text,
-    )
-    return _CREDENTIAL_COMPARISON_REVERSE.sub(
-        lambda match: f'"<redacted>" {match.group("op")} {match.group("name")}',
-        text,
-    )
+    spans: list[tuple[int, int]] = []
+    for pattern in (_CREDENTIAL_COMPARISON_FORWARD, _CREDENTIAL_COMPARISON_REVERSE, _CREDENTIAL_ASSIGNMENT):
+        spans.extend((match.start("literal"), match.end("literal")) for match in pattern.finditer(text))
+    if not spans:
+        return text
+    out: list[str] = []
+    cursor = 0
+    for start, end in sorted(spans):
+        if start < cursor:
+            continue
+        out.append(text[cursor:start])
+        out.append('"<redacted>"')
+        cursor = end
+    out.append(text[cursor:])
+    return "".join(out)
 
 
 def redact_sensitive_migration_text(text: str) -> str:
