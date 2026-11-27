@@ -6,18 +6,27 @@ AI orchestration layer for the verification-native [Mumei](https://github.com/mu
 
 ## Architecture
 
+```mermaid
+flowchart TD
+    Code["existing code"] --> Audit["audit / MCP scan_and_fix"]
+    NL["natural-language requirements"] --> Extract["extract-spec / MCP extract_spec"]
+    MM[".mm source or forge spec"] --> Work["generate / heal_file"]
+    Audit -->|contracts and validation inputs| Core["mumei CLI + Z3"]
+    Extract -->|candidate specs| Work
+    LLM["optional LLM provider"] -->|untrusted extraction candidates| Extract
+    LLM -->|untrusted specs and ports| Audit
+    LLM -->|untrusted code and repairs| Work
+    Work -->|subprocess: check + verify --json| Core
+    Core -->|counterexamples + diagnostics| Work
+    Proliferate["proliferate / forge fallback"] -->|Z3 unknown atoms| Lean["mumei-lean escalation"]
+    Audit -->|CLI-only Solidity guard-trace bridge| Lean
+    Core --> Evidence["audit JSON / proof evidence"]
+    Lean --> Evidence
+    Schedule["verify-schedule / explicit CLI audit schedules"] --> Adapters["external verifier adapters"]
+    Adapters -->|normalized observations, not proof| Evidence
 ```
-mumei CLI (Z3 verification)
-  ^ subprocess: mumei check / mumei verify --json
-  |
-agent/self_healing.py (heal mode)     agent/generate.py (generate mode)
-  ^ OpenAI-compatible API               ^ OpenAI-compatible API
-  |                                      |
-Ollama + Qwen (LLM inference)          Ollama + Qwen (LLM inference)
-  ^ Docker Compose                       ^ Docker Compose
-  |                                      |
-docker-compose.yml                     docker-compose.yml
-```
+
+The LLM and verifier adapters propose candidates or produce observations; they do not accept proofs. Mumei Core, Z3, Lean 4, and the explicit evidence-acceptance policy decide what becomes verified evidence. The cross-repository ownership boundary is defined in [mumei's verification-native architecture](https://github.com/mumei-lang/mumei/blob/develop/docs/VERIFICATION_NATIVE.md).
 
 The detailed generate flow, MCP relationships, and harness vocabulary are in [`docs/CLI_GUIDE.md`](docs/CLI_GUIDE.md) and [`docs/MCP_SERVER.md`](docs/MCP_SERVER.md).
 
