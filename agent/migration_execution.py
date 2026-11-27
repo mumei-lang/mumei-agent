@@ -216,6 +216,8 @@ def _verify_generated_mm(
             ),
         }
     )
+    status = verification.get("status")
+    verification["contract_proved"] = result.get("success") is True and status in {"success", "verified", "pass", "passed"}
     verification["proof_certificate"] = {
         "path": str(proof_path),
         "sha256": _sha256_file(proof_path),
@@ -378,7 +380,7 @@ def build_migration_execution(
             candidate["verification"] = verification
             if verification.get("operational_error"):
                 candidate["operational_errors"].append(verification["operational_error"])
-            elif verification.get("status") != "verified":
+            elif verification.get("contract_proved") is not True:
                 candidate["evidence_blockers"].append(f"generated .mm verification status is {verification.get('status')}")
             proof = verification.get("proof_certificate") if isinstance(verification.get("proof_certificate"), dict) else {}
             if verification.get("attempted") and not proof.get("written"):

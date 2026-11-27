@@ -25,7 +25,7 @@ class FakeVerifyClient:
             (Path(report_dir) / "report.sarif").write_text('{"version":"2.1.0","runs":[]}\n', encoding="utf-8")
         return {
             "success": self.success,
-            "report": {"status": "verified" if self.success else "refuted", "message": "fake verifier"},
+            "report": {"status": "success" if self.success else "refuted", "message": "fake verifier"},
             "stdout": "{}",
             "stderr": "",
         }
@@ -81,7 +81,8 @@ def test_migration_execution_records_acceptance_evidence_and_boundary(tmp_path: 
     assert candidate["extracted_contract"]["requires"] == ["x >= 0"]
     assert candidate["extracted_contract"]["ensures"] == ["result >= 0"]
     verification = candidate["verification"]
-    assert verification["status"] == "verified"
+    assert verification["status"] == "success"
+    assert verification["contract_proved"] is True
     assert verification["proof_certificate"]["written"] is True
     assert verification["proof_certificate"]["sha256"]
     assert verification["sarif"]["written"] is True
@@ -106,7 +107,8 @@ def test_migration_execution_keeps_weak_contracts_and_missing_proof_as_blockers(
     )
 
     candidate = report["candidates"][0]
-    assert candidate["verification"]["status"] == "verified"
+    assert candidate["verification"]["status"] == "success"
+    assert candidate["verification"]["contract_proved"] is True
     assert candidate["execution_state"] == "blocked"
     assert "generated skeleton has weak true/true contracts" in candidate["evidence_blockers"]
     assert "proof certificate was not written" in candidate["evidence_blockers"]
