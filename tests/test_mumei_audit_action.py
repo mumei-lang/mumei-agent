@@ -125,6 +125,113 @@ def test_composite_run_scripts_have_valid_bash_syntax(tmp_path: Path) -> None:
         assert result.returncode == 0, f"{step.get('name')}: {result.stderr}"
 
 
+def test_composite_action_fails_after_copying_candidate_operational_error(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "src").mkdir()
+    state = tmp_path / "action-state"
+    (state / "timing").mkdir(parents=True)
+    output = tmp_path / "github-output"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_uv = fake_bin / "uv"
+    fake_uv.write_text(
+        """#!/usr/bin/env python3
+import json
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+if args[:5] != ["run", "python", "-I", "-m", "agent"]:
+    raise SystemExit(0)
+rest = args[5:]
+if "--help" in rest:
+    print("--migration-execution-output")
+    raise SystemExit(0)
+
+def option(name):
+    if name not in rest:
+        return ""
+    index = rest.index(name)
+    return rest[index + 1] if index + 1 < len(rest) else ""
+
+audit_output = Path(option("--output"))
+sarif_output = Path(option("--sarif-output"))
+migration_output = Path(option("--migration-execution-output"))
+audit_output.write_text(json.dumps({"verification_status": "unverifiable", "finding_counts": {}}), encoding="utf-8")
+sarif_output.write_text("{}", encoding="utf-8")
+generated = migration_output.parent / f"{migration_output.stem}.migration-execution"
+generated.mkdir(parents=True, exist_ok=True)
+(generated / ".mumei-generated-artifacts").write_text("generated\\n", encoding="utf-8")
+migration_output.write_text(
+    json.dumps(
+        {
+            "schema": "mumei.migration-execution/v1",
+            "generated_at": "2026-01-01T00:00:00Z",
+            "source": {},
+            "audit": {},
+            "selection": {},
+            "operational_errors": [],
+            "candidates": [
+                {
+                    "execution_state": "operational_error",
+                    "function_name": "f",
+                    "source_provenance": {},
+                    "selection": {},
+                    "extracted_contract": {},
+                    "generated_mm": {},
+                    "heal": {},
+                    "verification": {},
+                    "unbound_audit_diagnostics": {},
+                    "contract_provenance": {},
+                    "evidence_blockers": [],
+                    "operational_errors": ["verifier transport failed"],
+                    "review_required": True,
+                }
+            ],
+            "summary": {"ready_for_human_review": 0, "blocked": 0, "operational_error": 1, "candidate_count": 1, "review_required": True},
+            "artifact_paths": {"migration_execution": str(migration_output), "generated_artifacts": str(generated)},
+            "evidence_boundary": ["generated .mm only; not host semantic equivalence"],
+        }
+    ),
+    encoding="utf-8",
+)
+raise SystemExit(0)
+""",
+        encoding="utf-8",
+    )
+    fake_uv.chmod(0o755)
+
+    audit_step = next(step for step in _action()["runs"]["steps"] if step["name"] == "Run mumei-agent audit")
+    probe = tmp_path / "audit-step.sh"
+    probe.write_text(audit_step["run"].replace("${{ github.action_path }}", str(ACTION_PATH.parent)), encoding="utf-8")
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "GITHUB_WORKSPACE": str(workspace),
+        "ACTION_STATE": str(state),
+        "AGENT_ROOT": str(ROOT),
+        "GITHUB_OUTPUT": str(output),
+        "CODE_FILE": "src",
+        "LANGUAGE": "python",
+        "AUDIT_ARGS": "",
+        "AUDIT_OUTPUT": ".mumei-audit/audit.json",
+        "SARIF_OUTPUT": ".mumei-audit/audit.sarif",
+        "MIGRATION_EXECUTION_OUTPUT": ".mumei-audit/migration_execution.json",
+    }
+
+    completed = subprocess.run(["bash", "-e", "-o", "pipefail", str(probe)], cwd=workspace, env=env, capture_output=True, text=True)
+
+    assert completed.returncode == 2
+    assert "candidate operational_error" in completed.stdout
+    assert (state / "migration-execution" / "migration_execution.json").is_file()
+    assert (state / "migration-execution" / "generated-artifacts" / ".mumei-generated-artifacts").is_file()
+    outputs = output.read_text(encoding="utf-8")
+    assert "audit_exit_code=0" in outputs
+    assert "migration_execution_status=emitted_by_audit_cli" in outputs
+    assert "migration_execution_operational_error_count=1" in outputs
+
+
 def test_prepare_output_path_rejects_symlink_parent_and_replaces_leaf_symlink(tmp_path: Path) -> None:
     helper = SUMMARY_SCRIPT.parent / "prepare_output_path.py"
     target = tmp_path / "target"
