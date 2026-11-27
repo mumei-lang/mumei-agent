@@ -597,6 +597,51 @@ def _single_return_expr(function_node: ast.FunctionDef | ast.AsyncFunctionDef) -
         return ""
 
 
+_TYPESCRIPT_RECORD_DECLARATION = re.compile(
+    r"^(?:export\s+)?(?:const|let|var)\s+([A-Za-z_]\w*)\s*:\s*Record\s*<",
+    re.MULTILINE,
+)
+_SOLIDITY_MAPPING_DECLARATION = re.compile(
+    r"\bmapping\s*\((?:[^()]|\([^()]*\))*\)\s*(?:(?:public|private|internal)\s+)*([A-Za-z_]\w*)",
+    re.DOTALL,
+)
+_SOLIDITY_ARRAY_DECLARATION = re.compile(
+    r"\b[A-Za-z_]\w*(?:\s*\[\s*\])+\s+(?:(?:public|private|internal|memory|storage|calldata)\s+)*([A-Za-z_]\w*)"
+)
+
+
+def _typescript_associative_containers(code: str) -> set[str]:
+    """Names declared as TypeScript ``Record`` objects rather than arrays."""
+    masked = _strip_go_rust_literals_and_comments(code, single_quoted_strings=True)
+    return set(_TYPESCRIPT_RECORD_DECLARATION.findall(masked))
+
+
+def _solidity_mapping_names(code: str) -> set[str]:
+    """Names declared as Solidity mappings and never as arrays in this file."""
+    masked = _strip_go_rust_literals_and_comments(code, single_quoted_strings=True)
+    mappings = set(_SOLIDITY_MAPPING_DECLARATION.findall(masked))
+    arrays = set(_SOLIDITY_ARRAY_DECLARATION.findall(masked))
+    return mappings - arrays
+
+
+def _typescript_visible_associative_containers(
+    containers: set[str], body: str, param_names: set[str]
+) -> set[str]:
+    """Drop global ``Record`` names shadowed by the function being analyzed."""
+    visible = set(containers) - param_names
+    if not visible:
+        return visible
+    masked = _strip_go_rust_literals_and_comments(body, single_quoted_strings=True)
+    for name in list(visible):
+        local_declaration = re.search(
+            rf"\b(?:const|let|var)\s+{re.escape(name)}\b", masked
+        )
+        arrow_parameter = re.search(rf"\b{re.escape(name)}\s*=>", masked)
+        if local_declaration or arrow_parameter:
+            visible.discard(name)
+    return visible
+
+
 def _typescript_param_annotation(raw: str) -> tuple[str, str | None]:
     """Split one TypeScript parameter into name text and optional annotation.
 
@@ -681,6 +726,7 @@ def _safety_requires_for_expression(
     language: str = "python",
     known_constants: dict[str, int] | None = None,
     nullable_params: set[str] | None = None,
+    associative_containers: set[str] | None = None,
 ) -> str:
     known_constants = known_constants or {}
     if not expression:
@@ -693,11 +739,11 @@ def _safety_requires_for_expression(
         findings = tree_sitter_extract.analyze_expression(expression, canonical)
         if findings is not None:
             requirements = _generic_requirements_from_findings(
-                findings, canonical, known_constants, nullable_params
+                findings, canonical, known_constants, nullable_params, associative_containers
             )
             return " && ".join(_dedupe_strings(requirements)) if requirements else "true"
         requirements = _generic_safety_requires_for_expression(
-            expression, known_constants, canonical, nullable_params
+            expression, known_constants, canonical, nullable_params, associative_containers
         )
         return " && ".join(_dedupe_strings(requirements)) if requirements else "true"
     requirements: list[str] = []
@@ -726,6 +772,7 @@ def _generic_requirements_from_findings(
     language: str = "typescript",
     known_constants: dict[str, int] | None = None,
     nullable_params: set[str] | None = None,
+    associative_containers: set[str] | None = None,
 ) -> list[str]:
     """Divide-by-zero / bounds / null requirements from syntax-tree findings.
 
@@ -737,6 +784,7 @@ def _generic_requirements_from_findings(
     permits a bare null dereference (#295).
     """
     known_constants = known_constants or {}
+    associative_containers = associative_containers or set()
     requirements: list[str] = []
     # JavaScript / TypeScript ``/`` and ``%`` with a zero divisor do not throw;
     # they return ``Infinity`` / ``NaN``.  Requiring a non-zero divisor for these
@@ -748,6 +796,8 @@ def _generic_requirements_from_findings(
         if not semantic_safety.divisor_provably_nonzero(divisor, known_constants):
             requirements.append(f"{divisor} != 0")
     for container, index in findings.index_accesses:
+        if container in associative_containers:
+            continue
         if semantic_safety.known_nonnegative_index(index, known_constants) is None:
             requirements.append(f"{index} >= 0")
         requirements.append(f"{index} < len_{container}")
@@ -800,8 +850,10 @@ def _generic_safety_requires_for_expression(
     known_constants: dict[str, int] | None = None,
     language: str = "typescript",
     nullable_params: set[str] | None = None,
+    associative_containers: set[str] | None = None,
 ) -> list[str]:
     known_constants = known_constants or {}
+    associative_containers = associative_containers or set()
     requirements: list[str] = []
     # JavaScript / TypeScript division/modulo by zero is not an exception.
     if language not in {"typescript", "javascript"}:
@@ -815,8 +867,9 @@ def _generic_safety_requires_for_expression(
     ):
         container = match.group("container")
         index = match.group("index")
-        if container == "map":
-            # ``map[K]V{...}`` is a Go map type/composite literal, not an index.
+        if container == "map" or container in associative_containers:
+            # ``map[K]V{...}`` is a Go map type/composite literal, not an index;
+            # declared associative containers are key lookups, not array indexing.
             continue
         if semantic_safety.known_nonnegative_index(index, known_constants) is None:
             requirements.append(f"{index} >= 0")
@@ -1246,6 +1299,7 @@ def _infer_rust_contracts(code: str) -> list[MumeiContractAtom]:
 
 def _infer_solidity_contracts(code: str) -> list[MumeiContractAtom]:
     known_constants = semantic_safety.collect_declared_constants(code, "solidity")
+    associative_containers = _solidity_mapping_names(code)
     extracted = tree_sitter_extract.extract_contract_functions(
         code, "solidity", _safe_identifier
     )
@@ -1265,6 +1319,7 @@ def _infer_solidity_contracts(code: str) -> list[MumeiContractAtom]:
                     raw_return_expr,
                     param_types,
                     known_constants,
+                    associative_containers,
                 )
                 local_names = _local_variable_names(fn.body, "solidity")
                 ensures = _ensures_for_return_expression(return_expr, return_type, param_names, known_constants, local_names)
@@ -1313,6 +1368,7 @@ def _infer_solidity_contracts(code: str) -> list[MumeiContractAtom]:
                 raw_return_expr,
                 param_types,
                 known_constants,
+                associative_containers,
             )
             local_names = _local_variable_names(body, "solidity")
             ensures = _ensures_for_return_expression(return_expr, return_type, param_names, known_constants, local_names)
@@ -1369,9 +1425,12 @@ def _solidity_safety_requires_for_expression(
     expression: str,
     param_types: dict[str, str] | None = None,
     known_constants: dict[str, int] | None = None,
+    associative_containers: set[str] | None = None,
 ) -> str:
     requirements: list[str] = []
-    base = _safety_requires_for_expression(expression, "solidity", known_constants)
+    base = _safety_requires_for_expression(
+        expression, "solidity", known_constants, associative_containers=associative_containers
+    )
     if base != "true":
         requirements.extend(part.strip() for part in base.split("&&") if part.strip())
     requirements.extend(
@@ -1568,6 +1627,7 @@ def _infer_typescript_arrow_functions_with_tree_sitter(
 
 def _infer_typescript_contracts(code: str) -> list[MumeiContractAtom]:
     known_constants = semantic_safety.collect_declared_constants(code, "typescript")
+    associative_containers = _typescript_associative_containers(code)
     extracted = tree_sitter_extract.extract_contract_functions(
         code, "typescript", _safe_identifier
     )
@@ -1592,6 +1652,9 @@ def _infer_typescript_contracts(code: str) -> list[MumeiContractAtom]:
                     "typescript",
                     known_constants,
                     _typescript_nullable_params(fn.params_text),
+                    _typescript_visible_associative_containers(
+                        associative_containers, fn.body, param_names
+                    ),
                 )
                 local_names = _local_variable_names(fn.body, "typescript")
                 ensures = _ensures_for_return_expression(return_expr, return_type, param_names, known_constants, local_names, param_types=param_types)
@@ -1676,6 +1739,9 @@ def _infer_typescript_contracts(code: str) -> list[MumeiContractAtom]:
                         "typescript",
                         known_constants,
                         _typescript_nullable_params(match.group("params")),
+                        _typescript_visible_associative_containers(
+                            associative_containers, body, param_names
+                        ),
                     ),
                     ensures=_ensures_for_return_expression(return_expr, return_type, param_names, known_constants, local_names, param_types=param_types),
                 )

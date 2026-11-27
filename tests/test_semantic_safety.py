@@ -17,6 +17,14 @@ def test_collect_declared_constants_solidity() -> None:
     assert "DERIVED" not in constants  # non-literal initializer skipped
 
 
+def test_collect_declared_constants_solidity_exponent_literal() -> None:
+    constants = semantic_safety.collect_declared_constants(
+        "uint256 private constant ACC_PRECISION = 1e18;\n",
+        "solidity",
+    )
+    assert constants["ACC_PRECISION"] == 10**18
+
+
 def test_collect_declared_constants_rust() -> None:
     source = (
         "const N: u64 = 7;\n"
@@ -50,6 +58,8 @@ def test_divisor_and_index_helpers() -> None:
     assert semantic_safety.divisor_provably_nonzero("N", consts) is True
     assert semantic_safety.divisor_provably_nonzero("ZERO", consts) is False
     assert semantic_safety.divisor_provably_nonzero("unknown", consts) is False
+    assert semantic_safety.divisor_provably_nonzero("1e18", consts) is True
+    assert semantic_safety.divisor_provably_nonzero("0e18", consts) is False
     assert semantic_safety.known_nonnegative_index("N", consts) == 7
     assert semantic_safety.known_nonnegative_index("NEG", consts) is None
     assert semantic_safety.known_nonnegative_index("unknown", consts) is None
