@@ -14,6 +14,12 @@ import re
 from pathlib import Path
 from urllib.parse import quote
 
+from agent.audit_baseline import (
+    FAIL_ON_CHOICES,
+    active_code_findings,
+    active_findings,
+    has_unbaselined_refuted_without_findings,
+)
 from agent.audit_models import AuditDirectoryResult, AuditResult
 
 SARIF_SCHEMA = "https://json.schemastore.org/sarif-2.1.0.json"
@@ -50,14 +56,17 @@ _RULES = {
 }
 
 
-def audit_exit_code(result: AuditResult | AuditDirectoryResult) -> int:
+def audit_exit_code(
+    result: AuditResult | AuditDirectoryResult, *, fail_on: str = "refuted"
+) -> int:
     """Return the stable process classification for one audit result.
 
     ``0`` means no failing code findings; ``1`` means the audit completed
     enough to report evidence against the code; ``2`` means operational or
     extraction errors prevented a normal audit. Spec-only diagnostics and
-    ``unverifiable`` do not fail by default; stricter CI policy belongs to the
-    later ``--fail-on`` contract rather than this baseline classification.
+    ``unverifiable`` do not fail by default. ``fail_on`` then selects whether
+    non-suppressed findings fail on any refuted/code evidence, any error-level
+    finding, only high-confidence code evidence, or never.
     """
     files = (
         result.file_results
@@ -71,24 +80,63 @@ def audit_exit_code(result: AuditResult | AuditDirectoryResult) -> int:
     )
     if has_operational_error:
         return 2
-    has_code_finding = any(
-        file_result.verification_status == "refuted" or bool(file_result.verification_violations)
+    if fail_on not in FAIL_ON_CHOICES:
+        raise ValueError(f"unsupported fail-on policy: {fail_on}")
+    if fail_on == "never":
+        return 0
+
+    active_code = active_code_findings(result)
+    unbaselined_refuted = has_unbaselined_refuted_without_findings(result)
+    unprojected_code_evidence = any(
+        not (file_result.findings or [])
+        and (
+            file_result.verification_status == "refuted"
+            or bool(file_result.verification_violations)
+        )
         for file_result in files
     )
-    return 1 if has_code_finding else 0
+    if fail_on == "high-confidence":
+        return (
+            1
+            if unbaselined_refuted
+            or unprojected_code_evidence
+            or any(row.get("confidence") == "high" for row in active_code)
+            else 0
+        )
+    if fail_on == "error":
+        return (
+            1
+            if unbaselined_refuted
+            or unprojected_code_evidence
+            or any(
+                row.get("severity") == "error" for row in active_findings(result)
+            )
+            else 0
+        )
+    if active_code or unbaselined_refuted or unprojected_code_evidence:
+        return 1
+    return 0
 
 
 def sarif_document(result: AuditResult | AuditDirectoryResult) -> dict:
     """Render one audit result as a SARIF 2.1.0 document."""
     results: list[dict] = []
+    baseline_states = _baseline_state_map(result)
     if isinstance(result, AuditDirectoryResult):
         for file_result in result.file_results:
-            results.extend(_file_sarif_results(file_result, include_trusted_atoms=False))
+            results.extend(
+                _file_sarif_results(
+                    file_result,
+                    include_trusted_atoms=False,
+                    baseline_states=baseline_states,
+                )
+            )
         results.extend(
             _trusted_atom_sarif_results(
                 result.trusted_atoms,
                 result.source_dir,
                 base_dir=result.source_dir,
+                baseline_states=baseline_states,
             )
         )
         results.extend(
@@ -98,11 +146,19 @@ def sarif_document(result: AuditResult | AuditDirectoryResult) -> dict:
                 _redact_message(error, [result.source_dir]),
                 result.source_dir,
                 None,
+                baseline_state=_baseline_state(
+                    baseline_states,
+                    _redact_message(error, [result.source_dir]),
+                    result.source_dir,
+                    None,
+                ),
             )
             for error in result.errors
         )
     else:
-        results.extend(_file_sarif_results(result))
+        results.extend(
+            _file_sarif_results(result, baseline_states=baseline_states)
+        )
 
     return {
         "$schema": SARIF_SCHEMA,
@@ -137,8 +193,14 @@ def write_sarif(result: AuditResult | AuditDirectoryResult, output_path: str | o
     path.write_text(sarif_json(result) + "\n", encoding="utf-8")
 
 
-def _file_sarif_results(result: AuditResult, *, include_trusted_atoms: bool = True) -> list[dict]:
+def _file_sarif_results(
+    result: AuditResult,
+    *,
+    include_trusted_atoms: bool = True,
+    baseline_states: dict[tuple[str, str, int | None], str] | None = None,
+) -> list[dict]:
     output: list[dict] = []
+    baseline_states = baseline_states or {}
     output.extend(
         _finding_result(
             "mumei.audit/verification-violation",
@@ -146,6 +208,12 @@ def _file_sarif_results(result: AuditResult, *, include_trusted_atoms: bool = Tr
             _redact_message(violation, [result.source_file]),
             result.source_file,
             None,
+            baseline_state=_baseline_state(
+                baseline_states,
+                _redact_message(violation, [result.source_file]),
+                result.source_file,
+                None,
+            ),
         )
         for violation in result.verification_violations
     )
@@ -156,6 +224,12 @@ def _file_sarif_results(result: AuditResult, *, include_trusted_atoms: bool = Tr
             _redact_message(issue, [result.source_file]),
             result.source_file,
             None,
+            baseline_state=_baseline_state(
+                baseline_states,
+                _redact_message(issue, [result.source_file]),
+                result.source_file,
+                None,
+            ),
         )
         for issue in result.spec_health_issues
     )
@@ -166,11 +240,23 @@ def _file_sarif_results(result: AuditResult, *, include_trusted_atoms: bool = Tr
             _redact_message(gap, [result.source_file]),
             result.source_file,
             None,
+            baseline_state=_baseline_state(
+                baseline_states,
+                _redact_message(gap, [result.source_file]),
+                result.source_file,
+                None,
+            ),
         )
         for gap in result.cross_validation_gaps
     )
     if include_trusted_atoms:
-        output.extend(_trusted_atom_sarif_results(result.trusted_atoms, result.source_file))
+        output.extend(
+            _trusted_atom_sarif_results(
+                result.trusted_atoms,
+                result.source_file,
+                baseline_states=baseline_states,
+            )
+        )
     output.extend(
         _finding_result(
             "mumei.audit/audit-error",
@@ -178,10 +264,53 @@ def _file_sarif_results(result: AuditResult, *, include_trusted_atoms: bool = Tr
             _redact_message(error, [result.source_file]),
             result.source_file,
             None,
+            baseline_state=_baseline_state(
+                baseline_states,
+                _redact_message(error, [result.source_file]),
+                result.source_file,
+                None,
+            ),
         )
         for error in result.errors
     )
     return output
+
+
+def _baseline_state_map(
+    result: AuditResult | AuditDirectoryResult,
+) -> dict[tuple[str, str, int | None], str]:
+    rows = list(result.findings or [])
+    if isinstance(result, AuditDirectoryResult):
+        rows.extend(
+            row
+            for file_result in result.file_results
+            for row in (file_result.findings or [])
+        )
+    return {
+        (
+            str(row.get("message")),
+            os.path.realpath(os.path.expanduser(str(row.get("source_file") or ""))),
+            row.get("line") if type(row.get("line")) is int else None,
+        ): str(row["baseline"])
+        for row in rows
+        if row.get("message") and row.get("baseline") in {"new", "suppressed"}
+    }
+
+
+def _baseline_state(
+    states: dict[tuple[str, str, int | None], str],
+    message: str,
+    source_file: str,
+    line: int | None,
+) -> str | None:
+    state = states.get(
+        (str(message), os.path.realpath(os.path.expanduser(source_file)), line)
+    )
+    if state == "suppressed":
+        return "unchanged"
+    if state == "new":
+        return "new"
+    return None
 
 
 def _trusted_atom_sarif_results(
@@ -189,6 +318,7 @@ def _trusted_atom_sarif_results(
     fallback_source: str,
     *,
     base_dir: str | None = None,
+    baseline_states: dict[tuple[str, str, int | None], str] | None = None,
 ) -> list[dict]:
     output: list[dict] = []
     for atom in trusted_atoms:
@@ -208,12 +338,27 @@ def _trusted_atom_sarif_results(
                 + (f": {atom.get('atom')}" if atom.get("atom") else ""),
                 source,
                 line if type(line) is int and line > 0 else None,
+                baseline_state=_baseline_state(
+                    baseline_states or {},
+                    "trusted atom bypasses Z3 verification"
+                    + (f": {atom.get('atom')}" if atom.get("atom") else ""),
+                    source,
+                    line if type(line) is int and line > 0 else None,
+                ),
             )
         )
     return output
 
 
-def _finding_result(rule_id: str, level: str, message: str, source_file: str, line: int | None) -> dict:
+def _finding_result(
+    rule_id: str,
+    level: str,
+    message: str,
+    source_file: str,
+    line: int | None,
+    *,
+    baseline_state: str | None = None,
+) -> dict:
     text = str(message)
     artifact_uri = _artifact_uri(source_file)
     fingerprint = hashlib.sha256(
@@ -222,13 +367,16 @@ def _finding_result(rule_id: str, level: str, message: str, source_file: str, li
     physical_location = {"artifactLocation": {"uri": artifact_uri}}
     if line is not None:
         physical_location["region"] = {"startLine": line}
-    return {
+    row = {
         "ruleId": rule_id,
         "level": level,
         "message": {"text": text},
         "locations": [{"physicalLocation": physical_location}],
         "partialFingerprints": {"mumeiAuditFinding/v1": fingerprint},
     }
+    if baseline_state:
+        row["baselineState"] = baseline_state
+    return row
 
 
 _ABSOLUTE_PATH_RE = re.compile(r"(?<![\w:/])\/(?:[^\s\"'`<>|,.;:]+/)+[^\s\"'`<>|,.;:]*")

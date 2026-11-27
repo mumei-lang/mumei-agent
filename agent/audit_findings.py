@@ -85,12 +85,48 @@ def build_file_findings(result: AuditResult) -> list[dict]:
     return rows
 
 
+def _lexical_absolute_path(path: str) -> Path:
+    """Return a cwd-independent path without collapsing symlinked audit inputs."""
+    return Path(os.path.abspath(os.path.expanduser(path)))
+
+
+def _root_relative_source_key(source_file: str, source_dir: str) -> str:
+    root = _lexical_absolute_path(source_dir)
+    if any((candidate / ".git").exists() for candidate in (root, *root.parents)):
+        # In a git checkout the durable identity is the repository-relative
+        # file path. This is independent of the checkout directory name and
+        # also distinguishes src/x from other/x when the audit root changes.
+        return _stable_source_key(source_file)
+    try:
+        # Outside a git checkout (for example a temporary multi-repository
+        # scan root), keep the audit-root-relative prefix so independent
+        # nested trees do not collapse onto the same key.
+        return _lexical_absolute_path(source_file).relative_to(root).as_posix()
+    except (OSError, ValueError):
+        return _stable_source_key(source_file)
+
+
+def _refingerprint_for_audit_root(row: dict, source_dir: str) -> None:
+    row["fingerprint"] = _fingerprint(
+        str(row["category"]),
+        str(row["verification_basis"]),
+        str(row["message"]),
+        _root_relative_source_key(str(row["source_file"]), source_dir),
+        row.get("line") if type(row.get("line")) is int else None,
+    )
+
+
 def build_directory_findings(result: AuditDirectoryResult) -> list[dict]:
     rows = [
         finding
         for file_result in result.file_results
         for finding in (file_result.findings or build_file_findings(file_result))
     ]
+    for row in rows:
+        # Directory baselines are keyed relative to the audited root. This keeps
+        # identical diagnostics in independent nested checkouts distinct while
+        # remaining stable across invocation subdirectories.
+        _refingerprint_for_audit_root(row, result.source_dir)
     seen = {finding["fingerprint"] for finding in rows}
     for atom in result.trusted_atoms:
         source_file = (
@@ -101,6 +137,7 @@ def build_directory_findings(result: AuditDirectoryResult) -> list[dict]:
         if isinstance(atom, dict) and atom.get("file") and not os.path.isabs(source_file):
             source_file = str(Path(result.source_dir) / source_file)
         row = _trusted_atom_finding(source_file, atom)
+        _refingerprint_for_audit_root(row, result.source_dir)
         if row["fingerprint"] not in seen:
             seen.add(row["fingerprint"])
             rows.append(row)
@@ -353,7 +390,7 @@ def _redact_message(text: str, known_paths: list[str]) -> str:
 def _stable_source_key(source_file: str) -> str:
     """Use a checkout-relative source key when possible for stable CI fingerprints."""
     try:
-        path = Path(os.path.expanduser(source_file)).resolve()
+        path = _lexical_absolute_path(source_file)
         start = path if path.is_dir() else path.parent
         checkout_root = None
         for candidate in (start, *start.parents):
