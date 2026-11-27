@@ -938,7 +938,7 @@ def _go_nonnil_provenance(source: str, prefix: str, arg: str) -> bool:
         return _go_constructor_returns_pointer(source, global_init.group(1))
     lookup = re.search(rf"\b{re.escape(arg)}\s*,\s*(\w+)\s*:=\s*[\w.]+\[[^\n;]+\]", prefix)
     if lookup:
-        guard = re.search(rf"\bif\s*!\s*{re.escape(lookup.group(1))}\s*\{{[^{{}}]*\breturn\b", prefix[lookup.end():])
+        guard = re.search(rf"\bif\s*(?:!\s*{re.escape(lookup.group(1))}\s*\|\|\s*{re.escape(arg)}\s*==\s*nil|{re.escape(arg)}\s*==\s*nil)\s*\{{[^{{}}]*\breturn\b", prefix[lookup.end():])
         return bool(guard) and not re.search(rf"\b{re.escape(arg)}\s*=\s*nil\b", prefix[lookup.end():])
     return False
 

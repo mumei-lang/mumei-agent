@@ -1756,7 +1756,7 @@ var users = map[string]*user{}
 func passwordMatches(account *user, password string) bool { return account != nil }
 func login(input string) bool {
     account, known := users[input]
-    if !known {
+    if !known || account == nil {
         passwordMatches(dummyAccount, "x")
         return false
     }
