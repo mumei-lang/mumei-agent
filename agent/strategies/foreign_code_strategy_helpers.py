@@ -8069,97 +8069,43 @@ _SENTINEL_NESTED_INDEX_RES: dict[str, re.Pattern[str]] = {
 }
 
 
-_PROBABLE_REGEX_OPENERS = set("([{=,:;!&|?+-*%^~<>")
+def _braceless_exit_dominates_use(body: str, check_pos: int, use_pos: int) -> bool:
+    """Whether a braceless early-exit ``if`` dominates a later use.
 
-
-def _mask_probable_regex_literals(text: str) -> str:
-    """Blank likely JavaScript/TypeScript regex literals, preserving length.
-
-    This is deliberately conservative: only a ``/`` in a position where an
-    expression can start is treated as a regex opener. It prevents quotes or
-    braces inside ``/"/``-style literals from confusing the lightweight string
-    and brace scanners used by sentinel analysis.
+    When tree-sitter is available, use the real TypeScript syntax tree rather
+    than approximating JavaScript lexical structure with regexes. A guard
+    dominates the use only when both belong to the same statement sequence
+    (function/block body or switch case); object literals, strings, comments,
+    regexes and nested switch syntax are then handled by the parser instead of
+    by ad-hoc brace matching. Unparseable fragments fail closed: the guard is
+    not treated as dominating, so the use remains visible as a warning.
     """
-    chars = list(text)
-    i = 0
-    n = len(text)
-    while i < n:
-        if text[i] != "/" or (i + 1 < n and text[i + 1] in "/*"):
-            i += 1
-            continue
-        j = i - 1
-        while j >= 0 and text[j].isspace():
-            j -= 1
-        if j >= 0 and text[j] not in _PROBABLE_REGEX_OPENERS:
-            i += 1
-            continue
-        k = i + 1
-        in_class = False
-        end = -1
-        while k < n:
-            ch = text[k]
-            if ch == "\\":
-                k += 2
-                continue
-            if ch == "[":
-                in_class = True
-            elif ch == "]":
-                in_class = False
-            elif ch == "/" and not in_class:
-                end = k
-                break
-            elif ch in "\r\n":
-                break
-            k += 1
-        if end < 0:
-            i += 1
-            continue
-        for pos in range(i, end + 1):
-            if chars[pos] not in "\r\n":
-                chars[pos] = " "
-        i = end + 1
-    return "".join(chars)
-
-
-_GUARD_TAIL_TOKEN_RE = re.compile(r"[{}]|\bswitch\b|\bcase\b|\bdefault\s*:")
-
-
-def _braceless_exit_dominates_use(tail: str) -> bool:
-    """Whether the text after a braceless return/throw reaches the use.
-
-    Balanced object literals do not invalidate the guard, but a closing brace
-    that belongs to an outer block does. A following ``case`` in the same
-    switch also invalidates it; cases in a switch that starts after the guard
-    do not.
-    """
-    masked_tail = _strip_go_rust_literals_and_comments(_mask_probable_regex_literals(tail))
-    semicolon = masked_tail.find(";")
-    if semicolon < 0:
+    prefix = "async function __mumei_sentinel_guard__() {\n"
+    tree, _source_bytes = tree_sitter_extract.parse(prefix + body + "\n}", "typescript")
+    if tree is None or tree.root_node.has_error:
         return False
-    depth = 0
-    post_guard_switch_depth: int | None = None
-    pending_switch = False
-    for token in _GUARD_TAIL_TOKEN_RE.finditer(masked_tail[semicolon + 1 :]):
-        text = token.group(0)
-        if text == "switch":
-            pending_switch = True
-            continue
-        if text == "{":
-            depth += 1
-            if pending_switch:
-                post_guard_switch_depth = depth
-                pending_switch = False
-            continue
-        if text == "}":
-            if depth == 0:
-                return False
-            if post_guard_switch_depth == depth:
-                post_guard_switch_depth = None
-            depth -= 1
-            continue
-        if post_guard_switch_depth is None:
-            return False
-    return True
+
+    prefix_len = len(prefix.encode("utf-8"))
+
+    def byte_pos(char_pos: int) -> int:
+        return prefix_len + len(body[:char_pos].encode("utf-8"))
+
+    check_node = tree.root_node.descendant_for_byte_range(byte_pos(check_pos), byte_pos(check_pos))
+    while check_node is not None and check_node.type != "if_statement":
+        check_node = check_node.parent
+    if check_node is None or check_node.parent is None:
+        return False
+    sequence = check_node.parent
+    if sequence.type not in {"statement_block", "switch_case", "program"}:
+        return False
+
+    use_byte = byte_pos(use_pos)
+    use_node = tree.root_node.descendant_for_byte_range(use_byte, use_byte)
+    while use_node is not None:
+        if use_node == sequence:
+            return True
+        use_node = use_node.parent
+    return False
 
 
 def _sentinel_guarded(
@@ -8182,11 +8128,7 @@ def _sentinel_guarded(
         tail = body[match.end() : use_pos]
         if re.match(r"\s*\)*\s*(?:return|throw)\b", tail) is None:
             return False
-        # A braceless early exit nested inside another block or switch case
-        # does not dominate code after that block/case. Object literals may
-        # contain braces, so inspect balanced structure after the exit
-        # statement's first semicolon.
-        return _braceless_exit_dominates_use(tail)
+        return _braceless_exit_dominates_use(body, match.start(), use_pos)
 
     if kind == "minus1":
         safe_re = re.compile(

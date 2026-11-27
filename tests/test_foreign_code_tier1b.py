@@ -701,3 +701,29 @@ def test_ts_find_guard_before_switch_still_dominates_later_use() -> None:
         "switch (kind) { case 'a': console.log(1); } return el.value;"
     )
     assert not _sentinel_issues(body, "TypeScript")
+
+
+def test_ts_find_slash_in_comment_or_string_does_not_hide_nested_guard_boundary() -> None:
+    for separator in ("// /\n const x = 1;", 'const s = "/";'):
+        body = (
+            "const el = xs.find(x => x > 0); if (outer) { if (!el) return; "
+            f"{separator} }} return el.value;"
+        )
+        assert any("undefined" in issue.message for issue in _sentinel_issues(body, "TypeScript"))
+
+
+def test_ts_find_object_case_keys_do_not_invalidate_prior_guard() -> None:
+    body = (
+        "const el = xs.find(x => x > 0); if (!el) return; "
+        "const labels = { case: 'a', default: 'b' }; return el.value;"
+    )
+    assert not _sentinel_issues(body, "TypeScript")
+
+
+def test_ts_find_nested_switch_and_object_discriminant_remain_guarded() -> None:
+    body = (
+        "const el = xs.find(x => x > 0); if (!el) return; "
+        "switch ({ tag: kind }.tag) { case 'a': switch (inner) { case 1: console.log(1); } } "
+        "return el.value;"
+    )
+    assert not _sentinel_issues(body, "TypeScript")
