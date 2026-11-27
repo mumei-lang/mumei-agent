@@ -247,7 +247,7 @@ def _is_credential_name(value: str) -> bool:
                 while position >= 0:
                     remainder = lowered_part[position + len(root):]
                     prefix = lowered_part[:position]
-                    weak_blocked = root in {"token", "auth", "authentication"} and prefix and prefix not in weak_root_prefixes
+                    weak_blocked = root in {"auth", "authentication"} and prefix and prefix not in weak_root_prefixes
                     if not weak_blocked and (not remainder or remainder in compound_suffixes or (root in numeric_compound_roots and remainder.isdigit())):
                         return True
                     position = lowered_part.find(root, position + 1)
