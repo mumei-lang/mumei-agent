@@ -633,3 +633,24 @@ def test_ts_indexof_find_provenance_without_check_still_flagged() -> None:
     )
     issues = _sentinel_issues(body, "TypeScript")
     assert any("indexOf" in issue.message for issue in issues)
+
+
+def test_ts_find_nested_early_exit_does_not_guard_outer_use() -> None:
+    body = "const el = xs.find(x => x > 0); if (outer) { if (!el) return 0; } return el.value;"
+    assert any("undefined" in issue.message for issue in _sentinel_issues(body, "TypeScript"))
+
+
+def test_ts_indexof_first_expression_is_not_proven_by_later_search() -> None:
+    body = (
+        "const task = tasks.find((t) => t.id === id); if (!task) return 0; "
+        "const other = tasks[tasks.indexOf(task)]; rows[rows.indexOf(row)] = row;"
+    )
+    assert any("indexOf" in issue.message for issue in _sentinel_issues(body, "TypeScript"))
+
+
+def test_ts_indexof_find_provenance_still_flagged_after_mutation() -> None:
+    body = (
+        "const task = tasks.find((t) => t.id === id); if (!task) return 0; "
+        "tasks.splice(0, 1); tasks[tasks.indexOf(task)] = task;"
+    )
+    assert any("indexOf" in issue.message for issue in _sentinel_issues(body, "TypeScript"))

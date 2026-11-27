@@ -8087,7 +8087,13 @@ def _sentinel_guarded(
         sentinel check handles this statement form locally.
         """
         tail = body[match.end() : use_pos]
-        return re.match(r"\s*\)*\s*(?:return|throw)\b", tail) is not None
+        if re.match(r"\s*\)*\s*(?:return|throw)\b", tail) is None:
+            return False
+        # A braceless early exit nested inside another ``if`` does not dominate
+        # code after that outer block. Object literals may contain braces, so
+        # inspect only the text after the exit statement's first semicolon.
+        semicolon = tail.find(";")
+        return semicolon >= 0 and "}" not in tail[semicolon + 1 :]
 
     if kind == "minus1":
         safe_re = re.compile(
@@ -8204,8 +8210,8 @@ def _sentinel_index_issues(
     nested = _SENTINEL_NESTED_INDEX_RES.get(label)
     if nested is not None:
         for match in nested.finditer(body):
-            proven_index = re.search(
-                r"\b(?P<array>[A-Za-z_]\w*)\.(?:indexOf|lastIndexOf)\s*\(\s*(?P<var>[A-Za-z_]\w*)\s*\)",
+            proven_index = re.match(
+                r"\[\s*(?P<array>[A-Za-z_]\w*)\.(?:indexOf|lastIndexOf)\s*\(\s*(?P<var>[A-Za-z_]\w*)\s*\)",
                 body[match.start() : match.start() + 200],
             )
             if proven_index is not None and label == "TypeScript":
@@ -8218,9 +8224,15 @@ def _sentinel_index_issues(
                 if assignment is not None and _sentinel_guarded(
                     body, var, match.start(), "undefined", since=assignment.end()
                 ):
-                    # ``array.find`` already established that this object is
-                    # an element, so ``array.indexOf(object)`` cannot miss.
-                    continue
+                    intervening = body[assignment.end() : match.start()]
+                    array_mutated = re.search(
+                        rf"\b{re.escape(array_name)}\s*(?:\.\s*(?:push|pop|shift|unshift|splice)\s*\(|\s*=[^=]|\.length\s*=|\[[^\]]+\]\s*=)",
+                        intervening,
+                    )
+                    if array_mutated is None:
+                        # ``array.find`` established membership and no mutation
+                        # before this use could remove the object.
+                        continue
             call = re.search(
                 r"\.(?:indexOf|lastIndexOf|findIndex|find)\s*\(|(?:strings|bytes)\.Index\w*",
                 match.group(0),
