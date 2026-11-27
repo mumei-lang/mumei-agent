@@ -2004,11 +2004,21 @@ def _rust_guarded_nonempty_len_divisors(body: str) -> set[str]:
         for match in re.finditer(pattern, stripped, re.DOTALL):
             if not re.search(r"\breturn\b|panic!|unreachable!", match.group("body")):
                 continue
+            # Only a top-level early-exit guard is known to dominate the rest of
+            # the function body. Nested guards may be conditional and are ignored.
+            if stripped[: match.start()].count("{") != stripped[: match.start()].count("}"):
+                continue
             name = match.group("name")
             use_pattern = re.compile(rf"\b{re.escape(name)}\.len\(\)")
             for use in use_pattern.finditer(stripped, match.end()):
                 between = stripped[match.end() : use.start()]
-                if not re.search(rf"\b{re.escape(name)}\s*=", between):
+                mutating_write = re.search(
+                    rf"\b{re.escape(name)}\s*(?:\[[^\]]*\])?=|"
+                    rf"\b{re.escape(name)}\s*\.\s*(?!len\b)[A-Za-z_]\w*\s*\(|"
+                    rf"&\s*mut\s+{re.escape(name)}\b",
+                    between,
+                )
+                if not mutating_write:
                     guarded.add(f"{name}.len()")
                     break
     return guarded
@@ -6479,7 +6489,7 @@ def _go_assignment_division_expressions(body: str) -> tuple[str, ...]:
 
     def visit(statements: tuple[tree_sitter_extract.Statement, ...]) -> None:
         for statement in statements:
-            if statement.kind in {"define", "assign"}:
+            if statement.kind in {"define", "assign", "var"}:
                 for value in statement.values:
                     if "/" not in value and "%" not in value:
                         continue

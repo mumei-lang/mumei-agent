@@ -1774,7 +1774,7 @@ class _Walker:
                 env, before, self._backward_regions[label]
             )
         kind = statement.kind
-        if kind in {"define", "assign"}:
+        if kind in {"define", "assign", "var"}:
             for value in statement.values:
                 if value and ("/" in value or "%" in value):
                     self.expression_facts.setdefault(_norm(value), []).append(env.copy())
