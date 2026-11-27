@@ -62,7 +62,7 @@
           "function_name": {"type": "string"},
           "source_provenance": {"type": "object"},
           "selection": {"type": "object"},
-          "extracted_contract": {"type": "object"},
+          "extracted_contract": {"type": "object", "description": "Contract clauses with string-literal contents redacted; string_literals_redacted records that redaction and therefore values are not evidence or comparison inputs."},
           "generated_mm": {"type": "object"},
           "heal": {"type": "object"},
           "verification": {"type": "object"},

@@ -1623,8 +1623,10 @@ def test_audit_pipeline_auto_heal_records_healed_files(tmp_path: Path, capsys) -
             heal_output_dir=str(output_dir),
         ).audit_file(source, "python", auto_migrate=True, auto_heal=True)
 
-    healed_path = output_dir / "withdraw.mm"
-    assert result.healed_files == [str(healed_path.resolve())]
+    assert len(result.healed_files) == 1
+    healed_path = Path(result.healed_files[0])
+    assert healed_path.parent == output_dir.resolve()
+    assert healed_path.name.startswith("withdraw-")
     assert result.heal_errors == []
     assert healed_path.read_text(encoding="utf-8") == hint.skeleton + "\n"
     assert "healed_files:" in result.report
@@ -1653,8 +1655,8 @@ def test_auto_heal_keeps_module_and_qualified_method_skeletons(tmp_path: Path) -
         healed, errors = pipeline._heal_migration_hints(hints, tmp_path / "ledger.py")
 
     assert errors == []
-    assert [Path(path).name for path in healed] == ["Ledger_debit.mm", "Ledger.debit.mm"]
-    assert [(tmp_path / f"{name}.mm").read_text(encoding="utf-8") for name in migrations] == [
+    assert [Path(path).name.split("-")[0] for path in healed] == ["Ledger_debit", "Ledger.debit"]
+    assert [Path(path).read_text(encoding="utf-8") for path in healed] == [
         skeleton + "\n" for skeleton in migrations.values()
     ]
 

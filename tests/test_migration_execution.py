@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -367,30 +369,33 @@ def test_heal_migration_hints_respects_selected_functions(tmp_path: Path) -> Non
     healed, errors = pipeline._heal_migration_hints(hints, tmp_path / "source.py", selected_functions=["withdraw"])
 
     assert errors == []
-    assert healed == [str(tmp_path / "withdraw.mm")]
-    assert (tmp_path / "withdraw.mm").exists()
-    assert not (tmp_path / "deposit.mm").exists()
+    assert len(healed) == 1
+    assert Path(healed[0]).parent == tmp_path
+    assert Path(healed[0]).name.startswith("withdraw-")
+    assert Path(healed[0]).suffix == ".mm"
+    assert not list(tmp_path.glob("deposit*.mm"))
 
 
 
-def test_string_literals_in_contracts_are_preserved_for_provenance(tmp_path: Path) -> None:
+def test_string_literals_in_contracts_are_redacted_and_not_reparsed(tmp_path: Path) -> None:
     source = tmp_path / "payment.py"
     source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
-    original = 'atom withdraw() -> i64 {\n    requires: message == "hello;world";\n    ensures: result >= 0;\n    body: { 0 }\n}'
-    healed_text = 'atom withdraw() -> i64 {\n    requires: message == "goodbye;world";\n    ensures: result >= 0;\n    body: { 0 }\n}'
-    healed = tmp_path / "withdraw.mm"
-    healed.write_text(healed_text, encoding="utf-8")
+    secret = "requires: injected; hello;world"
+    original = f'atom withdraw() -> i64 {{\n    requires: password == "{secret}";\n    ensures: result >= 0;\n    body: {{ 0 }}\n}}'
 
     report = build_migration_execution(
-        _result(source, [_hint("withdraw", original)], healed_files=[str(healed)]),
+        _result(source, [_hint("withdraw", original)]),
         output_path=tmp_path / "execution.json",
         mumei_client=FakeVerifyClient(),
     )
 
-    provenance = report["candidates"][0]["contract_provenance"]
-    assert provenance["original_requires"] == ['message == "hello;world"']
-    assert provenance["final_requires"] == ['message == "goodbye;world"']
-    assert provenance["contract_clauses_changed"] is True
+    candidate = report["candidates"][0]
+    provenance = candidate["contract_provenance"]
+    assert provenance["original_requires"] == ['password == "<redacted>"']
+    assert len(provenance["original_requires"]) == 1
+    assert candidate["extracted_contract"]["string_literals_redacted"] is True
+    assert candidate["execution_state"] == "blocked"
+    assert secret not in json.dumps(report)
 
 
 def test_migration_output_never_overwrites_existing_mm(tmp_path: Path) -> None:
@@ -402,9 +407,16 @@ def test_migration_output_never_overwrites_existing_mm(tmp_path: Path) -> None:
 
     healed, errors = pipeline._heal_migration_hints([_hint("withdraw")], tmp_path / "source.py")
 
-    assert healed == []
-    assert errors == ["withdraw: migration output already exists: withdraw.mm"]
+    assert errors == []
+    assert len(healed) == 1
+    assert Path(healed[0]).name.startswith("withdraw-")
+    assert Path(healed[0]).name != "withdraw.mm"
     assert existing.read_text(encoding="utf-8") == "atom existing() -> i64 { body: { 1 } }\n"
+
+    healed_again, errors_again = pipeline._heal_migration_hints([_hint("withdraw")], tmp_path / "source.py")
+    assert errors_again == []
+    assert len(healed_again) == 1
+    assert healed_again[0] == healed[0]
 
 
 def test_credential_shaped_skeleton_is_not_written_or_copied(tmp_path: Path) -> None:
@@ -417,7 +429,7 @@ def test_credential_shaped_skeleton_is_not_written_or_copied(tmp_path: Path) -> 
     healed, errors = pipeline._heal_migration_hints([_hint("withdraw", skeleton)], tmp_path / "source.py")
 
     assert healed == []
-    assert errors == ["withdraw: migration skeleton contains credential-shaped data"]
+    assert errors == ["withdraw: migration skeleton contains string literals that may be sensitive"]
     assert not (tmp_path / "heal" / "withdraw.mm").exists()
 
     source = tmp_path / "payment.py"
@@ -479,7 +491,7 @@ def test_unqualified_diagnostic_does_not_match_qualified_candidate(tmp_path: Pat
     source.write_text("class Service:\n    def check(self):\n        pass\n", encoding="utf-8")
     result = _result(
         source,
-        [_hint("Service.check")],
+        [_hint("Service.check"), _hint("check")],
         native_replays=[
             {"function": "check", "input": {}, "verdict": "violates"},
             {"function": "Service.check", "input": {}, "verdict": "consistent"},
@@ -555,3 +567,156 @@ def test_directory_heal_errors_stay_attached_to_file_candidate(tmp_path: Path) -
     assert candidate["heal"]["errors"] == ["withdraw.mm: proof still failing"]
     assert "heal completed with errors" in candidate["evidence_blockers"]
     assert candidate["execution_state"] == "blocked"
+
+
+def test_unique_unqualified_diagnostic_matches_qualified_method(tmp_path: Path) -> None:
+    source = tmp_path / "service.py"
+    source.write_text("class Ledger:\n    def debit(self):\n        pass\n", encoding="utf-8")
+    result = _result(
+        source,
+        [_hint("Ledger.debit")],
+        native_replays=[{"function": "debit", "input": {}, "verdict": "consistent"}],
+    )
+
+    report = build_migration_execution(result, output_path=tmp_path / "execution.json", mumei_client=FakeVerifyClient())
+
+    entries = report["candidates"][0]["unbound_audit_diagnostics"]["entries"]
+    assert [entry["outcome"] for entry in entries] == ["consistent"]
+
+
+def test_keyed_healed_output_binds_to_generated_mm(tmp_path: Path) -> None:
+    source = tmp_path / "payment.py"
+    source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+    existing = tmp_path / "withdraw.mm"
+    existing.write_text("atom existing() -> i64 { body: { 1 } }\n", encoding="utf-8")
+    pipeline = object.__new__(AuditPipeline)
+    pipeline.heal_output_dir = tmp_path
+    pipeline._run_heal_loop = lambda target: None
+    hint = _hint("withdraw")
+    healed, errors = pipeline._heal_migration_hints([hint], source)
+
+    assert errors == []
+    report = build_migration_execution(
+        _result(source, [hint], healed_files=healed),
+        output_path=tmp_path / "execution.json",
+        mumei_client=FakeVerifyClient(),
+    )
+
+    candidate = report["candidates"][0]
+    assert candidate["heal"]["healed_file"] == healed[0]
+    assert candidate["generated_mm"]["origin"] == "healed_file"
+    assert candidate["generated_mm"]["healed_source_path"] == healed[0]
+
+
+def test_same_named_directory_candidates_bind_their_own_keyed_healing(tmp_path: Path) -> None:
+    from agent.audit_models import AuditDirectoryResult
+
+    source_dir = tmp_path / "src"
+    output_dir = tmp_path / "heal"
+    source_dir.mkdir()
+    first = source_dir / "first.py"
+    second = source_dir / "second.py"
+    first.write_text("def same():\n    return 1\n", encoding="utf-8")
+    second.write_text("def same():\n    return 2\n", encoding="utf-8")
+    pipeline = object.__new__(AuditPipeline)
+    pipeline.heal_output_dir = output_dir
+    pipeline._run_heal_loop = lambda target: None
+    hint = _hint("same")
+    first_healed, first_errors = pipeline._heal_migration_hints([hint], first)
+    second_healed, second_errors = pipeline._heal_migration_hints([hint], second)
+    assert first_errors == second_errors == []
+    assert first_healed != second_healed
+
+    first_result = _result(first, [hint], healed_files=first_healed)
+    second_result = _result(second, [hint], healed_files=second_healed)
+    directory = AuditDirectoryResult(
+        success=False,
+        source_dir=str(source_dir),
+        language="python",
+        file_results=[first_result, second_result],
+        verification_status="unverifiable",
+        migration_hints=[hint, hint],
+        healed_files=first_healed + second_healed,
+    )
+
+    report = build_migration_execution(directory, output_path=tmp_path / "execution.json", mumei_client=FakeVerifyClient())
+
+    assert [candidate["heal"]["healed_file"] for candidate in report["candidates"]] == [first_healed[0], second_healed[0]]
+    assert all(candidate["generated_mm"]["origin"] == "healed_file" for candidate in report["candidates"])
+
+
+@pytest.mark.integration
+def test_real_mumei_cli_audit_writes_migration_execution(tmp_path: Path) -> None:
+    binary = os.environ.get("MUMEI_BIN", "")
+    if not binary or not Path(binary).is_absolute() or not Path(binary).is_file():
+        pytest.skip("set MUMEI_BIN to an absolute trusted Core executable")
+    source = tmp_path / "payment.py"
+    source.write_text("def divide(total: int, count: int) -> int:\n    return total // count\n", encoding="utf-8")
+    audit_output = tmp_path / "audit.json"
+    execution_output = tmp_path / "execution.json"
+    env = os.environ.copy()
+    env["LLM_API_KEY"] = ""
+    env["OPENAI_API_KEY"] = ""
+    env["MUMEI_BIN"] = binary
+    repo = str(Path(__file__).parents[1])
+    env["PYTHONPATH"] = repo + os.pathsep + env.get("PYTHONPATH", "")
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "agent",
+            "audit",
+            "--code-file",
+            str(source),
+            "--language",
+            "python",
+            "--format",
+            "json",
+            "--auto-migrate",
+            "--migration-function",
+            "divide",
+            "--migration-execution-output",
+            str(execution_output),
+            "--output",
+            str(audit_output),
+        ],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "[Step 3/3] Running self-healing loop" in completed.stderr
+    audit = json.loads(audit_output.read_text(encoding="utf-8"))
+    assert len(audit["migration_hints"]) == 1
+    assert audit["next_steps"][-1]["migration_execution_report"] == str(execution_output)
+    report = json.loads(execution_output.read_text(encoding="utf-8"))
+    assert report["selection"]["requested_functions"] == ["divide"]
+    assert len(report["candidates"]) == 1
+    candidate = report["candidates"][0]
+    assert candidate["heal"]["attempted"] is True
+    assert candidate["verification"]["contract_proved"] is True
+    assert candidate["verification"]["proof_certificate"]["written"] is True
+    assert candidate["verification"]["sarif"]["written"] is True
+    assert Path(candidate["generated_mm"]["path"]).is_file()
+
+
+def test_rerun_reuses_identical_output_and_suffixes_healed_divergence(tmp_path: Path) -> None:
+    pipeline = object.__new__(AuditPipeline)
+    pipeline.heal_output_dir = tmp_path
+    source = tmp_path / "source.py"
+    source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+    hint = _hint("withdraw")
+    def mutate(target: Path) -> None:
+        target.write_text(target.read_text(encoding="utf-8") + "// healed\n", encoding="utf-8")
+
+    pipeline._run_heal_loop = mutate
+    first, first_errors = pipeline._heal_migration_hints([hint], source)
+    diverged, diverged_errors = pipeline._heal_migration_hints([hint], source)
+    assert first_errors == diverged_errors == []
+    assert diverged[0] != first[0]
+    assert Path(diverged[0]).name.endswith("-1.mm")

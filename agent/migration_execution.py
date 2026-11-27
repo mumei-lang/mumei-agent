@@ -97,9 +97,58 @@ def _strip_mm_comments(source: str, *, mask_strings: bool) -> list[str]:
     return code_lines
 
 
+def _outside_string_mask(code: str) -> str:
+    out: list[str] = []
+    in_string = False
+    escaped = False
+    for char in code:
+        if in_string:
+            out.append("\n" if char == "\n" else " ")
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+            out.append(" ")
+        else:
+            out.append(char)
+    return "".join(out)
+
+
+def _redact_string_literals(text: str) -> str:
+    out: list[str] = []
+    in_string = False
+    escaped = False
+    for char in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+            out.append('"<redacted>"')
+        else:
+            out.append(char)
+    return "".join(out)
+
+
+def migration_text_has_string_literals(text: str) -> bool:
+    code = "\n".join(_strip_mm_comments(text, mask_strings=True))
+    return '"' in code
+
+
 def _extract_mm_clauses(code: str, keyword: str) -> list[str]:
     clauses: list[str] = []
-    for match in re.finditer(rf"\b{keyword}\s*:", code):
+    outside_strings = _outside_string_mask(code)
+    for match in re.finditer(rf"\b{keyword}\s*:", outside_strings):
         index = match.end()
         start = index
         in_string = False
@@ -118,7 +167,7 @@ def _extract_mm_clauses(code: str, keyword: str) -> list[str]:
                 index += 1
                 continue
             if char == ";":
-                clauses.append(code[start:index].strip())
+                clauses.append(_redact_string_literals(code[start:index].strip()))
                 break
             index += 1
     return clauses
@@ -136,6 +185,7 @@ def _extracted_contract(skeleton: str) -> dict[str, object]:
         "ensures": ensures,
         "weak_true_contract": weak,
         "trusted_atom_declarations": trusted_atoms,
+        "string_literals_redacted": any('"<redacted>"' in item for item in requires + ensures),
         "generated_contract_sha256": _sha256_text(skeleton),
     }
 
@@ -145,6 +195,32 @@ def _candidate_source(result: AuditResult | AuditDirectoryResult, hint: dict[str
     if file_result is None:
         return result, default_path, default_language
     return file_result, file_result.source_file, file_result.language
+
+
+def migration_output_key(source_path: str | Path, skeleton: str) -> str:
+    source_identity = str(Path(source_path).expanduser().resolve())
+    return _sha256_text(source_identity + "\0" + skeleton)[:12]
+
+
+def migration_output_target(output_dir: Path, source_path: str | Path, function_name: str, skeleton: str) -> Path:
+    key = migration_output_key(source_path, skeleton)
+    candidates = [output_dir / f"{function_name}-{key}.mm"]
+    suffix = 1
+    while candidates[-1].exists() or candidates[-1].is_symlink():
+        candidates.append(output_dir / f"{function_name}-{key}-{suffix}.mm")
+        suffix += 1
+    first_absent: Path | None = None
+    canonical = _canonical_mm_text(skeleton)
+    for candidate in candidates:
+        if not candidate.exists() and not candidate.is_symlink():
+            first_absent = candidate
+            break
+        try:
+            if candidate.is_file() and candidate.read_text(encoding="utf-8") == canonical:
+                return candidate
+        except OSError:
+            pass
+    return first_absent or candidates[-1]
 
 
 def _canonical_mm_text(text: str) -> str:
@@ -162,9 +238,29 @@ def _redact_error_text(text: str) -> str:
     return redact_secrets(_ABSOLUTE_PATH_FRAGMENT.sub("<path>", str(text)))
 
 
-def _healed_content(function_name: str, healed_files: list[str], skeleton: str) -> tuple[str, str | None, bool]:
-    expected_names = {f"{function_name}.mm", f"{_safe_stem(function_name)}.mm", f"{_safe_identifier(function_name)}.mm"}
-    matches = [Path(healed) for healed in healed_files if Path(healed).name in expected_names and Path(healed).is_file()]
+def _healed_content(function_name: str, healed_files: list[str], skeleton: str, source_path: str, excluded_paths: set[str]) -> tuple[str, str | None, bool]:
+    base_names = {function_name, _safe_stem(function_name), _safe_identifier(function_name)}
+    expected_names = {f"{base}.mm" for base in base_names}
+    key = migration_output_key(source_path, skeleton)
+
+    def matches(path: Path) -> bool:
+        if not path.is_file():
+            return False
+        if path.name in expected_names:
+            return True
+        return any(
+            re.fullmatch(rf"{re.escape(base)}-{key}(?:-\d+)?\.mm", path.name) is not None
+            for base in base_names
+        )
+
+    matches = [Path(healed) for healed in healed_files if str(Path(healed)) not in excluded_paths and matches(Path(healed))]
+    try:
+        source_parent = Path(source_path).expanduser().resolve().parent
+        preferred = [path for path in matches if path.expanduser().resolve().parent == source_parent]
+    except OSError:
+        preferred = []
+    if len(preferred) == 1:
+        matches = preferred
     if len(matches) != 1:
         return skeleton, None, False
     path = matches[0]
@@ -180,7 +276,18 @@ def _behavior_entries(file_result: AuditResult | AuditDirectoryResult, function_
         return entries
 
     def matches(value: object) -> bool:
-        return str(value or "") == function_name
+        text = str(value or "")
+        if text == function_name:
+            return True
+        leaf = function_name.split(".")[-1]
+        if "." in text or text != leaf:
+            return False
+        same_leaf_hints = [
+            str(hint.get("function_name") or "")
+            for hint in file_result.migration_hints
+            if isinstance(hint, dict) and str(hint.get("function_name") or "").split(".")[-1] == leaf
+        ]
+        return same_leaf_hints == [function_name]
 
     for item in file_result.native_replays:
         if isinstance(item, dict) and matches(item.get("function") or item.get("function_name") or item.get("atom")):
@@ -336,11 +443,13 @@ def build_migration_execution(
             "A verified generated .mm skeleton proves only the skeleton contract as written; it is not proof that host-language code implements the same behavior.",
             "Behavioral replay, native execution, and body-port entries are diagnostic evidence only and are not semantic-equivalence proof or formal verdicts.",
             "Weak true/true contracts and trusted atom declarations remain blockers for human review even when verification succeeds.",
+            "String literals in migration skeletons are redacted in recorded contract clauses and block generated .mm artifact copying because they may be sensitive.",
         ],
     }
     _write_partial(output_path, report)
 
     occurrences: dict[tuple[str, str], int] = {}
+    claimed_healed_files: set[str] = set()
     missing = set(requested)
     for hint_index, hint in enumerate(result.migration_hints):
         if not isinstance(hint, dict):
@@ -398,8 +507,9 @@ def build_migration_execution(
         report["candidates"].append(candidate)
         _write_partial(output_path, report)
         try:
-            healed_text, healed_path, used_healed = _healed_content(function_name, result.healed_files, skeleton)
+            healed_text, healed_path, used_healed = _healed_content(function_name, result.healed_files, skeleton, hint_source, claimed_healed_files)
             if healed_path is not None:
+                claimed_healed_files.add(healed_path)
                 candidate["heal"]["healed_file"] = healed_path
                 candidate["generated_mm"]["origin"] = "healed_file" if used_healed else "generated_skeleton"
             heal_errors = file_result.heal_errors if isinstance(file_result, AuditResult) else result.heal_errors
@@ -433,6 +543,11 @@ def build_migration_execution(
             }
             if not final_text.strip():
                 candidate["evidence_blockers"].append("generated .mm content is empty")
+                candidate["execution_state"] = "blocked"
+                _write_partial(output_path, report)
+                continue
+            if migration_text_has_string_literals(final_text):
+                candidate["evidence_blockers"].append("generated .mm contains string literals; artifact generation suppressed because values may be sensitive")
                 candidate["execution_state"] = "blocked"
                 _write_partial(output_path, report)
                 continue

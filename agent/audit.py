@@ -89,7 +89,7 @@ from agent.lean_bridge_helpers import run_lean_bridge_and_merge_proof_cert
 from agent.body_port import BodyPorter, body_port_violations
 from agent.native_replay import NativeReplayer, native_replay_violations, reconcile_body_ports
 from agent.llm_provider import LLMProvider, openai_client_adapter
-from agent.migration_execution import append_execution_next_step, build_migration_execution
+from agent.migration_execution import append_execution_next_step, build_migration_execution, migration_output_target, migration_text_has_string_literals
 from agent.migration_readiness import append_next_step_summary, build_migration_readiness
 from agent.mumei_client import create_mumei_client
 from agent.prompts.report_formatter import format_counterexample
@@ -1003,22 +1003,30 @@ class AuditPipeline:
             if not skeleton.strip():
                 heal_errors.append(f"{function_name}: migration skeleton is empty")
                 continue
+            if migration_text_has_string_literals(skeleton):
+                heal_errors.append(f"{function_name}: migration skeleton contains string literals that may be sensitive")
+                continue
             if redact_secrets(skeleton) != skeleton:
                 heal_errors.append(f"{function_name}: migration skeleton contains credential-shaped data")
                 continue
-            target = output_dir / f"{function_name}.mm"
-            if target.exists() or target.is_symlink():
-                heal_errors.append(f"{function_name}: migration output already exists: {target.name}")
-                continue
-            try:
-                with target.open("x", encoding="utf-8") as output_file:
-                    output_file.write(skeleton.rstrip() + "\n")
-            except FileExistsError:
-                heal_errors.append(f"{function_name}: migration output already exists: {target.name}")
-                continue
-            except OSError as exc:
-                heal_errors.append(f"{function_name}: could not write migration output: {type(exc).__name__}")
-                continue
+            target = migration_output_target(output_dir, source_path, function_name, skeleton)
+            canonical_skeleton = skeleton.rstrip() + "\n"
+            reuse_existing = False
+            if target.is_file():
+                try:
+                    reuse_existing = target.read_text(encoding="utf-8") == canonical_skeleton
+                except OSError:
+                    reuse_existing = False
+            if not reuse_existing:
+                try:
+                    with target.open("x", encoding="utf-8") as output_file:
+                        output_file.write(canonical_skeleton)
+                except FileExistsError:
+                    heal_errors.append(f"{function_name}: migration output already exists: {target.name}")
+                    continue
+                except OSError as exc:
+                    heal_errors.append(f"{function_name}: could not write migration output: {type(exc).__name__}")
+                    continue
             try:
                 self._run_heal_loop(target)
             except Exception as exc:
