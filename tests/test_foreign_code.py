@@ -9253,14 +9253,18 @@ def test_hardcoded_secret_name_boundaries() -> None:
     assert _is_hardcoded_secret_name("passwordHash")
     assert not _is_hardcoded_secret_name("tokenize")
     assert not _is_hardcoded_secret_name("secretary")
+    assert _is_hardcoded_secret_name("authToken")
     assert not _is_hardcoded_secret_name("author")
     assert not _is_hardcoded_secret_name("keyboard")
+    assert not _is_hardcoded_secret_name("AUTH")
+    assert not _is_hardcoded_secret_name("AUTHENTICATION")
 
 
 def test_hardcoded_secret_negative_rhs_forms() -> None:
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
 
     cases = [
+        ("python", 'AUTH = "Bearer"\n'),
         ("python", 'ADMIN_TOKEN = ""\n'),
         ("python", 'ADMIN_TOKEN = "example-value"\n'),
         ("python", 'ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")\n'),
@@ -9269,6 +9273,7 @@ def test_hardcoded_secret_negative_rhs_forms() -> None:
         ("go", 'package main\nconst adminToken = "a" + "b"\nfunc main() {}\n'),
         ("rust", 'const ADMIN_TOKEN: &str = "";\nfn handle() {}\n'),
         ("rust", 'const ADMIN_TOKEN: &str = concat!("a", "b");\nfn handle() {}\n'),
+        ("typescript", 'const AUTHENTICATION = "basic";\nfunction f() {}\n'),
         ("typescript", 'const ADMIN_TOKEN = "";\nfunction f() {}\n'),
         ("typescript", 'const ADMIN_TOKEN = process.env.ADMIN_TOKEN ?? "";\nfunction f() {}\n'),
         ("typescript", 'const ADMIN_TOKEN = "a" + "b";\nfunction f() {}\n'),

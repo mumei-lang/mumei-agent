@@ -513,8 +513,6 @@ _CREDENTIAL_WORDS = frozenset(
         "passwd",
         "secret",
         "token",
-        "auth",
-        "authentication",
         "credential",
         "credentials",
         "apikey",
