@@ -53,6 +53,9 @@ def _write_core(tmp_path: Path, *, native_exit=0, artifact_exit=0, runtime_exit=
     core.write_text(
         "#!/bin/sh\n"
         'if [ "$1" = "verify-cert" ]; then\n'
+        '    if [ "$2" != "--strict" ]; then exit 2; fi\n'
+        '    case "$3" in */proof-cert.json) ;; *) exit 2;; esac\n'
+        '    case "$4" in */source.mm) ;; *) exit 2;; esac\n'
         f"    exit {cert_exit}\n"
         "fi\n"
         'if [ "$1" = "native-bundle" ] && [ "$2" = "recheck-llvm" ]; then\n'
@@ -336,6 +339,26 @@ def test_output_file_and_no_secret_echo(tmp_path, capsys, monkeypatch):
     text = output.read_text()
     assert sentinel not in text
     assert json.loads(text)["roles"]["artifact_reproduction"]["status"] == "accepted"
+
+
+def test_output_may_not_overwrite_declared_bundle_member(tmp_path, capsys):
+    core, bundle, source = _fixture(tmp_path)
+    code, out, err = _run(
+        capsys, _argv(core, bundle, source, "--output", str(bundle / "proof-cert.json"))
+    )
+    assert code == 1
+    assert out == ""
+    assert "--output may not overwrite" in err
+
+
+def test_oversize_declared_member_is_bounded_before_hashing(tmp_path, capsys):
+    core, bundle, source = _fixture(tmp_path)
+    with (bundle / "program.o").open("wb") as member:
+        member.truncate(33_554_432 + 1)
+    code, out, err = _run(capsys, _argv(core, bundle, source))
+    assert code == 1
+    assert out == ""
+    assert "exceeds the Core input bound" in err
 
 
 def test_unwritable_output_is_operational_error_not_traceback(tmp_path, capsys):

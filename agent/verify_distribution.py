@@ -33,7 +33,13 @@ import sys
 from pathlib import Path
 
 from agent import native_accept, native_observations_accept, native_recheck
-from agent.native_bundle import MAX_RECORD_BYTES, RECORD_FILE, declared_members
+from agent.native_bundle import (
+    MAX_RECORD_BYTES,
+    MAX_SOURCE_BYTES,
+    RECORD_FILE,
+    declared_members,
+    member_bound_bytes,
+)
 
 REPORT_SCHEMA = "mumei.verify-distribution-report/v1"
 PROOF_CERT = "proof-cert.json"
@@ -169,9 +175,22 @@ def _check_common(args: argparse.Namespace) -> dict:
     # exist before dispatch. The reused routes perform the authoritative
     # per-route validation again; this check only prevents partial reports
     # for inputs no route can consume.
-    for member in declared_members(bundle):
-        if not (bundle / member).is_file():
+    members = declared_members(bundle)
+    for member in members:
+        member_path = bundle / member
+        if not member_path.is_file():
             raise ValueError(f"declared bundle member is missing: {member}")
+        bound = member_bound_bytes(member)
+        if member_path.stat().st_size > bound:
+            raise ValueError(f"declared bundle member exceeds the Core input bound: {member}")
+        if args.output is not None:
+            try:
+                if Path(args.output).samefile(member_path):
+                    raise ValueError("--output may not overwrite a declared input")
+            except FileNotFoundError:
+                pass
+    if Path(args.source).stat().st_size > MAX_SOURCE_BYTES:
+        raise ValueError("--source exceeds the Core input bound")
     return record
 
 
@@ -244,7 +263,7 @@ def _route_call(fn, args: argparse.Namespace, outcome_key: str, positive: str) -
         return {
             "status": "failed",
             "reason": "route_input_or_operational_error",
-            "error": str(exc),
+            "error_type": type(exc).__name__,
             "checks_not_performed": [],
         }
 
@@ -342,7 +361,7 @@ def _proof_certificate_role(args: argparse.Namespace, record: dict) -> dict:
         return {
             "status": "failed",
             "reason": "proof_certificate_input_or_operational_error",
-            "error": str(exc),
+            "error_type": type(exc).__name__,
             "checks_not_performed": ["proof_certificate_independent_recheck"],
         }
 
