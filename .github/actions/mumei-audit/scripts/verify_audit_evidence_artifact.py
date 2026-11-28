@@ -8,7 +8,9 @@ import json
 import os
 import posixpath
 import re
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -19,7 +21,14 @@ CERT_BOUNDARY = (
     "proof certificate verification is certificate/source correspondence only; "
     "not a Z3 re-proof, not host semantic-equivalence proof, and no contract-vacuity assessment"
 )
+Z3_REVERIFY_BOUNDARY = (
+    "independent Z3 re-verification of generated .mm only; not host semantic-equivalence proof, "
+    "not a contract-vacuity assessment, and independent from certificate correspondence"
+)
 VERIFY_CERT_TIMEOUT_SECONDS = 60
+VERIFY_Z3_TIMEOUT_SECONDS = 60
+REVERIFY_MAX_FILES = 2048
+REVERIFY_MAX_TOTAL_BYTES = 256 * 1024 * 1024
 DIAGNOSTIC_CAP = 300
 
 
@@ -150,6 +159,86 @@ def _validate_written_claim(
     return _validate_file_claim(claim, label=label, original_root_text=original_root_text, generated_root=generated_root)
 
 
+def _check_reverify_copy_budget(companion_files: list[Path]) -> None:
+    if len(companion_files) > REVERIFY_MAX_FILES:
+        raise ArtifactVerificationError(
+            f"generated artifact re-verification copy exceeds the file-count cap ({REVERIFY_MAX_FILES})"
+        )
+    total_bytes = sum(path.stat().st_size for path in companion_files)
+    if total_bytes > REVERIFY_MAX_TOTAL_BYTES:
+        raise ArtifactVerificationError(
+            f"generated artifact re-verification copy exceeds the byte cap ({REVERIFY_MAX_TOTAL_BYTES})"
+        )
+
+
+def _copy_generated_tree(companion_files: list[Path], generated_root: Path, copy_root: Path) -> None:
+    """Copy only validated regular generated-artifact files, preserving relative layout."""
+    resolved_copy_root = copy_root.resolve(strict=False)
+    for source in companion_files:
+        relative = source.relative_to(generated_root)
+        if any(part in {"", ".", ".."} for part in relative.parts):
+            raise ArtifactVerificationError("generated artifact re-verification copy path is malformed")
+        target = copy_root.joinpath(*relative.parts)
+        resolved_target = target.resolve(strict=False)
+        if not resolved_target.is_relative_to(resolved_copy_root):
+            raise ArtifactVerificationError("generated artifact re-verification copy escapes its temporary directory")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+
+
+def _reverify_generated_mm(
+    binary: Path,
+    mm_artifacts: list[tuple[str, Path]],
+    generated_root: Path,
+    companion_files: list[Path],
+) -> int:
+    if not mm_artifacts:
+        raise ArtifactVerificationError("independent Z3 re-verification found no validated generated .mm artifact")
+    _check_reverify_copy_budget(companion_files)
+    with tempfile.TemporaryDirectory(prefix="mumei-audit-reverify-") as temporary:
+        temporary_root = Path(temporary)
+        copy_root = temporary_root / "generated-artifacts"
+        run_root = temporary_root / "run"
+        copy_root.mkdir(parents=True)
+        run_root.mkdir()
+        _copy_generated_tree(companion_files, generated_root, copy_root)
+        copy_root = copy_root.resolve()
+        verified = 0
+        for label, original_mm in mm_artifacts:
+            relative = original_mm.relative_to(generated_root)
+            copied_mm = copy_root.joinpath(*relative.parts)
+            resolved_copied_mm = copied_mm.resolve(strict=False)
+            if not resolved_copied_mm.is_relative_to(copy_root):
+                raise ArtifactVerificationError(f"generated .mm re-verification path escapes its copy for candidate {label}")
+            try:
+                completed = subprocess.run(
+                    [str(binary), "verify", str(copied_mm), "--json"],
+                    cwd=run_root,
+                    capture_output=True,
+                    text=True,
+                    timeout=VERIFY_Z3_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise ArtifactVerificationError(f"mumei verify --json timed out for candidate {label}") from exc
+            except OSError as exc:
+                raise ArtifactVerificationError(f"mumei verify --json could not execute for candidate {label}") from exc
+            except UnicodeDecodeError as exc:
+                raise ArtifactVerificationError(f"mumei verify --json returned undecodable output for candidate {label}") from exc
+            if completed.returncode != 0:
+                diagnostic = (completed.stderr or completed.stdout or "").replace("\n", " ")[:DIAGNOSTIC_CAP]
+                raise ArtifactVerificationError(
+                    f"mumei verify --json failed for candidate {label}: {diagnostic or 'no diagnostic output'}"
+                )
+            try:
+                verification_json = json.loads(completed.stdout)
+            except json.JSONDecodeError as exc:
+                raise ArtifactVerificationError(f"mumei verify --json returned malformed JSON for candidate {label}") from exc
+            if not isinstance(verification_json, dict) or verification_json.get("status") != "success":
+                raise ArtifactVerificationError(f"mumei verify --json did not return status success for candidate {label}")
+            verified += 1
+        return verified
+
+
 def verify_artifact(
     root: Path,
     *,
@@ -159,7 +248,10 @@ def verify_artifact(
     require_generated_mm: bool = False,
     allow_zero_candidates: bool = False,
     mumei_bin: str = "",
+    reverify_z3: bool = False,
 ) -> dict[str, int]:
+    if reverify_z3 and not mumei_bin:
+        raise ArtifactVerificationError("--reverify-z3 requires --mumei-bin")
     if root.is_symlink() or not root.is_dir():
         raise ArtifactVerificationError("evidence artifact root is missing or is not a regular directory")
     root = root.resolve()
@@ -300,6 +392,7 @@ def verify_artifact(
     validated_proof = 0
     validated_sarif = 0
     certificate_pairs: list[tuple[str, Path, Path]] = []
+    validated_mm_artifacts: list[tuple[str, Path]] = []
     incomplete_pair_candidates: list[str] = []
     for candidate in candidates:
         generated_mm = candidate.get("generated_mm")
@@ -332,6 +425,8 @@ def verify_artifact(
                 validated_sarif += 1
         if generated_mm_valid:
             validated_mm += 1
+            mm_label = str(candidate.get("function_name") or "<unknown>")
+            validated_mm_artifacts.append((mm_label, _map_claimed_path(generated_mm["path"], generated_value, generated_root)))
         if proof_valid:
             validated_proof += 1
         if generated_mm_valid and proof_valid:
@@ -380,6 +475,12 @@ def verify_artifact(
         print(f"proof certificate correspondence verified with mumei verify-cert --strict: {verified_certificates} candidate pair(s)")
         print(f"certificate verification boundary: {CERT_BOUNDARY}")
 
+    reverified_mm = 0
+    if reverify_z3:
+        reverified_mm = _reverify_generated_mm(binary, validated_mm_artifacts, generated_root, companion_files)
+        print(f"generated .mm independent Z3 re-verification verified: {reverified_mm} candidate artifact(s)")
+        print(f"Z3 re-verification boundary: {Z3_REVERIFY_BOUNDARY}")
+
     print("audit report artifact verified: audit.json and audit.sarif")
     print("ci policy artifact verified: generated-baseline.json")
     print("diagnostic log artifacts verified: audit.stdout.log and audit.stderr.log")
@@ -390,7 +491,9 @@ def verify_artifact(
     print(f"hidden generated companion files verified: {len(hidden_files)}")
     if not candidates and allow_zero_candidates:
         print("zero migration candidates explicitly allowed; no generated-.mm acceptance evidence present")
-    if mumei_bin:
+    if mumei_bin and reverify_z3:
+        print("verification mode: layout, metadata, counts, companion hashes, certificate correspondence, and independent Z3 re-verification")
+    elif mumei_bin:
         print("verification mode: layout, metadata, counts, companion hashes, and certificate correspondence")
     else:
         print("verification mode: action artifact layout, metadata, counts, and companion hashes only")
@@ -401,6 +504,7 @@ def verify_artifact(
         "companion_file_count": len(companion_files),
         "hidden_companion_count": len(hidden_files),
         "verified_certificate_count": verified_certificates,
+        "reverified_mm_count": reverified_mm,
     }
 
 
@@ -413,11 +517,14 @@ def main() -> int:
     parser.add_argument("--allow-zero-candidates", action="store_true")
     parser.add_argument("--forbidden-literal", default="")
     parser.add_argument("--mumei-bin", default="", help="optional trusted mumei binary enabling strict proof-certificate correspondence verification")
+    parser.add_argument("--reverify-z3", action="store_true", help="independently re-verify validated generated .mm files with the trusted mumei binary")
     args = parser.parse_args()
     if args.allow_zero_candidates and args.require_blocked_candidate:
         parser.error("--allow-zero-candidates cannot be combined with --require-blocked-candidate")
     if args.allow_zero_candidates and args.require_generated_mm:
         parser.error("--allow-zero-candidates cannot be combined with --require-generated-mm")
+    if args.reverify_z3 and not args.mumei_bin:
+        parser.error("--reverify-z3 requires --mumei-bin")
     try:
         verify_artifact(
             Path(args.artifact_dir),
@@ -427,6 +534,7 @@ def main() -> int:
             require_generated_mm=args.require_generated_mm,
             allow_zero_candidates=args.allow_zero_candidates,
             mumei_bin=args.mumei_bin,
+            reverify_z3=args.reverify_z3,
         )
     except ArtifactVerificationError as exc:
         raise SystemExit(f"audit evidence artifact verification failed: {exc}") from exc

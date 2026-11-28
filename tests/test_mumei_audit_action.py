@@ -1666,3 +1666,274 @@ def test_verify_artifact_strict_timeout_fails(tmp_path: Path) -> None:
         raise AssertionError("expected ArtifactVerificationError")
     except module.ArtifactVerificationError as exc:
         assert "timed out" in str(exc)
+
+
+def _artifact_snapshot(root: Path) -> dict[str, str]:
+    import hashlib
+
+    return {
+        path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+def _write_fake_reverify_mumei(tmp_path: Path, record: Path, *, mode: str = "success") -> Path:
+    if mode == "timeout":
+        verify_body = "import time\ntime.sleep(5)\n"
+    elif mode == "nonzero":
+        verify_body = "import sys\nsys.stderr.write('z3 verification failed')\nsys.exit(1)\n"
+    elif mode == "malformed":
+        verify_body = "print('not-json')\n"
+    elif mode == "wrong-status":
+        verify_body = "import json\nprint(json.dumps({'status': 'failed'}))\n"
+    elif mode == "undecodable":
+        verify_body = "import sys\nsys.stdout.buffer.write(b'\\xff')\n"
+    else:
+        verify_body = (
+            "import json, os, sys\n"
+            "from pathlib import Path\n"
+            "args = sys.argv[1:]\n"
+            "Path('report.json').write_text('verifier side effect\\n', encoding='utf-8')\n"
+            "cache = Path(args[1]).parent / '.mumei_cache'\n"
+            "cache.mkdir(exist_ok=True)\n"
+            "(cache / 'verification_cache.json').write_text('{}\\n', encoding='utf-8')\n"
+            f"with open({str(record)!r}, 'a', encoding='utf-8') as handle:\n"
+            "    handle.write(json.dumps({'argv': args, 'cwd': os.getcwd(), 'dependency_exists': (Path(args[1]).parent / 'deps' / 'helper.mm').exists()}) + '\\n')\n"
+            "print(json.dumps({'status': 'success'}))\n"
+        )
+    script = (
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "if len(sys.argv) > 1 and sys.argv[1] == 'verify-cert':\n"
+        "    sys.exit(0)\n"
+        "if len(sys.argv) > 1 and sys.argv[1] == 'verify':\n"
+    )
+    script += "".join("    " + line + "\n" for line in verify_body.splitlines())
+    script += "    sys.exit(0)\nsys.exit(1)\n"
+    return _write_fake_mumei_bin(tmp_path, script[len("#!/usr/bin/env python3\n"):])
+
+
+def test_verify_artifact_reverify_z3_positive_uses_temp_copy_and_preserves_artifact(tmp_path: Path) -> None:
+    root = tmp_path / "evidence"
+    _write_downloaded_action_artifact(root)
+    deps = root / "migration-execution" / "generated-artifacts" / "deps"
+    deps.mkdir()
+    (deps / "helper.mm").write_text("atom helper() -> i64 { requires: true; ensures: true; body: { 0 } }\n", encoding="utf-8")
+    status_path = root / "migration-execution" / "status.json"
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    status["generated_artifacts_copied"] += 1
+    status_path.write_text(json.dumps(status), encoding="utf-8")
+    before = _artifact_snapshot(root)
+    record = tmp_path / "reverify-invocations.jsonl"
+    binary = _write_fake_reverify_mumei(tmp_path, record)
+
+    result = _run_downloaded_artifact_verifier(root, "--mumei-bin", str(binary), "--reverify-z3")
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "independent Z3 re-verification verified: 1" in result.stdout
+    assert "not host semantic-equivalence proof" in result.stdout
+    assert "not a contract-vacuity assessment" in result.stdout
+    assert "independent from certificate correspondence" in result.stdout
+    assert _artifact_snapshot(root) == before
+    invocations = [json.loads(line) for line in record.read_text(encoding="utf-8").splitlines()]
+    assert len(invocations) == 1
+    assert invocations[0]["dependency_exists"] is True
+    argv = invocations[0]["argv"]
+    assert argv[0] == "verify"
+    assert argv[2] == "--json"
+    assert argv[1].endswith("divide.mm")
+    assert str(root) not in argv[1]
+    assert "mumei-audit-reverify-" in argv[1]
+    assert "mumei-audit-reverify-" in invocations[0]["cwd"]
+
+
+def test_verify_artifact_reverify_z3_requires_mumei_bin(tmp_path: Path) -> None:
+    root = tmp_path / "evidence"
+    _write_downloaded_action_artifact(root)
+
+    result = _run_downloaded_artifact_verifier(root, "--reverify-z3")
+
+    assert result.returncode != 0
+    assert "--reverify-z3 requires --mumei-bin" in result.stderr
+
+
+def test_verify_artifact_reverify_z3_nonzero_exit_fails(tmp_path: Path) -> None:
+    root = tmp_path / "evidence"
+    _write_downloaded_action_artifact(root)
+    binary = _write_fake_reverify_mumei(tmp_path, tmp_path / "unused.jsonl", mode="nonzero")
+
+    result = _run_downloaded_artifact_verifier(root, "--mumei-bin", str(binary), "--reverify-z3")
+
+    assert result.returncode != 0
+    assert "mumei verify --json failed" in result.stderr + result.stdout
+    assert "z3 verification failed" in result.stderr + result.stdout
+
+
+def test_verify_artifact_reverify_z3_malformed_json_fails(tmp_path: Path) -> None:
+    root = tmp_path / "evidence"
+    _write_downloaded_action_artifact(root)
+    binary = _write_fake_reverify_mumei(tmp_path, tmp_path / "unused.jsonl", mode="malformed")
+
+    result = _run_downloaded_artifact_verifier(root, "--mumei-bin", str(binary), "--reverify-z3")
+
+    assert result.returncode != 0
+    assert "malformed JSON" in result.stderr + result.stdout
+
+
+def test_verify_artifact_reverify_z3_wrong_status_fails(tmp_path: Path) -> None:
+    root = tmp_path / "evidence"
+    _write_downloaded_action_artifact(root)
+    binary = _write_fake_reverify_mumei(tmp_path, tmp_path / "unused.jsonl", mode="wrong-status")
+
+    result = _run_downloaded_artifact_verifier(root, "--mumei-bin", str(binary), "--reverify-z3")
+
+    assert result.returncode != 0
+    assert "status success" in result.stderr + result.stdout
+
+
+def test_verify_artifact_reverify_z3_timeout_fails(tmp_path: Path) -> None:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("verify_artifact_mod", VERIFY_ARTIFACT_SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.VERIFY_Z3_TIMEOUT_SECONDS = 0.5
+
+    root = tmp_path / "evidence"
+    _write_downloaded_action_artifact(root)
+    binary = _write_fake_reverify_mumei(tmp_path, tmp_path / "unused.jsonl", mode="timeout")
+    try:
+        module.verify_artifact(
+            root,
+            require_hidden_companion=False,
+            mumei_bin=str(binary),
+            reverify_z3=True,
+        )
+        raise AssertionError("expected ArtifactVerificationError")
+    except module.ArtifactVerificationError as exc:
+        assert "timed out" in str(exc)
+
+
+def _add_second_candidate_to_downloaded_artifact(root: Path) -> None:
+    generated = root / "migration-execution" / "generated-artifacts"
+    original_generated = "/original/workspace/.mumei-audit/migration_execution.migration-execution"
+    mm_text = "atom multiply() -> i64 { requires: true; ensures: true; body: { 0 } }\n"
+    proof_text = '{"proof": true, "second": true}\n'
+    sarif_text = '{"version": "2.1.0", "second": true}\n'
+    (generated / "multiply.mm").write_text(mm_text, encoding="utf-8")
+    (generated / "multiply.proof.json").write_text(proof_text, encoding="utf-8")
+    (generated / "multiply.sarif").write_text(sarif_text, encoding="utf-8")
+
+    execution_path = root / "migration-execution" / "migration_execution.json"
+    execution = json.loads(execution_path.read_text(encoding="utf-8"))
+    second = json.loads(json.dumps(execution["candidates"][0]))
+    second["function_name"] = "multiply"
+    second["generated_mm"] = {"path": f"{original_generated}/multiply.mm", "sha256": _sha256_text(mm_text)}
+    second["verification"]["proof_certificate"] = {
+        "written": True,
+        "path": f"{original_generated}/multiply.proof.json",
+        "sha256": _sha256_text(proof_text),
+    }
+    second["verification"]["sarif"] = {
+        "written": True,
+        "path": f"{original_generated}/multiply.sarif",
+        "sha256": _sha256_text(sarif_text),
+    }
+    execution["candidates"].append(second)
+    execution["summary"]["blocked"] = 2
+    execution["summary"]["candidate_count"] = 2
+    execution_path.write_text(json.dumps(execution), encoding="utf-8")
+
+    status_path = root / "migration-execution" / "status.json"
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    status["counts"]["blocked"] = 2
+    status["generated_artifacts_copied"] = sum(1 for path in generated.rglob("*") if path.is_file())
+    status_path.write_text(json.dumps(status), encoding="utf-8")
+
+
+def test_verify_artifact_reverify_z3_multi_candidate_verifies_every_validated_mm(tmp_path: Path) -> None:
+    root = tmp_path / "evidence"
+    _write_downloaded_action_artifact(root)
+    _add_second_candidate_to_downloaded_artifact(root)
+    record = tmp_path / "reverify-invocations.jsonl"
+    binary = _write_fake_reverify_mumei(tmp_path, record)
+
+    result = _run_downloaded_artifact_verifier(root, "--mumei-bin", str(binary), "--reverify-z3")
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "independent Z3 re-verification verified: 2" in result.stdout
+    invocations = [json.loads(line) for line in record.read_text(encoding="utf-8").splitlines()]
+    assert len(invocations) == 2
+    assert sorted(Path(row["argv"][1]).name for row in invocations) == ["divide.mm", "multiply.mm"]
+    assert all(str(root) not in row["argv"][1] for row in invocations)
+
+
+def test_verify_artifact_reverify_z3_copy_budget_fails_closed(tmp_path: Path) -> None:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("verify_artifact_mod", VERIFY_ARTIFACT_SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.REVERIFY_MAX_FILES = 0
+
+    root = tmp_path / "evidence"
+    _write_downloaded_action_artifact(root)
+    binary = _write_fake_reverify_mumei(tmp_path, tmp_path / "unused.jsonl")
+    try:
+        module.verify_artifact(
+            root,
+            require_hidden_companion=False,
+            mumei_bin=str(binary),
+            reverify_z3=True,
+        )
+        raise AssertionError("expected ArtifactVerificationError")
+    except module.ArtifactVerificationError as exc:
+        assert "file-count cap" in str(exc)
+
+
+def test_verify_artifact_without_reverify_flag_does_not_run_independent_verify(tmp_path: Path) -> None:
+    root = tmp_path / "evidence"
+    _write_downloaded_action_artifact(root)
+    record = tmp_path / "reverify-invocations.jsonl"
+    binary = _write_fake_reverify_mumei(tmp_path, record)
+
+    result = _run_downloaded_artifact_verifier(root, "--mumei-bin", str(binary))
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "independent Z3 re-verification verified" not in result.stdout
+    assert not record.exists()
+
+
+def test_verify_artifact_reverify_z3_undecodable_output_fails_closed(tmp_path: Path) -> None:
+    root = tmp_path / "evidence"
+    _write_downloaded_action_artifact(root)
+    binary = _write_fake_reverify_mumei(tmp_path, tmp_path / "unused.jsonl", mode="undecodable")
+
+    result = _run_downloaded_artifact_verifier(root, "--mumei-bin", str(binary), "--reverify-z3")
+
+    assert result.returncode != 0
+    assert "undecodable output" in result.stderr + result.stdout
+
+
+def test_verify_artifact_reverify_z3_byte_budget_fails_closed(tmp_path: Path) -> None:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("verify_artifact_mod", VERIFY_ARTIFACT_SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.REVERIFY_MAX_TOTAL_BYTES = 1
+
+    root = tmp_path / "evidence"
+    _write_downloaded_action_artifact(root)
+    binary = _write_fake_reverify_mumei(tmp_path, tmp_path / "unused.jsonl")
+    try:
+        module.verify_artifact(
+            root,
+            require_hidden_companion=False,
+            mumei_bin=str(binary),
+            reverify_z3=True,
+        )
+        raise AssertionError("expected ArtifactVerificationError")
+    except module.ArtifactVerificationError as exc:
+        assert "byte cap" in str(exc)
