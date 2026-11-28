@@ -45,6 +45,7 @@ from agent.strategies.foreign_code_strategy_helpers import (
     _mask_nested_function_literals,
     _normalize_language,
     _rust_function_scopes,
+    _safe_identifier,
     _solidity_function_blocks_with_attrs,
     _solidity_function_scopes,
     _solidity_insecure_randomness_issues,
@@ -1959,7 +1960,7 @@ def _solidity_pattern_issues(
         body_start_line = source.count("\n", 0, offset) + 1 if offset >= 0 else 0
         body_end_line = body_start_line + raw_body.count("\n")
         strong_duplicate = any(
-            issue.function_name == name
+            _safe_identifier(issue.function_name) == name
             and issue.line is not None
             and body_start_line <= issue.line <= body_end_line
             for issue in strong_randomness_issues

@@ -2020,3 +2020,22 @@ contract Auction {
     assert len(strong) == 1
     assert len(advisory) == 1
     assert advisory[0].function_name == "mix"
+
+
+def test_solidity_strong_randomness_suppresses_normalized_internal_function_advisory() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_solidity_contract_issues
+
+    source = '''
+contract Auction {
+    address[] players;
+    function _drawWinner(uint256 n) internal {
+        uint256 idx = uint256(keccak256(abi.encodePacked(block.timestamp, block.prevrandao, n))) % n;
+        address winner = players[idx];
+    }
+}
+'''
+
+    strong = [i for i in _detect_solidity_contract_issues(source) if "block entropy" in i.message]
+    advisory = [i for i in language_pattern_issues(source, "solidity") if "derives randomness" in i.message]
+    assert len(strong) == 1
+    assert advisory == []
