@@ -58,6 +58,10 @@ python scripts/ci_verify.py src/*.mm --proof-cert
 
 Minimal caller workflow:
 
+For a copyable payment/ledger starting point, use the validated repo-root starter in [`mumei-demo/templates/payment-ledger-starter`](https://github.com/mumei-lang/mumei-demo/tree/main/templates/payment-ledger-starter). It includes the canonical payment fixture, an empty audit baseline, a two-job audit/download-verification workflow, reviewer checklist, and migration evidence boundaries. Its offline verification job is fixture-smoke-only; real repositories with zero migration candidates are outside the current artifact verifier contract.
+
+The minimal example below uses `@develop` only as a bootstrap illustration. Before production use, review the action and replace that mutable ref with a full immutable commit SHA or immutable release ref, as the starter does. Do not treat a moving branch pin as reproducible supply-chain policy.
+
 ```yaml
 name: Mumei audit
 on: [pull_request]
