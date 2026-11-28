@@ -8348,6 +8348,29 @@ def test_division_guarded_by_an_early_return_is_not_flagged() -> None:
     assert flagged == {"share", "late"}
 
 
+def test_python_floor_division_requires_nonzero_contract() -> None:
+    unguarded = (
+        "def per_day(total_cents: int, days: int) -> int:\n"
+        "    return total_cents // days\n"
+    )
+    flagged = [i for i in _detect_python_safety_issues(unguarded) if "divide" in i.message]
+    assert len(flagged) == 1
+    assert "non-zero contract" in flagged[0].message
+    assert "days=0" in flagged[0].message
+
+    safe_shapes = (
+        "def exact_one(x: int) -> int:\n"
+        "    return x // 1\n"
+        "def exact_const(x: int) -> int:\n"
+        "    return x // 7\n"
+        "def guarded(total: int, days: int) -> int:\n"
+        "    if not days:\n"
+        "        raise ValueError\n"
+        "    return total // days\n"
+    )
+    assert not [i for i in _detect_python_safety_issues(safe_shapes) if "divide" in i.message]
+
+
 def test_go_division_by_a_cast_length_respects_the_length_guard() -> None:
     mumei = MagicMock()
     mumei.verify.return_value = {"success": True, "report": {"status": "ok"}, "stdout": "{}", "stderr": ""}
