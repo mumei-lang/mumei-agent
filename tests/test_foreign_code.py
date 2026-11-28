@@ -10351,6 +10351,19 @@ def make_share_token():
     (token, delay), status = (random.random(), 1), 200
     return token
 ''',
+        '''
+import hashlib
+import random
+
+def make_share_token():
+    return hashlib.sha256(str(random.random()).encode()).hexdigest()
+''',
+        '''
+import random
+
+def make_share_token():
+    return {"session": {"token": "%012x" % int(random.random() * (1 << 48))}}
+''',
     ]
 
     for source in negative_sources:
