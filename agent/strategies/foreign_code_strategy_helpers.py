@@ -992,7 +992,7 @@ def _python_timing_credential_issues(source: str) -> list[ForeignSafetyIssue]:
 
 
 _STRONG_CREDENTIAL_WORDS = frozenset({"token", "session", "secret", "password", "key"})
-_STRONG_ENTROPY_SELECTION_WORDS = frozenset({"winner", "draw", "prize", "lottery", "raffle"})
+_STRONG_ENTROPY_SELECTION_WORDS = frozenset({"winner", "prize", "lottery", "raffle"})
 
 
 def _name_parts(name: str) -> list[str]:

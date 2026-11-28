@@ -10246,3 +10246,14 @@ func loginHandler() string {
 '''
     assert not [i for i in _detect_safety_issues(mixed_parallel, "go") if "credential material" in i.message]
     assert [i for i in _detect_safety_issues(weak_parallel, "go") if "credential material" in i.message]
+
+
+def test_solidity_draw_time_calculation_is_negative_control() -> None:
+    source = '''
+contract Auction {
+    function getDrawTime(uint256 n) public view returns (uint256) {
+        return uint256(keccak256(abi.encodePacked(block.timestamp, n))) % n;
+    }
+}
+'''
+    assert not [i for i in _detect_solidity_contract_issues(source) if "block entropy" in i.message]
