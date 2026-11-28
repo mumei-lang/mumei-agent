@@ -8414,9 +8414,23 @@ func cleared(total int, xs map[string]int) int {
     return q
 }
 """
+    fixed_minus = """package main
+func fixedminus(total int, xs [4]int, skip int) int {
+    q := total / (len(xs) - skip)
+    return q
+}
+"""
+    fixed_shadowed = """package main
+func fixedshadow(total int, xs [4]int, cond bool) int {
+    if cond { xs := []int{}; q := total / len(xs); return q }
+    return 0
+}
+"""
     assert not [i for i in _detect_safety_issues(mixed, "go") if "divide" in i.message]
     assert not [i for i in _detect_safety_issues(fixed_array, "go") if "divide" in i.message]
     assert [i for i in _detect_safety_issues(cleared, "go") if "divide" in i.message]
+    assert [i for i in _detect_safety_issues(fixed_minus, "go") if "divide" in i.message]
+    assert [i for i in _detect_safety_issues(fixed_shadowed, "go") if "divide" in i.message]
 
 
 def test_rust_collection_len_divisor_detected_only_without_empty_guard() -> None:
@@ -8567,9 +8581,26 @@ def test_rust_collection_len_division_syntax_and_guard_edge_cases() -> None:
 """
     assert [i for i in _detect_safety_issues(parenthesized, "rust") if "divide" in i.message]
     assert not [i for i in _detect_safety_issues(tail_return_guard, "rust") if "divide" in i.message]
+    write_after_division = """fn f(total: i64, mut xs: &[i64]) -> i64 {
+    if xs.is_empty() { return 0 }
+    let y = total / xs.len() as i64;
+    xs = &[];
+    y
+}
+"""
+    struct_field_not_binding = """struct Config { xs: Vec<i64> }
+fn f(total: i64, xs: &[i64], config: Config) -> i64 {
+    if xs.is_empty() { return 0 }
+    let Config { xs: labels } = config;
+    let _ = labels;
+    total / xs.len() as i64
+}
+"""
     assert [i for i in _detect_safety_issues(loop_reassigned, "rust") if "divide" in i.message]
     assert not [i for i in _detect_safety_issues(fixed_array, "rust") if "divide" in i.message]
     assert [i for i in _detect_safety_issues(tuple_shadow, "rust") if "divide" in i.message]
+    assert not [i for i in _detect_safety_issues(write_after_division, "rust") if "divide" in i.message]
+    assert not [i for i in _detect_safety_issues(struct_field_not_binding, "rust") if "divide" in i.message]
 
 
 def test_rust_arbitrary_member_divisor_remains_conservative() -> None:

@@ -2057,13 +2057,29 @@ def _rust_collection_len_division_issues(
             return operator is not None and text(operator) == "-" and primitive_integer_syntax(argument)
         return False
 
+    def pattern_binding_identifiers(pattern) -> set[str]:
+        if pattern is None:
+            return set()
+        if pattern.type == "identifier":
+            return {text(pattern)}
+        if pattern.type == "shorthand_field_identifier":
+            return {text(pattern)}
+        if pattern.type == "field_pattern":
+            return pattern_binding_identifiers(pattern.child_by_field_name("pattern"))
+        names: set[str] = set()
+        for child in pattern.named_children:
+            if child.type in {"type_identifier", "field_identifier"}:
+                continue
+            names.update(pattern_binding_identifiers(child))
+        return names
+
     shadowed_identifiers: set[str] = set()
 
     def collect_shadowed_identifiers(node) -> None:
         if node.type == "let_declaration":
-            pattern = node.child_by_field_name("pattern")
-            if pattern is not None:
-                shadowed_identifiers.update(re.findall(r"[A-Za-z_]\w*", text(pattern)))
+            shadowed_identifiers.update(
+                pattern_binding_identifiers(node.child_by_field_name("pattern"))
+            )
         for child in node.named_children:
             collect_shadowed_identifiers(child)
 
@@ -2162,21 +2178,32 @@ def _rust_collection_len_division_issues(
             continue
         guards.append((receiver, statement.start_byte, statement.end_byte))
 
-    def contains_receiver_write(node, receiver: str, start: int, end: int) -> bool:
-        if node.end_byte <= start or node.start_byte >= end:
-            return False
+    def receiver_write_positions(node, receiver: str, start: int) -> list[int]:
+        positions: list[int] = []
+        if node.start_byte < start:
+            # The guard itself ends at ``start``; only later writes matter.
+            if node.end_byte <= start:
+                return positions
         if node.type == "assignment_expression":
             left = node.child_by_field_name("left")
             if left is not None and left.type == "identifier" and text(left) == receiver:
-                return True
-        if node.type == "let_declaration":
-            pattern = node.child_by_field_name("pattern")
-            if pattern is not None and re.search(rf"\b{re.escape(receiver)}\b", text(pattern)):
-                return True
-        return any(
-            contains_receiver_write(child, receiver, start, end)
-            for child in node.named_children
-        )
+                positions.append(node.start_byte)
+        if node.type == "let_declaration" and receiver in pattern_binding_identifiers(
+            node.child_by_field_name("pattern")
+        ):
+            positions.append(node.start_byte)
+        for child in node.named_children:
+            positions.extend(receiver_write_positions(child, receiver, start))
+        return positions
+
+    def enclosing_loops(node) -> list:
+        loops = []
+        current = node.parent
+        while current is not None:
+            if current.type in {"loop_expression", "while_expression", "for_expression"}:
+                loops.append(current)
+            current = current.parent
+        return loops
 
     def suppressed(node, receiver: str) -> bool:
         if receiver not in immutable_receivers:
@@ -2184,8 +2211,17 @@ def _rust_collection_len_division_issues(
         for guard_receiver_name, _guard_start, guard_end in guards:
             if guard_receiver_name != receiver or guard_end > node.start_byte:
                 continue
-            if not contains_receiver_write(block, receiver, guard_end, block.end_byte):
-                return True
+            writes = receiver_write_positions(block, receiver, guard_end)
+            if any(position < node.start_byte for position in writes):
+                continue
+            loops = enclosing_loops(node)
+            if loops and any(
+                loop.start_byte <= position < loop.end_byte
+                for loop in loops
+                for position in writes
+            ):
+                continue
+            return True
         return False
 
     issues: list[ForeignSafetyIssue] = []
@@ -5746,16 +5782,30 @@ def _detect_go_safety_issues(
                     source=source,
                     params_text=fn.params_text,
                 )
+                def simple_length_receiver(contract: str) -> str | None:
+                    value = re.sub(r"\s*!=\s*0\s*$", "", contract).strip()
+                    while True:
+                        value = _strip_outer_parentheses(value)
+                        cast = re.fullmatch(r"(\w+)\s*\((.*)\)", value)
+                        if cast is None or not _NUMERIC_CAST_NAME.fullmatch(cast.group(1)):
+                            break
+                        value = cast.group(2).strip()
+                    length = re.fullmatch(r"len\(\s*([A-Za-z_]\w*)\s*\)", value)
+                    return length.group(1) if length is not None else None
+
                 for issue in expr_issues:
                     if "can divide by" not in issue.message or issue.message in existing_division_messages:
                         continue
                     contract = issue.required_contracts[0] if issue.required_contracts else ""
                     if "len(" not in contract:
                         continue
-                    length_receiver = re.search(r"len\(\s*([A-Za-z_]\w*)\s*\)", contract)
+                    length_receiver = simple_length_receiver(contract)
                     if length_receiver and re.fullmatch(
                         r"\*?\[(?:0*[1-9]\d*)\][^\s]+",
-                        re.sub(r"\s+", "", param_types.get(length_receiver.group(1), "")),
+                        re.sub(r"\s+", "", param_types.get(length_receiver, "")),
+                    ) and not re.search(
+                        rf"\b(?:var\s+)?{re.escape(length_receiver)}\s*:=|\bvar\s+{re.escape(length_receiver)}\b",
+                        body,
                     ):
                         continue
                     existing_division_messages.add(issue.message)
