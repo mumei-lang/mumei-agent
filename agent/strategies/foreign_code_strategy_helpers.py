@@ -1096,14 +1096,23 @@ def _python_weak_random_only_expression(value: ast.AST | None, random_call: ast.
     )
 
 
+def _python_noncredential_timing_key(key: ast.AST) -> bool:
+    if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
+        return True
+    parts = set(_name_parts(key.value))
+    return bool(
+        parts.intersection({"jitter", "delay"})
+        or ("retry" in parts and parts.intersection({"after", "backoff", "interval", "timeout", "wait"}))
+    )
+
+
 def _python_dict_credential_context(value: ast.Dict, random_call: ast.AST) -> bool:
     for key, item in zip(value.keys, value.values, strict=True):
-        key_parts = set(_name_parts(key.value)) if isinstance(key, ast.Constant) and isinstance(key.value, str) else set()
         if not (
             isinstance(key, ast.Constant)
             and isinstance(key.value, str)
             and _has_strong_credential_name(key.value)
-            and not key_parts.intersection({"retry", "jitter", "delay"})
+            and not _python_noncredential_timing_key(key)
         ):
             continue
         if _python_weak_random_only_expression(item, random_call):
