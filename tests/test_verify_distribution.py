@@ -1,5 +1,6 @@
 """Tests for the native-first verify-distribution orchestrator."""
 
+import hashlib
 import json
 import os
 import shutil
@@ -193,6 +194,233 @@ def test_wrong_build_id_projects_unclaimed_exit_as_inconclusive(tmp_path, capsys
         assert roles[name]["exit_code"] == 1
         assert "acceptance" not in roles[name]["report"]
         assert "recheck" not in roles[name]["report"]
+
+
+def test_exact_layout_positive_raw_single_file_bundle(tmp_path, capsys):
+    core, bundle, source = _fixture(tmp_path)
+    (bundle / "program").chmod(0o755)
+    code, out, err = _run(
+        capsys, _argv(core, bundle, source, "--require-exact-bundle-layout")
+    )
+    assert code == 0 and err == ""
+    report = json.loads(out)
+    assert report["schema_version"] == "mumei.verify-distribution-report/v1"
+    assert report["roles"]["artifact_reproduction"]["status"] == "accepted"
+
+
+def test_exact_layout_positive_multifile_member_tree(tmp_path, capsys):
+    core = _write_core(tmp_path)
+    record = _record(multifile=True)
+    record["sources"] = {"app.mm": {}, "deps/dep.mm": {}}
+    bundle = _write_bundle(tmp_path, record)
+    source = _write_source(tmp_path)
+    (bundle / "program").chmod(0o755)
+    code, out, err = _run(
+        capsys, _argv(core, bundle, source, "--require-exact-bundle-layout")
+    )
+    assert code == 1 and err == ""
+    roles = json.loads(out)["roles"]
+    assert roles["proof_certificate"]["status"] == "unsupported"
+    assert roles["native_source_llvm"]["status"] == "accepted"
+    assert roles["artifact_reproduction"]["status"] == "accepted"
+
+
+def test_exact_layout_is_opt_in_for_packaging_files(tmp_path, capsys):
+    core, bundle, source = _fixture(tmp_path)
+    (bundle / "program").chmod(0o755)
+    (bundle / "README.md").write_text("packaging metadata\n")
+
+    code, out, err = _run(capsys, _argv(core, bundle, source))
+    assert code == 0 and err == ""
+    assert json.loads(out)["roles"]["artifact_reproduction"]["status"] == "accepted"
+
+    code, out, err = _run(
+        capsys, _argv(core, bundle, source, "--require-exact-bundle-layout")
+    )
+    assert code == 1
+    assert out == ""
+    assert "undeclared file" in err
+
+
+def test_exact_layout_accepts_core_profile_entry_bound(tmp_path, capsys):
+    core = _write_core(tmp_path)
+    record = _record(multifile=True)
+    record["sources"] = {}
+    for index in range(64):
+        parts = [f"d{index}_{depth}" for depth in range(15)] + [f"m{index}.mm"]
+        record["sources"]["/".join(parts)] = {}
+    bundle = _write_bundle(tmp_path, record)
+    source = _write_source(tmp_path)
+    (bundle / "program").chmod(0o755)
+
+    assert sum(1 for _ in bundle.rglob("*")) == 1030
+    code, out, err = _run(
+        capsys, _argv(core, bundle, source, "--require-exact-bundle-layout")
+    )
+    assert code == 1 and err == ""
+    roles = json.loads(out)["roles"]
+    assert roles["native_source_llvm"]["status"] == "accepted"
+    assert roles["artifact_reproduction"]["status"] == "accepted"
+
+
+def test_exact_layout_error_does_not_echo_undeclared_filename(tmp_path, capsys):
+    core, bundle, source = _fixture(tmp_path)
+    sensitive_name = "fake-layout-secret-name"
+    (bundle / sensitive_name).write_text("packaging metadata")
+    code, out, err = _run(
+        capsys, _argv(core, bundle, source, "--require-exact-bundle-layout")
+    )
+    assert code == 1
+    assert out == ""
+    assert "undeclared file" in err
+    assert sensitive_name not in err
+
+
+@pytest.mark.parametrize("entry_kind", ("file", "directory", "symlink"))
+def test_exact_layout_rejects_undeclared_entries(tmp_path, capsys, entry_kind):
+    core, bundle, source = _fixture(tmp_path)
+    extra = bundle / f"extra-{entry_kind}"
+    if entry_kind == "file":
+        extra.write_text("not part of the raw bundle")
+    elif entry_kind == "directory":
+        extra.mkdir()
+    else:
+        extra.symlink_to(bundle / "program.o")
+    code, out, err = _run(
+        capsys, _argv(core, bundle, source, "--require-exact-bundle-layout")
+    )
+    assert code == 1
+    assert out == ""
+    assert f"undeclared {entry_kind}" in err
+
+
+def test_exact_layout_rejects_output_inside_bundle(tmp_path, capsys):
+    core, bundle, source = _fixture(tmp_path)
+    output = bundle / "verification-report.json"
+    code, out, err = _run(
+        capsys,
+        _argv(
+            core,
+            bundle,
+            source,
+            "--require-exact-bundle-layout",
+            "--output",
+            str(output),
+        ),
+    )
+    assert code == 1
+    assert out == ""
+    assert "--output may not be inside --bundle" in err
+    assert not output.exists()
+
+
+def test_exact_layout_allows_output_outside_bundle(tmp_path, capsys):
+    core, bundle, source = _fixture(tmp_path)
+    (bundle / "program").chmod(0o755)
+    output = tmp_path / "verification-report.json"
+    code, out, err = _run(
+        capsys,
+        _argv(
+            core,
+            bundle,
+            source,
+            "--require-exact-bundle-layout",
+            "--output",
+            str(output),
+        ),
+    )
+    assert code == 0 and out == "" and err == ""
+    assert json.loads(output.read_text())["schema_version"] == (
+        "mumei.verify-distribution-report/v1"
+    )
+
+
+def test_exact_layout_escapes_declared_member_control_characters(tmp_path, capsys):
+    core = _write_core(tmp_path)
+    record = _record(multifile=True)
+    record["sources"] = {"bad\x1b[31m.mm": {}}
+    bundle = _write_bundle(tmp_path, record)
+    source = _write_source(tmp_path)
+    (bundle / "sources" / "bad\x1b[31m.mm").unlink()
+
+    code, out, err = _run(
+        capsys, _argv(core, bundle, source, "--require-exact-bundle-layout")
+    )
+    assert code == 1
+    assert out == ""
+    assert "bad\\x1b[31m.mm" in err
+    assert "\x1b" not in err
+
+
+def test_exact_layout_rejects_declared_member_symlink(tmp_path, capsys):
+    core, bundle, source = _fixture(tmp_path)
+    target = tmp_path / "program-real"
+    os.replace(bundle / "program", target)
+    target.chmod(0o755)
+    (bundle / "program").symlink_to(target)
+    code, out, err = _run(
+        capsys, _argv(core, bundle, source, "--require-exact-bundle-layout")
+    )
+    assert code == 1
+    assert out == ""
+    assert "declared bundle path is a symlink: program" in err
+
+
+def test_exact_layout_rejects_declared_non_regular_member(tmp_path, capsys):
+    core, bundle, source = _fixture(tmp_path)
+    (bundle / "program.o").unlink()
+    os.mkfifo(bundle / "program.o")
+    code, out, err = _run(
+        capsys, _argv(core, bundle, source, "--require-exact-bundle-layout")
+    )
+    assert code == 1
+    assert out == ""
+    assert "declared bundle path is not a regular file: program.o" in err
+
+
+def test_exact_layout_requires_executable_program(tmp_path, capsys):
+    core, bundle, source = _fixture(tmp_path)
+    code, out, err = _run(
+        capsys, _argv(core, bundle, source, "--require-exact-bundle-layout")
+    )
+    assert code == 1
+    assert out == ""
+    assert "bundle executable member is not executable: program" in err
+
+
+@pytest.mark.parametrize(
+    ("constant", "message"),
+    (
+        ("MAX_LAYOUT_ENTRIES", "entry bound"),
+        ("MAX_LAYOUT_DEPTH", "depth bound"),
+    ),
+)
+def test_exact_layout_enumeration_is_bounded(tmp_path, capsys, monkeypatch, constant, message):
+    import agent.verify_distribution as verify_distribution
+
+    monkeypatch.setattr(verify_distribution, constant, 0)
+    core, bundle, source = _fixture(tmp_path)
+    code, out, err = _run(
+        capsys, _argv(core, bundle, source, "--require-exact-bundle-layout")
+    )
+    assert code == 1
+    assert out == ""
+    assert message in err
+
+
+def test_exact_layout_does_not_change_wrong_build_id_projection(tmp_path, capsys):
+    core, bundle, source = _fixture(tmp_path)
+    (bundle / "program").chmod(0o755)
+    argv = _argv(core, bundle, source, "--require-exact-bundle-layout")
+    argv[argv.index(BUILD_ID)] = OTHER_BUILD_ID
+    code, out, _ = _run(capsys, argv)
+    assert code == 1
+    roles = json.loads(out)["roles"]
+    assert roles["proof_certificate"]["status"] == "accepted"
+    for name in ("native_source_llvm", "artifact_reproduction"):
+        assert roles[name]["status"] == "inconclusive"
+        assert roles[name]["reason"] == "unclaimed_exit_outcome"
+        assert roles[name]["exit_code"] == 1
 
 
 def test_partial_runtime_pin_projects_core_inconclusive(tmp_path, capsys):
@@ -405,6 +633,9 @@ def test_cli_help_mentions_trusted_runtime_boundary():
     compact = " ".join(help_text.split())
     assert "Off by default" in compact
     assert "trusted" in compact
+    assert "--require-exact-bundle-layout" in compact
+    assert "raw native-bundle build layout" in compact
+    assert "packaging may add README/LICENSE/install files" in compact
 
 
 @pytest.fixture
@@ -430,6 +661,13 @@ def test_real_core_incomplete_runtime_pins_are_inconclusive(tmp_path, capsys, re
             pytest.skip("native-bundle build needs linux/x86_64")
         pytest.fail(f"native-bundle build failed: {built.stderr}")
 
+    build_id = hashlib.sha256((bundle / RECORD_FILE).read_bytes()).hexdigest()
+    argv = _argv(Path(real_core), bundle, source, "--require-exact-bundle-layout")
+    argv[argv.index("--expected-build-id") + 1] = build_id
+    code, out, err = _run(capsys, argv)
+    assert code == 0 and err == ""
+    assert json.loads(out)["roles"]["artifact_reproduction"]["status"] == "accepted"
+
     for mode in ("partial", "absent"):
         mutated = tmp_path / f"bundle-{mode}"
         shutil.copytree(bundle, mutated)
@@ -443,8 +681,6 @@ def test_real_core_incomplete_runtime_pins_are_inconclusive(tmp_path, capsys, re
             record["link_build"]["expected_stdout_sha256"] = None
             record["link_build"]["expected_stderr_sha256"] = None
         record_path.write_text(json.dumps(record))
-        import hashlib
-
         build_id = hashlib.sha256(record_path.read_bytes()).hexdigest()
         argv = _argv(Path(real_core), mutated, source, "--enable-runtime-observations")
         argv[argv.index("--expected-build-id") + 1] = build_id
