@@ -5882,8 +5882,12 @@ def _detect_go_safety_issues(
             existing_division_messages = {
                 issue.message for issue in issues[fn_issues_start:] if "can divide by" in issue.message
             }
-            for expression, shadowed_at_use in _go_assignment_division_expressions(body):
-                facts = flow.facts_for_assignment_expression(expression) if flow is not None else None
+            for expression, shadowed_at_use, expression_position in _go_assignment_division_expressions(body):
+                facts = (
+                    flow.facts_for_assignment_expression(expression, expression_position)
+                    if flow is not None
+                    else None
+                )
                 expr_constants = dict(known_constants or {})
                 if flow is not None:
                     expr_constants.update(flow.constants)
@@ -6894,7 +6898,9 @@ def _is_float_expression(
     return False
 
 
-def _go_assignment_division_expressions(body: str) -> tuple[tuple[str, frozenset[str]], ...]:
+def _go_assignment_division_expressions(
+    body: str,
+) -> tuple[tuple[str, frozenset[str], tuple[int, int]], ...]:
     """Return Go assignment RHSs with shadowed parameter names visible at each use.
 
     Safety scanning historically followed return expressions only. Division by
@@ -6906,7 +6912,7 @@ def _go_assignment_division_expressions(body: str) -> tuple[tuple[str, frozenset
     tree = tree_sitter_extract.extract_statements(body, "go")
     if tree is None:
         return ()
-    expressions: list[tuple[str, frozenset[str]]] = []
+    expressions: list[tuple[str, frozenset[str], tuple[int, int]]] = []
 
     def visit(
         statements: tuple[tree_sitter_extract.Statement, ...],
@@ -6915,12 +6921,12 @@ def _go_assignment_division_expressions(body: str) -> tuple[tuple[str, frozenset
         shadowed = set(inherited_shadowed)
         for statement in statements:
             if statement.kind in {"define", "assign", "var"}:
-                for value in statement.values:
+                for value_index, value in enumerate(statement.values):
                     if "/" not in value and "%" not in value:
                         continue
                     findings = tree_sitter_extract.analyze_expression(value, "go")
                     if findings is not None and any("len(" in divisor for divisor in findings.divisors):
-                        expressions.append((value, frozenset(shadowed)))
+                        expressions.append((value, frozenset(shadowed), (statement.start, value_index)))
             nested_shadowed = frozenset(shadowed)
             if statement.kind in {"if", "for", "switch"}:
                 init_defined = {
