@@ -905,7 +905,10 @@ def test_verify_downloaded_action_artifact_zero_candidates_legacy_default_fails(
     completed = _run_downloaded_artifact_verifier(artifact)
 
     assert completed.returncode != 0
-    assert "must require human review" in completed.stderr
+    assert "zero migration candidates: no blocked/ready review evidence exists" in completed.stderr
+    assert "review-evidence" in completed.stderr
+    assert "not an operational failure" in completed.stderr
+    assert "--allow-zero-candidates" in completed.stderr
 
     review_required = tmp_path / "evidence-review-required"
     _write_zero_candidate_downloaded_action_artifact(review_required)
@@ -921,7 +924,7 @@ def test_verify_downloaded_action_artifact_zero_candidates_legacy_default_fails(
     rejected = _run_downloaded_artifact_verifier(review_required)
 
     assert rejected.returncode != 0
-    assert "does not consist of blocked/ready review evidence" in rejected.stderr
+    assert "zero migration candidates: no blocked/ready review evidence exists" in rejected.stderr
 
 
 def test_verify_downloaded_action_artifact_accepts_explicit_zero_candidates(tmp_path: Path) -> None:
