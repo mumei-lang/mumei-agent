@@ -5021,6 +5021,14 @@ def _go_map_names(source: str) -> set[str]:
 def _go_local_map_names(body: str, known_maps: set[str] | None = None) -> set[str]:
     """Return short variable map declarations local to a function body."""
     names = {match.group(1) for match in re.finditer(r"\b(\w+)\s*:=\s*map\[", body)}
+    names |= {
+        match.group(1)
+        for match in re.finditer(r"\b(\w+)\s*:=\s*make\(\s*map\[", body)
+    }
+    names |= {
+        match.group(1)
+        for match in re.finditer(r"\bvar\s+(\w+)\s+map\[", body)
+    }
     # Type assertion to a map type: ``m, _ := v.(map[K]V)``.
     for match in re.finditer(
         r"\b(\w+)\s*(?:,\s*\w+)?\s*:=\s*[^;{}]*\.\(\s*map\[", body

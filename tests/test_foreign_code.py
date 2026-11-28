@@ -8436,8 +8436,19 @@ func clearedslice(total int, xs []int) int {
     return q
 }
 """
+    cleared_make = """package main
+func clearedmake(total int) int {
+    xs := make(map[string]int)
+    xs["a"] = 1
+    if len(xs) == 0 { return 0 }
+    clear(xs)
+    q := total / len(xs)
+    return q
+}
+"""
     assert [i for i in _detect_safety_issues(cleared, "go") if "divide" in i.message]
     assert not [i for i in _detect_safety_issues(cleared_slice, "go") if "divide" in i.message]
+    assert [i for i in _detect_safety_issues(cleared_make, "go") if "divide" in i.message]
     fixed_minus_one = """package main
 func fixedminusone(total int, xs [4]int) int {
     q := total / (len(xs) - 1)
