@@ -986,3 +986,204 @@ def test_uppercase_credential_constants_are_redacted_and_blocked(tmp_path: Path,
     assert secret not in captured.out
     assert secret not in captured.err
     assert secret not in (tmp_path / "execution.json").read_text(encoding="utf-8")
+
+
+class ErosionResultClient(FakeVerifyClient):
+    def __init__(self, erosion_result):
+        super().__init__()
+        self.erosion_result = erosion_result
+        self.erosion_calls = []
+
+    def erosion_check(self, candidate_path, baseline_path):
+        self.erosion_calls.append((candidate_path, baseline_path))
+        return self.erosion_result
+
+
+def _healed_variant(tmp_path: Path, text: str) -> Path:
+    healed = tmp_path / "withdraw.mm"
+    healed.write_text(text, encoding="utf-8")
+    return healed
+
+
+def test_contract_erosion_pass_is_recorded_as_tool_provenance(tmp_path: Path) -> None:
+    source = tmp_path / "payment.py"
+    source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+    healed = _healed_variant(
+        tmp_path,
+        "atom withdraw(x: i64) -> i64 {\n    requires: x >= 0;\n    ensures: result >= 0;\n    body: { x + 0 }\n}\n",
+    )
+    client = ErosionResultClient({
+        "returncode": 0,
+        "report": {"status": "pass", "atoms": [{"name": "withdraw", "status": "preserved"}]},
+        "stderr": "",
+    })
+
+    report = build_migration_execution(
+        _result(source, [_hint("withdraw")], healed_files=[str(healed)]),
+        output_path=tmp_path / "execution.json",
+        mumei_client=client,
+    )
+
+    erosion = report["candidates"][0]["contract_erosion"]
+    assert erosion["status"] == "passed"
+    assert erosion["checked"] is True
+    assert erosion["summary"] == "contract erosion check passed"
+    assert erosion["atoms"] == [{"name": "withdraw", "status": "preserved"}]
+    assert len(client.erosion_calls) == 1
+    assert report["candidates"][0]["execution_state"] == "ready_for_human_review"
+
+
+def test_contract_erosion_failure_records_minimal_atoms_without_counterexamples(tmp_path: Path) -> None:
+    source = tmp_path / "payment.py"
+    source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+    healed = _healed_variant(
+        tmp_path,
+        "atom withdraw(x: i64) -> i64 {\n    requires: x >= 0;\n    ensures: result >= 0;\n    body: { x + 0 }\n}\n",
+    )
+    client = ErosionResultClient({
+        "returncode": 1,
+        "report": {
+            "status": "fail",
+            "atoms": [{
+                "name": "withdraw",
+                "status": "post_weakened",
+                "detail": "counterexample detail must not be copied",
+                "counterexample": {"x": "secret-shaped-input"},
+            }],
+        },
+        "stderr": "detailed compiler output must not be copied",
+    })
+
+    report = build_migration_execution(
+        _result(source, [_hint("withdraw")], healed_files=[str(healed)]),
+        output_path=tmp_path / "execution.json",
+        mumei_client=client,
+    )
+
+    erosion = report["candidates"][0]["contract_erosion"]
+    assert erosion["status"] == "failed"
+    assert erosion["eroded_atom_count"] == 1
+    assert erosion["atoms"] == [{"name": "withdraw", "status": "post_weakened"}]
+    serialized = json.dumps(report)
+    assert "counterexample detail must not be copied" not in serialized
+    assert "secret-shaped-input" not in serialized
+    assert "detailed compiler output must not be copied" not in serialized
+    assert report["candidates"][0]["execution_state"] == "ready_for_human_review"
+
+
+@pytest.mark.parametrize(
+    ("erosion_result", "expected"),
+    [
+        ({"returncode": 2, "report": None, "stderr": "unrecognized subcommand"}, "unavailable"),
+        ({"returncode": 0, "report": None, "stderr": ""}, "malformed"),
+        ({"returncode": 1, "report": {"status": "fail", "atoms": [{"name": "withdraw", "status": "inconclusive"}]}, "stderr": ""}, "inconclusive"),
+    ],
+)
+def test_contract_erosion_not_checked_or_inconclusive_is_explicit(tmp_path: Path, erosion_result, expected) -> None:
+    source = tmp_path / "payment.py"
+    source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+    healed = _healed_variant(
+        tmp_path,
+        "atom withdraw(x: i64) -> i64 {\n    requires: x >= 0;\n    ensures: result >= 0;\n    body: { x + 0 }\n}\n",
+    )
+
+    report = build_migration_execution(
+        _result(source, [_hint("withdraw")], healed_files=[str(healed)]),
+        output_path=tmp_path / "execution.json",
+        mumei_client=ErosionResultClient(erosion_result),
+    )
+
+    erosion = report["candidates"][0]["contract_erosion"]
+    assert erosion["status"] == expected
+    assert erosion["checked"] is (expected == "inconclusive")
+    assert report["candidates"][0]["execution_state"] == "ready_for_human_review"
+
+
+def test_contract_erosion_no_change_is_explicit_skip(tmp_path: Path) -> None:
+    source = tmp_path / "payment.py"
+    source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+
+    report = build_migration_execution(
+        _result(source, [_hint("withdraw")]),
+        output_path=tmp_path / "execution.json",
+        mumei_client=FakeVerifyClient(),
+    )
+
+    erosion = report["candidates"][0]["contract_erosion"]
+    assert erosion["status"] == "skipped_no_change"
+    assert erosion["checked"] is False
+    assert erosion["reason"] == "contract text is unchanged"
+
+
+def test_contract_clause_delta_is_exact_normalized_conjunct_delta(tmp_path: Path) -> None:
+    source = tmp_path / "payment.py"
+    source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+    original = (
+        "atom withdraw(x: i64) -> i64 {\n"
+        "    requires: x >= 0 && x < 10;\n"
+        "    ensures: result >= 0 && result <= x;\n"
+        "    body: { x }\n}"
+    )
+    final = (
+        "atom withdraw(x: i64) -> i64 {\n"
+        "    requires: x >= 0;\n"
+        "    ensures: result >= 0;\n"
+        "    body: { x }\n}"
+    )
+    healed = _healed_variant(tmp_path, final)
+
+    report = build_migration_execution(
+        _result(source, [_hint("withdraw", original)], healed_files=[str(healed)]),
+        output_path=tmp_path / "execution.json",
+        mumei_client=FakeVerifyClient(),
+    )
+
+    provenance = report["candidates"][0]["contract_provenance"]
+    assert provenance["requires_delta"] == {"added": [], "removed": ["x < 10"]}
+    assert provenance["ensures_delta"] == {"added": [], "removed": ["result <= x"]}
+    assert "semantically_equivalent" not in json.dumps(provenance)
+
+
+def test_contract_erosion_key_is_present_in_incremental_partial_writes(tmp_path: Path, monkeypatch) -> None:
+    from agent import migration_execution as migration_execution_module
+
+    source = tmp_path / "payment.py"
+    source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+    snapshots = []
+    real_write = migration_execution_module._write_partial
+
+    def capture_write(path, report):
+        snapshots.append(json.loads(json.dumps(report)))
+        return real_write(path, report)
+
+    monkeypatch.setattr(migration_execution_module, "_write_partial", capture_write)
+    build_migration_execution(
+        _result(source, [_hint("withdraw")]),
+        output_path=tmp_path / "execution.json",
+        mumei_client=FakeVerifyClient(),
+    )
+
+    candidate_snapshots = [snapshot["candidates"][0] for snapshot in snapshots if snapshot.get("candidates")]
+    assert candidate_snapshots
+    assert all("contract_erosion" in candidate for candidate in candidate_snapshots)
+    assert candidate_snapshots[0]["contract_erosion"]["status"] == "not_checked"
+    assert candidate_snapshots[-1]["contract_erosion"]["status"] == "skipped_no_change"
+
+
+def test_contract_erosion_provenance_does_not_change_fixed_boundary_or_next_step(tmp_path: Path) -> None:
+    from agent.migration_execution import append_execution_next_step
+
+    source = tmp_path / "payment.py"
+    source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+    result = _result(source, [_hint("withdraw")])
+    output = tmp_path / "execution.json"
+    report = build_migration_execution(result, output_path=output, mumei_client=FakeVerifyClient())
+
+    assert report["audit"]["verification_status"] == "unverifiable"
+    assert len(report["evidence_boundary"]) == 4
+    assert not any("proof grade" in item for item in report["evidence_boundary"])
+    append_execution_next_step(result, report, output)
+    step = result.next_steps[-1]
+    assert step["migration_execution_report"] == str(output)
+    assert "migration execution evidence" in step["action"]
+    assert "contract_erosion" not in step
