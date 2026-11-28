@@ -9907,7 +9907,60 @@ def _cast_and_subtraction_issues(
             local_names=local_names,
         )
     )
+    if label == "Solidity" and subtraction_regions:
+        # The operand-specific underflow witness is strictly stronger evidence
+        # for the same unchecked spans, so the generic arithmetic witness is
+        # skipped when one already fired (precision over recall).
+        if not any("can underflow" in issue.message for issue in issues):
+            issues.extend(
+                _solidity_unchecked_arithmetic_issues(function_name, text, subtraction_regions)
+            )
     return issues
+
+
+# Arithmetic operators whose wrapping inside a Solidity ≥0.8 ``unchecked { }``
+# region is silent rather than reverting. ``++``/``--`` are excluded: the
+# ``unchecked { ++i; }`` loop-increment idiom is ubiquitous legitimate gas
+# optimization, so flagging it would bury the witness in false positives.
+# Bit operations, comparisons, and division are out of scope — division
+# reverts on zero even inside ``unchecked``.
+_UNCHECKED_COMPOUND_ARITH_RE = re.compile(r"[-+*]=")
+_UNCHECKED_BINARY_ARITH_RE = re.compile(r"[\w\)\]]\s*[+\-*]\s*[\w\(]")
+_UNCHECKED_INC_DEC_RE = re.compile(r"\+\+|--")
+
+
+def _solidity_unchecked_arithmetic_issues(
+    function_name: str,
+    text: str,
+    regions: list[tuple[int, int]],
+) -> list[ForeignSafetyIssue]:
+    """Flag the first arithmetic operation inside any ``unchecked { }`` span.
+
+    Precision rationale: this is a medium-confidence review witness, not a
+    proof of a missing invariant — ``unchecked`` arithmetic is sometimes a
+    deliberate, correct optimization, so the message only says the arithmetic
+    relies on a bounds invariant that is not machine-checked. One finding per
+    function keeps noise bounded; ``text`` is the position-preserving
+    literal/comment-stripped body so span positions line up with ``regions``.
+    """
+    for start, end in regions:
+        segment = _UNCHECKED_INC_DEC_RE.sub("  ", text[start:end])
+        arithmetic = _UNCHECKED_COMPOUND_ARITH_RE.search(
+            segment
+        ) or _UNCHECKED_BINARY_ARITH_RE.search(segment)
+        if arithmetic is not None:
+            return [
+                ForeignSafetyIssue(
+                    function_name=function_name,
+                    message=(
+                        f"Solidity function `{function_name}` performs arithmetic "
+                        "inside an `unchecked` block that relies on an unchecked "
+                        "arithmetic bounds invariant"
+                    ),
+                    confidence="medium",
+                )
+            ]
+    return []
 
 
 def _unsigned_subtraction_issues(

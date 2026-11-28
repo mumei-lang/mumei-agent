@@ -11001,3 +11001,120 @@ def test_split_index_guard_body_with_nested_braces_still_dominates_later_use() -
     for language, body in (("go", go_nested_guard), ("rust", rust_nested_guard)):
         hits = [i for i in _detect_safety_issues(body, language) if "positive literal index" in i.message]
         assert not hits, (language, hits)
+
+
+def test_solidity_unchecked_arithmetic_positive_controls() -> None:
+    transfer_from = '''
+pragma solidity ^0.8.0;
+contract VaultToken {
+    mapping(address => mapping(address => uint256)) allowance;
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        unchecked {
+            allowance[from][msg.sender] -= amount;
+        }
+        return true;
+    }
+}
+'''
+    init = '''
+pragma solidity ^0.8.0;
+contract EnglishAuction {
+    uint64 public endTime;
+    function init(uint64 duration_) external {
+        unchecked {
+            endTime = uint64(block.timestamp + duration_);
+        }
+    }
+}
+'''
+    earned = '''
+pragma solidity ^0.8.0;
+contract StakingRewards {
+    mapping(address => uint256) userRewardPerTokenPaid;
+    function rewardPerToken() public view returns (uint256) { return 0; }
+    function earned(address account) public view returns (uint256) {
+        uint256 rpt;
+        unchecked {
+            rpt = rewardPerToken() - userRewardPerTokenPaid[account];
+        }
+        return rpt;
+    }
+}
+'''
+    for source, function_name in ((transfer_from, "transferFrom"), (init, "init"), (earned, "earned")):
+        hits = [i for i in _detect_safety_issues(source, "solidity") if "unchecked arithmetic bounds invariant" in i.message]
+        assert len(hits) == 1, (function_name, hits)
+        assert hits[0].function_name == function_name
+        assert hits[0].confidence == "medium"
+        assert not hits[0].counterexample
+
+
+def test_solidity_unchecked_arithmetic_negative_controls() -> None:
+    fixed_transfer_from = '''
+pragma solidity ^0.8.0;
+contract VaultToken {
+    mapping(address => mapping(address => uint256)) allowance;
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        uint256 allowed = allowance[from][msg.sender];
+        require(allowed >= amount, "insufficient allowance");
+        allowance[from][msg.sender] = allowed - amount;
+        return true;
+    }
+}
+'''
+    increment_only = '''
+pragma solidity ^0.8.0;
+contract Loop {
+    function sum(uint256 n) external pure returns (uint256) {
+        uint256 total;
+        for (uint256 i = 0; i < n; ) {
+            total += i;
+            unchecked { ++i; }
+        }
+        return total;
+    }
+    function dec(uint256 n) external pure {
+        unchecked { --n; }
+    }
+}
+'''
+    no_arithmetic = '''
+pragma solidity ^0.8.0;
+contract Store {
+    mapping(address => uint256) bal;
+    function put(uint256 x) external {
+        unchecked {
+            bal[msg.sender] = x;
+        }
+    }
+}
+'''
+    checked_arithmetic = '''
+pragma solidity ^0.8.0;
+contract Math {
+    function sub(uint256 a, uint256 b) external pure returns (uint256) {
+        return a - b + 1;
+    }
+}
+'''
+    for name, source in (("fixed_transfer_from", fixed_transfer_from), ("increment_only", increment_only), ("no_arithmetic", no_arithmetic), ("checked_arithmetic", checked_arithmetic)):
+        assert not [i for i in _detect_safety_issues(source, "solidity") if "unchecked arithmetic bounds invariant" in i.message], name
+
+
+def test_solidity_unchecked_arithmetic_message_redacts_operands() -> None:
+    source = '''
+pragma solidity ^0.8.0;
+contract VaultToken {
+    mapping(address => mapping(address => uint256)) allowance;
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        unchecked {
+            allowance[from][msg.sender] -= amount;
+        }
+        return true;
+    }
+}
+'''
+    hits = [i for i in _detect_safety_issues(source, "solidity") if "unchecked arithmetic bounds invariant" in i.message]
+    assert len(hits) == 1
+    for forbidden in ("allowance", "amount", "from", "msg.sender", "-=", "without a bounds invariant"):
+        assert forbidden not in hits[0].message
