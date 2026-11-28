@@ -8735,6 +8735,22 @@ fn f(total: i64, xs: &[i64], config: Config) -> i64 {
     assert [i for i in _detect_safety_issues(exiting_branch_write_before_return, "rust") if "divide" in i.message]
     assert [i for i in _detect_safety_issues(match_guard_not_binding, "rust") if "divide" in i.message]
     assert len(rhs_divisions) == 1
+    rhs_only = """fn f(amount: i64, mut xs: &[i64]) -> i64 {
+    if xs.is_empty() { return 0 }
+    xs = &xs[..amount as usize / xs.len()];
+    0
+}
+"""
+    assert not [i for i in _detect_safety_issues(rhs_only, "rust") if "divide" in i.message]
+    match_guard_without_write = """fn f(amount: i64, xs: &[i64], n: usize) -> i64 {
+    if xs.is_empty() { return 0 }
+    match n {
+        m if xs.len() == m => amount / xs.len() as i64,
+        _ => 0
+    }
+}
+"""
+    assert not [i for i in _detect_safety_issues(match_guard_without_write, "rust") if "divide" in i.message]
 
 
 def test_rust_arbitrary_member_divisor_remains_conservative() -> None:
