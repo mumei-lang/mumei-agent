@@ -9315,3 +9315,18 @@ def test_hardcoded_secret_sentinel_not_in_verifier_result_output_or_written_spec
     captured = capsys.readouterr()
     assert secret not in captured.out
     assert secret not in captured.err
+
+
+def test_hardcoded_secret_python_unicode_annotation_positions() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    positive = 'ADMIN_TOKEN: 文字列 = "unicode-position-value"\n'
+    assert any(
+        "hardcoded credential" in issue.message
+        for issue in _detect_safety_issues(positive, "python")
+    )
+    negative = 'ADMIN_TOKEN: 文字列 = "unicode-" "value"\n'
+    assert not any(
+        "hardcoded credential" in issue.message
+        for issue in _detect_safety_issues(negative, "python")
+    )
