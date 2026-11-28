@@ -1846,8 +1846,12 @@ def _python_split_index_issues(source: str) -> list[ForeignSafetyIssue]:
                     return True
             return False
 
-        def analyze_block(statements: list[ast.stmt], split_vars: set[str]) -> bool:
-            guarded_limits: dict[str, int] = {}
+        def analyze_block(
+            statements: list[ast.stmt],
+            split_vars: set[str],
+            inherited_limits: dict[str, int] | None = None,
+        ) -> bool:
+            guarded_limits = dict(inherited_limits or {})
             for stmt in statements:
                 if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                     continue
@@ -1856,11 +1860,9 @@ def _python_split_index_issues(source: str) -> list[ForeignSafetyIssue]:
                     for expression in statement_expressions(stmt)
                 ):
                     return True
+                guard_update: tuple[str, int] | None = None
                 if isinstance(stmt, ast.If) and _python_body_definitely_exits(stmt.body):
-                    guard = _python_len_exit_guard_limit(stmt.test)
-                    if guard is not None:
-                        name, limit = guard
-                        guarded_limits[name] = max(limit, guarded_limits.get(name, -1))
+                    guard_update = _python_len_exit_guard_limit(stmt.test)
                 if isinstance(stmt, ast.Assign):
                     if len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
                         target = stmt.targets[0].id
@@ -1884,11 +1886,14 @@ def _python_split_index_issues(source: str) -> list[ForeignSafetyIssue]:
                         ):
                             split_vars.add(target)
                 for nested in nested_statement_lists(stmt):
-                    if analyze_block(nested, split_vars.copy()):
+                    if analyze_block(nested, split_vars.copy(), guarded_limits.copy()):
                         return True
+                if guard_update is not None:
+                    name, limit = guard_update
+                    guarded_limits[name] = max(limit, guarded_limits.get(name, -1))
             return False
 
-        if analyze_block(function.body, set()):
+        if analyze_block(function.body, set(), {}):
             return _split_index_issue(
                 function.name,
                 "Python",
@@ -2058,14 +2063,15 @@ def _rust_is_split_vec_expression(expression: str, annotation: str | None) -> bo
     collect = re.search(r"\.\s*collect\b", expression)
     if collect is None:
         return False
-    return annotation is not None or re.search(r"\.\s*collect\s*::\s*<\s*Vec\b", expression) is not None
+    vec_annotation = annotation is not None and re.match(r"^:\s*Vec\s*<", annotation) is not None
+    return vec_annotation or re.search(r"\.\s*collect\s*::\s*<\s*Vec\b", expression) is not None
 
 
 def _rust_split_index_issues(source: str) -> list[ForeignSafetyIssue]:
     stripped = _strip_go_rust_literals_and_comments(source)
     issues: list[ForeignSafetyIssue] = []
     assign_re = re.compile(
-        r"\blet\s+(?:mut\s+)?(?P<name>\w+)\s*(?P<annotation>:\s*Vec\s*<[^;=]+>)?\s*=\s*(?P<expr>[^;]+);",
+        r"\blet\s+(?:mut\s+)?(?P<name>\w+)\s*(?P<annotation>:\s*[^=;]+?)?\s*=\s*(?P<expr>[^;]+);",
         re.DOTALL,
     )
     direct_re = re.compile(r"\.\s*(?:split_whitespace|split)\s*\(")

@@ -10776,6 +10776,7 @@ def test_python_split_index_negative_controls() -> None:
         "non_split_receiver": 'def f(label):\n    parts = label.partition(":")\n    return parts[1]\n',
         "reassigned": 'def f(label):\n    parts = label.split(":")\n    parts = label.split(":")\n    return parts[1]\n',
         "exiting_len_guard": 'def f(label):\n    parts = label.split(":")\n    if len(parts) <= 1:\n        raise ValueError("short")\n    return parts[1]\n',
+        "outer_guard_nested_use": 'def f(label, cond):\n    parts = label.split(":")\n    if len(parts) <= 1:\n        raise ValueError("short")\n    if cond:\n        return parts[1]\n    return ""\n',
         "continue_len_guard": 'def f(lines):\n    for line in lines:\n        parts = line.split(":")\n        if len(parts) <= 1:\n            continue\n        return parts[1]\n    return ""\n',
     }
     for name, source in sources.items():
@@ -10784,9 +10785,9 @@ def test_python_split_index_negative_controls() -> None:
     non_exiting_guard = 'def f(label):\n    parts = label.split(":")\n    if len(parts) <= 1:\n        print("short")\n    return parts[1]\n'
     other_variable_guard = 'def f(label, other):\n    parts = label.split(":")\n    if len(other) <= 1:\n        raise ValueError("short")\n    return parts[1]\n'
     positive_len_guard = 'def f(label):\n    parts = label.split(":")\n    if len(parts) > 1:\n        return parts[1]\n    return ""\n'
-    outer_guard_nested_use = 'def f(label, cond):\n    parts = label.split(":")\n    if len(parts) <= 1:\n        raise ValueError("short")\n    if cond:\n        return parts[1]\n    return ""\n'
     insufficient_guard = 'def f(label):\n    parts = label.split(":")\n    if len(parts) <= 1:\n        raise ValueError("short")\n    return parts[2]\n'
-    for source in (non_exiting_guard, other_variable_guard, positive_len_guard, outer_guard_nested_use, insufficient_guard):
+    guard_body_use = 'def f(label):\n    parts = label.split(":")\n    if len(parts) <= 1:\n        return parts[1]\n    return ""\n'
+    for source in (non_exiting_guard, other_variable_guard, positive_len_guard, insufficient_guard, guard_body_use):
         assert [i for i in _detect_safety_issues(source, "python") if "positive literal index" in i.message]
 
 
@@ -10894,6 +10895,8 @@ def test_rust_split_index_negative_controls() -> None:
         "fixed_literal": '    let parts = vec!["a", "b"];\n    parts[1].to_string()\n',
         "non_split_receiver": '    let parts: Vec<&str> = line.split_terminator(\',\').collect();\n    parts[1].to_string()\n',
         "not_vec_collect": '    let parts = line.split(\',\').collect();\n    parts[1].to_string()\n',
+        "vecdeque_annotation": '    let parts: VecDeque<&str> = line.split(\',\').collect();\n    parts[1].to_string()\n',
+        "custom_annotation": '    let parts: Parts = line.split(\',\').collect();\n    parts[1].to_string()\n',
         "reassigned": '    let parts: Vec<&str> = line.split(\',\').collect();\n    let parts = line.split(\',\').collect::<Vec<_>>();\n    parts[1].to_string()\n',
         "exiting_len_guard": '    let parts: Vec<&str> = line.split(\',\').collect();\n    if parts.len() < 2 {\n        return String::new();\n    }\n    parts[1].to_string()\n',
     }
