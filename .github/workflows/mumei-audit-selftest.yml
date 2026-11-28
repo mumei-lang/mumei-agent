@@ -56,38 +56,18 @@ jobs:
       contents: read
       actions: read
     steps:
+      - uses: actions/checkout@v4
+
       - name: Download audit evidence artifact
         uses: actions/download-artifact@v4
         with:
           name: mumei-audit-evidence
           path: evidence
 
-      - name: Verify canonical evidence files
+      - name: Verify downloaded action evidence artifact
         run: |
-          test -s evidence/audit.json
-          test -s evidence/audit.sarif
-          test -s evidence/generated-baseline.json
-          test -e evidence/audit.stdout.log
-          test -e evidence/audit.stderr.log
-          test -s evidence/migration-execution/migration_execution.json
-          test -s evidence/migration-execution/status.json
-          test -e evidence/migration-execution/generated-artifacts/.mumei-generated-artifacts
-          if grep -R -q 'fake-password-value' evidence/migration-execution; then
-            echo "::error::credential-like sentinel appeared in migration execution evidence"
-            exit 1
-          fi
-          python3 - <<'PY'
-          import json
-          baseline=json.load(open('evidence/generated-baseline.json', encoding='utf-8'))
-          sarif=json.load(open('evidence/audit.sarif', encoding='utf-8'))
-          execution=json.load(open('evidence/migration-execution/migration_execution.json', encoding='utf-8'))
-          status=json.load(open('evidence/migration-execution/status.json', encoding='utf-8'))
-          assert baseline['version'] == 'mumei.audit-baseline/v1'
-          assert sarif['version'] == '2.1.0'
-          assert execution['schema'] == 'mumei.migration-execution/v1'
-          assert status['status'] == 'emitted_by_audit_cli'
-          assert status['counts']['blocked'] >= 1
-          assert status['review_required'] is True
-          assert 'host-language code implements the same behavior' in status['boundary']
-          assert 'fake-password-value' not in json.dumps(execution)
-          PY
+          python3 .github/actions/mumei-audit/scripts/verify_audit_evidence_artifact.py evidence \
+            --require-hidden-companion \
+            --require-blocked-candidate \
+            --require-generated-mm \
+            --forbidden-literal fake-password-value
