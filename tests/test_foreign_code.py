@@ -9203,3 +9203,78 @@ contract Vault {
         issue.function_name == "withdraw" and "no access-control guard" in issue.message
         for issue in _detect_solidity_contract_issues(source)
     )
+
+
+def test_hardcoded_secret_direct_literal_positive_languages() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    secret = "unit-test-credential-value"
+    cases = [
+        (
+            "python",
+            f'ADMIN_TOKEN = "{secret}"\n',
+            "ADMIN_TOKEN",
+        ),
+        (
+            "go",
+            f'package main\n\nconst adminToken = "{secret}"\n\nfunc main() {{}}\n',
+            "main",
+        ),
+        (
+            "rust",
+            f'const ADMIN_TOKEN: &str = "{secret}";\nfn handle() {{ let _token = ADMIN_TOKEN; }}\n',
+            "handle",
+        ),
+        (
+            "typescript",
+            f'const ADMIN_TOKEN = "{secret}";\nfunction handleAdminDelete() {{ return ADMIN_TOKEN; }}\n',
+            "handleAdminDelete",
+        ),
+    ]
+    for language, source, expected_text in cases:
+        issues = [
+            issue
+            for issue in _detect_safety_issues(source, language)
+            if "hardcoded credential" in issue.message
+        ]
+        assert issues, language
+        assert expected_text in issues[0].message
+        assert secret not in issues[0].message
+        assert not issues[0].counterexample
+
+
+def test_hardcoded_secret_name_boundaries() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _is_hardcoded_secret_name
+
+    assert _is_hardcoded_secret_name("ADMIN_TOKEN")
+    assert _is_hardcoded_secret_name("adminToken")
+    assert _is_hardcoded_secret_name("apiKey")
+    assert _is_hardcoded_secret_name("PRIVATE_KEY")
+    assert _is_hardcoded_secret_name("passwordHash")
+    assert not _is_hardcoded_secret_name("tokenize")
+    assert not _is_hardcoded_secret_name("secretary")
+    assert not _is_hardcoded_secret_name("author")
+    assert not _is_hardcoded_secret_name("keyboard")
+
+
+def test_hardcoded_secret_negative_rhs_forms() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    cases = [
+        ("python", 'ADMIN_TOKEN = ""\n'),
+        ("python", 'ADMIN_TOKEN = "example-value"\n'),
+        ("python", 'ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")\n'),
+        ("python", 'ADMIN_TOKEN = "a" + "b"\n'),
+        ("go", 'package main\nconst adminToken = ""\nfunc main() {}\n'),
+        ("go", 'package main\nconst adminToken = "a" + "b"\nfunc main() {}\n'),
+        ("rust", 'const ADMIN_TOKEN: &str = "";\nfn handle() {}\n'),
+        ("rust", 'const ADMIN_TOKEN: &str = concat!("a", "b");\nfn handle() {}\n'),
+        ("typescript", 'const ADMIN_TOKEN = "";\nfunction f() {}\n'),
+        ("typescript", 'const ADMIN_TOKEN = process.env.ADMIN_TOKEN ?? "";\nfunction f() {}\n'),
+        ("typescript", 'const ADMIN_TOKEN = "a" + "b";\nfunction f() {}\n'),
+    ]
+    for language, source in cases:
+        assert not any(
+            "hardcoded credential" in issue.message
+            for issue in _detect_safety_issues(source, language)
+        ), (language, source)
