@@ -10223,6 +10223,232 @@ def make_share_token() -> str:
     assert not [i for i in _detect_safety_issues(source, "python") if "weak randomness" in i.message]
 
 
+def test_python_insecure_randomness_collection_return_and_unpacking_precision() -> None:
+    negative_sources = [
+        '''
+import random
+import secrets
+
+def make_share_token():
+    return secrets.token_hex(16), random.random()
+''',
+        '''
+import random
+import secrets
+
+def make_share_token():
+    return {"token": secrets.token_hex(16), "retry_after": random.random()}
+''',
+        '''
+import random
+import secrets
+
+def make_share_token():
+    token, delay = secrets.token_hex(16), random.random()
+    return token
+''',
+        '''
+import random
+import secrets
+
+def make_share_token():
+    token = secrets.token_hex(16)
+    return token + str(random.random())
+''',
+    ]
+    positive_sources = [
+        '''
+import random
+
+def make_share_token():
+    return {"token": "%012x" % int(random.random() * (1 << 48)), "retry_after": 1}
+''',
+        '''
+import random
+
+def make_share_token():
+    token, delay = "%012x" % int(random.random() * (1 << 48)), 1
+    return token
+''',
+        '''
+import random
+
+def make_share_token():
+    token = delay = random.random()
+    return token
+''',
+    ]
+
+    for source in negative_sources:
+        assert not [i for i in _detect_safety_issues(source, "python") if "weak randomness" in i.message]
+    for source in positive_sources:
+        assert [i for i in _detect_safety_issues(source, "python") if "weak randomness" in i.message]
+
+
+def test_python_insecure_randomness_weak_only_expression_precision() -> None:
+    negative_sources = [
+        '''
+import random
+import secrets
+
+def make_share_token():
+    token = secrets.token_hex(16)
+    return {"token": token + str(random.random())}
+''',
+        '''
+import random
+import secrets
+
+def make_share_token():
+    secure = secrets.token_hex(16)
+    token, delay = secure + str(random.random()), 1
+    return token
+''',
+        '''
+import random
+import secrets
+
+def make_share_token():
+    secure = secrets.token_hex(16)
+    token = secure + str(random.random())
+    return token
+''',
+        '''
+import random
+import secrets
+
+def make_share_token():
+    secure = secrets.token_hex(16)
+    token: str = secure + str(random.random())
+    return token
+''',
+        '''
+import random
+import secrets
+
+def make_share_token():
+    (token, delay), status = (secrets.token_hex(16), random.random()), 200
+    return token
+''',
+        '''
+import random
+import secrets
+
+def make_share_token():
+    return {"session": {"token": secrets.token_hex(16), "session_retry_after": random.random()}}
+''',
+        '''
+import random
+import secrets
+
+def make_share_token():
+    return {"session": {"token": secrets.token_hex(16), "session_retry_seconds": random.random()}}
+''',
+        '''
+import random
+import secrets
+
+def make_share_token():
+    return {"session": {"token": secrets.token_hex(16), "session_retry_window": random.random()}}
+''',
+        '''
+import random
+
+def make_share_token():
+    return {
+        "token_backoff": random.random(),
+        "token_timeout": random.random(),
+        "secret_interval": random.random(),
+        "token_expiry": random.random(),
+        "token_ttl": random.random(),
+        "session_expires_in": random.random(),
+        "token_duration": random.random(),
+        "token_lifetime": random.random(),
+        "session_time": random.random(),
+        "time_until_token_refresh": random.random(),
+        "retry_token": random.random(),
+        "retry_wait_for_session": random.random(),
+    }
+''',
+        '''
+import hashlib
+import random
+
+def make_share_token():
+    return hashlib.sha256(random.SystemRandom().randbytes(32) + str(random.random()).encode()).hexdigest()
+''',
+    ]
+    positive_sources = [
+        '''
+import random
+
+def make_share_token():
+    return format(random.random(), ".12f")
+''',
+        '''
+import random
+
+def make_share_token():
+    return repr(random.random())
+''',
+        '''
+import random
+
+def make_share_token():
+    (token, delay), status = (random.random(), 1), 200
+    return token
+''',
+        '''
+import hashlib
+import random
+
+def make_share_token():
+    return hashlib.sha256(str(random.random()).encode()).hexdigest()
+''',
+        '''
+import random
+
+def make_share_token():
+    return {"session": {"token": "%012x" % int(random.random() * (1 << 48))}}
+''',
+        '''
+import random
+
+def make_share_token():
+    return {"second_factor_token": "%012x" % int(random.random() * (1 << 48))}
+''',
+        '''
+import random
+
+def make_share_token():
+    return {"token_second_factor": "%012x" % int(random.random() * (1 << 48))}
+''',
+        '''
+import random
+
+def make_share_token():
+    return {"one_time_token": "%012x" % int(random.random() * (1 << 48))}
+''',
+        '''
+import random
+
+def make_share_token():
+    return {"oneTimePassword": "%012x" % int(random.random() * (1 << 48))}
+''',
+        '''
+import random
+
+def make_share_token():
+    return {"time_based_one_time_password": "%012x" % int(random.random() * (1 << 48))}
+''',
+    ]
+
+    for source in negative_sources:
+        assert not [i for i in _detect_safety_issues(source, "python") if "weak randomness" in i.message]
+    for source in positive_sources:
+        assert [i for i in _detect_safety_issues(source, "python") if "weak randomness" in i.message]
+
+
 def test_go_insecure_randomness_parallel_assignment_pairs_lhs_and_rhs() -> None:
     mixed_parallel = '''package auth
 import (

@@ -1068,6 +1068,135 @@ def _python_function_own_nodes(function: ast.AST):
         stack.extend(ast.iter_child_nodes(node))
 
 
+def _python_ast_contains(root: ast.AST | None, needle: ast.AST) -> bool:
+    return root is not None and any(node is needle for node in ast.walk(root))
+
+
+def _python_contains_system_random(value: ast.AST) -> bool:
+    return any(
+        isinstance(node, ast.Attribute)
+        and node.attr == "SystemRandom"
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "random"
+        for node in ast.walk(value)
+    )
+
+
+def _python_weak_random_only_expression(value: ast.AST | None, random_call: ast.AST) -> bool:
+    if value is None or isinstance(value, (ast.Tuple, ast.List, ast.Set, ast.Dict)):
+        return False
+    if not _python_ast_contains(value, random_call) or _python_contains_system_random(value):
+        return False
+    # Precision-first shallow witness: local variables such as scale factors are
+    # intentional false negatives rather than scope/dataflow inference.
+    allowed_names = {"random", "int", "str", "hex", "round", "format", "repr", "hashlib"}
+    return not any(
+        isinstance(node, ast.Name) and node.id not in allowed_names
+        for node in ast.walk(value)
+    )
+
+
+_PYTHON_NONCREDENTIAL_METADATA_KEY_PARTS = frozenset({
+    "after",
+    "age",
+    "attempt",
+    "attempts",
+    "backoff",
+    "cooldown",
+    "count",
+    "deadline",
+    "delay",
+    "duration",
+    "expiration",
+    "expire",
+    "expires",
+    "expiry",
+    "interval",
+    "jitter",
+    "lifetime",
+    "period",
+    "retry",
+    "seconds",
+    "sleep",
+    "timeout",
+    "timestamp",
+    "ttl",
+    "until",
+    "validity",
+    "wait",
+})
+
+
+def _python_noncredential_metadata_key(key: ast.AST) -> bool:
+    if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
+        return True
+    parts = _name_parts(key.value)
+    if any(part in _PYTHON_NONCREDENTIAL_METADATA_KEY_PARTS for part in parts):
+        return True
+    credential_indexes = [index for index, part in enumerate(parts) if part in _STRONG_CREDENTIAL_WORDS]
+    if not credential_indexes:
+        return True
+    return any(
+        part == "time" and not (index > 0 and parts[index - 1] == "one")
+        for index, part in enumerate(parts[max(credential_indexes) + 1:], start=max(credential_indexes) + 1)
+    )
+
+
+def _python_dict_credential_context(value: ast.Dict, random_call: ast.AST) -> bool:
+    for key, item in zip(value.keys, value.values, strict=True):
+        if not (
+            isinstance(key, ast.Constant)
+            and isinstance(key.value, str)
+            and _has_strong_credential_name(key.value)
+            and not _python_noncredential_metadata_key(key)
+        ):
+            continue
+        if _python_weak_random_only_expression(item, random_call):
+            return True
+        if isinstance(item, ast.Dict) and _python_dict_credential_context(item, random_call):
+            return True
+    return False
+
+
+def _python_return_credential_context(return_node: ast.Return, random_call: ast.AST, function_is_credential: bool) -> bool:
+    if not function_is_credential:
+        return False
+    value = return_node.value
+    if isinstance(value, ast.Dict):
+        return _python_dict_credential_context(value, random_call)
+    if isinstance(value, (ast.Tuple, ast.List, ast.Set)):
+        return False
+    return _python_weak_random_only_expression(value, random_call)
+
+
+def _python_tuple_assignment_credential_context(target: ast.Tuple | ast.List, value: ast.AST, random_call: ast.AST) -> bool:
+    if any(isinstance(element, ast.Starred) for element in target.elts):
+        return False
+    if not isinstance(value, (ast.Tuple, ast.List)) or len(target.elts) != len(value.elts):
+        return False
+    for target_element, value_element in zip(target.elts, value.elts, strict=True):
+        if isinstance(target_element, (ast.Tuple, ast.List)):
+            if _python_tuple_assignment_credential_context(target_element, value_element, random_call):
+                return True
+        elif any(_has_strong_credential_name(name) for name in _python_target_names(target_element)):
+            if _python_weak_random_only_expression(value_element, random_call):
+                return True
+    return False
+
+
+def _python_assignment_credential_context(assign: ast.Assign, random_call: ast.AST) -> bool:
+    for target in assign.targets:
+        target_names = _python_target_names(target)
+        if not any(_has_strong_credential_name(name) for name in target_names):
+            continue
+        if isinstance(target, (ast.Tuple, ast.List)):
+            if _python_tuple_assignment_credential_context(target, assign.value, random_call):
+                return True
+        elif _python_weak_random_only_expression(assign.value, random_call):
+            return True
+    return False
+
+
 def _python_insecure_randomness_issues(source: str) -> list[ForeignSafetyIssue]:
     try:
         tree = ast.parse(source)
@@ -1097,18 +1226,14 @@ def _python_insecure_randomness_issues(source: str) -> list[ForeignSafetyIssue]:
             while cursor in parents and parents[cursor] is not function:
                 cursor = parents[cursor]
                 if isinstance(cursor, ast.Return):
-                    credential_context = function_is_credential
+                    credential_context = _python_return_credential_context(cursor, node, function_is_credential)
                 elif isinstance(cursor, ast.Assign):
-                    credential_context = any(
-                        _has_strong_credential_name(name)
-                        for target in cursor.targets
-                        for name in _python_target_names(target)
-                    )
+                    credential_context = _python_assignment_credential_context(cursor, node)
                 elif isinstance(cursor, ast.AnnAssign):
                     credential_context = any(
                         _has_strong_credential_name(name)
                         for name in _python_target_names(cursor.target)
-                    )
+                    ) and _python_weak_random_only_expression(cursor.value, node)
                 if credential_context:
                     break
             if credential_context:
