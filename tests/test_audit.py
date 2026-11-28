@@ -1031,6 +1031,27 @@ def test_audit_verification_status_refuted_for_counterexample() -> None:
     assert status == "refuted"
 
 
+def test_audit_verification_status_ignores_counterexample_in_function_name() -> None:
+    result = {
+        "success": False,
+        "verification": {
+            "success": True,
+            "report": {"status": "verified", "diagnostics": []},
+        },
+    }
+
+    status = _verification_status_from_foreign_result(
+        result,
+        counterexample_values=[],
+        verification_violations=[
+            "Python function `counterexample_helper.token_matches` uses early-exit credential comparison "
+            "that may expose a timing side channel"
+        ],
+    )
+
+    assert status == "verified"
+
+
 def test_audit_verification_status_preserves_skips_without_verification_failure() -> None:
     result = {
         "success": True,
