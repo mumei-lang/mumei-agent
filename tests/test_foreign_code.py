@@ -9203,3 +9203,130 @@ contract Vault {
         issue.function_name == "withdraw" and "no access-control guard" in issue.message
         for issue in _detect_solidity_contract_issues(source)
     )
+
+
+def test_hardcoded_secret_direct_literal_positive_languages() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    secret = "unit-test-credential-value"
+    cases = [
+        (
+            "python",
+            f'ADMIN_TOKEN = "{secret}"\n',
+            "ADMIN_TOKEN",
+        ),
+        (
+            "go",
+            f'package main\n\nconst adminToken = "{secret}"\n\nfunc main() {{}}\n',
+            "main",
+        ),
+        (
+            "rust",
+            f'const ADMIN_TOKEN: &str = "{secret}";\nfn handle() {{ let _token = ADMIN_TOKEN; }}\n',
+            "handle",
+        ),
+        (
+            "typescript",
+            f'const ADMIN_TOKEN = "{secret}";\nfunction handleAdminDelete() {{ return ADMIN_TOKEN; }}\n',
+            "handleAdminDelete",
+        ),
+    ]
+    for language, source, expected_text in cases:
+        issues = [
+            issue
+            for issue in _detect_safety_issues(source, language)
+            if "hardcoded credential" in issue.message
+        ]
+        assert issues, language
+        assert expected_text in issues[0].message
+        assert secret not in issues[0].message
+        assert not issues[0].counterexample
+
+
+def test_hardcoded_secret_name_boundaries() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _is_hardcoded_secret_name
+
+    assert _is_hardcoded_secret_name("ADMIN_TOKEN")
+    assert _is_hardcoded_secret_name("adminToken")
+    assert _is_hardcoded_secret_name("apiKey")
+    assert _is_hardcoded_secret_name("PRIVATE_KEY")
+    assert _is_hardcoded_secret_name("passwordHash")
+    assert not _is_hardcoded_secret_name("tokenize")
+    assert not _is_hardcoded_secret_name("secretary")
+    assert _is_hardcoded_secret_name("authToken")
+    assert not _is_hardcoded_secret_name("author")
+    assert not _is_hardcoded_secret_name("keyboard")
+    assert not _is_hardcoded_secret_name("AUTH")
+    assert not _is_hardcoded_secret_name("AUTHENTICATION")
+    assert not _is_hardcoded_secret_name("CSRF_TOKEN_HEADER")
+
+
+def test_hardcoded_secret_negative_rhs_forms() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    cases = [
+        ("python", 'AUTH = "Bearer"\n'),
+        ("python", 'CSRF_TOKEN_HEADER = "X-CSRF-Token"\n'),
+        ("python", 'ADMIN_TOKEN = ""\n'),
+        ("python", 'ADMIN_TOKEN = "example-value"\n'),
+        ("python", 'ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")\n'),
+        ("python", 'ADMIN_TOKEN = "a" + "b"\n'),
+        ("python", 'ADMIN_TOKEN = "a" "b"\n'),
+        ("go", 'package main\nconst adminToken = ""\nfunc main() {}\n'),
+        ("go", 'package main\nconst adminToken = "a" + "b"\nfunc main() {}\n'),
+        ("rust", 'const ADMIN_TOKEN: &str = "";\nfn handle() {}\n'),
+        ("rust", 'const ADMIN_TOKEN: &str = concat!("a", "b");\nfn handle() {}\n'),
+        ("typescript", 'const AUTHENTICATION = "basic";\nfunction f() {}\n'),
+        ("typescript", 'const ADMIN_TOKEN = "";\nfunction f() {}\n'),
+        ("typescript", 'const ADMIN_TOKEN = process.env.ADMIN_TOKEN ?? "";\nfunction f() {}\n'),
+        ("typescript", 'const ADMIN_TOKEN = "a" + "b";\nfunction f() {}\n'),
+    ]
+    for language, source in cases:
+        assert not any(
+            "hardcoded credential" in issue.message
+            for issue in _detect_safety_issues(source, language)
+        ), (language, source)
+
+
+def test_hardcoded_secret_sentinel_not_in_verifier_result_output_or_written_spec(capsys) -> None:
+    secret = "unit-test-credential-sentinel"
+    written: list[str] = []
+
+    def fake_verify(path: str, **kwargs) -> dict:
+        written.append(Path(path).read_text(encoding="utf-8"))
+        return {"success": True, "report": {"status": "verified"}, "stdout": "{}", "stderr": ""}
+
+    mumei = MagicMock()
+    mumei.verify.side_effect = fake_verify
+    source = (
+        f'ADMIN_TOKEN = "{secret}"\n'
+        "def read() -> int:\n"
+        "    return 1\n"
+    )
+
+    result = ForeignCodeVerifier(mumei_client=mumei).verify(source, "python")
+
+    assert result["success"] is False
+    assert any("hardcoded credential" in error for error in result["errors"])
+    mumei.verify.assert_called_once()
+    assert written
+    assert secret not in json.dumps(result, sort_keys=True)
+    assert all(secret not in text for text in written)
+    captured = capsys.readouterr()
+    assert secret not in captured.out
+    assert secret not in captured.err
+
+
+def test_hardcoded_secret_python_unicode_annotation_positions() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    positive = 'ADMIN_TOKEN: 文字列 = "unicode-position-value"\n'
+    assert any(
+        "hardcoded credential" in issue.message
+        for issue in _detect_safety_issues(positive, "python")
+    )
+    negative = 'ADMIN_TOKEN: 文字列 = "unicode-" "value"\n'
+    assert not any(
+        "hardcoded credential" in issue.message
+        for issue in _detect_safety_issues(negative, "python")
+    )

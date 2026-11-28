@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import ast
+import io
+import tokenize
 from datetime import datetime, timezone
 from fractions import Fraction
 from functools import lru_cache
@@ -506,6 +508,328 @@ def _normalize_language(language: str) -> str:
     }
     return aliases.get(language.strip().lower(), language.strip().lower())
 
+
+_CREDENTIAL_WORDS = frozenset(
+    {
+        "password",
+        "passwd",
+        "secret",
+        "token",
+        "credential",
+        "credentials",
+        "apikey",
+        "privatekey",
+        "accesskey",
+        "sessionkey",
+        "signingkey",
+        "encryptionkey",
+    }
+)
+_CREDENTIAL_KEY_PAIRS = frozenset(
+    {
+        ("api", "key"),
+        ("private", "key"),
+        ("access", "key"),
+        ("session", "key"),
+        ("signing", "key"),
+        ("encryption", "key"),
+    }
+)
+_CREDENTIAL_NAME_PART = re.compile(
+    r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|\d+"
+)
+
+
+def _is_hardcoded_secret_name(name: str) -> bool:
+    """True when a credential word is a whole lexical word in ``name``."""
+    words = [
+        match.group(0).lower()
+        for component in re.split(r"[._$\-]+", name)
+        for match in _CREDENTIAL_NAME_PART.finditer(component)
+    ]
+    if words and words[-1] in {
+        "header",
+        "headername",
+        "name",
+        "env",
+        "envvar",
+        "variable",
+        "param",
+        "parameter",
+    }:
+        return False
+    return bool(
+        any(word in _CREDENTIAL_WORDS for word in words)
+        or any(pair in _CREDENTIAL_KEY_PAIRS for pair in zip(words, words[1:]))
+    )
+
+
+def _is_placeholder_secret_value(value: str) -> bool:
+    stripped = value.strip()
+    if not stripped:
+        return True
+    lowered = stripped.lower()
+    if any(
+        marker in lowered
+        for marker in (
+            "placeholder",
+            "example",
+            "sample",
+            "dummy",
+            "changeme",
+            "change-me",
+            "redacted",
+        )
+    ):
+        return True
+    compact = re.sub(r"[\s_\-]+", "", lowered)
+    return bool(
+        compact
+        in {
+            "test",
+            "testing",
+            "secret",
+            "password",
+            "token",
+            "apikey",
+            "key",
+            "changeme",
+            "yourtokenhere",
+            "yoursecrethere",
+            "todo",
+        }
+        or re.fullmatch(r"x+|\*+", lowered)
+    )
+
+
+def _node_text(source_bytes: bytes, node) -> str:
+    return source_bytes[node.start_byte : node.end_byte].decode("utf-8", errors="replace")
+
+
+def _string_literal_content(node, source_bytes: bytes, language: str) -> str | None:
+    """Return string contents for exactly one simple literal node, never emitting it."""
+    text = _node_text(source_bytes, node)
+    if language == "go":
+        if node.type == "raw_string_literal" and len(text) >= 2 and text.startswith("`") and text.endswith("`"):
+            return text[1:-1]
+        if node.type != "interpreted_string_literal":
+            return None
+    elif language == "rust":
+        if node.type != "string_literal":
+            return None
+    elif language == "typescript":
+        if node.type != "string":
+            return None
+    else:
+        return None
+    if len(text) < 2 or text[0] not in {'"', "'"} or text[-1] != text[0]:
+        return None
+    return text[1:-1]
+
+
+def _tree_secret_assignment(node, source_bytes: bytes, language: str) -> tuple[str, str, int] | None:
+    """Extract ``(name, literal contents, line)`` from one direct constant assignment."""
+    value_node = None
+    name_node = None
+    if language == "go" and node.type == "const_spec":
+        name_node = node.child_by_field_name("name")
+        expression_list = node.child_by_field_name("value")
+        if expression_list is None or len(expression_list.named_children) != 1:
+            return None
+        value_node = expression_list.named_children[0]
+    elif language == "rust" and node.type == "const_item":
+        name_node = node.child_by_field_name("name")
+        value_node = node.child_by_field_name("value")
+    elif language == "typescript" and node.type == "variable_declarator":
+        parent = node.parent
+        if (
+            parent is None
+            or parent.type != "lexical_declaration"
+            or not parent.children
+            or parent.children[0].type != "const"
+        ):
+            return None
+        name_node = node.child_by_field_name("name")
+        value_node = node.child_by_field_name("value")
+    else:
+        return None
+    if name_node is None or name_node.type != "identifier" or value_node is None:
+        return None
+    value = _string_literal_content(value_node, source_bytes, language)
+    if value is None:
+        return None
+    return _node_text(source_bytes, name_node), value, node.start_point[0] + 1
+
+
+_TREE_FUNCTION_TYPES = {
+    "go": {"function_declaration", "method_declaration"},
+    "rust": {"function_item", "function_signature_item"},
+    "typescript": {"function_declaration", "method_definition", "function_expression", "arrow_function"},
+}
+
+
+def _tree_enclosing_function_name(node, source_bytes: bytes, language: str) -> str | None:
+    current = node.parent
+    while current is not None:
+        if current.type in _TREE_FUNCTION_TYPES.get(language, set()):
+            name_node = current.child_by_field_name("name")
+            if name_node is not None:
+                return _node_text(source_bytes, name_node)
+            return None
+        current = current.parent
+    return None
+
+
+def _tree_first_use_function(root, source_bytes: bytes, language: str, name: str, declaration_node) -> str | None:
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if (
+            declaration_node.start_byte <= node.start_byte
+            and node.end_byte <= declaration_node.end_byte
+        ):
+            continue
+        if node.type == "identifier" and _node_text(source_bytes, node) == name:
+            function_name = _tree_enclosing_function_name(node, source_bytes, language)
+            if function_name:
+                return function_name
+        stack.extend(reversed(node.children))
+    return None
+
+
+def _tree_hardcoded_secret_issues(source: str, language: str) -> list[ForeignSafetyIssue]:
+    tree, source_bytes = tree_sitter_extract.parse(source, language)
+    if tree is None or source_bytes is None:
+        return []
+    label = {"go": "Go", "rust": "Rust", "typescript": "TypeScript"}[language]
+    issues: list[ForeignSafetyIssue] = []
+    stack = [tree.root_node]
+    while stack:
+        node = stack.pop()
+        extracted = _tree_secret_assignment(node, source_bytes, language)
+        if extracted is not None:
+            name, value, line = extracted
+            if _is_hardcoded_secret_name(name) and not _is_placeholder_secret_value(value):
+                enclosing = _tree_enclosing_function_name(node, source_bytes, language)
+                use_function = enclosing or _tree_first_use_function(
+                    tree.root_node, source_bytes, language, name, node
+                )
+                if use_function:
+                    message = (
+                        f"{label} function `{use_function}` uses hardcoded credential "
+                        f"constant `{name}` stored directly in source"
+                    )
+                    function_name = use_function
+                elif language == "go" and re.search(r"^\s*package\s+main\b", source, re.MULTILINE):
+                    message = (
+                        f"{label} hardcoded credential constant `{name}` in package main "
+                        "is stored directly in source"
+                    )
+                    function_name = "main"
+                else:
+                    message = (
+                        f"{label} hardcoded credential constant `{name}` "
+                        "is stored directly in source"
+                    )
+                    function_name = name
+                issues.append(
+                    ForeignSafetyIssue(
+                        function_name=function_name,
+                        message=message,
+                        line=line,
+                    )
+                )
+        stack.extend(reversed(node.children))
+    return issues
+
+
+def _python_enclosing_function(tree: ast.AST, line: int) -> str | None:
+    candidates = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.lineno <= line <= (node.end_lineno or node.lineno)
+    ]
+    if not candidates:
+        return None
+    innermost = max(candidates, key=lambda node: (node.lineno, node.end_lineno or node.lineno))
+    return innermost.name
+
+
+def _python_single_string_literal(source: str, value_node: ast.AST) -> bool:
+    segment = ast.get_source_segment(source, value_node)
+    if segment is None:
+        return False
+    try:
+        count = sum(
+            1
+            for token in tokenize.generate_tokens(io.StringIO(segment).readline)
+            if token.type == tokenize.STRING
+        )
+    except (IndentationError, SyntaxError, tokenize.TokenError):
+        return False
+    return count == 1
+
+
+def _python_hardcoded_secret_issues(source: str) -> list[ForeignSafetyIssue]:
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    issues: list[ForeignSafetyIssue] = []
+    for node in ast.walk(tree):
+        value_node: ast.AST | None = None
+        targets: list[ast.expr] = []
+        if isinstance(node, ast.Assign):
+            value_node = node.value
+            targets = list(node.targets)
+        elif isinstance(node, ast.AnnAssign):
+            value_node = node.value
+            targets = [node.target]
+        if not isinstance(value_node, ast.Constant) or not isinstance(value_node.value, str):
+            continue
+        if _is_placeholder_secret_value(value_node.value):
+            continue
+        for target in targets:
+            if not isinstance(target, ast.Name) or not _is_hardcoded_secret_name(target.id):
+                continue
+            if not _python_single_string_literal(source, value_node):
+                continue
+            function_name = _python_enclosing_function(tree, node.lineno) or target.id
+            if function_name == target.id:
+                message = (
+                    f"Python hardcoded credential constant `{target.id}` "
+                    "is stored directly in source"
+                )
+            else:
+                message = (
+                    f"Python function `{function_name}` uses hardcoded credential "
+                    f"constant `{target.id}` stored directly in source"
+                )
+            issues.append(
+                ForeignSafetyIssue(
+                    function_name=function_name,
+                    message=message,
+                    line=node.lineno,
+                )
+            )
+    return issues
+
+
+def _hardcoded_secret_issues(source: str, language: str) -> list[ForeignSafetyIssue]:
+    if language == "python":
+        return _python_hardcoded_secret_issues(source)
+    if language in {"go", "rust", "typescript"}:
+        return _tree_hardcoded_secret_issues(source, language)
+    return []
+
+
+def _with_hardcoded_secret_issues(
+    issues: list[ForeignSafetyIssue], source: str, language: str
+) -> list[ForeignSafetyIssue]:
+    return [*issues, *_hardcoded_secret_issues(source, language)]
+
+
 def _is_generated_source(source: str) -> bool:
     """Return True when ``source`` starts with a standard generated-code marker."""
     return bool(re.search(r"^\s*//\s*Code generated by", source, re.MULTILINE))
@@ -591,15 +915,16 @@ def _detect_safety_issues(
         # Suppress false positives for ``(param - N) as usize`` indexing into
         # ``const`` arrays (e.g. ``LAST_DAYS[(month - 1) as usize]``).  The tool
         # lacks the caller range contract, so the cast is unprovable.
-        return [
+        filtered = [
             issue
             for issue in issues
             if not _is_rust_usize_cast_array_issue(issue, source, blocks)
         ]
+        return _with_hardcoded_secret_issues(filtered, original_source, normalized)
     if normalized == "typescript":
         blocks = _typescript_function_blocks(source)
         nullable_params = _typescript_nullable_param_names(source)
-        return _detect_block_safety_issues(
+        issues = _detect_block_safety_issues(
             source,
             blocks,
             "TypeScript",
@@ -608,6 +933,7 @@ def _detect_safety_issues(
             ),
             nullable_params=nullable_params,
         )
+        return _with_hardcoded_secret_issues(issues, original_source, normalized)
     if normalized == "go":
         if (
             _is_go_compiler_test(source)
@@ -629,9 +955,12 @@ def _detect_safety_issues(
         known_constants = _go_declared_constants(package_source)
         known_constants.update(_go_imported_package_constants(source, source_file))
         stripped_source = _strip_go_rust_literals_and_comments(source)
-        return _detect_go_safety_issues(stripped_source, known_constants=known_constants, original_source=original_source, source_file=source_file)
+        issues = _detect_go_safety_issues(stripped_source, known_constants=known_constants, original_source=original_source, source_file=source_file)
+        return _with_hardcoded_secret_issues(issues, original_source, normalized)
     if normalized == "python":
-        return _detect_python_safety_issues(source)
+        return _with_hardcoded_secret_issues(
+            _detect_python_safety_issues(source), original_source, normalized
+        )
     if normalized == "solidity":
         mapping_names = _solidity_mapping_names(source)
         solidity_constants = _solidity_declared_constants(
