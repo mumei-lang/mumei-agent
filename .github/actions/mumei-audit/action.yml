@@ -70,6 +70,14 @@ outputs:
   migration_execution_operational_error_count:
     description: Number of migration execution candidates in operational_error state.
     value: ${{ steps.audit.outputs.migration_execution_operational_error_count }}
+  evidence_verifier_ref:
+    description: >-
+      Full lowercase 40-hex commit SHA of the running action revision, suitable for fetching
+      the matching evidence verifier script, or empty when the action ref is not an immutable
+      commit SHA (for example a local path or tag reference). Operational assistance against
+      accidental action/verifier revision skew only; not a trust anchor for artifact producer
+      authenticity or malicious tamper.
+    value: ${{ steps.capture_ref.outputs.evidence_verifier_ref }}
 runs:
   using: composite
   steps:
@@ -88,6 +96,19 @@ runs:
         test -f "$AGENT_ROOT/pyproject.toml"
         test -f "$AGENT_ROOT/uv.lock"
         echo "AGENT_ROOT=$AGENT_ROOT" >> "$GITHUB_ENV"
+
+    - name: Capture action revision for evidence verifier pinning
+      id: capture_ref
+      shell: bash
+      env:
+        ACTION_REF: ${{ github.action_ref }}
+      run: |
+        if printf '%s' "$ACTION_REF" | grep -qE '^[0-9a-f]{40}$'; then
+          echo "evidence_verifier_ref=$ACTION_REF" >> "$GITHUB_OUTPUT"
+        else
+          echo "evidence_verifier_ref=" >> "$GITHUB_OUTPUT"
+          echo "::notice::mumei-audit action ref is not an immutable 40-hex commit SHA; evidence_verifier_ref output is empty."
+        fi
 
     - name: Set up Python
       uses: actions/setup-python@v7

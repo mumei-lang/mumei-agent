@@ -1937,3 +1937,69 @@ def test_verify_artifact_reverify_z3_byte_budget_fails_closed(tmp_path: Path) ->
         raise AssertionError("expected ArtifactVerificationError")
     except module.ArtifactVerificationError as exc:
         assert "byte cap" in str(exc)
+
+
+def _capture_ref_step() -> dict:
+    steps = _action()["runs"]["steps"]
+    return next(step for step in steps if step.get("id") == "capture_ref")
+
+
+def test_evidence_verifier_ref_output_wiring() -> None:
+    action = _action()
+    assert "evidence_verifier_ref" in action["outputs"]
+    assert (
+        action["outputs"]["evidence_verifier_ref"]["value"]
+        == "${{ steps.capture_ref.outputs.evidence_verifier_ref }}"
+    )
+    description = action["outputs"]["evidence_verifier_ref"]["description"]
+    assert "not a trust anchor" in description
+
+    step = _capture_ref_step()
+    assert step["env"]["ACTION_REF"] == "${{ github.action_ref }}"
+    # The action ref must flow through env indirection: the run script never
+    # expands it inline (GitHub documents run-time expansion as unreliable).
+    assert "github.action_ref" not in step["run"]
+    assert "$ACTION_REF" in step["run"]
+    assert "GITHUB_OUTPUT" in step["run"]
+
+
+def _run_capture_ref(action_ref: str) -> str:
+    import tempfile
+
+    step_run = _capture_ref_step()["run"]
+    with tempfile.TemporaryDirectory() as td:
+        output = Path(td) / "github-output"
+        probe = Path(td) / "probe.sh"
+        probe.write_text(step_run, encoding="utf-8")
+        env = dict(os.environ)
+        env["ACTION_REF"] = action_ref
+        env["GITHUB_OUTPUT"] = str(output)
+        completed = subprocess.run(
+            ["bash", "-e", "-o", "pipefail", str(probe)],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert completed.returncode == 0, completed.stderr
+        return output.read_text(encoding="utf-8")
+
+
+def test_capture_ref_accepts_full_lowercase_sha() -> None:
+    out = _run_capture_ref("f305c8b3c8823cb352222a60b07a0d7b3dfba74e")
+    assert "evidence_verifier_ref=f305c8b3c8823cb352222a60b07a0d7b3dfba74e" in out
+
+
+def test_capture_ref_rejects_non_immutable_refs_fail_closed() -> None:
+    for ref in (
+        "",
+        "v1",
+        "main",
+        "./.github/actions/mumei-audit",
+        "F305C8B3C8823CB352222A60B07A0D7B3DFBA74E",
+        "f305c8b3c8823cb352222a60b07a0d7b3dfba74",  # 39 hex
+        "f305c8b3c8823cb352222a60b07a0d7b3dfba74ee",  # 41 hex
+        "g305c8b3c8823cb352222a60b07a0d7b3dfba74e",  # non-hex char
+    ):
+        out = _run_capture_ref(ref)
+        lines = [line for line in out.splitlines() if line.startswith("evidence_verifier_ref=")]
+        assert lines == ["evidence_verifier_ref="]

@@ -35,6 +35,20 @@ jobs:
           migration-execution-output: .mumei-audit/migration_execution.json
           upload-sarif: true
 
+      - name: Assert evidence verifier ref invariant
+        shell: bash
+        env:
+          EVIDENCE_VERIFIER_REF: ${{ steps.audit.outputs.evidence_verifier_ref }}
+        run: |
+          # Invariant: the output is empty (non-immutable invocation, such as
+          # this local-path selftest) or a full lowercase 40-hex commit SHA.
+          # Anything else means the capture wiring regressed.
+          if [ -n "$EVIDENCE_VERIFIER_REF" ] && ! printf '%s' "$EVIDENCE_VERIFIER_REF" | grep -qE '^[0-9a-f]{40}$'; then
+            echo "evidence_verifier_ref is neither empty nor a full lowercase 40-hex SHA" >&2
+            exit 1
+          fi
+          echo "evidence_verifier_ref invariant holds (empty for local-path invocation: '$EVIDENCE_VERIFIER_REF')"
+
       - name: Publish measured action runtime
         run: |
           {
