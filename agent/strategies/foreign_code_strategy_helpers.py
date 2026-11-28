@@ -1096,45 +1096,22 @@ def _python_weak_random_only_expression(value: ast.AST | None, random_call: ast.
     )
 
 
-_PYTHON_TIMING_KEY_PARTS = frozenset({
-    "after",
-    "attempt",
-    "attempts",
+_PYTHON_NONCREDENTIAL_METADATA_KEY_PARTS = frozenset({
     "backoff",
-    "count",
     "delay",
-    "duration",
-    "expiration",
-    "expires",
     "expiry",
     "interval",
     "jitter",
-    "millis",
-    "millisecond",
-    "milliseconds",
-    "ms",
-    "period",
-    "sec",
-    "second",
-    "seconds",
-    "secs",
-    "sleep",
+    "retry",
     "timeout",
     "ttl",
-    "wait",
-    "window",
 })
 
 
 def _python_noncredential_timing_key(key: ast.AST) -> bool:
     if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
         return True
-    parts = _name_parts(key.value)
-    credential_indexes = [index for index, part in enumerate(parts) if part in _STRONG_CREDENTIAL_WORDS]
-    if not credential_indexes:
-        return True
-    trailing_parts = parts[max(credential_indexes) + 1:]
-    return any(part in _PYTHON_TIMING_KEY_PARTS for part in trailing_parts)
+    return bool(set(_name_parts(key.value)).intersection(_PYTHON_NONCREDENTIAL_METADATA_KEY_PARTS))
 
 
 def _python_dict_credential_context(value: ast.Dict, random_call: ast.AST) -> bool:
