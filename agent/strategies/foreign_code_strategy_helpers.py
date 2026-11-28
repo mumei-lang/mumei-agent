@@ -570,8 +570,6 @@ _TIMING_CREDENTIAL_METADATA_SUFFIXES = _CREDENTIAL_METADATA_SUFFIXES | {"type"}
 def _is_timing_credential_function_name(name: str) -> bool:
     """Credential-purpose evidence for timing comparison, excluding type metadata."""
     words = _credential_name_words(name)
-    if words and words[-1] in _TIMING_CREDENTIAL_METADATA_SUFFIXES:
-        return False
     single_word_hit = any(
         word in _CREDENTIAL_WORDS and (index + 1 >= len(words) or words[index + 1] not in _TIMING_CREDENTIAL_METADATA_SUFFIXES)
         for index, word in enumerate(words)

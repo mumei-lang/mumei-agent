@@ -9370,6 +9370,11 @@ func secretTokenTypeMatches(presented, stored string) bool {
         ("go", go, "tokenMatches"),
         ("go", go_with_comment, "tokenMatches"),
         ("go", go_independent_credential, "secretTokenTypeMatches"),
+        ("go", """package main
+func verifyTokenFromHeader(presented, stored string) bool {
+    return presented == stored
+}
+""", "verifyTokenFromHeader"),
         ("python", python, "token_matches"),
         ("python", python_independent_credential, "secret_token_type_matches"),
     ):
