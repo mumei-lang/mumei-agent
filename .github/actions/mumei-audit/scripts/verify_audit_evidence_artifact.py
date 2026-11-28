@@ -150,6 +150,7 @@ def verify_artifact(
     forbidden_literal: str = "",
     require_blocked_candidate: bool = False,
     require_generated_mm: bool = False,
+    allow_zero_candidates: bool = False,
 ) -> dict[str, int]:
     if root.is_symlink() or not root.is_dir():
         raise ArtifactVerificationError("evidence artifact root is missing or is not a regular directory")
@@ -212,6 +213,7 @@ def verify_artifact(
     summary = execution.get("summary")
     artifact_paths = execution.get("artifact_paths")
     boundary = execution.get("evidence_boundary")
+    selection = execution.get("selection")
     if not isinstance(candidates, list) or not isinstance(summary, dict) or not isinstance(artifact_paths, dict):
         raise ArtifactVerificationError("migration execution artifact is missing candidates, summary, or artifact paths")
     if not isinstance(boundary, list) or not any(isinstance(item, str) and HOST_BOUNDARY in item for item in boundary):
@@ -238,11 +240,27 @@ def verify_artifact(
         raise ArtifactVerificationError("migration execution candidate count is inconsistent")
     if type(status.get("ready_count")) is not int or status["ready_count"] != computed_counts["ready_for_human_review"]:
         raise ArtifactVerificationError("migration execution ready count is inconsistent")
-    if summary.get("review_required") is not True or status.get("review_required") is not True:
+    if candidates:
+        if summary.get("review_required") is not True or status.get("review_required") is not True:
+            raise ArtifactVerificationError("blocked/ready migration execution evidence must require human review")
+    elif allow_zero_candidates:
+        if summary.get("review_required") is not False or status.get("review_required") is not False:
+            raise ArtifactVerificationError("zero-candidate migration execution evidence unexpectedly requires review")
+        if not isinstance(selection, dict) or not isinstance(selection.get("missing_requested_functions"), list):
+            raise ArtifactVerificationError("zero-candidate migration execution artifact is missing selection evidence")
+        missing_requested = selection["missing_requested_functions"]
+        if not all(isinstance(item, str) for item in missing_requested):
+            raise ArtifactVerificationError("zero-candidate migration execution missing-selection evidence is malformed")
+        if missing_requested:
+            raise ArtifactVerificationError("zero-candidate migration execution evidence has missing requested functions")
+    elif summary.get("review_required") is not True or status.get("review_required") is not True:
         raise ArtifactVerificationError("blocked/ready migration execution evidence must require human review")
     if computed_counts["operational_error"] != 0:
         raise ArtifactVerificationError("successful action artifact contains candidate operational_error")
-    if computed_counts["blocked"] + computed_counts["ready_for_human_review"] != len(candidates) or not candidates:
+    if (
+        computed_counts["blocked"] + computed_counts["ready_for_human_review"] != len(candidates)
+        or (not candidates and not allow_zero_candidates)
+    ):
         raise ArtifactVerificationError("successful action artifact does not consist of blocked/ready review evidence")
     if require_blocked_candidate and computed_counts["blocked"] == 0:
         raise ArtifactVerificationError("fixed selftest artifact does not exercise the blocked review path")
@@ -314,6 +332,8 @@ def verify_artifact(
     print(f"generated companion files verified: {len(companion_files)}")
     print(f"generated companion claims verified: mm={validated_mm}, proof={validated_proof}, sarif={validated_sarif}")
     print(f"hidden generated companion files verified: {len(hidden_files)}")
+    if not candidates and allow_zero_candidates:
+        print("zero migration candidates explicitly allowed; no generated-.mm acceptance evidence present")
     print("verification mode: action artifact layout, metadata, counts, and companion hashes only")
     print("migration execution boundary: generated-.mm acceptance evidence only; not host semantic-equivalence proof")
     print("baseline boundary: generated CI policy artifact; not evidence")
@@ -330,8 +350,13 @@ def main() -> int:
     parser.add_argument("--require-hidden-companion", action="store_true")
     parser.add_argument("--require-blocked-candidate", action="store_true")
     parser.add_argument("--require-generated-mm", action="store_true")
+    parser.add_argument("--allow-zero-candidates", action="store_true")
     parser.add_argument("--forbidden-literal", default="")
     args = parser.parse_args()
+    if args.allow_zero_candidates and args.require_blocked_candidate:
+        parser.error("--allow-zero-candidates cannot be combined with --require-blocked-candidate")
+    if args.allow_zero_candidates and args.require_generated_mm:
+        parser.error("--allow-zero-candidates cannot be combined with --require-generated-mm")
     try:
         verify_artifact(
             Path(args.artifact_dir),
@@ -339,6 +364,7 @@ def main() -> int:
             forbidden_literal=args.forbidden_literal,
             require_blocked_candidate=args.require_blocked_candidate,
             require_generated_mm=args.require_generated_mm,
+            allow_zero_candidates=args.allow_zero_candidates,
         )
     except ArtifactVerificationError as exc:
         raise SystemExit(f"audit evidence artifact verification failed: {exc}") from exc
