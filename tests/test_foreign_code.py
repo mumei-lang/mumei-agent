@@ -9286,3 +9286,29 @@ def test_hardcoded_secret_negative_rhs_forms() -> None:
             "hardcoded credential" in issue.message
             for issue in _detect_safety_issues(source, language)
         ), (language, source)
+
+
+def test_hardcoded_secret_sentinel_not_in_verifier_result_output_or_written_spec(capsys) -> None:
+    secret = "unit-test-credential-sentinel"
+    written: list[str] = []
+
+    def fake_verify(path: str, **kwargs) -> dict:
+        written.append(Path(path).read_text(encoding="utf-8"))
+        return {"success": True, "report": {"status": "verified"}, "stdout": "{}", "stderr": ""}
+
+    mumei = MagicMock()
+    mumei.verify.side_effect = fake_verify
+    source = (
+        f'ADMIN_TOKEN = "{secret}"\n'
+        "def read() -> int:\n"
+        "    return 1\n"
+    )
+
+    result = ForeignCodeVerifier(mumei_client=mumei).verify(source, "python")
+
+    assert result["success"] is False
+    assert secret not in json.dumps(result, sort_keys=True)
+    assert all(secret not in text for text in written)
+    captured = capsys.readouterr()
+    assert secret not in captured.out
+    assert secret not in captured.err
