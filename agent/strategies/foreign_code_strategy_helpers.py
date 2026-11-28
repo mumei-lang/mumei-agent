@@ -5021,14 +5021,6 @@ def _go_map_names(source: str) -> set[str]:
 def _go_local_map_names(body: str, known_maps: set[str] | None = None) -> set[str]:
     """Return short variable map declarations local to a function body."""
     names = {match.group(1) for match in re.finditer(r"\b(\w+)\s*:=\s*map\[", body)}
-    names |= {
-        match.group(1)
-        for match in re.finditer(r"\b(\w+)\s*:=\s*make\(\s*map\[", body)
-    }
-    names |= {
-        match.group(1)
-        for match in re.finditer(r"\bvar\s+(\w+)\s+map\[", body)
-    }
     # Type assertion to a map type: ``m, _ := v.(map[K]V)``.
     for match in re.finditer(
         r"\b(\w+)\s*(?:,\s*\w+)?\s*:=\s*[^;{}]*\.\(\s*map\[", body
@@ -5760,12 +5752,6 @@ def _detect_go_safety_issues(
                 sequence_names=sequence_names,
                 contract_results=contract_results,
                 contract_outputs=contract_outputs,
-                map_names=go_map_names
-                | {
-                    name
-                    for name, raw_type in param_types.items()
-                    if re.sub(r"\s+", "", raw_type).startswith("map[")
-                },
             )
             for index, expression in enumerate(expressions):
                 facts = flow.facts_for_expression(expression) if flow is not None else None
