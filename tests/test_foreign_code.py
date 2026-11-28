@@ -9652,20 +9652,29 @@ def test_solidity_unchecked_call_negative_controls() -> None:
 interface IERC20Like {
     function transfer(address to, uint256 amount) external returns (bool);
 }
+interface IERC20NoBool {
+    function transfer(address to, uint256 amount) external returns (uint256);
+}
 contract Token { function transfer(address to, uint256 amount) external returns (bool) {} }
 contract Pool {
     IERC20Like public rewardToken;
+    IERC20NoBool public noBoolToken;
     Token public token;
+    UnknownToken public unknownToken;
     function payFee(uint256 fee) internal {
         (bool ok, ) = payable(feeRecipient).call{value: fee}("");
         require(ok);
         noValue.call("");
+        payable(feeRecipient).send(fee);
+        target.delegatecall("");
     }
     function getReward() public {
         require(rewardToken.transfer(msg.sender, amount));
         bool ok2 = rewardToken.transfer(msg.sender, amount);
         if (rewardToken.transfer(msg.sender, amount)) { revert(); }
         token.transfer(msg.sender, amount);
+        noBoolToken.transfer(msg.sender, amount);
+        unknownToken.transfer(msg.sender, amount);
     }
 }
 '''
