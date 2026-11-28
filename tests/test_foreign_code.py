@@ -11159,3 +11159,23 @@ contract VaultToken {
     assert len(hits) == 1
     for forbidden in ("allowance", "amount", "from", "msg.sender", "-=", "without a bounds invariant"):
         assert forbidden not in hits[0].message
+
+
+def test_constants_only_python_with_credential_omits_extraction_artifact() -> None:
+    """Constants-only sources must not emit the extraction artifact even when a
+    real safety issue keeps the verdict fail-closed."""
+    source = 'ADMIN_TOKEN = "exp-admin-7f3d92a1"\nDEFAULT_DB = "expenses.db"\n'
+    result = ForeignCodeVerifier(mumei_bin="mumei").verify(source, "python")
+    assert result["success"] is False
+    assert not any("No function signatures were extracted" in e for e in result["errors"])
+    assert any("hardcoded credential" in e for e in result["errors"])
+
+
+def test_extraction_failure_with_real_functions_stays_fail_closed(monkeypatch) -> None:
+    """When parsing finds function declarations but extraction still yields no
+    specs, the extraction error must remain."""
+    verifier = ForeignCodeVerifier(mumei_bin="mumei")
+    monkeypatch.setattr(verifier.extractor, "extract", lambda *a, **k: [])
+    result = verifier.verify("def mean(a, b):\n    return (a + b) / 2\n", "python")
+    assert result["success"] is False
+    assert "No function signatures were extracted." in result["errors"]

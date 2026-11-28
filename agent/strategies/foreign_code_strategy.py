@@ -683,6 +683,14 @@ class ForeignCodeVerifier:
                     ],
                     **_first_counterexample_payload([]),
                 }
+            # Extraction failure stays fail-closed when the source plausibly
+            # declares functions (True) or the check is inconclusive (None).
+            # When parsing succeeded but no function declarations exist, the
+            # message is an extractor artifact — real safety issues still gate
+            # `success` on their own.
+            extraction_errors = (
+                [] if has_functions is False else ["No function signatures were extracted."]
+            )
             return {
                 "success": False,
                 "language": normalized_language,
@@ -692,7 +700,7 @@ class ForeignCodeVerifier:
                 "mumei_source": "",
                 "verification": None,
                 "errors": [
-                    "No function signatures were extracted.",
+                    *extraction_errors,
                     *[issue.message for issue in safety_issues],
                 ],
                 "warnings": pattern_warnings,
