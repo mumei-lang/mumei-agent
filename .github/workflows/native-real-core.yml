@@ -26,6 +26,7 @@ on:
       - agent/strategies/**
       - agent/test_harvest.py
       - agent/verify_accept*.py
+      - agent/verify_distribution.py
       - agent/verify_attempt*.py
       - agent/verify_recheck*.py
       - agent/verify_schedule.py
@@ -42,6 +43,7 @@ on:
       - tests/test_observe_tests_cli.py
       - tests/test_proliferate_sibling_lemmas.py
       - tests/test_verify_accept.py
+      - tests/test_verify_distribution.py
       - tests/test_verify_attempt.py
       - tests/test_verify_recheck.py
       - tests/test_verify_schedule.py
@@ -141,6 +143,7 @@ jobs:
               tests/test_native_stdout_accept.py \
               tests/test_native_stdout_recheck.py \
               tests/test_verify_recheck.py \
+              tests/test_verify_distribution.py \
               tests/test_controls_gate.py \
               tests/test_core_evidence.py \
               tests/test_evidence_accept_list.py \

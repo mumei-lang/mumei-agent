@@ -368,12 +368,14 @@ def test_output_may_not_overwrite_declared_bundle_member(tmp_path, capsys):
 def test_output_may_not_overwrite_source_or_core(tmp_path, capsys, input_kind):
     core, bundle, source = _fixture(tmp_path)
     declared = source if input_kind == "source" else core
+    before = declared.read_bytes()
     code, out, err = _run(
         capsys, _argv(core, bundle, source, "--output", str(declared))
     )
     assert code == 1
     assert out == ""
     assert "--output may not overwrite" in err
+    assert declared.read_bytes() == before
 
 
 def test_oversize_declared_member_is_bounded_before_hashing(tmp_path, capsys):
