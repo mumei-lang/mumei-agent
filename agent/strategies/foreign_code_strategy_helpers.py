@@ -5945,6 +5945,194 @@ def _python_zero_exit_guards(func: ast.FunctionDef) -> list[tuple[int, str]]:
     return guards
 
 
+def _python_simple_name(node: ast.AST) -> str | None:
+    return node.id if isinstance(node, ast.Name) else None
+
+
+def _python_len_name(node: ast.AST) -> str | None:
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "len"
+        and len(node.args) == 1
+    ):
+        return _python_simple_name(node.args[0])
+    return None
+
+
+def _python_membership_pair(test: ast.AST, *, positive: bool) -> tuple[str, str] | None:
+    if not isinstance(test, ast.Compare) or len(test.ops) != 1 or len(test.comparators) != 1:
+        return None
+    op = test.ops[0]
+    if (positive and not isinstance(op, ast.In)) or (not positive and not isinstance(op, ast.NotIn)):
+        return None
+    index = _python_simple_name(test.left)
+    container = _python_simple_name(test.comparators[0])
+    if index and container:
+        return container, index
+    return None
+
+
+def _python_bounds_exit_pair(test: ast.AST) -> tuple[str, str] | None:
+    tests = test.values if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.Or) else [test]
+    lower: str | None = None
+    upper: tuple[str, str] | None = None
+    for item in tests:
+        if not isinstance(item, ast.Compare) or len(item.ops) != 1 or len(item.comparators) != 1:
+            continue
+        left, op, right = item.left, item.ops[0], item.comparators[0]
+        left_name = _python_simple_name(left)
+        right_name = _python_simple_name(right)
+        if (
+            left_name
+            and isinstance(right, ast.Constant)
+            and right.value == 0
+            and isinstance(op, ast.Lt)
+        ):
+            lower = left_name
+        if (
+            right_name
+            and isinstance(left, ast.Constant)
+            and left.value == 0
+            and isinstance(op, ast.Gt)
+        ):
+            lower = right_name
+        if left_name and isinstance(op, ast.GtE):
+            container = _python_len_name(right)
+            if container:
+                upper = (container, left_name)
+        if right_name and isinstance(op, ast.LtE):
+            container = _python_len_name(left)
+            if container:
+                upper = (container, right_name)
+    if upper is not None and lower == upper[1]:
+        return upper
+    return None
+
+
+def _python_assignment_target_names(target: ast.AST) -> Iterable[str]:
+    if isinstance(target, ast.Name):
+        yield target.id
+    elif isinstance(target, (ast.Tuple, ast.List)):
+        for element in target.elts:
+            yield from _python_assignment_target_names(element)
+    elif isinstance(target, ast.Starred):
+        yield from _python_assignment_target_names(target.value)
+
+
+def _python_index_assignment_lines(func: ast.FunctionDef) -> list[tuple[int, str]]:
+    assigned: list[tuple[int, str]] = []
+    for node in ast.walk(func):
+        targets: list[ast.AST] = []
+        if isinstance(node, ast.Assign):
+            targets = list(node.targets)
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.For, ast.AsyncFor)):
+            targets = [node.target]
+        elif isinstance(node, ast.NamedExpr):
+            targets = [node.target]
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            targets = [item.optional_vars for item in node.items if item.optional_vars is not None]
+        elif isinstance(node, ast.Delete):
+            targets = list(node.targets)
+        for target in targets:
+            assigned.extend((node.lineno, name) for name in _python_assignment_target_names(target))
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            assigned.append((node.lineno, node.name))
+        elif isinstance(node, ast.ExceptHandler) and isinstance(node.name, str):
+            assigned.append((node.lineno, node.name))
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            assigned.extend((node.lineno, name) for name in node.names)
+        elif isinstance(node, ast.Import):
+            assigned.extend((node.lineno, alias.asname or alias.name.split(".", 1)[0]) for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            assigned.extend((node.lineno, alias.asname or alias.name) for alias in node.names)
+    return assigned
+
+
+_PYTHON_CONTAINER_MUTATION_METHODS = frozenset(
+    {"append", "clear", "extend", "insert", "pop", "popitem", "remove", "setdefault", "update"}
+)
+
+
+def _python_container_mutation_lines(func: ast.FunctionDef) -> list[tuple[int, str]]:
+    mutations: list[tuple[int, str]] = []
+    for node in ast.walk(func):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in _PYTHON_CONTAINER_MUTATION_METHODS
+            and isinstance(node.func.value, ast.Name)
+        ):
+            mutations.append((node.lineno, node.func.value.id))
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if (
+                    isinstance(target, ast.Subscript)
+                    and isinstance(target.slice, ast.Slice)
+                    and isinstance(target.value, ast.Name)
+                ):
+                    mutations.append((node.lineno, target.value.id))
+        elif isinstance(node, ast.Delete):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    mutations.append((node.lineno, target.id))
+                elif isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name):
+                    mutations.append((node.lineno, target.value.id))
+    return mutations
+
+
+def _python_own_returns(func: ast.FunctionDef) -> list[ast.Return]:
+    returns: list[ast.Return] = []
+
+    def visit(node: ast.AST) -> None:
+        if isinstance(node, ast.Return):
+            returns.append(node)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            return
+        for child in ast.iter_child_nodes(node):
+            visit(child)
+
+    for stmt in func.body:
+        visit(stmt)
+    return returns
+
+
+def _python_negative_index_exit_guards(func: ast.FunctionDef) -> list[tuple[int, tuple[str, str]]]:
+    """Top-level exit guards that definitely dominate later returns."""
+    guards: list[tuple[int, tuple[str, str]]] = []
+    for stmt in func.body:
+        if not (
+            isinstance(stmt, ast.If)
+            and not stmt.orelse
+            and stmt.body
+            and isinstance(stmt.body[-1], (ast.Return, ast.Raise))
+        ):
+            continue
+        end = stmt.end_lineno or stmt.lineno
+        pair = _python_membership_pair(stmt.test, positive=False) or _python_bounds_exit_pair(stmt.test)
+        if pair is not None:
+            guards.append((end, pair))
+    return guards
+
+
+def _python_positive_membership_pairs(func: ast.FunctionDef, ret: ast.Return) -> set[tuple[int, tuple[str, str]]]:
+    """Membership tests that directly control the return through an ancestor ``if``."""
+    parents = {
+        child: node
+        for node in ast.walk(func)
+        for child in ast.iter_child_nodes(node)
+    }
+    pairs: set[tuple[int, tuple[str, str]]] = set()
+    child: ast.AST = ret
+    node = parents.get(ret)
+    while node is not None:
+        if isinstance(node, ast.If) and child in node.body:
+            pair = _python_membership_pair(node.test, positive=True)
+            if pair is not None:
+                pairs.add((node.lineno, pair))
+        child, node = node, parents.get(node)
+    return pairs
+
 def _detect_python_safety_issues(source: str) -> list[ForeignSafetyIssue]:
     try:
         tree = ast.parse(source)
@@ -5962,6 +6150,10 @@ def _detect_python_safety_issues(source: str) -> list[ForeignSafetyIssue]:
             for target in (stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target])
             if isinstance(target, ast.Name)
         ]
+        index_guards = _python_negative_index_exit_guards(node)
+        index_assigned = _python_index_assignment_lines(node)
+        container_mutations = _python_container_mutation_lines(node)
+        own_return_ids = {id(ret) for ret in _python_own_returns(node)}
         for ret in [ret for ret in ast.walk(node) if isinstance(ret, ast.Return) and ret.value is not None]:
             try:
                 text = ast.unparse(ret.value)
@@ -5974,9 +6166,42 @@ def _detect_python_safety_issues(source: str) -> list[ForeignSafetyIssue]:
                 if line < ret.lineno
                 and not any(n == name and line < at <= ret.lineno for at, n in assigned)
             }
+            guarded_index_pairs = {
+                pair
+                for line, pair in index_guards
+                if line < ret.lineno
+                and not any(
+                    n in pair and line <= at <= ret.lineno
+                    for at, n in index_assigned
+                )
+                and not any(
+                    n == pair[0] and line <= at <= ret.lineno
+                    for at, n in container_mutations
+                )
+            }
+            guarded_index_pairs.update(
+                pair
+                for line, pair in _python_positive_membership_pairs(node, ret)
+                if not any(
+                    n in pair and line <= at <= ret.lineno
+                    for at, n in index_assigned
+                )
+                and not any(
+                    n == pair[0] and line <= at <= ret.lineno
+                    for at, n in container_mutations
+                )
+            )
+            if id(ret) not in own_return_ids or any(
+                isinstance(part, (ast.Lambda, ast.GeneratorExp)) for part in ast.walk(ret.value)
+            ):
+                guarded_index_pairs = set()
             issues.extend(
                 _issues_for_expression(
-                    node.name, text, "Python", guaranteed_nonzero=nonzero
+                    node.name,
+                    text,
+                    "Python",
+                    guaranteed_nonzero=nonzero,
+                    guarded_index_pairs=guarded_index_pairs,
                 )
             )
         body_text = ast.get_source_segment(source, node)
@@ -10818,6 +11043,7 @@ def _issues_for_expression(
     guaranteed_nonzero: set[str] | None = None,
     parallel_slicing: set[tuple[str, str]] | None = None,
     guarded_indices: set[str] | None = None,
+    guarded_index_pairs: set[tuple[str, str]] | None = None,
     float_variables: set[str] | None = None,
     unsigned_locals: set[str] | None = None,
     known_strings: set[str] | None = None,
@@ -10911,6 +11137,8 @@ def _issues_for_expression(
             index = match.group("index")
             if container == "map":
                 # ``map[K]V{...}`` is a Go map type/composite literal, not an index.
+                continue
+            if label == "Python" and guarded_index_pairs and (container, index) in guarded_index_pairs:
                 continue
             if mapping_names and container in mapping_names:
                 # Solidity / Rust mappings have no bounds; missing keys return zero.
