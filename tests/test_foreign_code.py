@@ -9307,6 +9307,9 @@ def test_hardcoded_secret_sentinel_not_in_verifier_result_output_or_written_spec
     result = ForeignCodeVerifier(mumei_client=mumei).verify(source, "python")
 
     assert result["success"] is False
+    assert any("hardcoded credential" in error for error in result["errors"])
+    mumei.verify.assert_called_once()
+    assert written
     assert secret not in json.dumps(result, sort_keys=True)
     assert all(secret not in text for text in written)
     captured = capsys.readouterr()

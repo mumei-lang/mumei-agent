@@ -756,18 +756,28 @@ def _python_enclosing_function(tree: ast.AST, line: int) -> str | None:
     return innermost.name
 
 
-def _python_single_string_literal(source: str, value_node: ast.AST) -> bool:
-    segment = ast.get_source_segment(source, value_node)
-    if segment is None:
-        return False
+def _python_string_tokens(source: str) -> list[tuple[tuple[int, int], tuple[int, int]]] | None:
     try:
-        count = sum(
-            1
-            for token in tokenize.generate_tokens(io.StringIO(segment).readline)
+        return [
+            (token.start, token.end)
+            for token in tokenize.generate_tokens(io.StringIO(source).readline)
             if token.type == tokenize.STRING
-        )
+        ]
     except (IndentationError, SyntaxError, tokenize.TokenError):
-        return False
+        return None
+
+
+def _python_single_string_literal(
+    value_node: ast.AST,
+    string_tokens: list[tuple[tuple[int, int], tuple[int, int]]],
+) -> bool:
+    start = (value_node.lineno, value_node.col_offset)
+    end = (value_node.end_lineno or value_node.lineno, value_node.end_col_offset or value_node.col_offset)
+    count = sum(
+        1
+        for token_start, token_end in string_tokens
+        if start <= token_start and token_end <= end
+    )
     return count == 1
 
 
@@ -775,6 +785,9 @@ def _python_hardcoded_secret_issues(source: str) -> list[ForeignSafetyIssue]:
     try:
         tree = ast.parse(source)
     except SyntaxError:
+        return []
+    string_tokens = _python_string_tokens(source)
+    if string_tokens is None:
         return []
     issues: list[ForeignSafetyIssue] = []
     for node in ast.walk(tree):
@@ -788,7 +801,7 @@ def _python_hardcoded_secret_issues(source: str) -> list[ForeignSafetyIssue]:
             targets = [node.target]
         if not isinstance(value_node, ast.Constant) or not isinstance(value_node.value, str):
             continue
-        if not _python_single_string_literal(source, value_node):
+        if not _python_single_string_literal(value_node, string_tokens):
             continue
         if _is_placeholder_secret_value(value_node.value):
             continue
