@@ -2065,7 +2065,14 @@ def _rust_collection_len_division_issues(
         if pattern.type == "shorthand_field_identifier":
             return {text(pattern)}
         if pattern.type == "field_pattern":
-            return pattern_binding_identifiers(pattern.child_by_field_name("pattern"))
+            nested = pattern.child_by_field_name("pattern")
+            if nested is not None:
+                return pattern_binding_identifiers(nested)
+            return {
+                text(child)
+                for child in pattern.named_children
+                if child.type == "shorthand_field_identifier"
+            }
         names: set[str] = set()
         for child in pattern.named_children:
             if child.type in {"type_identifier", "field_identifier"}:
@@ -2214,8 +2221,16 @@ def _rust_collection_len_division_issues(
             current = current.parent
         return loops
 
+    def inside_closure(node) -> bool:
+        current = node.parent
+        while current is not None:
+            if current.type == "closure_expression":
+                return True
+            current = current.parent
+        return False
+
     def suppressed(node, receiver: str) -> bool:
-        if receiver not in immutable_receivers:
+        if receiver not in immutable_receivers or inside_closure(node):
             return False
         for guard_receiver_name, _guard_start, guard_end in guards:
             if guard_receiver_name != receiver or guard_end > node.start_byte:
@@ -5757,7 +5772,7 @@ def _detect_go_safety_issues(
             existing_division_messages = {
                 issue.message for issue in issues[fn_issues_start:] if "can divide by" in issue.message
             }
-            for expression in _go_assignment_division_expressions(body):
+            for expression, shadowed_at_use in _go_assignment_division_expressions(body):
                 facts = flow.facts_for_assignment_expression(expression) if flow is not None else None
                 expr_constants = dict(known_constants or {})
                 if flow is not None:
@@ -5794,13 +5809,39 @@ def _detect_go_safety_issues(
                 def simple_length_receiver(contract: str) -> str | None:
                     value = re.sub(r"\s*!=\s*0\s*$", "", contract).strip()
                     while True:
-                        value = _strip_outer_parentheses(value)
-                        cast = re.fullmatch(r"(\w+)\s*\((.*)\)", value)
-                        if cast is None or not _NUMERIC_CAST_NAME.fullmatch(cast.group(1)):
+                        stripped = _strip_outer_parentheses(value)
+                        cast = re.fullmatch(r"(\w+)\s*\((.*)\)", stripped)
+                        if cast is not None and _NUMERIC_CAST_NAME.fullmatch(cast.group(1)):
+                            stripped = cast.group(2).strip()
+                        if stripped == value:
+                            value = stripped
                             break
-                        value = cast.group(2).strip()
+                        value = stripped
                     length = re.fullmatch(r"len\(\s*([A-Za-z_]\w*)\s*\)", value)
                     return length.group(1) if length is not None else None
+
+                def fixed_array_length(name: str) -> int | None:
+                    array_type = re.fullmatch(
+                        r"\*?\[(0*[1-9]\d*)\][^\s]+",
+                        re.sub(r"\s+", "", param_types.get(name, "")),
+                    )
+                    return int(array_type.group(1)) if array_type is not None else None
+
+                def provably_nonzero_fixed_length_expression(contract: str) -> bool:
+                    value = re.sub(r"\s*!=\s*0\s*$", "", contract).strip()
+                    while True:
+                        stripped = _strip_outer_parentheses(value)
+                        if stripped == value:
+                            break
+                        value = stripped
+                    subtraction = re.fullmatch(
+                        r"len\(\s*([A-Za-z_]\w*)\s*\)\s*-\s*(\d+)",
+                        value,
+                    )
+                    if subtraction is None:
+                        return False
+                    length = fixed_array_length(subtraction.group(1))
+                    return length is not None and int(subtraction.group(2)) < length
 
                 for issue in expr_issues:
                     if "can divide by" not in issue.message or issue.message in existing_division_messages:
@@ -5809,13 +5850,13 @@ def _detect_go_safety_issues(
                     if "len(" not in contract:
                         continue
                     length_receiver = simple_length_receiver(contract)
-                    if length_receiver and re.fullmatch(
-                        r"\*?\[(?:0*[1-9]\d*)\][^\s]+",
-                        re.sub(r"\s+", "", param_types.get(length_receiver, "")),
-                    ) and not re.search(
-                        rf"\b(?:var\s+)?{re.escape(length_receiver)}\s*:=|\bvar\s+{re.escape(length_receiver)}\b",
-                        body,
+                    if (
+                        length_receiver is not None
+                        and fixed_array_length(length_receiver) is not None
+                        and length_receiver not in shadowed_at_use
                     ):
+                        continue
+                    if provably_nonzero_fixed_length_expression(contract):
                         continue
                     existing_division_messages.add(issue.message)
                     issues.append(issue)
@@ -6743,8 +6784,8 @@ def _is_float_expression(
     return False
 
 
-def _go_assignment_division_expressions(body: str) -> tuple[str, ...]:
-    """Return RHS expressions of Go assignments whose divisor contains ``len``.
+def _go_assignment_division_expressions(body: str) -> tuple[tuple[str, frozenset[str]], ...]:
+    """Return Go assignment RHSs with shadowed parameter names visible at each use.
 
     Safety scanning historically followed return expressions only. Division by
     a collection length in an intermediate assignment is the same runtime
@@ -6755,9 +6796,13 @@ def _go_assignment_division_expressions(body: str) -> tuple[str, ...]:
     tree = tree_sitter_extract.extract_statements(body, "go")
     if tree is None:
         return ()
-    expressions: list[str] = []
+    expressions: list[tuple[str, frozenset[str]]] = []
 
-    def visit(statements: tuple[tree_sitter_extract.Statement, ...]) -> None:
+    def visit(
+        statements: tuple[tree_sitter_extract.Statement, ...],
+        inherited_shadowed: frozenset[str],
+    ) -> None:
+        shadowed = set(inherited_shadowed)
         for statement in statements:
             if statement.kind in {"define", "assign", "var"}:
                 for value in statement.values:
@@ -6765,11 +6810,29 @@ def _go_assignment_division_expressions(body: str) -> tuple[str, ...]:
                         continue
                     findings = tree_sitter_extract.analyze_expression(value, "go")
                     if findings is not None and any("len(" in divisor for divisor in findings.divisors):
-                        expressions.append(value)
-            for nested in (statement.init, statement.body, statement.orelse, statement.post):
-                visit(nested)
+                        expressions.append((value, frozenset(shadowed)))
+            nested_shadowed = frozenset(shadowed)
+            if statement.kind in {"if", "for"}:
+                init_defined = {
+                    target
+                    for init in statement.init
+                    if init.kind in {"define", "var"}
+                    for target in init.targets
+                    if re.fullmatch(r"[A-Za-z_]\w*", target)
+                }
+                nested_shadowed = frozenset(shadowed | init_defined)
+            visit(statement.init, frozenset(shadowed))
+            visit(statement.body, nested_shadowed)
+            visit(statement.orelse, nested_shadowed)
+            visit(statement.post, nested_shadowed)
+            if statement.kind in {"define", "var"}:
+                shadowed.update(
+                    target
+                    for target in statement.targets
+                    if re.fullmatch(r"[A-Za-z_]\w*", target)
+                )
 
-    visit(tree.statements)
+    visit(tree.statements, frozenset())
     return tuple(dict.fromkeys(expressions))
 
 
