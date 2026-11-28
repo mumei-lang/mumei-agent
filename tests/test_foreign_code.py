@@ -8418,6 +8418,8 @@ func fixedshadow(total int, xs [4]int, cond bool) int {
     return 0
 }
 """
+    assert not [i for i in _detect_safety_issues(mixed, "go") if "divide" in i.message]
+    assert not [i for i in _detect_safety_issues(fixed_array, "go") if "divide" in i.message]
     fixed_minus_one = """package main
 func fixedminusone(total int, xs [4]int) int {
     q := total / (len(xs) - 1)
