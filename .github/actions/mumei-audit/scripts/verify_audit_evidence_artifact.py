@@ -8,12 +8,19 @@ import json
 import os
 import posixpath
 import re
+import subprocess
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 SCHEMA = "mumei.migration-execution/v1"
 STATES = ("ready_for_human_review", "blocked", "operational_error")
 HOST_BOUNDARY = "not proof that host-language code implements the same behavior"
+CERT_BOUNDARY = (
+    "proof certificate verification is certificate/source correspondence only; "
+    "not a Z3 re-proof, not host semantic-equivalence proof, and no contract-vacuity assessment"
+)
+VERIFY_CERT_TIMEOUT_SECONDS = 60
+DIAGNOSTIC_CAP = 300
 
 
 class ArtifactVerificationError(Exception):
@@ -151,6 +158,7 @@ def verify_artifact(
     require_blocked_candidate: bool = False,
     require_generated_mm: bool = False,
     allow_zero_candidates: bool = False,
+    mumei_bin: str = "",
 ) -> dict[str, int]:
     if root.is_symlink() or not root.is_dir():
         raise ArtifactVerificationError("evidence artifact root is missing or is not a regular directory")
@@ -291,6 +299,8 @@ def verify_artifact(
     validated_mm = 0
     validated_proof = 0
     validated_sarif = 0
+    certificate_pairs: list[tuple[str, Path, Path]] = []
+    incomplete_pair_candidates: list[str] = []
     for candidate in candidates:
         generated_mm = candidate.get("generated_mm")
         verification = candidate.get("verification")
@@ -302,8 +312,7 @@ def verify_artifact(
         )
         if candidate["execution_state"] == "ready_for_human_review" and not generated_mm_valid:
             raise ArtifactVerificationError("ready_for_human_review candidate is missing a validated generated .mm artifact")
-        if generated_mm_valid:
-            validated_mm += 1
+        proof_valid = False
         if isinstance(verification, dict):
             proof = verification.get("proof_certificate")
             sarif_claim = verification.get("sarif")
@@ -313,7 +322,7 @@ def verify_artifact(
                 original_root_text=generated_value,
                 generated_root=generated_root,
             ):
-                validated_proof += 1
+                proof_valid = True
             if isinstance(sarif_claim, dict) and _validate_written_claim(
                 sarif_claim,
                 label="generated SARIF",
@@ -321,8 +330,55 @@ def verify_artifact(
                 generated_root=generated_root,
             ):
                 validated_sarif += 1
+        if generated_mm_valid:
+            validated_mm += 1
+        if proof_valid:
+            validated_proof += 1
+        if generated_mm_valid and proof_valid:
+            mm_target = _map_claimed_path(generated_mm["path"], generated_value, generated_root)
+            cert_target = _map_claimed_path(verification["proof_certificate"]["path"], generated_value, generated_root)
+            label = candidate.get("function_name") or "<unknown>"
+            certificate_pairs.append((str(label), cert_target, mm_target))
+        else:
+            incomplete_pair_candidates.append(str(candidate.get("function_name") or "<unknown>"))
     if require_generated_mm and validated_mm == 0:
         raise ArtifactVerificationError("no generated .mm companion claim was validated")
+
+    verified_certificates = 0
+    if mumei_bin:
+        binary = Path(mumei_bin)
+        if binary.is_symlink() or not binary.is_file() or not os.access(binary, os.X_OK):
+            raise ArtifactVerificationError("--mumei-bin is not an executable regular file")
+        binary = binary.resolve()
+        if binary.is_relative_to(root):
+            raise ArtifactVerificationError("--mumei-bin must not resolve inside the untrusted downloaded artifact")
+        if incomplete_pair_candidates:
+            raise ArtifactVerificationError(
+                "strict certificate verification requires a validated pair for every candidate; missing for: "
+                + ", ".join(sorted(incomplete_pair_candidates))
+            )
+        if not certificate_pairs:
+            raise ArtifactVerificationError("strict certificate verification found no validated generated-.mm/proof-certificate pair")
+        for label, cert_path, mm_path in certificate_pairs:
+            try:
+                completed = subprocess.run(
+                    [str(binary), "verify-cert", str(cert_path), str(mm_path), "--strict"],
+                    capture_output=True,
+                    text=True,
+                    timeout=VERIFY_CERT_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise ArtifactVerificationError(f"mumei verify-cert timed out for candidate {label}") from exc
+            except OSError as exc:
+                raise ArtifactVerificationError(f"mumei verify-cert could not execute for candidate {label}") from exc
+            if completed.returncode != 0:
+                diagnostic = (completed.stderr or completed.stdout or "").replace("\n", " ")[:DIAGNOSTIC_CAP]
+                raise ArtifactVerificationError(
+                    f"mumei verify-cert --strict failed for candidate {label}: {diagnostic or 'no diagnostic output'}"
+                )
+            verified_certificates += 1
+        print(f"proof certificate correspondence verified with mumei verify-cert --strict: {verified_certificates} candidate pair(s)")
+        print(f"certificate verification boundary: {CERT_BOUNDARY}")
 
     print("audit report artifact verified: audit.json and audit.sarif")
     print("ci policy artifact verified: generated-baseline.json")
@@ -334,13 +390,17 @@ def verify_artifact(
     print(f"hidden generated companion files verified: {len(hidden_files)}")
     if not candidates and allow_zero_candidates:
         print("zero migration candidates explicitly allowed; no generated-.mm acceptance evidence present")
-    print("verification mode: action artifact layout, metadata, counts, and companion hashes only")
+    if mumei_bin:
+        print("verification mode: layout, metadata, counts, companion hashes, and certificate correspondence")
+    else:
+        print("verification mode: action artifact layout, metadata, counts, and companion hashes only")
     print("migration execution boundary: generated-.mm acceptance evidence only; not host semantic-equivalence proof")
     print("baseline boundary: generated CI policy artifact; not evidence")
     return {
         "candidate_count": len(candidates),
         "companion_file_count": len(companion_files),
         "hidden_companion_count": len(hidden_files),
+        "verified_certificate_count": verified_certificates,
     }
 
 
@@ -352,6 +412,7 @@ def main() -> int:
     parser.add_argument("--require-generated-mm", action="store_true")
     parser.add_argument("--allow-zero-candidates", action="store_true")
     parser.add_argument("--forbidden-literal", default="")
+    parser.add_argument("--mumei-bin", default="", help="optional trusted mumei binary enabling strict proof-certificate correspondence verification")
     args = parser.parse_args()
     if args.allow_zero_candidates and args.require_blocked_candidate:
         parser.error("--allow-zero-candidates cannot be combined with --require-blocked-candidate")
@@ -365,6 +426,7 @@ def main() -> int:
             require_blocked_candidate=args.require_blocked_candidate,
             require_generated_mm=args.require_generated_mm,
             allow_zero_candidates=args.allow_zero_candidates,
+            mumei_bin=args.mumei_bin,
         )
     except ArtifactVerificationError as exc:
         raise SystemExit(f"audit evidence artifact verification failed: {exc}") from exc

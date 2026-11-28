@@ -1541,3 +1541,128 @@ def test_annotate_audit_caps_annotations_with_remainder_notice(tmp_path: Path) -
 def test_annotate_audit_empty_findings_emits_nothing(tmp_path: Path) -> None:
     assert _run_annotate(tmp_path, {"findings": []}).strip() == ""
     assert _run_annotate(tmp_path, {}).strip() == ""
+
+
+def _write_fake_mumei_bin(tmp_path: Path, script_body: str) -> Path:
+    binary = tmp_path / "fake-mumei"
+    binary.write_text("#!/usr/bin/env python3\n" + script_body, encoding="utf-8")
+    binary.chmod(0o755)
+    return binary
+
+
+def test_verify_artifact_strict_certificate_pass_records_invocation(tmp_path: Path) -> None:
+    root = tmp_path / "evidence"
+    _write_downloaded_action_artifact(root)
+    record = tmp_path / "invocations.jsonl"
+    binary = tmp_path / "fake-mumei"
+    binary.write_text(
+        "#!/usr/bin/env python3\nimport json, sys\n"
+        + f"record = open({str(record)!r}, 'a')\n"
+        + "record.write(json.dumps(sys.argv[1:]) + '\\n')\nrecord.close()\nsys.exit(0)\n",
+        encoding="utf-8",
+    )
+    binary.chmod(0o755)
+    result = _run_downloaded_artifact_verifier(root, "--mumei-bin", str(binary))
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "proof certificate correspondence verified" in result.stdout
+    assert "not a Z3 re-proof" in result.stdout
+    invocations = [json.loads(line) for line in record.read_text(encoding="utf-8").splitlines()]
+    assert len(invocations) == 1
+    argv = invocations[0]
+    assert argv[0] == "verify-cert"
+    assert argv[3] == "--strict"
+    cert_arg, mm_arg = argv[1], argv[2]
+    assert cert_arg.endswith("divide.proof.json")
+    assert mm_arg.endswith("divide.mm")
+    assert str(root) in cert_arg and str(root) in mm_arg
+    assert "/original/workspace" not in cert_arg
+    assert "/original/workspace" not in mm_arg
+
+
+def test_verify_artifact_strict_certificate_nonzero_exit_fails(tmp_path: Path) -> None:
+    root = tmp_path / "evidence"
+    _write_downloaded_action_artifact(root)
+    binary = _write_fake_mumei_bin(tmp_path, "import sys\nsys.stderr.write('certificate changed')\nsys.exit(1)\n")
+    result = _run_downloaded_artifact_verifier(root, "--mumei-bin", str(binary))
+    assert result.returncode != 0
+    assert "verify-cert --strict failed" in result.stderr + result.stdout
+    assert "certificate changed" in result.stderr + result.stdout
+
+
+def test_verify_artifact_strict_missing_pair_fails_closed(tmp_path: Path) -> None:
+    root = tmp_path / "evidence"
+    _write_downloaded_action_artifact(root)
+    execution_path = root / "migration-execution" / "migration_execution.json"
+    execution = json.loads(execution_path.read_text(encoding="utf-8"))
+    execution["candidates"][0]["verification"]["proof_certificate"] = {"written": False}
+    execution_path.write_text(json.dumps(execution), encoding="utf-8")
+    binary = _write_fake_mumei_bin(tmp_path, "import sys\nsys.exit(0)\n")
+    result = _run_downloaded_artifact_verifier(root, "--mumei-bin", str(binary))
+    assert result.returncode != 0
+    assert "validated pair for every candidate" in result.stderr + result.stdout
+
+
+def test_verify_artifact_strict_without_pairs_fails_closed(tmp_path: Path) -> None:
+    root = tmp_path / "evidence"
+    _write_zero_candidate_downloaded_action_artifact(root)
+    binary = _write_fake_mumei_bin(tmp_path, "import sys\nsys.exit(0)\n")
+    result = _run_downloaded_artifact_verifier(root, "--mumei-bin", str(binary), "--allow-zero-candidates")
+    assert result.returncode != 0
+    assert "no validated generated-.mm/proof-certificate pair" in result.stderr + result.stdout
+
+
+def test_verify_artifact_strict_rejects_binary_inside_artifact(tmp_path: Path) -> None:
+    root = tmp_path / "evidence"
+    _write_downloaded_action_artifact(root)
+    inside = root / "migration-execution" / "generated-artifacts" / "evil-mumei"
+    inside.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    inside.chmod(0o755)
+    copied = sum(1 for path in (root / "migration-execution" / "generated-artifacts").rglob("*") if path.is_file())
+    status_path = root / "migration-execution" / "status.json"
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    status["generated_artifacts_copied"] = copied
+    status_path.write_text(json.dumps(status), encoding="utf-8")
+    result = _run_downloaded_artifact_verifier(root, "--mumei-bin", str(inside))
+    assert result.returncode != 0
+    assert "untrusted downloaded artifact" in result.stderr + result.stdout
+
+
+def test_verify_artifact_strict_rejects_non_executable_binary(tmp_path: Path) -> None:
+    root = tmp_path / "evidence"
+    _write_downloaded_action_artifact(root)
+    binary = tmp_path / "not-executable"
+    binary.write_text("x", encoding="utf-8")
+    result = _run_downloaded_artifact_verifier(root, "--mumei-bin", str(binary))
+    assert result.returncode != 0
+    assert "not an executable regular file" in result.stderr + result.stdout
+
+
+def test_verify_artifact_shallow_mode_runs_no_subprocess(tmp_path: Path) -> None:
+    root = tmp_path / "evidence"
+    _write_downloaded_action_artifact(root)
+    result = _run_downloaded_artifact_verifier(root)
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "layout, metadata, counts, and companion hashes only" in result.stdout
+    assert "proof certificate correspondence verified" not in result.stdout
+
+
+def test_verify_artifact_strict_timeout_fails(tmp_path: Path) -> None:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("verify_artifact_mod", VERIFY_ARTIFACT_SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.VERIFY_CERT_TIMEOUT_SECONDS = 0.5
+
+    root = tmp_path / "evidence"
+    _write_downloaded_action_artifact(root)
+    binary = _write_fake_mumei_bin(tmp_path, "import time\ntime.sleep(5)\n")
+    try:
+        module.verify_artifact(
+            root,
+            require_hidden_companion=False,
+            mumei_bin=str(binary),
+        )
+        raise AssertionError("expected ArtifactVerificationError")
+    except module.ArtifactVerificationError as exc:
+        assert "timed out" in str(exc)
