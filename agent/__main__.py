@@ -77,6 +77,7 @@ _SUBCOMMANDS = {
     "verify-attempt",
     "verify-recheck",
     "verify-accept",
+    "verify-distribution",
     "verify-schedule",
     "verify-plan",
     "native-attempt",
@@ -1069,6 +1070,24 @@ def main() -> None:
         verify_accept_build_parser(parser)
         args = parser.parse_args(argv[1:])
         raise SystemExit(verify_accept_main(args))
+    elif command == "verify-distribution":
+        import argparse
+        from agent.verify_distribution import (
+            build_distribution_parser,
+            main_distribution,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent verify-distribution",
+            description=(
+                "Verify a native-first distribution through existing "
+                "declared consumer routes and emit a role-separated "
+                "JSON report; thin orchestration, not a deep acceptance fold."
+            ),
+        )
+        build_distribution_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(main_distribution(args))
     elif command == "verify-schedule":
         import argparse
         from agent.verify_schedule import (
