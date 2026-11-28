@@ -1105,22 +1105,17 @@ _PYTHON_NONCREDENTIAL_KEY_PARTS_ANYWHERE = frozenset({
     "timeout",
     "ttl",
 })
-_PYTHON_NONCREDENTIAL_TRAILING_KEY_PARTS = frozenset({
+_PYTHON_NONCREDENTIAL_TRAILING_KEY_PARTS = _PYTHON_NONCREDENTIAL_KEY_PARTS_ANYWHERE | frozenset({
     "after",
     "attempt",
     "attempts",
-    "backoff",
     "cooldown",
     "count",
     "deadline",
-    "delay",
     "duration",
     "expiration",
     "expire",
     "expires",
-    "expiry",
-    "interval",
-    "jitter",
     "lifetime",
     "millis",
     "millisecond",
@@ -1134,15 +1129,13 @@ _PYTHON_NONCREDENTIAL_TRAILING_KEY_PARTS = frozenset({
     "secs",
     "sleep",
     "time",
-    "timeout",
     "timestamp",
-    "ttl",
     "validity",
     "wait",
 })
 
 
-def _python_noncredential_timing_key(key: ast.AST) -> bool:
+def _python_noncredential_metadata_key(key: ast.AST) -> bool:
     if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
         return True
     parts = _name_parts(key.value)
@@ -1161,7 +1154,7 @@ def _python_dict_credential_context(value: ast.Dict, random_call: ast.AST) -> bo
             isinstance(key, ast.Constant)
             and isinstance(key.value, str)
             and _has_strong_credential_name(key.value)
-            and not _python_noncredential_timing_key(key)
+            and not _python_noncredential_metadata_key(key)
         ):
             continue
         if _python_weak_random_only_expression(item, random_call):
