@@ -1885,9 +1885,21 @@ def _python_split_index_issues(source: str) -> list[ForeignSafetyIssue]:
                             and _python_split_call(stmt.value)
                         ):
                             split_vars.add(target)
-                for nested in nested_statement_lists(stmt):
-                    if analyze_block(nested, split_vars.copy(), guarded_limits.copy()):
+                if isinstance(stmt, ast.If):
+                    # An exiting bad-direction length guard dominates the else/elif
+                    # arm, but not uses inside the exiting body itself.
+                    if analyze_block(stmt.body, split_vars.copy(), guarded_limits.copy()):
                         return True
+                    else_limits = guarded_limits.copy()
+                    if guard_update is not None:
+                        name, limit = guard_update
+                        else_limits[name] = max(limit, else_limits.get(name, -1))
+                    if analyze_block(stmt.orelse, split_vars.copy(), else_limits):
+                        return True
+                else:
+                    for nested in nested_statement_lists(stmt):
+                        if analyze_block(nested, split_vars.copy(), guarded_limits.copy()):
+                            return True
                 if guard_update is not None:
                     name, limit = guard_update
                     guarded_limits[name] = max(limit, guarded_limits.get(name, -1))
@@ -1909,30 +1921,35 @@ def _python_split_index_issues(source: str) -> list[ForeignSafetyIssue]:
     return issues
 
 
-def _brace_depth_at(text: str, position: int) -> int:
-    """Approximate control-flow block depth, ignoring composite literals.
+def _is_control_brace(text: str, index: int) -> bool:
+    line_start = text.rfind("\n", 0, index) + 1
+    prefix = text[line_start:index].strip()
+    previous = index - 1
+    while previous >= 0 and text[previous].isspace():
+        previous -= 1
+    return bool(
+        re.match(
+            r"(?:\}\s*)?(?:if|for|else|switch|select|while|loop|match)\b",
+            prefix,
+        )
+        or (previous >= 0 and text[previous] == ")")
+    )
 
-    This is deliberately shallow syntax rather than language-level scope resolution:
-    braces whose line starts with a control keyword, or which directly follow a
-    parenthesized header/function literal, delimit blocks. Braces in composite
-    literals do not.
+
+def _control_depths(text: str) -> list[int]:
+    """Return shallow control-flow depth before each position in ``text``.
+
+    Braces in composite literals do not affect depth; control keywords and
+    parenthesized headers/function literals do. This is structured syntax only,
+    not CFG or dataflow analysis.
     """
+    depths = [0] * (len(text) + 1)
     depth = 0
     brace_kinds: list[bool] = []
-    for index, char in enumerate(text[:position]):
+    for index, char in enumerate(text):
+        depths[index] = depth
         if char == "{":
-            line_start = text.rfind("\n", 0, index) + 1
-            prefix = text[line_start:index].strip()
-            previous = index - 1
-            while previous >= 0 and text[previous].isspace():
-                previous -= 1
-            is_control = bool(
-                re.match(
-                    r"(?:\}\s*)?(?:if|for|else|switch|select|while|loop|match)\b",
-                    prefix,
-                )
-                or (previous >= 0 and text[previous] == ")")
-            )
+            is_control = _is_control_brace(text, index)
             brace_kinds.append(is_control)
             if is_control:
                 depth += 1
@@ -1940,7 +1957,8 @@ def _brace_depth_at(text: str, position: int) -> int:
             is_control = brace_kinds.pop() if brace_kinds else True
             if is_control:
                 depth = max(0, depth - 1)
-    return depth
+    depths[len(text)] = depth
+    return depths
 
 
 def _top_level_block_text(text: str) -> str:
@@ -1978,10 +1996,8 @@ def _text_len_exit_guard_limit(
     pattern = re.compile(
         rf"\bif\s+{len_expr}\s*(<=|<)\s*(\d+)\s*\{{"
     )
-    use_depth = _brace_depth_at(body, use_pos)
+    depths = _control_depths(body)
     for match in pattern.finditer(body, 0, use_pos):
-        if _brace_depth_at(body, match.start()) != use_depth:
-            continue
         bound = int(match.group(2)) - (1 if match.group(1) == "<" else 0)
         if bound < index:
             continue
@@ -1989,7 +2005,38 @@ def _text_len_exit_guard_limit(
         if opening < 0:
             continue
         block = _balanced_brace_body(body, opening)
-        if _block_definitely_exits(block, language):
+        if not _block_definitely_exits(block, language):
+            continue
+        close_pos = opening + 1 + len(block)
+        after_guard = close_pos + 1
+        if use_pos < after_guard:
+            continue
+        guard_depth = depths[match.start()]
+        if min(depths[after_guard : use_pos + 1]) < guard_depth:
+            continue
+        # A case/default label or match arm boundary at or above the guard's
+        # depth is a sibling branch, not a dominated continuation.
+        if _sibling_branch_boundary(body, after_guard, use_pos, guard_depth, depths, language):
+            continue
+        return True
+    return False
+
+
+def _sibling_branch_boundary(
+    body: str,
+    start: int,
+    end: int,
+    guard_depth: int,
+    depths: list[int],
+    language: str,
+) -> bool:
+    segment = body[start:end]
+    if language == "go":
+        boundary = re.compile(r"(?m)^[ \t]*(?:case\b|default[ \t]*:)")
+    else:
+        boundary = re.compile(r"=>")
+    for hit in boundary.finditer(segment):
+        if depths[start + hit.start()] <= guard_depth:
             return True
     return False
 

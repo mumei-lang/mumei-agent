@@ -10776,6 +10776,8 @@ def test_python_split_index_negative_controls() -> None:
         "non_split_receiver": 'def f(label):\n    parts = label.partition(":")\n    return parts[1]\n',
         "reassigned": 'def f(label):\n    parts = label.split(":")\n    parts = label.split(":")\n    return parts[1]\n',
         "exiting_len_guard": 'def f(label):\n    parts = label.split(":")\n    if len(parts) <= 1:\n        raise ValueError("short")\n    return parts[1]\n',
+        "else_len_guard": 'def f(label):\n    parts = label.split(":")\n    if len(parts) <= 1:\n        raise ValueError("short")\n    else:\n        return parts[1]\n',
+        "elif_len_guard": 'def f(label, cond):\n    parts = label.split(":")\n    if len(parts) <= 1:\n        raise ValueError("short")\n    elif cond:\n        return parts[1]\n    return ""\n',
         "outer_guard_nested_use": 'def f(label, cond):\n    parts = label.split(":")\n    if len(parts) <= 1:\n        raise ValueError("short")\n    if cond:\n        return parts[1]\n    return ""\n',
         "continue_len_guard": 'def f(lines):\n    for line in lines:\n        parts = line.split(":")\n        if len(parts) <= 1:\n            continue\n        return parts[1]\n    return ""\n',
     }
@@ -10787,7 +10789,8 @@ def test_python_split_index_negative_controls() -> None:
     positive_len_guard = 'def f(label):\n    parts = label.split(":")\n    if len(parts) > 1:\n        return parts[1]\n    return ""\n'
     insufficient_guard = 'def f(label):\n    parts = label.split(":")\n    if len(parts) <= 1:\n        raise ValueError("short")\n    return parts[2]\n'
     guard_body_use = 'def f(label):\n    parts = label.split(":")\n    if len(parts) <= 1:\n        return parts[1]\n    return ""\n'
-    for source in (non_exiting_guard, other_variable_guard, positive_len_guard, insufficient_guard, guard_body_use):
+    nondominant_guard = 'def f(label, cond):\n    parts = label.split(":")\n    if cond:\n        if len(parts) <= 1:\n            raise ValueError("short")\n    return parts[1]\n'
+    for source in (non_exiting_guard, other_variable_guard, positive_len_guard, insufficient_guard, guard_body_use, nondominant_guard):
         assert [i for i in _detect_safety_issues(source, "python") if "positive literal index" in i.message]
 
 
@@ -10842,7 +10845,10 @@ func f() string {
         "non_split_receiver": '    parts := strings.SplitAfter(path, "/")\n    return parts[1]\n',
         "reassigned": '    parts := strings.Split(path, "/")\n    parts = strings.Split(path, "/")\n    return parts[1]\n',
         "exiting_len_guard": '    parts := strings.Split(path, "/")\n    if len(parts) < 4 {\n        return ""\n    }\n    return parts[3]\n',
+        "nested_after_len_guard": '    parts := strings.Split(path, "/")\n    if len(parts) < 2 {\n        return ""\n    }\n    if ok {\n        return parts[1]\n    }\n    return ""\n',
+        "own_else_len_guard": '    parts := strings.Split(path, "/")\n    if len(parts) < 2 {\n        return ""\n    } else {\n        return parts[1]\n    }\n    return ""\n',
         "continue_len_guard": '    for _, line := range lines {\n        parts := strings.Fields(line)\n        if len(parts) < 5 {\n            continue\n        }\n        return parts[4]\n    }\n    return ""\n',
+        "same_case_len_guard": '    parts := strings.Split(path, "/")\n    switch kind {\n    case 1:\n        if len(parts) < 2 {\n            return ""\n        }\n        return parts[1]\n    }\n    return ""\n',
         "continue_len_guard_composite_literal": '    for _, line := range lines {\n        fields := strings.Fields(line)\n        if len(fields) < 5 {\n            continue\n        }\n        entries = append(entries, record{path: fields[2], latency: fields[4]})\n    }\n    return ""\n',
     }
     for name, body in bodies.items():
@@ -10850,7 +10856,13 @@ func f() string {
 
     non_exiting_guard = '    parts := strings.Split(path, "/")\n    if len(parts) < 4 {\n        println("short")\n    }\n    return parts[3]\n'
     other_variable_guard = '    parts := strings.Split(path, "/")\n    if len(other) < 4 {\n        return ""\n    }\n    return parts[3]\n'
-    for body in (non_exiting_guard, other_variable_guard):
+    insufficient_guard = '    parts := strings.Split(path, "/")\n    if len(parts) < 2 {\n        return ""\n    }\n    return parts[3]\n'
+    guard_body_use = '    parts := strings.Split(path, "/")\n    if len(parts) < 2 {\n        return parts[1]\n    }\n    return ""\n'
+    nondominant_guard = '    parts := strings.Split(path, "/")\n    if cond {\n        if len(parts) < 2 {\n            return ""\n        }\n    }\n    return parts[1]\n'
+    outer_sibling_else = '    parts := strings.Split(path, "/")\n    if cond {\n        if len(parts) < 2 {\n            return ""\n        }\n    } else {\n        return parts[1]\n    }\n    return ""\n'
+    switch_sibling = '    parts := strings.Split(path, "/")\n    switch kind {\n    case 1:\n        if len(parts) < 2 {\n            return ""\n        }\n    case 2:\n        return parts[1]\n    }\n    return ""\n'
+    select_sibling = '    parts := strings.Split(path, "/")\n    select {\n    case <-ready:\n        if len(parts) < 2 {\n            return ""\n        }\n    default:\n        return parts[1]\n    }\n    return ""\n'
+    for body in (non_exiting_guard, other_variable_guard, insufficient_guard, guard_body_use, nondominant_guard, outer_sibling_else, switch_sibling, select_sibling):
         assert [i for i in _detect_safety_issues(template % body, "go") if "positive literal index" in i.message]
 
 
@@ -10899,13 +10911,21 @@ def test_rust_split_index_negative_controls() -> None:
         "custom_annotation": '    let parts: Parts = line.split(\',\').collect();\n    parts[1].to_string()\n',
         "reassigned": '    let parts: Vec<&str> = line.split(\',\').collect();\n    let parts = line.split(\',\').collect::<Vec<_>>();\n    parts[1].to_string()\n',
         "exiting_len_guard": '    let parts: Vec<&str> = line.split(\',\').collect();\n    if parts.len() < 2 {\n        return String::new();\n    }\n    parts[1].to_string()\n',
+        "nested_after_len_guard": '    let parts: Vec<&str> = line.split(\',\').collect();\n    if parts.len() < 2 {\n        return String::new();\n    }\n    if ok {\n        return parts[1].to_string();\n    }\n    String::new()\n',
+        "own_else_len_guard": '    let parts: Vec<&str> = line.split(\',\').collect();\n    if parts.len() < 2 {\n        return String::new();\n    } else {\n        return parts[1].to_string();\n    }\n    String::new()\n',
+        "same_arm_len_guard": '    let parts: Vec<&str> = line.split(\',\').collect();\n    match kind {\n        1 => {\n            if parts.len() < 2 {\n                return String::new();\n            }\n            return parts[1].to_string();\n        }\n        _ => String::new(),\n    }\n',
     }
     for name, body in bodies.items():
         assert not [i for i in _detect_safety_issues(template % body, "rust") if "positive literal index" in i.message], name
 
     non_exiting_guard = '    let parts: Vec<&str> = line.split(\',\').collect();\n    if parts.len() < 2 {\n        println!("short");\n    }\n    parts[1].to_string()\n'
     other_variable_guard = '    let parts: Vec<&str> = line.split(\',\').collect();\n    if other.len() < 2 {\n        return String::new();\n    }\n    parts[1].to_string()\n'
-    for body in (non_exiting_guard, other_variable_guard):
+    insufficient_guard = '    let parts: Vec<&str> = line.split(\',\').collect();\n    if parts.len() < 2 {\n        return String::new();\n    }\n    parts[2].to_string()\n'
+    guard_body_use = '    let parts: Vec<&str> = line.split(\',\').collect();\n    if parts.len() < 2 {\n        return parts[1].to_string();\n    }\n    String::new()\n'
+    nondominant_guard = '    let parts: Vec<&str> = line.split(\',\').collect();\n    if cond {\n        if parts.len() < 2 {\n            return String::new();\n        }\n    }\n    parts[1].to_string()\n'
+    outer_sibling_else = '    let parts: Vec<&str> = line.split(\',\').collect();\n    if cond {\n        if parts.len() < 2 {\n            return String::new();\n        }\n    } else {\n        return parts[1].to_string();\n    }\n    String::new()\n'
+    match_sibling = '    let parts: Vec<&str> = line.split(\',\').collect();\n    match kind {\n        1 => {\n            if parts.len() < 2 {\n                return String::new();\n            }\n        }\n        2 => parts[1].to_string(),\n        _ => String::new(),\n    }\n'
+    for body in (non_exiting_guard, other_variable_guard, insufficient_guard, guard_body_use, nondominant_guard, outer_sibling_else, match_sibling):
         assert [i for i in _detect_safety_issues(template % body, "rust") if "positive literal index" in i.message]
 
     continue_guard = '    for line in lines {\n        let parts: Vec<&str> = line.split(\',\').collect();\n        if parts.len() < 2 {\n            continue;\n        }\n        return parts[1].to_string();\n    }\n    String::new()\n'
@@ -10957,3 +10977,27 @@ def test_split_index_medium_witnesses_reach_verifier_errors_without_index_detail
         assert _violation_confidence(hits[0]) == "medium"
         for value in forbidden:
             assert value not in hits[0]
+
+
+def test_split_index_guard_close_matches_balanced_brace_position() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import (
+        _balanced_brace_body,
+        _control_depths,
+    )
+
+    guard = 'if len(parts) < 2 {\n    if ok {\n        return ""\n    }\n    return ""\n}\n'
+    opening = guard.index("{")
+    block = _balanced_brace_body(guard, opening)
+    close_pos = opening + 1 + len(block)
+    assert guard[close_pos] == "}"
+    assert close_pos == len(guard) - 2
+    depths = _control_depths(guard)
+    assert depths[close_pos + 1] == depths[guard.index("if")]
+
+
+def test_split_index_guard_body_with_nested_braces_still_dominates_later_use() -> None:
+    go_nested_guard = '    parts := strings.Split(path, "/")\n    if len(parts) < 2 {\n        if ok {\n            return ""\n        }\n        return ""\n    }\n    return parts[1]\n'
+    rust_nested_guard = '    let parts: Vec<&str> = line.split(\',\').collect();\n    if parts.len() < 2 {\n        if ok {\n            return String::new();\n        }\n        return String::new();\n    }\n    parts[1].to_string()\n'
+    for language, body in (("go", go_nested_guard), ("rust", rust_nested_guard)):
+        hits = [i for i in _detect_safety_issues(body, language) if "positive literal index" in i.message]
+        assert not hits, (language, hits)
