@@ -9471,9 +9471,10 @@ def token_matches(provided, expected):
         ), (language, source)
 
 
-def test_timing_credential_comparison_never_outputs_secret_values() -> None:
+def test_timing_credential_comparison_never_outputs_secret_values(capsys, tmp_path, monkeypatch) -> None:
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
 
+    monkeypatch.chdir(tmp_path)
     secret = "unit-test-timing-secret-sentinel"
     source = f'''package main
 const probe = "{secret}"
@@ -9485,6 +9486,10 @@ func tokenMatches(presented, stored string) bool {{
         issue for issue in _detect_safety_issues(source, "go")
         if "timing" in issue.message.lower() and "credential" in issue.message.lower()
     ]
+    captured = capsys.readouterr()
     assert len(issues) == 1
     assert secret not in issues[0].message
     assert not issues[0].counterexample
+    assert secret not in captured.out
+    assert secret not in captured.err
+    assert not list(tmp_path.iterdir())
