@@ -1363,3 +1363,70 @@ def test_summarize_audit_tolerates_missing_or_nonstring_source_file(tmp_path: Pa
     )
     assert "no source file finding" in text
     assert "none source file finding" in text
+
+
+def test_summarize_audit_strips_runner_paths_in_raw_bullets(tmp_path: Path) -> None:
+    workspace = "/home/runner/work/mumei-demo/mumei-demo"
+    row = _finding("new", "encoding-gap: fee_cents")
+    row["source_file"] = f"{workspace}/src/payment_ledger.py"
+    text = _write_summary_run(
+        tmp_path,
+        {
+            "verification_status": "refuted",
+            "findings": [row],
+            "verification_violations": [f"violation in {workspace}/src/payment_ledger.py line 12"],
+            "cross_validation_gaps": [f"spec precondition assumed in {workspace}/src/payment_ledger.py"],
+            "next_steps": [
+                {
+                    "action": f"migration execution evidence を確認: report: {workspace}/.mumei-audit/migration_execution.json",
+                    "migration_execution_report": f"{workspace}/.mumei-audit/migration_execution.json",
+                }
+            ],
+        },
+        extra_env={"GITHUB_WORKSPACE": workspace},
+    )
+    assert "/home/runner/work" not in text
+    assert workspace not in text
+    assert ".mumei-audit/migration_execution.json" in text
+    assert "src/payment_ledger.py" in text
+
+
+def test_summarize_audit_strips_exact_workspace_path_alone(tmp_path: Path) -> None:
+    workspace = "/home/runner/work/mumei-demo/mumei-demo"
+    text = _write_summary_run(
+        tmp_path,
+        {
+            "verification_status": "refuted",
+            "next_steps": [f"audit ran in {workspace} and wrote output"],
+        },
+        extra_env={"GITHUB_WORKSPACE": workspace},
+    )
+    assert workspace not in text
+    assert "audit ran in . and wrote output" in text
+
+
+def test_summarize_audit_does_not_strip_sibling_workspace_prefix(tmp_path: Path) -> None:
+    workspace = "/home/runner/work/mumei-demo/mumei-demo"
+    sibling = "/home/runner/work/mumei-demo/mumei-demo-other/src/lib.py"
+    text = _write_summary_run(
+        tmp_path,
+        {
+            "verification_status": "refuted",
+            "next_steps": [f"sibling reference {sibling}"],
+        },
+        extra_env={"GITHUB_WORKSPACE": workspace},
+    )
+    assert sibling in text
+
+
+def test_summarize_audit_display_unchanged_without_workspace_env(tmp_path: Path) -> None:
+    env = {"GITHUB_WORKSPACE": ""}
+    text = _write_summary_run(
+        tmp_path,
+        {
+            "verification_status": "refuted",
+            "next_steps": ["report at /some/absolute/path/report.json"],
+        },
+        extra_env=env,
+    )
+    assert "/some/absolute/path/report.json" in text
