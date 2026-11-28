@@ -9438,6 +9438,11 @@ func tokenHeaderMatches(presented, stored string) bool {
 }
 """),
         ("go", """package main
+func matchTokenHTTPHeaderName(presented, stored string) bool {
+    return presented == stored
+}
+"""),
+        ("go", """package main
 func tokenMatches(presented, stored string) bool {
     return len(presented) == len(stored)
 }
