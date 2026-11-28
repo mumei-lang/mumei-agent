@@ -9952,18 +9952,46 @@ def _simple_arith_operands(
 
 
 def _unchecked_addition_guarded(text: str, left: str, right: str, pos: int) -> bool:
-    """Shallow idiomatic overflow guard: a ``require`` dominating textually
-    before the addition that references both operands together with a
-    ``type(uintN).max`` bound (``require(a <= type(uint256).max - b)``)."""
-    for match in re.finditer(r"\brequire\s*\((?P<cond>[^;]*)\)", text[:pos]):
-        cond = match.group("cond")
-        if ".max" not in cond:
-            continue
-        if re.search(rf"\b{re.escape(left)}\b", cond) and re.search(
-            rf"\b{re.escape(right)}\b", cond
-        ):
+    """Whether ``left + right`` at ``pos`` is guarded by a direct overflow
+    comparison — exactly ``x <= type(uintN).max - y`` (or its mirror
+    ``type(uintN).max - y >= x``) in either operand order — whose dominance
+    is confirmed by the same ``_guard_mechanism`` machinery as subtraction.
+    A ``require`` in a non-dominating sibling branch does not suppress."""
+    maxexpr = r"type\s*\(\s*uint\d*\s*\)\s*\.\s*max"
+    for x, y in ((left, right), (right, left)):
+        xb, yb = re.escape(x), re.escape(y)
+        shapes = (
+            rf"\b{xb}\s*<=?\s*{maxexpr}\s*-\s*{yb}\b"
+            rf"|{maxexpr}\s*-\s*{yb}\s*>?=?\s*{xb}\b"
+        )
+        for match in re.finditer(shapes, text):
+            if match.end() > pos:
+                break
+            mechanism = _guard_mechanism(text, match, pos)
+            if mechanism not in _GUARD_HOLDS_MECHANISMS:
+                continue
+            if mechanism == "asserted" and not _require_dominates_use(
+                text, match.start(), pos
+            ):
+                continue
             return True
     return False
+
+
+def _require_dominates_use(text: str, comparison_pos: int, use_pos: int) -> bool:
+    """Shallow control-depth dominance for the ``require``/``assert`` enclosing
+    a comparison: ``if (ok) { require(...) }`` does not dominate a later use
+    because the depth drops below the require's depth when the branch closes,
+    while a top-level require does. Same approximation direction as the
+    split-index guard dominance work — suppression must be justified."""
+    require_pos = -1
+    for keyword in re.finditer(r"\b(?:require|assert)\s*\(", text[:comparison_pos]):
+        require_pos = keyword.start()
+    if require_pos < 0:
+        return False
+    depths = _control_depths(text)
+    require_depth = depths[require_pos]
+    return min(depths[require_pos : use_pos + 1]) >= require_depth
 
 
 def _solidity_unchecked_arithmetic_issues(

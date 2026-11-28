@@ -11128,6 +11128,19 @@ contract Vault {
     for name, source in (("fixed_transfer_from", fixed_transfer_from), ("increment_only", increment_only), ("no_arithmetic", no_arithmetic), ("checked_arithmetic", checked_arithmetic), ("require_guarded_subtraction", require_guarded_subtraction), ("require_guarded_compound", require_guarded_compound), ("require_guarded_addition", require_guarded_addition)):
         assert not [i for i in _detect_safety_issues(source, "solidity") if "unchecked arithmetic bounds invariant" in i.message], name
 
+    nondominant_require_addition = '''
+pragma solidity ^0.8.0;
+contract Vault {
+    function add(uint256 a, uint256 b, bool ok) external pure returns (uint256) {
+        if (ok) {
+            require(a <= type(uint256).max - b);
+        }
+        unchecked { return a + b; }
+    }
+}
+'''
+    assert [i for i in _detect_safety_issues(nondominant_require_addition, "solidity") if "unchecked arithmetic bounds invariant" in i.message]
+
 
 def test_solidity_unchecked_arithmetic_message_redacts_operands() -> None:
     source = '''
