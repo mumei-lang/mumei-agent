@@ -10846,6 +10846,7 @@ func f() string {
         "reassigned": '    parts := strings.Split(path, "/")\n    parts = strings.Split(path, "/")\n    return parts[1]\n',
         "exiting_len_guard": '    parts := strings.Split(path, "/")\n    if len(parts) < 4 {\n        return ""\n    }\n    return parts[3]\n',
         "nested_after_len_guard": '    parts := strings.Split(path, "/")\n    if len(parts) < 2 {\n        return ""\n    }\n    if ok {\n        return parts[1]\n    }\n    return ""\n',
+        "own_else_len_guard": '    parts := strings.Split(path, "/")\n    if len(parts) < 2 {\n        return ""\n    } else {\n        return parts[1]\n    }\n    return ""\n',
         "continue_len_guard": '    for _, line := range lines {\n        parts := strings.Fields(line)\n        if len(parts) < 5 {\n            continue\n        }\n        return parts[4]\n    }\n    return ""\n',
         "continue_len_guard_composite_literal": '    for _, line := range lines {\n        fields := strings.Fields(line)\n        if len(fields) < 5 {\n            continue\n        }\n        entries = append(entries, record{path: fields[2], latency: fields[4]})\n    }\n    return ""\n',
     }
@@ -10857,7 +10858,8 @@ func f() string {
     insufficient_guard = '    parts := strings.Split(path, "/")\n    if len(parts) < 2 {\n        return ""\n    }\n    return parts[3]\n'
     guard_body_use = '    parts := strings.Split(path, "/")\n    if len(parts) < 2 {\n        return parts[1]\n    }\n    return ""\n'
     nondominant_guard = '    parts := strings.Split(path, "/")\n    if cond {\n        if len(parts) < 2 {\n            return ""\n        }\n    }\n    return parts[1]\n'
-    for body in (non_exiting_guard, other_variable_guard, insufficient_guard, guard_body_use, nondominant_guard):
+    outer_sibling_else = '    parts := strings.Split(path, "/")\n    if cond {\n        if len(parts) < 2 {\n            return ""\n        }\n    } else {\n        return parts[1]\n    }\n    return ""\n'
+    for body in (non_exiting_guard, other_variable_guard, insufficient_guard, guard_body_use, nondominant_guard, outer_sibling_else):
         assert [i for i in _detect_safety_issues(template % body, "go") if "positive literal index" in i.message]
 
 
@@ -10907,6 +10909,7 @@ def test_rust_split_index_negative_controls() -> None:
         "reassigned": '    let parts: Vec<&str> = line.split(\',\').collect();\n    let parts = line.split(\',\').collect::<Vec<_>>();\n    parts[1].to_string()\n',
         "exiting_len_guard": '    let parts: Vec<&str> = line.split(\',\').collect();\n    if parts.len() < 2 {\n        return String::new();\n    }\n    parts[1].to_string()\n',
         "nested_after_len_guard": '    let parts: Vec<&str> = line.split(\',\').collect();\n    if parts.len() < 2 {\n        return String::new();\n    }\n    if ok {\n        return parts[1].to_string();\n    }\n    String::new()\n',
+        "own_else_len_guard": '    let parts: Vec<&str> = line.split(\',\').collect();\n    if parts.len() < 2 {\n        return String::new();\n    } else {\n        return parts[1].to_string();\n    }\n    String::new()\n',
     }
     for name, body in bodies.items():
         assert not [i for i in _detect_safety_issues(template % body, "rust") if "positive literal index" in i.message], name
@@ -10916,7 +10919,8 @@ def test_rust_split_index_negative_controls() -> None:
     insufficient_guard = '    let parts: Vec<&str> = line.split(\',\').collect();\n    if parts.len() < 2 {\n        return String::new();\n    }\n    parts[2].to_string()\n'
     guard_body_use = '    let parts: Vec<&str> = line.split(\',\').collect();\n    if parts.len() < 2 {\n        return parts[1].to_string();\n    }\n    String::new()\n'
     nondominant_guard = '    let parts: Vec<&str> = line.split(\',\').collect();\n    if cond {\n        if parts.len() < 2 {\n            return String::new();\n        }\n    }\n    parts[1].to_string()\n'
-    for body in (non_exiting_guard, other_variable_guard, insufficient_guard, guard_body_use, nondominant_guard):
+    outer_sibling_else = '    let parts: Vec<&str> = line.split(\',\').collect();\n    if cond {\n        if parts.len() < 2 {\n            return String::new();\n        }\n    } else {\n        return parts[1].to_string();\n    }\n    String::new()\n'
+    for body in (non_exiting_guard, other_variable_guard, insufficient_guard, guard_body_use, nondominant_guard, outer_sibling_else):
         assert [i for i in _detect_safety_issues(template % body, "rust") if "positive literal index" in i.message]
 
     continue_guard = '    for line in lines {\n        let parts: Vec<&str> = line.split(\',\').collect();\n        if parts.len() < 2 {\n            continue;\n        }\n        return parts[1].to_string();\n    }\n    String::new()\n'

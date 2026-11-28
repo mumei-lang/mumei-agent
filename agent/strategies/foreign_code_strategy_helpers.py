@@ -1936,45 +1936,29 @@ def _is_control_brace(text: str, index: int) -> bool:
     )
 
 
-def _control_block_spans(text: str) -> list[tuple[int, int]]:
-    """Return content spans of control-flow blocks, ignoring composite literals.
+def _control_depths(text: str) -> list[int]:
+    """Return shallow control-flow depth before each position in ``text``.
 
-    This is deliberately shallow syntax rather than language-level scope
-    resolution: braces whose line starts with a control keyword, or which
-    directly follow a parenthesized header/function literal, delimit blocks.
+    Braces in composite literals do not affect depth; control keywords and
+    parenthesized headers/function literals do. This is structured syntax only,
+    not CFG or dataflow analysis.
     """
-    stack: list[tuple[int, bool]] = []
-    spans: list[tuple[int, int]] = []
+    depths = [0] * (len(text) + 1)
+    depth = 0
+    brace_kinds: list[bool] = []
     for index, char in enumerate(text):
+        depths[index] = depth
         if char == "{":
-            stack.append((index, _is_control_brace(text, index)))
-        elif char == "}" and stack:
-            opening, is_control = stack.pop()
+            is_control = _is_control_brace(text, index)
+            brace_kinds.append(is_control)
             if is_control:
-                spans.append((opening + 1, index))
-    return spans
-
-
-def _immediate_control_span(spans: list[tuple[int, int]], position: int) -> tuple[int, int] | None:
-    containing = [
-        span
-        for span in spans
-        if span[0] <= position < span[1]
-    ]
-    if not containing:
-        return None
-    return min(containing, key=lambda span: span[1] - span[0])
-
-
-def _control_span_ancestor(
-    ancestor: tuple[int, int] | None,
-    descendant: tuple[int, int] | None,
-) -> bool:
-    if ancestor is None:
-        return True
-    if descendant is None:
-        return False
-    return ancestor[0] <= descendant[0] and descendant[1] <= ancestor[1]
+                depth += 1
+        elif char == "}":
+            is_control = brace_kinds.pop() if brace_kinds else True
+            if is_control:
+                depth = max(0, depth - 1)
+    depths[len(text)] = depth
+    return depths
 
 
 def _top_level_block_text(text: str) -> str:
@@ -2012,8 +1996,7 @@ def _text_len_exit_guard_limit(
     pattern = re.compile(
         rf"\bif\s+{len_expr}\s*(<=|<)\s*(\d+)\s*\{{"
     )
-    control_spans = _control_block_spans(body)
-    use_span = _immediate_control_span(control_spans, use_pos)
+    depths = _control_depths(body)
     for match in pattern.finditer(body, 0, use_pos):
         bound = int(match.group(2)) - (1 if match.group(1) == "<" else 0)
         if bound < index:
@@ -2024,11 +2007,12 @@ def _text_len_exit_guard_limit(
         block = _balanced_brace_body(body, opening)
         if not _block_definitely_exits(block, language):
             continue
-        guard_body_span = (opening + 1, opening + 1 + len(block))
-        if guard_body_span[0] <= use_pos < guard_body_span[1]:
+        close_pos = opening + 1 + len(block)
+        after_guard = close_pos + 1
+        if use_pos < after_guard:
             continue
-        guard_span = _immediate_control_span(control_spans, match.start())
-        if _control_span_ancestor(guard_span, use_span):
+        guard_depth = depths[match.start()]
+        if min(depths[after_guard : use_pos + 1]) >= guard_depth:
             return True
     return False
 
