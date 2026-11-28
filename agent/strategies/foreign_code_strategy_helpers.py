@@ -1100,10 +1100,13 @@ def _python_noncredential_timing_key(key: ast.AST) -> bool:
     if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
         return True
     parts = set(_name_parts(key.value))
-    return bool(
-        parts.intersection({"jitter", "delay"})
-        or ("retry" in parts and parts.intersection({"after", "backoff", "interval", "timeout", "wait"}))
-    )
+    if parts.intersection({"jitter", "delay"}):
+        return True
+    if "retry" not in parts:
+        return False
+    unknown_parts = parts - (_STRONG_CREDENTIAL_WORDS | {"retry"})
+    has_explicit_credential_part = bool(parts.intersection({"token", "secret", "password", "key"}))
+    return bool(unknown_parts) or not has_explicit_credential_part
 
 
 def _python_dict_credential_context(value: ast.Dict, random_call: ast.AST) -> bool:
