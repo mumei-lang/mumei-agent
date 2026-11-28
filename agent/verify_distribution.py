@@ -453,8 +453,12 @@ def main_distribution(args: argparse.Namespace | None = None) -> int:
         print(f"verify-distribution: {exc}", file=sys.stderr)
         return 1
     document = json.dumps(report, indent=2, sort_keys=True) + "\n"
-    if args.output is not None:
-        Path(args.output).write_text(document, encoding="utf-8")
-    else:
-        sys.stdout.write(document)
+    try:
+        if args.output is not None:
+            Path(args.output).write_text(document, encoding="utf-8")
+        else:
+            sys.stdout.write(document)
+    except OSError as exc:
+        print(f"verify-distribution: cannot write report: {exc}", file=sys.stderr)
+        return 1
     return distribution_exit_code(report)

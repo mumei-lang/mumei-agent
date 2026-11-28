@@ -338,6 +338,18 @@ def test_output_file_and_no_secret_echo(tmp_path, capsys, monkeypatch):
     assert json.loads(text)["roles"]["artifact_reproduction"]["status"] == "accepted"
 
 
+def test_unwritable_output_is_operational_error_not_traceback(tmp_path, capsys):
+    core, bundle, source = _fixture(tmp_path)
+    missing_parent = tmp_path / "missing" / "report.json"
+    code, out, err = _run(
+        capsys, _argv(core, bundle, source, "--output", str(missing_parent))
+    )
+    assert code == 1
+    assert out == ""
+    assert "cannot write report" in err
+    assert "Traceback" not in err
+
+
 def test_cli_help_mentions_trusted_runtime_boundary():
     help_text = build_distribution_parser().format_help()
     compact = " ".join(help_text.split())
