@@ -948,13 +948,13 @@ def _python_timing_credential_issues(source: str) -> list[ForeignSafetyIssue]:
         loop = _python_early_exit_compare_loop(node)
         if loop is None:
             continue
-        class_names = []
+        scope_names = []
         cursor = node
         while cursor in parents:
             cursor = parents[cursor]
-            if isinstance(cursor, ast.ClassDef):
-                class_names.append(cursor.name)
-        display_name = ".".join([*reversed(class_names), node.name])
+            if isinstance(cursor, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                scope_names.append(cursor.name)
+        display_name = ".".join([*reversed(scope_names), node.name])
         issues.append(ForeignSafetyIssue(
             function_name=display_name,
             message=(f"Python function `{display_name}` uses early-exit credential comparison "
