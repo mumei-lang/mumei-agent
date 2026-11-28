@@ -1516,6 +1516,7 @@ class _Walker:
         body: str,
         contract_results: set[str] | None = None,
         contract_outputs: set[str] | None = None,
+        map_names: set[str] | None = None,
         backward_regions: dict[
             str, tuple[tree_sitter_extract.Statement, ...]
         ] | None = None,
@@ -1534,6 +1535,7 @@ class _Walker:
         # by the function's ``ensures`` doc-comment contract.
         self.contract_results = set(contract_results or ())
         self.contract_outputs = set(contract_outputs or ())
+        self.map_names = {_norm(name) for name in map_names or ()}
         # Environments carried by ``break`` to the innermost enclosing switch /
         # loop (one list per open construct).
         self.break_targets: list[list[_Env]] = []
@@ -1984,7 +1986,7 @@ class _Walker:
         if kind == "expr":
             for value in statement.values:
                 clear_call = re.fullmatch(r"clear\(([_A-Za-z]\w*)\)", _norm(value))
-                if clear_call:
+                if clear_call and _norm(clear_call.group(1)) in self.map_names:
                     for name in env.containers_equal_len(clear_call.group(1)):
                         env.kill(name)
                 self._expression(value, env, statement.start)
@@ -3419,6 +3421,7 @@ def analyze_function(
     sequence_names: set[str] | None = None,
     contract_results: set[str] | None = None,
     contract_outputs: set[str] | None = None,
+    map_names: set[str] | None = None,
 ) -> FunctionDataflow | None:
     """Return function-local dataflow facts for ``body`` or ``None`` to fall back.
 
@@ -3442,6 +3445,7 @@ def analyze_function(
         body,
         contract_results=contract_results,
         contract_outputs=contract_outputs,
+        map_names=map_names,
         backward_regions=backward_regions,
         backward_gotos=backward_gotos,
     )
