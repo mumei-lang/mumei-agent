@@ -889,6 +889,10 @@ def _go_timing_credential_issues(source: str) -> list[ForeignSafetyIssue]:
 
 
 def _python_early_exit_compare_loop(function: ast.FunctionDef | ast.AsyncFunctionDef) -> ast.For | None:
+    parameter_names = {
+        parameter.arg
+        for parameter in [*function.args.posonlyargs, *function.args.args, *function.args.kwonlyargs]
+    }
     for statement in function.body:
         if not isinstance(statement, ast.For):
             continue
@@ -896,8 +900,15 @@ def _python_early_exit_compare_loop(function: ast.FunctionDef | ast.AsyncFunctio
             continue
         if statement.iter.func.id != "zip" or len(statement.iter.args) != 2:
             continue
-        if not all(isinstance(arg, ast.Name) for arg in statement.iter.args):
+        if not all(isinstance(arg, ast.Name) and arg.id in parameter_names for arg in statement.iter.args):
             continue
+        if (
+            not isinstance(statement.target, ast.Tuple)
+            or len(statement.target.elts) != 2
+            or not all(isinstance(element, ast.Name) for element in statement.target.elts)
+        ):
+            continue
+        loop_variables = {element.id for element in statement.target.elts}
         if len(statement.body) != 1 or not isinstance(statement.body[0], ast.If):
             continue
         test = statement.body[0].test
@@ -908,6 +919,7 @@ def _python_early_exit_compare_loop(function: ast.FunctionDef | ast.AsyncFunctio
             and isinstance(test.left, ast.Name)
             and len(test.comparators) == 1
             and isinstance(test.comparators[0], ast.Name)
+            and {test.left.id, test.comparators[0].id} == loop_variables
             and len(statement.body[0].body) == 1
             and isinstance(statement.body[0].body[0], ast.Return)
             and isinstance(statement.body[0].body[0].value, ast.Constant)

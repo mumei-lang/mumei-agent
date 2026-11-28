@@ -9446,6 +9446,23 @@ def can_read(doc, api_key, token):
             return False
     return True
 """),
+        ("python", """import hmac
+def token_matches(provided, expected):
+    if not hmac.compare_digest(provided, expected):
+        return False
+    for a, b in zip(provided, expected):
+        if a != separator:
+            return False
+    return True
+"""),
+        ("python", """def token_matches(provided, expected):
+    left = provided
+    right = expected
+    for a, b in zip(left, right):
+        if a != b:
+            return False
+    return True
+"""),
     ]
     for language, source in cases:
         assert not any(
