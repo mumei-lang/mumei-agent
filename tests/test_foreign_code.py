@@ -10767,6 +10767,81 @@ func viewItem(item *Item) string {
             assert value not in hits[0]
 
 
+
+def _python_index_hits(source: str):
+    return [i for i in _detect_python_safety_issues(source) if "without a bounds contract" in i.message]
+
+
+def test_python_index_negative_exit_guards_suppress_exact_pair() -> None:
+    cases = {
+        "bounds_raise": 'def f(items, i):\n    if i < 0 or i >= len(items):\n        raise IndexError()\n    return items[i]\n',
+        "bounds_return": 'def f(items, i):\n    if i < 0 or i >= len(items):\n        return None\n    return items[i]\n',
+        "membership_raise": 'def f(mapping, key):\n    if key not in mapping:\n        raise KeyError()\n    return mapping[key]\n',
+        "membership_return": 'def f(mapping, key):\n    if key not in mapping:\n        return None\n    return mapping[key]\n',
+    }
+    for name, source in cases.items():
+        assert not _python_index_hits(source), name
+
+
+def test_python_index_positive_membership_suppresses_only_controlled_return() -> None:
+    direct = 'def f(mapping, key):\n    if key in mapping:\n        return mapping[key]\n    return None\n'
+    nested_inside = 'def f(mapping, key, cond):\n    if key in mapping:\n        if cond:\n            return mapping[key]\n    return None\n'
+    local_assignment = 'def f(key):\n    mapping = {"a": 1}\n    if key in mapping:\n        return mapping[key]\n    return None\n'
+    assert not _python_index_hits(direct)
+    assert not _python_index_hits(nested_inside)
+    assert not _python_index_hits(local_assignment)
+
+    sibling_else = 'def f(mapping, key):\n    if key in mapping:\n        pass\n    else:\n        return mapping[key]\n    return None\n'
+    after_if = 'def f(mapping, key):\n    if key in mapping:\n        pass\n    return mapping[key]\n'
+    assert _python_index_hits(sibling_else)
+    assert _python_index_hits(after_if)
+
+
+def test_python_index_guard_negative_controls_remain_visible() -> None:
+    cases = {
+        "unguarded": 'def f(items, i):\n    return items[i]\n',
+        "no_annotation_unguarded": 'def f(data, key):\n    return data[key]\n',
+        "wrong_container": 'def f(items, other, i):\n    if i < 0 or i >= len(items):\n        raise IndexError()\n    return other[i]\n',
+        "wrong_index": 'def f(items, i, j):\n    if i < 0 or i >= len(items):\n        raise IndexError()\n    return items[j]\n',
+        "reassigned_index": 'def f(items, i):\n    if i < 0 or i >= len(items):\n        raise IndexError()\n    i = 0\n    return items[i]\n',
+        "reassigned_container": 'def f(items, i):\n    if i < 0 or i >= len(items):\n        raise IndexError()\n    items = []\n    return items[i]\n',
+        "nested_negative_exit_not_dominating": 'def f(mapping, key, cond):\n    if cond:\n        if key not in mapping:\n            return None\n    return mapping[key]\n',
+        "non_exiting_bounds_guard": 'def f(items, i):\n    if i < 0 or i >= len(items):\n        print("bad")\n    return items[i]\n',
+        "try_except_not_suppressed": 'def f(items, i):\n    try:\n        return items[i]\n    except IndexError:\n        return None\n',
+        "positive_reassignment_inside_guard": 'def f(mapping, key, other):\n    if key in mapping:\n        key = other\n        return mapping[key]\n    return None\n',
+        "attribute_shape_not_normalized": 'def f(self, key):\n    if key in self.mapping:\n        return self.mapping[key]\n    return None\n',
+        "tuple_reassignment_inside_guard": 'def f(mapping, key, other):\n    if key in mapping:\n        key, _ = other, None\n        return mapping[key]\n    return None\n',
+        "for_reassignment_inside_guard": 'def f(mapping, key, values):\n    if key in mapping:\n        for key in values:\n            pass\n        return mapping[key]\n    return None\n',
+        "container_mutated_after_bounds_guard": 'def f(items, i):\n    if i < 0 or i >= len(items):\n        raise IndexError()\n    items.clear()\n    return items[i]\n',
+        "container_key_deleted_inside_membership_guard": 'def f(mapping, key):\n    if key in mapping:\n        del mapping[key]\n        return mapping[key]\n    return None\n',
+        "container_slice_reassigned_after_bounds_guard": 'def f(items, i):\n    if i < 0 or i >= len(items):\n        raise IndexError()\n    items[:] = []\n    return items[i]\n',
+        "def_rebinds_index_inside_guard": 'def f(mapping, key):\n    if key in mapping:\n        def key():\n            return 0\n        return mapping[key]\n    return None\n',
+        "delete_index_inside_guard": 'def f(mapping, key):\n    if key in mapping:\n        del key\n        return mapping[key]\n    return None\n',
+        "import_rebinds_container_inside_guard": 'def f(mapping, key):\n    if key in mapping:\n        import mapping\n        return mapping[key]\n    return None\n',
+        "nested_function_use_not_controlled_by_outer_guard": 'def outer(mapping, key):\n    if key in mapping:\n        def inner():\n            return mapping[key]\n    return None\n',
+        "lambda_return_not_controlled_by_guard": 'def outer(mapping, key):\n    if key in mapping:\n        return lambda: mapping[key]\n    return None\n',
+    }
+    for name, source in cases.items():
+        assert _python_index_hits(source), name
+
+
+def test_python_index_guard_matrix_controls() -> None:
+    suppressed = {
+        "C1": 'def f(environment, key):\n    if key in environment:\n        return environment[key]\n    return ""\n',
+        "C2": 'def f(data, key):\n    if key in data:\n        return data[key]\n    return ""\n',
+        "F5": 'def f(items, i):\n    if i < 0 or i >= len(items):\n        raise IndexError()\n    return items[i]\n',
+    }
+    for name, source in suppressed.items():
+        assert not _python_index_hits(source), name
+
+    retained = {
+        "B1": 'def f(items: list[int], i: int):\n    return items[i]\n',
+        "B2": 'def f(items, i):\n    return items[i]\n',
+        "E2": 'def f(items, i):\n    return items[i]\n',
+    }
+    for name, source in retained.items():
+        assert _python_index_hits(source), name
+
 def test_python_split_positive_literal_index_is_medium_witness() -> None:
     inline = '''
 def subcategory(label: str) -> str:
