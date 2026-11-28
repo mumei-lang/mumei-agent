@@ -10939,8 +10939,14 @@ def _issues_for_expression(
                 continue
             issues.append(_null_safety_issue(function_name, value, label))
     if label not in {"TypeScript", "JavaScript"}:
+        # Python floor division ``//`` carries the exact same zero-division
+        # contract as ``/`` and ``%``. It is matched first so the operator
+        # alternation cannot split the token into a plain ``/`` match, and it
+        # is enabled for Python only: in Go/Rust ``//`` is a comment token
+        # (stripped before this point) and Solidity uses it the same way.
+        division_op_pattern = r"//|%|/" if label == "Python" else r"/|%"
         for match in re.finditer(
-            r"\b(?P<left>[A-Za-z_][A-Za-z0-9_]*)\s*(?P<op>/|%)\s*(?P<right>[A-Za-z_][A-Za-z0-9_]*(?:\s*\([^)]*\))?(?:\.[A-Za-z_][A-Za-z0-9_]*|\[[^\]]*\])*)",
+            r"\b(?P<left>[A-Za-z_][A-Za-z0-9_]*)\s*(?P<op>" + division_op_pattern + r")\s*(?P<right>[A-Za-z_][A-Za-z0-9_]*(?:\s*\([^)]*\))?(?:\.[A-Za-z_][A-Za-z0-9_]*|\[[^\]]*\])*)",
             expression,
         ):
             # Solidity >=0.8 reverts on division/modulo by zero by default.
