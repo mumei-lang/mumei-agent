@@ -762,7 +762,7 @@ def _verify_generated_mm(
     return verification
 
 
-def _python_definition_index(source: str) -> tuple[dict[str, tuple[int, int]], dict[str, list[tuple[int, int]]]] | None:
+def _python_definition_index(source: str) -> tuple[dict[str, list[tuple[int, int]]], dict[str, list[tuple[int, int]]]] | None:
     """Map Python function definitions to their source spans.
 
     Returns ``(qualified, leaf_spans)`` where ``qualified`` maps dotted names
