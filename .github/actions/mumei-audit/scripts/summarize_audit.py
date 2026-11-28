@@ -5,8 +5,23 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
+
+
+def _sanitize_display_text(text: str) -> str:
+    """Strip checkout-local runner absolute paths from summary display text.
+
+    Paths under ``GITHUB_WORKSPACE`` become workspace-relative; the exact
+    workspace path alone is rendered as ``.``. Text is unchanged when the
+    workspace is unknown so the display never fails closed.
+    """
+    workspace = (os.environ.get("GITHUB_WORKSPACE") or "").rstrip("/")
+    if not workspace:
+        return text
+    text = text.replace(workspace + "/", "")
+    return re.sub(r"(?<![\w/.-])" + re.escape(workspace) + r"(?![\w/.-])", ".", text)
 
 
 def _int_file(path: str) -> int | None:
@@ -155,12 +170,13 @@ def main() -> int:
     if not audit:
         lines.extend(["", "Audit JSON was not produced or was malformed; inspect the audit log artifact."])
 
+    output_text = _sanitize_display_text("\n".join(lines))
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
         with Path(summary).open("a", encoding="utf-8") as handle:
-            handle.write("\n".join(lines) + "\n")
+            handle.write(output_text + "\n")
     else:
-        print("\n".join(lines))
+        print(output_text)
 
     if args.github_output:
         with Path(args.github_output).open("a", encoding="utf-8") as handle:
