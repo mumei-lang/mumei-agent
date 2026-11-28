@@ -9332,3 +9332,294 @@ def test_hardcoded_secret_python_unicode_annotation_positions() -> None:
         "hardcoded credential" in issue.message
         for issue in _detect_safety_issues(negative, "python")
     )
+
+
+def test_timing_credential_comparison_positive_controls() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    go = """package main
+func tokenMatches(presented, stored string) bool {
+    return presented == stored
+}
+"""
+    go_with_comment = """package main
+func tokenMatches(presented, stored string) bool {
+    return presented == stored // direct comparison
+}
+"""
+    go_independent_credential = """package main
+func secretTokenTypeMatches(presented, stored string) bool {
+    return presented == stored
+}
+"""
+    python = """def token_matches(provided, expected):
+    if len(provided) != len(expected):
+        return False
+    for a, b in zip(provided, expected):
+        if a != b:
+            return False
+    return True
+"""
+    python_independent_credential = """def secret_token_type_matches(provided, expected):
+    for a, b in zip(provided, expected):
+        if a != b:
+            return False
+    return True
+"""
+    for language, source, function in (
+        ("go", go, "tokenMatches"),
+        ("go", go_with_comment, "tokenMatches"),
+        ("go", go_independent_credential, "secretTokenTypeMatches"),
+        ("python", python, "token_matches"),
+        ("python", python_independent_credential, "secret_token_type_matches"),
+    ):
+        issues = [
+            issue for issue in _detect_safety_issues(source, language)
+            if "timing" in issue.message.lower() and "credential" in issue.message.lower()
+        ]
+        assert len(issues) == 1, (language, [issue.message for issue in _detect_safety_issues(source, language)])
+        assert issues[0].function_name == function
+        assert not issues[0].counterexample
+
+
+def test_timing_credential_comparison_negative_controls() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    cases = [
+        ("go", """package main
+import "crypto/subtle"
+func tokenMatches(presented, stored string) bool {
+    return subtle.ConstantTimeCompare([]byte(presented), []byte(stored)) == 1
+}
+"""),
+        ("go", """package main
+func matches(presented, stored string) bool {
+    return presented == stored
+}
+"""),
+        ("go", """package main
+func tokenizeMatches(presented, stored string) bool {
+    return presented == stored
+}
+"""),
+        ("go", """package main
+func authMatches(presented, stored string) bool {
+    return presented == stored
+}
+"""),
+        ("go", """package main
+func authenticationMatches(presented, stored string) bool {
+    return presented == stored
+}
+"""),
+        ("go", """package main
+func secretaryMatches(presented, stored string) bool {
+    return presented == stored
+}
+"""),
+        ("go", """package main
+func tokenTypeMatches(presented, stored string) bool {
+    return presented == stored
+}
+"""),
+        ("go", """package main
+func apiKeyTypeMatches(presented, stored string) bool {
+    return presented == stored
+}
+"""),
+        ("go", """package main
+func tokenHeaderMatches(presented, stored string) bool {
+    return presented == stored
+}
+"""),
+        ("go", """package main
+func tokenEnvVarMatches(presented, stored string) bool {
+    return presented == stored
+}
+"""),
+        ("go", """package main
+func matchTokenHTTPHeaderName(presented, stored string) bool {
+    return presented == stored
+}
+"""),
+        ("go", """package main
+func tokenMatches(presented, stored string) bool {
+    return len(presented) == len(stored)
+}
+"""),
+        ("go", """package main
+func tokenMatches(presented, stored string) bool {
+    if presented == "" {
+        return false
+    }
+    return presented == stored
+}
+"""),
+        ("python", """import hmac
+def token_matches(provided, expected):
+    return hmac.compare_digest(provided.encode(), expected.encode())
+"""),
+        ("python", """import hmac
+def can_read(doc, api_key, token):
+    return hmac.compare_digest(doc["owner"].encode(), api_key.encode())
+"""),
+        ("python", """def matches(provided, expected):
+    for a, b in zip(provided, expected):
+        if a != b:
+            return False
+    return True
+"""),
+        ("python", """def tokenize_values(provided, expected):
+    for a, b in zip(provided, expected):
+        if a != b:
+            return False
+    return True
+"""),
+        ("python", """def auth_matches(provided, expected):
+    for a, b in zip(provided, expected):
+        if a != b:
+            return False
+    return True
+"""),
+        ("python", """def secretary_matches(provided, expected):
+    for a, b in zip(provided, expected):
+        if a != b:
+            return False
+    return True
+"""),
+        ("python", """def token_type_matches(provided, expected):
+    for a, b in zip(provided, expected):
+        if a != b:
+            return False
+    return True
+"""),
+        ("python", """def api_key_type_matches(provided, expected):
+    for a, b in zip(provided, expected):
+        if a != b:
+            return False
+    return True
+"""),
+        ("python", """def token_header_matches(provided, expected):
+    for a, b in zip(provided, expected):
+        if a != b:
+            return False
+    return True
+"""),
+        ("python", """def token_env_var_matches(provided, expected):
+    for a, b in zip(provided, expected):
+        if a != b:
+            return False
+    return True
+"""),
+        ("python", """def token_matches(provided, expected):
+    for a, b in zip(provided, expected):
+        if len(a) != len(b):
+            return False
+    return True
+"""),
+        ("python", """import hmac
+def token_matches(provided, expected):
+    if not hmac.compare_digest(provided, expected):
+        return False
+    for a, b in zip(provided, expected):
+        if a != separator:
+            return False
+    return True
+"""),
+        ("python", """def token_matches(provided, expected):
+    left = provided
+    right = expected
+    for a, b in zip(left, right):
+        if a != b:
+            return False
+    return True
+"""),
+    ]
+    for language, source in cases:
+        assert not any(
+            "timing" in issue.message.lower() and "credential" in issue.message.lower()
+            for issue in _detect_safety_issues(source, language)
+        ), (language, source)
+
+
+def test_timing_credential_comparison_same_method_names_have_distinct_messages() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """class First:
+    def token_matches(self, provided, expected):
+        for a, b in zip(provided, expected):
+            if a != b:
+                return False
+        return True
+
+
+class Second:
+    def token_matches(self, provided, expected):
+        for a, b in zip(provided, expected):
+            if a != b:
+                return False
+        return True
+"""
+    issues = [
+        issue for issue in _detect_safety_issues(source, "python")
+        if "timing" in issue.message.lower() and "credential" in issue.message.lower()
+    ]
+    assert len(issues) == 2
+    assert {issue.function_name for issue in issues} == {"First.token_matches", "Second.token_matches"}
+    assert len({issue.message for issue in issues}) == 2
+
+
+def test_timing_credential_comparison_same_local_function_names_have_distinct_messages() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """def first_outer():
+    def token_matches(provided, expected):
+        for a, b in zip(provided, expected):
+            if a != b:
+                return False
+        return True
+    return token_matches
+
+
+def second_outer():
+    def token_matches(provided, expected):
+        for a, b in zip(provided, expected):
+            if a != b:
+                return False
+        return True
+    return token_matches
+"""
+    issues = [
+        issue for issue in _detect_safety_issues(source, "python")
+        if "timing" in issue.message.lower() and "credential" in issue.message.lower()
+    ]
+    assert len(issues) == 2
+    assert {issue.function_name for issue in issues} == {
+        "first_outer.token_matches",
+        "second_outer.token_matches",
+    }
+    assert len({issue.message for issue in issues}) == 2
+
+
+def test_timing_credential_comparison_never_outputs_secret_values(capsys, tmp_path, monkeypatch) -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    monkeypatch.chdir(tmp_path)
+    secret = "unit-test-timing-secret-sentinel"
+    source = f'''package main
+const probe = "{secret}"
+func tokenMatches(presented, stored string) bool {{
+    return presented == stored
+}}
+'''
+    issues = [
+        issue for issue in _detect_safety_issues(source, "go")
+        if "timing" in issue.message.lower() and "credential" in issue.message.lower()
+    ]
+    captured = capsys.readouterr()
+    assert len(issues) == 1
+    assert secret not in issues[0].message
+    assert not issues[0].counterexample
+    assert secret not in captured.out
+    assert secret not in captured.err
+    assert not list(tmp_path.iterdir())

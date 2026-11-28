@@ -342,7 +342,10 @@ def _verification_status_from_foreign_result(
         result.get("counterexample")
         or report.get("counterexample")
         or counterexample_values
-        or any("counterexample" in violation.lower() for violation in (verification_violations or []))
+        or any(
+            "z3 counterexample" in violation.lower() or "status=refuted counterexample" in violation.lower()
+            for violation in (verification_violations or [])
+        )
     )
     skipped_clause_warnings = any(
         warning.startswith("Skipped unsupported Z3 clause:") for warning in diagnostics

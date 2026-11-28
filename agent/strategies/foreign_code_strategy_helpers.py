@@ -535,34 +535,58 @@ _CREDENTIAL_KEY_PAIRS = frozenset(
         ("encryption", "key"),
     }
 )
+_CREDENTIAL_METADATA_SUFFIXES = {
+    "header",
+    "headername",
+    "name",
+    "env",
+    "envvar",
+    "variable",
+    "param",
+    "parameter",
+    "type",
+}
 _CREDENTIAL_NAME_PART = re.compile(
     r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|\d+"
 )
 
 
-def _is_hardcoded_secret_name(name: str) -> bool:
-    """True when a credential word is a whole lexical word in ``name``."""
-    words = [
+def _credential_name_words(name: str) -> list[str]:
+    return [
         match.group(0).lower()
         for component in re.split(r"[._$\-]+", name)
         for match in _CREDENTIAL_NAME_PART.finditer(component)
     ]
-    if words and words[-1] in {
-        "header",
-        "headername",
-        "name",
-        "env",
-        "envvar",
-        "variable",
-        "param",
-        "parameter",
-        "type",
-    }:
+
+
+def _is_hardcoded_secret_name(name: str) -> bool:
+    """True when a credential word is a whole lexical word in ``name``."""
+    words = _credential_name_words(name)
+    if words and words[-1] in _CREDENTIAL_METADATA_SUFFIXES:
         return False
     return bool(
         any(word in _CREDENTIAL_WORDS for word in words)
         or any(pair in _CREDENTIAL_KEY_PAIRS for pair in zip(words, words[1:]))
     )
+
+
+
+def _is_timing_credential_function_name(name: str) -> bool:
+    """Credential-purpose evidence for timing comparison, excluding metadata bindings."""
+    if not _is_hardcoded_secret_name(name):
+        return False
+    words = _credential_name_words(name)
+    single_word_hit = any(
+        word in _CREDENTIAL_WORDS
+        and (index + 1 >= len(words) or words[index + 1] not in _CREDENTIAL_METADATA_SUFFIXES)
+        for index, word in enumerate(words)
+    )
+    key_pair_hit = any(
+        pair in _CREDENTIAL_KEY_PAIRS
+        and (index + 2 >= len(words) or words[index + 2] not in _CREDENTIAL_METADATA_SUFFIXES)
+        for index, pair in enumerate(zip(words, words[1:]))
+    )
+    return single_word_hit or key_pair_hit
 
 
 def _is_placeholder_secret_value(value: str) -> bool:
@@ -817,6 +841,164 @@ def _python_hardcoded_secret_issues(source: str) -> list[ForeignSafetyIssue]:
     return issues
 
 
+def _go_string_parameter_names(function_node, source_bytes: bytes) -> set[str]:
+    parameters = function_node.child_by_field_name("parameters")
+    if parameters is None:
+        return set()
+    names: set[str] = set()
+    for parameter in parameters.named_children:
+        if parameter.type != "parameter_declaration":
+            continue
+        type_name = None
+        identifiers = []
+        for child in parameter.named_children:
+            if child.type == "identifier":
+                identifiers.append(_node_text(source_bytes, child))
+            elif child.type in {"type_identifier", "qualified_type"}:
+                type_name = _node_text(source_bytes, child)
+        if type_name == "string":
+            names.update(identifiers)
+    return names
+
+
+def _go_direct_string_equality_return(function_node, source_bytes: bytes):
+    string_params = _go_string_parameter_names(function_node, source_bytes)
+    block = next((child for child in function_node.named_children if child.type == "block"), None)
+    statements = next((child for child in block.named_children if child.type == "statement_list"), None) if block else None
+    executable_statements = [
+        child for child in statements.named_children if child.type != "comment"
+    ] if statements is not None else []
+    if len(executable_statements) != 1:
+        return None
+    ret = executable_statements[0]
+    if ret.type != "return_statement":
+        return None
+    expressions = next((child for child in ret.named_children if child.type == "expression_list"), None)
+    comparison = expressions.named_children[0] if expressions is not None and len(expressions.named_children) == 1 else None
+    if comparison is None or comparison.type != "binary_expression":
+        return None
+    operands = [child for child in comparison.children if child.type == "identifier"]
+    operator = next((child for child in comparison.children if child.type == "=="), None)
+    if (
+        operator is not None
+        and len(operands) == 2
+        and all(_node_text(source_bytes, operand) in string_params for operand in operands)
+    ):
+        return ret
+    return None
+
+
+def _go_timing_credential_issues(source: str) -> list[ForeignSafetyIssue]:
+    tree, source_bytes = tree_sitter_extract.parse(source, "go")
+    if tree is None or source_bytes is None:
+        return []
+    issues: list[ForeignSafetyIssue] = []
+    stack = [tree.root_node]
+    while stack:
+        node = stack.pop()
+        if node.type == "function_declaration":
+            name_node = node.child_by_field_name("name")
+            if name_node is None:
+                stack.extend(reversed(node.children))
+                continue
+            function_name = _node_text(source_bytes, name_node)
+            if _is_timing_credential_function_name(function_name):
+                ret = _go_direct_string_equality_return(node, source_bytes)
+                if ret is not None:
+                    issues.append(ForeignSafetyIssue(
+                        function_name=function_name,
+                        message=(f"Go function `{function_name}` uses non-constant-time credential "
+                                 "comparison that may expose a timing side channel"),
+                        line=ret.start_point[0] + 1,
+                    ))
+        stack.extend(reversed(node.children))
+    return issues
+
+
+def _python_early_exit_compare_loop(function: ast.FunctionDef | ast.AsyncFunctionDef) -> ast.For | None:
+    parameter_names = {
+        parameter.arg
+        for parameter in [*function.args.posonlyargs, *function.args.args, *function.args.kwonlyargs]
+    }
+    for statement in function.body:
+        if not isinstance(statement, ast.For):
+            continue
+        if not isinstance(statement.iter, ast.Call) or not isinstance(statement.iter.func, ast.Name):
+            continue
+        if statement.iter.func.id != "zip" or len(statement.iter.args) != 2:
+            continue
+        if not all(isinstance(arg, ast.Name) and arg.id in parameter_names for arg in statement.iter.args):
+            continue
+        if (
+            not isinstance(statement.target, ast.Tuple)
+            or len(statement.target.elts) != 2
+            or not all(isinstance(element, ast.Name) for element in statement.target.elts)
+        ):
+            continue
+        loop_variables = {element.id for element in statement.target.elts}
+        if len(statement.body) != 1 or not isinstance(statement.body[0], ast.If):
+            continue
+        test = statement.body[0].test
+        if (
+            isinstance(test, ast.Compare)
+            and len(test.ops) == 1
+            and isinstance(test.ops[0], ast.NotEq)
+            and isinstance(test.left, ast.Name)
+            and len(test.comparators) == 1
+            and isinstance(test.comparators[0], ast.Name)
+            and {test.left.id, test.comparators[0].id} == loop_variables
+            and len(statement.body[0].body) == 1
+            and isinstance(statement.body[0].body[0], ast.Return)
+            and isinstance(statement.body[0].body[0].value, ast.Constant)
+            and statement.body[0].body[0].value.value is False
+        ):
+            return statement
+    return None
+
+
+def _python_timing_credential_issues(source: str) -> list[ForeignSafetyIssue]:
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+    issues: list[ForeignSafetyIssue] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if not _is_timing_credential_function_name(node.name):
+            continue
+        loop = _python_early_exit_compare_loop(node)
+        if loop is None:
+            continue
+        scope_names = []
+        cursor = node
+        while cursor in parents:
+            cursor = parents[cursor]
+            if isinstance(cursor, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                scope_names.append(cursor.name)
+        display_name = ".".join([*reversed(scope_names), node.name])
+        issues.append(ForeignSafetyIssue(
+            function_name=display_name,
+            message=(f"Python function `{display_name}` uses early-exit credential comparison "
+                     "that may expose a timing side channel"),
+            line=loop.lineno,
+        ))
+    return issues
+
+
+def _timing_credential_issues(source: str, language: str) -> list[ForeignSafetyIssue]:
+    if language == "go":
+        return _go_timing_credential_issues(source)
+    if language == "python":
+        return _python_timing_credential_issues(source)
+    return []
+
+
 def _hardcoded_secret_issues(source: str, language: str) -> list[ForeignSafetyIssue]:
     if language == "python":
         return _python_hardcoded_secret_issues(source)
@@ -828,7 +1010,7 @@ def _hardcoded_secret_issues(source: str, language: str) -> list[ForeignSafetyIs
 def _with_hardcoded_secret_issues(
     issues: list[ForeignSafetyIssue], source: str, language: str
 ) -> list[ForeignSafetyIssue]:
-    return [*issues, *_hardcoded_secret_issues(source, language)]
+    return [*issues, *_hardcoded_secret_issues(source, language), *_timing_credential_issues(source, language)]
 
 
 def _is_generated_source(source: str) -> bool:
