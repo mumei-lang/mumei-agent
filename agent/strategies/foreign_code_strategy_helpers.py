@@ -2267,8 +2267,8 @@ def _rust_collection_len_division_issues(
             if node.end_byte <= start:
                 return positions
 
-        def record_write() -> None:
-            positions.append((node.start_byte, exiting_branch_ranges(node)))
+        def record_write(position: int) -> None:
+            positions.append((position, exiting_branch_ranges(node)))
 
         if node.type == "assignment_expression":
             left = node.child_by_field_name("left")
@@ -2278,7 +2278,8 @@ def _rust_collection_len_division_issues(
                 and text(left) == receiver
                 and not is_shadowed_at(receiver, node.start_byte)
             ):
-                record_write()
+                # The right-hand side is evaluated before the assignment takes effect.
+                record_write(node.end_byte)
         if node.type == "reference_expression":
             value = node.child_by_field_name("value")
             while value is not None and value.type == "parenthesized_expression" and value.named_children:
@@ -2290,7 +2291,7 @@ def _rust_collection_len_division_issues(
                 and not is_shadowed_at(receiver, node.start_byte)
                 and any(child.type == "mutable_specifier" for child in node.children)
             ):
-                record_write()
+                record_write(node.start_byte)
         for child in node.named_children:
             positions.extend(receiver_write_positions(child, receiver, start))
         return positions
@@ -6927,7 +6928,7 @@ def _go_assignment_division_expressions(body: str) -> tuple[tuple[str, frozenset
                     if re.fullmatch(r"[A-Za-z_]\w*", target)
                 }
                 nested_shadowed = frozenset(shadowed | init_defined)
-            elif statement.kind == "range":
+            elif statement.kind == "range" and statement.operator == ":=":
                 range_defined = {
                     target
                     for target in statement.targets

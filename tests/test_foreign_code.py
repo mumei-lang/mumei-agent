@@ -8465,8 +8465,15 @@ func switchshadow(total int, xs [4]int) int {
 """
     assert not [i for i in _detect_safety_issues(fixed_double_paren, "go") if "divide" in i.message]
     assert not [i for i in _detect_safety_issues(closed_block_shadow, "go") if "divide" in i.message]
+    range_assign_same_array = """package main
+func rangereassign(total int, xs [4]int, arrays [][4]int) int {
+    for _, xs = range arrays { q := total / len(xs); return q }
+    return 0
+}
+"""
     assert [i for i in _detect_safety_issues(range_shadow, "go") if "divide" in i.message]
     assert [i for i in _detect_safety_issues(switch_shadow, "go") if "divide" in i.message]
+    assert not [i for i in _detect_safety_issues(range_assign_same_array, "go") if "divide" in i.message]
 
 
 def test_rust_collection_len_divisor_detected_only_without_empty_guard() -> None:
@@ -8711,8 +8718,23 @@ fn f(total: i64, xs: &[i64], config: Config) -> i64 {
 }
 """
     assert [i for i in _detect_safety_issues(if_let_shadow, "rust") if "divide" in i.message]
+    assignment_rhs_before_write = """fn f(amount: i64, mut xs: &[i64], cond: bool) -> i64 {
+    if xs.is_empty() { return 0 }
+    if cond {
+        xs = &xs[..amount as usize / xs.len()];
+        return amount / xs.len() as i64
+    }
+    amount / xs.len() as i64
+}
+"""
+    rhs_divisions = [
+        i
+        for i in _detect_safety_issues(assignment_rhs_before_write, "rust")
+        if "divide" in i.message
+    ]
     assert [i for i in _detect_safety_issues(exiting_branch_write_before_return, "rust") if "divide" in i.message]
     assert [i for i in _detect_safety_issues(match_guard_not_binding, "rust") if "divide" in i.message]
+    assert len(rhs_divisions) == 1
 
 
 def test_rust_arbitrary_member_divisor_remains_conservative() -> None:
