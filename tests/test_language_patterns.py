@@ -1964,3 +1964,78 @@ def test_rust_body_text_inside_string_keeps_real_line() -> None:
     issues = language_pattern_issues(source, "rust")
     matching = [i for i in issues if "res.unwrap()" in i.message]
     assert matching and all(i.line == 5 for i in matching)
+
+
+def test_solidity_strong_randomness_suppresses_duplicate_medium_advisory() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_solidity_contract_issues
+
+    source = '''
+contract Auction {
+    address[] players;
+    function drawWinner() public {
+        uint256 n = players.length;
+        uint256 idx = uint256(keccak256(abi.encodePacked(block.timestamp, block.prevrandao, n))) % n;
+        address winner = players[idx];
+    }
+}
+'''
+
+    strong = [i for i in _detect_solidity_contract_issues(source) if "block entropy" in i.message]
+    advisory = [i for i in language_pattern_issues(source, "solidity") if "derives randomness" in i.message]
+    assert len(strong) == 1
+    assert advisory == []
+
+
+def test_solidity_medium_randomness_advisory_remains_without_strong_selection_witness() -> None:
+    source = '''
+contract Helper {
+    function mix(uint256 n) public view returns (uint256) {
+        return uint256(keccak256(abi.encodePacked(block.timestamp, n))) % n;
+    }
+}
+'''
+
+    advisory = [i for i in language_pattern_issues(source, "solidity") if "derives randomness" in i.message]
+    assert len(advisory) == 1
+
+
+def test_solidity_randomness_suppression_is_same_function_not_only_same_name() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_solidity_contract_issues
+
+    source = '''
+contract Auction {
+    address[] players;
+    function mix(uint256 n) public {
+        uint256 idx = uint256(keccak256(abi.encodePacked(block.timestamp, block.prevrandao, n))) % n;
+        address winner = players[idx];
+    }
+    function mix(uint256 n, uint256 salt) public view returns (uint256) {
+        return uint256(keccak256(abi.encodePacked(block.timestamp, n, salt))) % n;
+    }
+}
+'''
+
+    strong = [i for i in _detect_solidity_contract_issues(source) if "block entropy" in i.message]
+    advisory = [i for i in language_pattern_issues(source, "solidity") if "derives randomness" in i.message]
+    assert len(strong) == 1
+    assert len(advisory) == 1
+    assert advisory[0].function_name == "mix"
+
+
+def test_solidity_strong_randomness_suppresses_normalized_internal_function_advisory() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_solidity_contract_issues
+
+    source = '''
+contract Auction {
+    address[] players;
+    function _drawWinner(uint256 n) internal {
+        uint256 idx = uint256(keccak256(abi.encodePacked(block.timestamp, block.prevrandao, n))) % n;
+        address winner = players[idx];
+    }
+}
+'''
+
+    strong = [i for i in _detect_solidity_contract_issues(source) if "block entropy" in i.message]
+    advisory = [i for i in language_pattern_issues(source, "solidity") if "derives randomness" in i.message]
+    assert len(strong) == 1
+    assert advisory == []

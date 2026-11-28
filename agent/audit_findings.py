@@ -274,6 +274,21 @@ def _violation_confidence(message: str) -> str:
         lowered_message,
     ):
         return "high"
+    if re.fullmatch(
+        r"python function `[^`]+` generates credential material with direct weak randomness(?: at line \d+)?",
+        lowered_message,
+    ):
+        return "high"
+    if re.fullmatch(
+        r"go function `[^`]+` generates credential material from a timestamp(?: at line \d+)?",
+        lowered_message,
+    ):
+        return "high"
+    if re.fullmatch(
+        r"solidity function `[^`]+` derives random winner selection from predictable block entropy(?: at line \d+)?",
+        lowered_message,
+    ):
+        return "high"
     return "medium"
 
 

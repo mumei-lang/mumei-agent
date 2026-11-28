@@ -45,8 +45,10 @@ from agent.strategies.foreign_code_strategy_helpers import (
     _mask_nested_function_literals,
     _normalize_language,
     _rust_function_scopes,
+    _safe_identifier,
     _solidity_function_blocks_with_attrs,
     _solidity_function_scopes,
+    _solidity_insecure_randomness_issues,
     _typescript_function_blocks,
 )
 
@@ -1923,6 +1925,7 @@ def _solidity_pattern_issues(
     if _is_solidity_mock_source(source):
         return []
     issues: list[ForeignSafetyIssue] = []
+    strong_randomness_issues = _solidity_insecure_randomness_issues(source)
     used_offsets: set[int] = set()
     non_code = _non_code_states(source, "solidity")
     for name, _attrs, raw_body, _params in _solidity_function_blocks_with_attrs(source):
@@ -1954,7 +1957,15 @@ def _solidity_pattern_issues(
                         body,
                     )
                 )
-        if weak_rng:
+        body_start_line = source.count("\n", 0, offset) + 1 if offset >= 0 else 0
+        body_end_line = body_start_line + raw_body.count("\n")
+        strong_duplicate = any(
+            _safe_identifier(issue.function_name) == name
+            and issue.line is not None
+            and body_start_line <= issue.line <= body_end_line
+            for issue in strong_randomness_issues
+        )
+        if weak_rng and not strong_duplicate:
             issues.append(
                 ForeignSafetyIssue(
                     function_name=name,
