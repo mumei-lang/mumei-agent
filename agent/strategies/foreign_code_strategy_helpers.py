@@ -1302,8 +1302,8 @@ def _typescript_member_call(node, source_bytes: bytes) -> tuple[str, str, list[s
     return _node_text(source_bytes, obj), _node_text(source_bytes, prop), args
 
 
-def _typescript_capability_key_witness(root, source_bytes: bytes, weak_functions: set[str]) -> bool:
-    key_names: set[str] = set()
+def _typescript_capability_key_witness(root, source_bytes: bytes, weak_functions: set[str]) -> set[str]:
+    key_weak_functions: dict[tuple[str, str], set[str]] = {}
     for function_node in [node for node in _tree_nodes(root) if node.type in _TREE_FUNCTION_TYPES["typescript"]]:
         for declaration in [node for node in _tree_nodes(function_node) if node.type == "variable_declarator"]:
             name = declaration.child_by_field_name("name")
@@ -1311,19 +1311,22 @@ def _typescript_capability_key_witness(root, source_bytes: bytes, weak_functions
             if name is None or value is None:
                 continue
             key = _node_text(source_bytes, name)
-            if not any(_typescript_contains_direct_call(value, source_bytes, weak) for weak in weak_functions):
+            called_weak_functions = {
+                weak for weak in weak_functions
+                if _typescript_contains_direct_call(value, source_bytes, weak)
+            }
+            if not called_weak_functions:
                 continue
             for call in [node for node in _tree_nodes(function_node) if node.type == "call_expression"]:
                 parts = _typescript_member_call(call, source_bytes)
                 if parts is not None and parts[1] == "set" and parts[2] and parts[2][0] == key:
-                    key_names.add(key)
-    if not key_names:
-        return False
+                    key_weak_functions.setdefault((parts[0], key), set()).update(called_weak_functions)
+    witnessed_weak_functions: set[str] = set()
     for call in [node for node in _tree_nodes(root) if node.type == "call_expression"]:
         parts = _typescript_member_call(call, source_bytes)
-        if parts is not None and parts[1] == "get" and parts[2] and parts[2][0] in key_names:
-            return True
-    return False
+        if parts is not None and parts[1] == "get" and parts[2]:
+            witnessed_weak_functions.update(key_weak_functions.get((parts[0], parts[2][0]), set()))
+    return witnessed_weak_functions
 
 
 def _typescript_insecure_randomness_issues(source: str) -> list[ForeignSafetyIssue]:
@@ -1339,12 +1342,13 @@ def _typescript_insecure_randomness_issues(source: str) -> list[ForeignSafetyIss
         if function_name:
             weak_calls.append((function_name, node))
             weak_functions.add(function_name)
-    if not weak_calls or not _typescript_capability_key_witness(tree.root_node, source_bytes, weak_functions):
+    capable_weak_functions = _typescript_capability_key_witness(tree.root_node, source_bytes, weak_functions)
+    if not weak_calls or not capable_weak_functions:
         return []
     issues: list[ForeignSafetyIssue] = []
     seen: set[str] = set()
     for function_name, node in weak_calls:
-        if function_name in seen:
+        if function_name in seen or function_name not in capable_weak_functions:
             continue
         seen.add(function_name)
         line = node.start_point[0] + 1

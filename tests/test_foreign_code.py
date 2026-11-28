@@ -10169,3 +10169,42 @@ def make_share_token() -> str:
 '''
     for source in (except_shadow, walrus_shadow):
         assert not [i for i in _detect_safety_issues(source, "python") if "weak randomness" in i.message]
+
+
+def test_typescript_insecure_randomness_reports_only_witnessed_weak_function() -> None:
+    source = '''
+export function generateCode(): string {
+  return Math.random().toString(36).slice(2, 9);
+}
+export function makeNoise(): number {
+  return Math.random();
+}
+export function createLink(links: Map<string, object>): object {
+  const code = generateCode();
+  links.set(code, { code });
+  return { code };
+}
+export function resolveLink(links: Map<string, object>, code: string): object | undefined {
+  return links.get(code);
+}
+'''
+    issues = [i for i in _detect_safety_issues(source, "typescript") if "weak randomness" in i.message]
+
+    assert [issue.function_name for issue in issues] == ["generateCode"]
+
+
+def test_typescript_insecure_randomness_requires_matching_capability_receiver() -> None:
+    source = '''
+export function generateCode(): string {
+  return Math.random().toString(36).slice(2, 9);
+}
+export function createLink(links: Map<string, object>): object {
+  const code = generateCode();
+  links.set(code, { code });
+  return { code };
+}
+export function resolveLink(otherLinks: Map<string, object>, code: string): object | undefined {
+  return otherLinks.get(code);
+}
+'''
+    assert not [i for i in _detect_safety_issues(source, "typescript") if "weak randomness" in i.message]
