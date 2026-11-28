@@ -1,6 +1,7 @@
 """Build migration-execution acceptance artifacts from audit migration hints."""
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -761,6 +762,60 @@ def _verify_generated_mm(
     return verification
 
 
+def _python_definition_index(source: str) -> tuple[dict[str, tuple[int, int]], dict[str, list[tuple[int, int]]]] | None:
+    """Map Python function definitions to their source spans.
+
+    Returns ``(qualified, leaf_spans)`` where ``qualified`` maps dotted names
+    (``Class.method``, ``function``) to ``(lineno, end_lineno)`` and
+    ``leaf_spans`` maps each leaf name to every span defining it. Returns
+    ``None`` when the source cannot be parsed, in which case no name can be
+    resolved and callers must not deduplicate anything.
+    """
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return None
+    qualified: dict[str, tuple[int, int]] = {}
+    leaf_spans: dict[str, list[tuple[int, int]]] = {}
+
+    def visit(node: ast.AST, prefix: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                qualname = f"{prefix}.{child.name}" if prefix else child.name
+                span = (child.lineno, child.end_lineno or child.lineno)
+                qualified.setdefault(qualname, span)
+                leaf_spans.setdefault(child.name, []).append(span)
+                visit(child, qualname)
+            elif isinstance(child, ast.ClassDef):
+                visit(child, f"{prefix}.{child.name}" if prefix else child.name)
+            else:
+                visit(child, prefix)
+
+    visit(tree, "")
+    return qualified, leaf_spans
+
+
+def _resolve_python_definition_span(
+    function_name: str,
+    qualified: dict[str, tuple[int, int]],
+    leaf_spans: dict[str, list[tuple[int, int]]],
+) -> tuple[int, int] | None:
+    """Resolve a hint function name to one definition span, or ``None``.
+
+    A qualified name resolves only when it exactly matches a class-path
+    definition. An unqualified leaf resolves only when the file defines that
+    leaf exactly once; multiple same-leaf definitions (for example a legit
+    module-level function and a method sharing the name) stay unresolved so
+    the caller never deduplicates on a guess.
+    """
+    if "." in function_name:
+        return qualified.get(function_name)
+    spans = leaf_spans.get(function_name, [])
+    if len(spans) == 1:
+        return spans[0]
+    return None
+
+
 def _write_partial(output_path: Path, report: dict[str, object]) -> None:
     _write_json_atomic(output_path, report)
 
@@ -829,6 +884,13 @@ def build_migration_execution(
     occurrences: dict[tuple[str, str], int] = {}
     claimed_healed_files: set[str] = set()
     missing = set(requested)
+
+    # Pass 1: attribute every hint to its source file exactly once, in the
+    # same iteration/occurrence order the candidate loop below relies on, and
+    # resolve Python hints to their function definition span. Hints that
+    # cannot be resolved keep ``dedupe_key=None`` and are never merged.
+    hint_records: list[dict[str, object]] = []
+    definition_indexes: dict[str, tuple[dict[str, tuple[int, int]], dict[str, list[tuple[int, int]]]] | None] = {}
     for hint_index, hint in enumerate(result.migration_hints):
         if not isinstance(hint, dict):
             continue
@@ -841,6 +903,68 @@ def build_migration_execution(
         occurrence = occurrences.get(occurrence_key, 0)
         occurrences[occurrence_key] = occurrence + 1
         file_result, hint_source, hint_language = _candidate_source(result, hint, occurrence, source_path, language)
+        dedupe_key: tuple[str, int, int] | None = None
+        if str(hint_language).lower() == "python":
+            if hint_source not in definition_indexes:
+                definition_indexes[hint_source] = _python_definition_index(_read_source(hint_source))
+            index_entry = definition_indexes[hint_source]
+            if index_entry is not None:
+                span = _resolve_python_definition_span(function_name, index_entry[0], index_entry[1])
+                if span is not None:
+                    dedupe_key = (hint_source, span[0], span[1])
+        hint_records.append(
+            {
+                "hint_index": hint_index,
+                "hint": hint,
+                "function_name": function_name,
+                "file_result": file_result,
+                "hint_source": hint_source,
+                "hint_language": hint_language,
+                "dedupe_key": dedupe_key,
+            }
+        )
+
+    # Pass 2: group hints resolving to the same definition. The representative
+    # is the first qualified-named hint in the group when one exists, else the
+    # first hint; absorbed hints contribute their reason text to the
+    # representative's selection reason so no review signal is lost. Position
+    # keys are indexes into ``hint_records``.
+    groups: dict[tuple[str, int, int], list[int]] = {}
+    for position, record in enumerate(hint_records):
+        key = record["dedupe_key"]
+        if key is not None:
+            groups.setdefault(key, []).append(position)
+    skip_positions: set[int] = set()
+    merged_reasons: dict[int, str] = {}
+    for positions in groups.values():
+        if len(positions) < 2:
+            continue
+        representative = positions[0]
+        for position in positions:
+            if "." in str(hint_records[position]["function_name"]):
+                representative = position
+                break
+        reason_parts: list[str] = []
+        for position in positions:
+            record = hint_records[position]
+            reason = str(record["hint"].get("reason") or "")
+            if position == representative:
+                reason_parts.insert(0, reason)
+            else:
+                alias = record["function_name"]
+                reason_parts.append(f"duplicate hint for `{alias}` resolving to the same definition: {reason}")
+                skip_positions.add(position)
+        merged_reasons[representative] = "\n".join(part for part in reason_parts if part)
+
+    for position, record in enumerate(hint_records):
+        if position in skip_positions:
+            continue
+        hint_index = record["hint_index"]
+        hint = record["hint"]
+        function_name = record["function_name"]
+        file_result = record["file_result"]
+        hint_source = record["hint_source"]
+        hint_language = record["hint_language"]
         skeleton = str(hint.get("skeleton") or "")
         source_text = _read_source(hint_source)
         health = _contract_health(file_result)
@@ -856,7 +980,7 @@ def build_migration_execution(
                 "audit_priority": str(hint.get("priority") or "review"),
                 "migration_hint_index": hint_index,
             },
-            "selection": {"selected": True, "reason": redact_secrets(str(hint.get("reason") or ""))},
+            "selection": {"selected": True, "reason": redact_secrets(merged_reasons.get(position, str(hint.get("reason") or "")))},
             "extracted_contract": _extracted_contract(skeleton),
             "generated_mm": {"path": None, "sha256": None, "origin": "generated_skeleton", "healed_source_path": None},
             "heal": {"attempted": heal_attempted, "errors": [], "healed_file": None},
