@@ -2057,12 +2057,26 @@ def _rust_collection_len_division_issues(
             return operator is not None and text(operator) == "-" and primitive_integer_syntax(argument)
         return False
 
+    shadowed_identifiers: set[str] = set()
+
+    def collect_shadowed_identifiers(node) -> None:
+        if node.type == "let_declaration":
+            pattern = node.child_by_field_name("pattern")
+            if pattern is not None:
+                shadowed_identifiers.update(re.findall(r"[A-Za-z_]\w*", text(pattern)))
+        for child in node.named_children:
+            collect_shadowed_identifiers(child)
+
+    collect_shadowed_identifiers(block)
+
     def primitive_integer_numerator(node) -> bool:
         if primitive_integer_syntax(node):
             return True
         if node is None or node.type != "identifier":
             return False
         name = text(node)
+        if name in shadowed_identifiers:
+            return False
         if normalized_types.get(name, "") in integer_types:
             return True
         return False

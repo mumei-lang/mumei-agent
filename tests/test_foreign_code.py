@@ -8518,8 +8518,19 @@ fn f(recipients: &[String], cond: bool) -> Amount {
     }
 }
 """
+    tuple_numerator_shadow = """struct Amount;
+impl std::ops::Div<usize> for Amount {
+    type Output = Amount;
+    fn div(self, _rhs: usize) -> Amount { Amount }
+}
+fn f(amount: i64, xs: &[i64]) -> Amount {
+    let (amount,) = (Amount,);
+    amount / xs.len()
+}
+"""
     assert not [i for i in _detect_safety_issues(nested_shadowing, "rust") if "divide" in i.message]
     assert not [i for i in _detect_safety_issues(nested_custom_shadow, "rust") if "divide" in i.message]
+    assert not [i for i in _detect_safety_issues(tuple_numerator_shadow, "rust") if "divide" in i.message]
     assert [i for i in _detect_safety_issues(primitive_parameter, "rust") if "divide" in i.message]
 
 
