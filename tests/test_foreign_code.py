@@ -8362,6 +8362,398 @@ def test_go_division_by_a_cast_length_respects_the_length_guard() -> None:
     assert errors(unguarded)
 
 
+def test_go_division_in_assignment_uses_collection_length_guard_facts() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    unguarded = """package main
+func average(total int64, records []int64) int64 {
+    average := total / int64(len(records))
+    return average
+}
+"""
+    guarded = """package main
+func average(total int64, records []int64) int64 {
+    if len(records) == 0 {
+        return 0
+    }
+    average := total / int64(len(records))
+    return average
+}
+"""
+    unguarded_issues = [i for i in _detect_safety_issues(unguarded, "go") if "divide" in i.message]
+    guarded_issues = [i for i in _detect_safety_issues(guarded, "go") if "divide" in i.message]
+    assert any("int64(len(records))" in i.message for i in unguarded_issues)
+    assert guarded_issues == []
+
+    non_length = """package main
+func average(total int64, divisor int64) int64 {
+    average := total / divisor
+    return average
+}
+"""
+    assert not [i for i in _detect_safety_issues(non_length, "go") if "divide" in i.message]
+
+    mixed = """package main
+func mixed(total int, xs []int, d int) int {
+    if len(xs) == 0 { return 0 }
+    q := total/len(xs) + total/d
+    return q
+}
+"""
+    fixed_array = """package main
+func fixed(total int, xs [4]int) int {
+    q := total / len(xs)
+    return q
+}
+"""
+    fixed_minus = """package main
+func fixedminus(total int, xs [4]int, skip int) int {
+    q := total / (len(xs) - skip)
+    return q
+}
+"""
+    fixed_shadowed = """package main
+func fixedshadow(total int, xs [4]int, cond bool) int {
+    if cond { xs := []int{}; q := total / len(xs); return q }
+    return 0
+}
+"""
+    assert not [i for i in _detect_safety_issues(mixed, "go") if "divide" in i.message]
+    assert not [i for i in _detect_safety_issues(fixed_array, "go") if "divide" in i.message]
+    fixed_minus_one = """package main
+func fixedminusone(total int, xs [4]int) int {
+    q := total / (len(xs) - 1)
+    return q
+}
+"""
+    fixed_double_paren = """package main
+func fixeddoubleparen(total int, xs [4]int) int {
+    q := total / ((len(xs)))
+    return q
+}
+"""
+    closed_block_shadow = """package main
+func closedblockshadow(total int, xs [4]int, cond bool) int {
+    if cond { xs := []int{}; _ = xs }
+    q := total / len(xs)
+    return q
+}
+"""
+    assert [i for i in _detect_safety_issues(fixed_minus, "go") if "divide" in i.message]
+    assert [i for i in _detect_safety_issues(fixed_shadowed, "go") if "divide" in i.message]
+    assert not [i for i in _detect_safety_issues(fixed_minus_one, "go") if "divide" in i.message]
+    range_shadow = """package main
+func rangeshadow(total int, xs [4]int) int {
+    for _, xs := range [][]int{{}} { q := total / len(xs); return q }
+    return 0
+}
+"""
+    switch_shadow = """package main
+func switchshadow(total int, xs [4]int) int {
+    switch xs := []int{}; true { case true: q := total / len(xs); return q }
+    return 0
+}
+"""
+    assert not [i for i in _detect_safety_issues(fixed_double_paren, "go") if "divide" in i.message]
+    assert not [i for i in _detect_safety_issues(closed_block_shadow, "go") if "divide" in i.message]
+    range_assign_same_array = """package main
+func rangereassign(total int, xs [4]int, arrays [][4]int) int {
+    for _, xs = range arrays { q := total / len(xs); return q }
+    return 0
+}
+"""
+    assert [i for i in _detect_safety_issues(range_shadow, "go") if "divide" in i.message]
+    assert [i for i in _detect_safety_issues(switch_shadow, "go") if "divide" in i.message]
+    assert not [i for i in _detect_safety_issues(range_assign_same_array, "go") if "divide" in i.message]
+
+
+def test_rust_collection_len_divisor_detected_only_without_empty_guard() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    unguarded = """pub fn split_payment(amount_cents: i64, recipients: &[String]) -> i64 {
+    amount_cents / recipients.len() as i64
+}
+"""
+    guarded = """pub fn split_payment(amount_cents: i64, recipients: &[String]) -> i64 {
+    if recipients.is_empty() {
+        return 0;
+    }
+    amount_cents / recipients.len() as i64
+}
+"""
+    unguarded_issues = [i for i in _detect_safety_issues(unguarded, "rust") if "divide" in i.message]
+    guarded_issues = [i for i in _detect_safety_issues(guarded, "rust") if "divide" in i.message]
+    assert any("recipients.len()" in i.message for i in unguarded_issues)
+    assert guarded_issues == []
+
+
+
+def test_rust_collection_len_division_respects_guard_position_and_shadowing() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    division_before_guard = """pub fn split(amount: i64, recipients: &[String]) -> i64 {
+    let first = amount / recipients.len() as i64;
+    if recipients.is_empty() { return 0; }
+    let _len = recipients.len();
+    first
+}
+"""
+    shadowed_receiver = """pub fn split(amount: i64, recipients: &[String]) -> i64 {
+    if recipients.is_empty() { return 0; }
+    let recipients = &[];
+    amount / recipients.len() as i64
+}
+"""
+    for source in (division_before_guard, shadowed_receiver):
+        assert [i for i in _detect_safety_issues(source, "rust") if "divide" in i.message]
+
+
+def test_rust_collection_len_guard_must_dominate_and_receiver_stays_immutable() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    nested_guard = """pub fn split(amount: i64, recipients: &[String], cond: bool) -> i64 {
+    if cond {
+        if recipients.is_empty() { return 0; }
+    }
+    amount / recipients.len() as i64
+}
+"""
+    mutable_receiver = """pub fn split(amount: i64, recipients: &mut Vec<String>) -> i64 {
+    if recipients.is_empty() { return 0; }
+    recipients.clear();
+    amount / recipients.len() as i64
+}
+"""
+    for source in (nested_guard, mutable_receiver):
+        assert [i for i in _detect_safety_issues(source, "rust") if "divide" in i.message]
+
+
+def test_rust_collection_len_division_requires_primitive_integer_numerator() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    operator_overloaded = """struct Amount;
+impl std::ops::Div<usize> for Amount {
+    type Output = Amount;
+    fn div(self, _rhs: usize) -> Amount { Amount }
+}
+fn f(amount: Amount, recipients: &[String]) -> Amount {
+    amount / recipients.len()
+}
+"""
+    primitive_parameter = """fn f(amount: i64, recipients: &[String]) -> i64 {
+    amount / recipients.len() as i64
+}
+"""
+    nested_shadowing = """struct Amount;
+impl std::ops::Div<usize> for Amount {
+    type Output = Amount;
+    fn div(self, _rhs: usize) -> Amount { Amount }
+}
+fn f(recipients: &[String], cond: bool) -> Amount {
+    let x = Amount;
+    if cond {
+        let x = 1i64;
+    }
+    x / recipients.len()
+}
+"""
+    assert not [i for i in _detect_safety_issues(operator_overloaded, "rust") if "divide" in i.message]
+    nested_custom_shadow = """fn f(recipients: &[String], cond: bool) {
+    let x = 1i64;
+    if cond {
+        let x = Amount;
+        x / recipients.len()
+    }
+}
+"""
+    tuple_numerator_shadow = """struct Amount;
+impl std::ops::Div<usize> for Amount {
+    type Output = Amount;
+    fn div(self, _rhs: usize) -> Amount { Amount }
+}
+fn f(amount: i64, xs: &[i64]) -> Amount {
+    let (amount,) = (Amount,);
+    amount / xs.len()
+}
+"""
+    assert not [i for i in _detect_safety_issues(nested_shadowing, "rust") if "divide" in i.message]
+    assert not [i for i in _detect_safety_issues(nested_custom_shadow, "rust") if "divide" in i.message]
+    assert not [i for i in _detect_safety_issues(tuple_numerator_shadow, "rust") if "divide" in i.message]
+    assert [i for i in _detect_safety_issues(primitive_parameter, "rust") if "divide" in i.message]
+
+
+def test_rust_collection_len_division_syntax_and_guard_edge_cases() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    parenthesized = """fn f(total: i64, xs: &[i64]) -> i64 {
+    total / (xs.len() as i64)
+}
+"""
+    tail_return_guard = """fn f(total: i64, xs: &[i64]) -> i64 {
+    if xs.is_empty() { return 0 }
+    total / xs.len() as i64
+}
+"""
+    loop_reassigned = """fn f(total: i64, mut xs: &[i64]) -> i64 {
+    if xs.is_empty() { return 0 }
+    loop {
+        let y = total / xs.len() as i64;
+        xs = &[];
+        return y
+    }
+}
+"""
+    fixed_array = """fn f(total: i64, xs: &[i64; 4]) -> i64 {
+    total / xs.len() as i64
+}
+"""
+    tuple_shadow = """fn f(total: i64, xs: &[i64]) -> i64 {
+    if xs.is_empty() { return 0 }
+    let (xs,) = (&[],);
+    total / xs.len() as i64
+}
+"""
+    assert [i for i in _detect_safety_issues(parenthesized, "rust") if "divide" in i.message]
+    assert not [i for i in _detect_safety_issues(tail_return_guard, "rust") if "divide" in i.message]
+    write_after_division = """fn f(total: i64, mut xs: &[i64]) -> i64 {
+    if xs.is_empty() { return 0 }
+    let y = total / xs.len() as i64;
+    xs = &[];
+    y
+}
+"""
+    struct_field_not_binding = """struct Config { xs: Vec<i64> }
+fn f(total: i64, xs: &[i64], config: Config) -> i64 {
+    if xs.is_empty() { return 0 }
+    let Config { xs: labels } = config;
+    let _ = labels;
+    total / xs.len() as i64
+}
+"""
+    assert [i for i in _detect_safety_issues(loop_reassigned, "rust") if "divide" in i.message]
+    assert not [i for i in _detect_safety_issues(fixed_array, "rust") if "divide" in i.message]
+    assert [i for i in _detect_safety_issues(tuple_shadow, "rust") if "divide" in i.message]
+    mutable_reborrow = """fn f(total: i64, mut xs: &[i64]) -> i64 {
+    if xs.is_empty() { return 0 }
+    std::mem::replace(&mut xs, &[]);
+    total / xs.len() as i64
+}
+"""
+    struct_shorthand_shadow = """struct Config { xs: Vec<i64> }
+fn f(total: i64, xs: &[i64], config: Config) -> i64 {
+    if xs.is_empty() { return 0 }
+    let Config { xs } = config;
+    total / xs.len() as i64
+}
+"""
+    closure_reexecution = """fn f(total: i64, mut xs: &[i64]) -> impl FnMut() -> i64 {
+    if xs.is_empty() { panic!() }
+    move || {
+        let y = total / xs.len() as i64;
+        xs = &[];
+        y
+    }
+}
+"""
+    assert not [i for i in _detect_safety_issues(write_after_division, "rust") if "divide" in i.message]
+    assert not [i for i in _detect_safety_issues(struct_field_not_binding, "rust") if "divide" in i.message]
+    assert [i for i in _detect_safety_issues(mutable_reborrow, "rust") if "divide" in i.message]
+    exiting_branch_reborrow = """fn f(total: i64, mut xs: &[i64], cond: bool) -> i64 {
+    if xs.is_empty() { return 0 }
+    if cond { std::mem::replace(&mut xs, &[]); return 0 }
+    total / xs.len() as i64
+}
+"""
+    parenthesized_reborrow = """fn f(total: i64, mut xs: &[i64]) -> i64 {
+    if xs.is_empty() { return 0 }
+    std::mem::replace(&mut (xs), &[]);
+    total / xs.len() as i64
+}
+"""
+    assert [i for i in _detect_safety_issues(struct_shorthand_shadow, "rust") if "divide" in i.message]
+    assert [i for i in _detect_safety_issues(closure_reexecution, "rust") if "divide" in i.message]
+    closed_scope_shadow = """fn f(total: i64, xs: &[i64], cond: bool) -> i64 {
+    if xs.is_empty() { return 0 }
+    if cond { let xs = &[]; let _ = xs; }
+    total / xs.len() as i64
+}
+"""
+    active_scope_shadow = """fn f(total: i64, xs: &[i64], cond: bool) -> i64 {
+    if xs.is_empty() { return 0 }
+    if cond { let xs = &[]; return total / xs.len() as i64 }
+    0
+}
+"""
+    assert not [i for i in _detect_safety_issues(exiting_branch_reborrow, "rust") if "divide" in i.message]
+    assert [i for i in _detect_safety_issues(parenthesized_reborrow, "rust") if "divide" in i.message]
+    if_let_shadow = """fn f(amount: i64, xs: &[i64], opt: Option<&[i64]>) -> i64 {
+    if xs.is_empty() { return 0 }
+    if let Some(xs) = opt { return amount / xs.len() as i64 }
+    0
+}
+"""
+    assert not [i for i in _detect_safety_issues(closed_scope_shadow, "rust") if "divide" in i.message]
+    assert [i for i in _detect_safety_issues(active_scope_shadow, "rust") if "divide" in i.message]
+    exiting_branch_write_before_return = """fn f(amount: i64, mut xs: &[i64], cond: bool) -> i64 {
+    if xs.is_empty() { return 0 }
+    if cond { xs = &[]; return amount / xs.len() as i64 }
+    amount / xs.len() as i64
+}
+"""
+    match_guard_not_binding = """fn f(amount: i64, mut xs: &[i64], n: usize) -> i64 {
+    if xs.is_empty() { return 0 }
+    match n {
+        m if xs.len() == m => { xs = &[]; amount / xs.len() as i64 }
+        _ => 0
+    }
+}
+"""
+    assert [i for i in _detect_safety_issues(if_let_shadow, "rust") if "divide" in i.message]
+    assignment_rhs_before_write = """fn f(amount: i64, mut xs: &[i64], cond: bool) -> i64 {
+    if xs.is_empty() { return 0 }
+    if cond {
+        xs = &xs[..amount as usize / xs.len()];
+        return amount / xs.len() as i64
+    }
+    amount / xs.len() as i64
+}
+"""
+    rhs_divisions = [
+        i
+        for i in _detect_safety_issues(assignment_rhs_before_write, "rust")
+        if "divide" in i.message
+    ]
+    assert [i for i in _detect_safety_issues(exiting_branch_write_before_return, "rust") if "divide" in i.message]
+    assert [i for i in _detect_safety_issues(match_guard_not_binding, "rust") if "divide" in i.message]
+    assert len(rhs_divisions) == 1
+    rhs_only = """fn f(amount: i64, mut xs: &[i64]) -> i64 {
+    if xs.is_empty() { return 0 }
+    xs = &xs[..amount as usize / xs.len()];
+    0
+}
+"""
+    assert not [i for i in _detect_safety_issues(rhs_only, "rust") if "divide" in i.message]
+    match_guard_without_write = """fn f(amount: i64, xs: &[i64], n: usize) -> i64 {
+    if xs.is_empty() { return 0 }
+    match n {
+        m if xs.len() == m => amount / xs.len() as i64,
+        _ => 0
+    }
+}
+"""
+    assert not [i for i in _detect_safety_issues(match_guard_without_write, "rust") if "divide" in i.message]
+
+
+def test_rust_arbitrary_member_divisor_remains_conservative() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """pub fn ratio(total: i64, stats: Stats) -> i64 {
+    total / stats.count
+}
+"""
+    assert not [i for i in _detect_safety_issues(source, "rust") if "divide" in i.message]
+
+
 def test_go_guard_on_a_length_does_not_cover_an_8_bit_cast_of_it() -> None:
     mumei = MagicMock()
     mumei.verify.return_value = {"success": True, "report": {"status": "ok"}, "stdout": "{}", "stderr": ""}

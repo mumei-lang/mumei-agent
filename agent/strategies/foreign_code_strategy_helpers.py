@@ -1987,6 +1987,405 @@ def _rust_guarded_indices(body: str) -> set[str]:
     return guarded
 
 
+def _rust_collection_len_division_issues(
+    function_name: str, body: str, raw_param_types: dict[str, str] | None = None
+) -> list[ForeignSafetyIssue]:
+    """Find integer division/modulo by simple collection ``len()`` in Rust.
+
+    Unlike the expression-level heuristic, this scan is positional: an empty
+    check suppresses a finding only when it is a top-level early-exit guard
+    that textually dominates the division. Suppression is further limited to
+    immutable reference parameters whose raw type is still visible after
+    shadowing analysis. The finding itself is type-independent because zero
+    integer division panics regardless of whether the receiver is mutable.
+    """
+    parser = tree_sitter_extract._get_parser("rust")
+    if parser is None:
+        return []
+    source = f"fn __mumei_len_division_scan() {{\n{body}\n}}"
+    source_bytes = source.encode("utf-8")
+    try:
+        tree = parser.parse(source_bytes)
+    except Exception:
+        return []
+    if tree.root_node.has_error:
+        return []
+    function = next(
+        (child for child in tree.root_node.named_children if child.type == "function_item"),
+        None,
+    )
+    block = function.child_by_field_name("body") if function is not None else None
+    if block is None:
+        return []
+
+    def text(node) -> str:
+        return source_bytes[node.start_byte : node.end_byte].decode("utf-8")
+
+    normalized_types = {
+        name: re.sub(r"\s+", "", type_text.strip())
+        for name, type_text in (raw_param_types or {}).items()
+    }
+    immutable_receivers = {
+        name
+        for name, type_text in normalized_types.items()
+        if re.fullmatch(r"&(?:'\w+)?(?:\[[^\]]+\]|Vec<.+>)", type_text)
+    }
+
+    def fixed_len_is_nonzero(receiver: str) -> bool:
+        type_text = normalized_types.get(receiver, "")
+        array = re.fullmatch(r"&(?:'\w+)?(?:mut)?\[[^;]+;(\d+)\]", type_text)
+        return array is not None and int(array.group(1)) > 0
+
+    integer_types = {
+        "i8", "i16", "i32", "i64", "i128", "isize",
+        "u8", "u16", "u32", "u64", "u128", "usize",
+    }
+
+    def primitive_integer_type(type_node) -> bool:
+        return type_node is not None and text(type_node) in integer_types
+
+    def primitive_integer_syntax(node) -> bool:
+        if node is None:
+            return False
+        if node.type == "integer_literal":
+            return True
+        if node.type == "type_cast_expression":
+            return primitive_integer_type(node.child_by_field_name("type"))
+        if node.type == "unary_expression":
+            operator = node.child_by_field_name("operator")
+            argument = node.child_by_field_name("argument")
+            return operator is not None and text(operator) == "-" and primitive_integer_syntax(argument)
+        return False
+
+    def pattern_binding_identifiers(pattern) -> set[str]:
+        if pattern is None:
+            return set()
+        if pattern.type == "identifier":
+            return {text(pattern)}
+        if pattern.type == "shorthand_field_identifier":
+            return {text(pattern)}
+        if pattern.type == "field_pattern":
+            nested = pattern.child_by_field_name("pattern")
+            if nested is not None:
+                return pattern_binding_identifiers(nested)
+            return {
+                text(child)
+                for child in pattern.named_children
+                if child.type == "shorthand_field_identifier"
+            }
+        if pattern.type == "match_pattern":
+            return (
+                pattern_binding_identifiers(pattern.named_children[0])
+                if pattern.named_children
+                else set()
+            )
+        if pattern.type == "tuple_struct_pattern":
+            names: set[str] = set()
+            for child in pattern.named_children[1:]:
+                names.update(pattern_binding_identifiers(child))
+            return names
+        names = set()
+        for child in pattern.named_children:
+            if child.type in {"type_identifier", "field_identifier"}:
+                continue
+            names.update(pattern_binding_identifiers(child))
+        return names
+
+    binding_scopes: list[tuple[str, int, int, int]] = []
+
+    def enclosing_block(node):
+        current = node.parent
+        while current is not None:
+            if current.type == "block":
+                return current
+            current = current.parent
+        return block
+
+    def record_binding(name: str, start: int, scope) -> None:
+        binding_scopes.append((name, start, scope.start_byte, scope.end_byte))
+
+    def collect_binding_scopes(node) -> None:
+        if node.type == "let_declaration":
+            scope = enclosing_block(node)
+            for name in pattern_binding_identifiers(node.child_by_field_name("pattern")):
+                record_binding(name, node.end_byte, scope)
+        elif node.type == "for_expression":
+            scope = node.child_by_field_name("body")
+            if scope is not None:
+                for name in pattern_binding_identifiers(node.child_by_field_name("pattern")):
+                    record_binding(name, scope.start_byte, scope)
+        elif node.type in {"if_expression", "while_expression"}:
+            condition = node.child_by_field_name("condition")
+            scope = (
+                node.child_by_field_name("consequence")
+                if node.type == "if_expression"
+                else node.child_by_field_name("body")
+            )
+            if (
+                condition is not None
+                and condition.type == "let_condition"
+                and scope is not None
+            ):
+                for name in pattern_binding_identifiers(condition.child_by_field_name("pattern")):
+                    record_binding(name, scope.start_byte, scope)
+        elif node.type == "closure_expression":
+            scope = node.child_by_field_name("body")
+            parameters = node.child_by_field_name("parameters")
+            if scope is not None and parameters is not None:
+                for parameter in parameters.named_children:
+                    for name in pattern_binding_identifiers(parameter):
+                        record_binding(name, scope.start_byte, scope)
+        elif node.type == "match_arm":
+            scope = node.child_by_field_name("value")
+            pattern = node.child_by_field_name("pattern")
+            if scope is not None and pattern is not None:
+                for name in pattern_binding_identifiers(pattern):
+                    record_binding(name, scope.start_byte, scope)
+        for child in node.named_children:
+            collect_binding_scopes(child)
+
+    collect_binding_scopes(block)
+
+    def is_shadowed_at(name: str, position: int) -> bool:
+        return any(
+            binding_name == name and scope_start <= position < scope_end and position >= start
+            for binding_name, start, scope_start, scope_end in binding_scopes
+        )
+
+    def primitive_integer_numerator(node) -> bool:
+        if primitive_integer_syntax(node):
+            return True
+        if node is None or node.type != "identifier":
+            return False
+        name = text(node)
+        if is_shadowed_at(name, node.start_byte):
+            return False
+        if normalized_types.get(name, "") in integer_types:
+            return True
+        return False
+
+    def simple_len_call(node) -> str | None:
+        if node is None or node.type != "call_expression":
+            return None
+        function_node = node.child_by_field_name("function")
+        if function_node is None or function_node.type != "field_expression":
+            return None
+        value = function_node.child_by_field_name("value")
+        field = function_node.child_by_field_name("field")
+        if value is None or field is None or text(field) != "len":
+            return None
+        return text(value) if value.type == "identifier" else None
+
+    def len_divisor_receiver(node) -> str | None:
+        if node is None:
+            return None
+        direct = simple_len_call(node)
+        if direct is not None:
+            return direct
+        if node.type == "parenthesized_expression" and node.named_children:
+            return len_divisor_receiver(node.named_children[0])
+        if node.type != "type_cast_expression":
+            return None
+        cast_type = node.child_by_field_name("type")
+        if cast_type is None or not re.fullmatch(
+            r"(?:i|u)(?:64|128|size)", text(cast_type)
+        ):
+            return None
+        return simple_len_call(node.child_by_field_name("value"))
+
+    def guard_receiver(condition) -> str | None:
+        if condition is None:
+            return None
+        if condition.type == "call_expression":
+            function_node = condition.child_by_field_name("function")
+            if function_node is None or function_node.type != "field_expression":
+                return None
+            value = function_node.child_by_field_name("value")
+            field = function_node.child_by_field_name("field")
+            if value is not None and field is not None and text(field) == "is_empty" and value.type == "identifier":
+                return text(value)
+            return None
+        if condition.type == "binary_expression":
+            left = condition.child_by_field_name("left")
+            right = condition.child_by_field_name("right")
+            operator = condition.child_by_field_name("operator")
+            if operator is not None and text(operator) == "==" and right is not None and text(right).strip() == "0":
+                return simple_len_call(left)
+        return None
+
+    def exits_directly(consequence) -> bool:
+        if consequence is None or consequence.type != "block":
+            return False
+
+        def is_exit(expression) -> bool:
+            if expression.type == "return_expression":
+                return True
+            if expression.type == "macro_invocation":
+                macro = expression.child_by_field_name("macro")
+                return macro is not None and text(macro) in {"panic", "unreachable"}
+            return False
+
+        for statement in consequence.named_children:
+            if is_exit(statement):
+                return True
+            if statement.type == "expression_statement" and statement.named_children:
+                if is_exit(statement.named_children[0]):
+                    return True
+        return False
+
+    guards: list[tuple[str, int, int]] = []
+    for statement in block.named_children:
+        if statement.type != "expression_statement" or not statement.named_children:
+            continue
+        if_expression = statement.named_children[0]
+        if if_expression.type != "if_expression":
+            continue
+        receiver = guard_receiver(if_expression.child_by_field_name("condition"))
+        if receiver is None or not exits_directly(if_expression.child_by_field_name("consequence")):
+            continue
+        guards.append((receiver, statement.start_byte, statement.end_byte))
+
+    def exiting_branch_ranges(node) -> tuple[tuple[int, int], ...]:
+        ranges: list[tuple[int, int]] = []
+        current = node.parent
+        while current is not None:
+            if current.type == "if_expression":
+                consequence = current.child_by_field_name("consequence")
+                if (
+                    consequence is not None
+                    and consequence.start_byte <= node.start_byte < consequence.end_byte
+                    and exits_directly(consequence)
+                ):
+                    ranges.append((consequence.start_byte, consequence.end_byte))
+            current = current.parent
+        return tuple(ranges)
+
+    def receiver_write_positions(node, receiver: str, start: int) -> list[tuple[int, tuple[tuple[int, int], ...]]]:
+        positions: list[tuple[int, tuple[tuple[int, int], ...]]] = []
+        if node.start_byte < start:
+            # The guard itself ends at ``start``; only later writes matter.
+            if node.end_byte <= start:
+                return positions
+
+        def record_write(position: int) -> None:
+            positions.append((position, exiting_branch_ranges(node)))
+
+        if node.type == "assignment_expression":
+            left = node.child_by_field_name("left")
+            if (
+                left is not None
+                and left.type == "identifier"
+                and text(left) == receiver
+                and not is_shadowed_at(receiver, node.start_byte)
+            ):
+                # The right-hand side is evaluated before the assignment takes effect.
+                record_write(node.end_byte)
+        if node.type == "reference_expression":
+            value = node.child_by_field_name("value")
+            while value is not None and value.type == "parenthesized_expression" and value.named_children:
+                value = value.named_children[0]
+            if (
+                value is not None
+                and value.type == "identifier"
+                and text(value) == receiver
+                and not is_shadowed_at(receiver, node.start_byte)
+                and any(child.type == "mutable_specifier" for child in node.children)
+            ):
+                record_write(node.start_byte)
+        for child in node.named_children:
+            positions.extend(receiver_write_positions(child, receiver, start))
+        return positions
+
+    def enclosing_loops(node) -> list:
+        loops = []
+        current = node.parent
+        while current is not None:
+            if current.type in {"loop_expression", "while_expression", "for_expression"}:
+                loops.append(current)
+            current = current.parent
+        return loops
+
+    def inside_closure(node) -> bool:
+        current = node.parent
+        while current is not None:
+            if current.type == "closure_expression":
+                return True
+            current = current.parent
+        return False
+
+    def suppressed(node, receiver: str) -> bool:
+        if receiver not in immutable_receivers or inside_closure(node):
+            return False
+        for guard_receiver_name, _guard_start, guard_end in guards:
+            if guard_receiver_name != receiver or guard_end > node.start_byte:
+                continue
+            if is_shadowed_at(receiver, node.start_byte):
+                continue
+            writes = receiver_write_positions(block, receiver, guard_end)
+
+            def write_is_relevant(position: int, branches: tuple[tuple[int, int], ...]) -> bool:
+                return not any(
+                    branch_start <= position < branch_end
+                    and not (branch_start <= node.start_byte < branch_end)
+                    for branch_start, branch_end in branches
+                )
+
+            if any(
+                position < node.start_byte and write_is_relevant(position, branches)
+                for position, branches in writes
+            ):
+                continue
+            loops = enclosing_loops(node)
+            if loops and any(
+                loop.start_byte <= position < loop.end_byte
+                and write_is_relevant(position, branches)
+                for loop in loops
+                for position, branches in writes
+            ):
+                continue
+            return True
+        return False
+
+    issues: list[ForeignSafetyIssue] = []
+    seen: set[tuple[str, int]] = set()
+
+    def visit(node) -> None:
+        if node is not block and node.type == "function_item":
+            return
+        if node.type == "binary_expression":
+            operator = node.child_by_field_name("operator")
+            if operator is not None and text(operator) in {"/", "%"}:
+                receiver = len_divisor_receiver(node.child_by_field_name("right"))
+                if (
+                    receiver is not None
+                    and primitive_integer_numerator(node.child_by_field_name("left"))
+                    and not (
+                        fixed_len_is_nonzero(receiver)
+                        and not is_shadowed_at(receiver, node.start_byte)
+                    )
+                    and not suppressed(node, receiver)
+                    and (receiver, node.start_byte) not in seen
+                ):
+                    seen.add((receiver, node.start_byte))
+                    divisor = f"{receiver}.len()"
+                    issues.append(
+                        ForeignSafetyIssue(
+                            function_name=function_name,
+                            message=(
+                                f"Rust function `{function_name}` can divide by `{divisor}` "
+                                f"without a non-zero contract (Z3 counterexample: {divisor}=0)"
+                            ),
+                            required_contracts=(f"{divisor} != 0",),
+                            counterexample={divisor: 0},
+                        )
+                    )
+        for child in node.named_children:
+            visit(child)
+
+    visit(block)
+    return issues
+
+
 def _rust_doc_comment_nonzero_params(source: str, name: str) -> set[str]:
     """Extract parameter names whose doc comment states they must be non-zero.
 
@@ -4028,6 +4427,14 @@ def _detect_block_safety_issues(
             for p in redeclared:
                 block_param_types.pop(p, None)
                 block_raw_types.pop(p, None)
+            if label == "Rust":
+                issues.extend(
+                    _rust_collection_len_division_issues(
+                        name,
+                        body,
+                        (per_function_raw_param_types or {}).get(block_idx),
+                    )
+                )
             block_cast_sub_issues = _cast_and_subtraction_issues(
                 name,
                 (
@@ -5469,6 +5876,101 @@ def _detect_go_safety_issues(
                         issue for issue in expr_issues if not _is_sort_interface_index_issue(issue)
                     ]
                 issues.extend(expr_issues)
+            existing_division_messages = {
+                issue.message for issue in issues[fn_issues_start:] if "can divide by" in issue.message
+            }
+            for expression, shadowed_at_use, expression_position in _go_assignment_division_expressions(body):
+                facts = (
+                    flow.facts_for_assignment_expression(expression, expression_position)
+                    if flow is not None
+                    else None
+                )
+                expr_constants = dict(known_constants or {})
+                if flow is not None:
+                    expr_constants.update(flow.constants)
+                if facts is not None:
+                    expr_constants.update(facts.consts)
+                expr_nonzero = guaranteed_nonzero | (facts.nonzero if facts is not None else set())
+                expr_guarded = guarded_indices | (
+                    facts.bounded_indices(_go_index_accesses(expression))
+                    if facts is not None
+                    else set()
+                )
+                expr_issues = _issues_for_expression(
+                    fn.name,
+                    expression,
+                    "Go",
+                    dereference_values=set(),
+                    local_names=local_names,
+                    param_types=param_types,
+                    mapping_names=go_map_names,
+                    known_constants=expr_constants,
+                    parallel_slicing=parallel_slicing,
+                    guaranteed_nonzero=expr_nonzero,
+                    float_variables=float_variables,
+                    known_strings=known_strings,
+                    known_array_keys=global_array_keys,
+                    known_types=known_types,
+                    float_arrays=go_float_arrays,
+                    guarded_indices=expr_guarded,
+                    unsigned_locals=unsigned_vars,
+                    source=source,
+                    params_text=fn.params_text,
+                )
+                def simple_length_receiver(contract: str) -> str | None:
+                    value = re.sub(r"\s*!=\s*0\s*$", "", contract).strip()
+                    while True:
+                        stripped = _strip_outer_parentheses(value)
+                        cast = re.fullmatch(r"(\w+)\s*\((.*)\)", stripped)
+                        if cast is not None and _NUMERIC_CAST_NAME.fullmatch(cast.group(1)):
+                            stripped = cast.group(2).strip()
+                        if stripped == value:
+                            value = stripped
+                            break
+                        value = stripped
+                    length = re.fullmatch(r"len\(\s*([A-Za-z_]\w*)\s*\)", value)
+                    return length.group(1) if length is not None else None
+
+                def fixed_array_length(name: str) -> int | None:
+                    array_type = re.fullmatch(
+                        r"\*?\[(0*[1-9]\d*)\][^\s]+",
+                        re.sub(r"\s+", "", param_types.get(name, "")),
+                    )
+                    return int(array_type.group(1)) if array_type is not None else None
+
+                def provably_nonzero_fixed_length_expression(contract: str) -> bool:
+                    value = re.sub(r"\s*!=\s*0\s*$", "", contract).strip()
+                    while True:
+                        stripped = _strip_outer_parentheses(value)
+                        if stripped == value:
+                            break
+                        value = stripped
+                    subtraction = re.fullmatch(
+                        r"len\(\s*([A-Za-z_]\w*)\s*\)\s*-\s*(\d+)",
+                        value,
+                    )
+                    if subtraction is None:
+                        return False
+                    length = fixed_array_length(subtraction.group(1))
+                    return length is not None and int(subtraction.group(2)) < length
+
+                for issue in expr_issues:
+                    if "can divide by" not in issue.message or issue.message in existing_division_messages:
+                        continue
+                    contract = issue.required_contracts[0] if issue.required_contracts else ""
+                    if "len(" not in contract:
+                        continue
+                    length_receiver = simple_length_receiver(contract)
+                    if (
+                        length_receiver is not None
+                        and fixed_array_length(length_receiver) is not None
+                        and length_receiver not in shadowed_at_use
+                    ):
+                        continue
+                    if provably_nonzero_fixed_length_expression(contract):
+                        continue
+                    existing_division_messages.add(issue.message)
+                    issues.append(issue)
             if flow is not None:
                 issues.extend(_dataflow_safety_issues(fn.name, flow))
             # Body-level scan for casts/subtractions outside return
@@ -6393,6 +6895,67 @@ def _is_float_expression(
     return False
 
 
+def _go_assignment_division_expressions(
+    body: str,
+) -> tuple[tuple[str, frozenset[str], tuple[int, int]], ...]:
+    """Return Go assignment RHSs with shadowed parameter names visible at each use.
+
+    Safety scanning historically followed return expressions only. Division by
+    a collection length in an intermediate assignment is the same runtime
+    operation, so collect just those RHS expressions syntax-aware-ly and let
+    the caller reuse the normal expression checker. Other divisors are ignored
+    to keep this a narrow recall fix rather than a broad new dataflow analysis.
+    """
+    tree = tree_sitter_extract.extract_statements(body, "go")
+    if tree is None:
+        return ()
+    expressions: list[tuple[str, frozenset[str], tuple[int, int]]] = []
+
+    def visit(
+        statements: tuple[tree_sitter_extract.Statement, ...],
+        inherited_shadowed: frozenset[str],
+    ) -> None:
+        shadowed = set(inherited_shadowed)
+        for statement in statements:
+            if statement.kind in {"define", "assign", "var"}:
+                for value_index, value in enumerate(statement.values):
+                    if "/" not in value and "%" not in value:
+                        continue
+                    findings = tree_sitter_extract.analyze_expression(value, "go")
+                    if findings is not None and any("len(" in divisor for divisor in findings.divisors):
+                        expressions.append((value, frozenset(shadowed), (statement.start, value_index)))
+            nested_shadowed = frozenset(shadowed)
+            if statement.kind in {"if", "for", "switch"}:
+                init_defined = {
+                    target
+                    for init in statement.init
+                    if init.kind in {"define", "var"}
+                    for target in init.targets
+                    if re.fullmatch(r"[A-Za-z_]\w*", target)
+                }
+                nested_shadowed = frozenset(shadowed | init_defined)
+            elif statement.kind == "range" and statement.operator == ":=":
+                range_defined = {
+                    target
+                    for target in statement.targets
+                    if re.fullmatch(r"[A-Za-z_]\w*", target)
+                }
+                nested_shadowed = frozenset(shadowed | range_defined)
+            visit(statement.init, frozenset(shadowed))
+            visit(statement.body, nested_shadowed)
+            visit(statement.orelse, nested_shadowed)
+            visit(statement.post, nested_shadowed)
+            if statement.kind in {"define", "var"}:
+                shadowed.update(
+                    target
+                    for target in statement.targets
+                    if re.fullmatch(r"[A-Za-z_]\w*", target)
+                )
+
+    visit(tree.statements, frozenset())
+    return tuple(dict.fromkeys(expressions))
+
+
 def _division_safety_issue(
     function_name: str,
     divisor: str,
@@ -6410,6 +6973,16 @@ def _division_safety_issue(
     # ``uintptr(len(locktab))`` and similar casts of compile-time ``len(...)``
     # evaluate to the array's non-zero length.
     stripped = _strip_outer_parentheses(divisor)
+    if label == "Rust":
+        compact = re.sub(r"\s+", "", stripped)
+        castless = re.sub(r"(?:as(?:i|u)(?:8|16|32|64|128|size))+$", "", compact)
+        if re.fullmatch(r"[A-Za-z_]\w*\.len\(\)", castless):
+            # ``xs.len() as i64`` is zero exactly when ``xs.len()`` is zero.
+            # Tree-sitter normalisation removes whitespace inside the cast, so
+            # recover the semantic length expression before the member-divisor
+            # noise filter below.
+            divisor = castless
+            stripped = castless
     # Every layer of a cast like ``int32(len(xs))``: a guard may name any of them.
     unwrapped = {divisor, stripped}
     while re.fullmatch(r"\w+\s*\(.*\)", stripped):
@@ -6439,6 +7012,11 @@ def _division_safety_issue(
         return None
     if float_variables and (divisor in float_variables or stripped in float_variables):
         # Go float division by zero produces +/-Inf or NaN, not a panic.
+        return None
+    is_simple_rust_len = label == "Rust" and re.fullmatch(r"[A-Za-z_]\w*\.len\(\)", stripped) is not None
+    if is_simple_rust_len:
+        # Positional ownership: ``_rust_collection_len_division_issues`` scans
+        # these divisors with guard dominance and shadowing information.
         return None
     if "." in divisor and (guaranteed_nonzero is None or (divisor not in guaranteed_nonzero and stripped not in guaranteed_nonzero)):
         # Member/selector divisors such as ``obj.b`` or ``time.Second`` that are
