@@ -10378,6 +10378,12 @@ import random
 def make_share_token():
     return {"session": {"token": "%012x" % int(random.random() * (1 << 48))}}
 ''',
+        '''
+import random
+
+def make_share_token():
+    return {"retry_token": "%012x" % int(random.random() * (1 << 48))}
+''',
     ]
 
     for source in negative_sources:
