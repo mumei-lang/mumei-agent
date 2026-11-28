@@ -938,6 +938,20 @@ def test_verify_downloaded_action_artifact_accepts_fixture_without_hidden_compan
     assert "hidden generated companion files verified: 0" in completed.stdout
 
 
+def test_verify_downloaded_action_artifact_rejects_companion_count_mismatch(tmp_path: Path) -> None:
+    artifact = tmp_path / "evidence"
+    _write_downloaded_action_artifact(artifact)
+    status_path = artifact / "migration-execution" / "status.json"
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    status["generated_artifacts_copied"] += 1
+    status_path.write_text(json.dumps(status), encoding="utf-8")
+
+    completed = _run_downloaded_artifact_verifier(artifact)
+
+    assert completed.returncode != 0
+    assert "file count changed" in completed.stderr
+
+
 def test_verify_downloaded_action_artifact_rejects_generated_hash_mismatch(tmp_path: Path) -> None:
     artifact = tmp_path / "evidence"
     _write_downloaded_action_artifact(artifact)
