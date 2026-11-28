@@ -9423,6 +9423,16 @@ func tokenTypeMatches(presented, stored string) bool {
 }
 """),
         ("go", """package main
+func apiKeyTypeMatches(presented, stored string) bool {
+    return presented == stored
+}
+"""),
+        ("go", """package main
+func tokenHeaderMatches(presented, stored string) bool {
+    return presented == stored
+}
+"""),
+        ("go", """package main
 func tokenMatches(presented, stored string) bool {
     return len(presented) == len(stored)
 }
@@ -9468,6 +9478,18 @@ def can_read(doc, api_key, token):
     return True
 """),
         ("python", """def token_type_matches(provided, expected):
+    for a, b in zip(provided, expected):
+        if a != b:
+            return False
+    return True
+"""),
+        ("python", """def api_key_type_matches(provided, expected):
+    for a, b in zip(provided, expected):
+        if a != b:
+            return False
+    return True
+"""),
+        ("python", """def token_header_matches(provided, expected):
     for a, b in zip(provided, expected):
         if a != b:
             return False
