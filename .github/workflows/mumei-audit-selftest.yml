@@ -27,6 +27,14 @@ jobs:
 
       - name: Run composite audit action on a small repository fixture
         id: audit
+        # The fixture carries the intentional `value // divisor` floor-division
+        # defect, which is detected as active high-confidence evidence against
+        # the empty baseline, so the audit exits 1 and the action's enforcement
+        # step fails. That exit 1 is the detection positive control of this
+        # harness, not a regression and not a loosening of the audit gate: the
+        # exact exit code and the exact active finding rows are asserted below,
+        # so any additional or missing finding fails this job.
+        continue-on-error: true
         uses: ./.github/actions/mumei-audit
         with:
           code-file: examples/ci-small-repo/src
@@ -34,6 +42,60 @@ jobs:
           audit-args: --baseline examples/ci-small-repo/baseline.json --write-baseline .mumei-audit/generated-baseline.json --fail-on high-confidence
           migration-execution-output: .mumei-audit/migration_execution.json
           upload-sarif: true
+
+      - name: Download audit evidence artifact for assertions
+        uses: actions/download-artifact@v4
+        with:
+          name: mumei-audit-evidence
+          path: evidence
+
+      - name: Assert exact detector-gain audit outcome
+        shell: bash
+        env:
+          AUDIT_EXIT_CODE: ${{ steps.audit.outputs.audit_exit_code }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          # Exact positive-control pinning: the floor-division detector gain is
+          # only evidence while the exit code, row cardinality, row contents and
+          # fingerprints match exactly. Any drift fails this selftest loudly.
+          assert os.environ["AUDIT_EXIT_CODE"] == "1", (
+              f"fixture audit must exit exactly 1 (active high-confidence division finding), "
+              f"got {os.environ['AUDIT_EXIT_CODE']!r}"
+          )
+
+          audit = json.loads(Path("evidence/audit.json").read_text(encoding="utf-8"))
+          rows = audit.get("findings", [])
+          assert len(rows) == 2, f"expected exactly 2 finding rows, got {len(rows)}: {rows!r}"
+
+          active = [row for row in rows if row.get("baseline") == "new"]
+          assert len(active) == 2, f"expected both rows active against the empty baseline: {rows!r}"
+
+          division = [row for row in rows if "can divide by" in str(row.get("message", ""))]
+          assert len(division) == 1, f"expected exactly one division row: {rows!r}"
+          division = division[0]
+          assert division.get("severity") == "error", division
+          assert division.get("confidence") == "high", division
+          assert division.get("category") == "code", division
+          assert "`divide` can divide by `divisor`" in division["message"], division["message"]
+          assert "divisor=0" in division["message"], division["message"]
+          assert division.get("fingerprint") == "786f72548d6f3a67c91167de0e3a2c403f8bb012ec162330179158d49ca26277", division.get("fingerprint")
+
+          spec = [row for row in rows if "spec precondition assumed" in str(row.get("message", ""))]
+          assert len(spec) == 1, f"expected exactly one spec-precondition row: {rows!r}"
+          spec = spec[0]
+          assert spec.get("severity") == "warning", spec
+          assert spec.get("confidence") == "medium", spec
+          assert spec.get("category") == "spec", spec
+          assert spec.get("fingerprint") == "1feea1315de0882e4e17124c487d47e713120759babe2c819c87db12825d91f7", spec.get("fingerprint")
+
+          counts = audit.get("finding_counts", {})
+          assert counts.get("code") == 1 and counts.get("spec") == 1, counts
+          print("exact detector-gain outcome verified: exit 1, 2 active rows (division high/code + spec medium/spec)")
+          PY
 
       - name: Assert evidence verifier ref invariant
         shell: bash
