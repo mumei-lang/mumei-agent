@@ -9342,6 +9342,11 @@ func tokenMatches(presented, stored string) bool {
     return presented == stored
 }
 """
+    go_with_comment = """package main
+func tokenMatches(presented, stored string) bool {
+    return presented == stored // direct comparison
+}
+"""
     python = """def token_matches(provided, expected):
     if len(provided) != len(expected):
         return False
@@ -9350,7 +9355,11 @@ func tokenMatches(presented, stored string) bool {
             return False
     return True
 """
-    for language, source, function in (("go", go, "tokenMatches"), ("python", python, "token_matches")):
+    for language, source, function in (
+        ("go", go, "tokenMatches"),
+        ("go", go_with_comment, "tokenMatches"),
+        ("python", python, "token_matches"),
+    ):
         issues = [
             issue for issue in _detect_safety_issues(source, language)
             if "timing" in issue.message.lower() and "credential" in issue.message.lower()

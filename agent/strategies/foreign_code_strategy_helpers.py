@@ -841,9 +841,12 @@ def _go_direct_string_equality_return(function_node, source_bytes: bytes):
     string_params = _go_string_parameter_names(function_node, source_bytes)
     block = next((child for child in function_node.named_children if child.type == "block"), None)
     statements = next((child for child in block.named_children if child.type == "statement_list"), None) if block else None
-    if statements is None or len(statements.named_children) != 1:
+    executable_statements = [
+        child for child in statements.named_children if child.type != "comment"
+    ] if statements is not None else []
+    if len(executable_statements) != 1:
         return None
-    ret = statements.named_children[0]
+    ret = executable_statements[0]
     if ret.type != "return_statement":
         return None
     expressions = next((child for child in ret.named_children if child.type == "expression_list"), None)
