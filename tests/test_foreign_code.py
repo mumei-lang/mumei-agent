@@ -10355,18 +10355,14 @@ def make_share_token():
 import random
 
 def make_share_token():
-    return {"retry_token": random.random()}
-''',
-        '''
-import random
-
-def make_share_token():
     return {
         "token_backoff": random.random(),
         "token_timeout": random.random(),
         "secret_interval": random.random(),
         "token_expiry": random.random(),
         "token_ttl": random.random(),
+        "session_expires_in": random.random(),
+        "token_duration": random.random(),
     }
 ''',
         '''
@@ -10409,6 +10405,24 @@ import random
 
 def make_share_token():
     return {"session": {"token": "%012x" % int(random.random() * (1 << 48))}}
+''',
+        '''
+import random
+
+def make_share_token():
+    return {"retry_token": "%012x" % int(random.random() * (1 << 48))}
+''',
+        '''
+import random
+
+def make_share_token():
+    return {"retry_token_value": "%012x" % int(random.random() * (1 << 48))}
+''',
+        '''
+import random
+
+def make_share_token():
+    return {"retry_session": "%012x" % int(random.random() * (1 << 48))}
 ''',
         '''
 import random

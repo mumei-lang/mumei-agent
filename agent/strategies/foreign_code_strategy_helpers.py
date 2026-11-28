@@ -1096,22 +1096,63 @@ def _python_weak_random_only_expression(value: ast.AST | None, random_call: ast.
     )
 
 
-_PYTHON_NONCREDENTIAL_METADATA_KEY_PARTS = frozenset({
+_PYTHON_NONCREDENTIAL_KEY_PARTS_ANYWHERE = frozenset({
     "backoff",
     "delay",
     "expiry",
     "interval",
     "jitter",
-    "retry",
     "timeout",
     "ttl",
+})
+_PYTHON_NONCREDENTIAL_TRAILING_KEY_PARTS = frozenset({
+    "after",
+    "attempt",
+    "attempts",
+    "backoff",
+    "cooldown",
+    "count",
+    "deadline",
+    "delay",
+    "duration",
+    "expiration",
+    "expire",
+    "expires",
+    "expiry",
+    "interval",
+    "jitter",
+    "lifetime",
+    "millis",
+    "millisecond",
+    "milliseconds",
+    "ms",
+    "period",
+    "retry",
+    "sec",
+    "second",
+    "seconds",
+    "secs",
+    "sleep",
+    "time",
+    "timeout",
+    "timestamp",
+    "ttl",
+    "validity",
+    "wait",
 })
 
 
 def _python_noncredential_timing_key(key: ast.AST) -> bool:
     if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
         return True
-    return bool(set(_name_parts(key.value)).intersection(_PYTHON_NONCREDENTIAL_METADATA_KEY_PARTS))
+    parts = _name_parts(key.value)
+    if any(part in _PYTHON_NONCREDENTIAL_KEY_PARTS_ANYWHERE for part in parts):
+        return True
+    credential_indexes = [index for index, part in enumerate(parts) if part in _STRONG_CREDENTIAL_WORDS]
+    if not credential_indexes:
+        return True
+    trailing_parts = parts[max(credential_indexes) + 1:]
+    return any(part in _PYTHON_NONCREDENTIAL_TRAILING_KEY_PARTS for part in trailing_parts)
 
 
 def _python_dict_credential_context(value: ast.Dict, random_call: ast.AST) -> bool:
