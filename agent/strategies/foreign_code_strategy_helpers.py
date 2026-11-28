@@ -5051,12 +5051,10 @@ def _go_map_receiver_names(params_text: str, map_type_names: set[str]) -> set[st
     receiver_match = re.search(r"\(\s*(\w+)\s+\*?\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)", params_text)
     if receiver_match and receiver_match.group(2) in map_type_names:
         names.add(receiver_match.group(1))
-    # Parameter declarations: ``func foo(m MapType)`` or inline ``map[K]V``.
+    # Parameter declarations: ``func foo(m MapType)``.
     for match in re.finditer(r"\b(\w+)\s+\*?\s*([A-Za-z_][A-Za-z0-9_]*)\b", params_text):
         if match.group(2) in map_type_names:
             names.add(match.group(1))
-    for match in re.finditer(r"\b(\w+)\s+map\[[^\]]+\][A-Za-z0-9_.\[\]*]*", params_text):
-        names.add(match.group(1))
     return names
 
 
@@ -5754,7 +5752,12 @@ def _detect_go_safety_issues(
                 sequence_names=sequence_names,
                 contract_results=contract_results,
                 contract_outputs=contract_outputs,
-                map_names=go_map_names,
+                map_names=go_map_names
+                | {
+                    name
+                    for name, raw_type in param_types.items()
+                    if re.sub(r"\s+", "", raw_type).startswith("map[")
+                },
             )
             for index, expression in enumerate(expressions):
                 facts = flow.facts_for_expression(expression) if flow is not None else None
