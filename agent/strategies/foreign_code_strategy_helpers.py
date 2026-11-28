@@ -1885,9 +1885,21 @@ def _python_split_index_issues(source: str) -> list[ForeignSafetyIssue]:
                             and _python_split_call(stmt.value)
                         ):
                             split_vars.add(target)
-                for nested in nested_statement_lists(stmt):
-                    if analyze_block(nested, split_vars.copy(), guarded_limits.copy()):
+                if isinstance(stmt, ast.If):
+                    # An exiting bad-direction length guard dominates the else/elif
+                    # arm, but not uses inside the exiting body itself.
+                    if analyze_block(stmt.body, split_vars.copy(), guarded_limits.copy()):
                         return True
+                    else_limits = guarded_limits.copy()
+                    if guard_update is not None:
+                        name, limit = guard_update
+                        else_limits[name] = max(limit, else_limits.get(name, -1))
+                    if analyze_block(stmt.orelse, split_vars.copy(), else_limits):
+                        return True
+                else:
+                    for nested in nested_statement_lists(stmt):
+                        if analyze_block(nested, split_vars.copy(), guarded_limits.copy()):
+                            return True
                 if guard_update is not None:
                     name, limit = guard_update
                     guarded_limits[name] = max(limit, guarded_limits.get(name, -1))
@@ -1909,38 +1921,60 @@ def _python_split_index_issues(source: str) -> list[ForeignSafetyIssue]:
     return issues
 
 
-def _brace_depth_at(text: str, position: int) -> int:
-    """Approximate control-flow block depth, ignoring composite literals.
+def _is_control_brace(text: str, index: int) -> bool:
+    line_start = text.rfind("\n", 0, index) + 1
+    prefix = text[line_start:index].strip()
+    previous = index - 1
+    while previous >= 0 and text[previous].isspace():
+        previous -= 1
+    return bool(
+        re.match(
+            r"(?:\}\s*)?(?:if|for|else|switch|select|while|loop|match)\b",
+            prefix,
+        )
+        or (previous >= 0 and text[previous] == ")")
+    )
 
-    This is deliberately shallow syntax rather than language-level scope resolution:
-    braces whose line starts with a control keyword, or which directly follow a
-    parenthesized header/function literal, delimit blocks. Braces in composite
-    literals do not.
+
+def _control_block_spans(text: str) -> list[tuple[int, int]]:
+    """Return content spans of control-flow blocks, ignoring composite literals.
+
+    This is deliberately shallow syntax rather than language-level scope
+    resolution: braces whose line starts with a control keyword, or which
+    directly follow a parenthesized header/function literal, delimit blocks.
     """
-    depth = 0
-    brace_kinds: list[bool] = []
-    for index, char in enumerate(text[:position]):
+    stack: list[tuple[int, bool]] = []
+    spans: list[tuple[int, int]] = []
+    for index, char in enumerate(text):
         if char == "{":
-            line_start = text.rfind("\n", 0, index) + 1
-            prefix = text[line_start:index].strip()
-            previous = index - 1
-            while previous >= 0 and text[previous].isspace():
-                previous -= 1
-            is_control = bool(
-                re.match(
-                    r"(?:\}\s*)?(?:if|for|else|switch|select|while|loop|match)\b",
-                    prefix,
-                )
-                or (previous >= 0 and text[previous] == ")")
-            )
-            brace_kinds.append(is_control)
+            stack.append((index, _is_control_brace(text, index)))
+        elif char == "}" and stack:
+            opening, is_control = stack.pop()
             if is_control:
-                depth += 1
-        elif char == "}":
-            is_control = brace_kinds.pop() if brace_kinds else True
-            if is_control:
-                depth = max(0, depth - 1)
-    return depth
+                spans.append((opening + 1, index))
+    return spans
+
+
+def _immediate_control_span(spans: list[tuple[int, int]], position: int) -> tuple[int, int] | None:
+    containing = [
+        span
+        for span in spans
+        if span[0] <= position < span[1]
+    ]
+    if not containing:
+        return None
+    return min(containing, key=lambda span: span[1] - span[0])
+
+
+def _control_span_ancestor(
+    ancestor: tuple[int, int] | None,
+    descendant: tuple[int, int] | None,
+) -> bool:
+    if ancestor is None:
+        return True
+    if descendant is None:
+        return False
+    return ancestor[0] <= descendant[0] and descendant[1] <= ancestor[1]
 
 
 def _top_level_block_text(text: str) -> str:
@@ -1978,10 +2012,9 @@ def _text_len_exit_guard_limit(
     pattern = re.compile(
         rf"\bif\s+{len_expr}\s*(<=|<)\s*(\d+)\s*\{{"
     )
-    use_depth = _brace_depth_at(body, use_pos)
+    control_spans = _control_block_spans(body)
+    use_span = _immediate_control_span(control_spans, use_pos)
     for match in pattern.finditer(body, 0, use_pos):
-        if _brace_depth_at(body, match.start()) != use_depth:
-            continue
         bound = int(match.group(2)) - (1 if match.group(1) == "<" else 0)
         if bound < index:
             continue
@@ -1989,7 +2022,13 @@ def _text_len_exit_guard_limit(
         if opening < 0:
             continue
         block = _balanced_brace_body(body, opening)
-        if _block_definitely_exits(block, language):
+        if not _block_definitely_exits(block, language):
+            continue
+        guard_body_span = (opening + 1, opening + 1 + len(block))
+        if guard_body_span[0] <= use_pos < guard_body_span[1]:
+            continue
+        guard_span = _immediate_control_span(control_spans, match.start())
+        if _control_span_ancestor(guard_span, use_span):
             return True
     return False
 
