@@ -2033,7 +2033,7 @@ def _rust_collection_len_division_issues(
 
     def fixed_len_is_nonzero(receiver: str) -> bool:
         type_text = normalized_types.get(receiver, "")
-        array = re.fullmatch(r"&(?:'\w+)?\[[^;]+;(\d+)\]", type_text)
+        array = re.fullmatch(r"&(?:'\w+)?(?:mut)?\[[^;]+;(\d+)\]", type_text)
         return array is not None and int(array.group(1)) > 0
 
     integer_types = {
@@ -2080,17 +2080,46 @@ def _rust_collection_len_division_issues(
             names.update(pattern_binding_identifiers(child))
         return names
 
-    shadowed_identifiers: set[str] = set()
+    binding_scopes: list[tuple[str, int, int, int]] = []
 
-    def collect_shadowed_identifiers(node) -> None:
+    def enclosing_block(node):
+        current = node.parent
+        while current is not None:
+            if current.type == "block":
+                return current
+            current = current.parent
+        return block
+
+    def record_binding(name: str, start: int, scope) -> None:
+        binding_scopes.append((name, start, scope.start_byte, scope.end_byte))
+
+    def collect_binding_scopes(node) -> None:
         if node.type == "let_declaration":
-            shadowed_identifiers.update(
-                pattern_binding_identifiers(node.child_by_field_name("pattern"))
-            )
+            scope = enclosing_block(node)
+            for name in pattern_binding_identifiers(node.child_by_field_name("pattern")):
+                record_binding(name, node.end_byte, scope)
+        elif node.type == "for_expression":
+            scope = node.child_by_field_name("body")
+            if scope is not None:
+                for name in pattern_binding_identifiers(node.child_by_field_name("pattern")):
+                    record_binding(name, scope.start_byte, scope)
+        elif node.type == "closure_expression":
+            scope = node.child_by_field_name("body")
+            parameters = node.child_by_field_name("parameters")
+            if scope is not None and parameters is not None:
+                for parameter in parameters.named_children:
+                    for name in pattern_binding_identifiers(parameter):
+                        record_binding(name, scope.start_byte, scope)
         for child in node.named_children:
-            collect_shadowed_identifiers(child)
+            collect_binding_scopes(child)
 
-    collect_shadowed_identifiers(block)
+    collect_binding_scopes(block)
+
+    def is_shadowed_at(name: str, position: int) -> bool:
+        return any(
+            binding_name == name and scope_start <= position < scope_end and position >= start
+            for binding_name, start, scope_start, scope_end in binding_scopes
+        )
 
     def primitive_integer_numerator(node) -> bool:
         if primitive_integer_syntax(node):
@@ -2098,7 +2127,7 @@ def _rust_collection_len_division_issues(
         if node is None or node.type != "identifier":
             return False
         name = text(node)
-        if name in shadowed_identifiers:
+        if is_shadowed_at(name, node.start_byte):
             return False
         if normalized_types.get(name, "") in integer_types:
             return True
@@ -2212,12 +2241,13 @@ def _rust_collection_len_division_issues(
 
         if node.type == "assignment_expression":
             left = node.child_by_field_name("left")
-            if left is not None and left.type == "identifier" and text(left) == receiver:
+            if (
+                left is not None
+                and left.type == "identifier"
+                and text(left) == receiver
+                and not is_shadowed_at(receiver, node.start_byte)
+            ):
                 record_write()
-        if node.type == "let_declaration" and receiver in pattern_binding_identifiers(
-            node.child_by_field_name("pattern")
-        ):
-            record_write()
         if node.type == "reference_expression":
             value = node.child_by_field_name("value")
             while value is not None and value.type == "parenthesized_expression" and value.named_children:
@@ -2226,6 +2256,7 @@ def _rust_collection_len_division_issues(
                 value is not None
                 and value.type == "identifier"
                 and text(value) == receiver
+                and not is_shadowed_at(receiver, node.start_byte)
                 and any(child.type == "mutable_specifier" for child in node.children)
             ):
                 record_write()
@@ -2256,6 +2287,8 @@ def _rust_collection_len_division_issues(
         for guard_receiver_name, _guard_start, guard_end in guards:
             if guard_receiver_name != receiver or guard_end > node.start_byte:
                 continue
+            if is_shadowed_at(receiver, node.start_byte):
+                continue
             writes = receiver_write_positions(block, receiver, guard_end)
             if any(position < node.start_byte for position in writes):
                 continue
@@ -2280,7 +2313,10 @@ def _rust_collection_len_division_issues(
                 if (
                     receiver is not None
                     and primitive_integer_numerator(node.child_by_field_name("left"))
-                    and not fixed_len_is_nonzero(receiver)
+                    and not (
+                        fixed_len_is_nonzero(receiver)
+                        and not is_shadowed_at(receiver, node.start_byte)
+                    )
                     and not suppressed(node, receiver)
                     and (receiver, node.start_byte) not in seen
                 ):
@@ -4347,7 +4383,11 @@ def _detect_block_safety_issues(
                 block_raw_types.pop(p, None)
             if label == "Rust":
                 issues.extend(
-                    _rust_collection_len_division_issues(name, body, block_raw_types)
+                    _rust_collection_len_division_issues(
+                        name,
+                        body,
+                        (per_function_raw_param_types or {}).get(block_idx),
+                    )
                 )
             block_cast_sub_issues = _cast_and_subtraction_issues(
                 name,
