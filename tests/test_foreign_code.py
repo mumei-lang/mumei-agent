@@ -10345,6 +10345,13 @@ def make_share_token():
     return {"session": {"token": secrets.token_hex(16), "session_retry_seconds": random.random()}}
 ''',
         '''
+import random
+import secrets
+
+def make_share_token():
+    return {"session": {"token": secrets.token_hex(16), "session_retry_window": random.random()}}
+''',
+        '''
 import hashlib
 import random
 
@@ -10402,6 +10409,12 @@ import random
 
 def make_share_token():
     return {"retry_session": "%012x" % int(random.random() * (1 << 48))}
+''',
+        '''
+import random
+
+def make_share_token():
+    return {"second_factor_token": "%012x" % int(random.random() * (1 << 48))}
 ''',
     ]
 
