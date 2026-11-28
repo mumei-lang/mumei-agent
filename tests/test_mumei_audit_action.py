@@ -844,6 +844,16 @@ def test_verify_downloaded_action_artifact_accepts_blocked_review_success_path(t
     assert "baseline boundary: generated CI policy artifact; not evidence" in completed.stdout
 
 
+def test_verify_downloaded_action_artifact_accepts_ready_review_success_path(tmp_path: Path) -> None:
+    artifact = tmp_path / "evidence"
+    _write_downloaded_action_artifact(artifact, state="ready_for_human_review")
+
+    completed = _run_downloaded_artifact_verifier(artifact)
+
+    assert completed.returncode == 0, completed.stderr
+    assert "migration execution candidates verified: 1" in completed.stdout
+
+
 def test_verify_downloaded_action_artifact_accepts_unwritten_proof_and_sarif_as_nonclaims(tmp_path: Path) -> None:
     artifact = tmp_path / "evidence"
     _write_downloaded_action_artifact(artifact)
