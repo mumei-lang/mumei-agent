@@ -13,14 +13,16 @@ contract GuardedBank {
     }
 
     function withdraw(uint256 amount) public nonReentrant {
-        msg.sender.call{value: amount}("");
+        (bool ok, ) = msg.sender.call{value: amount}("");
+        require(ok, "payout failed");
         balances[msg.sender] -= amount;
     }
 
     function manualWithdraw(uint256 amount) public {
         require(!locked, "reentrant");
         locked = true;
-        msg.sender.call{value: amount}("");
+        (bool ok, ) = msg.sender.call{value: amount}("");
+        require(ok, "payout failed");
         balances[msg.sender] -= amount;
         locked = false;
     }

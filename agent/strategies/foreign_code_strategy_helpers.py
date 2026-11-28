@@ -9990,6 +9990,151 @@ def _is_solidity_mock_source(source: str) -> bool:
     return bool(contract_names) and all("Mock" in name for name in contract_names)
 
 
+
+def _solidity_node_text(source: str, node) -> str:
+    if node is None:
+        return ""
+    return source.encode()[node.start_byte:node.end_byte].decode(errors="replace")
+
+
+def _solidity_unwrap_expression(node):
+    while node is not None and node.type == "expression" and len(node.children) == 1:
+        node = node.children[0]
+    return node
+
+
+def _solidity_parameter_type(source: str, node) -> str:
+    return _solidity_node_text(source, node.child_by_field_name("type")).strip()
+
+
+def _solidity_shadowed_variable_names(source: str, function_node) -> set[str]:
+    """Local parameter/variable names that conservatively shadow state variables."""
+    names: set[str] = set()
+    stack = [function_node]
+    while stack:
+        node = stack.pop()
+        if node.type in {"parameter", "variable_declaration"}:
+            name = _solidity_node_text(source, node.child_by_field_name("name"))
+            if name:
+                names.add(name)
+        stack.extend(node.children)
+    return names
+
+
+def _solidity_bool_transfer_interfaces(source: str, root) -> set[str]:
+    """Same-file interfaces whose direct ``transfer`` signature returns bool."""
+    interfaces: set[str] = set()
+    for node in root.children:
+        if node.type != "interface_declaration":
+            continue
+        interface_name = _solidity_node_text(source, node.child_by_field_name("name"))
+        body = node.child_by_field_name("body")
+        for child in (body.children if body is not None else []):
+            if child.type != "function_definition":
+                continue
+            if _solidity_node_text(source, child.child_by_field_name("name")) != "transfer":
+                continue
+            params = [c for c in child.children if c.type == "parameter"]
+            returns = child.child_by_field_name("return_type")
+            return_params = [c for c in (returns.children if returns is not None else []) if c.type == "parameter"]
+            if (
+                len(params) == 2
+                and len(return_params) == 1
+                and _solidity_parameter_type(source, return_params[0]) == "bool"
+            ):
+                interfaces.add(interface_name)
+    return interfaces
+
+
+def _solidity_unchecked_call_issues(source: str) -> list[ForeignSafetyIssue]:
+    """Detect only direct unchecked low-level value calls and bool token transfers."""
+    parser = tree_sitter_extract._get_parser("solidity")
+    if parser is None:
+        return []
+    root = parser.parse(source.encode()).root_node
+    bool_transfer_interfaces = _solidity_bool_transfer_interfaces(source, root)
+    issues: list[ForeignSafetyIssue] = []
+
+    def contract_issues(contract) -> None:
+        body = contract.child_by_field_name("body")
+        if body is None:
+            return
+        state_types: dict[str, str] = {}
+        for child in body.children:
+            if child.type != "state_variable_declaration":
+                continue
+            name_node = child.child_by_field_name("name")
+            type_node = child.child_by_field_name("type")
+            if name_node is not None and type_node is not None:
+                state_types[_solidity_node_text(source, name_node)] = _solidity_node_text(source, type_node).strip()
+
+        def walk(node, function_name: str, shadowed_names: set[str]) -> None:
+            if node.type == "expression_statement":
+                expression = next((c for c in node.children if c.type == "expression"), None)
+                call = _solidity_unwrap_expression(expression)
+                if call is not None and call.type == "call_expression":
+                    function_expr = _solidity_unwrap_expression(call.child_by_field_name("function"))
+                    kind = None
+                    if function_expr is not None and function_expr.type == "struct_expression":
+                        assignments = [c for c in function_expr.children if c.type == "struct_field_assignment"]
+                        has_value = any(
+                            _solidity_node_text(source, assignment).split(":", 1)[0].strip() == "value"
+                            for assignment in assignments
+                        )
+                        member = _solidity_unwrap_expression(function_expr.child_by_field_name("type"))
+                        receiver = (
+                            _solidity_unwrap_expression(member.child_by_field_name("object"))
+                            if member is not None
+                            else None
+                        )
+                        if (
+                            has_value
+                            and member is not None
+                            and member.type == "member_expression"
+                            and _solidity_node_text(source, member.child_by_field_name("property")) == "call"
+                            and receiver is not None
+                            and receiver.type == "payable_conversion_expression"
+                        ):
+                            kind = "low-level-value-call"
+                    elif (
+                        function_expr is not None
+                        and function_expr.type == "member_expression"
+                        and _solidity_node_text(source, function_expr.child_by_field_name("property")) == "transfer"
+                    ):
+                        receiver = _solidity_unwrap_expression(function_expr.child_by_field_name("object"))
+                        arguments = [c for c in call.children if c.type == "call_argument"]
+                        if receiver is not None and receiver.type == "identifier" and len(arguments) == 2:
+                            receiver_name = _solidity_node_text(source, receiver)
+                            receiver_type = None if receiver_name in shadowed_names else state_types.get(receiver_name)
+                            if receiver_type in bool_transfer_interfaces:
+                                kind = "bool-token-transfer"
+                    if kind is not None:
+                        if kind == "low-level-value-call":
+                            detail = "discards the success flag of a low-level value call"
+                        else:
+                            detail = "discards the boolean return of an ERC20-like token transfer"
+                        issues.append(ForeignSafetyIssue(
+                            function_name=function_name,
+                            message=f"Solidity function `{function_name}` {detail} at line {node.start_point[0] + 1}",
+                            line=node.start_point[0] + 1,
+                        ))
+            for child in node.children:
+                walk(child, function_name, shadowed_names)
+
+        for child in body.children:
+            if child.type in {"function_definition", "constructor_definition"}:
+                walk(
+                    child,
+                    _solidity_node_text(source, child.child_by_field_name("name")) or "constructor",
+                    _solidity_shadowed_variable_names(source, child),
+                )
+
+    for node in root.children:
+        if node.type == "contract_declaration":
+            contract_issues(node)
+    return issues
+
+
 def _detect_solidity_contract_issues(
     source: str, source_file: str | None = None
 ) -> list[ForeignSafetyIssue]:
@@ -10021,6 +10166,7 @@ def _detect_solidity_contract_issues(
                         confidence="medium",
                     )
                 )
+    issues.extend(_solidity_unchecked_call_issues(source))
     return issues
 
 def _solidity_function_is_externally_callable(attrs: str) -> bool:

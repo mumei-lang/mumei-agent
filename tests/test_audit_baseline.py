@@ -472,3 +472,15 @@ def test_directory_fingerprint_uses_symlink_input_path_not_external_target(tmp_p
     _aggregate_directory_fixed_keys(directory)
 
     assert directory.findings[0]["fingerprint"] != directory.findings[1]["fingerprint"]
+
+
+def test_high_confidence_policy_catches_unchecked_calls() -> None:
+    result = _result(
+        verification_status="unverifiable",
+        verification_violations=[
+            "Solidity function `payFee` discards the success flag of a low-level value call"
+        ],
+    )
+
+    assert audit_exit_code(result, fail_on="high-confidence") == 1
+    assert audit_exit_code(result, fail_on="never") == 0

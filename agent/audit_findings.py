@@ -264,6 +264,16 @@ def _violation_confidence(message: str) -> str:
         return "high"
     if "credential comparison" in lowered_message and "timing side channel" in lowered_message:
         return "high"
+    if re.fullmatch(
+        r"solidity function `[^`]+` discards the success flag of a low-level value call(?: at line \d+)?",
+        lowered_message,
+    ):
+        return "high"
+    if re.fullmatch(
+        r"solidity function `[^`]+` discards the boolean return of an erc20-like token transfer(?: at line \d+)?",
+        lowered_message,
+    ):
+        return "high"
     return "medium"
 
 
