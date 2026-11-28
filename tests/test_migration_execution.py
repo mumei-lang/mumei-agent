@@ -1187,3 +1187,38 @@ def test_contract_erosion_provenance_does_not_change_fixed_boundary_or_next_step
     assert step["migration_execution_report"] == str(output)
     assert "migration execution evidence" in step["action"]
     assert "contract_erosion" not in step
+
+
+def test_clause_delta_preserves_string_literal_whitespace_and_mixed_or_boundaries() -> None:
+    from agent.migration_execution import _normalized_top_level_conjuncts
+
+    assert _normalized_top_level_conjuncts(['label == "a  b"']) == ['label == "a  b"']
+    assert _normalized_top_level_conjuncts(["x >= 0 || y >= 0 && z >= 0"]) == ["x >= 0 || y >= 0 && z >= 0"]
+    assert _normalized_top_level_conjuncts(["x >= 0 && z >= 0"]) == ["x >= 0", "z >= 0"]
+
+
+@pytest.mark.integration
+def test_real_mumei_erosion_recheck_is_recorded_for_changed_contract_text(tmp_path: Path) -> None:
+    binary = os.environ.get("MUMEI_BIN", "")
+    if not binary or not Path(binary).is_absolute() or not Path(binary).is_file():
+        pytest.skip("set MUMEI_BIN to an absolute trusted Core executable")
+    from agent.mumei_client import create_mumei_client
+
+    source = tmp_path / "payment.py"
+    source.write_text("def withdraw():\n    pass\n", encoding="utf-8")
+    healed = tmp_path / "withdraw.mm"
+    healed.write_text(
+        "atom withdraw(x: i64) -> i64 {\n    requires: x >= 0;\n    ensures: result >= 0;\n    body: { x + 0 }\n}\n",
+        encoding="utf-8",
+    )
+
+    report = build_migration_execution(
+        _result(source, [_hint("withdraw")], healed_files=[str(healed)]),
+        output_path=tmp_path / "execution.json",
+        mumei_client=create_mumei_client(binary),
+    )
+
+    erosion = report["candidates"][0]["contract_erosion"]
+    assert erosion["status"] == "passed"
+    assert erosion["checked"] is True
+    assert erosion["atoms"] == [{"name": "withdraw", "status": "preserved"}]

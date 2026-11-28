@@ -337,9 +337,69 @@ def _extract_mm_clauses(code: str, keyword: str) -> list[str]:
     return clauses
 
 
+def _normalize_conjunct_text(text: str) -> str:
+    out: list[str] = []
+    in_string = False
+    pending_space = False
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if in_string:
+            out.append(char)
+            if char == "\\" and index + 1 < len(text):
+                index += 1
+                out.append(text[index])
+            elif char == '"':
+                in_string = False
+            index += 1
+            continue
+        if char == '"':
+            if pending_space and out:
+                out.append(" ")
+            pending_space = False
+            in_string = True
+            out.append(char)
+        elif char.isspace():
+            pending_space = bool(out)
+        else:
+            if pending_space:
+                out.append(" ")
+            pending_space = False
+            out.append(char)
+        index += 1
+    return "".join(out).strip()
+
+
+def _has_top_level_or(text: str) -> bool:
+    depth = 0
+    in_string = False
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if in_string:
+            if char == "\\":
+                index += 2
+                continue
+            if char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth = max(0, depth - 1)
+        elif depth == 0 and text.startswith("||", index):
+            return True
+        index += 1
+    return False
+
+
 def _normalized_top_level_conjuncts(clauses: list[str]) -> list[str]:
     parts: list[str] = []
     for clause in clauses:
+        if _has_top_level_or(clause):
+            parts.append(_normalize_conjunct_text(clause))
+            continue
         start = 0
         index = 0
         depth = 0
@@ -361,12 +421,12 @@ def _normalized_top_level_conjuncts(clauses: list[str]) -> list[str]:
             elif char in ")]}":
                 depth = max(0, depth - 1)
             elif depth == 0 and clause.startswith("&&", index):
-                parts.append(re.sub(r"\s+", " ", clause[start:index]).strip())
+                parts.append(_normalize_conjunct_text(clause[start:index]))
                 index += 2
                 start = index
                 continue
             index += 1
-        parts.append(re.sub(r"\s+", " ", clause[start:]).strip())
+        parts.append(_normalize_conjunct_text(clause[start:]))
     return [part for part in parts if part]
 
 
