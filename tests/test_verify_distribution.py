@@ -242,6 +242,27 @@ def test_exact_layout_is_opt_in_for_packaging_files(tmp_path, capsys):
     assert "undeclared file" in err
 
 
+def test_exact_layout_accepts_core_profile_entry_bound(tmp_path, capsys):
+    core = _write_core(tmp_path)
+    record = _record(multifile=True)
+    record["sources"] = {}
+    for index in range(64):
+        parts = [f"d{index}_{depth}" for depth in range(15)] + [f"m{index}.mm"]
+        record["sources"]["/".join(parts)] = {}
+    bundle = _write_bundle(tmp_path, record)
+    source = _write_source(tmp_path)
+    (bundle / "program").chmod(0o755)
+
+    assert sum(1 for _ in bundle.rglob("*")) == 1030
+    code, out, err = _run(
+        capsys, _argv(core, bundle, source, "--require-exact-bundle-layout")
+    )
+    assert code == 1 and err == ""
+    roles = json.loads(out)["roles"]
+    assert roles["native_source_llvm"]["status"] == "accepted"
+    assert roles["artifact_reproduction"]["status"] == "accepted"
+
+
 def test_exact_layout_error_does_not_echo_undeclared_filename(tmp_path, capsys):
     core, bundle, source = _fixture(tmp_path)
     sensitive_name = "fake-layout-secret-name"
@@ -271,6 +292,64 @@ def test_exact_layout_rejects_undeclared_entries(tmp_path, capsys, entry_kind):
     assert code == 1
     assert out == ""
     assert f"undeclared {entry_kind}" in err
+
+
+def test_exact_layout_rejects_output_inside_bundle(tmp_path, capsys):
+    core, bundle, source = _fixture(tmp_path)
+    output = bundle / "verification-report.json"
+    code, out, err = _run(
+        capsys,
+        _argv(
+            core,
+            bundle,
+            source,
+            "--require-exact-bundle-layout",
+            "--output",
+            str(output),
+        ),
+    )
+    assert code == 1
+    assert out == ""
+    assert "--output may not be inside --bundle" in err
+    assert not output.exists()
+
+
+def test_exact_layout_allows_output_outside_bundle(tmp_path, capsys):
+    core, bundle, source = _fixture(tmp_path)
+    (bundle / "program").chmod(0o755)
+    output = tmp_path / "verification-report.json"
+    code, out, err = _run(
+        capsys,
+        _argv(
+            core,
+            bundle,
+            source,
+            "--require-exact-bundle-layout",
+            "--output",
+            str(output),
+        ),
+    )
+    assert code == 0 and out == "" and err == ""
+    assert json.loads(output.read_text())["schema_version"] == (
+        "mumei.verify-distribution-report/v1"
+    )
+
+
+def test_exact_layout_escapes_declared_member_control_characters(tmp_path, capsys):
+    core = _write_core(tmp_path)
+    record = _record(multifile=True)
+    record["sources"] = {"bad\x1b[31m.mm": {}}
+    bundle = _write_bundle(tmp_path, record)
+    source = _write_source(tmp_path)
+    (bundle / "sources" / "bad\x1b[31m.mm").unlink()
+
+    code, out, err = _run(
+        capsys, _argv(core, bundle, source, "--require-exact-bundle-layout")
+    )
+    assert code == 1
+    assert out == ""
+    assert "bad\\x1b[31m.mm" in err
+    assert "\x1b" not in err
 
 
 def test_exact_layout_rejects_declared_member_symlink(tmp_path, capsys):

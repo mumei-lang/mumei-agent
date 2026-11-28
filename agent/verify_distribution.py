@@ -150,6 +150,10 @@ def _is_build_id(value: str) -> bool:
     return len(value) == 64 and all(c in "0123456789abcdef" for c in value)
 
 
+def _display_member(member: str) -> str:
+    return member.encode("unicode_escape").decode("ascii")
+
+
 def _layout_directories(members: list[str]) -> set[str]:
     directories = set()
     for member in members:
@@ -199,7 +203,9 @@ def _validate_exact_layout(bundle: Path, members: list[str]) -> None:
             if is_symlink:
                 entry_kinds[member] = "symlink"
                 if member in expected_files or member in expected_dirs:
-                    raise ValueError(f"declared bundle path is a symlink: {member}")
+                    raise ValueError(
+                        f"declared bundle path is a symlink: {_display_member(member)}"
+                    )
                 raise ValueError("bundle layout contains an undeclared symlink")
             if is_dir:
                 entry_kinds[member] = "directory"
@@ -214,15 +220,23 @@ def _validate_exact_layout(bundle: Path, members: list[str]) -> None:
                 continue
             entry_kinds[member] = "other"
             if member in expected_files or member in expected_dirs:
-                raise ValueError(f"declared bundle path is not a regular file: {member}")
+                raise ValueError(
+                    "declared bundle path is not a regular file: "
+                    f"{_display_member(member)}"
+                )
             raise ValueError("bundle layout contains an undeclared non-regular file")
 
     for member in sorted(expected_files):
         kind = entry_kinds.get(member)
         if kind is None:
-            raise ValueError(f"declared bundle member is missing: {member}")
+            raise ValueError(
+                f"declared bundle member is missing: {_display_member(member)}"
+            )
         if kind != "file":
-            raise ValueError(f"declared bundle member is not a regular file: {member}")
+            raise ValueError(
+                "declared bundle member is not a regular file: "
+                f"{_display_member(member)}"
+            )
     executable = bundle / EXECUTABLE_MEMBER
     if EXECUTABLE_MEMBER in expected_files and not os.access(executable, os.X_OK):
         raise ValueError(f"bundle executable member is not executable: {EXECUTABLE_MEMBER}")
@@ -258,8 +272,16 @@ def _check_common(args: argparse.Namespace) -> dict:
         raise ValueError("--attempt-timeout must be 1..300000 ms")
     if args.memory_bound_mb is not None and not 1 <= args.memory_bound_mb <= 1_048_576:
         raise ValueError("--memory-bound-mb must be 1..1048576")
+    exact_layout = getattr(args, "require_exact_bundle_layout", False)
     if args.output is not None:
         output = Path(args.output)
+        if exact_layout:
+            resolved_output = output.resolve()
+            resolved_bundle = bundle.resolve()
+            if resolved_output == resolved_bundle or resolved_bundle in resolved_output.parents:
+                raise ValueError(
+                    "--output may not be inside --bundle when exact bundle layout is required"
+                )
         for declared in (args.core, args.source, record_path):
             try:
                 if output.samefile(declared):
@@ -277,15 +299,19 @@ def _check_common(args: argparse.Namespace) -> dict:
     # per-route validation again; this check only prevents partial reports
     # for inputs no route can consume.
     members = declared_members(bundle)
-    if getattr(args, "require_exact_bundle_layout", False):
+    if exact_layout:
         _validate_exact_layout(bundle, members)
     for member in members:
         member_path = bundle / member
+        display_member = _display_member(member) if exact_layout else member
         if not member_path.is_file():
-            raise ValueError(f"declared bundle member is missing: {member}")
+            raise ValueError(f"declared bundle member is missing: {display_member}")
         bound = member_bound_bytes(member)
         if member_path.stat().st_size > bound:
-            raise ValueError(f"declared bundle member exceeds the Core input bound: {member}")
+            raise ValueError(
+                "declared bundle member exceeds the Core input bound: "
+                f"{display_member}"
+            )
         if args.output is not None:
             try:
                 if Path(args.output).samefile(member_path):
